@@ -273,12 +273,12 @@ fn generate_mac(pair_idx: usize, end: VethEndId, seq: u32) -> [u8; 6] {
         VethEndId::B => 0x0B,
     };
     [
-        0x02,                          // Locally administered, unicast
-        0xFE,                          // Identifier byte
-        end_byte,                      // End identifier
-        (pair_idx & 0xFF) as u8,       // Pair index low byte
-        (seq & 0xFF) as u8,            // Sequence low byte
-        ((seq >> 8) & 0xFF) as u8,     // Sequence high byte
+        0x02,                      // Locally administered, unicast
+        0xFE,                      // Identifier byte
+        end_byte,                  // End identifier
+        (pair_idx & 0xFF) as u8,   // Pair index low byte
+        (seq & 0xFF) as u8,        // Sequence low byte
+        ((seq >> 8) & 0xFF) as u8, // Sequence high byte
     ]
 }
 
@@ -300,7 +300,10 @@ fn generate_mac(pair_idx: usize, end: VethEndId, seq: u32) -> [u8; 6] {
 pub fn create_pair() -> KernelResult<VethPairId> {
     with_table(|table| {
         // Find an empty slot.
-        let idx = table.pairs.iter().position(|p| !p.active)
+        let idx = table
+            .pairs
+            .iter()
+            .position(|p| !p.active)
             .ok_or(KernelError::ResourceExhausted)?;
 
         let seq_a = table.mac_counter;
@@ -330,7 +333,9 @@ pub fn create_pair() -> KernelResult<VethPairId> {
 ///   the pair is not active.
 pub fn destroy_pair(id: VethPairId) -> KernelResult<()> {
     with_table(|table| {
-        let pair = table.pairs.get_mut(id)
+        let pair = table
+            .pairs
+            .get_mut(id)
             .ok_or(KernelError::InvalidArgument)?;
         if !pair.active {
             return Err(KernelError::InvalidArgument);
@@ -362,7 +367,9 @@ pub fn move_end(pair_id: VethPairId, end: VethEndId, ns_id: NetNsId) -> KernelRe
     }
 
     with_table(|table| {
-        let pair = table.pairs.get_mut(pair_id)
+        let pair = table
+            .pairs
+            .get_mut(pair_id)
             .ok_or(KernelError::InvalidArgument)?;
         if !pair.active {
             return Err(KernelError::InvalidArgument);
@@ -387,7 +394,9 @@ pub fn move_end(pair_id: VethPairId, end: VethEndId, ns_id: NetNsId) -> KernelRe
 /// - [`KernelError::InvalidArgument`] if the pair/end is invalid.
 pub fn set_up(pair_id: VethPairId, end: VethEndId, up: bool) -> KernelResult<()> {
     with_table(|table| {
-        let pair = table.pairs.get_mut(pair_id)
+        let pair = table
+            .pairs
+            .get_mut(pair_id)
             .ok_or(KernelError::InvalidArgument)?;
         if !pair.active {
             return Err(KernelError::InvalidArgument);
@@ -410,7 +419,9 @@ pub fn set_up(pair_id: VethPairId, end: VethEndId, up: bool) -> KernelResult<()>
 /// - [`KernelError::InvalidArgument`] if the pair/end is invalid or inactive.
 pub fn set_bridged(pair_id: VethPairId, end: VethEndId, bridged: bool) -> KernelResult<()> {
     with_table(|table| {
-        let pair = table.pairs.get_mut(pair_id)
+        let pair = table
+            .pairs
+            .get_mut(pair_id)
             .ok_or(KernelError::InvalidArgument)?;
         if !pair.active {
             return Err(KernelError::InvalidArgument);
@@ -452,7 +463,9 @@ pub fn is_bridged(pair_id: VethPairId, end: VethEndId) -> bool {
 #[allow(clippy::arithmetic_side_effects)]
 pub fn send(pair_id: VethPairId, end: VethEndId, frame: Vec<u8>) -> KernelResult<()> {
     with_table(|table| {
-        let pair = table.pairs.get_mut(pair_id)
+        let pair = table
+            .pairs
+            .get_mut(pair_id)
             .ok_or(KernelError::InvalidArgument)?;
         if !pair.active {
             return Err(KernelError::InvalidArgument);
@@ -653,9 +666,7 @@ pub fn mac(pair_id: VethPairId, end: VethEndId) -> Option<[u8; 6]> {
 /// Count active veth pairs.
 #[must_use]
 pub fn active_count() -> usize {
-    with_table_ref(|table| {
-        table.pairs.iter().filter(|p| p.active).count()
-    })
+    with_table_ref(|table| table.pairs.iter().filter(|p| p.active).count())
 }
 
 /// List all active veth pairs' statistics.
@@ -843,7 +854,8 @@ fn test_frame_loopback() -> KernelResult<()> {
         Some(ref data) => {
             crate::serial_println!(
                 "[veth]   FAIL: received frame mismatch (got {} bytes, expected {})",
-                data.len(), frame.len()
+                data.len(),
+                frame.len()
             );
             destroy_pair(id)?;
             return Err(KernelError::InternalError);
@@ -938,7 +950,8 @@ fn test_queue_full_drop() -> KernelResult<()> {
     if stats.end_b.rx_pending != VETH_QUEUE_DEPTH {
         crate::serial_println!(
             "[veth]   FAIL: expected {} pending, got {}",
-            VETH_QUEUE_DEPTH, stats.end_b.rx_pending
+            VETH_QUEUE_DEPTH,
+            stats.end_b.rx_pending
         );
         destroy_pair(id)?;
         return Err(KernelError::InternalError);
@@ -952,7 +965,8 @@ fn test_queue_full_drop() -> KernelResult<()> {
     if drained != VETH_QUEUE_DEPTH {
         crate::serial_println!(
             "[veth]   FAIL: drained {} frames, expected {}",
-            drained, VETH_QUEUE_DEPTH
+            drained,
+            VETH_QUEUE_DEPTH
         );
         destroy_pair(id)?;
         return Err(KernelError::InternalError);
@@ -1068,7 +1082,8 @@ fn test_stats_tracking() -> KernelResult<()> {
     if stats.end_a.tx_bytes != total_bytes {
         crate::serial_println!(
             "[veth]   FAIL: end_a.tx_bytes = {}, expected {}",
-            stats.end_a.tx_bytes, total_bytes
+            stats.end_a.tx_bytes,
+            total_bytes
         );
         destroy_pair(id)?;
         return Err(KernelError::InternalError);
@@ -1086,7 +1101,8 @@ fn test_stats_tracking() -> KernelResult<()> {
     if stats.end_b.rx_bytes != total_bytes {
         crate::serial_println!(
             "[veth]   FAIL: end_b.rx_bytes = {}, expected {}",
-            stats.end_b.rx_bytes, total_bytes
+            stats.end_b.rx_bytes,
+            total_bytes
         );
         destroy_pair(id)?;
         return Err(KernelError::InternalError);
@@ -1205,7 +1221,8 @@ fn test_bidirectional() -> KernelResult<()> {
     if stats.end_a.tx_packets != 1 || stats.end_a.rx_packets != 1 {
         crate::serial_println!(
             "[veth]   FAIL: end_a tx={} rx={}, expected 1/1",
-            stats.end_a.tx_packets, stats.end_a.rx_packets
+            stats.end_a.tx_packets,
+            stats.end_a.rx_packets
         );
         destroy_pair(id)?;
         return Err(KernelError::InternalError);
@@ -1213,7 +1230,8 @@ fn test_bidirectional() -> KernelResult<()> {
     if stats.end_b.tx_packets != 1 || stats.end_b.rx_packets != 1 {
         crate::serial_println!(
             "[veth]   FAIL: end_b tx={} rx={}, expected 1/1",
-            stats.end_b.tx_packets, stats.end_b.rx_packets
+            stats.end_b.tx_packets,
+            stats.end_b.rx_packets
         );
         destroy_pair(id)?;
         return Err(KernelError::InternalError);

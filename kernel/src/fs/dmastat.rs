@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -155,7 +155,9 @@ where
 /// functions as mappings and transfers occur.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         fault_log: Vec::new(),
@@ -170,7 +172,10 @@ pub fn init_defaults() {
 /// Record a DMA mapping.
 pub fn record_map(device_id: u32, size: u64, _direction: DmaDirection) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device_id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
             .ok_or(KernelError::NotFound)?;
         dev.maps += 1;
         dev.bytes_mapped += size;
@@ -184,7 +189,10 @@ pub fn record_map(device_id: u32, size: u64, _direction: DmaDirection) -> Kernel
 /// Record a DMA unmap.
 pub fn record_unmap(device_id: u32, _size: u64) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device_id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
             .ok_or(KernelError::NotFound)?;
         dev.unmaps += 1;
         dev.active_mappings = dev.active_mappings.saturating_sub(1);
@@ -196,7 +204,10 @@ pub fn record_unmap(device_id: u32, _size: u64) -> KernelResult<()> {
 /// Record a DMA transfer completion.
 pub fn record_transfer(device_id: u32, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device_id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
             .ok_or(KernelError::NotFound)?;
         dev.bytes_transferred += bytes;
         Ok(())
@@ -211,9 +222,14 @@ pub fn record_fault(device_id: u32, fault_type: IommuFaultType, address: u64) ->
             dev.faults += 1;
         }
         state.total_faults += 1;
-        if state.fault_log.len() >= MAX_FAULTS { state.fault_log.remove(0); }
+        if state.fault_log.len() >= MAX_FAULTS {
+            state.fault_log.remove(0);
+        }
         state.fault_log.push(IommuFault {
-            device_id, fault_type, address, timestamp_ns: now,
+            device_id,
+            fault_type,
+            address,
+            timestamp_ns: now,
         });
         Ok(())
     })
@@ -222,12 +238,22 @@ pub fn record_fault(device_id: u32, fault_type: IommuFaultType, address: u64) ->
 /// Register a device for DMA tracking.
 pub fn register_device(device_id: u32, name: &str, iommu: bool) -> KernelResult<()> {
     with_state(|state| {
-        if state.devices.len() >= MAX_DEVICES { return Err(KernelError::ResourceExhausted); }
-        if state.devices.iter().any(|d| d.device_id == device_id) { return Err(KernelError::AlreadyExists); }
+        if state.devices.len() >= MAX_DEVICES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.devices.iter().any(|d| d.device_id == device_id) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.devices.push(DeviceDmaStats {
-            device_id, name: String::from(name), maps: 0, unmaps: 0,
-            bytes_mapped: 0, bytes_transferred: 0, faults: 0,
-            active_mappings: 0, iommu_enabled: iommu,
+            device_id,
+            name: String::from(name),
+            maps: 0,
+            unmaps: 0,
+            bytes_mapped: 0,
+            bytes_transferred: 0,
+            faults: 0,
+            active_mappings: 0,
+            iommu_enabled: iommu,
         });
         Ok(())
     })
@@ -235,13 +261,20 @@ pub fn register_device(device_id: u32, name: &str, iommu: bool) -> KernelResult<
 
 /// Get per-device statistics.
 pub fn device_stats() -> Vec<DeviceDmaStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Recent IOMMU faults.
 pub fn fault_log(n: usize) -> Vec<IommuFault> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let start = if n >= s.fault_log.len() { 0 } else { s.fault_log.len() - n };
+        let start = if n >= s.fault_log.len() {
+            0
+        } else {
+            s.fault_log.len() - n
+        };
         s.fault_log[start..].to_vec()
     })
 }
@@ -250,7 +283,14 @@ pub fn fault_log(n: usize) -> Vec<IommuFault> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_maps, s.total_unmaps, s.total_bytes, s.total_faults, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_maps,
+            s.total_unmaps,
+            s.total_bytes,
+            s.total_faults,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -281,14 +321,22 @@ pub fn self_test() {
     register_device(2, "dev2", false).expect("reg2");
     assert!(register_device(1, "dup", true).is_err());
     assert_eq!(device_stats().len(), 2);
-    let d = device_stats().iter().find(|d| d.device_id == 1).cloned().expect("dev");
+    let d = device_stats()
+        .iter()
+        .find(|d| d.device_id == 1)
+        .cloned()
+        .expect("dev");
     assert_eq!(d.maps, 0);
     assert!(d.iommu_enabled);
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Map increments count + bytes + active mappings exactly from zero.
     record_map(1, 4096, DmaDirection::ToDevice).expect("map");
-    let d = device_stats().iter().find(|d| d.device_id == 1).cloned().expect("dev");
+    let d = device_stats()
+        .iter()
+        .find(|d| d.device_id == 1)
+        .cloned()
+        .expect("dev");
     assert_eq!(d.maps, 1);
     assert_eq!(d.bytes_mapped, 4096);
     assert_eq!(d.active_mappings, 1);
@@ -296,14 +344,22 @@ pub fn self_test() {
 
     // 4: Unmap increments unmaps and drops active mappings back to zero.
     record_unmap(1, 4096).expect("unmap");
-    let d = device_stats().iter().find(|d| d.device_id == 1).cloned().expect("dev");
+    let d = device_stats()
+        .iter()
+        .find(|d| d.device_id == 1)
+        .cloned()
+        .expect("dev");
     assert_eq!(d.unmaps, 1);
     assert_eq!(d.active_mappings, 0);
     crate::serial_println!("  [4/8] unmap: OK");
 
     // 5: Transfer accumulates bytes exactly from zero.
     record_transfer(2, 65536).expect("transfer");
-    let d = device_stats().iter().find(|d| d.device_id == 2).cloned().expect("dev");
+    let d = device_stats()
+        .iter()
+        .find(|d| d.device_id == 2)
+        .cloned()
+        .expect("dev");
     assert_eq!(d.bytes_transferred, 65536);
     crate::serial_println!("  [5/8] transfer: OK");
 
@@ -312,7 +368,11 @@ pub fn self_test() {
     let faults = fault_log(5);
     assert_eq!(faults.len(), 1);
     assert_eq!(faults[0].device_id, 1);
-    let d = device_stats().iter().find(|d| d.device_id == 1).cloned().expect("dev");
+    let d = device_stats()
+        .iter()
+        .find(|d| d.device_id == 1)
+        .cloned()
+        .expect("dev");
     assert_eq!(d.faults, 1);
     crate::serial_println!("  [6/8] fault: OK");
 
@@ -324,10 +384,10 @@ pub fn self_test() {
     // 8: Aggregate totals equal the exact sums of the operations above.
     let (devs, maps, unmaps, bytes, faults, ops) = stats();
     assert_eq!(devs, 2);
-    assert_eq!(maps, 1);     // one record_map
-    assert_eq!(unmaps, 1);   // one record_unmap
+    assert_eq!(maps, 1); // one record_map
+    assert_eq!(unmaps, 1); // one record_unmap
     assert_eq!(bytes, 4096); // total_bytes tracks mapped bytes only
-    assert_eq!(faults, 1);   // one record_fault
+    assert_eq!(faults, 1); // one record_fault
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

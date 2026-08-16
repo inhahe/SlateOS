@@ -58,10 +58,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -311,11 +311,7 @@ pub fn compress_for_write(path: &str, data: &[u8]) -> Option<Vec<u8>> {
 
     let min = MIN_SIZE.load(Ordering::Relaxed);
     if (data.len() as u64) < min {
-        STATE.lock().stats.files_skipped = STATE
-            .lock()
-            .stats
-            .files_skipped
-            .saturating_add(1);
+        STATE.lock().stats.files_skipped = STATE.lock().stats.files_skipped.saturating_add(1);
         return None;
     }
 
@@ -331,11 +327,7 @@ pub fn compress_for_write(path: &str, data: &[u8]) -> Option<Vec<u8>> {
 
     // Skip if compressed size >= original (incompressible data).
     if compressed.len() >= data.len() {
-        STATE.lock().stats.files_skipped = STATE
-            .lock()
-            .stats
-            .files_skipped
-            .saturating_add(1);
+        STATE.lock().stats.files_skipped = STATE.lock().stats.files_skipped.saturating_add(1);
         return None;
     }
 
@@ -582,7 +574,8 @@ fn test_compress_decompress_lz4() {
         path_prefix: String::from("/tmp/fcomp_test"),
         extensions: Vec::new(),
         algorithm: Algorithm::Lz4,
-    }).expect("add rule");
+    })
+    .expect("add rule");
 
     let original = b"The quick brown fox jumps over the lazy dog. Repeated data helps compression: AAAAAAAAAA BBBBBBBBBB CCCCCCCCCC";
 
@@ -615,7 +608,8 @@ fn test_compress_decompress_gzip() {
         path_prefix: String::from("/tmp/fcomp_gz"),
         extensions: Vec::new(),
         algorithm: Algorithm::Gzip,
-    }).expect("add rule");
+    })
+    .expect("add rule");
 
     let original = b"Gzip test data with enough repetition to compress well: XXXXXXXXXX YYYYYYYYYY ZZZZZZZZZZ XXXXXXXXXX YYYYYYYYYY";
 
@@ -643,7 +637,8 @@ fn test_compress_decompress_zstd() {
         path_prefix: String::from("/tmp/fcomp_zst"),
         extensions: Vec::new(),
         algorithm: Algorithm::Zstd,
-    }).expect("add rule");
+    })
+    .expect("add rule");
 
     let original = b"Zstd test: repetitive content compresses well. Repeat repeat repeat repeat repeat repeat repeat!";
 
@@ -671,7 +666,8 @@ fn test_incompressible_skip() {
         path_prefix: String::from("/tmp/fcomp_rand"),
         extensions: Vec::new(),
         algorithm: Algorithm::Lz4,
-    }).expect("add rule");
+    })
+    .expect("add rule");
 
     // Random-looking data that won't compress well.
     // Small enough that LZ4 overhead makes compressed >= original.
@@ -705,7 +701,8 @@ fn test_rule_matching() {
         path_prefix: String::from("/var/log"),
         extensions: alloc::vec![String::from("log")],
         algorithm: Algorithm::Gzip,
-    }).expect("add rule");
+    })
+    .expect("add rule");
 
     // Should match.
     let data = b"Log line repeated many times: ERROR something went wrong ERROR something went wrong ERROR something went wrong";
@@ -736,7 +733,8 @@ fn test_min_size_filter() {
         path_prefix: String::from("/tmp/fcomp_min"),
         extensions: Vec::new(),
         algorithm: Algorithm::Lz4,
-    }).expect("add rule");
+    })
+    .expect("add rule");
 
     // Small file — should be skipped.
     let small = b"tiny";
@@ -770,7 +768,8 @@ fn test_stats() {
         path_prefix: String::from("/tmp/fcomp_stats"),
         extensions: Vec::new(),
         algorithm: Algorithm::Lz4,
-    }).expect("add rule");
+    })
+    .expect("add rule");
 
     let data = b"Stats test data with repetition for compression. XXXXXXXXXXXX YYYYYYYYYYYY";
     let compressed = compress_for_write("/tmp/fcomp_stats/test.txt", data);
@@ -778,8 +777,14 @@ fn test_stats() {
     let _ = decompress_for_read(&compressed.expect("checked"));
 
     let s = stats();
-    assert!(s.files_compressed >= 1, "should count at least 1 compressed");
-    assert!(s.files_decompressed >= 1, "should count at least 1 decompressed");
+    assert!(
+        s.files_compressed >= 1,
+        "should count at least 1 compressed"
+    );
+    assert!(
+        s.files_decompressed >= 1,
+        "should count at least 1 decompressed"
+    );
     assert!(s.bytes_original > 0);
     assert!(s.bytes_stored > 0);
 

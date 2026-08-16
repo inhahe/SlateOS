@@ -31,8 +31,8 @@
 // production paths.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -121,7 +121,10 @@ pub fn exit(nr: u64, start: u64, error: bool) {
         let mut current = MAX_LAT[idx].load(Ordering::Relaxed);
         while elapsed > current {
             match MAX_LAT[idx].compare_exchange_weak(
-                current, elapsed, Ordering::Relaxed, Ordering::Relaxed
+                current,
+                elapsed,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => current = actual,
@@ -209,7 +212,14 @@ pub fn stat(nr: u64) -> Option<SyscallStat> {
     let avg = total.checked_div(count).unwrap_or(0);
     let errors = ERRORS[idx].load(Ordering::Relaxed);
 
-    Some(SyscallStat { nr, count, total_cycles: total, avg_cycles: avg, max_cycles: max, errors })
+    Some(SyscallStat {
+        nr,
+        count,
+        total_cycles: total,
+        avg_cycles: avg,
+        max_cycles: max,
+        errors,
+    })
 }
 
 /// Get the top N syscalls by invocation count.
@@ -240,7 +250,12 @@ pub fn top_by_count(buf: &mut [SyscallStat]) -> usize {
     for i in 0..to_return {
         let nr = temp[i].1;
         buf[i] = stat(nr).unwrap_or(SyscallStat {
-            nr, count: 0, total_cycles: 0, avg_cycles: 0, max_cycles: 0, errors: 0,
+            nr,
+            count: 0,
+            total_cycles: 0,
+            avg_cycles: 0,
+            max_cycles: 0,
+            errors: 0,
         });
     }
     to_return
@@ -280,7 +295,9 @@ pub fn overall() -> OverallStats {
 /// Convert cycles to nanoseconds using the configured TSC frequency.
 pub fn cycles_to_ns(cycles: u64) -> u64 {
     let mhz = TSC_MHZ.load(Ordering::Relaxed);
-    if mhz == 0 { return 0; }
+    if mhz == 0 {
+        return 0;
+    }
     cycles.saturating_mul(1000).checked_div(mhz).unwrap_or(0)
 }
 
@@ -396,7 +413,10 @@ pub fn self_test() {
     assert_eq!(s.count, 1);
     assert!(s.avg_cycles > 0);
     assert_eq!(s.errors, 0);
-    serial_println!("[syscall_prof]   Single syscall: OK (avg={}ns)", cycles_to_ns(s.avg_cycles));
+    serial_println!(
+        "[syscall_prof]   Single syscall: OK (avg={}ns)",
+        cycles_to_ns(s.avg_cycles)
+    );
 
     // Test 3: Multiple syscalls.
     for _ in 0..10 {
@@ -416,20 +436,35 @@ pub fn self_test() {
     serial_println!("[syscall_prof]   Error tracking: OK");
 
     // Test 5: top_by_count.
-    let mut top = [SyscallStat { nr: 0, count: 0, total_cycles: 0, avg_cycles: 0, max_cycles: 0, errors: 0 }; 8];
+    let mut top = [SyscallStat {
+        nr: 0,
+        count: 0,
+        total_cycles: 0,
+        avg_cycles: 0,
+        max_cycles: 0,
+        errors: 0,
+    }; 8];
     let n = top_by_count(&mut top);
     assert!(n >= 3); // At least 3 distinct syscalls.
     assert_eq!(top[0].nr, 2); // SYS_TASK_ID has 10 calls (most).
-    serial_println!("[syscall_prof]   Top by count: #{} is syscall {} ({} calls)",
-        1, syscall_name(top[0].nr), top[0].count);
+    serial_println!(
+        "[syscall_prof]   Top by count: #{} is syscall {} ({} calls)",
+        1,
+        syscall_name(top[0].nr),
+        top[0].count
+    );
 
     // Test 6: Overall stats.
     let o = overall();
     assert_eq!(o.total_calls, 12); // 1 + 10 + 1
     assert_eq!(o.total_errors, 1);
     assert_eq!(o.distinct_syscalls, 3);
-    serial_println!("[syscall_prof]   Overall: {} calls, {} distinct, {} errors",
-        o.total_calls, o.distinct_syscalls, o.total_errors);
+    serial_println!(
+        "[syscall_prof]   Overall: {} calls, {} distinct, {} errors",
+        o.total_calls,
+        o.distinct_syscalls,
+        o.total_errors
+    );
 
     // Test 7: Disable/enable.
     disable();

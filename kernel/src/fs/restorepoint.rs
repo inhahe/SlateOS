@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -136,7 +136,7 @@ impl Default for RestoreConfig {
             auto_create: true,
             before_updates: true,
             before_installs: true,
-            schedule_hours: 168, // Weekly.
+            schedule_hours: 168,                      // Weekly.
             max_space_bytes: 10 * 1024 * 1024 * 1024, // 10 GiB.
             max_points: 20,
         }
@@ -178,7 +178,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         points: Vec::new(),
         config: RestoreConfig::default(),
@@ -196,7 +198,11 @@ pub fn create(description: &str, restore_type: RestoreType) -> KernelResult<u32>
 
         // Enforce limit by removing oldest.
         while state.points.len() >= max {
-            if let Some(pos) = state.points.iter().position(|p| p.status == PointStatus::Complete) {
+            if let Some(pos) = state
+                .points
+                .iter()
+                .position(|p| p.status == PointStatus::Complete)
+            {
                 state.points.remove(pos);
             } else {
                 break;
@@ -228,7 +234,10 @@ pub fn create(description: &str, restore_type: RestoreType) -> KernelResult<u32>
 /// Delete a restore point.
 pub fn delete(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.points.iter().position(|p| p.id == id)
+        let pos = state
+            .points
+            .iter()
+            .position(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         state.points.remove(pos);
         Ok(())
@@ -238,7 +247,10 @@ pub fn delete(id: u32) -> KernelResult<()> {
 /// Initiate restore from a point (marks it as restoring).
 pub fn restore(id: u32) -> KernelResult<RestorePoint> {
     with_state(|state| {
-        let point = state.points.iter_mut().find(|p| p.id == id)
+        let point = state
+            .points
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         if point.status != PointStatus::Complete {
             return Err(KernelError::InvalidArgument);
@@ -252,7 +264,12 @@ pub fn restore(id: u32) -> KernelResult<RestorePoint> {
 /// Get a restore point.
 pub fn get_point(id: u32) -> KernelResult<RestorePoint> {
     with_state(|state| {
-        state.points.iter().find(|p| p.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .points
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -272,12 +289,17 @@ pub fn list_points() -> Vec<RestorePoint> {
 /// Total disk space used by restore points.
 pub fn total_space_used() -> u64 {
     let guard = STATE.lock();
-    guard.as_ref().map_or(0, |s| s.points.iter().map(|p| p.size_bytes).sum())
+    guard
+        .as_ref()
+        .map_or(0, |s| s.points.iter().map(|p| p.size_bytes).sum())
 }
 
 /// Update configuration.
 pub fn set_config(config: RestoreConfig) -> KernelResult<()> {
-    with_state(|state| { state.config = config; Ok(()) })
+    with_state(|state| {
+        state.config = config;
+        Ok(())
+    })
 }
 
 pub fn get_config() -> KernelResult<RestoreConfig> {
@@ -285,7 +307,10 @@ pub fn get_config() -> KernelResult<RestoreConfig> {
 }
 
 pub fn set_auto_create(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.auto_create = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.auto_create = enabled;
+        Ok(())
+    })
 }
 
 /// Check if a restore point should be created (for integration hooks).
@@ -293,7 +318,9 @@ pub fn should_auto_create(trigger: RestoreType) -> bool {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            if !s.config.auto_create { return false; }
+            if !s.config.auto_create {
+                return false;
+            }
             match trigger {
                 RestoreType::BeforeUpdate => s.config.before_updates,
                 RestoreType::BeforeInstall => s.config.before_installs,
@@ -310,7 +337,13 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
     match guard.as_ref() {
         Some(s) => {
             let space: u64 = s.points.iter().map(|p| p.size_bytes).sum();
-            (s.points.len(), s.total_created, s.total_restored, space, s.ops)
+            (
+                s.points.len(),
+                s.total_created,
+                s.total_restored,
+                space,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }

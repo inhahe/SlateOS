@@ -20,9 +20,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -137,11 +137,13 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let mut id = 1u32;
     let mut tasks = Vec::new();
     let defaults = [
-        (TaskType::DiskTrim, 168, true),       // Weekly
+        (TaskType::DiskTrim, 168, true),        // Weekly
         (TaskType::IndexRebuild, 24, true),     // Daily
         (TaskType::UpdateCheck, 12, false),     // Twice daily
         (TaskType::IntegrityScan, 720, true),   // Monthly
@@ -154,7 +156,11 @@ pub fn init_defaults() {
     ];
     for (tt, interval, idle) in &defaults {
         tasks.push(MaintTask {
-            id: { let i = id; id += 1; i },
+            id: {
+                let i = id;
+                id += 1;
+                i
+            },
             task_type: *tt,
             enabled: true,
             interval_hours: *interval,
@@ -182,7 +188,9 @@ pub fn check_schedule() -> KernelResult<Vec<u32>> {
         let now = crate::hpet::elapsed_ns();
         let mut due = Vec::new();
         for task in &state.tasks {
-            if !task.enabled { continue; }
+            if !task.enabled {
+                continue;
+            }
             let interval_ns = (task.interval_hours as u64) * 3600 * 1_000_000_000;
             let elapsed = now.saturating_sub(task.last_run_ns);
             if elapsed >= interval_ns {
@@ -197,7 +205,10 @@ pub fn check_schedule() -> KernelResult<Vec<u32>> {
 pub fn run_task(task_id: u32) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let task = state.tasks.iter_mut().find(|t| t.id == task_id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == task_id)
             .ok_or(KernelError::NotFound)?;
         task.status = TaskStatus::Running;
         // Simulate task completion.
@@ -226,7 +237,10 @@ pub fn run_pending() -> KernelResult<usize> {
 /// Set task enabled.
 pub fn set_enabled(task_id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == task_id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == task_id)
             .ok_or(KernelError::NotFound)?;
         task.enabled = enabled;
         Ok(())
@@ -236,7 +250,10 @@ pub fn set_enabled(task_id: u32, enabled: bool) -> KernelResult<()> {
 /// Set task interval.
 pub fn set_interval(task_id: u32, hours: u32) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == task_id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == task_id)
             .ok_or(KernelError::NotFound)?;
         task.interval_hours = hours.clamp(1, 8760);
         Ok(())
@@ -246,7 +263,10 @@ pub fn set_interval(task_id: u32, hours: u32) -> KernelResult<()> {
 /// Set idle-only preference.
 pub fn set_idle_only(task_id: u32, idle_only: bool) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == task_id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == task_id)
             .ok_or(KernelError::NotFound)?;
         task.idle_only = idle_only;
         Ok(())
@@ -263,7 +283,10 @@ pub fn set_window(active: bool) -> KernelResult<()> {
 
 /// List all tasks.
 pub fn list_tasks() -> Vec<MaintTask> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.tasks.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.tasks.clone())
 }
 
 /// Statistics: (task_count, total_runs, total_failures, ops).
@@ -296,7 +319,10 @@ pub fn self_test() {
     assert_eq!(tasks[0].task_type, TaskType::DiskTrim);
     for t in &tasks {
         assert_eq!(t.status, TaskStatus::Idle);
-        assert_eq!((t.last_run_ns, t.last_duration_ms, t.run_count, t.fail_count), (0, 0, 0, 0));
+        assert_eq!(
+            (t.last_run_ns, t.last_duration_ms, t.run_count, t.fail_count),
+            (0, 0, 0, 0)
+        );
     }
     let (_, runs0, fails0, _) = stats();
     assert_eq!((runs0, fails0), (0, 0));

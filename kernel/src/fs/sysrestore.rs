@@ -27,10 +27,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -156,14 +156,16 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         snapshots: Vec::new(),
         next_id: 1,
         policy: RotationPolicy {
             max_snapshots: 20,
             max_total_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
-            max_age_secs: 30 * 24 * 3600, // 30 days
+            max_age_secs: 30 * 24 * 3600,             // 30 days
             keep_minimum: 3,
         },
         total_created: 0,
@@ -175,7 +177,10 @@ pub fn init_defaults() {
 
 /// Create a new snapshot.
 pub fn create_snapshot(
-    description: &str, snapshot_type: SnapshotType, size_bytes: u64, file_count: u32,
+    description: &str,
+    snapshot_type: SnapshotType,
+    size_bytes: u64,
+    file_count: u32,
 ) -> KernelResult<u32> {
     with_state(|state| {
         if state.snapshots.len() >= MAX_SNAPSHOTS {
@@ -186,9 +191,12 @@ pub fn create_snapshot(
         state.total_created += 1;
 
         state.snapshots.push(Snapshot {
-            id, description: String::from(description),
-            snapshot_type, state: SnapshotState::Complete,
-            size_bytes, file_count,
+            id,
+            description: String::from(description),
+            snapshot_type,
+            state: SnapshotState::Complete,
+            size_bytes,
+            file_count,
             created_ns: crate::hpet::elapsed_ns(),
             pinned: false,
         });
@@ -199,7 +207,10 @@ pub fn create_snapshot(
 /// Restore from a snapshot.
 pub fn restore_snapshot(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let snap = state.snapshots.iter_mut().find(|s| s.id == id)
+        let snap = state
+            .snapshots
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         if snap.state != SnapshotState::Complete {
             return Err(KernelError::InvalidArgument);
@@ -213,7 +224,10 @@ pub fn restore_snapshot(id: u32) -> KernelResult<()> {
 /// Pin a snapshot (prevent rotation).
 pub fn pin_snapshot(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let snap = state.snapshots.iter_mut().find(|s| s.id == id)
+        let snap = state
+            .snapshots
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         snap.pinned = true;
         Ok(())
@@ -223,7 +237,10 @@ pub fn pin_snapshot(id: u32) -> KernelResult<()> {
 /// Unpin a snapshot.
 pub fn unpin_snapshot(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let snap = state.snapshots.iter_mut().find(|s| s.id == id)
+        let snap = state
+            .snapshots
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         snap.pinned = false;
         Ok(())
@@ -233,7 +250,10 @@ pub fn unpin_snapshot(id: u32) -> KernelResult<()> {
 /// Delete a snapshot.
 pub fn delete_snapshot(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.snapshots.iter().position(|s| s.id == id)
+        let pos = state
+            .snapshots
+            .iter()
+            .position(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         state.snapshots.remove(pos);
         Ok(())
@@ -249,7 +269,11 @@ pub fn run_rotation() -> KernelResult<u32> {
 
         // Remove oldest non-pinned snapshots over max count.
         while state.snapshots.len() > max && state.snapshots.len() > min_keep {
-            if let Some(pos) = state.snapshots.iter().position(|s| !s.pinned && s.state != SnapshotState::Creating) {
+            if let Some(pos) = state
+                .snapshots
+                .iter()
+                .position(|s| !s.pinned && s.state != SnapshotState::Creating)
+            {
                 state.snapshots.remove(pos);
                 removed += 1;
                 state.total_rotated += 1;
@@ -262,9 +286,19 @@ pub fn run_rotation() -> KernelResult<u32> {
 }
 
 /// Set rotation policy.
-pub fn set_rotation_policy(max_snapshots: u32, max_total_bytes: u64, max_age_secs: u64, keep_minimum: u32) -> KernelResult<()> {
+pub fn set_rotation_policy(
+    max_snapshots: u32,
+    max_total_bytes: u64,
+    max_age_secs: u64,
+    keep_minimum: u32,
+) -> KernelResult<()> {
     with_state(|state| {
-        state.policy = RotationPolicy { max_snapshots, max_total_bytes, max_age_secs, keep_minimum };
+        state.policy = RotationPolicy {
+            max_snapshots,
+            max_total_bytes,
+            max_age_secs,
+            keep_minimum,
+        };
         Ok(())
     })
 }
@@ -272,7 +306,12 @@ pub fn set_rotation_policy(max_snapshots: u32, max_total_bytes: u64, max_age_sec
 /// Get rotation policy.
 pub fn get_rotation_policy() -> RotationPolicy {
     STATE.lock().as_ref().map_or(
-        RotationPolicy { max_snapshots: 20, max_total_bytes: 0, max_age_secs: 0, keep_minimum: 3 },
+        RotationPolicy {
+            max_snapshots: 20,
+            max_total_bytes: 0,
+            max_age_secs: 0,
+            keep_minimum: 3,
+        },
         |s| s.policy.clone(),
     )
 }
@@ -280,25 +319,42 @@ pub fn get_rotation_policy() -> RotationPolicy {
 /// Get snapshot by ID.
 pub fn get_snapshot(id: u32) -> KernelResult<Snapshot> {
     with_state(|state| {
-        state.snapshots.iter().find(|s| s.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .snapshots
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// List all snapshots.
 pub fn list_snapshots() -> Vec<Snapshot> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.snapshots.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.snapshots.clone())
 }
 
 /// Total size of all snapshots.
 pub fn total_size() -> u64 {
-    STATE.lock().as_ref().map_or(0, |s| s.snapshots.iter().map(|snap| snap.size_bytes).sum())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(0, |s| s.snapshots.iter().map(|snap| snap.size_bytes).sum())
 }
 
 /// Statistics: (snapshot_count, total_created, total_restored, total_rotated, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.snapshots.len(), s.total_created, s.total_restored, s.total_rotated, s.ops),
+        Some(s) => (
+            s.snapshots.len(),
+            s.total_created,
+            s.total_restored,
+            s.total_rotated,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -335,8 +391,15 @@ pub fn self_test() {
     crate::serial_println!("  [4/11] restore: OK");
 
     // 5: Create more snapshots.
-    let id2 = create_snapshot("Manual backup", SnapshotType::Manual, 200_000_000, 800).expect("create2");
-    let id3 = create_snapshot("Pre-driver", SnapshotType::PreDriverInstall, 100_000_000, 50).expect("create3");
+    let id2 =
+        create_snapshot("Manual backup", SnapshotType::Manual, 200_000_000, 800).expect("create2");
+    let id3 = create_snapshot(
+        "Pre-driver",
+        SnapshotType::PreDriverInstall,
+        100_000_000,
+        50,
+    )
+    .expect("create3");
     assert_eq!(list_snapshots().len(), 3);
     crate::serial_println!("  [5/11] multiple snapshots: OK");
 

@@ -30,10 +30,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -216,7 +216,11 @@ pub fn install_font(
         return Err(KernelError::ResourceExhausted);
     }
     // Check for duplicate family+style.
-    if state.fonts.iter().any(|f| f.family == family && f.style == style && f.path == path) {
+    if state
+        .fonts
+        .iter()
+        .any(|f| f.family == family && f.style == style && f.path == path)
+    {
         return Err(KernelError::AlreadyExists);
     }
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -241,7 +245,10 @@ pub fn install_font(
 /// Uninstall a font (system fonts cannot be uninstalled).
 pub fn uninstall_font(font_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let font = state.fonts.iter().find(|f| f.id == font_id)
+    let font = state
+        .fonts
+        .iter()
+        .find(|f| f.id == font_id)
         .ok_or(KernelError::NotFound)?;
     if font.system {
         return Err(KernelError::PermissionDenied);
@@ -254,7 +261,12 @@ pub fn uninstall_font(font_id: u64) -> KernelResult<()> {
 
 /// Get font by ID.
 pub fn get_font(font_id: u64) -> KernelResult<FontInfo> {
-    STATE.lock().fonts.iter().find(|f| f.id == font_id).cloned()
+    STATE
+        .lock()
+        .fonts
+        .iter()
+        .find(|f| f.id == font_id)
+        .cloned()
         .ok_or(KernelError::NotFound)
 }
 
@@ -262,19 +274,33 @@ pub fn get_font(font_id: u64) -> KernelResult<FontInfo> {
 pub fn list_fonts(category: Option<FontCategory>) -> Vec<FontInfo> {
     let state = STATE.lock();
     match category {
-        Some(cat) => state.fonts.iter().filter(|f| f.category == cat).cloned().collect(),
+        Some(cat) => state
+            .fonts
+            .iter()
+            .filter(|f| f.category == cat)
+            .cloned()
+            .collect(),
         None => state.fonts.clone(),
     }
 }
 
 /// Find fonts matching a family name.
 pub fn find_family(family: &str) -> Vec<FontInfo> {
-    STATE.lock().fonts.iter().filter(|f| f.family == family && f.enabled).cloned().collect()
+    STATE
+        .lock()
+        .fonts
+        .iter()
+        .filter(|f| f.family == family && f.enabled)
+        .cloned()
+        .collect()
 }
 
 /// Find a specific font by family and style.
 pub fn find_font(family: &str, style: FontStyle) -> KernelResult<FontInfo> {
-    STATE.lock().fonts.iter()
+    STATE
+        .lock()
+        .fonts
+        .iter()
         .find(|f| f.family == family && f.style == style && f.enabled)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -295,7 +321,10 @@ pub fn list_families() -> Vec<String> {
 /// Enable or disable a font.
 pub fn set_enabled(font_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let font = state.fonts.iter_mut().find(|f| f.id == font_id)
+    let font = state
+        .fonts
+        .iter_mut()
+        .find(|f| f.id == font_id)
         .ok_or(KernelError::NotFound)?;
     font.enabled = enabled;
     state.changes += 1;
@@ -453,13 +482,18 @@ pub fn clear_all() {
     let mut state = STATE.lock();
     state.fonts.clear();
     state.defaults = DefaultFonts {
-        ui: String::new(), document: String::new(),
-        monospace: String::new(), titlebar: String::new(),
+        ui: String::new(),
+        document: String::new(),
+        monospace: String::new(),
+        titlebar: String::new(),
         fallback: String::new(),
     };
     state.render = RenderSettings {
-        global_size_pt: 10, hint_mode: HintMode::Slight,
-        antialias: AntialiasMode::Subpixel, subpixel_order: SubpixelOrder::Rgb, dpi: 96,
+        global_size_pt: 10,
+        hint_mode: HintMode::Slight,
+        antialias: AntialiasMode::Subpixel,
+        subpixel_order: SubpixelOrder::Rgb,
+        dpi: 96,
     };
     state.changes = 0;
     NEXT_ID.store(1, Ordering::Relaxed);
@@ -477,9 +511,33 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: install fonts.
     serial_println!("fontmgr::self_test 1: install fonts");
-    let _f1 = install_font("TestSans", FontStyle::Regular, FontFormat::TrueType, FontCategory::SansSerif, "/fonts/test.ttf", "1.0", 500)?;
-    let _f2 = install_font("TestSans", FontStyle::Bold, FontFormat::TrueType, FontCategory::SansSerif, "/fonts/test-bold.ttf", "1.0", 500)?;
-    let f3 = install_font("TestMono", FontStyle::Regular, FontFormat::OpenType, FontCategory::Monospace, "/fonts/mono.otf", "2.0", 300)?;
+    let _f1 = install_font(
+        "TestSans",
+        FontStyle::Regular,
+        FontFormat::TrueType,
+        FontCategory::SansSerif,
+        "/fonts/test.ttf",
+        "1.0",
+        500,
+    )?;
+    let _f2 = install_font(
+        "TestSans",
+        FontStyle::Bold,
+        FontFormat::TrueType,
+        FontCategory::SansSerif,
+        "/fonts/test-bold.ttf",
+        "1.0",
+        500,
+    )?;
+    let f3 = install_font(
+        "TestMono",
+        FontStyle::Regular,
+        FontFormat::OpenType,
+        FontCategory::Monospace,
+        "/fonts/mono.otf",
+        "2.0",
+        300,
+    )?;
     assert_eq!(list_fonts(None).len(), 3);
 
     // Test 2: find fonts.

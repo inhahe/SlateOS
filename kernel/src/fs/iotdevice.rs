@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -96,7 +96,7 @@ pub struct IoTDevice {
     pub protocol: Protocol,
     pub room: String,
     pub online: bool,
-    pub state_value: String,    // e.g., "on", "off", "72°F", "locked"
+    pub state_value: String, // e.g., "on", "off", "72°F", "locked"
     pub last_seen_ns: u64,
     pub command_count: u64,
 }
@@ -146,7 +146,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         groups: Vec::new(),
@@ -159,7 +161,12 @@ pub fn init_defaults() {
 }
 
 /// Discover/add a device.
-pub fn discover(name: &str, dtype: DeviceType, protocol: Protocol, room: &str) -> KernelResult<u32> {
+pub fn discover(
+    name: &str,
+    dtype: DeviceType,
+    protocol: Protocol,
+    room: &str,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.devices.len() >= MAX_DEVICES {
             return Err(KernelError::ResourceExhausted);
@@ -169,9 +176,14 @@ pub fn discover(name: &str, dtype: DeviceType, protocol: Protocol, room: &str) -
         state.next_device_id += 1;
         state.total_discoveries += 1;
         state.devices.push(IoTDevice {
-            id, name: String::from(name), device_type: dtype,
-            protocol, room: String::from(room), online: true,
-            state_value: String::from("off"), last_seen_ns: now,
+            id,
+            name: String::from(name),
+            device_type: dtype,
+            protocol,
+            room: String::from(room),
+            online: true,
+            state_value: String::from("off"),
+            last_seen_ns: now,
             command_count: 0,
         });
         Ok(id)
@@ -183,7 +195,9 @@ pub fn remove_device(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.devices.len();
         state.devices.retain(|d| d.id != id);
-        if state.devices.len() == before { return Err(KernelError::NotFound); }
+        if state.devices.len() == before {
+            return Err(KernelError::NotFound);
+        }
         // Remove from groups.
         for g in &mut state.groups {
             g.device_ids.retain(|did| *did != id);
@@ -196,7 +210,10 @@ pub fn remove_device(id: u32) -> KernelResult<()> {
 pub fn set_state(id: u32, value: &str) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let dev = state.devices.iter_mut().find(|d| d.id == id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         if !dev.online {
             return Err(KernelError::NotSupported);
@@ -213,10 +230,15 @@ pub fn set_state(id: u32, value: &str) -> KernelResult<()> {
 pub fn set_online(id: u32, online: bool) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let dev = state.devices.iter_mut().find(|d| d.id == id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         dev.online = online;
-        if online { dev.last_seen_ns = now; }
+        if online {
+            dev.last_seen_ns = now;
+        }
         Ok(())
     })
 }
@@ -230,7 +252,9 @@ pub fn create_group(name: &str, device_ids: Vec<u32>) -> KernelResult<u32> {
         let id = state.next_group_id;
         state.next_group_id += 1;
         state.groups.push(DeviceGroup {
-            id, name: String::from(name), device_ids,
+            id,
+            name: String::from(name),
+            device_ids,
         });
         Ok(id)
     })
@@ -240,7 +264,10 @@ pub fn create_group(name: &str, device_ids: Vec<u32>) -> KernelResult<u32> {
 pub fn group_command(group_id: u32, value: &str) -> KernelResult<usize> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let group = state.groups.iter().find(|g| g.id == group_id)
+        let group = state
+            .groups
+            .iter()
+            .find(|g| g.id == group_id)
             .ok_or(KernelError::NotFound)?;
         let ids = group.device_ids.clone();
         let mut count = 0usize;
@@ -259,19 +286,29 @@ pub fn group_command(group_id: u32, value: &str) -> KernelResult<usize> {
 
 /// List all devices.
 pub fn list_devices() -> Vec<IoTDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// List devices by room.
 pub fn by_room(room: &str) -> Vec<IoTDevice> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.devices.iter().filter(|d| d.room == room).cloned().collect()
+        s.devices
+            .iter()
+            .filter(|d| d.room == room)
+            .cloned()
+            .collect()
     })
 }
 
 /// List groups.
 pub fn list_groups() -> Vec<DeviceGroup> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.groups.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.groups.clone())
 }
 
 /// Statistics: (device_count, group_count, online_count, total_commands, total_discoveries, ops).
@@ -280,7 +317,14 @@ pub fn stats() -> (usize, usize, usize, u64, u64, u64) {
     match guard.as_ref() {
         Some(s) => {
             let online = s.devices.iter().filter(|d| d.online).count();
-            (s.devices.len(), s.groups.len(), online, s.total_commands, s.total_discoveries, s.ops)
+            (
+                s.devices.len(),
+                s.groups.len(),
+                online,
+                s.total_commands,
+                s.total_discoveries,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0),
     }
@@ -299,9 +343,27 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty: OK");
 
     // 2: Discover devices.
-    let d1 = discover("Living Room Light", DeviceType::Light, Protocol::Zigbee, "Living Room").expect("d1");
-    let d2 = discover("Front Door Lock", DeviceType::Lock, Protocol::Zwave, "Hallway").expect("d2");
-    let d3 = discover("Thermostat", DeviceType::Thermostat, Protocol::Wifi, "Living Room").expect("d3");
+    let d1 = discover(
+        "Living Room Light",
+        DeviceType::Light,
+        Protocol::Zigbee,
+        "Living Room",
+    )
+    .expect("d1");
+    let d2 = discover(
+        "Front Door Lock",
+        DeviceType::Lock,
+        Protocol::Zwave,
+        "Hallway",
+    )
+    .expect("d2");
+    let d3 = discover(
+        "Thermostat",
+        DeviceType::Thermostat,
+        Protocol::Wifi,
+        "Living Room",
+    )
+    .expect("d3");
     assert_eq!(list_devices().len(), 3);
     crate::serial_println!("  [2/8] discover: OK");
 

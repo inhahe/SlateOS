@@ -49,9 +49,9 @@
 //! - Maximum frame payload: 64 KiB (configurable).
 //! - Close handshake: server echoes close frame before TCP shutdown.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -128,12 +128,7 @@ fn sha1(data: &[u8]) -> [u8; SHA1_DIGEST_SIZE] {
         let mut w = [0u32; 80];
         for t in 0..16 {
             let i = t * 4;
-            w[t] = u32::from_be_bytes([
-                block[i],
-                block[i + 1],
-                block[i + 2],
-                block[i + 3],
-            ]);
+            w[t] = u32::from_be_bytes([block[i], block[i + 1], block[i + 2], block[i + 3]]);
         }
         for t in 16..80 {
             w[t] = (w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16]).rotate_left(1);
@@ -151,7 +146,8 @@ fn sha1(data: &[u8]) -> [u8; SHA1_DIGEST_SIZE] {
                 _ => (b ^ c ^ d, 0xCA62C1D6u32),
             };
 
-            let temp = a.rotate_left(5)
+            let temp = a
+                .rotate_left(5)
                 .wrapping_add(f)
                 .wrapping_add(e)
                 .wrapping_add(k)
@@ -230,7 +226,9 @@ fn parse_upgrade_request(data: &[u8]) -> Option<WsUpgradeInfo> {
 
         // Case-insensitive header comparison.
         let name_lower = name.as_bytes();
-        if eq_ignore_ascii_case(name_lower, b"Upgrade") && eq_ignore_ascii_case(value.as_bytes(), b"websocket") {
+        if eq_ignore_ascii_case(name_lower, b"Upgrade")
+            && eq_ignore_ascii_case(value.as_bytes(), b"websocket")
+        {
             has_upgrade = true;
         } else if eq_ignore_ascii_case(name_lower, b"Connection") {
             // Connection header may contain multiple tokens.
@@ -360,8 +358,7 @@ pub fn parse_frame(data: &[u8]) -> Option<(WsFrame, usize)> {
             return None;
         }
         let len = u64::from_be_bytes([
-            data[2], data[3], data[4], data[5],
-            data[6], data[7], data[8], data[9],
+            data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9],
         ]) as usize;
         offset = 10;
         // Reject absurdly large frames.
@@ -501,8 +498,7 @@ pub fn handle_upgrade(
     use crate::net::tcp;
 
     // Parse the upgrade request.
-    let info = parse_upgrade_request(request_data)
-        .ok_or(KernelError::InvalidArgument)?;
+    let info = parse_upgrade_request(request_data).ok_or(KernelError::InvalidArgument)?;
 
     // Validate version (must be 13 per RFC 6455 §4.4).
     if info.version.trim() != "13" {
@@ -643,8 +639,8 @@ pub fn self_test() -> KernelResult<()> {
 
         // Full 20-byte verification for "abc".
         let abc_expected: [u8; 20] = [
-            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
-            0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
+            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+            0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
         ];
         assert_eq!(hash, abc_expected);
         serial_println!("[websocket]   SHA-1 'abc' full verify: OK");
@@ -655,8 +651,8 @@ pub fn self_test() -> KernelResult<()> {
         let nist_input = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
         let nist_hash = sha1(nist_input);
         let nist_expected: [u8; 20] = [
-            0x84, 0x98, 0x3e, 0x44, 0x1c, 0x3b, 0xd2, 0x6e, 0xba, 0xae,
-            0x4a, 0xa1, 0xf9, 0x51, 0x29, 0xe5, 0xe5, 0x46, 0x70, 0xf1,
+            0x84, 0x98, 0x3e, 0x44, 0x1c, 0x3b, 0xd2, 0x6e, 0xba, 0xae, 0x4a, 0xa1, 0xf9, 0x51,
+            0x29, 0xe5, 0xe5, 0x46, 0x70, 0xf1,
         ];
         assert_eq!(nist_hash, nist_expected);
         serial_println!("[websocket]   SHA-1 NIST 2-block: OK");
@@ -712,7 +708,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         let frame = text_frame("Hi");
         assert_eq!(frame[0], 0x81); // FIN + text
-        assert_eq!(frame[1], 2);    // len = 2, no mask
+        assert_eq!(frame[1], 2); // len = 2, no mask
         assert_eq!(&frame[2..4], b"Hi");
         serial_println!("[websocket]   Frame build (text): OK");
     }
@@ -721,7 +717,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         let frame = close_frame(1000, "OK");
         assert_eq!(frame[0], 0x88); // FIN + close
-        assert_eq!(frame[1], 4);    // 2 bytes code + 2 bytes reason
+        assert_eq!(frame[1], 4); // 2 bytes code + 2 bytes reason
         assert_eq!(frame[2], 0x03); // 1000 >> 8
         assert_eq!(frame[3], 0xE8); // 1000 & 0xFF
         assert_eq!(&frame[4..6], b"OK");
@@ -732,10 +728,10 @@ pub fn self_test() -> KernelResult<()> {
     {
         let payload = [0xAA; 200];
         let frame = build_frame(OP_BINARY, &payload, true);
-        assert_eq!(frame[0], 0x82);  // FIN + binary
-        assert_eq!(frame[1], 126);   // extended 16-bit length
-        assert_eq!(frame[2], 0);     // 200 >> 8
-        assert_eq!(frame[3], 200);   // 200 & 0xFF
+        assert_eq!(frame[0], 0x82); // FIN + binary
+        assert_eq!(frame[1], 126); // extended 16-bit length
+        assert_eq!(frame[2], 0); // 200 >> 8
+        assert_eq!(frame[3], 200); // 200 & 0xFF
         assert_eq!(frame.len(), 4 + 200);
         serial_println!("[websocket]   Frame build (extended length): OK");
     }

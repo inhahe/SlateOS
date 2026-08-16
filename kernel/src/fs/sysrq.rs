@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -78,7 +78,7 @@ const MAX_HANDLERS: usize = 64;
 
 struct State {
     handlers: Vec<SysRqHandler>,
-    enabled_mask: u32,  // Bitmask for categories.
+    enabled_mask: u32, // Bitmask for categories.
     total_triggers: u64,
     total_blocked: u64,
     ops: u64,
@@ -116,39 +116,91 @@ fn category_bit(cat: SysRqCategory) -> u32 {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         handlers: alloc::vec![
-            SysRqHandler { key: 'b', category: SysRqCategory::Reboot,
-                description: String::from("Immediately reboot"), enabled: true,
-                trigger_count: 0, last_triggered_ns: 0 },
-            SysRqHandler { key: 'e', category: SysRqCategory::Process,
-                description: String::from("Send SIGTERM to all processes"), enabled: true,
-                trigger_count: 0, last_triggered_ns: 0 },
-            SysRqHandler { key: 'i', category: SysRqCategory::Process,
-                description: String::from("Send SIGKILL to all processes"), enabled: true,
-                trigger_count: 0, last_triggered_ns: 0 },
-            SysRqHandler { key: 's', category: SysRqCategory::Filesystem,
-                description: String::from("Sync all filesystems"), enabled: true,
-                trigger_count: 0, last_triggered_ns: 0 },
-            SysRqHandler { key: 'u', category: SysRqCategory::Filesystem,
-                description: String::from("Remount all filesystems read-only"), enabled: true,
-                trigger_count: 0, last_triggered_ns: 0 },
-            SysRqHandler { key: 'm', category: SysRqCategory::Memory,
-                description: String::from("Show memory info"), enabled: true,
-                trigger_count: 0, last_triggered_ns: 0 },
-            SysRqHandler { key: 't', category: SysRqCategory::Debug,
-                description: String::from("Show task list"), enabled: true,
-                trigger_count: 0, last_triggered_ns: 0 },
-            SysRqHandler { key: 'h', category: SysRqCategory::Info,
-                description: String::from("Show SysRq help"), enabled: true,
-                trigger_count: 0, last_triggered_ns: 0 },
-            SysRqHandler { key: 'l', category: SysRqCategory::Debug,
-                description: String::from("Show backtrace for all CPUs"), enabled: true,
-                trigger_count: 0, last_triggered_ns: 0 },
-            SysRqHandler { key: 'f', category: SysRqCategory::Memory,
-                description: String::from("Call OOM killer"), enabled: true,
-                trigger_count: 0, last_triggered_ns: 0 },
+            SysRqHandler {
+                key: 'b',
+                category: SysRqCategory::Reboot,
+                description: String::from("Immediately reboot"),
+                enabled: true,
+                trigger_count: 0,
+                last_triggered_ns: 0
+            },
+            SysRqHandler {
+                key: 'e',
+                category: SysRqCategory::Process,
+                description: String::from("Send SIGTERM to all processes"),
+                enabled: true,
+                trigger_count: 0,
+                last_triggered_ns: 0
+            },
+            SysRqHandler {
+                key: 'i',
+                category: SysRqCategory::Process,
+                description: String::from("Send SIGKILL to all processes"),
+                enabled: true,
+                trigger_count: 0,
+                last_triggered_ns: 0
+            },
+            SysRqHandler {
+                key: 's',
+                category: SysRqCategory::Filesystem,
+                description: String::from("Sync all filesystems"),
+                enabled: true,
+                trigger_count: 0,
+                last_triggered_ns: 0
+            },
+            SysRqHandler {
+                key: 'u',
+                category: SysRqCategory::Filesystem,
+                description: String::from("Remount all filesystems read-only"),
+                enabled: true,
+                trigger_count: 0,
+                last_triggered_ns: 0
+            },
+            SysRqHandler {
+                key: 'm',
+                category: SysRqCategory::Memory,
+                description: String::from("Show memory info"),
+                enabled: true,
+                trigger_count: 0,
+                last_triggered_ns: 0
+            },
+            SysRqHandler {
+                key: 't',
+                category: SysRqCategory::Debug,
+                description: String::from("Show task list"),
+                enabled: true,
+                trigger_count: 0,
+                last_triggered_ns: 0
+            },
+            SysRqHandler {
+                key: 'h',
+                category: SysRqCategory::Info,
+                description: String::from("Show SysRq help"),
+                enabled: true,
+                trigger_count: 0,
+                last_triggered_ns: 0
+            },
+            SysRqHandler {
+                key: 'l',
+                category: SysRqCategory::Debug,
+                description: String::from("Show backtrace for all CPUs"),
+                enabled: true,
+                trigger_count: 0,
+                last_triggered_ns: 0
+            },
+            SysRqHandler {
+                key: 'f',
+                category: SysRqCategory::Memory,
+                description: String::from("Call OOM killer"),
+                enabled: true,
+                trigger_count: 0,
+                last_triggered_ns: 0
+            },
         ],
         enabled_mask: 0x7F, // All categories enabled.
         total_triggers: 0,
@@ -159,18 +211,27 @@ pub fn init_defaults() {
 
 /// List all registered handlers.
 pub fn list_handlers() -> Vec<SysRqHandler> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.handlers.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.handlers.clone())
 }
 
 /// Get handler for a key.
 pub fn get_handler(key: char) -> Option<SysRqHandler> {
-    STATE.lock().as_ref().and_then(|s| s.handlers.iter().find(|h| h.key == key).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.handlers.iter().find(|h| h.key == key).cloned())
 }
 
 /// Trigger a SysRq action.
 pub fn trigger(key: char) -> KernelResult<()> {
     with_state(|state| {
-        let handler = state.handlers.iter_mut().find(|h| h.key == key)
+        let handler = state
+            .handlers
+            .iter_mut()
+            .find(|h| h.key == key)
             .ok_or(KernelError::NotFound)?;
         if !handler.enabled {
             state.total_blocked += 1;
@@ -199,8 +260,12 @@ pub fn register(key: char, category: SysRqCategory, description: &str) -> Kernel
             return Err(KernelError::AlreadyExists);
         }
         state.handlers.push(SysRqHandler {
-            key, category, description: String::from(description),
-            enabled: true, trigger_count: 0, last_triggered_ns: 0,
+            key,
+            category,
+            description: String::from(description),
+            enabled: true,
+            trigger_count: 0,
+            last_triggered_ns: 0,
         });
         Ok(())
     })
@@ -211,7 +276,9 @@ pub fn unregister(key: char) -> KernelResult<()> {
     with_state(|state| {
         let before = state.handlers.len();
         state.handlers.retain(|h| h.key != key);
-        if state.handlers.len() == before { return Err(KernelError::NotFound); }
+        if state.handlers.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -232,7 +299,10 @@ pub fn get_enabled_mask() -> u32 {
 /// Enable/disable a specific handler.
 pub fn set_handler_enabled(key: char, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let handler = state.handlers.iter_mut().find(|h| h.key == key)
+        let handler = state
+            .handlers
+            .iter_mut()
+            .find(|h| h.key == key)
             .ok_or(KernelError::NotFound)?;
         handler.enabled = enabled;
         Ok(())
@@ -243,7 +313,13 @@ pub fn set_handler_enabled(key: char, enabled: bool) -> KernelResult<()> {
 pub fn stats() -> (usize, u64, u64, u32, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.handlers.len(), s.total_triggers, s.total_blocked, s.enabled_mask, s.ops),
+        Some(s) => (
+            s.handlers.len(),
+            s.total_triggers,
+            s.total_blocked,
+            s.enabled_mask,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

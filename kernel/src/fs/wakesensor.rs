@@ -32,10 +32,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -359,10 +359,14 @@ pub fn set_active_hours(
     };
     // Validate hours.
     if let Some(h) = start {
-        if h > 23 { return Err(KernelError::InvalidArgument); }
+        if h > 23 {
+            return Err(KernelError::InvalidArgument);
+        }
     }
     if let Some(h) = end {
-        if h > 23 { return Err(KernelError::InvalidArgument); }
+        if h > 23 {
+            return Err(KernelError::InvalidArgument);
+        }
     }
     sc.active_hours_start = start;
     sc.active_hours_end = end;
@@ -418,15 +422,15 @@ pub fn should_wake(motion_level: u32, sound_level: u32) -> bool {
     }
 
     let cam = &state.config.camera;
-    if cam.enabled && cam.consent == ConsentState::Granted
+    if cam.enabled
+        && cam.consent == ConsentState::Granted
         && motion_level >= cam.effective_threshold
     {
         return true;
     }
 
     let mic = &state.config.mic;
-    if mic.enabled && mic.consent == ConsentState::Granted
-        && sound_level >= mic.effective_threshold
+    if mic.enabled && mic.consent == ConsentState::Granted && sound_level >= mic.effective_threshold
     {
         return true;
     }
@@ -469,7 +473,10 @@ pub fn record_wake(sensor: SensorType, level: u32) {
 /// Mark a wake event as false positive.
 pub fn mark_false_positive(event_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let event = state.events.iter_mut().find(|e| e.id == event_id)
+    let event = state
+        .events
+        .iter_mut()
+        .find(|e| e.id == event_id)
         .ok_or(KernelError::NotFound)?;
     if !event.false_positive {
         event.false_positive = true;
@@ -521,11 +528,13 @@ pub fn init_defaults() {
 /// Return (globally_enabled, camera_enabled, mic_enabled, event_count, ops).
 pub fn stats() -> (bool, bool, bool, usize, u64) {
     let state = STATE.lock();
-    (state.config.globally_enabled,
-     state.config.camera.enabled,
-     state.config.mic.enabled,
-     state.events.len(),
-     OP_COUNT.load(Ordering::Relaxed))
+    (
+        state.config.globally_enabled,
+        state.config.camera.enabled,
+        state.config.mic.enabled,
+        state.events.len(),
+        OP_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 pub fn reset_stats() {

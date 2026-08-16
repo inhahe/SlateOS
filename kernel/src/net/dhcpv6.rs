@@ -30,15 +30,15 @@
 //! - `tick_renewal()` — maintain lease (called from net::poll)
 //! - Configures DNS servers via `dns::set_server_v6()`
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
 use super::ipv6::Ipv6Addr;
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -51,10 +51,8 @@ const DHCPV6_CLIENT_PORT: u16 = 546;
 const DHCPV6_SERVER_PORT: u16 = 547;
 
 /// All DHCP Relay Agents and Servers (ff02::1:2).
-const ALL_DHCP_SERVERS: Ipv6Addr = Ipv6Addr([
-    0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0x01, 0, 0x02,
-]);
+const ALL_DHCP_SERVERS: Ipv6Addr =
+    Ipv6Addr([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0, 0x02]);
 
 // --- DHCPv6 message types (RFC 8415 §7.3) ---
 
@@ -416,7 +414,12 @@ fn gen_xid() -> u32 {
 fn send_dhcpv6(data: &[u8]) -> KernelResult<()> {
     // DHCPv6 uses UDP on ports 546 (client) → 547 (server),
     // sent to the all-DHCP-servers multicast address (ff02::1:2).
-    super::udp::send_v6(DHCPV6_CLIENT_PORT, ALL_DHCP_SERVERS, DHCPV6_SERVER_PORT, data)
+    super::udp::send_v6(
+        DHCPV6_CLIENT_PORT,
+        ALL_DHCP_SERVERS,
+        DHCPV6_SERVER_PORT,
+        data,
+    )
 }
 
 /// Wait for a DHCPv6 response on the client port.
@@ -427,7 +430,11 @@ fn recv_dhcpv6(expected_xid: u32, timeout_polls: u32) -> Option<Vec<u8>> {
         Err(_) => return None,
     };
 
-    let timeout = if timeout_polls == 0 { RESPONSE_TIMEOUT_POLLS } else { timeout_polls };
+    let timeout = if timeout_polls == 0 {
+        RESPONSE_TIMEOUT_POLLS
+    } else {
+        timeout_polls
+    };
 
     for _ in 0..timeout {
         super::poll();
@@ -500,10 +507,8 @@ fn parse_response(data: &[u8]) -> Option<ParsedResponse> {
     // Parse options starting at byte 4.
     let mut offset = 4usize;
     while offset.saturating_add(4) <= data.len() {
-        let opt_code = u16::from_be_bytes([
-            *data.get(offset)?,
-            *data.get(offset.saturating_add(1))?,
-        ]);
+        let opt_code =
+            u16::from_be_bytes([*data.get(offset)?, *data.get(offset.saturating_add(1))?]);
         let opt_len = u16::from_be_bytes([
             *data.get(offset.saturating_add(2))?,
             *data.get(offset.saturating_add(3))?,
@@ -594,10 +599,8 @@ fn parse_ia_na(data: &[u8], resp: &mut ParsedResponse) {
                 valid_lifetime: valid,
             });
         } else if sub_code == OPT_STATUS_CODE && sub_len >= 2 {
-            resp.status_code = u16::from_be_bytes([
-                data[sub_start],
-                data[sub_start.saturating_add(1)],
-            ]);
+            resp.status_code =
+                u16::from_be_bytes([data[sub_start], data[sub_start.saturating_add(1)]]);
         }
 
         offset = sub_end;
@@ -732,17 +735,15 @@ pub fn discover() -> KernelResult<Ipv6Addr> {
     crate::serial_println!("[dhcpv6] Sent Solicit (xid={:#06x})", xid);
 
     let advertise = match recv_dhcpv6(xid, RESPONSE_TIMEOUT_POLLS) {
-        Some(data) => {
-            match parse_response(&data) {
-                Some(resp) if resp.msg_type == MSG_ADVERTISE => resp,
-                _ => {
-                    ERRORS.fetch_add(1, Ordering::Relaxed);
-                    let mut st = STATE.lock();
-                    st.state = Dhcpv6State::Idle;
-                    return Err(KernelError::NotSupported);
-                }
+        Some(data) => match parse_response(&data) {
+            Some(resp) if resp.msg_type == MSG_ADVERTISE => resp,
+            _ => {
+                ERRORS.fetch_add(1, Ordering::Relaxed);
+                let mut st = STATE.lock();
+                st.state = Dhcpv6State::Idle;
+                return Err(KernelError::NotSupported);
             }
-        }
+        },
         None => {
             let mut st = STATE.lock();
             st.state = Dhcpv6State::Idle;
@@ -833,9 +834,7 @@ fn apply_info_response(resp: &ParsedResponse) {
 
     // Configure the system DNS resolver with the first IPv6 DNS server.
     if resp.dns_count > 0 {
-        crate::serial_println!(
-            "[dhcpv6] DNS server: {}", resp.dns_servers[0]
-        );
+        crate::serial_println!("[dhcpv6] DNS server: {}", resp.dns_servers[0]);
         // Set it as the system IPv6 DNS server if available.
         // (The dns module would need a set_server_v6 function.)
     }
@@ -856,8 +855,16 @@ fn apply_lease(resp: &ParsedResponse, addr: IaAddress) {
     st.lease_valid_ns = now.saturating_add(valid_ns);
 
     // T1 = 50% of preferred lifetime (for renewal).
-    let t1 = if resp.t1 > 0 { resp.t1 } else { addr.preferred_lifetime / 2 };
-    let t2 = if resp.t2 > 0 { resp.t2 } else { (addr.preferred_lifetime * 4) / 5 };
+    let t1 = if resp.t1 > 0 {
+        resp.t1
+    } else {
+        addr.preferred_lifetime / 2
+    };
+    let t2 = if resp.t2 > 0 {
+        resp.t2
+    } else {
+        (addr.preferred_lifetime * 4) / 5
+    };
     st.t1_ns = now.saturating_add((t1 as u64).saturating_mul(1_000_000_000));
     st.t2_ns = now.saturating_add((t2 as u64).saturating_mul(1_000_000_000));
 
@@ -872,7 +879,11 @@ fn apply_lease(resp: &ParsedResponse, addr: IaAddress) {
 
     crate::serial_println!(
         "[dhcpv6] Bound: addr={} preferred={}s valid={}s T1={}s T2={}s",
-        addr.addr, addr.preferred_lifetime, addr.valid_lifetime, t1, t2,
+        addr.addr,
+        addr.preferred_lifetime,
+        addr.valid_lifetime,
+        t1,
+        t2,
     );
 
     if resp.dns_count > 0 {
@@ -919,8 +930,13 @@ pub fn tick_renewal() {
                     drop(st);
 
                     let pkt = build_renew(
-                        &duid, &server_duid, xid, iaid,
-                        addr.addr, addr.preferred_lifetime, addr.valid_lifetime,
+                        &duid,
+                        &server_duid,
+                        xid,
+                        iaid,
+                        addr.addr,
+                        addr.preferred_lifetime,
+                        addr.valid_lifetime,
                     );
                     let _ = send_dhcpv6(&pkt);
                     REQUESTS_SENT.fetch_add(1, Ordering::Relaxed);
@@ -1122,8 +1138,7 @@ pub fn self_test() -> KernelResult<()> {
         let duid = [0, 3, 0, 1, 1, 2, 3, 4, 5, 6];
         let server = [0, 3, 0, 1, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
         let addr = Ipv6Addr([
-            0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0x01,
+            0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
         ]);
         let pkt = build_request(&duid, &server, 0x111111, 1, addr, 3600, 7200);
         assert!(pkt[0] == MSG_REQUEST, "request type");
@@ -1140,11 +1155,12 @@ pub fn self_test() -> KernelResult<()> {
         reply.push(MSG_REPLY); // Type.
         reply.extend_from_slice(&[0x12, 0x34, 0x56]); // XID.
         // DNS servers option: code=23, len=16, one IPv6 address.
-        reply.push(0); reply.push(23); // OPT_DNS_SERVERS.
-        reply.push(0); reply.push(16); // Length = 16.
+        reply.push(0);
+        reply.push(23); // OPT_DNS_SERVERS.
+        reply.push(0);
+        reply.push(16); // Length = 16.
         reply.extend_from_slice(&[
-            0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0,
-            0, 0, 0, 0, 0, 0, 0x88, 0x88,
+            0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88,
         ]); // 2001:4860:4860::8888
 
         let resp = parse_response(&reply);
@@ -1163,15 +1179,14 @@ pub fn self_test() -> KernelResult<()> {
     {
         // DNS wire format: "\x07example\x03com\x00"
         let domain_data = [
-            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-            3, b'c', b'o', b'm',
-            0,
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
         ];
         let mut resp = ParsedResponse {
             msg_type: 0,
             server_duid: Vec::new(),
             ia_addr: None,
-            t1: 0, t2: 0,
+            t1: 0,
+            t2: 0,
             dns_servers: [Ipv6Addr::UNSPECIFIED; 3],
             dns_count: 0,
             domain: [0; 64],
@@ -1197,12 +1212,13 @@ pub fn self_test() -> KernelResult<()> {
         // T2 = 2880.
         ia_na_data.extend_from_slice(&2880u32.to_be_bytes());
         // IA Address sub-option.
-        ia_na_data.push(0); ia_na_data.push(5); // OPT_IAADDR.
-        ia_na_data.push(0); ia_na_data.push(24); // Length = 24.
+        ia_na_data.push(0);
+        ia_na_data.push(5); // OPT_IAADDR.
+        ia_na_data.push(0);
+        ia_na_data.push(24); // Length = 24.
         // Address: 2001:db8::1.
         ia_na_data.extend_from_slice(&[
-            0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0x01,
+            0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
         ]);
         // Preferred lifetime = 3600.
         ia_na_data.extend_from_slice(&3600u32.to_be_bytes());
@@ -1213,7 +1229,8 @@ pub fn self_test() -> KernelResult<()> {
             msg_type: 0,
             server_duid: Vec::new(),
             ia_addr: None,
-            t1: 0, t2: 0,
+            t1: 0,
+            t2: 0,
             dns_servers: [Ipv6Addr::UNSPECIFIED; 3],
             dns_count: 0,
             domain: [0; 64],
@@ -1298,7 +1315,9 @@ pub fn self_test() -> KernelResult<()> {
         assert!(xid & 0xFF000000 == 0, "24-bit xid");
         // Generate another — should differ (probabilistic).
         // Small spin to get a different timestamp.
-        for _ in 0..1000 { core::hint::spin_loop(); }
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
         let xid2 = gen_xid();
         // Not a strict test — xids could theoretically match.
         let _ = xid2;

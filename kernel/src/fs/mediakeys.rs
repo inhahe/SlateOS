@@ -26,10 +26,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -147,7 +147,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         sessions: Vec::new(),
         next_id: 1,
@@ -170,14 +172,21 @@ pub fn register_session(app_name: &str, app_pid: u32) -> KernelResult<u32> {
 
         let is_first = state.sessions.is_empty();
         state.sessions.push(MediaSession {
-            id, app_name: String::from(app_name), app_pid,
-            title: String::new(), artist: String::new(), album: String::new(),
+            id,
+            app_name: String::from(app_name),
+            app_pid,
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
             state: PlaybackState::Stopped,
-            duration_ms: 0, position_ms: 0,
+            duration_ms: 0,
+            position_ms: 0,
             is_active: is_first,
             created_ns: crate::hpet::elapsed_ns(),
         });
-        if is_first { state.active_id = id; }
+        if is_first {
+            state.active_id = id;
+        }
         Ok(id)
     })
 }
@@ -185,7 +194,10 @@ pub fn register_session(app_name: &str, app_pid: u32) -> KernelResult<u32> {
 /// Unregister a media session.
 pub fn unregister_session(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.sessions.iter().position(|s| s.id == id)
+        let pos = state
+            .sessions
+            .iter()
+            .position(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         state.sessions.remove(pos);
         if state.active_id == id {
@@ -199,9 +211,18 @@ pub fn unregister_session(id: u32) -> KernelResult<()> {
 }
 
 /// Update now-playing info.
-pub fn update_now_playing(id: u32, title: &str, artist: &str, album: &str, duration_ms: u64) -> KernelResult<()> {
+pub fn update_now_playing(
+    id: u32,
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration_ms: u64,
+) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.title = String::from(title);
         session.artist = String::from(artist);
@@ -215,7 +236,10 @@ pub fn update_now_playing(id: u32, title: &str, artist: &str, album: &str, durat
 /// Set playback state.
 pub fn set_playback_state(id: u32, state_val: PlaybackState) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.state = state_val;
         Ok(())
@@ -225,7 +249,10 @@ pub fn set_playback_state(id: u32, state_val: PlaybackState) -> KernelResult<()>
 /// Update position.
 pub fn update_position(id: u32, position_ms: u64) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.position_ms = position_ms;
         Ok(())
@@ -250,7 +277,10 @@ pub fn set_active(id: u32) -> KernelResult<()> {
 pub fn handle_key(key: MediaKey) -> KernelResult<()> {
     with_state(|state| {
         state.total_key_events += 1;
-        let active = state.sessions.iter_mut().find(|s| s.id == state.active_id)
+        let active = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == state.active_id)
             .ok_or(KernelError::NotFound)?;
         match key {
             MediaKey::Play => active.state = PlaybackState::Playing,
@@ -274,27 +304,44 @@ pub fn handle_key(key: MediaKey) -> KernelResult<()> {
 /// Get the active media session (now playing).
 pub fn get_active_session() -> Option<MediaSession> {
     STATE.lock().as_ref().and_then(|s| {
-        s.sessions.iter().find(|sess| sess.id == s.active_id).cloned()
+        s.sessions
+            .iter()
+            .find(|sess| sess.id == s.active_id)
+            .cloned()
     })
 }
 
 /// Get session by ID.
 pub fn get_session(id: u32) -> KernelResult<MediaSession> {
     with_state(|state| {
-        state.sessions.iter().find(|s| s.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// List all sessions.
 pub fn list_sessions() -> Vec<MediaSession> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.sessions.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sessions.clone())
 }
 
 /// Statistics: (session_count, total_sessions, total_key_events, active_id, ops).
 pub fn stats() -> (usize, u64, u64, u32, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.sessions.len(), s.total_sessions, s.total_key_events, s.active_id, s.ops),
+        Some(s) => (
+            s.sessions.len(),
+            s.total_sessions,
+            s.total_key_events,
+            s.active_id,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -324,7 +371,14 @@ pub fn self_test() {
     crate::serial_println!("  [3/11] auto-active: OK");
 
     // 4: Update now playing.
-    update_now_playing(id1, "Bohemian Rhapsody", "Queen", "A Night at the Opera", 354000).expect("update");
+    update_now_playing(
+        id1,
+        "Bohemian Rhapsody",
+        "Queen",
+        "A Night at the Opera",
+        354000,
+    )
+    .expect("update");
     let s = get_session(id1).expect("get");
     assert_eq!(s.title, "Bohemian Rhapsody");
     assert_eq!(s.artist, "Queen");

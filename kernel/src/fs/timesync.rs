@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -55,9 +55,9 @@ impl SyncStatus {
 /// NTP server stratum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stratum {
-    Primary,     // Stratum 1
-    Secondary,   // Stratum 2
-    Tertiary,    // Stratum 3
+    Primary,   // Stratum 1
+    Secondary, // Stratum 2
+    Tertiary,  // Stratum 3
     Unknown,
 }
 
@@ -80,9 +80,9 @@ pub struct NtpServer {
     pub stratum: Stratum,
     pub enabled: bool,
     pub last_poll_ns: u64,
-    pub offset_us: i64,     // Clock offset in microseconds.
-    pub delay_us: u64,      // Round-trip delay in microseconds.
-    pub jitter_us: u64,     // Jitter in microseconds.
+    pub offset_us: i64, // Clock offset in microseconds.
+    pub delay_us: u64,  // Round-trip delay in microseconds.
+    pub jitter_us: u64, // Jitter in microseconds.
     pub poll_count: u64,
     pub error_count: u64,
 }
@@ -135,20 +135,34 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         servers: alloc::vec![
             NtpServer {
-                id: 1, address: String::from("pool.ntp.org"),
-                stratum: Stratum::Secondary, enabled: true,
-                last_poll_ns: 0, offset_us: 0, delay_us: 0,
-                jitter_us: 0, poll_count: 0, error_count: 0,
+                id: 1,
+                address: String::from("pool.ntp.org"),
+                stratum: Stratum::Secondary,
+                enabled: true,
+                last_poll_ns: 0,
+                offset_us: 0,
+                delay_us: 0,
+                jitter_us: 0,
+                poll_count: 0,
+                error_count: 0,
             },
             NtpServer {
-                id: 2, address: String::from("time.google.com"),
-                stratum: Stratum::Primary, enabled: true,
-                last_poll_ns: 0, offset_us: 0, delay_us: 0,
-                jitter_us: 0, poll_count: 0, error_count: 0,
+                id: 2,
+                address: String::from("time.google.com"),
+                stratum: Stratum::Primary,
+                enabled: true,
+                last_poll_ns: 0,
+                offset_us: 0,
+                delay_us: 0,
+                jitter_us: 0,
+                poll_count: 0,
+                error_count: 0,
             },
         ],
         history: Vec::new(),
@@ -163,7 +177,10 @@ pub fn init_defaults() {
 
 /// List all NTP servers.
 pub fn list_servers() -> Vec<NtpServer> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.servers.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.servers.clone())
 }
 
 /// Add an NTP server.
@@ -178,9 +195,16 @@ pub fn add_server(address: &str, stratum: Stratum) -> KernelResult<u32> {
         let id = state.next_id;
         state.next_id += 1;
         state.servers.push(NtpServer {
-            id, address: String::from(address), stratum, enabled: true,
-            last_poll_ns: 0, offset_us: 0, delay_us: 0,
-            jitter_us: 0, poll_count: 0, error_count: 0,
+            id,
+            address: String::from(address),
+            stratum,
+            enabled: true,
+            last_poll_ns: 0,
+            offset_us: 0,
+            delay_us: 0,
+            jitter_us: 0,
+            poll_count: 0,
+            error_count: 0,
         });
         Ok(id)
     })
@@ -191,7 +215,9 @@ pub fn remove_server(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.servers.len();
         state.servers.retain(|s| s.id != id);
-        if state.servers.len() == before { return Err(KernelError::NotFound); }
+        if state.servers.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -202,7 +228,9 @@ pub fn sync_now() -> KernelResult<()> {
         let now = crate::hpet::elapsed_ns();
         let mut synced = false;
         for srv in state.servers.iter_mut() {
-            if !srv.enabled { continue; }
+            if !srv.enabled {
+                continue;
+            }
             srv.poll_count += 1;
             srv.last_poll_ns = now;
             // Simulated offset/delay.
@@ -214,8 +242,10 @@ pub fn sync_now() -> KernelResult<()> {
                 state.history.remove(0);
             }
             state.history.push(SyncRecord {
-                timestamp_ns: now, server_id: srv.id,
-                offset_us: srv.offset_us, delay_us: srv.delay_us,
+                timestamp_ns: now,
+                server_id: srv.id,
+                offset_us: srv.offset_us,
+                delay_us: srv.delay_us,
                 success: true,
             });
         }
@@ -233,18 +263,27 @@ pub fn sync_now() -> KernelResult<()> {
 
 /// Get current sync status.
 pub fn get_status() -> SyncStatus {
-    STATE.lock().as_ref().map_or(SyncStatus::Unsynchronized, |s| s.status)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(SyncStatus::Unsynchronized, |s| s.status)
 }
 
 /// Get sync history.
 pub fn sync_history() -> Vec<SyncRecord> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.history.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.history.clone())
 }
 
 /// Enable/disable a server.
 pub fn set_server_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let srv = state.servers.iter_mut().find(|s| s.id == id)
+        let srv = state
+            .servers
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         srv.enabled = enabled;
         Ok(())
@@ -255,7 +294,13 @@ pub fn set_server_enabled(id: u32, enabled: bool) -> KernelResult<()> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.servers.len(), s.total_syncs, s.total_errors, s.last_sync_ns, s.ops),
+        Some(s) => (
+            s.servers.len(),
+            s.total_syncs,
+            s.total_errors,
+            s.last_sync_ns,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

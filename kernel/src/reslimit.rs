@@ -32,10 +32,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -411,8 +411,11 @@ pub fn init() {
     state.next_id = 2;
     state.initialized = true;
 
-    crate::syslog!("init.reslimit", Info,
-        "Resource limits subsystem initialized (root group created)");
+    crate::syslog!(
+        "init.reslimit",
+        Info,
+        "Resource limits subsystem initialized (root group created)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -441,14 +444,20 @@ pub fn create_group(name: &str, parent_id: u32) -> KernelResult<u32> {
     }
 
     // Check for duplicate name under same parent.
-    if state.groups.iter().any(|g| g.name == name && g.parent_id == effective_parent) {
+    if state
+        .groups
+        .iter()
+        .any(|g| g.name == name && g.parent_id == effective_parent)
+    {
         return Err(KernelError::AlreadyExists);
     }
 
     let now = crate::hpet::elapsed_ns();
     let id = state.next_id;
     #[allow(clippy::arithmetic_side_effects)]
-    { state.next_id += 1; }
+    {
+        state.next_id += 1;
+    }
 
     let group = ResourceGroup {
         id,
@@ -467,8 +476,14 @@ pub fn create_group(name: &str, parent_id: u32) -> KernelResult<u32> {
 
     state.groups.push(group);
 
-    crate::syslog!("init.reslimit", Info,
-        "Created resource group '{}' (id={}, parent={})", name, id, effective_parent);
+    crate::syslog!(
+        "init.reslimit",
+        Info,
+        "Created resource group '{}' (id={}, parent={})",
+        name,
+        id,
+        effective_parent
+    );
 
     Ok(id)
 }
@@ -484,7 +499,10 @@ pub fn remove_group(id: u32) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
 
-    let idx = state.groups.iter().position(|g| g.id == id)
+    let idx = state
+        .groups
+        .iter()
+        .position(|g| g.id == id)
         .ok_or(KernelError::NotFound)?;
 
     // Check for active members.
@@ -503,8 +521,13 @@ pub fn remove_group(id: u32) -> KernelResult<()> {
     let name = state.groups[idx].name.clone();
     state.groups.swap_remove(idx);
 
-    crate::syslog!("init.reslimit", Info,
-        "Removed resource group '{}' (id={})", name, id);
+    crate::syslog!(
+        "init.reslimit",
+        Info,
+        "Removed resource group '{}' (id={})",
+        name,
+        id
+    );
 
     Ok(())
 }
@@ -512,9 +535,11 @@ pub fn remove_group(id: u32) -> KernelResult<()> {
 /// List all resource groups.
 pub fn list_groups() -> Vec<(u32, String, u32, u32, bool)> {
     let state = STATE.lock();
-    state.groups.iter().map(|g| {
-        (g.id, g.name.clone(), g.parent_id, g.member_count, g.enforce)
-    }).collect()
+    state
+        .groups
+        .iter()
+        .map(|g| (g.id, g.name.clone(), g.parent_id, g.member_count, g.enforce))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +549,10 @@ pub fn list_groups() -> Vec<(u32, String, u32, u32, bool)> {
 /// Set CPU limits for a resource group.
 pub fn set_cpu_limits(group_id: u32, limits: CpuLimits) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let group = state.groups.iter_mut().find(|g| g.id == group_id)
+    let group = state
+        .groups
+        .iter_mut()
+        .find(|g| g.id == group_id)
         .ok_or(KernelError::NotFound)?;
     group.cpu = limits;
     Ok(())
@@ -533,11 +561,15 @@ pub fn set_cpu_limits(group_id: u32, limits: CpuLimits) -> KernelResult<()> {
 /// Set memory limits for a resource group.
 pub fn set_memory_limits(group_id: u32, limits: MemoryLimits) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let group = state.groups.iter_mut().find(|g| g.id == group_id)
+    let group = state
+        .groups
+        .iter_mut()
+        .find(|g| g.id == group_id)
         .ok_or(KernelError::NotFound)?;
 
     // Validate: soft_rss should not exceed max_rss.
-    if limits.soft_rss != UNLIMITED && limits.max_rss != UNLIMITED
+    if limits.soft_rss != UNLIMITED
+        && limits.max_rss != UNLIMITED
         && limits.soft_rss > limits.max_rss
     {
         return Err(KernelError::InvalidArgument);
@@ -550,7 +582,10 @@ pub fn set_memory_limits(group_id: u32, limits: MemoryLimits) -> KernelResult<()
 /// Set I/O limits for a resource group.
 pub fn set_io_limits(group_id: u32, limits: IoLimits) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let group = state.groups.iter_mut().find(|g| g.id == group_id)
+    let group = state
+        .groups
+        .iter_mut()
+        .find(|g| g.id == group_id)
         .ok_or(KernelError::NotFound)?;
     group.io = limits;
     Ok(())
@@ -559,7 +594,10 @@ pub fn set_io_limits(group_id: u32, limits: IoLimits) -> KernelResult<()> {
 /// Set process/thread/file limits for a resource group.
 pub fn set_process_limits(group_id: u32, limits: ProcessLimits) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let group = state.groups.iter_mut().find(|g| g.id == group_id)
+    let group = state
+        .groups
+        .iter_mut()
+        .find(|g| g.id == group_id)
         .ok_or(KernelError::NotFound)?;
     group.process = limits;
     Ok(())
@@ -568,7 +606,10 @@ pub fn set_process_limits(group_id: u32, limits: ProcessLimits) -> KernelResult<
 /// Enable or disable enforcement for a group (useful for debugging).
 pub fn set_enforce(group_id: u32, enforce: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let group = state.groups.iter_mut().find(|g| g.id == group_id)
+    let group = state
+        .groups
+        .iter_mut()
+        .find(|g| g.id == group_id)
         .ok_or(KernelError::NotFound)?;
     group.enforce = enforce;
     Ok(())
@@ -586,7 +627,10 @@ pub fn assign_process(pid: u32, group_id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
 
     // Verify group exists.
-    let gidx = state.groups.iter().position(|g| g.id == group_id)
+    let gidx = state
+        .groups
+        .iter()
+        .position(|g| g.id == group_id)
         .ok_or(KernelError::NotFound)?;
 
     // Remove from old group if already assigned.
@@ -613,7 +657,10 @@ pub fn assign_process(pid: u32, group_id: u32) -> KernelResult<()> {
 pub fn unassign_process(pid: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
 
-    let pos = state.assignments.iter().position(|&(p, _)| p == pid)
+    let pos = state
+        .assignments
+        .iter()
+        .position(|&(p, _)| p == pid)
         .ok_or(KernelError::NotFound)?;
 
     let group_id = state.assignments[pos].1;
@@ -632,7 +679,9 @@ pub fn unassign_process(pid: u32) -> KernelResult<()> {
 /// Look up which group a process belongs to.
 pub fn group_for_process(pid: u32) -> Option<u32> {
     let state = STATE.lock();
-    state.assignments.iter()
+    state
+        .assignments
+        .iter()
         .find(|&&(p, _)| p == pid)
         .map(|&(_, gid)| gid)
 }
@@ -655,7 +704,9 @@ pub fn report_cpu_time(pid: u32, delta_ns: u64) {
 
     if let Some(group) = state.groups.iter_mut().find(|g| g.id == gid) {
         #[allow(clippy::arithmetic_side_effects)]
-        { group.usage.cpu_time_ns += delta_ns; }
+        {
+            group.usage.cpu_time_ns += delta_ns;
+        }
 
         // Reset period counter if a new 100ms period started.
         const PERIOD_NS: u64 = 100_000_000; // 100ms scheduling period
@@ -665,7 +716,9 @@ pub fn report_cpu_time(pid: u32, delta_ns: u64) {
         }
 
         #[allow(clippy::arithmetic_side_effects)]
-        { group.usage.cpu_period_ns += delta_ns; }
+        {
+            group.usage.cpu_period_ns += delta_ns;
+        }
     }
 }
 
@@ -685,17 +738,25 @@ pub fn report_memory_change(pid: u32, rss_delta: i64, virtual_delta: i64) {
     if let Some(group) = state.groups.iter_mut().find(|g| g.id == gid) {
         if rss_delta >= 0 {
             #[allow(clippy::arithmetic_side_effects)]
-            { group.usage.rss_bytes += rss_delta as u64; }
+            {
+                group.usage.rss_bytes += rss_delta as u64;
+            }
         } else {
-            group.usage.rss_bytes = group.usage.rss_bytes
+            group.usage.rss_bytes = group
+                .usage
+                .rss_bytes
                 .saturating_sub(rss_delta.unsigned_abs());
         }
 
         if virtual_delta >= 0 {
             #[allow(clippy::arithmetic_side_effects)]
-            { group.usage.virtual_bytes += virtual_delta as u64; }
+            {
+                group.usage.virtual_bytes += virtual_delta as u64;
+            }
         } else {
-            group.usage.virtual_bytes = group.usage.virtual_bytes
+            group.usage.virtual_bytes = group
+                .usage
+                .virtual_bytes
                 .saturating_sub(virtual_delta.unsigned_abs());
         }
 
@@ -763,7 +824,9 @@ pub fn report_process_created(pid: u32) {
     };
     if let Some(group) = state.groups.iter_mut().find(|g| g.id == gid) {
         #[allow(clippy::arithmetic_side_effects)]
-        { group.usage.process_count += 1; }
+        {
+            group.usage.process_count += 1;
+        }
     }
 }
 
@@ -788,7 +851,9 @@ pub fn report_thread_created(pid: u32) {
     };
     if let Some(group) = state.groups.iter_mut().find(|g| g.id == gid) {
         #[allow(clippy::arithmetic_side_effects)]
-        { group.usage.thread_count += 1; }
+        {
+            group.usage.thread_count += 1;
+        }
     }
 }
 
@@ -813,7 +878,9 @@ pub fn report_file_opened(pid: u32) {
     };
     if let Some(group) = state.groups.iter_mut().find(|g| g.id == gid) {
         #[allow(clippy::arithmetic_side_effects)]
-        { group.usage.open_files += 1; }
+        {
+            group.usage.open_files += 1;
+        }
     }
 }
 
@@ -854,19 +921,27 @@ pub fn check_memory(pid: u32, additional_bytes: u64) -> LimitCheck {
         return LimitCheck::Ok;
     }
 
-    let new_rss = state.groups[idx].usage.rss_bytes.saturating_add(additional_bytes);
+    let new_rss = state.groups[idx]
+        .usage
+        .rss_bytes
+        .saturating_add(additional_bytes);
 
     // Check hard RSS limit.
     if state.groups[idx].memory.max_rss != UNLIMITED && new_rss > state.groups[idx].memory.max_rss {
         #[allow(clippy::arithmetic_side_effects)]
-        { state.total_hard_violations += 1; }
+        {
+            state.total_hard_violations += 1;
+        }
         return LimitCheck::HardExceeded;
     }
 
     // Check soft RSS limit.
-    if state.groups[idx].memory.soft_rss != UNLIMITED && new_rss > state.groups[idx].memory.soft_rss {
+    if state.groups[idx].memory.soft_rss != UNLIMITED && new_rss > state.groups[idx].memory.soft_rss
+    {
         #[allow(clippy::arithmetic_side_effects)]
-        { state.total_soft_warnings += 1; }
+        {
+            state.total_soft_warnings += 1;
+        }
         return LimitCheck::SoftExceeded;
     }
 
@@ -893,7 +968,9 @@ pub fn check_process_limit(pid: u32) -> LimitCheck {
     let limit = state.groups[idx].process.max_processes;
     if limit != UNLIMITED && state.groups[idx].usage.process_count >= limit {
         #[allow(clippy::arithmetic_side_effects)]
-        { state.total_hard_violations += 1; }
+        {
+            state.total_hard_violations += 1;
+        }
         return LimitCheck::HardExceeded;
     }
 
@@ -920,7 +997,9 @@ pub fn check_thread_limit(pid: u32) -> LimitCheck {
     let limit = state.groups[idx].process.max_threads;
     if limit != UNLIMITED && state.groups[idx].usage.thread_count >= limit {
         #[allow(clippy::arithmetic_side_effects)]
-        { state.total_hard_violations += 1; }
+        {
+            state.total_hard_violations += 1;
+        }
         return LimitCheck::HardExceeded;
     }
 
@@ -947,7 +1026,9 @@ pub fn check_open_files(pid: u32) -> LimitCheck {
     let limit = state.groups[idx].process.max_open_files;
     if limit != UNLIMITED && state.groups[idx].usage.open_files >= limit {
         #[allow(clippy::arithmetic_side_effects)]
-        { state.total_hard_violations += 1; }
+        {
+            state.total_hard_violations += 1;
+        }
         return LimitCheck::HardExceeded;
     }
 
@@ -974,21 +1055,26 @@ pub fn check_io_read(pid: u32, bytes: u64) -> LimitCheck {
     // Check bandwidth limit.
     let bps_limit = state.groups[idx].io.max_read_bps;
     if bps_limit != UNLIMITED {
-        let new_bps = state.groups[idx].usage.io_read_bps_current.saturating_add(bytes);
+        let new_bps = state.groups[idx]
+            .usage
+            .io_read_bps_current
+            .saturating_add(bytes);
         if new_bps > bps_limit {
             #[allow(clippy::arithmetic_side_effects)]
-            { state.total_hard_violations += 1; }
+            {
+                state.total_hard_violations += 1;
+            }
             return LimitCheck::HardExceeded;
         }
     }
 
     // Check IOPS limit.
     let iops_limit = state.groups[idx].io.max_read_iops;
-    if iops_limit != UNLIMITED
-        && state.groups[idx].usage.io_read_iops_current >= iops_limit
-    {
+    if iops_limit != UNLIMITED && state.groups[idx].usage.io_read_iops_current >= iops_limit {
         #[allow(clippy::arithmetic_side_effects)]
-        { state.total_hard_violations += 1; }
+        {
+            state.total_hard_violations += 1;
+        }
         return LimitCheck::HardExceeded;
     }
 
@@ -1014,20 +1100,25 @@ pub fn check_io_write(pid: u32, bytes: u64) -> LimitCheck {
 
     let bps_limit = state.groups[idx].io.max_write_bps;
     if bps_limit != UNLIMITED {
-        let new_bps = state.groups[idx].usage.io_write_bps_current.saturating_add(bytes);
+        let new_bps = state.groups[idx]
+            .usage
+            .io_write_bps_current
+            .saturating_add(bytes);
         if new_bps > bps_limit {
             #[allow(clippy::arithmetic_side_effects)]
-            { state.total_hard_violations += 1; }
+            {
+                state.total_hard_violations += 1;
+            }
             return LimitCheck::HardExceeded;
         }
     }
 
     let iops_limit = state.groups[idx].io.max_write_iops;
-    if iops_limit != UNLIMITED
-        && state.groups[idx].usage.io_write_iops_current >= iops_limit
-    {
+    if iops_limit != UNLIMITED && state.groups[idx].usage.io_write_iops_current >= iops_limit {
         #[allow(clippy::arithmetic_side_effects)]
-        { state.total_hard_violations += 1; }
+        {
+            state.total_hard_violations += 1;
+        }
         return LimitCheck::HardExceeded;
     }
 
@@ -1041,7 +1132,10 @@ pub fn check_io_write(pid: u32, bytes: u64) -> LimitCheck {
 /// Get a snapshot of a group's limits and usage.
 pub fn get_group(group_id: u32) -> KernelResult<ResourceGroup> {
     let state = STATE.lock();
-    state.groups.iter().find(|g| g.id == group_id)
+    state
+        .groups
+        .iter()
+        .find(|g| g.id == group_id)
         .cloned()
         .ok_or(KernelError::NotFound)
 }
@@ -1049,7 +1143,9 @@ pub fn get_group(group_id: u32) -> KernelResult<ResourceGroup> {
 /// Get all groups that are children of the given parent.
 pub fn children_of(parent_id: u32) -> Vec<(u32, String)> {
     let state = STATE.lock();
-    state.groups.iter()
+    state
+        .groups
+        .iter()
         .filter(|g| g.parent_id == parent_id)
         .map(|g| (g.id, g.name.clone()))
         .collect()
@@ -1065,7 +1161,8 @@ pub fn effective_memory_limit(group_id: u32) -> u64 {
     let mut current_id = group_id;
 
     // Walk up the hierarchy.
-    for _ in 0..16 { // Max depth guard to prevent infinite loops.
+    for _ in 0..16 {
+        // Max depth guard to prevent infinite loops.
         match state.groups.iter().find(|g| g.id == current_id) {
             Some(group) => {
                 if group.memory.max_rss != UNLIMITED {
@@ -1122,15 +1219,25 @@ pub fn procfs_content() -> String {
     let mut out = String::from("=== Resource Limits ===\n\n");
 
     out.push_str(&format!("Groups: {}\n", state.groups.len()));
-    out.push_str(&format!("Process assignments: {}\n", state.assignments.len()));
-    out.push_str(&format!("Hard violations: {}\n", state.total_hard_violations));
+    out.push_str(&format!(
+        "Process assignments: {}\n",
+        state.assignments.len()
+    ));
+    out.push_str(&format!(
+        "Hard violations: {}\n",
+        state.total_hard_violations
+    ));
     out.push_str(&format!("Soft warnings: {}\n\n", state.total_soft_warnings));
 
     for group in &state.groups {
-        out.push_str(&format!("--- Group '{}' (id={}, parent={}) ---\n",
-            group.name, group.id, group.parent_id));
-        out.push_str(&format!("  Active: {}, Members: {}, Enforce: {}\n",
-            group.active, group.member_count, group.enforce));
+        out.push_str(&format!(
+            "--- Group '{}' (id={}, parent={}) ---\n",
+            group.name, group.id, group.parent_id
+        ));
+        out.push_str(&format!(
+            "  Active: {}, Members: {}, Enforce: {}\n",
+            group.active, group.member_count, group.enforce
+        ));
 
         // CPU
         out.push_str("  CPU: ");
@@ -1144,8 +1251,10 @@ pub fn procfs_content() -> String {
             out.push_str(&format!(", affinity=0x{:x}", group.cpu.affinity_mask));
         }
         out.push('\n');
-        out.push_str(&format!("    Used: {:.2}ms total\n",
-            group.usage.cpu_time_ns as f64 / 1_000_000.0));
+        out.push_str(&format!(
+            "    Used: {:.2}ms total\n",
+            group.usage.cpu_time_ns as f64 / 1_000_000.0
+        ));
 
         // Memory
         out.push_str("  Memory: RSS ");
@@ -1161,10 +1270,12 @@ pub fn procfs_content() -> String {
             out.push_str(&format_bytes(group.memory.max_virtual));
         }
         out.push('\n');
-        out.push_str(&format!("    Used: RSS {}, Virtual {}, Peak RSS {}\n",
+        out.push_str(&format!(
+            "    Used: RSS {}, Virtual {}, Peak RSS {}\n",
             format_bytes(group.usage.rss_bytes),
             format_bytes(group.usage.virtual_bytes),
-            format_bytes(group.usage.peak_rss_bytes)));
+            format_bytes(group.usage.peak_rss_bytes)
+        ));
 
         // I/O
         out.push_str("  I/O: ");
@@ -1183,17 +1294,24 @@ pub fn procfs_content() -> String {
             out.push_str(" [LOW PRIORITY]");
         }
         out.push('\n');
-        out.push_str(&format!("    Total: read {}, write {}, {} read ops, {} write ops\n",
+        out.push_str(&format!(
+            "    Total: read {}, write {}, {} read ops, {} write ops\n",
             format_bytes(group.usage.io_read_bytes),
             format_bytes(group.usage.io_write_bytes),
             group.usage.io_read_ops,
-            group.usage.io_write_ops));
+            group.usage.io_write_ops
+        ));
 
         // Process/Thread/Files
-        out.push_str(&format!("  Processes: {}/{}, Threads: {}/{}, Files: {}/{}\n\n",
-            group.usage.process_count, fmt_limit(group.process.max_processes),
-            group.usage.thread_count, fmt_limit(group.process.max_threads),
-            group.usage.open_files, fmt_limit(group.process.max_open_files)));
+        out.push_str(&format!(
+            "  Processes: {}/{}, Threads: {}/{}, Files: {}/{}\n\n",
+            group.usage.process_count,
+            fmt_limit(group.process.max_processes),
+            group.usage.thread_count,
+            fmt_limit(group.process.max_threads),
+            group.usage.open_files,
+            fmt_limit(group.process.max_open_files)
+        ));
     }
 
     out
@@ -1236,11 +1354,15 @@ pub fn self_test() -> bool {
             if $cond {
                 crate::serial_println!("  [PASS] {}", $name);
                 #[allow(clippy::arithmetic_side_effects)]
-                { passed += 1; }
+                {
+                    passed += 1;
+                }
             } else {
                 crate::serial_println!("  [FAIL] {}", $name);
                 #[allow(clippy::arithmetic_side_effects)]
-                { failed += 1; }
+                {
+                    failed += 1;
+                }
             }
         };
     }
@@ -1311,11 +1433,17 @@ pub fn self_test() -> bool {
     // Report more to cross soft limit.
     report_memory_change(100, 15 * 1024 * 1024, 0); // Now 85 MiB
     let chk = check_memory(100, 5 * 1024 * 1024); // 90 MiB total = over soft, under hard
-    check!("memory check: over soft limit = SoftExceeded", chk == LimitCheck::SoftExceeded);
+    check!(
+        "memory check: over soft limit = SoftExceeded",
+        chk == LimitCheck::SoftExceeded
+    );
 
     // Try to allocate past hard limit.
     let chk = check_memory(100, 20 * 1024 * 1024); // 105 MiB = over hard
-    check!("memory check: over hard limit = HardExceeded", chk == LimitCheck::HardExceeded);
+    check!(
+        "memory check: over hard limit = HardExceeded",
+        chk == LimitCheck::HardExceeded
+    );
 
     // Test 8: Process limits.
     let proc_lim = ProcessLimits {
@@ -1329,7 +1457,10 @@ pub fn self_test() -> bool {
     report_process_created(100);
     report_process_created(100);
     let chk = check_process_limit(100);
-    check!("process limit at cap = HardExceeded", chk == LimitCheck::HardExceeded);
+    check!(
+        "process limit at cap = HardExceeded",
+        chk == LimitCheck::HardExceeded
+    );
 
     // Free one.
     report_process_exited(100);
@@ -1354,7 +1485,10 @@ pub fn self_test() -> bool {
     // Report usage, then check again.
     report_io(100, 800_000, 0);
     let chk = check_io_read(100, 300_000); // 800K + 300K > 1M
-    check!("I/O read over limit = HardExceeded", chk == LimitCheck::HardExceeded);
+    check!(
+        "I/O read over limit = HardExceeded",
+        chk == LimitCheck::HardExceeded
+    );
 
     // Test 10: Unassign process.
     let r = unassign_process(100);
@@ -1387,14 +1521,19 @@ pub fn self_test() -> bool {
     let _ = set_memory_limits(child, child_mem);
 
     let eff = effective_memory_limit(child);
-    check!("effective limit = min(child, parent) = 200 MiB",
-        eff == 200 * 1024 * 1024);
+    check!(
+        "effective limit = min(child, parent) = 200 MiB",
+        eff == 200 * 1024 * 1024
+    );
 
     // Test 14: Enforcement toggle.
     let _ = assign_process(200, parent);
     report_memory_change(200, 300 * 1024 * 1024, 0); // Exceed 200 MiB limit.
     let chk = check_memory(200, 1);
-    check!("enforcement on: exceeds limit", chk == LimitCheck::HardExceeded);
+    check!(
+        "enforcement on: exceeds limit",
+        chk == LimitCheck::HardExceeded
+    );
 
     let _ = set_enforce(parent, false);
     let chk = check_memory(200, 1);
@@ -1408,6 +1547,10 @@ pub fn self_test() -> bool {
     let content = procfs_content();
     check!("procfs content is non-empty", content.len() > 50);
 
-    crate::serial_println!("[reslimit] Tests complete: {} passed, {} failed", passed, failed);
+    crate::serial_println!(
+        "[reslimit] Tests complete: {} passed, {} failed",
+        passed,
+        failed
+    );
     failed == 0
 }

@@ -37,8 +37,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
 use crate::fs::path::{Path, PathBuf};
+use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
 
 // ---------------------------------------------------------------------------
 // Random bytes — delegates to kernel CSPRNG (rng module)
@@ -69,18 +69,8 @@ impl DevFs {
 
 /// Device file names.
 const DEV_FILES: &[&str] = &[
-    "null",
-    "zero",
-    "full",
-    "random",
-    "urandom",
-    "console",
-    "tty",
-    "stdin",
-    "stdout",
-    "stderr",
-    "kmsg",
-    "uptime",
+    "null", "zero", "full", "random", "urandom", "console", "tty", "stdin", "stdout", "stderr",
+    "kmsg", "uptime",
 ];
 
 // ---------------------------------------------------------------------------
@@ -166,9 +156,7 @@ impl FileSystem for DevFs {
         match rel {
             "" => Err(KernelError::IsADirectory),
             "null" => Ok(Vec::new()),
-            "zero" | "full" => {
-                Ok(vec![0u8; len.min(65536)])
-            }
+            "zero" | "full" => Ok(vec![0u8; len.min(65536)]),
             "random" | "urandom" => {
                 let actual = len.min(65536);
                 let mut buf = vec![0u8; actual];
@@ -189,8 +177,7 @@ impl FileSystem for DevFs {
                 // /dev/kmsg: kernel log ring buffer (JSON-lines format).
                 // Reads all entries from the klog ring buffer.
                 let mut buf = alloc::vec![0u8; 64 * 1024];
-                let (written, _last_seq) =
-                    crate::klog::read_logs(u64::MAX, &mut buf);
+                let (written, _last_seq) = crate::klog::read_logs(u64::MAX, &mut buf);
                 buf.truncate(written);
                 Ok(buf)
             }
@@ -437,7 +424,10 @@ pub fn self_test() -> KernelResult<()> {
     match fs.write_file(Path::new("/full"), b"should fail") {
         Err(KernelError::DiskFull) => {}
         other => {
-            serial_println!("[devfs]   FAIL: /dev/full write should return DiskFull, got {:?}", other);
+            serial_println!(
+                "[devfs]   FAIL: /dev/full write should return DiskFull, got {:?}",
+                other
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -456,7 +446,10 @@ pub fn self_test() -> KernelResult<()> {
     }
     // Write to random (entropy contribution) should succeed.
     fs.write_file(Path::new("/random"), b"entropy seed")?;
-    serial_println!("[devfs]   random: {} random bytes, entropy write OK", rand1.len());
+    serial_println!(
+        "[devfs]   random: {} random bytes, entropy write OK",
+        rand1.len()
+    );
 
     // Test /dev/urandom: same behavior as /dev/random.
     let urand = fs.read_file(Path::new("/urandom"))?;

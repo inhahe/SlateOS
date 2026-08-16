@@ -52,7 +52,6 @@
 // (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
 // that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
 #![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
-
 // Diagnostic subsystem: the public API is tooling/hunt surface that may have no
 // production call sites in a normal build. The ring index arithmetic is bounded
 // by QUARANTINE_CAP (all `% QUARANTINE_CAP`), and the self-test intentionally
@@ -114,7 +113,11 @@ struct Entry {
 }
 
 impl Entry {
-    const EMPTY: Entry = Entry { addr: 0, class_idx: 0, slot_size: 0 };
+    const EMPTY: Entry = Entry {
+        addr: 0,
+        class_idx: 0,
+        slot_size: 0,
+    };
 }
 
 /// FIFO ring of parked slots. `entries[head]` is the oldest once `count`
@@ -175,7 +178,12 @@ fn report(addr: usize, class_idx: usize, slot_size: usize, off: usize) {
         "[quarantine] *** CORRUPTION *** parked slot {:#x} (class {}, {} B) \
          byte +{} = {:#04x} (expected {:#04x}) — stale-pointer/UAF write \
          (B-KNULLJUMP candidate)",
-        addr, class_idx, slot_size, off, bad, POISON_FREE
+        addr,
+        class_idx,
+        slot_size,
+        off,
+        bad,
+        POISON_FREE
     );
 }
 
@@ -215,7 +223,11 @@ pub fn disable() {
 /// `ptr` must be a live slab slot of exactly `slot_size` bytes belonging to
 /// size-class `class_idx`, about to be freed (still mapped and writable).
 #[must_use]
-pub unsafe fn on_free(ptr: *mut u8, class_idx: usize, slot_size: usize) -> Option<(*mut u8, usize)> {
+pub unsafe fn on_free(
+    ptr: *mut u8,
+    class_idx: usize,
+    slot_size: usize,
+) -> Option<(*mut u8, usize)> {
     let addr = ptr as usize;
     // SAFETY: caller guarantees the slot is writable for `slot_size` bytes.
     unsafe { fill_poison(addr, slot_size) };
@@ -231,7 +243,11 @@ pub unsafe fn on_free(ptr: *mut u8, class_idx: usize, slot_size: usize) -> Optio
         } else {
             q.count += 1;
         }
-        q.entries[head] = Entry { addr, class_idx, slot_size };
+        q.entries[head] = Entry {
+            addr,
+            class_idx,
+            slot_size,
+        };
         q.head = (head + 1) % QUARANTINE_CAP;
     });
 
@@ -370,9 +386,14 @@ pub fn self_test() {
     // Test 1: parking a slot fills it with POISON_FREE and holds it (None,
     // since the ring has room).
     // SAFETY: a/b point to 32-byte writable stack slots for the duration.
-    let e1 = unsafe { on_free(a, 2 /* class 32 */, 32) };
+    let e1 = unsafe {
+        on_free(a, 2 /* class 32 */, 32)
+    };
     assert!(e1.is_none(), "first park should not evict");
-    assert!(slot_a.iter().all(|&x| x == POISON_FREE), "slot A should be poisoned");
+    assert!(
+        slot_a.iter().all(|&x| x == POISON_FREE),
+        "slot A should be poisoned"
+    );
     serial_println!("[quarantine]   park fills poison + holds: OK");
 
     // Test 2: scan_all finds no corruption while poison is intact.
@@ -384,7 +405,9 @@ pub fn self_test() {
     // scan_all detects exactly one corruption. Write through the raw pointer
     // (as a stale pointer would) so the store aliases the parked slot.
     // SAFETY: `a` points to the 32-byte `slot_a`; offset 7 is in bounds.
-    unsafe { *a.add(7) = 0x00; } // stomp poison (like a zeroed link pointer)
+    unsafe {
+        *a.add(7) = 0x00;
+    } // stomp poison (like a zeroed link pointer)
     let c1 = scan_all();
     assert!(c1 >= 1, "scan_all must catch the stomped parked slot");
     serial_println!("[quarantine]   scan_all (corrupted): OK ({} found)", c1);
@@ -412,7 +435,11 @@ pub fn self_test() {
     let mut evictions = 0usize;
     for _ in 0..(QUARANTINE_CAP + 4) {
         // SAFETY: d is a valid 8-byte writable stack slot; re-poisoned each call.
-        if unsafe { on_free(d, 0 /* class 8 */, 8) }.is_some() {
+        if unsafe {
+            on_free(d, 0 /* class 8 */, 8)
+        }
+        .is_some()
+        {
             evictions += 1;
         }
     }

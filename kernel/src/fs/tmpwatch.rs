@@ -42,15 +42,15 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::vec::Vec;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::EntryType;
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::Vfs;
-use crate::fs::EntryType;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -187,7 +187,10 @@ pub fn watch_dirs() -> Vec<PathBuf> {
 
 /// Add a path prefix to exclude from cleanup.
 pub fn add_exclude(prefix: impl AsRef<Path>) {
-    TMPWATCH.lock().excludes.insert(prefix.as_ref().to_path_buf());
+    TMPWATCH
+        .lock()
+        .excludes
+        .insert(prefix.as_ref().to_path_buf());
 }
 
 /// Remove an exclusion.
@@ -284,14 +287,27 @@ pub fn run(now: u64) -> KernelResult<CleanupResult> {
     };
 
     for dir in &dirs {
-        scan_directory(dir, now, max_age, min_size, &excludes, remove_empty, 0, &mut result);
+        scan_directory(
+            dir,
+            now,
+            max_age,
+            min_size,
+            &excludes,
+            remove_empty,
+            0,
+            &mut result,
+        );
     }
 
     // Update stats.
     let mut inner = TMPWATCH.lock();
-    inner.stats.total_files_removed = inner.stats.total_files_removed
+    inner.stats.total_files_removed = inner
+        .stats
+        .total_files_removed
         .saturating_add(result.files_removed);
-    inner.stats.total_bytes_freed = inner.stats.total_bytes_freed
+    inner.stats.total_bytes_freed = inner
+        .stats
+        .total_bytes_freed
         .saturating_add(result.bytes_freed);
     inner.stats.runs = inner.stats.runs.saturating_add(1);
     inner.stats.last_run = now;
@@ -356,8 +372,16 @@ fn scan_directory(
         match entry.entry_type {
             EntryType::Directory => {
                 // Recurse into subdirectory.
-                scan_directory(&full_path, now, max_age, min_size, excludes, remove_empty,
-                    depth + 1, result);
+                scan_directory(
+                    &full_path,
+                    now,
+                    max_age,
+                    min_size,
+                    excludes,
+                    remove_empty,
+                    depth + 1,
+                    result,
+                );
 
                 // Optionally remove empty directories after their contents are cleaned.
                 if remove_empty {
@@ -420,8 +444,15 @@ fn collect_candidates(
 
         match entry.entry_type {
             EntryType::Directory => {
-                collect_candidates(&full_path, now, max_age, min_size, excludes,
-                    depth + 1, candidates);
+                collect_candidates(
+                    &full_path,
+                    now,
+                    max_age,
+                    min_size,
+                    excludes,
+                    depth + 1,
+                    candidates,
+                );
             }
             EntryType::File => {
                 if should_remove(&full_path, entry.size, now, max_age, min_size) {
@@ -559,10 +590,13 @@ pub fn self_test() -> KernelResult<()> {
             remove_exclude(e);
         }
 
-        let result = run(0)?;  // now=0 means all files are considered old
+        let result = run(0)?; // now=0 means all files are considered old
 
         if result.files_removed < 2 {
-            serial_println!("[tmpwatch]   ERROR: only removed {} files", result.files_removed);
+            serial_println!(
+                "[tmpwatch]   ERROR: only removed {} files",
+                result.files_removed
+            );
             // Restore excludes.
             for e in &saved_excludes {
                 add_exclude(e);
@@ -575,7 +609,9 @@ pub fn self_test() -> KernelResult<()> {
         // Verify files are gone.
         if Vfs::exists(format!("{}/old1.tmp", test_dir)) {
             serial_println!("[tmpwatch]   ERROR: old1.tmp still exists");
-            for e in &saved_excludes { add_exclude(e); }
+            for e in &saved_excludes {
+                add_exclude(e);
+            }
             remove_watch_dir(test_dir);
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
@@ -586,7 +622,10 @@ pub fn self_test() -> KernelResult<()> {
             add_exclude(e);
         }
         remove_watch_dir(test_dir);
-        serial_println!("[tmpwatch]   cleanup removes files: OK (removed {})", result.files_removed);
+        serial_println!(
+            "[tmpwatch]   cleanup removes files: OK (removed {})",
+            result.files_removed
+        );
     }
 
     // --- Test 6: Excludes protect files ---
@@ -601,7 +640,8 @@ pub fn self_test() -> KernelResult<()> {
         Vfs::write_file(format!("{}/keep_me.tmp", test_dir), b"keep")?;
 
         // Remove all other excludes to prevent interference.
-        let saved_excludes: Vec<PathBuf> = excludes().into_iter()
+        let saved_excludes: Vec<PathBuf> = excludes()
+            .into_iter()
             .filter(|e| !e.as_bytes().starts_with(test_dir.as_bytes()))
             .collect();
         for e in &saved_excludes {
@@ -613,7 +653,9 @@ pub fn self_test() -> KernelResult<()> {
         // keep_me.tmp should still exist (matches exclude prefix).
         if !Vfs::exists(format!("{}/keep_me.tmp", test_dir)) {
             serial_println!("[tmpwatch]   ERROR: excluded file was removed");
-            for e in &saved_excludes { add_exclude(e); }
+            for e in &saved_excludes {
+                add_exclude(e);
+            }
             remove_exclude(format!("{}/keep", test_dir));
             remove_watch_dir(test_dir);
             let _ = Vfs::remove_recursive(test_dir);
@@ -623,14 +665,18 @@ pub fn self_test() -> KernelResult<()> {
         // delete_me.tmp should be gone.
         if Vfs::exists(format!("{}/delete_me.tmp", test_dir)) {
             serial_println!("[tmpwatch]   ERROR: non-excluded file survived");
-            for e in &saved_excludes { add_exclude(e); }
+            for e in &saved_excludes {
+                add_exclude(e);
+            }
             remove_exclude(format!("{}/keep", test_dir));
             remove_watch_dir(test_dir);
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
         }
 
-        for e in &saved_excludes { add_exclude(e); }
+        for e in &saved_excludes {
+            add_exclude(e);
+        }
         remove_exclude(format!("{}/keep", test_dir));
         remove_watch_dir(test_dir);
         let _ = result;
@@ -646,17 +692,22 @@ pub fn self_test() -> KernelResult<()> {
 
         Vfs::write_file(format!("{}/dryrun.tmp", test_dir), b"dry run data")?;
 
-        let saved_excludes: Vec<PathBuf> = excludes().into_iter()
+        let saved_excludes: Vec<PathBuf> = excludes()
+            .into_iter()
             .filter(|e| !e.as_bytes().starts_with(test_dir.as_bytes()))
             .collect();
-        for e in &saved_excludes { remove_exclude(e); }
+        for e in &saved_excludes {
+            remove_exclude(e);
+        }
 
         let candidates = dry_run(0)?;
 
         // File should still exist.
         if !Vfs::exists(format!("{}/dryrun.tmp", test_dir)) {
             serial_println!("[tmpwatch]   ERROR: dry run deleted files!");
-            for e in &saved_excludes { add_exclude(e); }
+            for e in &saved_excludes {
+                add_exclude(e);
+            }
             remove_watch_dir(test_dir);
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
@@ -664,13 +715,17 @@ pub fn self_test() -> KernelResult<()> {
 
         if candidates.is_empty() {
             serial_println!("[tmpwatch]   ERROR: dry run found no candidates");
-            for e in &saved_excludes { add_exclude(e); }
+            for e in &saved_excludes {
+                add_exclude(e);
+            }
             remove_watch_dir(test_dir);
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
         }
 
-        for e in &saved_excludes { add_exclude(e); }
+        for e in &saved_excludes {
+            add_exclude(e);
+        }
         remove_watch_dir(test_dir);
         serial_println!("[tmpwatch]   dry-run: OK ({} candidates)", candidates.len());
     }
@@ -713,8 +768,12 @@ pub fn self_test() -> KernelResult<()> {
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
         }
-        serial_println!("[tmpwatch]   stats: OK (runs={} files_removed={} bytes_freed={})",
-            s.runs, s.total_files_removed, s.total_bytes_freed);
+        serial_println!(
+            "[tmpwatch]   stats: OK (runs={} files_removed={} bytes_freed={})",
+            s.runs,
+            s.total_files_removed,
+            s.total_bytes_freed
+        );
     }
 
     // --- Test 10: Recursive subdirectory scan ---
@@ -726,24 +785,34 @@ pub fn self_test() -> KernelResult<()> {
 
         add_watch_dir(test_dir)?;
 
-        let saved_excludes: Vec<PathBuf> = excludes().into_iter()
+        let saved_excludes: Vec<PathBuf> = excludes()
+            .into_iter()
             .filter(|e| !e.as_bytes().starts_with(test_dir.as_bytes()))
             .collect();
-        for e in &saved_excludes { remove_exclude(e); }
+        for e in &saved_excludes {
+            remove_exclude(e);
+        }
 
         let result = run(0)?;
 
         if Vfs::exists(format!("{}/sub/deep.tmp", test_dir)) {
             serial_println!("[tmpwatch]   ERROR: deep file not removed");
-            for e in &saved_excludes { add_exclude(e); }
+            for e in &saved_excludes {
+                add_exclude(e);
+            }
             remove_watch_dir(test_dir);
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
         }
 
-        for e in &saved_excludes { add_exclude(e); }
+        for e in &saved_excludes {
+            add_exclude(e);
+        }
         remove_watch_dir(test_dir);
-        serial_println!("[tmpwatch]   recursive scan: OK (removed {})", result.files_removed);
+        serial_println!(
+            "[tmpwatch]   recursive scan: OK (removed {})",
+            result.files_removed
+        );
     }
 
     // --- Cleanup ---

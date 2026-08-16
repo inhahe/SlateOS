@@ -47,10 +47,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::udriver::DeviceAddr;
@@ -69,7 +69,7 @@ const DEFAULT_AUTOSUSPEND_TIMEOUT_NS: u64 = 30_000_000_000;
 const MIN_AUTOSUSPEND_TIMEOUT_NS: u64 = 1_000_000_000;
 
 /// PCI PM capability register offsets (relative to capability pointer).
-const PM_CAP_PMC: u8 = 0x02;   // Power Management Capabilities
+const PM_CAP_PMC: u8 = 0x02; // Power Management Capabilities
 const PM_CAP_PMCSR: u8 = 0x04; // Power Management Control/Status
 
 /// PMCSR power state bits [1:0].
@@ -294,7 +294,10 @@ pub fn register_device(
         "devpower",
         Info,
         "registered {:02x}:{:02x}.{} '{}' policy={} pm={}",
-        addr.bus, addr.device, addr.function, name,
+        addr.bus,
+        addr.device,
+        addr.function,
+        name,
         policy.label(),
         if capabilities.pm_capable { "yes" } else { "no" }
     );
@@ -306,7 +309,10 @@ pub fn register_device(
 pub fn unregister_device(addr: DeviceAddr) -> KernelResult<()> {
     let mut state = STATE.lock();
 
-    let idx = state.devices.iter().position(|d| d.addr == addr)
+    let idx = state
+        .devices
+        .iter()
+        .position(|d| d.addr == addr)
         .ok_or(KernelError::NotFound)?;
 
     // Ensure device is in D0 before unregistering.
@@ -332,7 +338,10 @@ pub fn set_device_power(addr: DeviceAddr, target: PowerState) -> KernelResult<()
     let now = crate::hpet::elapsed_ns();
     let mut state = STATE.lock();
 
-    let idx = state.devices.iter().position(|d| d.addr == addr)
+    let idx = state
+        .devices
+        .iter()
+        .position(|d| d.addr == addr)
         .ok_or(KernelError::NotFound)?;
 
     let current = state.devices[idx].current_state;
@@ -357,8 +366,7 @@ pub fn set_device_power(addr: DeviceAddr, target: PowerState) -> KernelResult<()
     if current == PowerState::D0 && target != PowerState::D0 {
         // Entering sleep.
         state.devices[idx].sleep_entered_ns = now;
-        state.devices[idx].suspend_count = state.devices[idx]
-            .suspend_count.saturating_add(1);
+        state.devices[idx].suspend_count = state.devices[idx].suspend_count.saturating_add(1);
         state.total_device_suspends = state.total_device_suspends.saturating_add(1);
     } else if current != PowerState::D0 && target == PowerState::D0 {
         // Waking up.
@@ -366,7 +374,8 @@ pub fn set_device_power(addr: DeviceAddr, target: PowerState) -> KernelResult<()
         if sleep_start > 0 {
             let sleep_duration = now.saturating_sub(sleep_start);
             state.devices[idx].total_sleep_ns = state.devices[idx]
-                .total_sleep_ns.saturating_add(sleep_duration);
+                .total_sleep_ns
+                .saturating_add(sleep_duration);
         }
         state.devices[idx].sleep_entered_ns = 0;
         state.devices[idx].last_activity_ns = now;
@@ -391,8 +400,11 @@ pub fn set_device_power(addr: DeviceAddr, target: PowerState) -> KernelResult<()
         "devpower",
         Info,
         "{:02x}:{:02x}.{}: {} → {}",
-        addr.bus, addr.device, addr.function,
-        current.short(), target.short()
+        addr.bus,
+        addr.device,
+        addr.function,
+        current.short(),
+        target.short()
     );
 
     Ok(())
@@ -412,7 +424,10 @@ pub fn report_activity(addr: DeviceAddr) {
 pub fn set_policy(addr: DeviceAddr, policy: PowerPolicy) -> KernelResult<()> {
     let mut state = STATE.lock();
 
-    let dev = state.devices.iter_mut().find(|d| d.addr == addr)
+    let dev = state
+        .devices
+        .iter_mut()
+        .find(|d| d.addr == addr)
         .ok_or(KernelError::NotFound)?;
 
     dev.policy = policy;
@@ -424,7 +439,10 @@ pub fn set_policy(addr: DeviceAddr, policy: PowerPolicy) -> KernelResult<()> {
 pub fn set_autosuspend_timeout(addr: DeviceAddr, timeout_ns: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
 
-    let dev = state.devices.iter_mut().find(|d| d.addr == addr)
+    let dev = state
+        .devices
+        .iter_mut()
+        .find(|d| d.addr == addr)
         .ok_or(KernelError::NotFound)?;
 
     dev.autosuspend_timeout_ns = if timeout_ns < MIN_AUTOSUSPEND_TIMEOUT_NS {
@@ -459,8 +477,7 @@ pub fn system_suspend() -> usize {
             state.devices[i].sleep_entered_ns = now;
             state.devices[i].current_state = PowerState::D3Hot;
             state.devices[i].target_state = PowerState::D3Hot;
-            state.devices[i].suspend_count = state.devices[i]
-                .suspend_count.saturating_add(1);
+            state.devices[i].suspend_count = state.devices[i].suspend_count.saturating_add(1);
             suspended += 1;
         }
     }
@@ -468,14 +485,14 @@ pub fn system_suspend() -> usize {
     state.system_suspending = false;
     state.system_sleeping = true;
     state.total_system_suspends = state.total_system_suspends.saturating_add(1);
-    state.total_device_suspends = state.total_device_suspends
-        .saturating_add(suspended as u64);
+    state.total_device_suspends = state.total_device_suspends.saturating_add(suspended as u64);
 
     crate::syslog!(
         "devpower",
         Info,
         "system suspend: {}/{} devices suspended",
-        suspended, count
+        suspended,
+        count
     );
 
     suspended
@@ -499,8 +516,8 @@ pub fn system_resume() -> usize {
             let start = state.devices[i].sleep_entered_ns;
             if start > 0 {
                 let duration = now.saturating_sub(start);
-                state.devices[i].total_sleep_ns = state.devices[i]
-                    .total_sleep_ns.saturating_add(duration);
+                state.devices[i].total_sleep_ns =
+                    state.devices[i].total_sleep_ns.saturating_add(duration);
             }
             state.devices[i].sleep_entered_ns = 0;
             state.devices[i].current_state = PowerState::D0;
@@ -512,14 +529,14 @@ pub fn system_resume() -> usize {
 
     state.system_sleeping = false;
     state.total_system_resumes = state.total_system_resumes.saturating_add(1);
-    state.total_device_resumes = state.total_device_resumes
-        .saturating_add(resumed as u64);
+    state.total_device_resumes = state.total_device_resumes.saturating_add(resumed as u64);
 
     crate::syslog!(
         "devpower",
         Info,
         "system resume: {}/{} devices resumed",
-        resumed, count
+        resumed,
+        count
     );
 
     resumed
@@ -562,23 +579,23 @@ pub fn tick() {
             state.devices[i].sleep_entered_ns = now;
             state.devices[i].current_state = PowerState::D3Hot;
             state.devices[i].target_state = PowerState::D3Hot;
-            state.devices[i].suspend_count = state.devices[i]
-                .suspend_count.saturating_add(1);
+            state.devices[i].suspend_count = state.devices[i].suspend_count.saturating_add(1);
             suspended_count = suspended_count.saturating_add(1);
 
             crate::syslog!(
                 "devpower",
                 Info,
                 "auto-suspend {:02x}:{:02x}.{} '{}' after {}s idle",
-                state.devices[i].addr.bus, state.devices[i].addr.device,
+                state.devices[i].addr.bus,
+                state.devices[i].addr.device,
                 state.devices[i].addr.function,
-                state.devices[i].name, idle_ns / 1_000_000_000
+                state.devices[i].name,
+                idle_ns / 1_000_000_000
             );
         }
     }
 
-    state.total_device_suspends = state.total_device_suspends
-        .saturating_add(suspended_count);
+    state.total_device_suspends = state.total_device_suspends.saturating_add(suspended_count);
 }
 
 // ---------------------------------------------------------------------------
@@ -588,7 +605,10 @@ pub fn tick() {
 /// Get power state of a specific device.
 #[must_use]
 pub fn device_state(addr: DeviceAddr) -> Option<PowerState> {
-    STATE.lock().devices.iter()
+    STATE
+        .lock()
+        .devices
+        .iter()
         .find(|d| d.addr == addr)
         .map(|d| d.current_state)
 }
@@ -596,7 +616,10 @@ pub fn device_state(addr: DeviceAddr) -> Option<PowerState> {
 /// Get full power info for a specific device.
 #[must_use]
 pub fn device_info(addr: DeviceAddr) -> Option<DevicePowerEntry> {
-    STATE.lock().devices.iter()
+    STATE
+        .lock()
+        .devices
+        .iter()
         .find(|d| d.addr == addr)
         .cloned()
 }
@@ -611,11 +634,31 @@ pub fn all_devices() -> Vec<DevicePowerEntry> {
 #[must_use]
 pub fn state_counts() -> (usize, usize, usize, usize, usize) {
     let state = STATE.lock();
-    let d0 = state.devices.iter().filter(|d| d.current_state == PowerState::D0).count();
-    let d1 = state.devices.iter().filter(|d| d.current_state == PowerState::D1).count();
-    let d2 = state.devices.iter().filter(|d| d.current_state == PowerState::D2).count();
-    let d3h = state.devices.iter().filter(|d| d.current_state == PowerState::D3Hot).count();
-    let d3c = state.devices.iter().filter(|d| d.current_state == PowerState::D3Cold).count();
+    let d0 = state
+        .devices
+        .iter()
+        .filter(|d| d.current_state == PowerState::D0)
+        .count();
+    let d1 = state
+        .devices
+        .iter()
+        .filter(|d| d.current_state == PowerState::D1)
+        .count();
+    let d2 = state
+        .devices
+        .iter()
+        .filter(|d| d.current_state == PowerState::D2)
+        .count();
+    let d3h = state
+        .devices
+        .iter()
+        .filter(|d| d.current_state == PowerState::D3Hot)
+        .count();
+    let d3c = state
+        .devices
+        .iter()
+        .filter(|d| d.current_state == PowerState::D3Cold)
+        .count();
     (d0, d1, d2, d3h, d3c)
 }
 
@@ -636,8 +679,11 @@ pub struct DevPowerStats {
 #[must_use]
 pub fn stats() -> DevPowerStats {
     let state = STATE.lock();
-    let active = state.devices.iter()
-        .filter(|d| d.current_state == PowerState::D0).count();
+    let active = state
+        .devices
+        .iter()
+        .filter(|d| d.current_state == PowerState::D0)
+        .count();
     DevPowerStats {
         total_devices: state.devices.len(),
         active_devices: active,
@@ -662,44 +708,72 @@ pub fn procfs_content() -> String {
 
     out.push_str("=== Device Power Management ===\n\n");
 
-    let active = state.devices.iter()
-        .filter(|d| d.current_state == PowerState::D0).count();
+    let active = state
+        .devices
+        .iter()
+        .filter(|d| d.current_state == PowerState::D0)
+        .count();
     let sleeping = state.devices.len().saturating_sub(active);
 
     out.push_str(&format!("System sleeping:     {}\n", state.system_sleeping));
     out.push_str(&format!("Managed devices:     {}\n", state.devices.len()));
     out.push_str(&format!("  Active (D0):       {}\n", active));
     out.push_str(&format!("  Sleeping:          {}\n", sleeping));
-    out.push_str(&format!("System suspends:     {}\n", state.total_system_suspends));
-    out.push_str(&format!("System resumes:      {}\n", state.total_system_resumes));
-    out.push_str(&format!("Device suspends:     {}\n", state.total_device_suspends));
-    out.push_str(&format!("Device resumes:      {}\n", state.total_device_resumes));
-    out.push_str(&format!("Failed transitions:  {}\n\n", state.total_failures));
+    out.push_str(&format!(
+        "System suspends:     {}\n",
+        state.total_system_suspends
+    ));
+    out.push_str(&format!(
+        "System resumes:      {}\n",
+        state.total_system_resumes
+    ));
+    out.push_str(&format!(
+        "Device suspends:     {}\n",
+        state.total_device_suspends
+    ));
+    out.push_str(&format!(
+        "Device resumes:      {}\n",
+        state.total_device_resumes
+    ));
+    out.push_str(&format!(
+        "Failed transitions:  {}\n\n",
+        state.total_failures
+    ));
 
     for dev in &state.devices {
         out.push_str(&format!(
             "{:02x}:{:02x}.{} '{}' [{}] policy={}\n",
-            dev.addr.bus, dev.addr.device, dev.addr.function,
-            dev.name, dev.current_state.label(), dev.policy.label(),
+            dev.addr.bus,
+            dev.addr.device,
+            dev.addr.function,
+            dev.name,
+            dev.current_state.label(),
+            dev.policy.label(),
         ));
 
         let pm_str = if dev.capabilities.pm_capable {
-            format!("v{} D1={} D2={} PME={}",
+            format!(
+                "v{} D1={} D2={} PME={}",
                 dev.capabilities.pm_version,
                 dev.capabilities.supports_d1,
                 dev.capabilities.supports_d2,
-                dev.capabilities.supports_pme)
+                dev.capabilities.supports_pme
+            )
         } else {
             String::from("not PM-capable")
         };
         out.push_str(&format!("  PM: {}\n", pm_str));
-        out.push_str(&format!("  Suspends: {}  Sleep time: {}ms\n",
+        out.push_str(&format!(
+            "  Suspends: {}  Sleep time: {}ms\n",
             dev.suspend_count,
-            dev.total_sleep_ns / 1_000_000));
+            dev.total_sleep_ns / 1_000_000
+        ));
 
         if dev.policy == PowerPolicy::AutoSuspend {
-            out.push_str(&format!("  Auto-suspend timeout: {}s\n",
-                dev.autosuspend_timeout_ns / 1_000_000_000));
+            out.push_str(&format!(
+                "  Auto-suspend timeout: {}s\n",
+                dev.autosuspend_timeout_ns / 1_000_000_000
+            ));
         }
         out.push('\n');
     }
@@ -751,7 +825,15 @@ fn test_register_device() {
     reset_state();
 
     let addr = DeviceAddr::new(0, 1, 0);
-    assert!(register_device(addr, "test-dev", make_caps(true, true), PowerPolicy::AlwaysOn).is_ok());
+    assert!(
+        register_device(
+            addr,
+            "test-dev",
+            make_caps(true, true),
+            PowerPolicy::AlwaysOn
+        )
+        .is_ok()
+    );
 
     let devs = all_devices();
     assert_eq!(devs.len(), 1);
@@ -765,7 +847,13 @@ fn test_power_transition() {
     reset_state();
 
     let addr = DeviceAddr::new(0, 2, 0);
-    register_device(addr, "trans-test", make_caps(true, true), PowerPolicy::Manual).unwrap();
+    register_device(
+        addr,
+        "trans-test",
+        make_caps(true, true),
+        PowerPolicy::Manual,
+    )
+    .unwrap();
 
     // D0 → D3hot.
     assert!(set_device_power(addr, PowerState::D3Hot).is_ok());
@@ -789,8 +877,14 @@ fn test_unsupported_state() {
     // No D1 support.
     register_device(addr, "no-d1", make_caps(false, false), PowerPolicy::Manual).unwrap();
 
-    assert_eq!(set_device_power(addr, PowerState::D1), Err(KernelError::NotSupported));
-    assert_eq!(set_device_power(addr, PowerState::D2), Err(KernelError::NotSupported));
+    assert_eq!(
+        set_device_power(addr, PowerState::D1),
+        Err(KernelError::NotSupported)
+    );
+    assert_eq!(
+        set_device_power(addr, PowerState::D2),
+        Err(KernelError::NotSupported)
+    );
 
     // D3hot should always work.
     assert!(set_device_power(addr, PowerState::D3Hot).is_ok());
@@ -802,7 +896,13 @@ fn test_activity_reporting() {
     reset_state();
 
     let addr = DeviceAddr::new(0, 4, 0);
-    register_device(addr, "activity-test", make_caps(true, true), PowerPolicy::AutoSuspend).unwrap();
+    register_device(
+        addr,
+        "activity-test",
+        make_caps(true, true),
+        PowerPolicy::AutoSuspend,
+    )
+    .unwrap();
 
     let before = device_info(addr).unwrap().last_activity_ns;
     // Simulate some time passing.
@@ -819,7 +919,13 @@ fn test_policy_change() {
     reset_state();
 
     let addr = DeviceAddr::new(0, 5, 0);
-    register_device(addr, "policy-test", make_caps(true, true), PowerPolicy::AlwaysOn).unwrap();
+    register_device(
+        addr,
+        "policy-test",
+        make_caps(true, true),
+        PowerPolicy::AlwaysOn,
+    )
+    .unwrap();
 
     assert!(set_policy(addr, PowerPolicy::AutoSuspend).is_ok());
     assert_eq!(device_info(addr).unwrap().policy, PowerPolicy::AutoSuspend);
@@ -834,14 +940,26 @@ fn test_autosuspend_timeout() {
     reset_state();
 
     let addr = DeviceAddr::new(0, 6, 0);
-    register_device(addr, "timeout-test", make_caps(true, true), PowerPolicy::AutoSuspend).unwrap();
+    register_device(
+        addr,
+        "timeout-test",
+        make_caps(true, true),
+        PowerPolicy::AutoSuspend,
+    )
+    .unwrap();
 
     assert!(set_autosuspend_timeout(addr, 5_000_000_000).is_ok());
-    assert_eq!(device_info(addr).unwrap().autosuspend_timeout_ns, 5_000_000_000);
+    assert_eq!(
+        device_info(addr).unwrap().autosuspend_timeout_ns,
+        5_000_000_000
+    );
 
     // Below minimum should clamp.
     assert!(set_autosuspend_timeout(addr, 100).is_ok());
-    assert_eq!(device_info(addr).unwrap().autosuspend_timeout_ns, MIN_AUTOSUSPEND_TIMEOUT_NS);
+    assert_eq!(
+        device_info(addr).unwrap().autosuspend_timeout_ns,
+        MIN_AUTOSUSPEND_TIMEOUT_NS
+    );
 
     crate::serial_println!("  [devpower] test_autosuspend_timeout: ok");
 }
@@ -877,7 +995,13 @@ fn test_sleep_time_tracking() {
     reset_state();
 
     let addr = DeviceAddr::new(0, 9, 0);
-    register_device(addr, "sleep-track", make_caps(true, true), PowerPolicy::Manual).unwrap();
+    register_device(
+        addr,
+        "sleep-track",
+        make_caps(true, true),
+        PowerPolicy::Manual,
+    )
+    .unwrap();
 
     // Put to sleep.
     set_device_power(addr, PowerState::D3Hot).unwrap();
@@ -912,7 +1036,13 @@ fn test_unregister() {
     reset_state();
 
     let addr = DeviceAddr::new(0, 11, 0);
-    register_device(addr, "unreg-test", make_caps(true, true), PowerPolicy::AlwaysOn).unwrap();
+    register_device(
+        addr,
+        "unreg-test",
+        make_caps(true, true),
+        PowerPolicy::AlwaysOn,
+    )
+    .unwrap();
 
     assert!(unregister_device(addr).is_ok());
     assert!(all_devices().is_empty());
@@ -955,7 +1085,13 @@ fn test_procfs() {
     reset_state();
 
     let addr = DeviceAddr::new(0, 15, 0);
-    register_device(addr, "procfs-dev", make_caps(true, false), PowerPolicy::AutoSuspend).unwrap();
+    register_device(
+        addr,
+        "procfs-dev",
+        make_caps(true, false),
+        PowerPolicy::AutoSuspend,
+    )
+    .unwrap();
 
     let content = procfs_content();
     assert!(content.contains("Device Power Management"));

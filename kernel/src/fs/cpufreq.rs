@@ -20,11 +20,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -105,7 +105,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     // Simulate 4 CPUs at 3.6 GHz base, 4.8 GHz max.
     let mut cpus = Vec::new();
     for i in 0..4u32 {
@@ -151,7 +153,10 @@ pub fn get_governor() -> Option<Governor> {
 /// Set per-CPU governor.
 pub fn set_cpu_governor(cpu_id: u32, governor: Governor) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.governor = governor;
         state.total_governor_changes += 1;
@@ -161,15 +166,19 @@ pub fn set_cpu_governor(cpu_id: u32, governor: Governor) -> KernelResult<()> {
 
 /// Get frequency info for a CPU.
 pub fn get_cpu_info(cpu_id: u32) -> Option<CpuFreqInfo> {
-    STATE.lock().as_ref().and_then(|s| {
-        s.cpus.iter().find(|c| c.cpu_id == cpu_id).cloned()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.cpus.iter().find(|c| c.cpu_id == cpu_id).cloned())
 }
 
 /// Set frequency scaling range.
 pub fn set_scaling_range(cpu_id: u32, min_khz: u64, max_khz: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         if min_khz > max_khz || min_khz < cpu.min_khz || max_khz > cpu.max_khz {
             return Err(KernelError::InvalidArgument);
@@ -183,7 +192,10 @@ pub fn set_scaling_range(cpu_id: u32, min_khz: u64, max_khz: u64) -> KernelResul
 /// Simulate a frequency transition.
 pub fn set_frequency(cpu_id: u32, freq_khz: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         if freq_khz < cpu.scaling_min_khz || freq_khz > cpu.scaling_max_khz {
             return Err(KernelError::InvalidArgument);
@@ -226,7 +238,13 @@ pub fn format_freq(khz: u64) -> String {
 pub fn stats() -> (usize, u64, u64, bool, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpus.len(), s.total_transitions, s.total_governor_changes, s.boost_enabled, s.ops),
+        Some(s) => (
+            s.cpus.len(),
+            s.total_transitions,
+            s.total_governor_changes,
+            s.boost_enabled,
+            s.ops,
+        ),
         None => (0, 0, 0, false, 0),
     }
 }

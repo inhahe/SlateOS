@@ -130,22 +130,14 @@ impl LogEntry {
     fn module_str(&self) -> &str {
         let len = self.module_len as usize;
         // SAFETY: We only write valid UTF-8 into the module buffer.
-        unsafe {
-            core::str::from_utf8_unchecked(
-                self.module.get(..len).unwrap_or(&[]),
-            )
-        }
+        unsafe { core::str::from_utf8_unchecked(self.module.get(..len).unwrap_or(&[])) }
     }
 
     /// Get the message as a string slice.
     fn message_str(&self) -> &str {
         let len = self.message_len as usize;
         // SAFETY: We only write valid UTF-8 into the message buffer.
-        unsafe {
-            core::str::from_utf8_unchecked(
-                self.message.get(..len).unwrap_or(&[]),
-            )
-        }
+        unsafe { core::str::from_utf8_unchecked(self.message.get(..len).unwrap_or(&[])) }
     }
 }
 
@@ -195,17 +187,13 @@ impl LogRing {
         // Copy module name (truncate if too long).
         let mod_bytes = module.as_bytes();
         let mod_len = mod_bytes.len().min(MAX_MODULE_LEN);
-        entry.module[..mod_len].copy_from_slice(
-            mod_bytes.get(..mod_len).unwrap_or(&[]),
-        );
+        entry.module[..mod_len].copy_from_slice(mod_bytes.get(..mod_len).unwrap_or(&[]));
         entry.module_len = mod_len as u8;
 
         // Copy message (truncate if too long).
         let msg_bytes = message.as_bytes();
         let msg_len = msg_bytes.len().min(MAX_MSG_LEN);
-        entry.message[..msg_len].copy_from_slice(
-            msg_bytes.get(..msg_len).unwrap_or(&[]),
-        );
+        entry.message[..msg_len].copy_from_slice(msg_bytes.get(..msg_len).unwrap_or(&[]));
         entry.message_len = msg_len as u8;
 
         // Advance write index (wrap around).
@@ -228,12 +216,7 @@ impl LogRing {
     /// number seen (for the next call's `after_seq`).
     ///
     /// Entries are returned oldest-first.
-    fn read_since(
-        &self,
-        after_seq: u64,
-        buf: &mut [u8],
-        buf_cap: usize,
-    ) -> (usize, u64) {
+    fn read_since(&self, after_seq: u64, buf: &mut [u8], buf_cap: usize) -> (usize, u64) {
         let mut offset = 0usize;
         let mut count = 0usize;
         let mut newest_seq = after_seq;
@@ -258,7 +241,9 @@ impl LogRing {
             if entry.seq != seq {
                 // Entry was overwritten by a newer one — skip.
                 #[allow(clippy::arithmetic_side_effects)]
-                { seq += 1; }
+                {
+                    seq += 1;
+                }
                 continue;
             }
 
@@ -269,10 +254,7 @@ impl LogRing {
                 break; // Buffer full.
             }
 
-            let written = write_json_line(
-                entry,
-                buf.get_mut(offset..).unwrap_or(&mut []),
-            );
+            let written = write_json_line(entry, buf.get_mut(offset..).unwrap_or(&mut []));
             #[allow(clippy::arithmetic_side_effects)]
             {
                 offset += written;
@@ -281,7 +263,9 @@ impl LogRing {
             newest_seq = seq;
 
             #[allow(clippy::arithmetic_side_effects)]
-            { seq += 1; }
+            {
+                seq += 1;
+            }
         }
 
         (count, newest_seq)
@@ -306,7 +290,9 @@ fn boot_time_ms() -> u64 {
     let ticks = crate::apic::tick_count();
     // Each tick = 10 ms at 100 Hz.
     #[allow(clippy::arithmetic_side_effects)]
-    { ticks * 10 }
+    {
+        ticks * 10
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +350,9 @@ fn json_line_len(entry: &LogEntry) -> usize {
     // {"t":NNNNN,"l":"LEVEL","m":"MODULE","msg":"MESSAGE"}\n
     // Conservative estimate: overhead + module + message + some slack.
     #[allow(clippy::arithmetic_side_effects)]
-    { 60 + entry.module_len as usize + (entry.message_len as usize * 2) }
+    {
+        60 + entry.module_len as usize + (entry.message_len as usize * 2)
+    }
 }
 
 /// Write a log entry as a JSON line into a byte buffer.
@@ -408,7 +396,9 @@ impl<'a> BufWriter<'a> {
             }
         }
         #[allow(clippy::arithmetic_side_effects)]
-        { self.pos += len; }
+        {
+            self.pos += len;
+        }
     }
 
     fn write_u64(&mut self, val: u64) {
@@ -450,7 +440,10 @@ impl<'a> BufWriter<'a> {
                     // Control character — write as \u00XX.
                     let hex = b"0123456789abcdef";
                     let h = [
-                        b'\\', b'u', b'0', b'0',
+                        b'\\',
+                        b'u',
+                        b'0',
+                        b'0',
                         hex[(b >> 4) as usize],
                         hex[(b & 0x0f) as usize],
                     ];
@@ -463,7 +456,9 @@ impl<'a> BufWriter<'a> {
                     if avail > 0 {
                         self.buf[self.pos] = ch;
                         #[allow(clippy::arithmetic_side_effects)]
-                        { self.pos += 1; }
+                        {
+                            self.pos += 1;
+                        }
                     }
                 }
             }
@@ -491,14 +486,15 @@ pub fn log(level: Level, module: &str, message: &str) {
 pub fn log_fmt(level: Level, module: &str, args: fmt::Arguments<'_>) {
     // Format the message into a stack-allocated buffer.
     let mut buf = [0u8; MAX_MSG_LEN];
-    let mut writer = FmtBuf { buf: &mut buf, pos: 0 };
+    let mut writer = FmtBuf {
+        buf: &mut buf,
+        pos: 0,
+    };
     let _ = fmt::write(&mut writer, args);
     let len = writer.pos.min(MAX_MSG_LEN);
 
     // SAFETY: fmt::write only produces valid UTF-8.
-    let message = unsafe {
-        core::str::from_utf8_unchecked(buf.get(..len).unwrap_or(&[]))
-    };
+    let message = unsafe { core::str::from_utf8_unchecked(buf.get(..len).unwrap_or(&[])) };
 
     let mut ring = LOG_RING.lock();
     ring.write(level, module, message);
@@ -549,7 +545,9 @@ impl fmt::Write for FmtBuf<'_> {
             }
         }
         #[allow(clippy::arithmetic_side_effects)]
-        { self.pos += len; }
+        {
+            self.pos += len;
+        }
         Ok(())
     }
 }
@@ -673,7 +671,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let mut buf = [0u8; 512];
     // Read everything since before the test entry.
     // Use u64::MAX as "read from beginning" if before is 0.
-    let after_seq = if before == 0 { u64::MAX } else { before.wrapping_sub(1) };
+    let after_seq = if before == 0 {
+        u64::MAX
+    } else {
+        before.wrapping_sub(1)
+    };
     let (count, newest_seq) = read_logs(after_seq, &mut buf);
     if count == 0 {
         crate::serial_println!("[klog]   FAIL: read_logs returned 0 entries");
@@ -708,14 +710,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     let read_len2 = buf2.iter().position(|&b| b == 0).unwrap_or(buf2.len());
-    let output2 = core::str::from_utf8(
-        buf2.get(..read_len2).unwrap_or(&[])
-    ).unwrap_or("");
+    let output2 = core::str::from_utf8(buf2.get(..read_len2).unwrap_or(&[])).unwrap_or("");
     if !output2.contains("\\\"quotes\\\"") || !output2.contains("\\\\backslash") {
-        crate::serial_println!(
-            "[klog]   FAIL: JSON escaping incorrect: {}",
-            output2,
-        );
+        crate::serial_println!("[klog]   FAIL: JSON escaping incorrect: {}", output2,);
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[klog]   JSON escaping: OK");

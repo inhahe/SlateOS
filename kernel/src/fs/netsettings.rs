@@ -31,11 +31,11 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -279,7 +279,11 @@ pub fn list_interfaces() -> Vec<NetworkInterface> {
 
 /// Get a specific interface.
 pub fn get_interface(name: &str) -> KernelResult<NetworkInterface> {
-    STATE.lock().interfaces.iter().find(|i| i.name == name)
+    STATE
+        .lock()
+        .interfaces
+        .iter()
+        .find(|i| i.name == name)
         .cloned()
         .ok_or(KernelError::NotFound)
 }
@@ -337,7 +341,10 @@ pub fn add_interface(
 /// Remove an interface.
 pub fn remove_interface(name: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let idx = state.interfaces.iter().position(|i| i.name == name)
+    let idx = state
+        .interfaces
+        .iter()
+        .position(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     state.interfaces.remove(idx);
     state.changes += 1;
@@ -347,7 +354,10 @@ pub fn remove_interface(name: &str) -> KernelResult<()> {
 /// Set link state.
 pub fn set_link_state(name: &str, link: LinkState) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     iface.link_state = link;
     state.changes += 1;
@@ -368,7 +378,10 @@ pub fn set_ipv4(
     gateway: &str,
 ) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     iface.ipv4 = Ipv4Config {
         method,
@@ -390,7 +403,10 @@ pub fn set_ipv6(
     gateway: &str,
 ) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     iface.ipv6 = Ipv6Config {
         method,
@@ -407,7 +423,10 @@ pub fn set_ipv6(
 /// Set IPv6 privacy extensions.
 pub fn set_ipv6_privacy(name: &str, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     iface.ipv6.privacy_extensions = enabled;
     state.changes += 1;
@@ -417,7 +436,10 @@ pub fn set_ipv6_privacy(name: &str, enabled: bool) -> KernelResult<()> {
 /// Set MTU.
 pub fn set_mtu(name: &str, mtu: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     if mtu < 68 || mtu > 9000 {
         return Err(KernelError::InvalidArgument);
@@ -434,7 +456,10 @@ pub fn set_mtu(name: &str, mtu: u32) -> KernelResult<()> {
 /// Set DNS configuration for an interface.
 pub fn set_dns(name: &str, auto_dns: bool, servers: &[&str]) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     if servers.len() > MAX_DNS_SERVERS {
         return Err(KernelError::ResourceExhausted);
@@ -449,7 +474,10 @@ pub fn set_dns(name: &str, auto_dns: bool, servers: &[&str]) -> KernelResult<()>
 /// Set DNS-over-HTTPS URL.
 pub fn set_doh(name: &str, url: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     iface.dns.doh_url = String::from(url);
     state.changes += 1;
@@ -459,7 +487,10 @@ pub fn set_doh(name: &str, url: &str) -> KernelResult<()> {
 /// Add a DNS search domain.
 pub fn add_search_domain(name: &str, domain: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut().find(|i| i.name == name)
+    let iface = state
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == name)
         .ok_or(KernelError::NotFound)?;
     if !iface.dns.search_domains.iter().any(|d| d == domain) {
         iface.dns.search_domains.push(String::from(domain));
@@ -506,7 +537,9 @@ pub fn add_scanned_wifi(
 /// Connect to a Wi-Fi network.
 pub fn connect_wifi(iface_name: &str, ssid: &str, password: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut()
+    let iface = state
+        .interfaces
+        .iter_mut()
         .find(|i| i.name == iface_name && i.iface_type == InterfaceType::Wifi)
         .ok_or(KernelError::NotFound)?;
     iface.connected_ssid = String::from(ssid);
@@ -532,7 +565,9 @@ pub fn connect_wifi(iface_name: &str, ssid: &str, password: &str) -> KernelResul
 /// Disconnect Wi-Fi.
 pub fn disconnect_wifi(iface_name: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let iface = state.interfaces.iter_mut()
+    let iface = state
+        .interfaces
+        .iter_mut()
         .find(|i| i.name == iface_name && i.iface_type == InterfaceType::Wifi)
         .ok_or(KernelError::NotFound)?;
     iface.connected_ssid = String::new();
@@ -550,7 +585,10 @@ pub fn saved_networks() -> Vec<SavedNetwork> {
 /// Forget a saved network.
 pub fn forget_network(ssid: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let idx = state.saved_networks.iter().position(|s| s.ssid == ssid)
+    let idx = state
+        .saved_networks
+        .iter()
+        .position(|s| s.ssid == ssid)
         .ok_or(KernelError::NotFound)?;
     state.saved_networks.remove(idx);
     state.changes += 1;
@@ -560,7 +598,10 @@ pub fn forget_network(ssid: &str) -> KernelResult<()> {
 /// Set auto-connect for saved network.
 pub fn set_auto_connect(ssid: &str, auto_connect: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let net = state.saved_networks.iter_mut().find(|s| s.ssid == ssid)
+    let net = state
+        .saved_networks
+        .iter_mut()
+        .find(|s| s.ssid == ssid)
         .ok_or(KernelError::NotFound)?;
     net.auto_connect = auto_connect;
     state.changes += 1;
@@ -570,7 +611,10 @@ pub fn set_auto_connect(ssid: &str, auto_connect: bool) -> KernelResult<()> {
 /// Set priority for saved network.
 pub fn set_network_priority(ssid: &str, priority: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let net = state.saved_networks.iter_mut().find(|s| s.ssid == ssid)
+    let net = state
+        .saved_networks
+        .iter_mut()
+        .find(|s| s.ssid == ssid)
         .ok_or(KernelError::NotFound)?;
     net.priority = priority;
     state.changes += 1;
@@ -642,39 +686,37 @@ pub fn hostname() -> String {
 pub fn init_defaults() {
     let mut state = STATE.lock();
 
-    state.interfaces = vec![
-        NetworkInterface {
-            name: String::from("lo"),
-            display_name: String::from("Loopback"),
-            iface_type: InterfaceType::Loopback,
-            link_state: LinkState::Up,
-            mac_address: String::from("00:00:00:00:00:00"),
-            mtu: 65535,
-            ipv4: Ipv4Config {
-                method: IpMethod::Manual,
-                address: String::from("127.0.0.1"),
-                netmask: String::from("255.0.0.0"),
-                gateway: String::new(),
-            },
-            ipv6: Ipv6Config {
-                method: IpMethod::Manual,
-                address: String::from("::1"),
-                prefix_len: 128,
-                gateway: String::new(),
-                privacy_extensions: false,
-            },
-            dns: DnsConfig {
-                auto_dns: true,
-                servers: Vec::new(),
-                doh_url: String::new(),
-                search_domains: Vec::new(),
-            },
-            connected_ssid: String::new(),
-            speed_mbps: 0,
-            rx_bytes: 0,
-            tx_bytes: 0,
+    state.interfaces = vec![NetworkInterface {
+        name: String::from("lo"),
+        display_name: String::from("Loopback"),
+        iface_type: InterfaceType::Loopback,
+        link_state: LinkState::Up,
+        mac_address: String::from("00:00:00:00:00:00"),
+        mtu: 65535,
+        ipv4: Ipv4Config {
+            method: IpMethod::Manual,
+            address: String::from("127.0.0.1"),
+            netmask: String::from("255.0.0.0"),
+            gateway: String::new(),
         },
-    ];
+        ipv6: Ipv6Config {
+            method: IpMethod::Manual,
+            address: String::from("::1"),
+            prefix_len: 128,
+            gateway: String::new(),
+            privacy_extensions: false,
+        },
+        dns: DnsConfig {
+            auto_dns: true,
+            servers: Vec::new(),
+            doh_url: String::new(),
+            search_domains: Vec::new(),
+        },
+        connected_ssid: String::new(),
+        speed_mbps: 0,
+        rx_bytes: 0,
+        tx_bytes: 0,
+    }];
 
     // No detected gateway until real probing populates it.
     state.router = RouterInfo {
@@ -698,13 +740,17 @@ pub fn init_defaults() {
 /// Return (iface_count, connected_count, saved_count, ops).
 pub fn stats() -> (usize, usize, usize, u64) {
     let state = STATE.lock();
-    let connected = state.interfaces.iter()
+    let connected = state
+        .interfaces
+        .iter()
         .filter(|i| i.link_state == LinkState::Up && i.iface_type != InterfaceType::Loopback)
         .count();
-    (state.interfaces.len(),
-     connected,
-     state.saved_networks.len(),
-     OP_COUNT.load(Ordering::Relaxed))
+    (
+        state.interfaces.len(),
+        connected,
+        state.saved_networks.len(),
+        OP_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 pub fn reset_stats() {
@@ -739,7 +785,12 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: add interfaces.
     serial_println!("netsettings::self_test 1: add interfaces");
-    add_interface("eth0", "Ethernet", InterfaceType::Ethernet, "52:54:00:12:34:56")?;
+    add_interface(
+        "eth0",
+        "Ethernet",
+        InterfaceType::Ethernet,
+        "52:54:00:12:34:56",
+    )?;
     add_interface("wlan0", "Wi-Fi", InterfaceType::Wifi, "52:54:00:ab:cd:ef")?;
     assert_eq!(list_interfaces().len(), 2);
 
@@ -749,7 +800,13 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 3: set IPv4.
     serial_println!("netsettings::self_test 3: IPv4");
-    set_ipv4("eth0", IpMethod::Manual, "10.0.0.5", "255.255.255.0", "10.0.0.1")?;
+    set_ipv4(
+        "eth0",
+        IpMethod::Manual,
+        "10.0.0.5",
+        "255.255.255.0",
+        "10.0.0.1",
+    )?;
     let iface = get_interface("eth0")?;
     assert_eq!(iface.ipv4.method, IpMethod::Manual);
     assert_eq!(iface.ipv4.address, "10.0.0.5");
@@ -763,7 +820,13 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 5: Wi-Fi scan and connect.
     serial_println!("netsettings::self_test 5: Wi-Fi");
-    add_scanned_wifi("TestNet", 75, WifiSecurity::Wpa2Personal, WifiBand::Band5g, 44)?;
+    add_scanned_wifi(
+        "TestNet",
+        75,
+        WifiSecurity::Wpa2Personal,
+        WifiBand::Band5g,
+        44,
+    )?;
     let scan = wifi_scan();
     assert_eq!(scan.len(), 1);
     connect_wifi("wlan0", "TestNet", "password123")?;

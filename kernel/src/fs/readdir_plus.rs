@@ -265,13 +265,18 @@ pub fn readdir_plus<P: AsRef<Path> + ?Sized>(
     sort_entries(&mut entries, options.sort);
 
     // Calculate total size.
-    let total_size: u64 = entries.iter()
+    let total_size: u64 = entries
+        .iter()
         .filter_map(|e| e.meta.as_ref())
         .map(|m| m.size)
         .sum();
 
     // Apply pagination.
-    let limit = if options.limit == 0 { MAX_ENTRIES_PER_CALL } else { options.limit };
+    let limit = if options.limit == 0 {
+        MAX_ENTRIES_PER_CALL
+    } else {
+        options.limit
+    };
     let start = options.offset.min(entries.len());
     let end = (start + limit).min(entries.len());
     let has_more = end < entries.len();
@@ -425,16 +430,24 @@ fn test_sort_orders() {
     Vfs::write_file(alloc::format!("{}/b.txt", dir), b"bb").unwrap();
 
     // Sort by name.
-    let opts = ListOptions { sort: SortOrder::Name, ..Default::default() };
+    let opts = ListOptions {
+        sort: SortOrder::Name,
+        ..Default::default()
+    };
     let result = readdir_plus(dir, &opts).unwrap();
     let names: Vec<&Path> = result.entries.iter().map(|e| e.name.as_path()).collect();
     // First should be 'a.txt' (alphabetically first among our test files).
     assert!(names.windows(2).all(|w| w[0] <= w[1]));
 
     // Sort by size (largest first).
-    let opts2 = ListOptions { sort: SortOrder::SizeLargest, ..Default::default() };
+    let opts2 = ListOptions {
+        sort: SortOrder::SizeLargest,
+        ..Default::default()
+    };
     let result2 = readdir_plus(dir, &opts2).unwrap();
-    let sizes: Vec<u64> = result2.entries.iter()
+    let sizes: Vec<u64> = result2
+        .entries
+        .iter()
         .filter_map(|e| e.meta.as_ref())
         .map(|m| m.size)
         .collect();

@@ -204,14 +204,26 @@ pub fn set_files(paths: &[&str], op: FileOp, source: &str) -> KernelResult<()> {
     // Encode as newline-separated path list.
     let mut data = String::new();
     for (i, path) in paths.iter().enumerate() {
-        if i > 0 { data.push('\n'); }
+        if i > 0 {
+            data.push('\n');
+        }
         data.push_str(path);
     }
-    set_single(Format::FilePaths, Vec::from(data.as_bytes()), source, Some(op))
+    set_single(
+        Format::FilePaths,
+        Vec::from(data.as_bytes()),
+        source,
+        Some(op),
+    )
 }
 
 /// Set clipboard with a single format.
-fn set_single(format: Format, data: Vec<u8>, source: &str, file_op: Option<FileOp>) -> KernelResult<()> {
+fn set_single(
+    format: Format,
+    data: Vec<u8>,
+    source: &str,
+    file_op: Option<FileOp>,
+) -> KernelResult<()> {
     if data.len() > MAX_ENTRY_SIZE {
         return Err(KernelError::InvalidArgument);
     }
@@ -251,7 +263,11 @@ fn set_single(format: Format, data: Vec<u8>, source: &str, file_op: Option<FileO
 }
 
 /// Set clipboard with multiple formats simultaneously.
-pub fn set_multi(formats: Vec<FormatData>, source: &str, file_op: Option<FileOp>) -> KernelResult<()> {
+pub fn set_multi(
+    formats: Vec<FormatData>,
+    source: &str,
+    file_op: Option<FileOp>,
+) -> KernelResult<()> {
     if formats.len() > MAX_FORMATS {
         return Err(KernelError::InvalidArgument);
     }
@@ -324,7 +340,8 @@ pub fn get_files() -> Option<(Vec<String>, FileOp)> {
     for fd in &entry.formats {
         if fd.format == Format::FilePaths {
             let text = core::str::from_utf8(&fd.data).ok()?;
-            let paths: Vec<String> = text.lines()
+            let paths: Vec<String> = text
+                .lines()
                 .filter(|l| !l.is_empty())
                 .map(String::from)
                 .collect();
@@ -341,7 +358,9 @@ pub fn get_format(format: Format) -> Option<Vec<u8>> {
     let current = CURRENT.lock();
     let entry = current.as_ref()?;
 
-    entry.formats.iter()
+    entry
+        .formats
+        .iter()
         .find(|fd| fd.format == format)
         .map(|fd| fd.data.clone())
 }

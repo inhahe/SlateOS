@@ -23,11 +23,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -142,7 +142,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         groups: Vec::new(),
         mode: GroupingMode::ByApp,
@@ -165,7 +167,12 @@ pub fn set_mode(mode: GroupingMode) -> KernelResult<()> {
 }
 
 /// Add a notification (auto-grouped).
-pub fn add_notification(app_name: &str, title: &str, body: &str, priority: NotifPriority) -> KernelResult<(u32, u32)> {
+pub fn add_notification(
+    app_name: &str,
+    title: &str,
+    body: &str,
+    priority: NotifPriority,
+) -> KernelResult<(u32, u32)> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         state.total_notifications += 1;
@@ -203,7 +210,10 @@ pub fn add_notification(app_name: &str, title: &str, body: &str, priority: Notif
         if state.groups.len() >= MAX_GROUPS {
             // Remove oldest group.
             if !state.groups.is_empty() {
-                let oldest_idx = state.groups.iter().enumerate()
+                let oldest_idx = state
+                    .groups
+                    .iter()
+                    .enumerate()
                     .min_by_key(|(_, g)| g.latest_ns)
                     .map(|(i, _)| i)
                     .unwrap_or(0);
@@ -243,7 +253,10 @@ pub fn mark_read(notif_id: u32) -> KernelResult<()> {
 /// Mark all in a group as read.
 pub fn mark_group_read(group_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let group = state.groups.iter_mut().find(|g| g.group_id == group_id)
+        let group = state
+            .groups
+            .iter_mut()
+            .find(|g| g.group_id == group_id)
             .ok_or(KernelError::NotFound)?;
         for n in &mut group.notifications {
             n.read = true;
@@ -255,7 +268,10 @@ pub fn mark_group_read(group_id: u32) -> KernelResult<()> {
 /// Expand/collapse a group.
 pub fn set_expanded(group_id: u32, expanded: bool) -> KernelResult<()> {
     with_state(|state| {
-        let group = state.groups.iter_mut().find(|g| g.group_id == group_id)
+        let group = state
+            .groups
+            .iter_mut()
+            .find(|g| g.group_id == group_id)
             .ok_or(KernelError::NotFound)?;
         group.expanded = expanded;
         Ok(())
@@ -265,7 +281,10 @@ pub fn set_expanded(group_id: u32, expanded: bool) -> KernelResult<()> {
 /// Mute/unmute a group.
 pub fn set_muted(group_id: u32, muted: bool) -> KernelResult<()> {
     with_state(|state| {
-        let group = state.groups.iter_mut().find(|g| g.group_id == group_id)
+        let group = state
+            .groups
+            .iter_mut()
+            .find(|g| g.group_id == group_id)
             .ok_or(KernelError::NotFound)?;
         group.muted = muted;
         Ok(())
@@ -276,11 +295,15 @@ pub fn set_muted(group_id: u32, muted: bool) -> KernelResult<()> {
 pub fn dismiss_group(group_id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.groups.len();
-        let dismissed_count = state.groups.iter()
+        let dismissed_count = state
+            .groups
+            .iter()
             .find(|g| g.group_id == group_id)
             .map_or(0, |g| g.notifications.len() as u64);
         state.groups.retain(|g| g.group_id != group_id);
-        if state.groups.len() == before { return Err(KernelError::NotFound); }
+        if state.groups.len() == before {
+            return Err(KernelError::NotFound);
+        }
         state.total_dismissed += dismissed_count;
         Ok(())
     })
@@ -289,7 +312,11 @@ pub fn dismiss_group(group_id: u32) -> KernelResult<()> {
 /// Dismiss all notifications.
 pub fn dismiss_all() -> KernelResult<()> {
     with_state(|state| {
-        let total: u64 = state.groups.iter().map(|g| g.notifications.len() as u64).sum();
+        let total: u64 = state
+            .groups
+            .iter()
+            .map(|g| g.notifications.len() as u64)
+            .sum();
         state.groups.clear();
         state.total_dismissed += total;
         Ok(())
@@ -308,13 +335,20 @@ pub fn get_groups() -> Vec<NotifGroupEntry> {
 /// Get unread count.
 pub fn unread_count() -> usize {
     STATE.lock().as_ref().map_or(0, |s| {
-        s.groups.iter().flat_map(|g| g.notifications.iter()).filter(|n| !n.read).count()
+        s.groups
+            .iter()
+            .flat_map(|g| g.notifications.iter())
+            .filter(|n| !n.read)
+            .count()
     })
 }
 
 /// Get grouping mode.
 pub fn get_mode() -> GroupingMode {
-    STATE.lock().as_ref().map_or(GroupingMode::ByApp, |s| s.mode)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(GroupingMode::ByApp, |s| s.mode)
 }
 
 /// Statistics: (group_count, total_notifications, unread, total_dismissed, ops).
@@ -322,8 +356,19 @@ pub fn stats() -> (usize, u64, usize, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let unread = s.groups.iter().flat_map(|g| g.notifications.iter()).filter(|n| !n.read).count();
-            (s.groups.len(), s.total_notifications, unread, s.total_dismissed, s.ops)
+            let unread = s
+                .groups
+                .iter()
+                .flat_map(|g| g.notifications.iter())
+                .filter(|n| !n.read)
+                .count();
+            (
+                s.groups.len(),
+                s.total_notifications,
+                unread,
+                s.total_dismissed,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -343,8 +388,10 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty: OK");
 
     // 2: Add notifications (same app = same group).
-    let (g1, n1) = add_notification("mail", "New email", "From Alice", NotifPriority::Normal).expect("add1");
-    let (g2, _n2) = add_notification("mail", "New email", "From Bob", NotifPriority::Normal).expect("add2");
+    let (g1, n1) =
+        add_notification("mail", "New email", "From Alice", NotifPriority::Normal).expect("add1");
+    let (g2, _n2) =
+        add_notification("mail", "New email", "From Bob", NotifPriority::Normal).expect("add2");
     assert_eq!(g1, g2); // Same group.
     assert_eq!(get_groups().len(), 1);
     assert_eq!(unread_count(), 2);

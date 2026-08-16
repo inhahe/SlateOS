@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -135,7 +135,9 @@ where
 /// is exercised.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         cpu_states: Vec::new(),
         shootdown_log: Vec::new(),
@@ -155,11 +157,22 @@ pub fn init_defaults() {
 /// for an unregistered CPU id.
 pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
-        if state.cpu_states.len() >= MAX_CPU { return Err(KernelError::ResourceExhausted); }
+        if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.cpu_states.len() >= MAX_CPU {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.cpu_states.push(CpuTlbState {
-            cpu_id, hits: 0, misses: 0, shootdowns_sent: 0, shootdowns_recv: 0,
-            flushes: 0, flush_all: 0, flush_range: 0, walk_cycles: 0,
+            cpu_id,
+            hits: 0,
+            misses: 0,
+            shootdowns_sent: 0,
+            shootdowns_recv: 0,
+            flushes: 0,
+            flush_all: 0,
+            flush_range: 0,
+            walk_cycles: 0,
         });
         Ok(())
     })
@@ -168,7 +181,10 @@ pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
 /// Record a TLB hit.
 pub fn record_hit(cpu: u32, count: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
         cs.hits += count;
         state.total_hits += count;
@@ -179,7 +195,10 @@ pub fn record_hit(cpu: u32, count: u64) -> KernelResult<()> {
 /// Record a TLB miss.
 pub fn record_miss(cpu: u32, count: u64, walk_cycles: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
         cs.misses += count;
         cs.walk_cycles += walk_cycles;
@@ -189,7 +208,12 @@ pub fn record_miss(cpu: u32, count: u64, walk_cycles: u64) -> KernelResult<()> {
 }
 
 /// Record a TLB shootdown.
-pub fn record_shootdown(source: u32, target_count: u32, pages: u64, reason: FlushReason) -> KernelResult<()> {
+pub fn record_shootdown(
+    source: u32,
+    target_count: u32,
+    pages: u64,
+    reason: FlushReason,
+) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         if let Some(cs) = state.cpu_states.iter_mut().find(|c| c.cpu_id == source) {
@@ -197,13 +221,20 @@ pub fn record_shootdown(source: u32, target_count: u32, pages: u64, reason: Flus
         }
         // Record in all target CPUs (simplified: increment all others).
         for cs in &mut state.cpu_states {
-            if cs.cpu_id != source { cs.shootdowns_recv += 1; }
+            if cs.cpu_id != source {
+                cs.shootdowns_recv += 1;
+            }
         }
         state.total_shootdowns += 1;
-        if state.shootdown_log.len() >= MAX_EVENTS { state.shootdown_log.remove(0); }
+        if state.shootdown_log.len() >= MAX_EVENTS {
+            state.shootdown_log.remove(0);
+        }
         state.shootdown_log.push(ShootdownEvent {
-            source_cpu: source, target_cpus: target_count,
-            pages, timestamp_ns: now, reason,
+            source_cpu: source,
+            target_cpus: target_count,
+            pages,
+            timestamp_ns: now,
+            reason,
         });
         Ok(())
     })
@@ -212,10 +243,17 @@ pub fn record_shootdown(source: u32, target_count: u32, pages: u64, reason: Flus
 /// Record a TLB flush.
 pub fn record_flush(cpu: u32, full: bool) -> KernelResult<()> {
     with_state(|state| {
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
         cs.flushes += 1;
-        if full { cs.flush_all += 1; } else { cs.flush_range += 1; }
+        if full {
+            cs.flush_all += 1;
+        } else {
+            cs.flush_range += 1;
+        }
         state.total_flushes += 1;
         Ok(())
     })
@@ -223,7 +261,10 @@ pub fn record_flush(cpu: u32, full: bool) -> KernelResult<()> {
 
 /// Get per-CPU TLB state.
 pub fn cpu_stats() -> Vec<CpuTlbState> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.cpu_states.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.cpu_states.clone())
 }
 
 /// Hit rate as integer percentage (0-100).
@@ -232,7 +273,11 @@ pub fn hit_rate() -> u64 {
     match guard.as_ref() {
         Some(s) => {
             let total = s.total_hits + s.total_misses;
-            if total == 0 { 100 } else { s.total_hits * 100 / total }
+            if total == 0 {
+                100
+            } else {
+                s.total_hits * 100 / total
+            }
         }
         None => 0,
     }
@@ -241,7 +286,11 @@ pub fn hit_rate() -> u64 {
 /// Recent shootdown events.
 pub fn shootdown_log(n: usize) -> Vec<ShootdownEvent> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let start = if n >= s.shootdown_log.len() { 0 } else { s.shootdown_log.len() - n };
+        let start = if n >= s.shootdown_log.len() {
+            0
+        } else {
+            s.shootdown_log.len() - n
+        };
         s.shootdown_log[start..].to_vec()
     })
 }
@@ -250,7 +299,14 @@ pub fn shootdown_log(n: usize) -> Vec<ShootdownEvent> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpu_states.len(), s.total_hits, s.total_misses, s.total_shootdowns, s.total_flushes, s.ops),
+        Some(s) => (
+            s.cpu_states.len(),
+            s.total_hits,
+            s.total_misses,
+            s.total_shootdowns,
+            s.total_flushes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -283,13 +339,21 @@ pub fn self_test() {
     register_cpu(2).expect("cpu2");
     assert!(register_cpu(0).is_err());
     record_hit(0, 100).expect("hit");
-    let c = cpu_stats().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let c = cpu_stats()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(c.hits, 100);
     crate::serial_println!("  [2/8] hit: OK");
 
     // 3: Record miss with page-walk cycles.
     record_miss(1, 5, 500).expect("miss");
-    let c = cpu_stats().iter().find(|c| c.cpu_id == 1).cloned().expect("cpu1");
+    let c = cpu_stats()
+        .iter()
+        .find(|c| c.cpu_id == 1)
+        .cloned()
+        .expect("cpu1");
     assert_eq!(c.misses, 5);
     assert_eq!(c.walk_cycles, 500);
     crate::serial_println!("  [3/8] miss: OK");
@@ -304,8 +368,16 @@ pub fn self_test() {
     let log = shootdown_log(5);
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].source_cpu, 0);
-    let c0 = cpu_stats().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
-    let c1 = cpu_stats().iter().find(|c| c.cpu_id == 1).cloned().expect("cpu1");
+    let c0 = cpu_stats()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
+    let c1 = cpu_stats()
+        .iter()
+        .find(|c| c.cpu_id == 1)
+        .cloned()
+        .expect("cpu1");
     assert_eq!(c0.shootdowns_sent, 1);
     assert_eq!(c1.shootdowns_recv, 1); // every non-source CPU receives
     crate::serial_println!("  [5/8] shootdown: OK");
@@ -313,7 +385,11 @@ pub fn self_test() {
     // 6: Flush (full + range) increments exactly from zero.
     record_flush(2, true).expect("flush_full");
     record_flush(2, false).expect("flush_range");
-    let c = cpu_stats().iter().find(|c| c.cpu_id == 2).cloned().expect("cpu2");
+    let c = cpu_stats()
+        .iter()
+        .find(|c| c.cpu_id == 2)
+        .cloned()
+        .expect("cpu2");
     assert_eq!(c.flushes, 2);
     assert_eq!(c.flush_all, 1);
     assert_eq!(c.flush_range, 1);

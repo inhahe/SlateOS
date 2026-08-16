@@ -305,7 +305,13 @@ pub fn record(category: Category, event_id: u16, arg0: u64, arg1: u64) {
     if CATEGORY_MASK.load(Ordering::Relaxed) & cat_bit == 0 {
         return;
     }
-    record_with_task(category, event_id, crate::sched::current_task_id(), arg0, arg1);
+    record_with_task(
+        category,
+        event_id,
+        crate::sched::current_task_id(),
+        arg0,
+        arg1,
+    );
 }
 
 /// Record a trace event on behalf of a task the caller has already identified.

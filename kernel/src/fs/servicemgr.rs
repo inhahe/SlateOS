@@ -31,10 +31,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -187,8 +187,12 @@ pub fn init_defaults() {
         return;
     }
 
-    let def = |id: u32, name: &str, display_name: &str, description: &str,
-               startup_type: StartupType, auto_restart: bool| ServiceInfo {
+    let def = |id: u32,
+               name: &str,
+               display_name: &str,
+               description: &str,
+               startup_type: StartupType,
+               auto_restart: bool| ServiceInfo {
         id,
         name: String::from(name),
         display_name: String::from(display_name),
@@ -206,16 +210,46 @@ pub fn init_defaults() {
     };
 
     let services = alloc::vec![
-        def(1, "network", "NetworkManager",
-            "Manages network interfaces and connections", StartupType::Automatic, true),
-        def(2, "audio", "Audio Server",
-            "Audio mixing and output routing", StartupType::Automatic, true),
-        def(3, "display", "Display Server",
-            "Compositor and display output management", StartupType::Automatic, true),
-        def(4, "logging", "System Logger",
-            "Structured logging and log aggregation", StartupType::Automatic, true),
-        def(5, "cron", "Task Scheduler",
-            "Periodic and scheduled task execution", StartupType::Manual, false),
+        def(
+            1,
+            "network",
+            "NetworkManager",
+            "Manages network interfaces and connections",
+            StartupType::Automatic,
+            true
+        ),
+        def(
+            2,
+            "audio",
+            "Audio Server",
+            "Audio mixing and output routing",
+            StartupType::Automatic,
+            true
+        ),
+        def(
+            3,
+            "display",
+            "Display Server",
+            "Compositor and display output management",
+            StartupType::Automatic,
+            true
+        ),
+        def(
+            4,
+            "logging",
+            "System Logger",
+            "Structured logging and log aggregation",
+            StartupType::Automatic,
+            true
+        ),
+        def(
+            5,
+            "cron",
+            "Task Scheduler",
+            "Periodic and scheduled task execution",
+            StartupType::Manual,
+            false
+        ),
     ];
 
     *guard = Some(State {
@@ -283,7 +317,9 @@ pub fn register_service(
 /// process loader, spawn them here and store the actual PID.
 pub fn start_service(id: u32) -> KernelResult<()> {
     with_state(|st| {
-        let svc = st.services.iter_mut()
+        let svc = st
+            .services
+            .iter_mut()
             .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
 
@@ -310,7 +346,9 @@ pub fn start_service(id: u32) -> KernelResult<()> {
 /// Stop a service by ID. Clears PID and records the stop timestamp.
 pub fn stop_service(id: u32) -> KernelResult<()> {
     with_state(|st| {
-        let svc = st.services.iter_mut()
+        let svc = st
+            .services
+            .iter_mut()
             .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
 
@@ -330,7 +368,9 @@ pub fn stop_service(id: u32) -> KernelResult<()> {
 /// Restart a service (stop then start), incrementing restart_count.
 pub fn restart_service(id: u32) -> KernelResult<()> {
     with_state(|st| {
-        let svc = st.services.iter_mut()
+        let svc = st
+            .services
+            .iter_mut()
             .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
 
@@ -362,7 +402,9 @@ pub fn restart_service(id: u32) -> KernelResult<()> {
 /// Change a service's startup type.
 pub fn set_startup_type(id: u32, startup_type: StartupType) -> KernelResult<()> {
     with_state(|st| {
-        let svc = st.services.iter_mut()
+        let svc = st
+            .services
+            .iter_mut()
             .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
 
@@ -388,7 +430,9 @@ pub fn add_dependency(id: u32, depends_on_name: &str) -> KernelResult<()> {
     with_state(|st| {
         // Verify the dependency target exists and is not self.
         let self_name = {
-            let svc = st.services.iter()
+            let svc = st
+                .services
+                .iter()
                 .find(|s| s.id == id)
                 .ok_or(KernelError::NotFound)?;
             if svc.name == depends_on_name {
@@ -403,7 +447,9 @@ pub fn add_dependency(id: u32, depends_on_name: &str) -> KernelResult<()> {
         }
 
         // Add to depends_on (avoid duplicates).
-        let svc = st.services.iter_mut()
+        let svc = st
+            .services
+            .iter_mut()
             .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         let dep_name = String::from(depends_on_name);
@@ -412,7 +458,9 @@ pub fn add_dependency(id: u32, depends_on_name: &str) -> KernelResult<()> {
         }
 
         // Add to the target's depended_by (avoid duplicates).
-        let target = st.services.iter_mut()
+        let target = st
+            .services
+            .iter_mut()
             .find(|s| s.name == depends_on_name)
             .ok_or(KernelError::NotFound)?;
         if !target.depended_by.contains(&self_name) {
@@ -426,7 +474,8 @@ pub fn add_dependency(id: u32, depends_on_name: &str) -> KernelResult<()> {
 /// Retrieve a clone of a service by ID.
 pub fn get_service(id: u32) -> KernelResult<ServiceInfo> {
     with_state(|st| {
-        st.services.iter()
+        st.services
+            .iter()
             .find(|s| s.id == id)
             .cloned()
             .ok_or(KernelError::NotFound)
@@ -436,7 +485,8 @@ pub fn get_service(id: u32) -> KernelResult<ServiceInfo> {
 /// Find a service by its short name.
 pub fn find_by_name(name: &str) -> KernelResult<ServiceInfo> {
     with_state(|st| {
-        st.services.iter()
+        st.services
+            .iter()
             .find(|s| s.name == name)
             .cloned()
             .ok_or(KernelError::NotFound)
@@ -456,7 +506,9 @@ pub fn list_services() -> Vec<ServiceInfo> {
 pub fn list_running() -> Vec<ServiceInfo> {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(st) => st.services.iter()
+        Some(st) => st
+            .services
+            .iter()
             .filter(|s| s.state == ServiceState::Running)
             .cloned()
             .collect(),
@@ -472,10 +524,19 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     match guard.as_ref() {
         Some(st) => {
             let total = st.services.len();
-            let running = st.services.iter()
+            let running = st
+                .services
+                .iter()
                 .filter(|s| s.state == ServiceState::Running)
                 .count();
-            (total, running, st.total_starts, st.total_stops, st.total_failures, st.ops)
+            (
+                total,
+                running,
+                st.total_starts,
+                st.total_stops,
+                st.total_failures,
+                st.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0),
     }

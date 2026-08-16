@@ -469,12 +469,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // raise() and the check (the timer ISR calls process_pending which
     // would clear the bits, causing a false failure).
     // SAFETY: cli/sti are valid in ring 0; we restore interrupts immediately after the check.
-    unsafe { core::arch::asm!("cli", options(nomem, nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+    }
     raise(TIMER_SOFTIRQ | IRQ_POLL_SOFTIRQ);
     let bits = PENDING.get(cpu).map_or(0, |p| p.load(Ordering::Acquire));
-    unsafe { core::arch::asm!("sti", options(nomem, nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+    }
     if bits & TIMER_SOFTIRQ == 0 || bits & IRQ_POLL_SOFTIRQ == 0 {
-        serial_println!("[softirq]   FAIL: raise did not set expected bits (got {:#x})", bits);
+        serial_println!(
+            "[softirq]   FAIL: raise did not set expected bits (got {:#x})",
+            bits
+        );
         return Err(crate::error::KernelError::InternalError);
     }
     serial_println!("[softirq]   raise() sets pending bits: OK");
@@ -499,9 +506,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // SAFETY: process_pending() is exercised here precisely to
         // verify its no-op fast path; the surrounding without_interrupts
         // suppresses concurrent ISR-driven invocations.
-        unsafe { process_pending(); }
+        unsafe {
+            process_pending();
+        }
         let runs_after = TOTAL_RUNS.load(Ordering::Acquire);
-        if runs_after != runs_before { Err(()) } else { Ok(()) }
+        if runs_after != runs_before {
+            Err(())
+        } else {
+            Ok(())
+        }
     });
     if test2_ok.is_err() {
         serial_println!("[softirq]   FAIL: process_pending ran with no bits pending");
@@ -517,13 +530,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // could cause the test's process_pending() to be a no-op (bits
     // already drained by the ISR), tripping the "did not run handler"
     // assertion.
-    enum Test3Fail { NoHandler, BitsLeft(u32) }
+    enum Test3Fail {
+        NoHandler,
+        BitsLeft(u32),
+    }
     let test3_ok: Result<(), Test3Fail> = crate::cpu::without_interrupts(|| {
         raise(TIMER_SOFTIRQ);
         let handlers_before = TOTAL_HANDLERS.load(Ordering::Acquire);
         // SAFETY: deliberate probe of the dispatch path; outer
         // without_interrupts ensures no concurrent ISR also calls in.
-        unsafe { process_pending(); }
+        unsafe {
+            process_pending();
+        }
         let handlers_after = TOTAL_HANDLERS.load(Ordering::Acquire);
         if handlers_after <= handlers_before {
             return Err(Test3Fail::NoHandler);
@@ -540,7 +558,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(crate::error::KernelError::InternalError);
         }
         Err(Test3Fail::BitsLeft(r)) => {
-            serial_println!("[softirq]   FAIL: bits not cleared after processing (remaining {:#x})", r);
+            serial_println!(
+                "[softirq]   FAIL: bits not cleared after processing (remaining {:#x})",
+                r
+            );
             return Err(crate::error::KernelError::InternalError);
         }
         Ok(()) => {}

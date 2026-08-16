@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -160,7 +160,9 @@ where
 /// [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         processes: Vec::new(),
         total_maps: 0,
@@ -171,22 +173,45 @@ pub fn init_defaults() {
 }
 
 /// Create a VMA mapping.
-pub fn create_vma(pid: u32, start: u64, size: u64, perm: VmaPerm, vma_type: VmaType, name: &str) -> KernelResult<()> {
+pub fn create_vma(
+    pid: u32,
+    start: u64,
+    size: u64,
+    perm: VmaPerm,
+    vma_type: VmaType,
+    name: &str,
+) -> KernelResult<()> {
     with_state(|state| {
         let proc_space = if let Some(ps) = state.processes.iter_mut().find(|p| p.pid == pid) {
             ps
         } else {
-            if state.processes.len() >= MAX_PROCESSES { return Err(KernelError::ResourceExhausted); }
+            if state.processes.len() >= MAX_PROCESSES {
+                return Err(KernelError::ResourceExhausted);
+            }
             state.processes.push(ProcessAddrSpace {
-                pid, vmas: Vec::new(), total_mapped: 0, total_resident: 0,
-                maps_count: 0, unmaps_count: 0,
+                pid,
+                vmas: Vec::new(),
+                total_mapped: 0,
+                total_resident: 0,
+                maps_count: 0,
+                unmaps_count: 0,
             });
-            state.processes.last_mut().ok_or(KernelError::InternalError)?
+            state
+                .processes
+                .last_mut()
+                .ok_or(KernelError::InternalError)?
         };
-        if proc_space.vmas.len() >= MAX_VMAS_PER_PROC { return Err(KernelError::ResourceExhausted); }
+        if proc_space.vmas.len() >= MAX_VMAS_PER_PROC {
+            return Err(KernelError::ResourceExhausted);
+        }
         proc_space.vmas.push(Vma {
-            start, end: start + size, perm, vma_type,
-            name: String::from(name), resident_pages: 0, dirty_pages: 0,
+            start,
+            end: start + size,
+            perm,
+            vma_type,
+            name: String::from(name),
+            resident_pages: 0,
+            dirty_pages: 0,
         });
         proc_space.total_mapped += size;
         proc_space.maps_count += 1;
@@ -199,9 +224,15 @@ pub fn create_vma(pid: u32, start: u64, size: u64, perm: VmaPerm, vma_type: VmaT
 /// Remove a VMA mapping.
 pub fn remove_vma(pid: u32, start: u64) -> KernelResult<()> {
     with_state(|state| {
-        let ps = state.processes.iter_mut().find(|p| p.pid == pid)
+        let ps = state
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
-        let idx = ps.vmas.iter().position(|v| v.start == start)
+        let idx = ps
+            .vmas
+            .iter()
+            .position(|v| v.start == start)
             .ok_or(KernelError::NotFound)?;
         let size = ps.vmas[idx].end - ps.vmas[idx].start;
         ps.vmas.remove(idx);
@@ -216,20 +247,28 @@ pub fn remove_vma(pid: u32, start: u64) -> KernelResult<()> {
 /// List VMAs for a process.
 pub fn list_vmas(pid: u32) -> Vec<Vma> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.processes.iter().find(|p| p.pid == pid)
+        s.processes
+            .iter()
+            .find(|p| p.pid == pid)
             .map_or(Vec::new(), |p| p.vmas.clone())
     })
 }
 
 /// Get address space summary for a process.
 pub fn address_space(pid: u32) -> Option<ProcessAddrSpace> {
-    STATE.lock().as_ref().and_then(|s| s.processes.iter().find(|p| p.pid == pid).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.processes.iter().find(|p| p.pid == pid).cloned())
 }
 
 /// List all tracked processes.
 pub fn list_processes() -> Vec<(u32, usize, u64)> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.processes.iter().map(|p| (p.pid, p.vmas.len(), p.total_mapped)).collect()
+        s.processes
+            .iter()
+            .map(|p| (p.pid, p.vmas.len(), p.total_mapped))
+            .collect()
     })
 }
 
@@ -237,7 +276,13 @@ pub fn list_processes() -> Vec<(u32, usize, u64)> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.processes.len(), s.total_vmas, s.total_maps, s.total_unmaps, s.ops),
+        Some(s) => (
+            s.processes.len(),
+            s.total_vmas,
+            s.total_maps,
+            s.total_unmaps,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -263,7 +308,12 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty defaults: OK");
 
     // 2: Create VMA — auto-creates the owning process.
-    let rw = VmaPerm { read: true, write: true, exec: false, shared: false };
+    let rw = VmaPerm {
+        read: true,
+        write: true,
+        exec: false,
+        shared: false,
+    };
     create_vma(1, 0x400000, 0x100000, rw, VmaType::Heap, "[heap]").expect("create");
     assert_eq!(list_processes().len(), 1);
     assert_eq!(list_vmas(1).len(), 1);
@@ -280,7 +330,12 @@ pub fn self_test() {
     crate::serial_println!("  [4/8] remove vma: OK");
 
     // 5: Auto-create a second process.
-    let rx = VmaPerm { read: true, write: false, exec: true, shared: false };
+    let rx = VmaPerm {
+        read: true,
+        write: false,
+        exec: true,
+        shared: false,
+    };
     create_vma(500, 0x10000, 0x10000, rx, VmaType::FileBacked, "[text]").expect("auto_create");
     assert_eq!(list_processes().len(), 2);
     crate::serial_println!("  [5/8] auto-create process: OK");
@@ -293,9 +348,19 @@ pub fn self_test() {
     crate::serial_println!("  [6/8] address space: OK");
 
     // 7: Permission labels + not-found edge cases.
-    let perm = VmaPerm { read: true, write: true, exec: true, shared: true };
+    let perm = VmaPerm {
+        read: true,
+        write: true,
+        exec: true,
+        shared: true,
+    };
     assert_eq!(perm.label(), "rwxs");
-    let perm2 = VmaPerm { read: true, write: false, exec: false, shared: false };
+    let perm2 = VmaPerm {
+        read: true,
+        write: false,
+        exec: false,
+        shared: false,
+    };
     assert_eq!(perm2.label(), "r---");
     assert!(remove_vma(1, 0xDEAD).is_err());
     assert!(remove_vma(999, 0).is_err());

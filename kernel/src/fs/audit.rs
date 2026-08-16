@@ -43,11 +43,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
@@ -144,16 +144,26 @@ impl AuditMask {
     pub const ALL: Self = Self(0x0003_FFFF);
     /// Audit write-like operations only (write, delete, mkdir, rmdir, rename, chmod, chown, link, symlink, truncate).
     pub const WRITES: Self = Self(
-        AuditOp::Write as u32 | AuditOp::Delete as u32 | AuditOp::Mkdir as u32
-        | AuditOp::Rmdir as u32 | AuditOp::Rename as u32 | AuditOp::Chmod as u32
-        | AuditOp::Chown as u32 | AuditOp::Link as u32 | AuditOp::Symlink as u32
-        | AuditOp::Truncate as u32
+        AuditOp::Write as u32
+            | AuditOp::Delete as u32
+            | AuditOp::Mkdir as u32
+            | AuditOp::Rmdir as u32
+            | AuditOp::Rename as u32
+            | AuditOp::Chmod as u32
+            | AuditOp::Chown as u32
+            | AuditOp::Link as u32
+            | AuditOp::Symlink as u32
+            | AuditOp::Truncate as u32,
     );
     /// Audit security-relevant operations (chmod, chown, mount, unmount, xattr, exec).
     pub const SECURITY: Self = Self(
-        AuditOp::Chmod as u32 | AuditOp::Chown as u32 | AuditOp::Mount as u32
-        | AuditOp::Unmount as u32 | AuditOp::XattrSet as u32 | AuditOp::XattrRemove as u32
-        | AuditOp::Exec as u32
+        AuditOp::Chmod as u32
+            | AuditOp::Chown as u32
+            | AuditOp::Mount as u32
+            | AuditOp::Unmount as u32
+            | AuditOp::XattrSet as u32
+            | AuditOp::XattrRemove as u32
+            | AuditOp::Exec as u32,
     );
 
     /// Check if a specific operation is in this mask.
@@ -365,14 +375,17 @@ pub fn add_rule(
     let id = inner.next_rule_id;
     inner.next_rule_id = inner.next_rule_id.wrapping_add(1);
 
-    inner.rules.insert(id, AuditRule {
+    inner.rules.insert(
         id,
-        path_prefix: path_prefix.as_ref().to_path_buf(),
-        mask,
-        uid,
-        failures_only,
-        enabled: true,
-    });
+        AuditRule {
+            id,
+            path_prefix: path_prefix.as_ref().to_path_buf(),
+            mask,
+            uid,
+            failures_only,
+            enabled: true,
+        },
+    );
 
     id
 }
@@ -622,7 +635,11 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         let e = &entries[0];
-        if e.op != AuditOp::Write || e.uid != 1000 || e.path.as_path() != Path::new("/test/file.txt") || !e.success {
+        if e.op != AuditOp::Write
+            || e.uid != 1000
+            || e.path.as_path() != Path::new("/test/file.txt")
+            || !e.success
+        {
             serial_println!("[audit]   ERROR: event data mismatch");
             remove_rule(rule_id);
             return Err(KernelError::InternalError);
@@ -635,12 +652,14 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 4: Path prefix filtering ---
     {
         clear();
-        for rule in list_rules() { remove_rule(rule.id); }
+        for rule in list_rules() {
+            remove_rule(rule.id);
+        }
 
         let rule_id = add_rule("/important", AuditMask::ALL, None, false);
 
         log_ok(AuditOp::Read, 0, "/important/secret.txt");
-        log_ok(AuditOp::Read, 0, "/tmp/scratch.txt");  // Should not match.
+        log_ok(AuditOp::Read, 0, "/tmp/scratch.txt"); // Should not match.
 
         let entries = recent(10);
         if entries.len() != 1 {
@@ -661,12 +680,14 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 5: Operation mask filtering ---
     {
         clear();
-        for rule in list_rules() { remove_rule(rule.id); }
+        for rule in list_rules() {
+            remove_rule(rule.id);
+        }
 
         let rule_id = add_rule("", AuditMask::WRITES, None, false);
 
-        log_ok(AuditOp::Read, 0, "/foo");   // Should NOT be logged (read not in WRITES).
-        log_ok(AuditOp::Write, 0, "/bar");  // Should be logged.
+        log_ok(AuditOp::Read, 0, "/foo"); // Should NOT be logged (read not in WRITES).
+        log_ok(AuditOp::Write, 0, "/bar"); // Should be logged.
         log_ok(AuditOp::Delete, 0, "/baz"); // Should be logged.
 
         let entries = recent(10);
@@ -683,12 +704,14 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 6: UID filtering ---
     {
         clear();
-        for rule in list_rules() { remove_rule(rule.id); }
+        for rule in list_rules() {
+            remove_rule(rule.id);
+        }
 
         let rule_id = add_rule("", AuditMask::ALL, Some(1000), false);
 
-        log_ok(AuditOp::Read, 1000, "/user/file");  // Matches.
-        log_ok(AuditOp::Read, 0, "/root/file");      // Doesn't match.
+        log_ok(AuditOp::Read, 1000, "/user/file"); // Matches.
+        log_ok(AuditOp::Read, 0, "/root/file"); // Doesn't match.
 
         let entries = recent(10);
         if entries.len() != 1 {
@@ -704,7 +727,9 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 7: Failures-only filter ---
     {
         clear();
-        for rule in list_rules() { remove_rule(rule.id); }
+        for rule in list_rules() {
+            remove_rule(rule.id);
+        }
 
         let rule_id = add_rule("", AuditMask::ALL, None, true);
 
@@ -713,7 +738,10 @@ pub fn self_test() -> KernelResult<()> {
 
         let entries = recent(10);
         if entries.len() != 1 {
-            serial_println!("[audit]   ERROR: expected 1 entry (failure only), got {}", entries.len());
+            serial_println!(
+                "[audit]   ERROR: expected 1 entry (failure only), got {}",
+                entries.len()
+            );
             remove_rule(rule_id);
             return Err(KernelError::InternalError);
         }
@@ -730,7 +758,9 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 8: Two-path logging ---
     {
         clear();
-        for rule in list_rules() { remove_rule(rule.id); }
+        for rule in list_rules() {
+            remove_rule(rule.id);
+        }
 
         let rule_id = add_rule("", AuditMask::ALL, None, false);
 
@@ -756,7 +786,9 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 9: Search function ---
     {
         clear();
-        for rule in list_rules() { remove_rule(rule.id); }
+        for rule in list_rules() {
+            remove_rule(rule.id);
+        }
 
         let rule_id = add_rule("", AuditMask::ALL, None, false);
 
@@ -766,14 +798,20 @@ pub fn self_test() -> KernelResult<()> {
 
         let reads = search(10, Some(AuditOp::Read), None, None, false);
         if reads.len() != 2 {
-            serial_println!("[audit]   ERROR: search found {} reads, expected 2", reads.len());
+            serial_println!(
+                "[audit]   ERROR: search found {} reads, expected 2",
+                reads.len()
+            );
             remove_rule(rule_id);
             return Err(KernelError::InternalError);
         }
 
         let user_events = search(10, None, None, Some(1000), false);
         if user_events.len() != 1 {
-            serial_println!("[audit]   ERROR: search found {} user events, expected 1", user_events.len());
+            serial_println!(
+                "[audit]   ERROR: search found {} user events, expected 1",
+                user_events.len()
+            );
             remove_rule(rule_id);
             return Err(KernelError::InternalError);
         }
@@ -789,14 +827,24 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[audit]   ERROR: total events is 0");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[audit]   stats: OK (total={} buffer={}/{})",
-            s.total_events, s.buffer_used, s.buffer_size);
+        serial_println!(
+            "[audit]   stats: OK (total={} buffer={}/{})",
+            s.total_events,
+            s.buffer_used,
+            s.buffer_size
+        );
     }
 
     // --- Cleanup ---
     clear();
-    for rule in list_rules() { remove_rule(rule.id); }
-    if was_enabled { enable(); } else { disable(); }
+    for rule in list_rules() {
+        remove_rule(rule.id);
+    }
+    if was_enabled {
+        enable();
+    } else {
+        disable();
+    }
 
     serial_println!("[audit] Self-test passed (10 tests).");
     Ok(())

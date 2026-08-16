@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -105,8 +105,8 @@ pub struct EventRule {
     pub id: u32,
     pub event_type: EventType,
     pub subsystem: Subsystem,
-    pub devname_pattern: String,   // Simple prefix match.
-    pub action: String,            // Action to take (e.g. "mount", "notify").
+    pub devname_pattern: String, // Simple prefix match.
+    pub action: String,          // Action to take (e.g. "mount", "notify").
     pub enabled: bool,
 }
 
@@ -160,37 +160,54 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
         events: Vec::new(),
         rules: alloc::vec![
             EventRule {
-                id: 1, event_type: EventType::Add, subsystem: Subsystem::Block,
-                devname_pattern: String::from("sd"), action: String::from("automount"),
+                id: 1,
+                event_type: EventType::Add,
+                subsystem: Subsystem::Block,
+                devname_pattern: String::from("sd"),
+                action: String::from("automount"),
                 enabled: true,
             },
             EventRule {
-                id: 2, event_type: EventType::Add, subsystem: Subsystem::Usb,
-                devname_pattern: String::from("usb"), action: String::from("notify"),
+                id: 2,
+                event_type: EventType::Add,
+                subsystem: Subsystem::Usb,
+                devname_pattern: String::from("usb"),
+                action: String::from("notify"),
                 enabled: true,
             },
         ],
         devices: alloc::vec![
             KnownDevice {
-                devpath: String::from("/sys/block/sda"), devname: String::from("sda"),
-                subsystem: Subsystem::Block, online: true,
-                first_seen_ns: now, last_event_ns: now,
+                devpath: String::from("/sys/block/sda"),
+                devname: String::from("sda"),
+                subsystem: Subsystem::Block,
+                online: true,
+                first_seen_ns: now,
+                last_event_ns: now,
             },
             KnownDevice {
-                devpath: String::from("/sys/class/net/eth0"), devname: String::from("eth0"),
-                subsystem: Subsystem::Net, online: true,
-                first_seen_ns: now, last_event_ns: now,
+                devpath: String::from("/sys/class/net/eth0"),
+                devname: String::from("eth0"),
+                subsystem: Subsystem::Net,
+                online: true,
+                first_seen_ns: now,
+                last_event_ns: now,
             },
             KnownDevice {
-                devpath: String::from("/sys/class/input/keyboard0"), devname: String::from("keyboard0"),
-                subsystem: Subsystem::Input, online: true,
-                first_seen_ns: now, last_event_ns: now,
+                devpath: String::from("/sys/class/input/keyboard0"),
+                devname: String::from("keyboard0"),
+                subsystem: Subsystem::Input,
+                online: true,
+                first_seen_ns: now,
+                last_event_ns: now,
             },
         ],
         next_seq: 1,
@@ -202,7 +219,13 @@ pub fn init_defaults() {
 }
 
 /// Push a device event.
-pub fn notify(event_type: EventType, subsystem: Subsystem, devpath: &str, devname: &str, props: &[(&str, &str)]) -> KernelResult<u64> {
+pub fn notify(
+    event_type: EventType,
+    subsystem: Subsystem,
+    devpath: &str,
+    devname: &str,
+    props: &[(&str, &str)],
+) -> KernelResult<u64> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         let seq = state.next_seq;
@@ -215,8 +238,12 @@ pub fn notify(event_type: EventType, subsystem: Subsystem, devpath: &str, devnam
                     d.last_event_ns = now;
                 } else if state.devices.len() < MAX_DEVICES {
                     state.devices.push(KnownDevice {
-                        devpath: String::from(devpath), devname: String::from(devname),
-                        subsystem, online: true, first_seen_ns: now, last_event_ns: now,
+                        devpath: String::from(devpath),
+                        devname: String::from(devname),
+                        subsystem,
+                        online: true,
+                        first_seen_ns: now,
+                        last_event_ns: now,
                     });
                 }
             }
@@ -233,20 +260,30 @@ pub fn notify(event_type: EventType, subsystem: Subsystem, devpath: &str, devnam
             }
         }
         // Check rules.
-        let matched = state.rules.iter()
+        let matched = state
+            .rules
+            .iter()
             .filter(|r| r.enabled && r.event_type == event_type && r.subsystem == subsystem)
             .any(|r| devname.starts_with(&r.devname_pattern));
-        if matched { state.total_matched += 1; }
+        if matched {
+            state.total_matched += 1;
+        }
         // Store event.
-        let properties = props.iter()
+        let properties = props
+            .iter()
             .map(|(k, v)| (String::from(*k), String::from(*v)))
             .collect();
         if state.events.len() >= MAX_EVENTS {
             state.events.remove(0);
         }
         state.events.push(DeviceEvent {
-            seq, event_type, subsystem, devpath: String::from(devpath),
-            devname: String::from(devname), timestamp_ns: now, properties,
+            seq,
+            event_type,
+            subsystem,
+            devpath: String::from(devpath),
+            devname: String::from(devname),
+            timestamp_ns: now,
+            properties,
         });
         state.total_events += 1;
         Ok(seq)
@@ -256,25 +293,43 @@ pub fn notify(event_type: EventType, subsystem: Subsystem, devpath: &str, devnam
 /// Poll recent events (last N).
 pub fn poll(last_n: usize) -> Vec<DeviceEvent> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let start = if last_n >= s.events.len() { 0 } else { s.events.len() - last_n };
+        let start = if last_n >= s.events.len() {
+            0
+        } else {
+            s.events.len() - last_n
+        };
         s.events[start..].to_vec()
     })
 }
 
 /// Clear event log.
 pub fn clear_events() -> KernelResult<()> {
-    with_state(|state| { state.events.clear(); Ok(()) })
+    with_state(|state| {
+        state.events.clear();
+        Ok(())
+    })
 }
 
 /// Add an auto-action rule.
-pub fn add_rule(event_type: EventType, subsystem: Subsystem, pattern: &str, action: &str) -> KernelResult<u32> {
+pub fn add_rule(
+    event_type: EventType,
+    subsystem: Subsystem,
+    pattern: &str,
+    action: &str,
+) -> KernelResult<u32> {
     with_state(|state| {
-        if state.rules.len() >= MAX_RULES { return Err(KernelError::ResourceExhausted); }
+        if state.rules.len() >= MAX_RULES {
+            return Err(KernelError::ResourceExhausted);
+        }
         let id = state.next_rule_id;
         state.next_rule_id += 1;
         state.rules.push(EventRule {
-            id, event_type, subsystem, devname_pattern: String::from(pattern),
-            action: String::from(action), enabled: true,
+            id,
+            event_type,
+            subsystem,
+            devname_pattern: String::from(pattern),
+            action: String::from(action),
+            enabled: true,
         });
         Ok(id)
     })
@@ -285,31 +340,49 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.rules.len();
         state.rules.retain(|r| r.id != id);
-        if state.rules.len() == before { return Err(KernelError::NotFound); }
+        if state.rules.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
 
 /// List rules.
 pub fn list_rules() -> Vec<EventRule> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.rules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.rules.clone())
 }
 
 /// List known devices.
 pub fn list_devices() -> Vec<KnownDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Get device by path.
 pub fn get_device(devpath: &str) -> Option<KnownDevice> {
-    STATE.lock().as_ref().and_then(|s| s.devices.iter().find(|d| d.devpath == devpath).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.devices.iter().find(|d| d.devpath == devpath).cloned())
 }
 
 /// Statistics: (device_count, event_count, rule_count, total_events, total_matched, ops).
 pub fn stats() -> (usize, usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.events.len(), s.rules.len(), s.total_events, s.total_matched, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.events.len(),
+            s.rules.len(),
+            s.total_events,
+            s.total_matched,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -328,7 +401,14 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] defaults: OK");
 
     // 2: Notify add (matches rule).
-    let seq = notify(EventType::Add, Subsystem::Block, "/sys/block/sdb", "sdb1", &[("size", "1000000")]).expect("notify");
+    let seq = notify(
+        EventType::Add,
+        Subsystem::Block,
+        "/sys/block/sdb",
+        "sdb1",
+        &[("size", "1000000")],
+    )
+    .expect("notify");
     assert!(seq >= 1);
     assert_eq!(list_devices().len(), 4);
     crate::serial_println!("  [2/8] notify add: OK");
@@ -341,7 +421,14 @@ pub fn self_test() {
     crate::serial_println!("  [3/8] poll: OK");
 
     // 4: Notify remove.
-    notify(EventType::Remove, Subsystem::Block, "/sys/block/sdb", "sdb1", &[]).expect("remove");
+    notify(
+        EventType::Remove,
+        Subsystem::Block,
+        "/sys/block/sdb",
+        "sdb1",
+        &[],
+    )
+    .expect("remove");
     let d = get_device("/sys/block/sdb").expect("get");
     assert!(!d.online);
     crate::serial_println!("  [4/8] remove: OK");

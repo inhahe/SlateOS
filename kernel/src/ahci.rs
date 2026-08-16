@@ -209,7 +209,9 @@ unsafe fn mmio_read32(addr: usize) -> u32 {
 #[inline]
 unsafe fn mmio_write32(addr: usize, value: u32) {
     // SAFETY: Caller guarantees the address is a valid MMIO register.
-    unsafe { core::ptr::write_volatile(addr as *mut u32, value); }
+    unsafe {
+        core::ptr::write_volatile(addr as *mut u32, value);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +269,9 @@ impl AhciPort {
     #[inline]
     fn write_reg(&self, offset: usize, value: u32) {
         // SAFETY: regs_base was set to a valid MMIO address during init.
-        unsafe { mmio_write32(self.regs_base + offset, value); }
+        unsafe {
+            mmio_write32(self.regs_base + offset, value);
+        }
     }
 
     /// Stop command engine (clear ST and FRE, wait for CR and FR to clear).
@@ -475,7 +479,9 @@ impl AhciPort {
     /// Execute IDENTIFY DEVICE and populate sector_count/model/serial.
     #[allow(clippy::arithmetic_side_effects)]
     fn identify(&mut self, hhdm: u64) -> KernelResult<()> {
-        let slot = self.find_free_slot().ok_or(KernelError::ResourceExhausted)?;
+        let slot = self
+            .find_free_slot()
+            .ok_or(KernelError::ResourceExhausted)?;
 
         // Allocate a frame for the identify data buffer (512 bytes needed).
         let data_frame = frame::alloc_frame()?;
@@ -484,12 +490,16 @@ impl AhciPort {
 
         // Zero the data buffer.
         // SAFETY: data_virt points to a freshly allocated frame.
-        unsafe { core::ptr::write_bytes(data_virt, 0, 512); }
+        unsafe {
+            core::ptr::write_bytes(data_virt, 0, 512);
+        }
 
         // Zero the command table for this slot.
         let ct_slot_base = self.ct_virt + (slot as usize) * 256;
         // SAFETY: ct_slot_base is within our allocated DMA memory.
-        unsafe { core::ptr::write_bytes(ct_slot_base as *mut u8, 0, 256); }
+        unsafe {
+            core::ptr::write_bytes(ct_slot_base as *mut u8, 0, 256);
+        }
 
         // Build command: IDENTIFY DEVICE.
         self.build_h2d_fis(slot, ATA_CMD_IDENTIFY, 0, 0, 0);
@@ -501,9 +511,7 @@ impl AhciPort {
 
         // Parse IDENTIFY data (512 bytes of 16-bit words).
         // SAFETY: The device wrote 512 bytes to data_virt.
-        let words = unsafe {
-            core::slice::from_raw_parts(data_virt as *const u16, 256)
-        };
+        let words = unsafe { core::slice::from_raw_parts(data_virt as *const u16, 256) };
 
         // Word 60-61: Total addressable sectors (28-bit LBA).
         // Word 100-103: Total addressable sectors (48-bit LBA).
@@ -524,7 +532,9 @@ impl AhciPort {
 
         // Free the identify data frame.
         // SAFETY: We're done with the frame; it was allocated for temporary use.
-        unsafe { let _ = frame::free_frame(data_frame); }
+        unsafe {
+            let _ = frame::free_frame(data_frame);
+        }
 
         Ok(())
     }
@@ -550,7 +560,13 @@ impl AhciPort {
 
     /// Read sectors from the disk.
     #[allow(clippy::arithmetic_side_effects)]
-    fn read_sectors_impl(&mut self, lba: u64, count: u16, buf: &mut [u8], hhdm: u64) -> KernelResult<()> {
+    fn read_sectors_impl(
+        &mut self,
+        lba: u64,
+        count: u16,
+        buf: &mut [u8],
+        hhdm: u64,
+    ) -> KernelResult<()> {
         if count == 0 {
             return Ok(());
         }
@@ -560,7 +576,9 @@ impl AhciPort {
             return Err(KernelError::InvalidArgument);
         }
 
-        let slot = self.find_free_slot().ok_or(KernelError::ResourceExhausted)?;
+        let slot = self
+            .find_free_slot()
+            .ok_or(KernelError::ResourceExhausted)?;
 
         // Use a DMA frame for the data transfer.
         let data_frame = frame::alloc_frame()?;
@@ -571,14 +589,18 @@ impl AhciPort {
         let frame_size = frame::FRAME_SIZE;
         if byte_count as usize > frame_size {
             // SAFETY: Free the unused frame.
-            unsafe { let _ = frame::free_frame(data_frame); }
+            unsafe {
+                let _ = frame::free_frame(data_frame);
+            }
             return Err(KernelError::InvalidArgument);
         }
 
         // Zero command table for this slot.
         let ct_slot_base = self.ct_virt + (slot as usize) * 256;
         // SAFETY: Within our allocated DMA memory.
-        unsafe { core::ptr::write_bytes(ct_slot_base as *mut u8, 0, 256); }
+        unsafe {
+            core::ptr::write_bytes(ct_slot_base as *mut u8, 0, 256);
+        }
 
         // Build READ DMA EXT command.
         // Device register: bit 6 = LBA mode.
@@ -599,14 +621,22 @@ impl AhciPort {
 
         // Free the DMA frame.
         // SAFETY: We're done with the frame.
-        unsafe { let _ = frame::free_frame(data_frame); }
+        unsafe {
+            let _ = frame::free_frame(data_frame);
+        }
 
         result
     }
 
     /// Write sectors to the disk.
     #[allow(clippy::arithmetic_side_effects)]
-    fn write_sectors_impl(&mut self, lba: u64, count: u16, buf: &[u8], hhdm: u64) -> KernelResult<()> {
+    fn write_sectors_impl(
+        &mut self,
+        lba: u64,
+        count: u16,
+        buf: &[u8],
+        hhdm: u64,
+    ) -> KernelResult<()> {
         if count == 0 {
             return Ok(());
         }
@@ -616,7 +646,9 @@ impl AhciPort {
             return Err(KernelError::InvalidArgument);
         }
 
-        let slot = self.find_free_slot().ok_or(KernelError::ResourceExhausted)?;
+        let slot = self
+            .find_free_slot()
+            .ok_or(KernelError::ResourceExhausted)?;
 
         // Use a DMA frame for the data transfer.
         let data_frame = frame::alloc_frame()?;
@@ -627,7 +659,9 @@ impl AhciPort {
         let frame_size = frame::FRAME_SIZE;
         if byte_count as usize > frame_size {
             // SAFETY: Free the unused frame.
-            unsafe { let _ = frame::free_frame(data_frame); }
+            unsafe {
+                let _ = frame::free_frame(data_frame);
+            }
             return Err(KernelError::InvalidArgument);
         }
 
@@ -640,7 +674,9 @@ impl AhciPort {
         // Zero command table for this slot.
         let ct_slot_base = self.ct_virt + (slot as usize) * 256;
         // SAFETY: Within our allocated DMA memory.
-        unsafe { core::ptr::write_bytes(ct_slot_base as *mut u8, 0, 256); }
+        unsafe {
+            core::ptr::write_bytes(ct_slot_base as *mut u8, 0, 256);
+        }
 
         // Build WRITE DMA EXT command.
         self.build_h2d_fis(slot, ATA_CMD_WRITE_DMA_EXT, lba, count, 0x40);
@@ -652,7 +688,9 @@ impl AhciPort {
 
         // Free the DMA frame.
         // SAFETY: We're done with the frame.
-        unsafe { let _ = frame::free_frame(data_frame); }
+        unsafe {
+            let _ = frame::free_frame(data_frame);
+        }
 
         result
     }
@@ -703,7 +741,8 @@ impl BlockDevice for AhciDevice {
                 return Err(KernelError::InvalidArgument);
             }
 
-            lba = lba.checked_add(u64::from(batch))
+            lba = lba
+                .checked_add(u64::from(batch))
                 .ok_or(KernelError::InvalidArgument)?;
             offset += byte_count;
             remaining -= u32::from(batch);
@@ -732,7 +771,8 @@ impl BlockDevice for AhciDevice {
                 return Err(KernelError::InvalidArgument);
             }
 
-            lba = lba.checked_add(u64::from(batch))
+            lba = lba
+                .checked_add(u64::from(batch))
                 .ok_or(KernelError::InvalidArgument)?;
             offset += byte_count;
             remaining -= u32::from(batch);
@@ -785,7 +825,9 @@ fn init_port(abar_virt: usize, port_num: u32, hhdm: u64) -> KernelResult<AhciPor
 
     // Zero the entire frame.
     // SAFETY: clb_virt points to a freshly allocated frame.
-    unsafe { core::ptr::write_bytes(clb_virt as *mut u8, 0, frame::FRAME_SIZE); }
+    unsafe {
+        core::ptr::write_bytes(clb_virt as *mut u8, 0, frame::FRAME_SIZE);
+    }
 
     // FIS area at offset 1024 within the same frame.
     let fb_phys = clb_phys + 1024;
@@ -799,7 +841,9 @@ fn init_port(abar_virt: usize, port_num: u32, hhdm: u64) -> KernelResult<AhciPor
 
     // Zero command tables.
     // SAFETY: ct_virt points to a freshly allocated frame.
-    unsafe { core::ptr::write_bytes(ct_virt as *mut u8, 0, frame::FRAME_SIZE); }
+    unsafe {
+        core::ptr::write_bytes(ct_virt as *mut u8, 0, frame::FRAME_SIZE);
+    }
 
     // Stop the port before reconfiguring.
     let mut port = AhciPort {
@@ -868,8 +912,11 @@ pub fn init(hhdm_offset: u64) {
     for ctrl in &controllers {
         serial_println!(
             "[ahci] Found controller: {:04x}:{:04x} at {:02x}:{:02x}.{} IRQ={}",
-            ctrl.vendor_id, ctrl.device_id,
-            ctrl.address.bus, ctrl.address.device, ctrl.address.function,
+            ctrl.vendor_id,
+            ctrl.device_id,
+            ctrl.address.bus,
+            ctrl.address.device,
+            ctrl.address.function,
             ctrl.irq_line,
         );
 
@@ -889,7 +936,11 @@ pub fn init(hhdm_offset: u64) {
         let abar_phys = u64::from(abar_raw & 0xFFFF_FFF0);
         let abar_virt = (abar_phys + hhdm_offset) as usize;
 
-        serial_println!("[ahci]   ABAR physical: {:#010x}, virtual: {:#x}", abar_phys, abar_virt);
+        serial_println!(
+            "[ahci]   ABAR physical: {:#010x}, virtual: {:#x}",
+            abar_phys,
+            abar_virt
+        );
 
         // Map AHCI MMIO region into kernel page tables.
         // BAR addresses may be above physical RAM (not covered by HHDM).
@@ -901,9 +952,9 @@ pub fn init(hhdm_offset: u64) {
         if let Some(abar_frame) = frame::PhysFrame::from_addr(abar_phys) {
             let virt = page_table::VirtAddr::new(abar_phys + hhdm_offset);
             // SAFETY: abar_phys is the PCI BAR5 MMIO region for AHCI.
-            if let Err(_e) = unsafe {
-                page_table::map_frame(pml4_phys, virt, abar_frame, mmio_flags)
-            } {
+            if let Err(_e) =
+                unsafe { page_table::map_frame(pml4_phys, virt, abar_frame, mmio_flags) }
+            {
                 // May already be mapped in HHDM on high-RAM systems.
             }
             // SAFETY: Standard invlpg.
@@ -930,20 +981,28 @@ pub fn init(hhdm_offset: u64) {
 
         serial_println!(
             "[ahci]   Version: {}.{}, Ports: {}, Slots: {}, 64-bit: {}, PI: {:#010x}",
-            vs >> 16, (vs >> 8) & 0xFF,
-            num_ports, num_slots, supports_64bit, pi,
+            vs >> 16,
+            (vs >> 8) & 0xFF,
+            num_ports,
+            num_slots,
+            supports_64bit,
+            pi,
         );
 
         // Enable AHCI mode (set AE bit if not already set).
         if ghc & GHC_AE == 0 {
             // SAFETY: Valid MMIO register write.
-            unsafe { mmio_write32(abar_virt + HBA_GHC, ghc | GHC_AE); }
+            unsafe {
+                mmio_write32(abar_virt + HBA_GHC, ghc | GHC_AE);
+            }
             serial_println!("[ahci]   Enabled AHCI mode");
         }
 
         // Clear global interrupt status.
         // SAFETY: Valid MMIO register write.
-        unsafe { mmio_write32(abar_virt + HBA_IS, u32::MAX); }
+        unsafe {
+            mmio_write32(abar_virt + HBA_IS, u32::MAX);
+        }
 
         // Scan each implemented port.
         for port_num in 0..MAX_PORTS as u32 {
@@ -958,18 +1017,28 @@ pub fn init(hhdm_offset: u64) {
             let sig = port_signature(abar_virt, port_num);
             // 0x00000101 = SATA drive.
             if sig != 0x0000_0101 {
-                serial_println!("[ahci]   Port {}: non-ATA device (sig={:#010x}), skipping", port_num, sig);
+                serial_println!(
+                    "[ahci]   Port {}: non-ATA device (sig={:#010x}), skipping",
+                    port_num,
+                    sig
+                );
                 continue;
             }
 
-            serial_println!("[ahci]   Port {}: SATA device detected, initializing...", port_num);
+            serial_println!(
+                "[ahci]   Port {}: SATA device detected, initializing...",
+                port_num
+            );
 
             match init_port(abar_virt, port_num, hhdm_offset) {
                 Ok(port) => {
                     let capacity_mb = (port.sector_count * 512) / (1024 * 1024);
                     serial_println!(
                         "[ahci]   Port {}: {} ({} MB, {} sectors)",
-                        port_num, port.model, capacity_mb, port.sector_count,
+                        port_num,
+                        port.model,
+                        capacity_mb,
+                        port.sector_count,
                     );
                     serial_println!("[ahci]          Serial: {}", port.serial);
 
@@ -1000,7 +1069,10 @@ pub fn init(hhdm_offset: u64) {
     DEVICE_COUNT.store(total_devices, Ordering::Release);
     INITIALIZED.store(true, Ordering::Release);
 
-    serial_println!("[ahci] Initialization complete: {} device(s) registered", total_devices);
+    serial_println!(
+        "[ahci] Initialization complete: {} device(s) registered",
+        total_devices
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,10 +1117,16 @@ pub fn self_test() {
 
     // Test 1: Stats are coherent.
     let s = stats();
-    serial_println!("[ahci]   Initialized: {}, devices: {}", s.initialized, s.device_count);
+    serial_println!(
+        "[ahci]   Initialized: {}, devices: {}",
+        s.initialized,
+        s.device_count
+    );
 
     if !s.initialized {
-        serial_println!("[ahci]   No controller found — self-test SKIPPED (OK for VM without SATA)");
+        serial_println!(
+            "[ahci]   No controller found — self-test SKIPPED (OK for VM without SATA)"
+        );
         serial_println!("[ahci] Self-test PASSED (no hardware)");
         return;
     }
@@ -1064,9 +1142,13 @@ pub fn self_test() {
         let info = dev.info();
         serial_println!(
             "[ahci]   sda: {} sectors, sector_size={}",
-            info.sector_count, info.sector_size
+            info.sector_count,
+            info.sector_size
         );
-        assert!(info.sector_count > 0, "AHCI device should have non-zero capacity");
+        assert!(
+            info.sector_count > 0,
+            "AHCI device should have non-zero capacity"
+        );
 
         // Read sector 0 (should be MBR or GPT header).
         let mut buf = [0u8; SECTOR_SIZE];
@@ -1075,10 +1157,7 @@ pub fn self_test() {
 
         // Sanity: sector 0 of a formatted disk is rarely all-zero.
         let all_zero = buf.iter().all(|&b| b == 0);
-        serial_println!(
-            "[ahci]   Sector 0 read: OK (all-zero: {})",
-            all_zero
-        );
+        serial_println!("[ahci]   Sector 0 read: OK (all-zero: {})", all_zero);
 
         true
     });

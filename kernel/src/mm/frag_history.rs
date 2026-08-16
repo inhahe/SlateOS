@@ -35,9 +35,9 @@
 //! - Linux /sys/kernel/debug/extfrag — external fragmentation index
 //! - Linux compaction daemon — triggered by fragmentation thresholds
 
-use core::sync::atomic::{AtomicU32, Ordering};
 use crate::mm::frame;
 use crate::serial_println;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -97,7 +97,7 @@ struct HistoryRing(core::cell::UnsafeCell<[FragSnapshot; HISTORY_SIZE]>);
 unsafe impl Sync for HistoryRing {}
 
 static RING: HistoryRing = HistoryRing(core::cell::UnsafeCell::new(
-    [FragSnapshot::empty(); HISTORY_SIZE]
+    [FragSnapshot::empty(); HISTORY_SIZE],
 ));
 
 /// Write position.
@@ -113,10 +113,10 @@ static WRITE_POS: AtomicU32 = AtomicU32::new(0);
 /// or manually from kshell.
 pub fn sample() {
     let frame_stats = frame::stats();
-    let (free_frames, total_frames, order_counts) = frame_stats.map_or(
-        (0u32, 0u32, [0usize; frame::BUDDY_MAX_ORDER + 1]),
-        |s| (s.free_frames as u32, s.total_frames as u32, s.order_counts),
-    );
+    let (free_frames, total_frames, order_counts) = frame_stats
+        .map_or((0u32, 0u32, [0usize; frame::BUDDY_MAX_ORDER + 1]), |s| {
+            (s.free_frames as u32, s.total_frames as u32, s.order_counts)
+        });
 
     // Compute fragmentation using the same algorithm as mm::compute_fragmentation.
     let frag_pct = compute_frag(&order_counts);
@@ -130,8 +130,16 @@ pub fn sample() {
         }
     }
 
-    let order0_blocks = order_counts.first().copied().unwrap_or(0).min(u16::MAX as usize) as u16;
-    let max_order_blocks = order_counts.last().copied().unwrap_or(0).min(u16::MAX as usize) as u16;
+    let order0_blocks = order_counts
+        .first()
+        .copied()
+        .unwrap_or(0)
+        .min(u16::MAX as usize) as u16;
+    let max_order_blocks = order_counts
+        .last()
+        .copied()
+        .unwrap_or(0)
+        .min(u16::MAX as usize) as u16;
 
     let snapshot = FragSnapshot {
         tick: crate::apic::tick_count(),
@@ -302,8 +310,8 @@ fn compute_frag(order_counts: &[usize; frame::BUDDY_MAX_ORDER + 1]) -> u8 {
         let frames_per_block = 1u64 << order;
         let frames = (count as u64).saturating_mul(frames_per_block);
         total_frames = total_frames.saturating_add(frames);
-        weighted_order_sum = weighted_order_sum
-            .saturating_add((order as u64).saturating_mul(frames));
+        weighted_order_sum =
+            weighted_order_sum.saturating_add((order as u64).saturating_mul(frames));
     }
 
     if total_frames == 0 {
@@ -317,7 +325,10 @@ fn compute_frag(order_counts: &[usize; frame::BUDDY_MAX_ORDER + 1]) -> u8 {
     let max_order_x100 = (max_order as u64).saturating_mul(100);
 
     let frag = 100u64.saturating_sub(
-        avg_order_x100.saturating_mul(100).checked_div(max_order_x100).unwrap_or(0)
+        avg_order_x100
+            .saturating_mul(100)
+            .checked_div(max_order_x100)
+            .unwrap_or(0),
     );
 
     frag.min(100) as u8
@@ -345,8 +356,12 @@ pub fn self_test() {
     assert!(snap.total_frames > 0);
     assert!(snap.free_frames > 0);
     assert!(snap.frag_pct <= 100);
-    serial_println!("[frag_history]   Sample: OK (frag={}%, free={}, max_order={})",
-        snap.frag_pct, snap.free_frames, snap.max_avail_order);
+    serial_println!(
+        "[frag_history]   Sample: OK (frag={}%, free={}, max_order={})",
+        snap.frag_pct,
+        snap.free_frames,
+        snap.max_avail_order
+    );
 
     // Test 3: Multiple samples.
     sample();
@@ -370,8 +385,11 @@ pub fn self_test() {
     // Test 5: Trend with only 4 samples should be Stable (identical data).
     let t = trend();
     // With identical samples, trend should be Stable or Unknown.
-    assert!(t == FragTrend::Stable || t == FragTrend::Unknown,
-        "expected Stable/Unknown, got {:?}", t);
+    assert!(
+        t == FragTrend::Stable || t == FragTrend::Unknown,
+        "expected Stable/Unknown, got {:?}",
+        t
+    );
     serial_println!("[frag_history]   Trend: OK ({:?})", t);
 
     // Test 6: Ring buffer wraps correctly.
@@ -383,8 +401,11 @@ pub fn self_test() {
     let mut buf = [FragSnapshot::empty(); 32];
     let n = recent(&mut buf);
     assert_eq!(n, HISTORY_SIZE); // Can only get HISTORY_SIZE entries.
-    serial_println!("[frag_history]   Ring wrap: OK (wrote {}, can read {})",
-        HISTORY_SIZE + 5, n);
+    serial_println!(
+        "[frag_history]   Ring wrap: OK (wrote {}, can read {})",
+        HISTORY_SIZE + 5,
+        n
+    );
 
     // Cleanup.
     clear();

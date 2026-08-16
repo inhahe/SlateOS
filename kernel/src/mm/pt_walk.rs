@@ -36,9 +36,9 @@
 // commands; many helpers may not have call sites in production paths yet.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
-use crate::serial_println;
 use crate::mm::page_table::{self, PageFlags};
+use crate::serial_println;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -149,10 +149,15 @@ pub unsafe fn walk_all(
 ) -> WalkSummary {
     let hhdm = match page_table::hhdm() {
         Some(h) => h,
-        None => return WalkSummary {
-            pages_4k: 0, pages_2m: 0, pages_1g: 0,
-            total_mapped_bytes: 0, stopped_early: false,
-        },
+        None => {
+            return WalkSummary {
+                pages_4k: 0,
+                pages_2m: 0,
+                pages_1g: 0,
+                total_mapped_bytes: 0,
+                stopped_early: false,
+            };
+        }
     };
 
     WALK_OPS.fetch_add(1, Ordering::Relaxed);
@@ -294,16 +299,24 @@ pub unsafe fn walk_range(
 ) -> WalkSummary {
     let hhdm = match page_table::hhdm() {
         Some(h) => h,
-        None => return WalkSummary {
-            pages_4k: 0, pages_2m: 0, pages_1g: 0,
-            total_mapped_bytes: 0, stopped_early: false,
-        },
+        None => {
+            return WalkSummary {
+                pages_4k: 0,
+                pages_2m: 0,
+                pages_1g: 0,
+                total_mapped_bytes: 0,
+                stopped_early: false,
+            };
+        }
     };
 
     if start_vaddr >= end_vaddr {
         return WalkSummary {
-            pages_4k: 0, pages_2m: 0, pages_1g: 0,
-            total_mapped_bytes: 0, stopped_early: false,
+            pages_4k: 0,
+            pages_2m: 0,
+            pages_1g: 0,
+            total_mapped_bytes: 0,
+            stopped_early: false,
         };
     }
 
@@ -446,10 +459,13 @@ pub unsafe fn walk_range(
 #[must_use]
 pub unsafe fn count_mapped(pml4_phys: u64) -> (u64, u64, u64, u64) {
     // SAFETY: Caller guarantees pml4_phys is valid; forwarded to walk_all.
-    let summary = unsafe {
-        walk_all(pml4_phys, |_| WalkAction::Continue)
-    };
-    (summary.pages_4k, summary.pages_2m, summary.pages_1g, summary.total_mapped_bytes)
+    let summary = unsafe { walk_all(pml4_phys, |_| WalkAction::Continue) };
+    (
+        summary.pages_4k,
+        summary.pages_2m,
+        summary.pages_1g,
+        summary.total_mapped_bytes,
+    )
 }
 
 /// Count mapped pages in a specific virtual address range.
@@ -458,16 +474,15 @@ pub unsafe fn count_mapped(pml4_phys: u64) -> (u64, u64, u64, u64) {
 ///
 /// `pml4_phys` must be a valid PML4 physical address.
 #[must_use]
-pub unsafe fn count_mapped_range(
-    pml4_phys: u64,
-    start: u64,
-    end: u64,
-) -> (u64, u64, u64, u64) {
+pub unsafe fn count_mapped_range(pml4_phys: u64, start: u64, end: u64) -> (u64, u64, u64, u64) {
     // SAFETY: Caller guarantees pml4_phys is valid; forwarded to walk_range.
-    let summary = unsafe {
-        walk_range(pml4_phys, start, end, |_| WalkAction::Continue)
-    };
-    (summary.pages_4k, summary.pages_2m, summary.pages_1g, summary.total_mapped_bytes)
+    let summary = unsafe { walk_range(pml4_phys, start, end, |_| WalkAction::Continue) };
+    (
+        summary.pages_4k,
+        summary.pages_2m,
+        summary.pages_1g,
+        summary.total_mapped_bytes,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -554,9 +569,17 @@ pub fn self_test() {
             }
         })
     };
-    serial_println!("[pt_walk]   Kernel walk (first 10): 4k={} 2m={} 1g={} ({} bytes)",
-        summary.pages_4k, summary.pages_2m, summary.pages_1g, summary.total_mapped_bytes);
-    assert!(found_entries > 0, "kernel page tables should have mapped entries");
+    serial_println!(
+        "[pt_walk]   Kernel walk (first 10): 4k={} 2m={} 1g={} ({} bytes)",
+        summary.pages_4k,
+        summary.pages_2m,
+        summary.pages_1g,
+        summary.total_mapped_bytes
+    );
+    assert!(
+        found_entries > 0,
+        "kernel page tables should have mapped entries"
+    );
     serial_println!("[pt_walk]   Found mapped entries: OK ({})", found_entries);
 
     // Test 3: Walk with Stop action (stop after 3 entries).
@@ -574,12 +597,17 @@ pub fn self_test() {
     };
     assert!(summary.stopped_early);
     assert!(count <= 3);
-    serial_println!("[pt_walk]   Walk with Stop: OK (stopped after {} entries)", count);
+    serial_println!(
+        "[pt_walk]   Walk with Stop: OK (stopped after {} entries)",
+        count
+    );
 
     // Test 4: Walk empty range returns nothing.
     // SAFETY: pml4_phys from CR3 is valid.
     let summary = unsafe {
-        walk_range(pml4_phys, 0x1000_0000, 0x1000_0000, |_| WalkAction::Continue)
+        walk_range(pml4_phys, 0x1000_0000, 0x1000_0000, |_| {
+            WalkAction::Continue
+        })
     };
     assert_eq!(summary.total_mapped_bytes, 0);
     serial_println!("[pt_walk]   Empty range: OK");
@@ -587,19 +615,28 @@ pub fn self_test() {
     // Test 5: Walk user space (should be empty in kernel-only context).
     // SAFETY: pml4_phys from CR3 is valid.
     let summary = unsafe {
-        walk_range(pml4_phys, 0x0000_0000_0040_0000, 0x0000_0000_0100_0000, |_| {
-            WalkAction::Continue
-        })
+        walk_range(
+            pml4_phys,
+            0x0000_0000_0040_0000,
+            0x0000_0000_0100_0000,
+            |_| WalkAction::Continue,
+        )
     };
-    serial_println!("[pt_walk]   User range: 4k={} 2m={} (expected ~0 in kernel context)",
-        summary.pages_4k, summary.pages_2m);
+    serial_println!(
+        "[pt_walk]   User range: 4k={} 2m={} (expected ~0 in kernel context)",
+        summary.pages_4k,
+        summary.pages_2m
+    );
 
     // Test 6: Statistics updated.
     let s = stats();
     assert!(s.walk_ops >= 3);
     assert!(s.entries_visited > 0);
-    serial_println!("[pt_walk]   Stats: ops={}, entries_visited={}",
-        s.walk_ops, s.entries_visited);
+    serial_println!(
+        "[pt_walk]   Stats: ops={}, entries_visited={}",
+        s.walk_ops,
+        s.entries_visited
+    );
 
     serial_println!("[pt_walk] Self-test PASSED");
 }

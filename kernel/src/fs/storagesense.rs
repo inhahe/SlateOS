@@ -23,11 +23,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -136,15 +136,69 @@ where
 
 fn default_policies() -> Vec<CleanupPolicy> {
     alloc::vec![
-        CleanupPolicy { category: CleanupCategory::TempFiles, enabled: true, max_age_days: 7, estimated_bytes: 50_000_000, last_freed_bytes: 0 },
-        CleanupPolicy { category: CleanupCategory::RecycleBin, enabled: true, max_age_days: 30, estimated_bytes: 200_000_000, last_freed_bytes: 0 },
-        CleanupPolicy { category: CleanupCategory::Downloads, enabled: false, max_age_days: 60, estimated_bytes: 500_000_000, last_freed_bytes: 0 },
-        CleanupPolicy { category: CleanupCategory::ThumbnailCache, enabled: true, max_age_days: 14, estimated_bytes: 100_000_000, last_freed_bytes: 0 },
-        CleanupPolicy { category: CleanupCategory::SystemCache, enabled: true, max_age_days: 30, estimated_bytes: 300_000_000, last_freed_bytes: 0 },
-        CleanupPolicy { category: CleanupCategory::LogFiles, enabled: true, max_age_days: 30, estimated_bytes: 50_000_000, last_freed_bytes: 0 },
-        CleanupPolicy { category: CleanupCategory::BrowserCache, enabled: false, max_age_days: 14, estimated_bytes: 200_000_000, last_freed_bytes: 0 },
-        CleanupPolicy { category: CleanupCategory::PackageCache, enabled: true, max_age_days: 60, estimated_bytes: 400_000_000, last_freed_bytes: 0 },
-        CleanupPolicy { category: CleanupCategory::OldUpdates, enabled: true, max_age_days: 90, estimated_bytes: 1_000_000_000, last_freed_bytes: 0 },
+        CleanupPolicy {
+            category: CleanupCategory::TempFiles,
+            enabled: true,
+            max_age_days: 7,
+            estimated_bytes: 50_000_000,
+            last_freed_bytes: 0
+        },
+        CleanupPolicy {
+            category: CleanupCategory::RecycleBin,
+            enabled: true,
+            max_age_days: 30,
+            estimated_bytes: 200_000_000,
+            last_freed_bytes: 0
+        },
+        CleanupPolicy {
+            category: CleanupCategory::Downloads,
+            enabled: false,
+            max_age_days: 60,
+            estimated_bytes: 500_000_000,
+            last_freed_bytes: 0
+        },
+        CleanupPolicy {
+            category: CleanupCategory::ThumbnailCache,
+            enabled: true,
+            max_age_days: 14,
+            estimated_bytes: 100_000_000,
+            last_freed_bytes: 0
+        },
+        CleanupPolicy {
+            category: CleanupCategory::SystemCache,
+            enabled: true,
+            max_age_days: 30,
+            estimated_bytes: 300_000_000,
+            last_freed_bytes: 0
+        },
+        CleanupPolicy {
+            category: CleanupCategory::LogFiles,
+            enabled: true,
+            max_age_days: 30,
+            estimated_bytes: 50_000_000,
+            last_freed_bytes: 0
+        },
+        CleanupPolicy {
+            category: CleanupCategory::BrowserCache,
+            enabled: false,
+            max_age_days: 14,
+            estimated_bytes: 200_000_000,
+            last_freed_bytes: 0
+        },
+        CleanupPolicy {
+            category: CleanupCategory::PackageCache,
+            enabled: true,
+            max_age_days: 60,
+            estimated_bytes: 400_000_000,
+            last_freed_bytes: 0
+        },
+        CleanupPolicy {
+            category: CleanupCategory::OldUpdates,
+            enabled: true,
+            max_age_days: 90,
+            estimated_bytes: 1_000_000_000,
+            last_freed_bytes: 0
+        },
     ]
 }
 
@@ -154,7 +208,9 @@ fn default_policies() -> Vec<CleanupPolicy> {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         policies: default_policies(),
         schedule: Schedule::Weekly,
@@ -169,7 +225,9 @@ pub fn init_defaults() {
 /// Estimate total saveable bytes from enabled categories.
 pub fn estimate_savings() -> KernelResult<u64> {
     with_state(|state| {
-        let total: u64 = state.policies.iter()
+        let total: u64 = state
+            .policies
+            .iter()
             .filter(|p| p.enabled)
             .map(|p| p.estimated_bytes)
             .sum();
@@ -183,7 +241,9 @@ pub fn run_cleanup() -> KernelResult<u64> {
         let now = crate::hpet::elapsed_ns();
         let mut total_freed: u64 = 0;
         for policy in state.policies.iter_mut() {
-            if !policy.enabled { continue; }
+            if !policy.enabled {
+                continue;
+            }
             // Simulate cleanup: free the estimated amount.
             let freed = policy.estimated_bytes;
             policy.last_freed_bytes = freed;
@@ -199,7 +259,10 @@ pub fn run_cleanup() -> KernelResult<u64> {
 /// Run cleanup for a specific category.
 pub fn run_category(category: CleanupCategory) -> KernelResult<u64> {
     with_state(|state| {
-        let policy = state.policies.iter_mut().find(|p| p.category == category)
+        let policy = state
+            .policies
+            .iter_mut()
+            .find(|p| p.category == category)
             .ok_or(KernelError::NotFound)?;
         let freed = policy.estimated_bytes;
         policy.last_freed_bytes = freed;
@@ -221,7 +284,10 @@ pub fn set_schedule(schedule: Schedule) -> KernelResult<()> {
 /// Enable/disable a category.
 pub fn set_category_enabled(category: CleanupCategory, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let policy = state.policies.iter_mut().find(|p| p.category == category)
+        let policy = state
+            .policies
+            .iter_mut()
+            .find(|p| p.category == category)
             .ok_or(KernelError::NotFound)?;
         policy.enabled = enabled;
         Ok(())
@@ -231,7 +297,10 @@ pub fn set_category_enabled(category: CleanupCategory, enabled: bool) -> KernelR
 /// Set max age for a category.
 pub fn set_max_age(category: CleanupCategory, days: u32) -> KernelResult<()> {
     with_state(|state| {
-        let policy = state.policies.iter_mut().find(|p| p.category == category)
+        let policy = state
+            .policies
+            .iter_mut()
+            .find(|p| p.category == category)
             .ok_or(KernelError::NotFound)?;
         policy.max_age_days = days;
         Ok(())
@@ -248,18 +317,28 @@ pub fn set_low_space_threshold(mb: u32) -> KernelResult<()> {
 
 /// List policies.
 pub fn list_policies() -> Vec<CleanupPolicy> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.policies.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.policies.clone())
 }
 
 /// Get current schedule.
 pub fn get_schedule() -> Schedule {
-    STATE.lock().as_ref().map_or(Schedule::Manual, |s| s.schedule)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Schedule::Manual, |s| s.schedule)
 }
 
 /// Format bytes to human-readable string.
 pub fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
-        format!("{}.{} GB", bytes / 1_073_741_824, (bytes % 1_073_741_824) / 107_374_183)
+        format!(
+            "{}.{} GB",
+            bytes / 1_073_741_824,
+            (bytes % 1_073_741_824) / 107_374_183
+        )
     } else if bytes >= 1_048_576 {
         format!("{}.{} MB", bytes / 1_048_576, (bytes % 1_048_576) / 104_858)
     } else if bytes >= 1_024 {

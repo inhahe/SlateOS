@@ -23,8 +23,8 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
-use alloc::vec::Vec;
 use crate::port;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // PCI I/O ports
@@ -133,7 +133,7 @@ fn config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     | (u32::from(bus) << 16)
     | (u32::from(device & 0x1F) << 11)
     | (u32::from(function & 0x07) << 8)
-    | u32::from(offset & 0xFC)            // Dword-aligned
+    | u32::from(offset & 0xFC) // Dword-aligned
 }
 
 /// Read a 32-bit value from PCI configuration space.
@@ -289,7 +289,11 @@ fn scan_function(bus: u8, device: u8, function: u8, devices: &mut Vec<PciDevice>
     }
 
     devices.push(PciDevice {
-        address: PciAddress { bus, device, function },
+        address: PciAddress {
+            bus,
+            device,
+            function,
+        },
         vendor_id,
         device_id,
         class,
@@ -306,7 +310,9 @@ fn scan_function(bus: u8, device: u8, function: u8, devices: &mut Vec<PciDevice>
 /// Find the first PCI device matching a vendor/device ID pair.
 pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
     let devices = scan_bus0();
-    devices.into_iter().find(|d| d.vendor_id == vendor && d.device_id == device)
+    devices
+        .into_iter()
+        .find(|d| d.vendor_id == vendor && d.device_id == device)
 }
 
 /// Find all PCI devices matching a vendor/device ID pair.
@@ -317,7 +323,10 @@ pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
 #[allow(dead_code)] // API for drivers zone; unused until multi-device support.
 pub fn find_all_devices(vendor: u16, device: u16) -> Vec<PciDevice> {
     let devices = scan_bus0();
-    devices.into_iter().filter(|d| d.vendor_id == vendor && d.device_id == device).collect()
+    devices
+        .into_iter()
+        .filter(|d| d.vendor_id == vendor && d.device_id == device)
+        .collect()
 }
 
 /// Find all PCI devices matching a class/subclass pair.
@@ -327,7 +336,10 @@ pub fn find_all_devices(vendor: u16, device: u16) -> Vec<PciDevice> {
 #[allow(dead_code)] // API for drivers zone; unused until driver framework.
 pub fn find_devices_by_class(class: u8, subclass: u8) -> Vec<PciDevice> {
     let devices = scan_bus0();
-    devices.into_iter().filter(|d| d.class == class && d.subclass == subclass).collect()
+    devices
+        .into_iter()
+        .filter(|d| d.class == class && d.subclass == subclass)
+        .collect()
 }
 
 /// Enable bus mastering (DMA) for a PCI device.
@@ -388,7 +400,10 @@ pub fn walk_capabilities(addr: PciAddress) -> Vec<PciCapability> {
         let cap_id = config_read8(addr.bus, addr.device, addr.function, ptr);
         let cap_next = config_read8(addr.bus, addr.device, addr.function, ptr.wrapping_add(1));
 
-        caps.push(PciCapability { id: cap_id, offset: ptr });
+        caps.push(PciCapability {
+            id: cap_id,
+            offset: ptr,
+        });
 
         ptr = cap_next & 0xFC;
         count = count.wrapping_add(1);
@@ -404,7 +419,10 @@ pub fn find_capability(addr: PciAddress, cap_id: u8) -> Option<PciCapability> {
 
 /// Find all capabilities with a given ID for a device.
 pub fn find_capabilities(addr: PciAddress, cap_id: u8) -> Vec<PciCapability> {
-    walk_capabilities(addr).into_iter().filter(|c| c.id == cap_id).collect()
+    walk_capabilities(addr)
+        .into_iter()
+        .filter(|c| c.id == cap_id)
+        .collect()
 }
 
 /// Decode a 64-bit BAR (for memory-mapped BARs that are 64-bit).

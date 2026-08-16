@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -106,14 +106,16 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let default_curve = alloc::vec![
-        (0, 10),      // Dark → 10%
-        (50, 30),     // Dim room → 30%
-        (200, 50),    // Normal → 50%
-        (500, 75),    // Bright → 75%
-        (1000, 100),  // Sunlight → 100%
+        (0, 10),     // Dark → 10%
+        (50, 30),    // Dim room → 30%
+        (200, 50),   // Normal → 50%
+        (500, 75),   // Bright → 75%
+        (1000, 100), // Sunlight → 100%
     ];
 
     let display = DisplayBrightness {
@@ -147,11 +149,15 @@ pub fn register_display(name: &str) -> KernelResult<u32> {
         let id = state.next_id;
         state.next_id += 1;
         state.displays.push(DisplayBrightness {
-            id, name: String::from(name),
-            brightness: 70, min_brightness: 5,
+            id,
+            name: String::from(name),
+            brightness: 70,
+            min_brightness: 5,
             mode: BrightnessMode::Manual,
             auto_curve: alloc::vec![(0, 10), (200, 50), (1000, 100)],
-            ambient_lux: 0, dimmed: false, pre_dim_brightness: 70,
+            ambient_lux: 0,
+            dimmed: false,
+            pre_dim_brightness: 70,
         });
         Ok(id)
     })
@@ -160,7 +166,10 @@ pub fn register_display(name: &str) -> KernelResult<u32> {
 /// Set brightness manually (0-100).
 pub fn set_brightness(display_id: u32, level: u32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.brightness = level.clamp(d.min_brightness, 100);
         d.dimmed = false;
@@ -172,7 +181,10 @@ pub fn set_brightness(display_id: u32, level: u32) -> KernelResult<()> {
 /// Increase brightness by step.
 pub fn brightness_up(display_id: u32, step: u32) -> KernelResult<u32> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.brightness = (d.brightness + step).min(100);
         d.dimmed = false;
@@ -184,7 +196,10 @@ pub fn brightness_up(display_id: u32, step: u32) -> KernelResult<u32> {
 /// Decrease brightness by step.
 pub fn brightness_down(display_id: u32, step: u32) -> KernelResult<u32> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.brightness = d.brightness.saturating_sub(step).max(d.min_brightness);
         d.dimmed = false;
@@ -196,7 +211,10 @@ pub fn brightness_down(display_id: u32, step: u32) -> KernelResult<u32> {
 /// Update ambient light reading and auto-adjust if in auto mode.
 pub fn update_ambient(display_id: u32, lux: u32) -> KernelResult<u32> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.ambient_lux = lux;
 
@@ -227,7 +245,10 @@ pub fn update_ambient(display_id: u32, lux: u32) -> KernelResult<u32> {
 /// Set brightness mode.
 pub fn set_mode(display_id: u32, mode: BrightnessMode) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.mode = mode;
         if mode == BrightnessMode::BatterySaver {
@@ -240,7 +261,10 @@ pub fn set_mode(display_id: u32, mode: BrightnessMode) -> KernelResult<()> {
 /// Dim display for inactivity.
 pub fn dim(display_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         if !d.dimmed {
             d.pre_dim_brightness = d.brightness;
@@ -254,7 +278,10 @@ pub fn dim(display_id: u32) -> KernelResult<()> {
 /// Undim display (restore previous brightness).
 pub fn undim(display_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         if d.dimmed {
             d.brightness = d.pre_dim_brightness;
@@ -267,7 +294,10 @@ pub fn undim(display_id: u32) -> KernelResult<()> {
 /// Set minimum brightness.
 pub fn set_min_brightness(display_id: u32, min: u32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.displays.iter_mut().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter_mut()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         d.min_brightness = min.clamp(0, 50);
         if d.brightness < d.min_brightness {
@@ -279,13 +309,19 @@ pub fn set_min_brightness(display_id: u32, min: u32) -> KernelResult<()> {
 
 /// List all displays.
 pub fn list_displays() -> Vec<DisplayBrightness> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.displays.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.displays.clone())
 }
 
 /// Get brightness for a display.
 pub fn get_brightness(display_id: u32) -> KernelResult<u32> {
     with_state(|state| {
-        let d = state.displays.iter().find(|d| d.id == display_id)
+        let d = state
+            .displays
+            .iter()
+            .find(|d| d.id == display_id)
             .ok_or(KernelError::NotFound)?;
         Ok(d.brightness)
     })
@@ -295,7 +331,12 @@ pub fn get_brightness(display_id: u32) -> KernelResult<u32> {
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.displays.len(), s.total_adjustments, s.total_auto_adjustments, s.ops),
+        Some(s) => (
+            s.displays.len(),
+            s.total_adjustments,
+            s.total_auto_adjustments,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

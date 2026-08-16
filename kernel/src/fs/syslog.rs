@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -143,7 +143,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     // Seed with a boot message.
     let boot_entry = LogEntry {
@@ -196,7 +198,12 @@ pub fn log(severity: Severity, source: &str, message: &str) -> KernelResult<u64>
 }
 
 /// Log with PID.
-pub fn log_with_pid(severity: Severity, source: &str, message: &str, pid: u32) -> KernelResult<u64> {
+pub fn log_with_pid(
+    severity: Severity,
+    source: &str,
+    message: &str,
+    pid: u32,
+) -> KernelResult<u64> {
     with_state(|state| {
         if severity < state.min_keep {
             state.dropped += 1;
@@ -208,7 +215,8 @@ pub fn log_with_pid(severity: Severity, source: &str, message: &str, pid: u32) -
         state.total_logged += 1;
 
         state.entries.push(LogEntry {
-            id, severity,
+            id,
+            severity,
             source: String::from(source),
             message: String::from(message),
             timestamp_ns: crate::hpet::elapsed_ns(),
@@ -227,7 +235,11 @@ pub fn log_with_pid(severity: Severity, source: &str, message: &str, pid: u32) -
 pub fn tail(count: usize) -> Vec<LogEntry> {
     let guard = STATE.lock();
     guard.as_ref().map_or(Vec::new(), |s| {
-        let start = if s.entries.len() > count { s.entries.len() - count } else { 0 };
+        let start = if s.entries.len() > count {
+            s.entries.len() - count
+        } else {
+            0
+        };
         s.entries[start..].to_vec()
     })
 }
@@ -237,19 +249,28 @@ pub fn query(filter: &LogFilter) -> Vec<LogEntry> {
     let guard = STATE.lock();
     guard.as_ref().map_or(Vec::new(), |s| {
         let limit = filter.limit.unwrap_or(100);
-        s.entries.iter()
+        s.entries
+            .iter()
             .filter(|e| {
                 if let Some(min) = filter.min_severity {
-                    if e.severity < min { return false; }
+                    if e.severity < min {
+                        return false;
+                    }
                 }
                 if let Some(ref src) = filter.source {
-                    if !e.source.contains(src.as_str()) { return false; }
+                    if !e.source.contains(src.as_str()) {
+                        return false;
+                    }
                 }
                 if let Some(ref msg) = filter.message {
-                    if !e.message.contains(msg.as_str()) { return false; }
+                    if !e.message.contains(msg.as_str()) {
+                        return false;
+                    }
                 }
                 if let Some(after) = filter.after_ns {
-                    if e.timestamp_ns < after { return false; }
+                    if e.timestamp_ns < after {
+                        return false;
+                    }
                 }
                 true
             })
@@ -264,19 +285,31 @@ pub fn count_by_severity() -> Vec<(Severity, usize)> {
     let guard = STATE.lock();
     guard.as_ref().map_or(Vec::new(), |s| {
         let sevs = [
-            Severity::Debug, Severity::Info, Severity::Notice, Severity::Warning,
-            Severity::Error, Severity::Critical, Severity::Alert, Severity::Emergency,
+            Severity::Debug,
+            Severity::Info,
+            Severity::Notice,
+            Severity::Warning,
+            Severity::Error,
+            Severity::Critical,
+            Severity::Alert,
+            Severity::Emergency,
         ];
-        sevs.iter().map(|sev| {
-            let count = s.entries.iter().filter(|e| e.severity == *sev).count();
-            (*sev, count)
-        }).filter(|(_, c)| *c > 0).collect()
+        sevs.iter()
+            .map(|sev| {
+                let count = s.entries.iter().filter(|e| e.severity == *sev).count();
+                (*sev, count)
+            })
+            .filter(|(_, c)| *c > 0)
+            .collect()
     })
 }
 
 /// Set minimum severity to keep.
 pub fn set_min_severity(severity: Severity) -> KernelResult<()> {
-    with_state(|state| { state.min_keep = severity; Ok(()) })
+    with_state(|state| {
+        state.min_keep = severity;
+        Ok(())
+    })
 }
 
 /// Clear all entries.
@@ -293,9 +326,24 @@ pub fn stats() -> (usize, u64, u64, usize, usize, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let errors = s.entries.iter().filter(|e| e.severity >= Severity::Error).count();
-            let crits = s.entries.iter().filter(|e| e.severity >= Severity::Critical).count();
-            (s.entries.len(), s.total_logged, s.dropped, errors, crits, s.ops)
+            let errors = s
+                .entries
+                .iter()
+                .filter(|e| e.severity >= Severity::Error)
+                .count();
+            let crits = s
+                .entries
+                .iter()
+                .filter(|e| e.severity >= Severity::Critical)
+                .count();
+            (
+                s.entries.len(),
+                s.total_logged,
+                s.dropped,
+                errors,
+                crits,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0),
     }
@@ -330,20 +378,29 @@ pub fn self_test() {
     crate::serial_println!("  [4/11] tail: OK");
 
     // 5: Query by severity.
-    let filter = LogFilter { min_severity: Some(Severity::Error), ..Default::default() };
+    let filter = LogFilter {
+        min_severity: Some(Severity::Error),
+        ..Default::default()
+    };
     let results = query(&filter);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].severity, Severity::Error);
     crate::serial_println!("  [5/11] query severity: OK");
 
     // 6: Query by source.
-    let filter = LogFilter { source: Some(String::from("scheduler")), ..Default::default() };
+    let filter = LogFilter {
+        source: Some(String::from("scheduler")),
+        ..Default::default()
+    };
     let results = query(&filter);
     assert_eq!(results.len(), 1);
     crate::serial_println!("  [6/11] query source: OK");
 
     // 7: Query by message.
-    let filter = LogFilter { message: Some(String::from("Hello")), ..Default::default() };
+    let filter = LogFilter {
+        message: Some(String::from("Hello")),
+        ..Default::default()
+    };
     let results = query(&filter);
     assert_eq!(results.len(), 1);
     crate::serial_println!("  [7/11] query message: OK");

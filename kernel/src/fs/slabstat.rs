@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -53,7 +53,9 @@ pub struct SlabCache {
 impl SlabCache {
     /// Utilization percentage (0-100).
     pub fn utilization_pct(&self) -> u64 {
-        if self.total_objects == 0 { return 0; }
+        if self.total_objects == 0 {
+            return 0;
+        }
         self.active_objects * 100 / self.total_objects
     }
 }
@@ -108,7 +110,9 @@ where
 /// [`alloc`]/[`free`] on each object operation.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         caches: Vec::new(),
         total_allocs: 0,
@@ -121,14 +125,30 @@ pub fn init_defaults() {
 /// Create a slab cache.
 pub fn create_cache(name: &str, object_size: u32, align: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.caches.len() >= MAX_CACHES { return Err(KernelError::ResourceExhausted); }
-        if state.caches.iter().any(|c| c.name == name) { return Err(KernelError::AlreadyExists); }
-        let objects_per_slab = if object_size > 0 { 16384 / object_size } else { 1 };
+        if state.caches.len() >= MAX_CACHES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.caches.iter().any(|c| c.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
+        let objects_per_slab = if object_size > 0 {
+            16384 / object_size
+        } else {
+            1
+        };
         state.caches.push(SlabCache {
-            name: String::from(name), object_size, objects_per_slab,
-            total_objects: 0, active_objects: 0, total_slabs: 0,
-            active_slabs: 0, total_allocs: 0, total_frees: 0,
-            high_watermark: 0, align, reclaim_count: 0,
+            name: String::from(name),
+            object_size,
+            objects_per_slab,
+            total_objects: 0,
+            active_objects: 0,
+            total_slabs: 0,
+            active_slabs: 0,
+            total_allocs: 0,
+            total_frees: 0,
+            high_watermark: 0,
+            align,
+            reclaim_count: 0,
         });
         Ok(())
     })
@@ -137,14 +157,20 @@ pub fn create_cache(name: &str, object_size: u32, align: u32) -> KernelResult<()
 /// Record an allocation from a slab cache.
 pub fn alloc(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let c = state.caches.iter_mut().find(|c| c.name == name).ok_or(KernelError::NotFound)?;
+        let c = state
+            .caches
+            .iter_mut()
+            .find(|c| c.name == name)
+            .ok_or(KernelError::NotFound)?;
         c.active_objects += 1;
         c.total_allocs += 1;
         if c.active_objects > c.total_objects {
             c.total_objects = c.active_objects;
             c.total_slabs = c.total_objects.div_ceil(c.objects_per_slab as u64) as u32;
         }
-        if c.active_objects > c.high_watermark { c.high_watermark = c.active_objects; }
+        if c.active_objects > c.high_watermark {
+            c.high_watermark = c.active_objects;
+        }
         c.active_slabs = c.active_objects.div_ceil(c.objects_per_slab as u64) as u32;
         state.total_allocs += 1;
         Ok(())
@@ -154,8 +180,14 @@ pub fn alloc(name: &str) -> KernelResult<()> {
 /// Record a free to a slab cache.
 pub fn free(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let c = state.caches.iter_mut().find(|c| c.name == name).ok_or(KernelError::NotFound)?;
-        if c.active_objects == 0 { return Err(KernelError::InvalidArgument); }
+        let c = state
+            .caches
+            .iter_mut()
+            .find(|c| c.name == name)
+            .ok_or(KernelError::NotFound)?;
+        if c.active_objects == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
         c.active_objects -= 1;
         c.total_frees += 1;
         c.active_slabs = c.active_objects.div_ceil(c.objects_per_slab as u64) as u32;
@@ -167,9 +199,15 @@ pub fn free(name: &str) -> KernelResult<()> {
 /// Reclaim unused slabs from a cache.
 pub fn reclaim(name: &str) -> KernelResult<u32> {
     with_state(|state| {
-        let c = state.caches.iter_mut().find(|c| c.name == name).ok_or(KernelError::NotFound)?;
+        let c = state
+            .caches
+            .iter_mut()
+            .find(|c| c.name == name)
+            .ok_or(KernelError::NotFound)?;
         let free_slabs = c.total_slabs.saturating_sub(c.active_slabs);
-        if free_slabs == 0 { return Ok(0); }
+        if free_slabs == 0 {
+            return Ok(0);
+        }
         c.total_slabs = c.active_slabs;
         c.total_objects = c.total_slabs as u64 * c.objects_per_slab as u64;
         c.reclaim_count += 1;
@@ -180,12 +218,18 @@ pub fn reclaim(name: &str) -> KernelResult<u32> {
 
 /// List all caches.
 pub fn list() -> Vec<SlabCache> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.caches.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.caches.clone())
 }
 
 /// Get cache by name.
 pub fn get(name: &str) -> Option<SlabCache> {
-    STATE.lock().as_ref().and_then(|s| s.caches.iter().find(|c| c.name == name).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.caches.iter().find(|c| c.name == name).cloned())
 }
 
 /// Top N by active objects.
@@ -202,7 +246,13 @@ pub fn top_active(n: usize) -> Vec<SlabCache> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.caches.len(), s.total_allocs, s.total_frees, s.total_reclaims, s.ops),
+        Some(s) => (
+            s.caches.len(),
+            s.total_allocs,
+            s.total_frees,
+            s.total_reclaims,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

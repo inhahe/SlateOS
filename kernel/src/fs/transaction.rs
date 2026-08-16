@@ -40,10 +40,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::Vfs;
@@ -176,7 +176,10 @@ pub fn begin_with_label(label: &str) -> KernelResult<TxId> {
 /// Add a write operation to the transaction.
 pub fn tx_write(tx_id: TxId, path: &str, data: &[u8]) -> KernelResult<()> {
     let mut inner = TRANSACTIONS.lock();
-    let tx = inner.transactions.get_mut(&tx_id).ok_or(KernelError::NotFound)?;
+    let tx = inner
+        .transactions
+        .get_mut(&tx_id)
+        .ok_or(KernelError::NotFound)?;
     check_active(tx)?;
     check_capacity(tx)?;
 
@@ -191,7 +194,10 @@ pub fn tx_write(tx_id: TxId, path: &str, data: &[u8]) -> KernelResult<()> {
 /// Add a remove operation to the transaction.
 pub fn tx_remove(tx_id: TxId, path: &str) -> KernelResult<()> {
     let mut inner = TRANSACTIONS.lock();
-    let tx = inner.transactions.get_mut(&tx_id).ok_or(KernelError::NotFound)?;
+    let tx = inner
+        .transactions
+        .get_mut(&tx_id)
+        .ok_or(KernelError::NotFound)?;
     check_active(tx)?;
     check_capacity(tx)?;
 
@@ -205,7 +211,10 @@ pub fn tx_remove(tx_id: TxId, path: &str) -> KernelResult<()> {
 /// Add a mkdir operation to the transaction.
 pub fn tx_mkdir(tx_id: TxId, path: &str) -> KernelResult<()> {
     let mut inner = TRANSACTIONS.lock();
-    let tx = inner.transactions.get_mut(&tx_id).ok_or(KernelError::NotFound)?;
+    let tx = inner
+        .transactions
+        .get_mut(&tx_id)
+        .ok_or(KernelError::NotFound)?;
     check_active(tx)?;
     check_capacity(tx)?;
 
@@ -219,7 +228,10 @@ pub fn tx_mkdir(tx_id: TxId, path: &str) -> KernelResult<()> {
 /// Add a rename operation to the transaction.
 pub fn tx_rename(tx_id: TxId, from: &str, to: &str) -> KernelResult<()> {
     let mut inner = TRANSACTIONS.lock();
-    let tx = inner.transactions.get_mut(&tx_id).ok_or(KernelError::NotFound)?;
+    let tx = inner
+        .transactions
+        .get_mut(&tx_id)
+        .ok_or(KernelError::NotFound)?;
     check_active(tx)?;
     check_capacity(tx)?;
 
@@ -234,7 +246,10 @@ pub fn tx_rename(tx_id: TxId, from: &str, to: &str) -> KernelResult<()> {
 /// Add a symlink creation to the transaction.
 pub fn tx_symlink(tx_id: TxId, path: &str, target: &str) -> KernelResult<()> {
     let mut inner = TRANSACTIONS.lock();
-    let tx = inner.transactions.get_mut(&tx_id).ok_or(KernelError::NotFound)?;
+    let tx = inner
+        .transactions
+        .get_mut(&tx_id)
+        .ok_or(KernelError::NotFound)?;
     check_active(tx)?;
     check_capacity(tx)?;
 
@@ -255,7 +270,10 @@ pub fn commit(tx_id: TxId) -> KernelResult<()> {
     // before executing VFS operations to avoid deadlock).
     let ops = {
         let mut inner = TRANSACTIONS.lock();
-        let tx = inner.transactions.get_mut(&tx_id).ok_or(KernelError::NotFound)?;
+        let tx = inner
+            .transactions
+            .get_mut(&tx_id)
+            .ok_or(KernelError::NotFound)?;
         check_active(tx)?;
         tx.ops.clone()
     };
@@ -272,7 +290,9 @@ pub fn commit(tx_id: TxId) -> KernelResult<()> {
                 // Operation failed — roll back all executed operations.
                 serial_println!(
                     "[tx] Operation {} failed ({:?}), rolling back {} ops",
-                    i, e, undo_stack.len(),
+                    i,
+                    e,
+                    undo_stack.len(),
                 );
 
                 let rollback_ok = rollback_ops(&undo_stack);
@@ -307,7 +327,10 @@ pub fn commit(tx_id: TxId) -> KernelResult<()> {
 /// Discards all queued operations.
 pub fn rollback(tx_id: TxId) -> KernelResult<()> {
     let mut inner = TRANSACTIONS.lock();
-    let tx = inner.transactions.get_mut(&tx_id).ok_or(KernelError::NotFound)?;
+    let tx = inner
+        .transactions
+        .get_mut(&tx_id)
+        .ok_or(KernelError::NotFound)?;
     check_active(tx)?;
     tx.state = TxState::RolledBack;
     tx.ops.clear();
@@ -317,7 +340,10 @@ pub fn rollback(tx_id: TxId) -> KernelResult<()> {
 /// Get info about a transaction.
 pub fn info(tx_id: TxId) -> KernelResult<TxInfo> {
     let inner = TRANSACTIONS.lock();
-    let tx = inner.transactions.get(&tx_id).ok_or(KernelError::NotFound)?;
+    let tx = inner
+        .transactions
+        .get(&tx_id)
+        .ok_or(KernelError::NotFound)?;
     Ok(TxInfo {
         id: tx.id,
         state: tx.state,
@@ -348,7 +374,10 @@ pub fn list() -> Vec<TxInfo> {
 /// Active transactions cannot be removed — commit or rollback first.
 pub fn remove(tx_id: TxId) -> KernelResult<()> {
     let mut inner = TRANSACTIONS.lock();
-    let tx = inner.transactions.get(&tx_id).ok_or(KernelError::NotFound)?;
+    let tx = inner
+        .transactions
+        .get(&tx_id)
+        .ok_or(KernelError::NotFound)?;
     if tx.state == TxState::Active {
         return Err(KernelError::InvalidArgument);
     }
@@ -380,9 +409,7 @@ fn execute_op(op: &TxOp) -> KernelResult<UndoOp> {
                     path: path.clone(),
                     data: old_data,
                 },
-                Err(KernelError::NotFound) => UndoOp::RemoveFile {
-                    path: path.clone(),
-                },
+                Err(KernelError::NotFound) => UndoOp::RemoveFile { path: path.clone() },
                 Err(e) => return Err(e),
             };
 

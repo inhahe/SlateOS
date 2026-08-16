@@ -29,7 +29,7 @@
 //! - Linux `mm/memory.c` `copy_page_range()` — PTE duplication for fork
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::mm::page_table::{self, PageFlags, PageTableEntry, VirtAddr};
 use crate::serial_println;
 
@@ -86,8 +86,7 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
     // CoW refcounting is per-frame (the buddy allocator operates on
     // 16 KiB frames), so we check the frame's refcount.
     let frame_base = old_phys & !(FRAME_SIZE as u64 - 1);
-    let frame = PhysFrame::from_addr(frame_base)
-        .ok_or(KernelError::InternalError)?;
+    let frame = PhysFrame::from_addr(frame_base).ok_or(KernelError::InternalError)?;
     let rc = frame::refcount(frame);
 
     if rc <= 1 {
@@ -117,7 +116,9 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
                         new_flags = PageFlags::from_bits(new_flags.bits() & !PageFlags::COW.bits());
                         let new_pte = PageTableEntry::new(sibling_pte.phys_addr(), new_flags);
                         // SAFETY: pml4_phys is valid, sibling_virt is in the same frame group.
-                        unsafe { write_pte(pml4_phys, sibling_virt, new_pte, hhdm).ok(); }
+                        unsafe {
+                            write_pte(pml4_phys, sibling_virt, new_pte, hhdm).ok();
+                        }
                     }
                 }
             }
@@ -209,7 +210,9 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
         let new_pte = PageTableEntry::new(new_4k_phys, new_flags);
 
         // SAFETY: pml4_phys is valid, sibling_virt is in the same group.
-        unsafe { write_pte(pml4_phys, sibling_virt, new_pte, hhdm).ok(); }
+        unsafe {
+            write_pte(pml4_phys, sibling_virt, new_pte, hhdm).ok();
+        }
         pages_resolved += 1;
     }
 
@@ -334,7 +337,9 @@ unsafe fn write_pte(
 
     let pt = pde.phys_addr();
     // SAFETY: pt is a valid page table, virt.pt_index() < 512.
-    unsafe { page_table::write_entry(pt, virt.pt_index(), entry, hhdm); }
+    unsafe {
+        page_table::write_entry(pt, virt.pt_index(), entry, hhdm);
+    }
 
     Ok(())
 }
@@ -378,7 +383,9 @@ pub unsafe fn mark_cow(pml4_phys: u64, virt: VirtAddr) -> KernelResult<()> {
 
     let new_pte = PageTableEntry::new(pte.phys_addr(), flags);
     // SAFETY: pml4_phys valid, virt is an existing present mapping.
-    unsafe { write_pte(pml4_phys, virt, new_pte, hhdm)?; }
+    unsafe {
+        write_pte(pml4_phys, virt, new_pte, hhdm)?;
+    }
 
     Ok(())
 }
@@ -428,13 +435,16 @@ unsafe fn map_child_pte(
     let user = virt.is_user();
     // SAFETY: child_pml4 is a valid PML4 (caller guarantee); each level is
     // created or returned by walk_or_create.
-    let pdpt = unsafe { page_table::walk_or_create(child_pml4, virt.pml4_index(), true, user, hhdm)? };
+    let pdpt =
+        unsafe { page_table::walk_or_create(child_pml4, virt.pml4_index(), true, user, hhdm)? };
     // SAFETY: pdpt was returned by walk_or_create above.
     let pd = unsafe { page_table::walk_or_create(pdpt, virt.pdpt_index(), true, user, hhdm)? };
     // SAFETY: pd was returned by walk_or_create above.
     let pt = unsafe { page_table::walk_or_create(pd, virt.pd_index(), true, user, hhdm)? };
     // SAFETY: pt is a valid page table; pt_index() < 512.
-    unsafe { page_table::write_entry(pt, virt.pt_index(), entry, hhdm); }
+    unsafe {
+        page_table::write_entry(pt, virt.pt_index(), entry, hhdm);
+    }
     Ok(())
 }
 
@@ -505,7 +515,9 @@ unsafe fn clone_frame_group(
             if let Some(frame) = PhysFrame::from_addr(frame_base) {
                 // SAFETY: frame is a valid allocated frame currently mapped
                 // into the parent.
-                unsafe { frame::ref_inc(frame)?; }
+                unsafe {
+                    frame::ref_inc(frame)?;
+                }
             }
             // Frames not owned by the allocator (e.g., device MMIO mapped
             // into user space) are shared without refcounting — they are
@@ -529,7 +541,9 @@ unsafe fn clone_frame_group(
             // Downgrade the parent PTE to read-only + COW in place.
             let parent_cow = PageTableEntry::new(phys, cow_flags);
             // SAFETY: parent_pt is valid, pt_idx < 512.
-            unsafe { page_table::write_entry(parent_pt, pt_idx, parent_cow, hhdm); }
+            unsafe {
+                page_table::write_entry(parent_pt, pt_idx, parent_cow, hhdm);
+            }
             parent_needs_flush = true;
 
             parent_cow
@@ -541,7 +555,9 @@ unsafe fn clone_frame_group(
         let hw_virt = VirtAddr::new(group_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
         // SAFETY: child_pml4 is a valid PML4 owned by the caller; hw_virt is
         // a 4 KiB-aligned user address.
-        unsafe { map_child_pte(child_pml4, hw_virt, child_entry, hhdm)?; }
+        unsafe {
+            map_child_pte(child_pml4, hw_virt, child_entry, hhdm)?;
+        }
     }
 
     if seen_count == 0 {
@@ -685,13 +701,16 @@ pub unsafe fn clone_address_space_cow(parent_pml4: u64) -> KernelResult<u64> {
         // pool; the PML4 itself is freed.
         // SAFETY: child_pml4 came from alloc_pml4, is not loaded in any CR3,
         // and no thread is using it yet.
-        unsafe { page_table::destroy_user_address_space(child_pml4); }
+        unsafe {
+            page_table::destroy_user_address_space(child_pml4);
+        }
         return Err(e);
     }
 
     serial_println!(
         "[cow] Cloned address space: parent={:#x} -> child={:#x}",
-        parent_pml4, child_pml4
+        parent_pml4,
+        child_pml4
     );
 
     Ok(child_pml4)
@@ -788,16 +807,28 @@ fn test_clone_address_space_cow() {
         .expect("map ro");
     }
 
-    assert!(frame::refcount(rw_frame) == 1, "rw refcount should start at 1");
-    assert!(frame::refcount(ro_frame) == 1, "ro refcount should start at 1");
+    assert!(
+        frame::refcount(rw_frame) == 1,
+        "rw refcount should start at 1"
+    );
+    assert!(
+        frame::refcount(ro_frame) == 1,
+        "ro refcount should start at 1"
+    );
 
     // Clone the address space (fork).
     // SAFETY: parent is a valid, quiescent PML4 we just built.
     let child = unsafe { clone_address_space_cow(parent).expect("clone_address_space_cow") };
 
     // Refcounts bumped to 2 (parent + child).
-    assert!(frame::refcount(rw_frame) == 2, "rw refcount should be 2 after fork");
-    assert!(frame::refcount(ro_frame) == 2, "ro refcount should be 2 after fork");
+    assert!(
+        frame::refcount(rw_frame) == 2,
+        "rw refcount should be 2 after fork"
+    );
+    assert!(
+        frame::refcount(ro_frame) == 2,
+        "ro refcount should be 2 after fork"
+    );
 
     // Child maps the same physical frames.
     assert!(
@@ -810,26 +841,48 @@ fn test_clone_address_space_cow() {
     );
 
     // Writable page downgraded to CoW (RO + COW) in BOTH address spaces.
-    let pflags = page_table::translate_flags(parent, VirtAddr::new(rw_virt)).expect("parent rw flags");
+    let pflags =
+        page_table::translate_flags(parent, VirtAddr::new(rw_virt)).expect("parent rw flags");
     assert!(pflags.contains(PageFlags::COW), "parent rw should be COW");
-    assert!(!pflags.contains(PageFlags::WRITABLE), "parent rw should be read-only");
-    let cflags = page_table::translate_flags(child, VirtAddr::new(rw_virt)).expect("child rw flags");
+    assert!(
+        !pflags.contains(PageFlags::WRITABLE),
+        "parent rw should be read-only"
+    );
+    let cflags =
+        page_table::translate_flags(child, VirtAddr::new(rw_virt)).expect("child rw flags");
     assert!(cflags.contains(PageFlags::COW), "child rw should be COW");
-    assert!(!cflags.contains(PageFlags::WRITABLE), "child rw should be read-only");
+    assert!(
+        !cflags.contains(PageFlags::WRITABLE),
+        "child rw should be read-only"
+    );
 
     // Read-only page: shared without a COW bit.
-    let proflags = page_table::translate_flags(parent, VirtAddr::new(ro_virt)).expect("parent ro flags");
-    assert!(!proflags.contains(PageFlags::COW), "parent ro should not be COW");
-    let croflags = page_table::translate_flags(child, VirtAddr::new(ro_virt)).expect("child ro flags");
-    assert!(!croflags.contains(PageFlags::COW), "child ro should not be COW");
-    assert!(!croflags.contains(PageFlags::WRITABLE), "child ro should be read-only");
+    let proflags =
+        page_table::translate_flags(parent, VirtAddr::new(ro_virt)).expect("parent ro flags");
+    assert!(
+        !proflags.contains(PageFlags::COW),
+        "parent ro should not be COW"
+    );
+    let croflags =
+        page_table::translate_flags(child, VirtAddr::new(ro_virt)).expect("child ro flags");
+    assert!(
+        !croflags.contains(PageFlags::COW),
+        "child ro should not be COW"
+    );
+    assert!(
+        !croflags.contains(PageFlags::WRITABLE),
+        "child ro should be read-only"
+    );
 
     // Data intact.
     // SAFETY: rw_phys is still a valid frame, mapped via HHDM.
     unsafe {
         let p = (rw_phys + hhdm) as *const u8;
         for i in 0u8..16 {
-            assert!(p.add(i as usize).read() == 0x10 + i, "rw data corrupted after fork");
+            assert!(
+                p.add(i as usize).read() == 0x10 + i,
+                "rw data corrupted after fork"
+            );
         }
     }
 
@@ -860,7 +913,11 @@ fn test_refcount() {
     // Decrement back to 1.
     // SAFETY: frame is allocated.
     let new_rc = unsafe { frame::ref_dec(frame).expect("ref_dec") };
-    assert!(new_rc == 1, "refcount after dec should be 1, got {}", new_rc);
+    assert!(
+        new_rc == 1,
+        "refcount after dec should be 1, got {}",
+        new_rc
+    );
 
     // Free the frame (refcount goes 1 → 0, actually freed).
     // SAFETY: we're the sole owner.
@@ -923,8 +980,7 @@ fn test_cow_resolve_sole_owner() {
     let virt = VirtAddr::new(test_virt_base);
     // SAFETY: test address, valid pml4, valid frame.
     unsafe {
-        page_table::map_frame(pml4, virt, frame_val, flags)
-            .expect("cow test map");
+        page_table::map_frame(pml4, virt, frame_val, flags).expect("cow test map");
     }
 
     // Mark all 4 hardware pages as CoW (clear WRITABLE, set COW).
@@ -955,8 +1011,7 @@ fn test_cow_resolve_sole_owner() {
     );
 
     // Call resolve_cow_fault for the first hardware page.
-    resolve_cow_fault(pml4, test_virt_base)
-        .expect("sole-owner cow resolve should succeed");
+    resolve_cow_fault(pml4, test_virt_base).expect("sole-owner cow resolve should succeed");
 
     // Verify: PTE should now be WRITABLE and not COW.
     // SAFETY: pml4 and virt reference our test mapping.
@@ -1010,12 +1065,12 @@ fn test_cow_resolve_sole_owner() {
 
     // Cleanup: unmap and free.
     // SAFETY: we mapped it above, sole owner.
-    let returned = unsafe {
-        page_table::unmap_frame(pml4, virt).expect("cow test unmap")
-    };
+    let returned = unsafe { page_table::unmap_frame(pml4, virt).expect("cow test unmap") };
     crate::tlb::flush_range(test_virt_base, HW_PAGES_PER_FRAME as u32);
     // SAFETY: sole owner.
-    unsafe { frame::free_frame(returned).expect("cow test free"); }
+    unsafe {
+        frame::free_frame(returned).expect("cow test free");
+    }
 
     serial_println!("[cow]   Sole-owner CoW resolve: OK");
 }
@@ -1055,13 +1110,14 @@ fn test_cow_resolve_shared() {
     let virt = VirtAddr::new(test_virt_base);
     // SAFETY: test address, valid frame.
     unsafe {
-        page_table::map_frame(pml4, virt, frame_val, flags)
-            .expect("cow test map");
+        page_table::map_frame(pml4, virt, frame_val, flags).expect("cow test map");
     }
 
     // Simulate sharing: increment refcount to 2 (as if fork duplicated the PTE).
     // SAFETY: frame is allocated.
-    unsafe { frame::ref_inc(frame_val).expect("ref_inc for sharing"); }
+    unsafe {
+        frame::ref_inc(frame_val).expect("ref_inc for sharing");
+    }
     assert!(
         frame::refcount(frame_val) == 2,
         "refcount should be 2 after sharing"
@@ -1071,13 +1127,14 @@ fn test_cow_resolve_shared() {
     for i in 0..HW_PAGES_PER_FRAME {
         let hw_virt = VirtAddr::new(test_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
         // SAFETY: pages are mapped.
-        unsafe { mark_cow(pml4, hw_virt).expect("mark_cow shared"); }
+        unsafe {
+            mark_cow(pml4, hw_virt).expect("mark_cow shared");
+        }
     }
     crate::tlb::flush_range(test_virt_base, HW_PAGES_PER_FRAME as u32);
 
     // Resolve CoW — should allocate new frame and copy.
-    resolve_cow_fault(pml4, test_virt_base)
-        .expect("shared cow resolve should succeed");
+    resolve_cow_fault(pml4, test_virt_base).expect("shared cow resolve should succeed");
 
     // Verify: PTE should point to a DIFFERENT physical address.
     // SAFETY: pml4 and virt reference our test mapping.
@@ -1142,12 +1199,12 @@ fn test_cow_resolve_shared() {
 
     // Cleanup: unmap the new frame and free it.
     // SAFETY: pml4/virt reference our test mapping; we are sole owner.
-    let returned = unsafe {
-        page_table::unmap_frame(pml4, virt).expect("cow test unmap")
-    };
+    let returned = unsafe { page_table::unmap_frame(pml4, virt).expect("cow test unmap") };
     crate::tlb::flush_range(test_virt_base, HW_PAGES_PER_FRAME as u32);
     // SAFETY: sole owner of the new frame.
-    unsafe { frame::free_frame(returned).expect("cow test free new"); }
+    unsafe {
+        frame::free_frame(returned).expect("cow test free new");
+    }
 
     // The old frame may or may not still be allocated (refcount was
     // decremented during resolve).  Don't try to free it again — the

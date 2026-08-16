@@ -21,11 +21,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -106,7 +106,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
         boot_timestamp_ns: now,
@@ -123,7 +125,10 @@ pub fn init_defaults() {
 /// Get current uptime in nanoseconds.
 pub fn current_uptime_ns() -> u64 {
     let now = crate::hpet::elapsed_ns();
-    STATE.lock().as_ref().map_or(0, |s| now.saturating_sub(s.boot_timestamp_ns))
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(0, |s| now.saturating_sub(s.boot_timestamp_ns))
 }
 
 /// Get boot timestamp.
@@ -168,7 +173,10 @@ pub fn record_shutdown(reason: ShutdownReason) -> KernelResult<u32> {
 
 /// Get uptime history.
 pub fn history() -> Vec<UptimeSession> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.history.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.history.clone())
 }
 
 /// Get longest uptime ever recorded (nanoseconds).
@@ -200,7 +208,13 @@ pub fn format_duration(ns: u64) -> String {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.history.len(), s.total_sessions, s.longest_uptime_ns, s.total_uptime_ns, s.ops),
+        Some(s) => (
+            s.history.len(),
+            s.total_sessions,
+            s.longest_uptime_ns,
+            s.total_uptime_ns,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

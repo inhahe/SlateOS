@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -35,13 +35,13 @@ use crate::error::{KernelError, KernelResult};
 /// CPU idle state (C-state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CState {
-    C0,   // Active.
-    C1,   // Halt.
-    C1E,  // Enhanced halt.
-    C3,   // Sleep.
-    C6,   // Deep sleep.
-    C7,   // Package sleep.
-    C10,  // Deepest sleep.
+    C0,  // Active.
+    C1,  // Halt.
+    C1E, // Enhanced halt.
+    C3,  // Sleep.
+    C6,  // Deep sleep.
+    C7,  // Package sleep.
+    C10, // Deepest sleep.
 }
 
 impl CState {
@@ -87,8 +87,8 @@ impl CState {
 pub struct CpuIdleState {
     pub cpu_id: u32,
     pub current_state: CState,
-    pub entries: [u64; 7],       // Per C-state entry counts.
-    pub residency_ns: [u64; 7],  // Per C-state total time.
+    pub entries: [u64; 7],      // Per C-state entry counts.
+    pub residency_ns: [u64; 7], // Per C-state total time.
     pub total_idle_ns: u64,
     pub total_active_ns: u64,
     pub last_entry_ns: u64,
@@ -142,7 +142,9 @@ where
 /// global total of 6,480,000 transitions.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         cpu_states: Vec::new(),
         total_transitions: 0,
@@ -160,14 +162,20 @@ pub fn init_defaults() {
 /// if the maximum CPU count is reached.
 pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.cpu_states.len() >= MAX_CPU { return Err(KernelError::ResourceExhausted); }
+        if state.cpu_states.len() >= MAX_CPU {
+            return Err(KernelError::ResourceExhausted);
+        }
         if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) {
             return Err(KernelError::AlreadyExists);
         }
         state.cpu_states.push(CpuIdleState {
-            cpu_id, current_state: CState::C0,
-            entries: [0u64; 7], residency_ns: [0u64; 7],
-            total_idle_ns: 0, total_active_ns: 0, last_entry_ns: 0,
+            cpu_id,
+            current_state: CState::C0,
+            entries: [0u64; 7],
+            residency_ns: [0u64; 7],
+            total_idle_ns: 0,
+            total_active_ns: 0,
+            last_entry_ns: 0,
         });
         Ok(())
     })
@@ -177,12 +185,17 @@ pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
 pub fn enter_state(cpu: u32, state_idx: CState) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
         cs.current_state = state_idx;
         cs.last_entry_ns = now;
         let depth = state_idx.depth() as usize;
-        if depth < 7 { cs.entries[depth] += 1; }
+        if depth < 7 {
+            cs.entries[depth] += 1;
+        }
         state.total_transitions += 1;
         Ok(())
     })
@@ -192,11 +205,16 @@ pub fn enter_state(cpu: u32, state_idx: CState) -> KernelResult<()> {
 pub fn exit_state(cpu: u32) -> KernelResult<u64> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
         let duration = now.saturating_sub(cs.last_entry_ns);
         let depth = cs.current_state.depth() as usize;
-        if depth < 7 { cs.residency_ns[depth] += duration; }
+        if depth < 7 {
+            cs.residency_ns[depth] += duration;
+        }
         cs.total_idle_ns += duration;
         cs.current_state = CState::C0;
         state.total_idle_ns += duration;
@@ -207,16 +225,26 @@ pub fn exit_state(cpu: u32) -> KernelResult<u64> {
 
 /// Get per-CPU idle state.
 pub fn per_cpu() -> Vec<CpuIdleState> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.cpu_states.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.cpu_states.clone())
 }
 
 /// Idle percentage for a CPU (0-100).
 pub fn idle_pct(cpu: u32) -> u64 {
     STATE.lock().as_ref().map_or(0, |s| {
-        s.cpu_states.iter().find(|c| c.cpu_id == cpu).map_or(0, |cs| {
-            let total = cs.total_idle_ns + cs.total_active_ns;
-            if total == 0 { 0 } else { cs.total_idle_ns * 100 / total }
-        })
+        s.cpu_states
+            .iter()
+            .find(|c| c.cpu_id == cpu)
+            .map_or(0, |cs| {
+                let total = cs.total_idle_ns + cs.total_active_ns;
+                if total == 0 {
+                    0
+                } else {
+                    cs.total_idle_ns * 100 / total
+                }
+            })
     })
 }
 
@@ -224,7 +252,12 @@ pub fn idle_pct(cpu: u32) -> u64 {
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpu_states.len(), s.total_transitions, s.total_idle_ns, s.ops),
+        Some(s) => (
+            s.cpu_states.len(),
+            s.total_transitions,
+            s.total_idle_ns,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

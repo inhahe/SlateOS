@@ -60,7 +60,9 @@ impl ArchiveFormat {
     pub fn extensions(self) -> &'static [&'static str] {
         match self {
             Self::Zip => &[".zip"],
-            Self::Tar => &[".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.lz4", ".tar.zst"],
+            Self::Tar => &[
+                ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.lz4", ".tar.zst",
+            ],
             Self::Cpio => &[".cpio"],
             Self::Ar => &[".a", ".ar", ".deb"],
             Self::Rar => &[".rar"],
@@ -160,25 +162,35 @@ pub fn detect(data: &[u8]) -> Option<ArchiveFormat> {
     }
 
     // ZIP: PK\x03\x04 (local file header) or PK\x05\x06 (empty archive).
-    if data.len() >= 4 && data[0] == b'P' && data[1] == b'K'
-        && (data[2] == 3 || data[2] == 5) && (data[3] == 4 || data[3] == 6)
+    if data.len() >= 4
+        && data[0] == b'P'
+        && data[1] == b'K'
+        && (data[2] == 3 || data[2] == 5)
+        && (data[3] == 4 || data[3] == 6)
     {
         return Some(ArchiveFormat::Zip);
     }
 
     // RAR5: Rar!\x1a\x07\x01\x00
     if data.len() >= 8
-        && data[0] == b'R' && data[1] == b'a' && data[2] == b'r'
-        && data[3] == b'!' && data[4] == 0x1a && data[5] == 0x07
+        && data[0] == b'R'
+        && data[1] == b'a'
+        && data[2] == b'r'
+        && data[3] == b'!'
+        && data[4] == 0x1a
+        && data[5] == 0x07
     {
         return Some(ArchiveFormat::Rar);
     }
 
     // 7z: 7z\xbc\xaf\x27\x1c
     if data.len() >= 6
-        && data[0] == b'7' && data[1] == b'z'
-        && data[2] == 0xbc && data[3] == 0xaf
-        && data[4] == 0x27 && data[5] == 0x1c
+        && data[0] == b'7'
+        && data[1] == b'z'
+        && data[2] == 0xbc
+        && data[3] == 0xaf
+        && data[4] == 0x27
+        && data[5] == 0x1c
     {
         return Some(ArchiveFormat::SevenZ);
     }
@@ -219,9 +231,12 @@ pub fn detect_from_extension(name: &str) -> Option<ArchiveFormat> {
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".zip") {
         Some(ArchiveFormat::Zip)
-    } else if lower.ends_with(".tar") || lower.ends_with(".tgz")
-        || lower.ends_with(".tar.gz") || lower.ends_with(".tar.bz2")
-        || lower.ends_with(".tar.xz") || lower.ends_with(".tar.lz4")
+    } else if lower.ends_with(".tar")
+        || lower.ends_with(".tgz")
+        || lower.ends_with(".tar.gz")
+        || lower.ends_with(".tar.bz2")
+        || lower.ends_with(".tar.xz")
+        || lower.ends_with(".tar.lz4")
         || lower.ends_with(".tar.zst")
     {
         Some(ArchiveFormat::Tar)
@@ -265,102 +280,132 @@ pub fn list_format(data: &[u8], fmt: ArchiveFormat) -> KernelResult<Vec<ArchiveE
 
 fn list_zip(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let zip_entries = crate::fs::zip::parse(data)?;
-    Ok(zip_entries.iter().map(|e| ArchiveEntry {
-        name: e.name.clone(),
-        size: e.uncompressed_size,
-        kind: if e.is_dir { EntryKind::Directory } else { EntryKind::File },
-        mtime: 0,
-        mode: 0,
-        uid: 0,
-        gid: 0,
-        link_target: PathBuf::new(),
-    }).collect())
+    Ok(zip_entries
+        .iter()
+        .map(|e| ArchiveEntry {
+            name: e.name.clone(),
+            size: e.uncompressed_size,
+            kind: if e.is_dir {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
+            mtime: 0,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            link_target: PathBuf::new(),
+        })
+        .collect())
 }
 
 fn list_tar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let tar_entries = crate::fs::tar::parse(data)?;
-    Ok(tar_entries.iter().map(|e| {
-        let kind = match e.kind {
-            crate::fs::tar::EntryKind::File => EntryKind::File,
-            crate::fs::tar::EntryKind::Directory => EntryKind::Directory,
-            crate::fs::tar::EntryKind::Symlink => EntryKind::Symlink,
-            _ => EntryKind::Other,
-        };
-        ArchiveEntry {
-            name: e.name.clone(),
-            size: e.size,
-            kind,
-            mtime: e.mtime,
-            mode: e.mode,
-            uid: e.uid,
-            gid: e.gid,
-            link_target: e.link_target.clone(),
-        }
-    }).collect())
+    Ok(tar_entries
+        .iter()
+        .map(|e| {
+            let kind = match e.kind {
+                crate::fs::tar::EntryKind::File => EntryKind::File,
+                crate::fs::tar::EntryKind::Directory => EntryKind::Directory,
+                crate::fs::tar::EntryKind::Symlink => EntryKind::Symlink,
+                _ => EntryKind::Other,
+            };
+            ArchiveEntry {
+                name: e.name.clone(),
+                size: e.size,
+                kind,
+                mtime: e.mtime,
+                mode: e.mode,
+                uid: e.uid,
+                gid: e.gid,
+                link_target: e.link_target.clone(),
+            }
+        })
+        .collect())
 }
 
 fn list_cpio(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let cpio_entries = crate::fs::cpio::uncpio(data)?;
-    Ok(cpio_entries.iter().map(|e| {
-        let kind = match e.entry_type {
-            crate::fs::cpio::CpioEntryType::File => EntryKind::File,
-            crate::fs::cpio::CpioEntryType::Directory => EntryKind::Directory,
-            crate::fs::cpio::CpioEntryType::Symlink => EntryKind::Symlink,
-            _ => EntryKind::Other,
-        };
-        ArchiveEntry {
-            name: e.name.clone(),
-            size: e.data.len() as u64,
-            kind,
-            mtime: e.mtime as u64,
-            mode: e.mode,
-            uid: e.uid,
-            gid: e.gid,
-            link_target: e.link_target.clone(),
-        }
-    }).collect())
+    Ok(cpio_entries
+        .iter()
+        .map(|e| {
+            let kind = match e.entry_type {
+                crate::fs::cpio::CpioEntryType::File => EntryKind::File,
+                crate::fs::cpio::CpioEntryType::Directory => EntryKind::Directory,
+                crate::fs::cpio::CpioEntryType::Symlink => EntryKind::Symlink,
+                _ => EntryKind::Other,
+            };
+            ArchiveEntry {
+                name: e.name.clone(),
+                size: e.data.len() as u64,
+                kind,
+                mtime: e.mtime as u64,
+                mode: e.mode,
+                uid: e.uid,
+                gid: e.gid,
+                link_target: e.link_target.clone(),
+            }
+        })
+        .collect())
 }
 
 fn list_ar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let ar_entries = crate::fs::ar::unar(data)?;
-    Ok(ar_entries.iter().map(|e| ArchiveEntry {
-        name: e.name.clone(),
-        size: e.data.len() as u64,
-        kind: EntryKind::File, // AR only has files.
-        mtime: e.mtime,
-        mode: e.mode,
-        uid: e.uid,
-        gid: e.gid,
-        link_target: PathBuf::new(),
-    }).collect())
+    Ok(ar_entries
+        .iter()
+        .map(|e| ArchiveEntry {
+            name: e.name.clone(),
+            size: e.data.len() as u64,
+            kind: EntryKind::File, // AR only has files.
+            mtime: e.mtime,
+            mode: e.mode,
+            uid: e.uid,
+            gid: e.gid,
+            link_target: PathBuf::new(),
+        })
+        .collect())
 }
 
 fn list_rar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let rar_entries = crate::fs::rar::parse(data)?;
-    Ok(rar_entries.iter().map(|e| ArchiveEntry {
-        name: e.name.clone(),
-        size: e.unpacked_size,
-        kind: if e.is_dir { EntryKind::Directory } else { EntryKind::File },
-        mtime: e.mtime as u64,
-        mode: 0,
-        uid: 0,
-        gid: 0,
-        link_target: PathBuf::new(),
-    }).collect())
+    Ok(rar_entries
+        .iter()
+        .map(|e| ArchiveEntry {
+            name: e.name.clone(),
+            size: e.unpacked_size,
+            kind: if e.is_dir {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
+            mtime: e.mtime as u64,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            link_target: PathBuf::new(),
+        })
+        .collect())
 }
 
 fn list_7z(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let entries = crate::fs::sevenz::un7z(data)?;
-    Ok(entries.iter().map(|e| ArchiveEntry {
-        name: e.name.clone(),
-        size: e.data.len() as u64,
-        kind: if e.is_dir { EntryKind::Directory } else { EntryKind::File },
-        mtime: 0,
-        mode: 0,
-        uid: 0,
-        gid: 0,
-        link_target: PathBuf::new(),
-    }).collect())
+    Ok(entries
+        .iter()
+        .map(|e| ArchiveEntry {
+            name: e.name.clone(),
+            size: e.data.len() as u64,
+            kind: if e.is_dir {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
+            mtime: 0,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            link_target: PathBuf::new(),
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -391,37 +436,49 @@ pub fn extract_one_format<N: AsRef<Path> + ?Sized>(
     match fmt {
         ArchiveFormat::Zip => {
             let entries = crate::fs::zip::parse(data)?;
-            let entry = entries.iter().find(|e| e.name.as_path() == name)
+            let entry = entries
+                .iter()
+                .find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
             crate::fs::zip::extract_entry(data, entry)
         }
         ArchiveFormat::Tar => {
             let entries = crate::fs::tar::parse(data)?;
-            let entry = entries.iter().find(|e| e.name.as_path() == name)
+            let entry = entries
+                .iter()
+                .find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
             crate::fs::tar::entry_data(data, entry).map(<[u8]>::to_vec)
         }
         ArchiveFormat::Cpio => {
             let entries = crate::fs::cpio::uncpio(data)?;
-            let entry = entries.iter().find(|e| e.name.as_path() == name)
+            let entry = entries
+                .iter()
+                .find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
             Ok(entry.data.clone())
         }
         ArchiveFormat::Ar => {
             let entries = crate::fs::ar::unar(data)?;
-            let entry = entries.iter().find(|e| e.name.as_path() == name)
+            let entry = entries
+                .iter()
+                .find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
             Ok(entry.data.clone())
         }
         ArchiveFormat::Rar => {
             let entries = crate::fs::rar::parse(data)?;
-            let entry = entries.iter().find(|e| e.name.as_path() == name)
+            let entry = entries
+                .iter()
+                .find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
             crate::fs::rar::entry_data(data, entry).map(<[u8]>::to_vec)
         }
         ArchiveFormat::SevenZ => {
             let entries = crate::fs::sevenz::un7z(data)?;
-            let entry = entries.iter().find(|e| e.name.as_path() == name)
+            let entry = entries
+                .iter()
+                .find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
             Ok(entry.data.clone())
         }
@@ -462,7 +519,8 @@ pub fn extract_all_format<D: AsRef<Path> + ?Sized>(
     let _ = Vfs::mkdir(dest);
 
     // Create directories first (sorted so parents precede children).
-    let mut dirs: Vec<&Path> = entries.iter()
+    let mut dirs: Vec<&Path> = entries
+        .iter()
         .filter(|e| e.kind == EntryKind::Directory)
         .map(|e| e.name.as_path())
         .collect();
@@ -472,14 +530,18 @@ pub fn extract_all_format<D: AsRef<Path> + ?Sized>(
         let path = match confine_under(dest, dir) {
             Ok(p) => p,
             Err(e) => {
-                result.errors.push(alloc::format!("unsafe dir {}: {:?}", dir.display(), e));
+                result
+                    .errors
+                    .push(alloc::format!("unsafe dir {}: {:?}", dir.display(), e));
                 continue;
             }
         };
         match Vfs::mkdir(&path) {
             Ok(()) => result.dirs_created = result.dirs_created.saturating_add(1),
             Err(KernelError::AlreadyExists) => {}
-            Err(e) => result.errors.push(alloc::format!("mkdir {}: {:?}", path.display(), e)),
+            Err(e) => result
+                .errors
+                .push(alloc::format!("mkdir {}: {:?}", path.display(), e)),
         }
     }
 
@@ -492,9 +554,11 @@ pub fn extract_all_format<D: AsRef<Path> + ?Sized>(
         let path = match confine_under(dest, &entry.name) {
             Ok(p) => p,
             Err(e) => {
-                result.errors.push(
-                    alloc::format!("unsafe member {}: {:?}", entry.name.display(), e),
-                );
+                result.errors.push(alloc::format!(
+                    "unsafe member {}: {:?}",
+                    entry.name.display(),
+                    e
+                ));
                 continue;
             }
         };
@@ -514,14 +578,16 @@ pub fn extract_all_format<D: AsRef<Path> + ?Sized>(
                         result.bytes_written = result.bytes_written.saturating_add(bytes);
                     }
                     Err(e) => {
-                        result.errors.push(alloc::format!("write {}: {:?}", path.display(), e));
+                        result
+                            .errors
+                            .push(alloc::format!("write {}: {:?}", path.display(), e));
                     }
                 }
             }
             Err(e) => {
-                result.errors.push(
-                    alloc::format!("extract {}: {:?}", entry.name.display(), e),
-                );
+                result
+                    .errors
+                    .push(alloc::format!("extract {}: {:?}", entry.name.display(), e));
             }
         }
     }
@@ -530,8 +596,11 @@ pub fn extract_all_format<D: AsRef<Path> + ?Sized>(
 
     serial_println!(
         "[archive] Extract ({}): {} files, {} dirs, {} bytes, {} errors",
-        fmt.label(), result.files_extracted, result.dirs_created,
-        result.bytes_written, result.errors.len(),
+        fmt.label(),
+        result.files_extracted,
+        result.dirs_created,
+        result.bytes_written,
+        result.errors.len(),
     );
 
     Ok(result)
@@ -567,7 +636,9 @@ pub fn create(fmt: ArchiveFormat, entries: &[CreateEntry]) -> KernelResult<Vec<u
 
     serial_println!(
         "[archive] Create ({}): {} entries, {} bytes",
-        fmt.label(), entries.len(), data.len(),
+        fmt.label(),
+        entries.len(),
+        data.len(),
     );
 
     Ok(data)
@@ -603,9 +674,10 @@ fn create_zip(entries: &[CreateEntry]) -> Vec<u8> {
 }
 
 fn create_tar(entries: &[CreateEntry]) -> Vec<u8> {
-    use crate::fs::tar::{TarWriteEntry, EntryKind as TarKind};
-    let tar_entries: Vec<TarWriteEntry> = entries.iter().map(|e| {
-        TarWriteEntry {
+    use crate::fs::tar::{EntryKind as TarKind, TarWriteEntry};
+    let tar_entries: Vec<TarWriteEntry> = entries
+        .iter()
+        .map(|e| TarWriteEntry {
             name: dir_member_name(&e.name, e.kind == EntryKind::Directory),
             data: e.data.clone(),
             kind: match e.kind {
@@ -619,8 +691,8 @@ fn create_tar(entries: &[CreateEntry]) -> Vec<u8> {
             gid: 0,
             mtime: 0,
             link_target: PathBuf::new(),
-        }
-    }).collect();
+        })
+        .collect();
     crate::fs::tar::create(&tar_entries)
 }
 
@@ -697,8 +769,15 @@ fn test_detect_zip() {
 fn test_detect_tar() {
     // USTAR magic at offset 257.
     let mut data = [0u8; 270];
-    data[0] = b't'; data[1] = b'e'; data[2] = b's'; data[3] = b't';
-    data[257] = b'u'; data[258] = b's'; data[259] = b't'; data[260] = b'a'; data[261] = b'r';
+    data[0] = b't';
+    data[1] = b'e';
+    data[2] = b's';
+    data[3] = b't';
+    data[257] = b'u';
+    data[258] = b's';
+    data[259] = b't';
+    data[260] = b'a';
+    data[261] = b'r';
     assert_eq!(detect(&data), Some(ArchiveFormat::Tar));
     serial_println!("[archive]   detect tar: ok");
 }
@@ -717,10 +796,16 @@ fn test_detect_ar() {
 
 fn test_detect_extension() {
     assert_eq!(detect_from_extension("file.zip"), Some(ArchiveFormat::Zip));
-    assert_eq!(detect_from_extension("file.tar.gz"), Some(ArchiveFormat::Tar));
+    assert_eq!(
+        detect_from_extension("file.tar.gz"),
+        Some(ArchiveFormat::Tar)
+    );
     assert_eq!(detect_from_extension("pkg.deb"), Some(ArchiveFormat::Ar));
     assert_eq!(detect_from_extension("data.rar"), Some(ArchiveFormat::Rar));
-    assert_eq!(detect_from_extension("data.7z"), Some(ArchiveFormat::SevenZ));
+    assert_eq!(
+        detect_from_extension("data.7z"),
+        Some(ArchiveFormat::SevenZ)
+    );
     assert_eq!(detect_from_extension("file.txt"), None);
     serial_println!("[archive]   detect extension: ok");
 }
@@ -745,7 +830,9 @@ fn test_zip_roundtrip() {
     let listed = list(&archive).expect("list zip");
     assert!(!listed.is_empty(), "should list entries");
     assert!(
-        listed.iter().any(|e| e.name.as_path() == Path::new("hello.txt")),
+        listed
+            .iter()
+            .any(|e| e.name.as_path() == Path::new("hello.txt")),
         "should find hello.txt",
     );
 
@@ -768,18 +855,18 @@ fn test_zip_roundtrip() {
 }
 
 fn test_tar_roundtrip() {
-    let entries = alloc::vec![
-        CreateEntry {
-            name: PathBuf::from("data.txt"),
-            data: b"TAR content".to_vec(),
-            kind: EntryKind::File,
-        },
-    ];
+    let entries = alloc::vec![CreateEntry {
+        name: PathBuf::from("data.txt"),
+        data: b"TAR content".to_vec(),
+        kind: EntryKind::File,
+    },];
 
     let archive = create(ArchiveFormat::Tar, &entries).expect("create tar");
     let listed = list(&archive).expect("list tar");
     assert!(
-        listed.iter().any(|e| e.name.as_path() == Path::new("data.txt")),
+        listed
+            .iter()
+            .any(|e| e.name.as_path() == Path::new("data.txt")),
         "should find data.txt",
     );
 
@@ -835,8 +922,14 @@ fn test_extract_rejects_traversal() {
     let _ = Vfs::mkdir("/tmp/archive_slip");
     let result = extract_all(&archive, dest).expect("extract");
 
-    assert_eq!(result.files_extracted, 1, "only the safe member may be written");
-    assert!(!result.errors.is_empty(), "the escaping member must be reported");
+    assert_eq!(
+        result.files_extracted, 1,
+        "only the safe member may be written"
+    );
+    assert!(
+        !result.errors.is_empty(),
+        "the escaping member must be reported"
+    );
     assert!(
         Vfs::read_file("/tmp/archive_slip/dest/good.txt").is_ok(),
         "the safe member should still extract",

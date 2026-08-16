@@ -21,143 +21,76 @@
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 
-use super::number::{
-    MAX_SYSCALL_NR, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE, SYS_CHANNEL_RECV,
-    SYS_CHANNEL_SEND, SYS_CHANNEL_TRY_RECV, SYS_CONSOLE_READ_CHAR,
-    SYS_CONSOLE_TRY_READ_CHAR,
-    SYS_CONSOLE_WRITE, SYS_CP_CLOSE, SYS_CP_CREATE, SYS_CP_NOTIFY,
-    SYS_CP_REGISTER, SYS_CP_TRY_WAIT, SYS_CP_UNREGISTER, SYS_CP_WAIT,
-    SYS_CLOCK_MONOTONIC,
-    SYS_CLOCK_REALTIME,
-    SYS_CLOCK_SETTIME,
-    SYS_CLOCK_ADJTIME,
-    SYS_DEBUG_PRINT, SYS_LOG_READ,
-    SYS_CHANNEL_SEND_BLOCKING, SYS_CHANNEL_SEND_TIMEOUT,
-    SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE,
-    SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
-    SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ,
-    SYS_EVENTFD_WRITE, SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT,
-    SYS_FS_DELETE, SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE, SYS_FS_READ_FILE,
-    SYS_FS_RMDIR, SYS_FS_STAT, SYS_FS_LINK, SYS_FS_STATVFS, SYS_FS_FLOCK,
-    SYS_FS_FUNLOCK, SYS_FS_SYNC,
-    SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE, SYS_FS_DUP, SYS_FS_HANDLE_PATH,
-    SYS_FS_READDIR_AT, SYS_FS_TMPFILE,
-    SYS_FS_FALLOCATE, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE,
-    SYS_FS_MOUNT, SYS_FS_UMOUNT, SYS_FS_FORMAT, SYS_FS_CHECK, SYS_FS_TRIM,
-    SYS_FS_WRITE_FILE,
-    SYS_FS_OPEN, SYS_FS_OPEN_MODE, SYS_FS_CLOSE, SYS_FS_READ, SYS_FS_WRITE,
-    SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
-    SYS_FS_TRASH, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRASH_EMPTY,
-    SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WATCH_CLOSE,
-    SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_READ, SYS_FS_JOURNAL_FLUSH,
-    SYS_FS_METADATA, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
-    SYS_FS_SET_TIMES, SYS_FS_GET_XATTR, SYS_FS_SET_XATTR, SYS_FS_REMOVE_XATTR,
-    SYS_FS_LIST_XATTRS,
-    SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT,
-    SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI,
-    SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT,
-    SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_CMP_REQUEUE_PI,
-    SYS_FUTEX_REQUEUE,
-    SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
-    SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
-    SYS_IRQ_WAIT, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_POLL,
-    SYS_PIPE_READ, SYS_PIPE_READABLE_BYTES,
-    SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE,
-    SYS_PORT_READ, SYS_PORT_WRITE,
-    SYS_DMA_ALLOC, SYS_DMA_FREE,
-    SYS_DMA_DOMAIN_CREATE, SYS_DMA_DOMAIN_DESTROY,
-    SYS_DMA_MAP, SYS_DMA_UNMAP,
-    SYS_DMA_ATTACH, SYS_DMA_DETACH,
-    SYS_CPU_COUNT,
-    SYS_PHYS_PAGES_TOTAL, SYS_PHYS_PAGES_AVAIL,
-    SYS_LOADAVG,
-    SYS_CPU_TIMES,
-    SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE,
-    SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE,
-    SYS_SYSCTL_GET, SYS_SYSCTL_SET,
-    SYS_MM_SET_PROFILE, SYS_MM_GET_PROFILE,
-    SYS_SYSTEM_SET_PROFILE, SYS_GETRANDOM,
-    SYS_CAP_QUERY, SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL,
-    SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT, SYS_PROCESS_ID,
-    SYS_NOTIFY_READY, SYS_PROCESS_IS_READY,
-    SYS_PROCESS_CRASH_INFO,
-    SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_INITIAL_FDS,
-    SYS_PROCESS_SET_EXEC_FDS,
-    SYS_PROCESS_PARENT_ID,
-    SYS_PROCESS_COUNT,
-    SYS_PROCESS_GET_CREDENTIALS,
-    SYS_PROCESS_SET_CREDENTIALS,
-    SYS_PROCESS_GET_NICE,
-    SYS_PROCESS_SET_NICE,
-    SYS_PROCESS_SET_PGID,
-    SYS_PROCESS_GET_PGID,
-    SYS_PROCESS_SET_SID,
-    SYS_PROCESS_GET_SID,
-    SYS_TTY_GET_PGRP,
-    SYS_TTY_SET_PGRP,
-    SYS_TTY_ACQUIRE_CTTY,
-    SYS_TTY_RELEASE_CTTY,
-    SYS_TTY_GET_TERMIOS,
-    SYS_TTY_SET_TERMIOS,
-    SYS_TTY_READ,
-    SYS_SIGNAL_REGISTER,
-    SYS_SIGNAL_SEND,
-    SYS_SIGNAL_MASK,
-    SYS_SIGNAL_PENDING,
-    SYS_SIGNAL_STOP_SELF,
-    SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX,
-    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS,
-    SYS_SET_EXCEPTION_HANDLER,
-    SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_SIZE, SYS_SHM_UNMAP,
-    SYS_SLEEP, SYS_TASK_ID,
-    SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_RECV,
-    SYS_SOCKETPAIR_TRY_SEND, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_CLOSE,
-    SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_RECV_TIMEOUT,
-    SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_SHUTDOWN,
-    SYS_TCP_ACCEPT, SYS_TCP_ABORT, SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER,
-    SYS_TCP_PEER_ADDR,
-    SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND,
-    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
-    SYS_THREAD_SUSPEND, SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY,
-    SYS_SET_FS_BASE,
-    SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
-    SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_WAIT, SYS_SEM_TRY_WAIT, SYS_SEM_CLOSE,
-    SYS_SEM_WAIT_TIMEOUT,
-    SYS_SERVICE_REGISTER, SYS_SERVICE_CONNECT, SYS_SERVICE_ACCEPT,
-    SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_UNREGISTER,
-    SYS_NS_CREATE, SYS_NS_BIND, SYS_NS_UNBIND, SYS_NS_HIDE,
-    SYS_NS_ATTACH, SYS_NS_QUERY,
-    SYS_CHANNEL_RECV_TIMEOUT,
-    SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_RECV_CAPS,
-    SYS_PIPE_READ_TIMEOUT, SYS_PIPE_WRITE_TIMEOUT,
-    SYS_PIPE_PEEK, SYS_PIPE_WAIT_READABLE,
-    SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_RECV, SYS_UDP_SEND,
-    SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE,
-    SYS_DNS_RESOLVE, SYS_DNS_REVERSE_RESOLVE,
-    SYS_NET_STAT,
-    SYS_ICMP_PING, SYS_ICMP_PING_WAIT,
-    SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_NET_IF_INFO,
-    SYS_NET_IF_CONFIG,
-    SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST,
-    SYS_NET_FW_ENABLE, SYS_NET_FW_SET_POLICY, SYS_NET_FW_ADD_RULE,
-    SYS_NET_FW_DEL_RULE, SYS_NET_FW_FLUSH,
-    SYS_NET_RAW_OPEN, SYS_NET_RAW_TX, SYS_NET_RAW_RX, SYS_NET_RAW_CLOSE,
-    SYS_ARP_TABLE, SYS_DNS_CACHE_STATS,
-    SYS_TCP_POLL_STATUS, SYS_TCP_LISTENER_READY,
-    SYS_UDP_RX_READY, SYS_UDP_RX_FRONT_BYTES,
-    SYS_TCP_SHUTDOWN, SYS_TCP_INFO,
-    SYS_TCP_SET_NODELAY, SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS,
-    SYS_TCP_LAST_ERROR, SYS_TCP_LOCAL_PORT,
-    SYS_DRM_OPEN, SYS_DRM_CLOSE, SYS_DRM_DISPLAY_SIZE,
-    SYS_DRM_GEM_CREATE, SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP,
-    SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY,
-    SYS_DRM_PAGE_FLIP, SYS_DRM_FLUSH_REGION,
-    SYS_DRM_CONNECTOR_STATUS, SYS_DRM_MODE_GET, SYS_DRM_CRTC_INFO,
-    SYS_DRM_CURSOR_SET, SYS_DRM_CURSOR_MOVE,
-    SYS_DRM_ATOMIC_COMMIT,
-    SYS_YIELD,
-};
 use super::handlers;
+use super::number::{
+    MAX_SYSCALL_NR, SYS_ARP_TABLE, SYS_CAP_QUERY, SYS_CAP_REQUEST, SYS_CAP_REQUEST_CANCEL,
+    SYS_CAP_REQUEST_STATUS, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE, SYS_CHANNEL_RECV,
+    SYS_CHANNEL_RECV_CAPS, SYS_CHANNEL_RECV_TIMEOUT, SYS_CHANNEL_SEND, SYS_CHANNEL_SEND_BLOCKING,
+    SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_SEND_TIMEOUT, SYS_CHANNEL_TRY_RECV, SYS_CLOCK_ADJTIME,
+    SYS_CLOCK_MONOTONIC, SYS_CLOCK_REALTIME, SYS_CLOCK_SETTIME, SYS_CONSOLE_READ_CHAR,
+    SYS_CONSOLE_TRY_READ_CHAR, SYS_CONSOLE_WRITE, SYS_CP_CLOSE, SYS_CP_CREATE, SYS_CP_NOTIFY,
+    SYS_CP_REGISTER, SYS_CP_TRY_WAIT, SYS_CP_UNREGISTER, SYS_CP_WAIT, SYS_CPU_COUNT, SYS_CPU_TIMES,
+    SYS_DEBUG_PRINT, SYS_DMA_ALLOC, SYS_DMA_ATTACH, SYS_DMA_DETACH, SYS_DMA_DOMAIN_CREATE,
+    SYS_DMA_DOMAIN_DESTROY, SYS_DMA_FREE, SYS_DMA_MAP, SYS_DMA_UNMAP, SYS_DNS_CACHE_STATS,
+    SYS_DNS_RESOLVE, SYS_DNS_REVERSE_RESOLVE, SYS_DRM_ATOMIC_COMMIT, SYS_DRM_CLOSE,
+    SYS_DRM_CONNECTOR_STATUS, SYS_DRM_CRTC_INFO, SYS_DRM_CURSOR_MOVE, SYS_DRM_CURSOR_SET,
+    SYS_DRM_DISPLAY_SIZE, SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY, SYS_DRM_FLUSH_REGION,
+    SYS_DRM_GEM_CREATE, SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP, SYS_DRM_MODE_GET, SYS_DRM_OPEN,
+    SYS_DRM_PAGE_FLIP, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE,
+    SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE,
+    SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT, SYS_FS_APPEND, SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY,
+    SYS_FS_DELETE, SYS_FS_DUP, SYS_FS_FALLOCATE, SYS_FS_FLOCK, SYS_FS_FORMAT, SYS_FS_FSTAT,
+    SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK, SYS_FS_GET_XATTR, SYS_FS_HANDLE_PATH, SYS_FS_JOURNAL_CURSOR,
+    SYS_FS_JOURNAL_FLUSH, SYS_FS_JOURNAL_READ, SYS_FS_LINK, SYS_FS_LIST_DIR, SYS_FS_LIST_XATTRS,
+    SYS_FS_LSTAT, SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE, SYS_FS_MOUNT, SYS_FS_OPEN,
+    SYS_FS_OPEN_MODE, SYS_FS_READ, SYS_FS_READ_FILE, SYS_FS_READDIR_AT, SYS_FS_READLINK,
+    SYS_FS_REMOVE_XATTR, SYS_FS_RENAME, SYS_FS_RMDIR, SYS_FS_SEEK, SYS_FS_SEEK_DATA,
+    SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS, SYS_FS_SET_TIMES,
+    SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS, SYS_FS_SYMLINK, SYS_FS_SYNC, SYS_FS_TMPFILE,
+    SYS_FS_TRASH, SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRIM,
+    SYS_FS_TRUNCATE, SYS_FS_UMOUNT, SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ,
+    SYS_FS_WRITE, SYS_FS_WRITE_FILE, SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI,
+    SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE, SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI,
+    SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
+    SYS_GETRANDOM, SYS_ICMP_PING, SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER,
+    SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT, SYS_LOADAVG, SYS_LOG_READ,
+    SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP,
+    SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
+    SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE, SYS_NET_RAW_OPEN,
+    SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST,
+    SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE,
+    SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL, SYS_PIPE_CLOSE,
+    SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT,
+    SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE,
+    SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_COUNT,
+    SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS,
+    SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_SID,
+    SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID,
+    SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE,
+    SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX,
+    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_SCHED_GET_PROFILE,
+    SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE,
+    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
+    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
+    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
+    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
+    SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_REGISTER,
+    SYS_SIGNAL_SEND, SYS_SIGNAL_STOP_SELF, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE,
+    SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
+    SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
+    SYS_SOCKETPAIR_SHUTDOWN, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET,
+    SYS_SYSCTL_SET, SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT,
+    SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO,
+    SYS_TCP_LAST_ERROR, SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY,
+    SYS_TCP_LOCAL_PORT, SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND,
+    SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN,
+    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_RESUME,
+    SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
+    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
+    SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
+    SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV,
+    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_YIELD,
+};
 use crate::drm::syscall as drm_handlers;
 
 // ---------------------------------------------------------------------------
@@ -210,13 +143,21 @@ impl SyscallResult {
     /// Success with a single return value.
     #[must_use]
     pub const fn ok(value: i64) -> Self {
-        Self { value, value2: 0, has_value2: false }
+        Self {
+            value,
+            value2: 0,
+            has_value2: false,
+        }
     }
 
     /// Success returning two values (`value` in `rax`, `value2` in `rdx`).
     #[must_use]
     pub const fn ok2(value: i64, value2: i64) -> Self {
-        Self { value, value2, has_value2: true }
+        Self {
+            value,
+            value2,
+            has_value2: true,
+        }
     }
 
     /// Error result.
@@ -278,8 +219,7 @@ struct SyscallTable {
 /// lint because the const context requires `as usize`.
 #[allow(clippy::cast_possible_truncation)]
 const fn build_v1_table() -> SyscallTable {
-    let mut handlers: [Option<SyscallHandler>; MAX_SYSCALL_NR] =
-        [None; MAX_SYSCALL_NR];
+    let mut handlers: [Option<SyscallHandler>; MAX_SYSCALL_NR] = [None; MAX_SYSCALL_NR];
 
     // Kernel-core (0–199)
     handlers[SYS_YIELD as usize] = Some(handlers::sys_yield);
@@ -373,10 +313,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SOCKETPAIR_TRY_SEND as usize] = Some(handlers::sys_socketpair_try_send);
     handlers[SYS_SOCKETPAIR_TRY_RECV as usize] = Some(handlers::sys_socketpair_try_recv);
     handlers[SYS_SOCKETPAIR_CLOSE as usize] = Some(handlers::sys_socketpair_close);
-    handlers[SYS_SOCKETPAIR_SEND_TIMEOUT as usize] =
-        Some(handlers::sys_socketpair_send_timeout);
-    handlers[SYS_SOCKETPAIR_RECV_TIMEOUT as usize] =
-        Some(handlers::sys_socketpair_recv_timeout);
+    handlers[SYS_SOCKETPAIR_SEND_TIMEOUT as usize] = Some(handlers::sys_socketpair_send_timeout);
+    handlers[SYS_SOCKETPAIR_RECV_TIMEOUT as usize] = Some(handlers::sys_socketpair_recv_timeout);
     handlers[SYS_SOCKETPAIR_POLL as usize] = Some(handlers::sys_socketpair_poll);
     handlers[SYS_SOCKETPAIR_READABLE_BYTES as usize] =
         Some(handlers::sys_socketpair_readable_bytes);
@@ -719,7 +657,8 @@ pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
     } else {
         serial_println!(
             "[syscall] Unimplemented syscall {} (v{})",
-            nr, V1_TABLE.version
+            nr,
+            V1_TABLE.version
         );
         SyscallResult::err(KernelError::NotSupported)
     };
@@ -775,11 +714,18 @@ enum IoDir {
 /// bump `syscw` without a matching `wchar` — dishonest undercounting.
 const fn io_dir_for_syscall(nr: u64) -> Option<IoDir> {
     match nr {
-        SYS_FS_READ | SYS_FS_READ_FILE | SYS_PIPE_READ | SYS_PIPE_TRY_READ
-        | SYS_PIPE_READ_TIMEOUT | SYS_CONSOLE_READ_CHAR
+        SYS_FS_READ
+        | SYS_FS_READ_FILE
+        | SYS_PIPE_READ
+        | SYS_PIPE_TRY_READ
+        | SYS_PIPE_READ_TIMEOUT
+        | SYS_CONSOLE_READ_CHAR
         | SYS_CONSOLE_TRY_READ_CHAR => Some(IoDir::Read),
-        SYS_FS_WRITE | SYS_PIPE_WRITE | SYS_PIPE_TRY_WRITE
-        | SYS_PIPE_WRITE_TIMEOUT | SYS_CONSOLE_WRITE => Some(IoDir::Write),
+        SYS_FS_WRITE
+        | SYS_PIPE_WRITE
+        | SYS_PIPE_TRY_WRITE
+        | SYS_PIPE_WRITE_TIMEOUT
+        | SYS_CONSOLE_WRITE => Some(IoDir::Write),
         _ => None,
     }
 }
@@ -844,7 +790,14 @@ pub fn current_version() -> u32 {
 ///
 /// Returns `InternalError` if a live-filter dispatch is refused.
 pub fn verify_dispatch_under_filtering() -> KernelResult<()> {
-    let args = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let args = SyscallArgs {
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
     let r = dispatch(SYS_SIGNAL_STOP_SELF, &args);
 
     if r.value == i64::from(KernelError::PermissionDenied.code()) {
@@ -860,14 +813,16 @@ pub fn verify_dispatch_under_filtering() -> KernelResult<()> {
     if r.value != i64::from(KernelError::InvalidArgument.code()) {
         serial_println!(
             "[syscall]   FAIL: syscall {} under live filtering returned {}, expected InvalidArgument",
-            SYS_SIGNAL_STOP_SELF, r.value
+            SYS_SIGNAL_STOP_SELF,
+            r.value
         );
         return Err(KernelError::InternalError);
     }
 
     serial_println!(
         "[syscall] Top-of-range dispatch under live filtering (nr {} of {}): OK",
-        SYS_SIGNAL_STOP_SELF, MAX_SYSCALL_NR
+        SYS_SIGNAL_STOP_SELF,
+        MAX_SYSCALL_NR
     );
     Ok(())
 }
@@ -918,7 +873,12 @@ pub fn self_test() -> KernelResult<()> {
 /// with its own boot self-tests and real glibc RELRO usage — also runs.
 fn test_dispatch_mprotect_native() -> KernelResult<()> {
     let mk = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
-        arg0, arg1, arg2, arg3: 0, arg4: 0, arg5: 0,
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
 
     // (a) Misaligned address → InvalidArgument (EINVAL), and NOT
@@ -939,7 +899,10 @@ fn test_dispatch_mprotect_native() -> KernelResult<()> {
     // (b) Zero length → success (0), no work.
     let r = dispatch(SYS_MPROTECT, &mk(0x1000, 0, 0x1));
     if r.value != 0 {
-        serial_println!("[syscall]   FAIL: native mprotect len=0 returned {}, expected 0", r.value);
+        serial_println!(
+            "[syscall]   FAIL: native mprotect len=0 returned {}, expected 0",
+            r.value
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -999,7 +962,12 @@ fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
     use crate::proc::pcb;
 
     let mk = |arg0: u64, arg1: u64| SyscallArgs {
-        arg0, arg1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     // Negative group targets travel in the `arg0` slot as their two's
     // complement bit pattern, which is what the handler reads back as i64.
@@ -1081,7 +1049,10 @@ fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
     if dispatch(SYS_PROCESS_SET_PGID, &mk(child, NO_GROUP)).value
         != i64::from(KernelError::PermissionDenied.code())
     {
-        return fail("setpgid into a nonexistent group should be PermissionDenied", &live);
+        return fail(
+            "setpgid into a nonexistent group should be PermissionDenied",
+            &live,
+        );
     }
 
     // (5) Argument gates. A negative pid is not a PID: `setpgid` reports it
@@ -1112,12 +1083,18 @@ fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
     if dispatch(SYS_PROCESS_GET_PGID, &mk(0, 0)).value
         != i64::from(KernelError::NoSuchProcess.code())
     {
-        return fail("getpgid(0) with no owning process should be NoSuchProcess", &live);
+        return fail(
+            "getpgid(0) with no owning process should be NoSuchProcess",
+            &live,
+        );
     }
     if dispatch(SYS_PROCESS_SET_SID, &mk(0, 0)).value
         != i64::from(KernelError::NoSuchProcess.code())
     {
-        return fail("setsid() with no owning process should be NoSuchProcess", &live);
+        return fail(
+            "setsid() with no owning process should be NoSuchProcess",
+            &live,
+        );
     }
 
     // (7) `kill(-pgid, 0)`: a live group is reachable through the *native*
@@ -1138,13 +1115,17 @@ fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
     if dispatch(SYS_SIGNAL_SEND, &mk(minus_one, 0)).value
         != i64::from(KernelError::NoSuchProcess.code())
     {
-        return fail("kill(-1, 0) should be NoSuchProcess (broadcast unmodelled)", &live);
+        return fail(
+            "kill(-1, 0) should be NoSuchProcess (broadcast unmodelled)",
+            &live,
+        );
     }
     // `kill(0, ..)` means "my own group" — unresolvable here, so ESRCH.
-    if dispatch(SYS_SIGNAL_SEND, &mk(0, 0)).value
-        != i64::from(KernelError::NoSuchProcess.code())
-    {
-        return fail("kill(0, 0) with no owning process should be NoSuchProcess", &live);
+    if dispatch(SYS_SIGNAL_SEND, &mk(0, 0)).value != i64::from(KernelError::NoSuchProcess.code()) {
+        return fail(
+            "kill(0, 0) with no owning process should be NoSuchProcess",
+            &live,
+        );
     }
 
     // (8) Ordering: target resolution precedes signal validation. The same
@@ -1154,19 +1135,23 @@ fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
     if dispatch(SYS_SIGNAL_SEND, &mk(neg(child_i), 999)).value
         != i64::from(KernelError::InvalidArgument.code())
     {
-        return fail("bad signal at a live group should be InvalidArgument", &live);
+        return fail(
+            "bad signal at a live group should be InvalidArgument",
+            &live,
+        );
     }
     if dispatch(SYS_SIGNAL_SEND, &mk(neg(NO_GROUP_I), 999)).value
         != i64::from(KernelError::NoSuchProcess.code())
     {
-        return fail("bad signal at a dead group should be NoSuchProcess (ESRCH first)", &live);
+        return fail(
+            "bad signal at a dead group should be NoSuchProcess (ESRCH first)",
+            &live,
+        );
     }
 
     pcb::destroy(child);
     pcb::destroy(parent);
-    serial_println!(
-        "[syscall]   Native process groups (533-536) + kill(-pgid) ordering: OK"
-    );
+    serial_println!("[syscall]   Native process groups (533-536) + kill(-pgid) ordering: OK");
     Ok(())
 }
 
@@ -1184,7 +1169,12 @@ fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
 /// syscall number was never registered.
 fn test_dispatch_ctty_syscalls() -> KernelResult<()> {
     let mk = |arg0: u64| SyscallArgs {
-        arg0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     fn fail(msg: &str) -> KernelResult<()> {
         serial_println!("[syscall]   FAIL: ctty: {}", msg);
@@ -1261,7 +1251,12 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
     //     This also proves both numbers are registered: an unregistered
     //     number reports NotSupported.
     let null_args = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     for (nr, name) in [
         (SYS_TTY_GET_TERMIOS, "SYS_TTY_GET_TERMIOS"),
@@ -1340,7 +1335,7 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
 fn test_dispatch_tty_job_control() -> KernelResult<()> {
     use crate::proc::pcb;
     use crate::proc::signal::{self, SIGTTIN, SIGTTOU};
-    use crate::syscall::handlers::{tty_job_control_decide, TtyAccessDecision};
+    use crate::syscall::handlers::{TtyAccessDecision, tty_job_control_decide};
 
     fn fail(msg: &str, pids: &[u64]) -> KernelResult<()> {
         serial_println!("[syscall]   FAIL: tty job control: {}", msg);
@@ -1398,10 +1393,16 @@ fn test_dispatch_tty_job_control() -> KernelResult<()> {
     let blocked_write = tty_job_control_decide(job, SIGTTOU);
     let _ = signal::set_blocked(job, saved_mask);
     if blocked_read != TtyAccessDecision::Fail(KernelError::IoError) {
-        return fail("a background read with SIGTTIN blocked should be EIO", &cleanup);
+        return fail(
+            "a background read with SIGTTIN blocked should be EIO",
+            &cleanup,
+        );
     }
     if blocked_write != TtyAccessDecision::Allow {
-        return fail("a background write with SIGTTOU blocked should be allowed", &cleanup);
+        return fail(
+            "a background write with SIGTTOU blocked should be allowed",
+            &cleanup,
+        );
     }
 
     // (4) Orphan the job's group by removing its only guardian. The shell is
@@ -1420,11 +1421,17 @@ fn test_dispatch_tty_job_control() -> KernelResult<()> {
     //     nothing about the terminal changed, only the guardian went away.
     pcb::destroy(shell);
     if !pcb::pgrp_is_orphaned(job) {
-        return fail("the job's group was not orphaned by its parent's exit", &[job]);
+        return fail(
+            "the job's group was not orphaned by its parent's exit",
+            &[job],
+        );
     }
     for sig in [SIGTTIN, SIGTTOU] {
         if tty_job_control_decide(job, sig) != TtyAccessDecision::Fail(KernelError::IoError) {
-            return fail("an orphaned background group was not refused with EIO", &[job]);
+            return fail(
+                "an orphaned background group was not refused with EIO",
+                &[job],
+            );
         }
     }
 
@@ -1469,7 +1476,12 @@ fn test_dispatch_wait_process_group_filter() -> KernelResult<()> {
     use crate::proc::pcb;
 
     let mk = |arg0: u64| SyscallArgs {
-        arg0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     #[allow(clippy::cast_sign_loss)]
     let neg = |pid: i64| -> u64 { -pid as u64 };
@@ -1492,7 +1504,10 @@ fn test_dispatch_wait_process_group_filter() -> KernelResult<()> {
     let child_a = pcb::create("waitpg-a", 0);
     let child_b = pcb::create("waitpg-b", 0);
     if child_a >= child_b {
-        return fail("expected ascending PIDs for the ordering check", &[child_a, child_b]);
+        return fail(
+            "expected ascending PIDs for the ordering check",
+            &[child_a, child_b],
+        );
     }
     let both = [child_a, child_b];
     for (pid, tid, code) in [(child_a, 9970_u64, 11_i32), (child_b, 9971, 22)] {
@@ -1521,7 +1536,10 @@ fn test_dispatch_wait_process_group_filter() -> KernelResult<()> {
     #[allow(clippy::cast_possible_wrap)]
     let child_b_i = child_b as i64;
     if dispatch(SYS_PROCESS_TRY_WAIT, &mk(neg(child_b_i))).value != 22 {
-        return fail("wait(-pgid_b) should reap child_b, not the lowest-PID child", &both);
+        return fail(
+            "wait(-pgid_b) should reap child_b, not the lowest-PID child",
+            &both,
+        );
     }
 
     // (3) The filter is still restricting after a successful reap: child_a
@@ -1529,7 +1547,10 @@ fn test_dispatch_wait_process_group_filter() -> KernelResult<()> {
     if dispatch(SYS_PROCESS_TRY_WAIT, &mk(neg(NO_GROUP_I))).value
         != i64::from(KernelError::NoChildProcess.code())
     {
-        return fail("empty group should still be NoChildProcess with a zombie pending", &[child_a]);
+        return fail(
+            "empty group should still be NoChildProcess with a zombie pending",
+            &[child_a],
+        );
     }
 
     // (4) child_a's own group reaps child_a, leaving nothing behind.
@@ -1584,7 +1605,12 @@ fn test_dispatch_wait_status_reports_job_control() -> KernelResult<()> {
     const SIGTSTP: u32 = 20;
 
     let mk = |arg0: u64, arg1: u64| SyscallArgs {
-        arg0, arg1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
 
     fn fail(msg: &str, pids: &[u64]) -> KernelResult<()> {
@@ -1621,7 +1647,10 @@ fn test_dispatch_wait_status_reports_job_control() -> KernelResult<()> {
 
     // (b) Running child, nothing to report → 0, not an error.
     if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(child_arg, WNOHANG)).value != 0 {
-        return fail("a running child with no transition should be a WNOHANG miss", &one);
+        return fail(
+            "a running child with no transition should be a WNOHANG miss",
+            &one,
+        );
     }
 
     // (c) A stop the caller did not ask about is invisible. This is the
@@ -1651,7 +1680,13 @@ fn test_dispatch_wait_status_reports_job_control() -> KernelResult<()> {
     if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(child_arg, WNOHANG | WUNTRACED)).value != 0 {
         return fail("WUNTRACED must not report a continue", &one);
     }
-    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(child_arg, WNOHANG | WCONTINUED)).value != child_i {
+    if dispatch(
+        SYS_PROCESS_WAIT_STATUS,
+        &mk(child_arg, WNOHANG | WCONTINUED),
+    )
+    .value
+        != child_i
+    {
         return fail("WCONTINUED should report the resumed child", &one);
     }
 
@@ -1702,7 +1737,12 @@ fn test_dispatch_wait_status_reports_job_control() -> KernelResult<()> {
 /// the stop and send the `SIGCONT`.
 fn test_dispatch_signal_stop_self_rejects_non_stop_signals() -> KernelResult<()> {
     let mk = |arg0: u64| SyscallArgs {
-        arg0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
 
     // 0 (the existence-probe signal), 9 (SIGKILL — fatal, not a stop),
@@ -1721,7 +1761,8 @@ fn test_dispatch_signal_stop_self_rejects_non_stop_signals() -> KernelResult<()>
         if r.value != i64::from(KernelError::InvalidArgument.code()) {
             serial_println!(
                 "[syscall]   FAIL: signal_stop_self({}) returned {}, expected InvalidArgument",
-                sig, r.value
+                sig,
+                r.value
             );
             return Err(KernelError::InternalError);
         }
@@ -1738,8 +1779,13 @@ fn test_dispatch_signal_stop_self_rejects_non_stop_signals() -> KernelResult<()>
 fn test_io_dir_classification() -> KernelResult<()> {
     // Reads.
     for nr in [
-        SYS_FS_READ, SYS_FS_READ_FILE, SYS_PIPE_READ, SYS_PIPE_TRY_READ,
-        SYS_PIPE_READ_TIMEOUT, SYS_CONSOLE_READ_CHAR, SYS_CONSOLE_TRY_READ_CHAR,
+        SYS_FS_READ,
+        SYS_FS_READ_FILE,
+        SYS_PIPE_READ,
+        SYS_PIPE_TRY_READ,
+        SYS_PIPE_READ_TIMEOUT,
+        SYS_CONSOLE_READ_CHAR,
+        SYS_CONSOLE_TRY_READ_CHAR,
     ] {
         if io_dir_for_syscall(nr) != Some(IoDir::Read) {
             serial_println!("[syscall]   FAIL: nr {} not classified as Read", nr);
@@ -1748,7 +1794,10 @@ fn test_io_dir_classification() -> KernelResult<()> {
     }
     // Writes.
     for nr in [
-        SYS_FS_WRITE, SYS_PIPE_WRITE, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE_TIMEOUT,
+        SYS_FS_WRITE,
+        SYS_PIPE_WRITE,
+        SYS_PIPE_TRY_WRITE,
+        SYS_PIPE_WRITE_TIMEOUT,
         SYS_CONSOLE_WRITE,
     ] {
         if io_dir_for_syscall(nr) != Some(IoDir::Write) {
@@ -1770,8 +1819,12 @@ fn test_io_dir_classification() -> KernelResult<()> {
 
 fn test_dispatch_yield() -> KernelResult<()> {
     let args = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0,
-        arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let result = dispatch(SYS_YIELD, &args);
     if result.value != 0 {
@@ -1784,8 +1837,12 @@ fn test_dispatch_yield() -> KernelResult<()> {
 
 fn test_dispatch_task_id() -> KernelResult<()> {
     let args = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0,
-        arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let result = dispatch(SYS_TASK_ID, &args);
     let current = crate::sched::current_task_id();
@@ -1796,7 +1853,8 @@ fn test_dispatch_task_id() -> KernelResult<()> {
     if result.value != expected {
         serial_println!(
             "[syscall]   FAIL: task_id returned {}, expected {}",
-            result.value, expected
+            result.value,
+            expected
         );
         return Err(KernelError::InternalError);
     }
@@ -1806,8 +1864,12 @@ fn test_dispatch_task_id() -> KernelResult<()> {
 
 fn test_dispatch_unimplemented() -> KernelResult<()> {
     let args = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0,
-        arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     // Use a known-undefined number in kernel-core range (95 is unallocated).
     let result = dispatch(95, &args);
@@ -1824,8 +1886,12 @@ fn test_dispatch_unimplemented() -> KernelResult<()> {
 
 fn test_dispatch_out_of_range() -> KernelResult<()> {
     let args = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0,
-        arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let result = dispatch(9999, &args);
     if result.value != i64::from(KernelError::InvalidArgument.code()) {
@@ -1843,15 +1909,16 @@ fn test_dispatch_out_of_range() -> KernelResult<()> {
 fn test_dispatch_channel_roundtrip() -> KernelResult<()> {
     // Create a channel via syscall.
     let args = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0,
-        arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let result = dispatch(SYS_CHANNEL_CREATE, &args);
     if result.value < 0 {
-        serial_println!(
-            "[syscall]   FAIL: channel_create returned {}",
-            result.value
-        );
+        serial_println!("[syscall]   FAIL: channel_create returned {}", result.value);
         return Err(KernelError::InternalError);
     }
 
@@ -1869,7 +1936,9 @@ fn test_dispatch_channel_roundtrip() -> KernelResult<()> {
         arg0: ep0_raw,
         arg1: msg_data.as_ptr() as u64,
         arg2: msg_data.len() as u64,
-        arg3: 0, arg4: 0, arg5: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let send_result = dispatch(SYS_CHANNEL_SEND, &send_args);
     if send_result.value != 0 {
@@ -1886,7 +1955,9 @@ fn test_dispatch_channel_roundtrip() -> KernelResult<()> {
         arg0: ep1_raw,
         arg1: recv_buf.as_mut_ptr() as u64,
         arg2: recv_buf.len() as u64,
-        arg3: 0, arg4: 0, arg5: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let recv_result = dispatch(SYS_CHANNEL_TRY_RECV, &recv_args);
     if recv_result.value != 2 {
@@ -1906,13 +1977,21 @@ fn test_dispatch_channel_roundtrip() -> KernelResult<()> {
     // Close both endpoints via syscall.
     let close0_args = SyscallArgs {
         arg0: ep0_raw,
-        arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     dispatch(SYS_CHANNEL_CLOSE, &close0_args);
 
     let close1_args = SyscallArgs {
         arg0: ep1_raw,
-        arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     dispatch(SYS_CHANNEL_CLOSE, &close1_args);
 
@@ -1923,8 +2002,12 @@ fn test_dispatch_channel_roundtrip() -> KernelResult<()> {
 /// Test clock_monotonic syscall returns a non-negative nanosecond value.
 fn test_dispatch_clock_monotonic() -> KernelResult<()> {
     let args = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0,
-        arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let result = dispatch(SYS_CLOCK_MONOTONIC, &args);
     if result.value < 0 {
@@ -1967,7 +2050,12 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
     // that loop until a count is exhausted must not have to special-case the
     // final iteration.
     let zero_len = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let result = dispatch(SYS_GETRANDOM, &zero_len);
     if result.value != 0 {
@@ -1980,7 +2068,12 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
 
     // Null pointer with a nonzero length is an error, not a silent no-op.
     let null_buf = SyscallArgs {
-        arg0: 0, arg1: 16, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 16,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     if dispatch(SYS_GETRANDOM, &null_buf).value >= 0 {
         serial_println!("[syscall]   FAIL: getrandom(NULL, 16) did not fail");
@@ -1996,7 +2089,10 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
     let good = SyscallArgs {
         arg0: sink.as_mut_ptr() as u64,
         arg1: 32,
-        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let result = dispatch(SYS_GETRANDOM, &good);
     if result.value != 32 {
@@ -2020,7 +2116,10 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
     let good2 = SyscallArgs {
         arg0: second.as_mut_ptr() as u64,
         arg1: 32,
-        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     if dispatch(SYS_GETRANDOM, &good2).value != 32 {
         serial_println!("[syscall]   FAIL: second getrandom draw did not return 32");
@@ -2042,15 +2141,16 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
 /// (error) returns.
 fn test_dispatch_clock_realtime() -> KernelResult<()> {
     let args = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0,
-        arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let result = dispatch(SYS_CLOCK_REALTIME, &args);
     if result.value < 0 {
-        serial_println!(
-            "[syscall]   FAIL: clock_realtime returned {}",
-            result.value
-        );
+        serial_println!("[syscall]   FAIL: clock_realtime returned {}", result.value);
         return Err(KernelError::InternalError);
     }
     serial_println!(
@@ -2069,14 +2169,23 @@ fn test_dispatch_clock_realtime() -> KernelResult<()> {
 /// backwards; when uninitialized it must reject with an error.
 fn test_dispatch_clock_settime() -> KernelResult<()> {
     let read = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let before = dispatch(SYS_CLOCK_REALTIME, &read).value;
 
     let set = SyscallArgs {
         #[allow(clippy::cast_sign_loss)]
         arg0: before.max(0) as u64,
-        arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let result = dispatch(SYS_CLOCK_SETTIME, &set);
 
@@ -2093,7 +2202,8 @@ fn test_dispatch_clock_settime() -> KernelResult<()> {
         if after < before {
             serial_println!(
                 "[syscall]   FAIL: clock_settime moved time backwards ({} -> {})",
-                before, after
+                before,
+                after
             );
             return Err(KernelError::InternalError);
         }
@@ -2122,12 +2232,22 @@ fn test_dispatch_clock_adjtime() -> KernelResult<()> {
     const STEP_NS: u64 = 1_000_000; // 1 ms
 
     let read = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let before = dispatch(SYS_CLOCK_REALTIME, &read).value;
 
     let forward = SyscallArgs {
-        arg0: STEP_NS, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg0: STEP_NS,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let result = dispatch(SYS_CLOCK_ADJTIME, &forward);
 
@@ -2146,14 +2266,19 @@ fn test_dispatch_clock_adjtime() -> KernelResult<()> {
         let restore = SyscallArgs {
             // -STEP_NS reinterpreted as u64 (inverse of the forward step).
             arg0: (STEP_NS as i64).wrapping_neg() as u64,
-            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
         };
         let _ = dispatch(SYS_CLOCK_ADJTIME, &restore);
 
         if after < before {
             serial_println!(
                 "[syscall]   FAIL: clock_adjtime moved time backwards ({} -> {})",
-                before, after
+                before,
+                after
             );
             return Err(KernelError::InternalError);
         }
@@ -2177,14 +2302,14 @@ fn test_dispatch_console_write() -> KernelResult<()> {
     let args = SyscallArgs {
         arg0: msg.as_ptr() as u64,
         arg1: msg.len() as u64,
-        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let result = dispatch(SYS_CONSOLE_WRITE, &args);
     if result.value < 0 {
-        serial_println!(
-            "[syscall]   FAIL: console_write returned {}",
-            result.value
-        );
+        serial_println!("[syscall]   FAIL: console_write returned {}", result.value);
         return Err(KernelError::InternalError);
     }
     #[allow(clippy::cast_possible_wrap)]
@@ -2192,7 +2317,8 @@ fn test_dispatch_console_write() -> KernelResult<()> {
     if result.value != expected_len {
         serial_println!(
             "[syscall]   FAIL: console_write returned {}, expected {}",
-            result.value, expected_len
+            result.value,
+            expected_len
         );
         return Err(KernelError::InternalError);
     }
@@ -2215,7 +2341,8 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
         arg1: test_path.len() as u64,
         arg2: test_data.as_ptr() as u64,
         arg3: test_data.len() as u64,
-        arg4: 0, arg5: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let write_result = dispatch(SYS_FS_WRITE_FILE, &write_args);
     if write_result.value < 0 {
@@ -2234,7 +2361,8 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
         arg1: test_path.len() as u64,
         arg2: read_buf.as_mut_ptr() as u64,
         arg3: read_buf.len() as u64,
-        arg4: 0, arg5: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let read_result = dispatch(SYS_FS_READ_FILE, &read_args);
     #[allow(clippy::cast_possible_wrap)]
@@ -2242,7 +2370,8 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
     if read_result.value != expected_len {
         serial_println!(
             "[syscall]   FAIL: read_file returned {}, expected {}",
-            read_result.value, expected_len
+            read_result.value,
+            expected_len
         );
         return Err(KernelError::InternalError);
     }
@@ -2257,34 +2386,37 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
         arg0: test_path.as_ptr() as u64,
         arg1: test_path.len() as u64,
         arg2: stat_buf.as_mut_ptr() as u64,
-        arg3: 0, arg4: 0, arg5: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let stat_result = dispatch(SYS_FS_STAT, &stat_args);
     if stat_result.value != 0 {
-        serial_println!(
-            "[syscall]   FAIL: stat returned {}",
-            stat_result.value
-        );
+        serial_println!("[syscall]   FAIL: stat returned {}", stat_result.value);
         return Err(KernelError::InternalError);
     }
     // Verify size field (bytes 0-7, u64 LE).
     let stat_size = u64::from_le_bytes([
-        stat_buf[0], stat_buf[1], stat_buf[2], stat_buf[3],
-        stat_buf[4], stat_buf[5], stat_buf[6], stat_buf[7],
+        stat_buf[0],
+        stat_buf[1],
+        stat_buf[2],
+        stat_buf[3],
+        stat_buf[4],
+        stat_buf[5],
+        stat_buf[6],
+        stat_buf[7],
     ]);
     if stat_size != test_data.len() as u64 {
         serial_println!(
             "[syscall]   FAIL: stat size {} != expected {}",
-            stat_size, test_data.len()
+            stat_size,
+            test_data.len()
         );
         return Err(KernelError::InternalError);
     }
     // Verify type field (byte 8): 0=file.
     if stat_buf[8] != 0 {
-        serial_println!(
-            "[syscall]   FAIL: stat type {} != 0 (file)",
-            stat_buf[8]
-        );
+        serial_println!("[syscall]   FAIL: stat type {} != 0 (file)", stat_buf[8]);
         return Err(KernelError::InternalError);
     }
 
@@ -2292,14 +2424,14 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
     let delete_args = SyscallArgs {
         arg0: test_path.as_ptr() as u64,
         arg1: test_path.len() as u64,
-        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let delete_result = dispatch(SYS_FS_DELETE, &delete_args);
     if delete_result.value != 0 {
-        serial_println!(
-            "[syscall]   FAIL: delete returned {}",
-            delete_result.value
-        );
+        serial_println!("[syscall]   FAIL: delete returned {}", delete_result.value);
         return Err(KernelError::InternalError);
     }
 
@@ -2308,14 +2440,14 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
     let mkdir_args = SyscallArgs {
         arg0: dir_path.as_ptr() as u64,
         arg1: dir_path.len() as u64,
-        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let mkdir_result = dispatch(SYS_FS_MKDIR, &mkdir_args);
     if mkdir_result.value != 0 {
-        serial_println!(
-            "[syscall]   FAIL: mkdir returned {}",
-            mkdir_result.value
-        );
+        serial_println!("[syscall]   FAIL: mkdir returned {}", mkdir_result.value);
         return Err(KernelError::InternalError);
     }
 
@@ -2324,7 +2456,9 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
         arg0: dir_path.as_ptr() as u64,
         arg1: dir_path.len() as u64,
         arg2: stat_buf.as_mut_ptr() as u64,
-        arg3: 0, arg4: 0, arg5: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let stat_dir_result = dispatch(SYS_FS_STAT, &stat_dir_args);
     if stat_dir_result.value != 0 {
@@ -2336,10 +2470,7 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
     }
     // Type should be 1 (directory).
     if stat_buf[8] != 1 {
-        serial_println!(
-            "[syscall]   FAIL: stat dir type {} != 1",
-            stat_buf[8]
-        );
+        serial_println!("[syscall]   FAIL: stat dir type {} != 1", stat_buf[8]);
         return Err(KernelError::InternalError);
     }
 
@@ -2351,14 +2482,12 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
         arg1: root_path.len() as u64,
         arg2: list_buf.as_mut_ptr() as u64,
         arg3: list_buf.len() as u64,
-        arg4: 0, arg5: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let list_result = dispatch(SYS_FS_LIST_DIR, &list_args);
     if list_result.value < 0 {
-        serial_println!(
-            "[syscall]   FAIL: list_dir returned {}",
-            list_result.value
-        );
+        serial_println!("[syscall]   FAIL: list_dir returned {}", list_result.value);
         return Err(KernelError::InternalError);
     }
 
@@ -2366,17 +2495,19 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
     let rmdir_args = SyscallArgs {
         arg0: dir_path.as_ptr() as u64,
         arg1: dir_path.len() as u64,
-        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
     let rmdir_result = dispatch(SYS_FS_RMDIR, &rmdir_args);
     if rmdir_result.value != 0 {
-        serial_println!(
-            "[syscall]   FAIL: rmdir returned {}",
-            rmdir_result.value
-        );
+        serial_println!("[syscall]   FAIL: rmdir returned {}", rmdir_result.value);
         return Err(KernelError::InternalError);
     }
 
-    serial_println!("[syscall]   Dispatch FS roundtrip: OK (write/read/stat/delete/mkdir/listdir/rmdir)");
+    serial_println!(
+        "[syscall]   Dispatch FS roundtrip: OK (write/read/stat/delete/mkdir/listdir/rmdir)"
+    );
     Ok(())
 }

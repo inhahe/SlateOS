@@ -326,10 +326,18 @@ pub fn handle_scancode() {
 fn handle_normal(code: u8, pressed: bool) {
     match code {
         // Modifier keys — update state, no character output.
-        0x2A => { LEFT_SHIFT.store(pressed, Ordering::Release); }
-        0x36 => { RIGHT_SHIFT.store(pressed, Ordering::Release); }
-        0x1D => { LEFT_CTRL.store(pressed, Ordering::Release); }
-        0x38 => { LEFT_ALT.store(pressed, Ordering::Release); }
+        0x2A => {
+            LEFT_SHIFT.store(pressed, Ordering::Release);
+        }
+        0x36 => {
+            RIGHT_SHIFT.store(pressed, Ordering::Release);
+        }
+        0x1D => {
+            LEFT_CTRL.store(pressed, Ordering::Release);
+        }
+        0x38 => {
+            LEFT_ALT.store(pressed, Ordering::Release);
+        }
         0x3A => {
             // Caps Lock toggles on press only.
             if pressed {
@@ -352,8 +360,12 @@ fn handle_normal(code: u8, pressed: bool) {
 fn handle_extended(code: u8, pressed: bool) {
     match code {
         // Extended modifier keys.
-        0x1D => { RIGHT_CTRL.store(pressed, Ordering::Release); }
-        0x38 => { RIGHT_ALT.store(pressed, Ordering::Release); }
+        0x1D => {
+            RIGHT_CTRL.store(pressed, Ordering::Release);
+        }
+        0x38 => {
+            RIGHT_ALT.store(pressed, Ordering::Release);
+        }
         _ => {
             // Only produce characters on key press.
             if pressed {
@@ -370,11 +382,9 @@ fn handle_extended(code: u8, pressed: bool) {
 /// Returns `None` for keys that don't produce visible characters
 /// (function keys, modifier keys handled elsewhere, etc.).
 fn scancode_to_ascii(code: u8) -> Option<u8> {
-    let shift = LEFT_SHIFT.load(Ordering::Acquire)
-        || RIGHT_SHIFT.load(Ordering::Acquire);
+    let shift = LEFT_SHIFT.load(Ordering::Acquire) || RIGHT_SHIFT.load(Ordering::Acquire);
     let caps = CAPS_LOCK.load(Ordering::Acquire);
-    let ctrl = LEFT_CTRL.load(Ordering::Acquire)
-        || RIGHT_CTRL.load(Ordering::Acquire);
+    let ctrl = LEFT_CTRL.load(Ordering::Acquire) || RIGHT_CTRL.load(Ordering::Acquire);
 
     // Determine effective shift state for letters: XOR of shift and caps.
     let upper = shift ^ caps;
@@ -383,64 +393,346 @@ fn scancode_to_ascii(code: u8) -> Option<u8> {
     // Index: scan code (0x02-0x39, plus a few others).
     let ch: u8 = match code {
         // Number row
-        0x02 => if shift { b'!' } else { b'1' },
-        0x03 => if shift { b'@' } else { b'2' },
-        0x04 => if shift { b'#' } else { b'3' },
-        0x05 => if shift { b'$' } else { b'4' },
-        0x06 => if shift { b'%' } else { b'5' },
-        0x07 => if shift { b'^' } else { b'6' },
-        0x08 => if shift { b'&' } else { b'7' },
-        0x09 => if shift { b'*' } else { b'8' },
-        0x0A => if shift { b'(' } else { b'9' },
-        0x0B => if shift { b')' } else { b'0' },
-        0x0C => if shift { b'_' } else { b'-' },
-        0x0D => if shift { b'+' } else { b'=' },
+        0x02 => {
+            if shift {
+                b'!'
+            } else {
+                b'1'
+            }
+        }
+        0x03 => {
+            if shift {
+                b'@'
+            } else {
+                b'2'
+            }
+        }
+        0x04 => {
+            if shift {
+                b'#'
+            } else {
+                b'3'
+            }
+        }
+        0x05 => {
+            if shift {
+                b'$'
+            } else {
+                b'4'
+            }
+        }
+        0x06 => {
+            if shift {
+                b'%'
+            } else {
+                b'5'
+            }
+        }
+        0x07 => {
+            if shift {
+                b'^'
+            } else {
+                b'6'
+            }
+        }
+        0x08 => {
+            if shift {
+                b'&'
+            } else {
+                b'7'
+            }
+        }
+        0x09 => {
+            if shift {
+                b'*'
+            } else {
+                b'8'
+            }
+        }
+        0x0A => {
+            if shift {
+                b'('
+            } else {
+                b'9'
+            }
+        }
+        0x0B => {
+            if shift {
+                b')'
+            } else {
+                b'0'
+            }
+        }
+        0x0C => {
+            if shift {
+                b'_'
+            } else {
+                b'-'
+            }
+        }
+        0x0D => {
+            if shift {
+                b'+'
+            } else {
+                b'='
+            }
+        }
 
         0x0E => b'\x08', // Backspace
         0x0F => b'\t',   // Tab
         0x1C => b'\n',   // Enter
 
         // QWERTY row
-        0x10 => if upper { b'Q' } else { b'q' },
-        0x11 => if upper { b'W' } else { b'w' },
-        0x12 => if upper { b'E' } else { b'e' },
-        0x13 => if upper { b'R' } else { b'r' },
-        0x14 => if upper { b'T' } else { b't' },
-        0x15 => if upper { b'Y' } else { b'y' },
-        0x16 => if upper { b'U' } else { b'u' },
-        0x17 => if upper { b'I' } else { b'i' },
-        0x18 => if upper { b'O' } else { b'o' },
-        0x19 => if upper { b'P' } else { b'p' },
-        0x1A => if shift { b'{' } else { b'[' },
-        0x1B => if shift { b'}' } else { b']' },
+        0x10 => {
+            if upper {
+                b'Q'
+            } else {
+                b'q'
+            }
+        }
+        0x11 => {
+            if upper {
+                b'W'
+            } else {
+                b'w'
+            }
+        }
+        0x12 => {
+            if upper {
+                b'E'
+            } else {
+                b'e'
+            }
+        }
+        0x13 => {
+            if upper {
+                b'R'
+            } else {
+                b'r'
+            }
+        }
+        0x14 => {
+            if upper {
+                b'T'
+            } else {
+                b't'
+            }
+        }
+        0x15 => {
+            if upper {
+                b'Y'
+            } else {
+                b'y'
+            }
+        }
+        0x16 => {
+            if upper {
+                b'U'
+            } else {
+                b'u'
+            }
+        }
+        0x17 => {
+            if upper {
+                b'I'
+            } else {
+                b'i'
+            }
+        }
+        0x18 => {
+            if upper {
+                b'O'
+            } else {
+                b'o'
+            }
+        }
+        0x19 => {
+            if upper {
+                b'P'
+            } else {
+                b'p'
+            }
+        }
+        0x1A => {
+            if shift {
+                b'{'
+            } else {
+                b'['
+            }
+        }
+        0x1B => {
+            if shift {
+                b'}'
+            } else {
+                b']'
+            }
+        }
 
         // Home row
-        0x1E => if upper { b'A' } else { b'a' },
-        0x1F => if upper { b'S' } else { b's' },
-        0x20 => if upper { b'D' } else { b'd' },
-        0x21 => if upper { b'F' } else { b'f' },
-        0x22 => if upper { b'G' } else { b'g' },
-        0x23 => if upper { b'H' } else { b'h' },
-        0x24 => if upper { b'J' } else { b'j' },
-        0x25 => if upper { b'K' } else { b'k' },
-        0x26 => if upper { b'L' } else { b'l' },
-        0x27 => if shift { b':' } else { b';' },
-        0x28 => if shift { b'"' } else { b'\'' },
-        0x29 => if shift { b'~' } else { b'`' },
+        0x1E => {
+            if upper {
+                b'A'
+            } else {
+                b'a'
+            }
+        }
+        0x1F => {
+            if upper {
+                b'S'
+            } else {
+                b's'
+            }
+        }
+        0x20 => {
+            if upper {
+                b'D'
+            } else {
+                b'd'
+            }
+        }
+        0x21 => {
+            if upper {
+                b'F'
+            } else {
+                b'f'
+            }
+        }
+        0x22 => {
+            if upper {
+                b'G'
+            } else {
+                b'g'
+            }
+        }
+        0x23 => {
+            if upper {
+                b'H'
+            } else {
+                b'h'
+            }
+        }
+        0x24 => {
+            if upper {
+                b'J'
+            } else {
+                b'j'
+            }
+        }
+        0x25 => {
+            if upper {
+                b'K'
+            } else {
+                b'k'
+            }
+        }
+        0x26 => {
+            if upper {
+                b'L'
+            } else {
+                b'l'
+            }
+        }
+        0x27 => {
+            if shift {
+                b':'
+            } else {
+                b';'
+            }
+        }
+        0x28 => {
+            if shift {
+                b'"'
+            } else {
+                b'\''
+            }
+        }
+        0x29 => {
+            if shift {
+                b'~'
+            } else {
+                b'`'
+            }
+        }
 
-        0x2B => if shift { b'|' } else { b'\\' },
+        0x2B => {
+            if shift {
+                b'|'
+            } else {
+                b'\\'
+            }
+        }
 
         // Bottom row
-        0x2C => if upper { b'Z' } else { b'z' },
-        0x2D => if upper { b'X' } else { b'x' },
-        0x2E => if upper { b'C' } else { b'c' },
-        0x2F => if upper { b'V' } else { b'v' },
-        0x30 => if upper { b'B' } else { b'b' },
-        0x31 => if upper { b'N' } else { b'n' },
-        0x32 => if upper { b'M' } else { b'm' },
-        0x33 => if shift { b'<' } else { b',' },
-        0x34 => if shift { b'>' } else { b'.' },
-        0x35 => if shift { b'?' } else { b'/' },
+        0x2C => {
+            if upper {
+                b'Z'
+            } else {
+                b'z'
+            }
+        }
+        0x2D => {
+            if upper {
+                b'X'
+            } else {
+                b'x'
+            }
+        }
+        0x2E => {
+            if upper {
+                b'C'
+            } else {
+                b'c'
+            }
+        }
+        0x2F => {
+            if upper {
+                b'V'
+            } else {
+                b'v'
+            }
+        }
+        0x30 => {
+            if upper {
+                b'B'
+            } else {
+                b'b'
+            }
+        }
+        0x31 => {
+            if upper {
+                b'N'
+            } else {
+                b'n'
+            }
+        }
+        0x32 => {
+            if upper {
+                b'M'
+            } else {
+                b'm'
+            }
+        }
+        0x33 => {
+            if shift {
+                b'<'
+            } else {
+                b','
+            }
+        }
+        0x34 => {
+            if shift {
+                b'>'
+            } else {
+                b'.'
+            }
+        }
+        0x35 => {
+            if shift {
+                b'?'
+            } else {
+                b'/'
+            }
+        }
 
         // Space
         0x39 => b' ',
@@ -482,15 +774,15 @@ pub const KEY_END: u8 = 0x85;
 
 fn extended_to_ascii(code: u8) -> Option<u8> {
     match code {
-        0x1C => Some(b'\n'),   // Keypad Enter
-        0x35 => Some(b'/'),    // Keypad /
-        0x53 => Some(0x7F),    // Delete → DEL character
-        0x48 => Some(KEY_UP),  // Up arrow
-        0x50 => Some(KEY_DOWN),// Down arrow
-        0x4B => Some(KEY_LEFT),// Left arrow
-        0x4D => Some(KEY_RIGHT),// Right arrow
-        0x47 => Some(KEY_HOME),// Home
-        0x4F => Some(KEY_END), // End
+        0x1C => Some(b'\n'),     // Keypad Enter
+        0x35 => Some(b'/'),      // Keypad /
+        0x53 => Some(0x7F),      // Delete → DEL character
+        0x48 => Some(KEY_UP),    // Up arrow
+        0x50 => Some(KEY_DOWN),  // Down arrow
+        0x4B => Some(KEY_LEFT),  // Left arrow
+        0x4D => Some(KEY_RIGHT), // Right arrow
+        0x47 => Some(KEY_HOME),  // Home
+        0x4F => Some(KEY_END),   // End
         _ => None,
     }
 }
@@ -668,9 +960,7 @@ fn try_read_char_raw() -> Option<u8> {
     let head = INPUT_HEAD.load(Ordering::Acquire);
     let tail = INPUT_TAIL.load(Ordering::Acquire);
 
-    if (head & INPUT_BUF_MASK as u32) == (tail & INPUT_BUF_MASK as u32)
-        && head == tail
-    {
+    if (head & INPUT_BUF_MASK as u32) == (tail & INPUT_BUF_MASK as u32) && head == tail {
         return None; // Empty.
     }
 
@@ -973,7 +1263,11 @@ pub fn self_test() -> Result<(), &'static str> {
         "[keyboard]   Ring buffer: head={}, tail={} ({})",
         head,
         tail,
-        if head == tail { "empty, OK" } else { "non-empty" }
+        if head == tail {
+            "empty, OK"
+        } else {
+            "non-empty"
+        }
     );
 
     echo_ring_self_test()?;

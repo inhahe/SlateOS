@@ -27,10 +27,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -292,11 +292,7 @@ pub fn defaults_for(fs_type: FsType, workload: WorkloadType) -> TuneProfile {
 // ---------------------------------------------------------------------------
 
 /// Create a new tuning profile from workload defaults.
-pub fn create_profile(
-    name: &str,
-    fs_type: FsType,
-    workload: WorkloadType,
-) -> KernelResult<u64> {
+pub fn create_profile(name: &str, fs_type: FsType, workload: WorkloadType) -> KernelResult<u64> {
     let mut state = STATE.lock();
     if state.profiles.len() >= 64 {
         return Err(KernelError::ResourceExhausted);
@@ -373,7 +369,10 @@ pub fn set_block_size(profile_id: u64, size: u32) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.block_size = size;
     p.modified_ns = crate::hpet::elapsed_ns();
@@ -384,7 +383,10 @@ pub fn set_block_size(profile_id: u64, size: u32) -> KernelResult<()> {
 /// Set journal mode.
 pub fn set_journal_mode(profile_id: u64, mode: JournalMode) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     if p.fs_type == FsType::Fat32 && mode != JournalMode::Off {
         return Err(KernelError::NotSupported);
@@ -401,7 +403,10 @@ pub fn set_commit_interval(profile_id: u64, secs: u32) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.commit_interval_secs = secs;
     p.modified_ns = crate::hpet::elapsed_ns();
@@ -415,7 +420,10 @@ pub fn set_reserved_pct(profile_id: u64, pct: u32) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.reserved_pct = pct;
     p.modified_ns = crate::hpet::elapsed_ns();
@@ -429,7 +437,10 @@ pub fn set_inode_ratio(profile_id: u64, ratio: u32) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.inode_ratio = ratio;
     p.modified_ns = crate::hpet::elapsed_ns();
@@ -440,7 +451,10 @@ pub fn set_inode_ratio(profile_id: u64, ratio: u32) -> KernelResult<()> {
 /// Set block allocation strategy.
 pub fn set_alloc_strategy(profile_id: u64, strategy: AllocStrategy) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.alloc_strategy = strategy;
     p.modified_ns = crate::hpet::elapsed_ns();
@@ -451,7 +465,10 @@ pub fn set_alloc_strategy(profile_id: u64, strategy: AllocStrategy) -> KernelRes
 /// Set discard/TRIM enablement.
 pub fn set_discard(profile_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.discard = enabled;
     p.modified_ns = crate::hpet::elapsed_ns();
@@ -462,7 +479,10 @@ pub fn set_discard(profile_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set data checksumming (btrfs/f2fs).
 pub fn set_data_checksum(profile_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     if enabled && p.fs_type != FsType::Btrfs && p.fs_type != FsType::F2fs {
         return Err(KernelError::NotSupported);
@@ -476,13 +496,20 @@ pub fn set_data_checksum(profile_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set compression.
 pub fn set_compression(profile_id: u64, enabled: bool, algo: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     if enabled && p.fs_type != FsType::Btrfs && p.fs_type != FsType::F2fs {
         return Err(KernelError::NotSupported);
     }
     p.compression = enabled;
-    p.compression_algo = if enabled { String::from(algo) } else { String::new() };
+    p.compression_algo = if enabled {
+        String::from(algo)
+    } else {
+        String::new()
+    };
     p.modified_ns = crate::hpet::elapsed_ns();
     state.changes += 1;
     Ok(())
@@ -491,7 +518,10 @@ pub fn set_compression(profile_id: u64, enabled: bool, algo: &str) -> KernelResu
 /// Set dir_index enablement.
 pub fn set_dir_index(profile_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.dir_index = enabled;
     p.modified_ns = crate::hpet::elapsed_ns();
@@ -502,7 +532,10 @@ pub fn set_dir_index(profile_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set lazy init.
 pub fn set_lazy_init(profile_id: u64, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.lazy_init = enabled;
     p.modified_ns = crate::hpet::elapsed_ns();
@@ -513,7 +546,10 @@ pub fn set_lazy_init(profile_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set stripe width for RAID (0 = not RAID).
 pub fn set_stripe_width(profile_id: u64, width: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.stripe_width = width;
     p.modified_ns = crate::hpet::elapsed_ns();
@@ -524,7 +560,10 @@ pub fn set_stripe_width(profile_id: u64, width: u32) -> KernelResult<()> {
 /// Mark profile as applied to a live filesystem.
 pub fn mark_applied(profile_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let p = state.profiles.iter_mut().find(|p| p.id == profile_id)
+    let p = state
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
     p.applied = true;
     p.modified_ns = crate::hpet::elapsed_ns();
@@ -581,29 +620,47 @@ pub fn init_defaults() {
         &mut state,
         "journal_mode",
         "ordered (default)",
-        &["Good balance of safety and speed", "Metadata always consistent"],
+        &[
+            "Good balance of safety and speed",
+            "Metadata always consistent",
+        ],
         &["Data may be stale after crash if not fsynced"],
     );
     add_tradeoff(
         &mut state,
         "journal_mode",
         "journal (full data journaling)",
-        &["Safest: both data and metadata journaled", "Best crash recovery"],
-        &["~30-50% write throughput penalty", "Doubles write amplification"],
+        &[
+            "Safest: both data and metadata journaled",
+            "Best crash recovery",
+        ],
+        &[
+            "~30-50% write throughput penalty",
+            "Doubles write amplification",
+        ],
     );
     add_tradeoff(
         &mut state,
         "journal_mode",
         "writeback",
         &["Fastest writes", "Lowest CPU overhead"],
-        &["Data corruption risk on crash", "Not recommended for databases"],
+        &[
+            "Data corruption risk on crash",
+            "Not recommended for databases",
+        ],
     );
     add_tradeoff(
         &mut state,
         "inode_ratio",
         "4096 (many inodes)",
-        &["Handles millions of small files", "Good for source trees, node_modules"],
-        &["More space used for inode table", "Wasted on large-file workloads"],
+        &[
+            "Handles millions of small files",
+            "Good for source trees, node_modules",
+        ],
+        &[
+            "More space used for inode table",
+            "Wasted on large-file workloads",
+        ],
     );
     add_tradeoff(
         &mut state,
@@ -616,7 +673,10 @@ pub fn init_defaults() {
         &mut state,
         "alloc_strategy",
         "sequential",
-        &["Best for large sequential reads/writes", "Reduces fragmentation for big files"],
+        &[
+            "Best for large sequential reads/writes",
+            "Reduces fragmentation for big files",
+        ],
         &["Poor for many small concurrent allocations"],
     );
     add_tradeoff(
@@ -644,15 +704,24 @@ pub fn init_defaults() {
         &mut state,
         "discard",
         "enabled (TRIM)",
-        &["SSD performance maintained over time", "Prevents write amplification"],
+        &[
+            "SSD performance maintained over time",
+            "Prevents write amplification",
+        ],
         &["Small overhead per delete/trim", "Not needed on HDDs"],
     );
     add_tradeoff(
         &mut state,
         "data_checksum",
         "enabled",
-        &["Detects silent data corruption (bit rot)", "Essential for long-term storage"],
-        &["CPU overhead on every read/write", "Only supported on btrfs/f2fs"],
+        &[
+            "Detects silent data corruption (bit rot)",
+            "Essential for long-term storage",
+        ],
+        &[
+            "CPU overhead on every read/write",
+            "Only supported on btrfs/f2fs",
+        ],
     );
 
     state.changes += 1;

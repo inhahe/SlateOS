@@ -40,12 +40,12 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::pathutil::{confine_under, is_dot_entry};
 use crate::serial_println;
+use alloc::string::String;
+use alloc::vec::Vec;
 // The preempt-aware `crate::sync::Mutex` (NOT raw `spin::Mutex`): the container
 // TABLE is contended across many tasks and its critical sections walk/mutate the
 // container list, so it must never be held across an involuntary preemption. A
@@ -355,8 +355,7 @@ pub fn restart_backoff_ns(restart_count: u32) -> u64 {
 }
 
 /// Configuration for creating a container.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ContainerConfig {
     /// Container name (for human identification).
     pub name: String,
@@ -408,13 +407,14 @@ pub struct ContainerConfig {
     pub image_source: String,
 }
 
-
 impl ContainerConfig {
     /// Create a minimal container config with a name.
     pub fn new(name: &str) -> Self {
-        let name = String::from(
-            if name.len() > MAX_NAME_LEN { &name[..MAX_NAME_LEN] } else { name }
-        );
+        let name = String::from(if name.len() > MAX_NAME_LEN {
+            &name[..MAX_NAME_LEN]
+        } else {
+            name
+        });
         Self {
             name,
             ..Self::default()
@@ -479,7 +479,11 @@ impl ContainerConfig {
     /// A name longer than 64 bytes (the UTS field width) is truncated.
     #[must_use]
     pub fn hostname(mut self, name: &str) -> Self {
-        let name = if name.len() > 64 { name.get(..64).unwrap_or("") } else { name };
+        let name = if name.len() > 64 {
+            name.get(..64).unwrap_or("")
+        } else {
+            name
+        };
         self.hostname = String::from(name);
         self
     }
@@ -946,7 +950,10 @@ pub fn is_initialized() -> bool {
 pub fn init() {
     let mut table = TABLE.lock();
     *table = Some(ContainerTable::new());
-    serial_println!("[container] Initialized ({} max containers)", MAX_CONTAINERS);
+    serial_println!(
+        "[container] Initialized ({} max containers)",
+        MAX_CONTAINERS
+    );
 }
 
 fn with_table<F, R>(f: F) -> R
@@ -1063,12 +1070,7 @@ static EVENT_LOG: Mutex<EventLog> = Mutex::named(EventLog::new(), b"container-ev
 /// Cheap and lock-local: takes only the event-log lock (never the container
 /// table), so it is safe to call from within a `with_table` closure or from
 /// the process-exit path.  Drops the oldest event when the ring is full.
-fn record_event(
-    id: ContainerId,
-    name: &str,
-    kind: ContainerEventKind,
-    exit_code: Option<i32>,
-) {
+fn record_event(id: ContainerId, name: &str, kind: ContainerEventKind, exit_code: Option<i32>) {
     let time_ns = crate::hrtimer::now_ns();
     let mut log = EVENT_LOG.lock();
     let seq = log.next_seq;
@@ -1199,34 +1201,30 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
     // --- Phase 2: Create sub-resources (with rollback on failure). ---
 
     // 2a: PID namespace.
-    let pid_ns = crate::pidns::create(crate::pidns::ROOT_NS)
-        .inspect_err(|&e| {
-            serial_println!("[container] Failed to create PID namespace: {:?}", e);
-        })?;
+    let pid_ns = crate::pidns::create(crate::pidns::ROOT_NS).inspect_err(|&e| {
+        serial_println!("[container] Failed to create PID namespace: {:?}", e);
+    })?;
 
     // 2b: User namespace.
-    let user_ns = crate::userns::create(crate::userns::ROOT_NS, 0)
-        .inspect_err(|&e| {
-            serial_println!("[container] Failed to create user namespace: {:?}", e);
-            let _ = crate::pidns::delete(pid_ns);
-        })?;
+    let user_ns = crate::userns::create(crate::userns::ROOT_NS, 0).inspect_err(|&e| {
+        serial_println!("[container] Failed to create user namespace: {:?}", e);
+        let _ = crate::pidns::delete(pid_ns);
+    })?;
 
     // 2c: Network namespace.
-    let net_ns = crate::netns::create()
-        .inspect_err(|&e| {
-            serial_println!("[container] Failed to create network namespace: {:?}", e);
-            let _ = crate::userns::delete(user_ns);
-            let _ = crate::pidns::delete(pid_ns);
-        })?;
+    let net_ns = crate::netns::create().inspect_err(|&e| {
+        serial_println!("[container] Failed to create network namespace: {:?}", e);
+        let _ = crate::userns::delete(user_ns);
+        let _ = crate::pidns::delete(pid_ns);
+    })?;
 
     // 2d: Cgroup.
-    let cgroup_id = crate::cgroup::create(crate::cgroup::ROOT_CGROUP)
-        .inspect_err(|&e| {
-            serial_println!("[container] Failed to create cgroup: {:?}", e);
-            let _ = crate::netns::delete(net_ns);
-            let _ = crate::userns::delete(user_ns);
-            let _ = crate::pidns::delete(pid_ns);
-        })?;
+    let cgroup_id = crate::cgroup::create(crate::cgroup::ROOT_CGROUP).inspect_err(|&e| {
+        serial_println!("[container] Failed to create cgroup: {:?}", e);
+        let _ = crate::netns::delete(net_ns);
+        let _ = crate::userns::delete(user_ns);
+        let _ = crate::pidns::delete(pid_ns);
+    })?;
 
     // --- Phase 3: Apply configuration. ---
 
@@ -1288,11 +1286,17 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
 
     if let Some(ip) = config.net_ip {
         let ip = crate::netns::Ipv4Addr(ip);
-        let mask = config.net_mask.map(crate::netns::Ipv4Addr)
+        let mask = config
+            .net_mask
+            .map(crate::netns::Ipv4Addr)
             .unwrap_or(crate::netns::Ipv4Addr::new(255, 255, 255, 0));
-        let gw = config.net_gateway.map(crate::netns::Ipv4Addr)
+        let gw = config
+            .net_gateway
+            .map(crate::netns::Ipv4Addr)
             .unwrap_or(crate::netns::Ipv4Addr::UNSPECIFIED);
-        let dns = config.net_dns.map(crate::netns::Ipv4Addr)
+        let dns = config
+            .net_dns
+            .map(crate::netns::Ipv4Addr)
             .unwrap_or(crate::netns::Ipv4Addr::UNSPECIFIED);
         let _ = crate::netns::configure_interface(net_ns, ip, mask, gw, dns);
 
@@ -1302,7 +1306,9 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
                 veth_pair = Some(pair_id);
                 serial_println!(
                     "[container] '{}': veth pair {} (host <-> ns {})",
-                    config.name, pair_id, net_ns
+                    config.name,
+                    pair_id,
+                    net_ns
                 );
             }
             Err(e) => {
@@ -1310,7 +1316,8 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
                 // This can happen if all veth slots are exhausted.
                 serial_println!(
                     "[container] '{}': veth setup failed: {:?} (no host link)",
-                    config.name, e
+                    config.name,
+                    e
                 );
             }
         }
@@ -1366,7 +1373,13 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
 
     serial_println!(
         "[container] Created '{}' (id={}, pidns={}, userns={}, netns={}, cgroup={}, veth={:?})",
-        config.name, slot, pid_ns, user_ns, net_ns, cgroup_id, veth_pair
+        config.name,
+        slot,
+        pid_ns,
+        user_ns,
+        net_ns,
+        cgroup_id,
+        veth_pair
     );
 
     let new_id = slot as ContainerId;
@@ -1419,7 +1432,10 @@ pub fn stop(id: ContainerId) -> KernelResult<()> {
         // A graceful stop is a user request: remember it so the restart policy
         // is suppressed (Docker: restart is not honored after `docker stop`).
         table.containers[idx].user_stopped = true;
-        Ok((table.containers[idx].net_ns, table.containers[idx].name.clone()))
+        Ok((
+            table.containers[idx].net_ns,
+            table.containers[idx].name.clone(),
+        ))
     })?;
     // A stopped container publishes no ports (Docker semantics): tear down its
     // host-port NAT forwards so a dead container can't keep receiving traffic.
@@ -1463,10 +1479,7 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
             return;
         };
         for (idx, ct) in table.containers.iter_mut().enumerate() {
-            if ct.active
-                && ct.state == ContainerState::Running
-                && ct.init_pid == Some(pid)
-            {
+            if ct.active && ct.state == ContainerState::Running && ct.init_pid == Some(pid) {
                 ct.state = ContainerState::Stopped;
                 // Record the init's exit code (Docker's "Exited (N)").  A
                 // negative value indicates a crash (negated exception code).
@@ -1533,7 +1546,8 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
     if let Some(id) = remove_id {
         if !crate::workqueue::submit(do_container_autoremove, u64::from(id)) {
             serial_println!(
-                "[container] auto-remove of id={} dropped (workqueue full)", id
+                "[container] auto-remove of id={} dropped (workqueue full)",
+                id
             );
         }
     }
@@ -1557,7 +1571,8 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
 fn restart_backoff_fire(arg: u64) {
     if !crate::workqueue::submit(do_container_restart, arg) {
         serial_println!(
-            "[container] delayed auto-restart of id={} dropped (workqueue full)", arg
+            "[container] delayed auto-restart of id={} dropped (workqueue full)",
+            arg
         );
     }
 }
@@ -1567,12 +1582,8 @@ fn do_container_restart(arg: u64) {
         return;
     };
     match relaunch_recorded(id, false) {
-        Ok(pid) => serial_println!(
-            "[container] auto-restarted id={}: new init pid={}", id, pid
-        ),
-        Err(e) => serial_println!(
-            "[container] auto-restart of id={} failed: {:?}", id, e
-        ),
+        Ok(pid) => serial_println!("[container] auto-restarted id={}: new init pid={}", id, pid),
+        Err(e) => serial_println!("[container] auto-restart of id={} failed: {:?}", id, e),
     }
 }
 
@@ -1590,9 +1601,7 @@ fn do_container_autoremove(arg: u64) {
     };
     match delete(id) {
         Ok(()) => serial_println!("[container] auto-removed id={} (--rm)", id),
-        Err(e) => serial_println!(
-            "[container] auto-remove of id={} failed: {:?}", id, e
-        ),
+        Err(e) => serial_println!("[container] auto-remove of id={} failed: {:?}", id, e),
     }
 }
 
@@ -1624,8 +1633,17 @@ pub fn mark_failed(id: ContainerId) -> KernelResult<()> {
 /// - [`KernelError::InvalidArgument`] if container is Running.
 pub fn delete(id: ContainerId) -> KernelResult<()> {
     // Extract sub-resource IDs while holding the table lock.
-    let (pid_ns, user_ns, net_ns, cgroup_id, veth_pairs, name, rootfs_mount, tmpfs_mounts, log_path) =
-        with_table(|table| {
+    let (
+        pid_ns,
+        user_ns,
+        net_ns,
+        cgroup_id,
+        veth_pairs,
+        name,
+        rootfs_mount,
+        tmpfs_mounts,
+        log_path,
+    ) = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
@@ -1648,10 +1666,17 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
                 veth_pairs.push(m.veth_pair);
             }
         }
-        let result = (ct.pid_ns, ct.user_ns, ct.net_ns, ct.cgroup_id,
-                      veth_pairs, ct.name.clone(), ct.rootfs_mount.clone(),
-                      ct.tmpfs_mounts.clone(),
-                      ct.log_path.clone());
+        let result = (
+            ct.pid_ns,
+            ct.user_ns,
+            ct.net_ns,
+            ct.cgroup_id,
+            veth_pairs,
+            ct.name.clone(),
+            ct.rootfs_mount.clone(),
+            ct.tmpfs_mounts.clone(),
+            ct.log_path.clone(),
+        );
 
         // Mark slot as inactive.
         table.containers[idx].active = false;
@@ -1848,9 +1873,7 @@ pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult
     // volume list is validated at `add_volume_mount` time, so this is purely
     // defensive.
     for (guest_prefix, host_target, read_only) in &volumes {
-        let _ = crate::ipc::namespace::add_volume(
-            pid, guest_prefix, host_target, *read_only,
-        );
+        let _ = crate::ipc::namespace::add_volume(pid, guest_prefix, host_target, *read_only);
     }
 
     // Apply the read-only-root flag (Docker `--read-only`).  Only meaningful
@@ -1992,7 +2015,9 @@ fn open_capture_log(id: ContainerId) -> Option<(String, u64)> {
         Err(e) => {
             serial_println!(
                 "[container] run id={}: log capture disabled (open {} failed: {:?})",
-                id, path, e
+                id,
+                path,
+                e
             );
             None
         }
@@ -2125,51 +2150,50 @@ fn run_with_abi(
     // Step 4: record init PID and flip Created → Running atomically under
     // the table lock.  Snapshot the network namespace, container IP, and
     // published ports for step 5 while we hold the lock.
-    let port_install: Option<PortInstall> =
-        with_table(|table| {
-            let idx = id as usize;
-            if idx >= MAX_CONTAINERS || !table.containers[idx].active {
-                return None;
+    let port_install: Option<PortInstall> = with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return None;
+        }
+        table.containers[idx].init_pid = Some(result.pid);
+        table.containers[idx].state = ContainerState::Running;
+        // Persist the init process's working directory so a later
+        // `exec_path` (docker exec / container run-in) with no explicit cwd
+        // starts in the same directory (Docker inherits the image/--workdir
+        // WorkingDir for exec). The runner sets `options.cwd` to the CLI
+        // `-w`, else the image's WorkingDir, else `None`. A path is bytes;
+        // this one always originates from a UTF-8 image-config/CLI string,
+        // so store it as such (empty when the init had no cwd override).
+        table.containers[idx].working_dir.clear();
+        if let Some(dir) = options.cwd {
+            if let Ok(s) = core::str::from_utf8(dir) {
+                table.containers[idx].working_dir.push_str(s);
             }
-            table.containers[idx].init_pid = Some(result.pid);
-            table.containers[idx].state = ContainerState::Running;
-            // Persist the init process's working directory so a later
-            // `exec_path` (docker exec / container run-in) with no explicit cwd
-            // starts in the same directory (Docker inherits the image/--workdir
-            // WorkingDir for exec). The runner sets `options.cwd` to the CLI
-            // `-w`, else the image's WorkingDir, else `None`. A path is bytes;
-            // this one always originates from a UTF-8 image-config/CLI string,
-            // so store it as such (empty when the init had no cwd override).
-            table.containers[idx].working_dir.clear();
-            if let Some(dir) = options.cwd {
-                if let Ok(s) = core::str::from_utf8(dir) {
-                    table.containers[idx].working_dir.push_str(s);
-                }
-            }
-            // A launched container is, by definition, not user-stopped; clear
-            // the flag so its restart policy is armed for the new init. (The
-            // auto-restart counter is *not* reset here — that would let an
-            // `on-failure:N` container loop forever; it is reset only by a
-            // manual start/restart.)
-            table.containers[idx].user_stopped = false;
-            // Record the capture-log path (if the redirect above succeeded) so
-            // `logs(id)` knows where to read from.  Empty when capture was
-            // skipped.
-            table.containers[idx].log_path.clear();
-            if let Some(ref p) = captured_log_path {
-                table.containers[idx].log_path.push_str(p);
-            }
-            // Only install port forwards when the container has both an IP
-            // (forward target) and at least one published port.
-            match table.containers[idx].container_ip {
-                Some(ip) if !table.containers[idx].published_ports.is_empty() => Some((
-                    table.containers[idx].net_ns,
-                    ip,
-                    table.containers[idx].published_ports.clone(),
-                )),
-                _ => None,
-            }
-        });
+        }
+        // A launched container is, by definition, not user-stopped; clear
+        // the flag so its restart policy is armed for the new init. (The
+        // auto-restart counter is *not* reset here — that would let an
+        // `on-failure:N` container loop forever; it is reset only by a
+        // manual start/restart.)
+        table.containers[idx].user_stopped = false;
+        // Record the capture-log path (if the redirect above succeeded) so
+        // `logs(id)` knows where to read from.  Empty when capture was
+        // skipped.
+        table.containers[idx].log_path.clear();
+        if let Some(ref p) = captured_log_path {
+            table.containers[idx].log_path.push_str(p);
+        }
+        // Only install port forwards when the container has both an IP
+        // (forward target) and at least one published port.
+        match table.containers[idx].container_ip {
+            Some(ip) if !table.containers[idx].published_ports.is_empty() => Some((
+                table.containers[idx].net_ns,
+                ip,
+                table.containers[idx].published_ports.clone(),
+            )),
+            _ => None,
+        }
+    });
 
     // Step 5: install the container's published-port NAT rules (the
     // `-p host:container` forwards).  Done after the state flip and outside
@@ -2179,19 +2203,30 @@ fn run_with_abi(
     // starts, just without that one forward.  All rules are flushed when the
     // container stops or is deleted (`flush_port_forwards`).
     if let Some((net_ns, ip, ports)) = port_install {
-        let container_ip =
-            crate::net::interface::Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]);
+        let container_ip = crate::net::interface::Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]);
         for (proto, host_port, container_port) in ports {
             match crate::net::nat::add_port_forward(
-                proto, host_port, container_ip, container_port, net_ns,
+                proto,
+                host_port,
+                container_ip,
+                container_port,
+                net_ns,
             ) {
                 Ok(()) => serial_println!(
                     "[container] run id={}: published {:?} :{} -> {}:{}",
-                    id, proto, host_port, container_ip, container_port
+                    id,
+                    proto,
+                    host_port,
+                    container_ip,
+                    container_port
                 ),
                 Err(e) => serial_println!(
                     "[container] run id={}: WARNING could not publish {:?} :{} -> :{}: {:?}",
-                    id, proto, host_port, container_port, e
+                    id,
+                    proto,
+                    host_port,
+                    container_port,
+                    e
                 ),
             }
         }
@@ -2261,15 +2296,10 @@ pub fn logs(id: ContainerId) -> KernelResult<Vec<u8>> {
 /// - [`KernelError::InvalidArgument`] if the container doesn't exist, is not in
 ///   `Created` state, or `vfs_path` cannot be read from the VFS.
 /// - Any error from [`run`]/`spawn_process` (invalid ELF, out of memory).
-pub fn run_path(
-    id: ContainerId,
-    vfs_path: &str,
-    extra_args: &[&str],
-) -> KernelResult<u64> {
+pub fn run_path(id: ContainerId, vfs_path: &str, extra_args: &[&str]) -> KernelResult<u64> {
     // Read the ELF image from the host VFS.  A read failure (missing file,
     // permission, I/O) maps to InvalidArgument — the caller passed a bad path.
-    let elf = crate::fs::vfs::Vfs::read_file(vfs_path)
-        .map_err(|_| KernelError::InvalidArgument)?;
+    let elf = crate::fs::vfs::Vfs::read_file(vfs_path).map_err(|_| KernelError::InvalidArgument)?;
 
     // Build argv: argv[0] is the binary path, then the extra args.  Own the
     // byte buffers, then borrow them for SpawnOptions.
@@ -2291,8 +2321,7 @@ pub fn run_path(
         if idx < MAX_CONTAINERS && table.containers[idx].active {
             table.containers[idx].init_exe_path.clear();
             table.containers[idx].init_exe_path.push_str(vfs_path);
-            table.containers[idx].init_args =
-                extra_args.iter().map(|s| String::from(*s)).collect();
+            table.containers[idx].init_args = extra_args.iter().map(|s| String::from(*s)).collect();
         }
     });
 
@@ -2441,11 +2470,7 @@ fn resolve_in_rootfs<P: AsRef<Path> + ?Sized>(
 ///   no rootfs, or `container_path` is unsafe (escapes the jail / names the
 ///   root).
 /// - Any VFS write error (missing parent directory, read-only fs, …).
-pub fn copy_to_container(
-    id: ContainerId,
-    container_path: &str,
-    data: &[u8],
-) -> KernelResult<()> {
+pub fn copy_to_container(id: ContainerId, container_path: &str, data: &[u8]) -> KernelResult<()> {
     let root_path = with_table_ref(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
@@ -2468,10 +2493,7 @@ pub fn copy_to_container(
 /// - [`KernelError::InvalidArgument`] if the container is invalid/inactive, has
 ///   no rootfs, or `container_path` is unsafe.
 /// - Any VFS read error (file not found, …).
-pub fn copy_from_container(
-    id: ContainerId,
-    container_path: &str,
-) -> KernelResult<Vec<u8>> {
+pub fn copy_from_container(id: ContainerId, container_path: &str) -> KernelResult<Vec<u8>> {
     let root_path = with_table_ref(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
@@ -2518,10 +2540,7 @@ pub fn entry_kind_in_container(
 /// - [`KernelError::InvalidArgument`] if the container is invalid/inactive, has
 ///   no rootfs, or `container_path` is unsafe.
 /// - Any error propagated from [`tar_tree`].
-pub fn copy_dir_from_container(
-    id: ContainerId,
-    container_path: &str,
-) -> KernelResult<Vec<u8>> {
+pub fn copy_dir_from_container(id: ContainerId, container_path: &str) -> KernelResult<Vec<u8>> {
     let root_path = with_table_ref(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
@@ -2768,10 +2787,14 @@ pub fn untar_tree<B: AsRef<Path> + ?Sized>(base: &B, archive: &[u8]) -> KernelRe
     let _ = Vfs::mkdir(base);
 
     for (entry, dest) in entries.iter().zip(dests.iter()) {
-        let Some(dest) = dest.as_deref() else { continue };
+        let Some(dest) = dest.as_deref() else {
+            continue;
+        };
         // The path relative to `base`, recovered from the confined join so it
         // is already normalised (no leading `/`, no `.`, no trailing `/`).
-        let Some(rel) = dest.strip_prefix(base) else { continue };
+        let Some(rel) = dest.strip_prefix(base) else {
+            continue;
+        };
         match entry.kind {
             EntryKind::Directory => {
                 ensure_dir_path(base, &rel);
@@ -2815,11 +2838,7 @@ pub fn untar_tree<B: AsRef<Path> + ?Sized>(base: &B, archive: &[u8]) -> KernelRe
 /// - [`KernelError::InvalidArgument`] if `dest_dir` is empty/contains NUL, an
 ///   archive name escapes the destination, or `name` is invalid.
 /// - Any tar-parse or VFS error encountered while extracting.
-pub fn import_rootfs(
-    name: &str,
-    archive: &[u8],
-    dest_dir: &str,
-) -> KernelResult<ContainerId> {
+pub fn import_rootfs(name: &str, archive: &[u8], dest_dir: &str) -> KernelResult<ContainerId> {
     // Extract the archive into the destination first; this also validates
     // `dest_dir` and the archive (a `..` escape or malformed tar fails here,
     // before any container state is created).
@@ -2852,11 +2871,7 @@ pub fn import_rootfs(
 /// # Errors
 /// - Any error from [`export_rootfs`] (e.g. source invalid or rootfs-less).
 /// - Any error from [`import_rootfs`] (e.g. invalid `dest_dir`/`new_name`).
-pub fn commit(
-    src_id: ContainerId,
-    new_name: &str,
-    dest_dir: &str,
-) -> KernelResult<ContainerId> {
+pub fn commit(src_id: ContainerId, new_name: &str, dest_dir: &str) -> KernelResult<ContainerId> {
     let archive = export_rootfs(src_id)?;
     import_rootfs(new_name, &archive, dest_dir)
 }
@@ -3260,8 +3275,9 @@ pub fn add_volume_mount<H: AsRef<Path> + ?Sized, G: AsRef<Path> + ?Sized>(
         // Replace an existing volume at the same guest prefix (last-writer-
         // wins), mirroring `namespace::add_volume` semantics. Both the host
         // target and the read-only flag are overwritten.
-        if let Some(existing) =
-            vols.iter_mut().find(|(g, _, _)| g.as_path() == guest_prefix)
+        if let Some(existing) = vols
+            .iter_mut()
+            .find(|(g, _, _)| g.as_path() == guest_prefix)
         {
             existing.1 = host_target.to_path_buf();
             existing.2 = read_only;
@@ -3326,7 +3342,11 @@ pub fn add_tmpfs_mount<G: AsRef<Path> + ?Sized>(
             return Err(KernelError::InvalidArgument);
         }
         // Reject a duplicate guest prefix (a plain volume or an existing tmpfs).
-        if ct.volumes.iter().any(|(g, _, _)| g.as_path() == guest_prefix) {
+        if ct
+            .volumes
+            .iter()
+            .any(|(g, _, _)| g.as_path() == guest_prefix)
+        {
             return Err(KernelError::InvalidArgument);
         }
         if ct.volumes.len() >= MAX_VOLUMES_PER_CONTAINER {
@@ -3356,7 +3376,8 @@ pub fn add_tmpfs_mount<G: AsRef<Path> + ?Sized>(
             return Err(KernelError::InvalidArgument);
         }
         let ct = &mut table.containers[idx];
-        ct.volumes.push((guest_prefix.to_path_buf(), host_mount.clone(), false));
+        ct.volumes
+            .push((guest_prefix.to_path_buf(), host_mount.clone(), false));
         ct.tmpfs_mounts.push(host_mount.clone());
         Ok(())
     });
@@ -3416,8 +3437,9 @@ pub fn add_port_publish(
         let ports = &mut table.containers[idx].published_ports;
         // Replace an existing publish at the same (proto, host_port)
         // (last-writer-wins) — a host port can map to only one target.
-        if let Some(existing) =
-            ports.iter_mut().find(|(p, h, _)| *p == proto && *h == host_port)
+        if let Some(existing) = ports
+            .iter_mut()
+            .find(|(p, h, _)| *p == proto && *h == host_port)
         {
             existing.2 = container_port;
             return Ok(());
@@ -3452,11 +3474,15 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             net_ns: ct.net_ns,
             cgroup_id: ct.cgroup_id,
             veth_pair: ct.veth_pair,
-            memberships: ct.memberships.iter().map(|m| NetworkAttachment {
-                network_name: m.network_name.clone(),
-                veth_pair: m.veth_pair,
-                ip: m.ip,
-            }).collect(),
+            memberships: ct
+                .memberships
+                .iter()
+                .map(|m| NetworkAttachment {
+                    network_name: m.network_name.clone(),
+                    veth_pair: m.veth_pair,
+                    ip: m.ip,
+                })
+                .collect(),
             nr_procs: ct.pids.len(),
             init_pid: ct.init_pid,
             root_path: ct.root_path.clone(),
@@ -3512,7 +3538,11 @@ pub fn record_primary_membership(
         }
         let ct = &mut table.containers[idx];
         let vp = ct.veth_pair.ok_or(KernelError::NotFound)?;
-        if let Some(m) = ct.memberships.iter_mut().find(|m| m.network_name == network_name) {
+        if let Some(m) = ct
+            .memberships
+            .iter_mut()
+            .find(|m| m.network_name == network_name)
+        {
             m.ip = ip;
             m.subnet = subnet;
             m.prefix_len = prefix_len;
@@ -3601,7 +3631,11 @@ pub fn attach_network(
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::NotFound);
         }
-        if table.containers[idx].memberships.iter().any(|m| m.network_name == network_name) {
+        if table.containers[idx]
+            .memberships
+            .iter()
+            .any(|m| m.network_name == network_name)
+        {
             return Err(KernelError::AlreadyExists);
         }
         Ok(table.containers[idx].net_ns)
@@ -3702,7 +3736,11 @@ pub fn detach_network(id: ContainerId, network_name: &str) -> KernelResult<[u8; 
 fn prefix_to_mask(prefix_len: u8) -> [u8; 4] {
     let n = prefix_len.min(32);
     // 32-bit mask with the top `n` bits set. Guard the `>> 32` UB when n == 0.
-    let bits: u32 = if n == 0 { 0 } else { u32::MAX << (32u8.saturating_sub(n)) };
+    let bits: u32 = if n == 0 {
+        0
+    } else {
+        u32::MAX << (32u8.saturating_sub(n))
+    };
     bits.to_be_bytes()
 }
 
@@ -3905,7 +3943,9 @@ fn health_tick_one(idx: usize, now: u64) {
     });
     let Some(snap) = snap else { return };
 
-    let Ok(cid) = ContainerId::try_from(idx) else { return };
+    let Ok(cid) = ContainerId::try_from(idx) else {
+        return;
+    };
 
     // Mutable working copy of the fields we may change.
     let mut status = snap.status;
@@ -3924,14 +3964,9 @@ fn health_tick_one(idx: usize, now: u64) {
                 // Finished. Reap it (fast path — already a zombie, no blocking)
                 // and score the result. A timed-out probe is always a failure.
                 let reaped = wait_process(pid);
-                let code = if timed_out {
-                    1
-                } else {
-                    reaped.unwrap_or(1)
-                };
-                let (s, k) = apply_probe_result(
-                    status, streak, snap.started_ns, now, &snap.cfg, code,
-                );
+                let code = if timed_out { 1 } else { reaped.unwrap_or(1) };
+                let (s, k) =
+                    apply_probe_result(status, streak, snap.started_ns, now, &snap.cfg, code);
                 status = s;
                 streak = k;
                 // Unbind the probe process from the container.
@@ -3963,9 +3998,7 @@ fn health_tick_one(idx: usize, now: u64) {
             Err(_) => {
                 // Could not even launch the probe (binary missing, OOM): score
                 // it as a failure and try again next interval.
-                let (s, k) = apply_probe_result(
-                    status, streak, snap.started_ns, now, &snap.cfg, 1,
-                );
+                let (s, k) = apply_probe_result(status, streak, snap.started_ns, now, &snap.cfg, 1);
                 status = s;
                 streak = k;
                 next_due_ns = now.saturating_add(snap.cfg.effective_interval_ns());
@@ -3985,7 +4018,9 @@ fn health_tick_one(idx: usize, now: u64) {
 
     // --- Phase C: write the results back under the lock ---
     with_table(|table| {
-        let Some(ct) = table.containers.get_mut(idx) else { return };
+        let Some(ct) = table.containers.get_mut(idx) else {
+            return;
+        };
         if !ct.active {
             return;
         }
@@ -4018,7 +4053,10 @@ fn health_launch_probe(
             .unwrap_or_default();
         alloc::vec![b"/bin/sh".to_vec(), b"-c".to_vec(), cmdline]
     } else {
-        cfg.probe_args().iter().map(|s| s.as_bytes().to_vec()).collect()
+        cfg.probe_args()
+            .iter()
+            .map(|s| s.as_bytes().to_vec())
+            .collect()
     };
     let guest_cmd: &[u8] = argv_owned
         .first()
@@ -4096,10 +4134,7 @@ pub fn wait_status(id: ContainerId) -> Option<(bool, Option<i32>)> {
             return None;
         }
         let ct = &table.containers[idx];
-        let terminal = matches!(
-            ct.state,
-            ContainerState::Stopped | ContainerState::Failed
-        );
+        let terminal = matches!(ct.state, ContainerState::Stopped | ContainerState::Failed);
         Some((terminal, ct.exit_code))
     })
 }
@@ -4124,10 +4159,7 @@ fn wait_snapshot(id: ContainerId) -> Option<(bool, Option<i32>, Option<u64>)> {
             return None;
         }
         let ct = &table.containers[idx];
-        let terminal = matches!(
-            ct.state,
-            ContainerState::Stopped | ContainerState::Failed
-        );
+        let terminal = matches!(ct.state, ContainerState::Stopped | ContainerState::Failed);
         Some((terminal, ct.exit_code, ct.init_pid))
     })
 }
@@ -4323,11 +4355,7 @@ pub struct ExecSpawn {
 /// - [`KernelError::NotFound`] if the executable does not exist in the rootfs.
 /// - Any error from [`spawn_process`](crate::proc::spawn::spawn_process)
 ///   (invalid ELF, out of memory) or from [`add_process_task`].
-pub fn exec_path(
-    id: ContainerId,
-    guest_cmd: &[u8],
-    argv: &[&[u8]],
-) -> KernelResult<ExecSpawn> {
+pub fn exec_path(id: ContainerId, guest_cmd: &[u8], argv: &[&[u8]]) -> KernelResult<ExecSpawn> {
     exec_path_env(id, guest_cmd, argv, &[], None)
 }
 
@@ -4405,11 +4433,9 @@ pub fn exec_path_env(
     // 2. Resolve the guest command under the rootfs and read the ELF bytes.
     //    The command path is supplied by the container CLI as a str; require
     //    valid UTF-8 (general paths are bytes, but a command name is text).
-    let guest_str =
-        core::str::from_utf8(guest_cmd).map_err(|_| KernelError::InvalidArgument)?;
+    let guest_str = core::str::from_utf8(guest_cmd).map_err(|_| KernelError::InvalidArgument)?;
     let host_path = resolve_in_rootfs(&root_path, guest_str)?;
-    let elf = crate::fs::vfs::Vfs::read_file(&host_path)
-        .map_err(|_| KernelError::NotFound)?;
+    let elf = crate::fs::vfs::Vfs::read_file(&host_path).map_err(|_| KernelError::NotFound)?;
 
     // 3. Spawn the process (enqueued, not yet run) with the requested argv and
     //    an `exe_path` of the *guest* command (backs /proc/<pid>/exe). ABI is
@@ -4441,10 +4467,17 @@ pub fn exec_path_env(
 
     serial_println!(
         "[container] exec id={} '{}': pid={} task={} entry={:#x}",
-        id, guest_str, result.pid, result.task_id, result.entry_point
+        id,
+        guest_str,
+        result.pid,
+        result.task_id,
+        result.entry_point
     );
 
-    Ok(ExecSpawn { pid: result.pid, task_id: result.task_id })
+    Ok(ExecSpawn {
+        pid: result.pid,
+        task_id: result.task_id,
+    })
 }
 
 /// Rename a container (Docker `rename`).
@@ -4575,7 +4608,10 @@ pub fn pause(id: ContainerId) -> KernelResult<usize> {
             return Err(KernelError::InvalidArgument);
         }
         table.containers[idx].frozen = true;
-        Ok((table.containers[idx].pids.clone(), table.containers[idx].name.clone()))
+        Ok((
+            table.containers[idx].pids.clone(),
+            table.containers[idx].name.clone(),
+        ))
     })?;
 
     let mut suspended = 0usize;
@@ -4616,7 +4652,10 @@ pub fn unpause(id: ContainerId) -> KernelResult<usize> {
             return Err(KernelError::InvalidArgument);
         }
         table.containers[idx].frozen = false;
-        Ok((table.containers[idx].pids.clone(), table.containers[idx].name.clone()))
+        Ok((
+            table.containers[idx].pids.clone(),
+            table.containers[idx].name.clone(),
+        ))
     })?;
 
     let mut resumed = 0usize;
@@ -4696,9 +4735,7 @@ pub fn exists(id: ContainerId) -> bool {
 /// Count active containers.
 #[must_use]
 pub fn active_count() -> usize {
-    with_table_ref(|table| {
-        table.containers.iter().filter(|c| c.active).count()
-    })
+    with_table_ref(|table| table.containers.iter().filter(|c| c.active).count())
 }
 
 /// List all active container IDs and names.
@@ -4762,9 +4799,7 @@ pub fn prune() -> usize {
     // borrow from list().
     let victims: Vec<ContainerId> = list()
         .into_iter()
-        .filter(|(_, _, st)| {
-            matches!(st, ContainerState::Stopped | ContainerState::Failed)
-        })
+        .filter(|(_, _, st)| matches!(st, ContainerState::Stopped | ContainerState::Failed))
         .map(|(id, _, _)| id)
         .collect();
     let mut removed = 0usize;
@@ -4975,15 +5010,19 @@ pub fn self_test() {
         let ci_net = info(ct_net).unwrap();
 
         // Should have a veth pair assigned.
-        assert!(ci_net.veth_pair.is_some(),
-            "networked container should have veth pair");
+        assert!(
+            ci_net.veth_pair.is_some(),
+            "networked container should have veth pair"
+        );
 
         // Container without network should NOT have a veth pair.
         let plain_cfg = ContainerConfig::new("test-no-net");
         let ct_plain = create(&plain_cfg).expect("create plain container");
         let ci_plain = info(ct_plain).unwrap();
-        assert!(ci_plain.veth_pair.is_none(),
-            "non-networked container should have no veth pair");
+        assert!(
+            ci_plain.veth_pair.is_none(),
+            "non-networked container should have no veth pair"
+        );
 
         // Clean up: delete destroys the veth pair too.
         delete(ct_net).expect("delete networked ct");
@@ -5005,40 +5044,77 @@ pub fn self_test() {
         record_primary_membership(ct, "primary-net", [10, 90, 0, 2], [10, 90, 0, 0], 24)
             .expect("record primary membership");
         assert!(is_member_of(ct, "primary-net"));
-        assert_eq!(info(ct).expect("info").memberships.len(), 1, "one membership after primary");
+        assert_eq!(
+            info(ct).expect("info").memberships.len(),
+            1,
+            "one membership after primary"
+        );
         // The primary membership reuses the container's primary veth.
-        assert_eq!(network_membership(ct, "primary-net").map(|(_, p)| p), Some(true));
+        assert_eq!(
+            network_membership(ct, "primary-net").map(|(_, p)| p),
+            Some(true)
+        );
 
         // Attach a second network at runtime — a fresh, distinct interface.
         let vp2 = attach_network(
-            ct, "second-net", [10, 91, 0, 5], [10, 91, 0, 0], 24, [10, 91, 0, 1],
+            ct,
+            "second-net",
+            [10, 91, 0, 5],
+            [10, 91, 0, 0],
+            24,
+            [10, 91, 0, 1],
         )
         .expect("attach second net");
         assert!(is_member_of(ct, "second-net"));
-        assert_eq!(info(ct).expect("info").memberships.len(), 2, "two memberships");
+        assert_eq!(
+            info(ct).expect("info").memberships.len(),
+            2,
+            "two memberships"
+        );
         assert_ne!(
-            Some(vp2), info(ct).expect("info").veth_pair,
+            Some(vp2),
+            info(ct).expect("info").veth_pair,
             "runtime interface distinct from primary veth"
         );
-        assert_eq!(network_membership(ct, "second-net").map(|(_, p)| p), Some(false));
+        assert_eq!(
+            network_membership(ct, "second-net").map(|(_, p)| p),
+            Some(false)
+        );
 
         // A duplicate attach to the same network is rejected.
         assert!(matches!(
-            attach_network(ct, "second-net", [10, 91, 0, 6], [10, 91, 0, 0], 24, [10, 91, 0, 1]),
+            attach_network(
+                ct,
+                "second-net",
+                [10, 91, 0, 6],
+                [10, 91, 0, 0],
+                24,
+                [10, 91, 0, 1]
+            ),
             Err(KernelError::AlreadyExists)
         ));
 
         // The primary network cannot be detached (owned by the lifecycle).
-        assert!(matches!(detach_network(ct, "primary-net"), Err(KernelError::InvalidArgument)));
+        assert!(matches!(
+            detach_network(ct, "primary-net"),
+            Err(KernelError::InvalidArgument)
+        ));
 
         // Detach the runtime network — membership + interface torn down.
         let freed_ip = detach_network(ct, "second-net").expect("detach second net");
         assert_eq!(freed_ip, [10, 91, 0, 5]);
         assert!(!is_member_of(ct, "second-net"));
-        assert_eq!(info(ct).expect("info").memberships.len(), 1, "back to one membership");
+        assert_eq!(
+            info(ct).expect("info").memberships.len(),
+            1,
+            "back to one membership"
+        );
 
         // Detaching a network the container is not on is NotFound.
-        assert!(matches!(detach_network(ct, "no-such-net"), Err(KernelError::NotFound)));
+        assert!(matches!(
+            detach_network(ct, "no-such-net"),
+            Err(KernelError::NotFound)
+        ));
 
         // Delete destroys the primary + any remaining membership veths.
         delete(ct).expect("cleanup multinet ct");
@@ -5047,8 +5123,12 @@ pub fn self_test() {
 
     // Test 16: add_process sets task's net_ns, remove_process resets it.
     {
-        let net_cfg2 = ContainerConfig::new("test-net-ns-propagation")
-            .network([10, 99, 0, 2], Some([255, 255, 255, 0]), Some([10, 99, 0, 1]), None);
+        let net_cfg2 = ContainerConfig::new("test-net-ns-propagation").network(
+            [10, 99, 0, 2],
+            Some([255, 255, 255, 0]),
+            Some([10, 99, 0, 1]),
+            None,
+        );
         let ct_ns = create(&net_cfg2).expect("create ns-propagation ct");
         let ci_ns = info(ct_ns).unwrap();
 
@@ -5062,14 +5142,19 @@ pub fn self_test() {
         // Add the current task to the container — net_ns should propagate.
         add_process(ct_ns, task_id).expect("add_process");
         let after_add = crate::sched::current_task_net_ns();
-        assert_eq!(after_add, ci_ns.net_ns,
-            "task net_ns should match container's net_ns after add_process");
+        assert_eq!(
+            after_add, ci_ns.net_ns,
+            "task net_ns should match container's net_ns after add_process"
+        );
 
         // Remove the process — net_ns should revert to ROOT_NS.
         remove_process(ct_ns, task_id).expect("remove_process");
         let after_remove = crate::sched::current_task_net_ns();
-        assert_eq!(after_remove, crate::netns::ROOT_NS,
-            "task net_ns should revert to ROOT_NS after remove_process");
+        assert_eq!(
+            after_remove,
+            crate::netns::ROOT_NS,
+            "task net_ns should revert to ROOT_NS after remove_process"
+        );
 
         // Restore original ns (should already be ROOT_NS but be explicit).
         let _ = crate::sched::set_task_net_ns(task_id, original_ns);
@@ -5084,9 +5169,8 @@ pub fn self_test() {
         // A real, compiled userspace ELF — same binary the init path
         // installs as /bin/hello.  We only need it to be a valid loadable
         // ELF; the process is torn down before it ever executes.
-        static HELLO_ELF: &[u8] = include_bytes!(
-            "../../services/hello/target/x86_64-unknown-none/release/hello"
-        );
+        static HELLO_ELF: &[u8] =
+            include_bytes!("../../services/hello/target/x86_64-unknown-none/release/hello");
 
         let run_cfg = ContainerConfig::new("test-run-ct").memory(4096);
         let ct_run = create(&run_cfg).expect("create run container");
@@ -5132,8 +5216,10 @@ pub fn self_test() {
             );
 
             // Can't run a container twice.
-            assert!(run(ct_run, HELLO_ELF, &opts).is_err(),
-                "running an already-running container must fail");
+            assert!(
+                run(ct_run, HELLO_ELF, &opts).is_err(),
+                "running an already-running container must fail"
+            );
 
             // Tear down the init process.  Detach from the cgroup/namespaces
             // first (while the task is still alive so the count decrements),
@@ -5185,8 +5271,7 @@ pub fn self_test() {
         let ct_jail = create(&jail_cfg).expect("create jail container");
 
         // Configuring the rootfs is only allowed before run.
-        set_root_path(ct_jail, "/containers/test-jail/rootfs")
-            .expect("set rootfs");
+        set_root_path(ct_jail, "/containers/test-jail/rootfs").expect("set rootfs");
         assert_eq!(
             info(ct_jail).unwrap().root_path.as_path(),
             Path::new("/containers/test-jail/rootfs"),
@@ -5202,13 +5287,15 @@ pub fn self_test() {
         // The registered process resolves paths inside its rootfs.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(JAIL_PID, "/bin/sh")
-                .expect("resolve jailed path").into_owned(),
+                .expect("resolve jailed path")
+                .into_owned(),
             PathBuf::from("/containers/test-jail/rootfs/bin/sh"),
         );
         // `..` cannot escape the jail.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(JAIL_PID, "/../../etc/passwd")
-                .expect("resolve escape attempt").into_owned(),
+                .expect("resolve escape attempt")
+                .into_owned(),
             PathBuf::from("/containers/test-jail/rootfs/etc/passwd"),
         );
 
@@ -5239,21 +5326,17 @@ pub fn self_test() {
 
         let vol_cfg = ContainerConfig::new("test-vol-ct").memory(4096);
         let ct_vol = create(&vol_cfg).expect("create vol container");
-        set_root_path(ct_vol, "/containers/test-vol/rootfs")
-            .expect("set rootfs");
+        set_root_path(ct_vol, "/containers/test-vol/rootfs").expect("set rootfs");
         // Volumes are configurable only before run. `/data` is read-write,
         // `/logs` is read-only (Docker `-v host:guest:ro`).
-        add_volume_mount(ct_vol, "/srv/data", "/data", false)
-            .expect("add data volume");
-        add_volume_mount(ct_vol, "/var/log/test-vol", "/logs", true)
-            .expect("add logs volume");
+        add_volume_mount(ct_vol, "/srv/data", "/data", false).expect("add data volume");
+        add_volume_mount(ct_vol, "/var/log/test-vol", "/logs", true).expect("add logs volume");
         // Bad args / guest-root volume are rejected.
         assert!(add_volume_mount(ct_vol, "relative", "/x", false).is_err());
         assert!(add_volume_mount(ct_vol, "/host", "rel", false).is_err());
         assert!(add_volume_mount(ct_vol, "/host", "/", false).is_err());
         // Re-adding at an existing guest prefix replaces, not stacks.
-        add_volume_mount(ct_vol, "/srv/data2", "/data", false)
-            .expect("replace data volume");
+        add_volume_mount(ct_vol, "/srv/data2", "/data", false).expect("replace data volume");
         assert_eq!(
             info(ct_vol).unwrap().volumes.len(),
             2,
@@ -5266,24 +5349,28 @@ pub fn self_test() {
         // Volume path escapes the rootfs to the host target.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/data/file.txt")
-                .expect("resolve volume path").into_owned(),
+                .expect("resolve volume path")
+                .into_owned(),
             PathBuf::from("/srv/data2/file.txt"),
         );
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/logs/app.log")
-                .expect("resolve logs volume").into_owned(),
+                .expect("resolve logs volume")
+                .into_owned(),
             PathBuf::from("/var/log/test-vol/app.log"),
         );
         // Non-volume path stays jailed under the rootfs.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/bin/sh")
-                .expect("resolve non-volume path").into_owned(),
+                .expect("resolve non-volume path")
+                .into_owned(),
             PathBuf::from("/containers/test-vol/rootfs/bin/sh"),
         );
         // `..` cannot climb out of a volume into the host.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/data/../escape")
-                .expect("resolve escape attempt").into_owned(),
+                .expect("resolve escape attempt")
+                .into_owned(),
             PathBuf::from("/containers/test-vol/rootfs/escape"),
         );
 
@@ -5291,23 +5378,19 @@ pub fn self_test() {
         // volume is denied (EROFS), while a write under the read-write `/data`
         // volume and a write to a plain jailed path are allowed.
         assert!(
-            crate::ipc::namespace::check_writable_for(VOL_PID, "/logs/app.log")
-                .is_err(),
+            crate::ipc::namespace::check_writable_for(VOL_PID, "/logs/app.log").is_err(),
             "write to read-only volume must be denied",
         );
         assert!(
-            crate::ipc::namespace::check_writable_for(VOL_PID, "/logs")
-                .is_err(),
+            crate::ipc::namespace::check_writable_for(VOL_PID, "/logs").is_err(),
             "write to the read-only mount point itself must be denied",
         );
         assert!(
-            crate::ipc::namespace::check_writable_for(VOL_PID, "/data/file.txt")
-                .is_ok(),
+            crate::ipc::namespace::check_writable_for(VOL_PID, "/data/file.txt").is_ok(),
             "write to read-write volume must be allowed",
         );
         assert!(
-            crate::ipc::namespace::check_writable_for(VOL_PID, "/bin/sh")
-                .is_ok(),
+            crate::ipc::namespace::check_writable_for(VOL_PID, "/bin/sh").is_ok(),
             "write to a non-volume jailed path must be allowed",
         );
 
@@ -5345,32 +5428,29 @@ pub fn self_test() {
         );
         set_root_path(ct_ro, "/containers/test-ro/rootfs").expect("set rootfs");
         // A writable volume punches a hole through the read-only root.
-        add_volume_mount(ct_ro, "/srv/rw", "/scratch", false)
-            .expect("add rw volume");
+        add_volume_mount(ct_ro, "/srv/rw", "/scratch", false).expect("add rw volume");
 
         add_process(ct_ro, RO_PID).expect("register ro process");
 
         // Writes into the read-only rootfs are denied.
         assert!(
-            crate::ipc::namespace::check_writable_for(RO_PID, "/etc/hosts")
-                .is_err(),
+            crate::ipc::namespace::check_writable_for(RO_PID, "/etc/hosts").is_err(),
             "write into a --read-only rootfs must be denied",
         );
         assert!(
-            crate::ipc::namespace::check_writable_for(RO_PID, "/bin/sh")
-                .is_err(),
+            crate::ipc::namespace::check_writable_for(RO_PID, "/bin/sh").is_err(),
             "write into a --read-only rootfs must be denied",
         );
         // The writable volume still permits writes (rw hole through RO root).
         assert!(
-            crate::ipc::namespace::check_writable_for(RO_PID, "/scratch/tmp")
-                .is_ok(),
+            crate::ipc::namespace::check_writable_for(RO_PID, "/scratch/tmp").is_ok(),
             "writable volume must remain writable under --read-only root",
         );
         // Reads / path resolution are unaffected by the read-only flag.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(RO_PID, "/bin/sh")
-                .expect("resolve under ro root").into_owned(),
+                .expect("resolve under ro root")
+                .into_owned(),
             PathBuf::from("/containers/test-ro/rootfs/bin/sh"),
         );
 
@@ -5398,7 +5478,8 @@ pub fn self_test() {
         assert_eq!(hn_cfg.hostname, "web-01", "builder must set hostname");
         let ct_hn = create(&hn_cfg).expect("create hostname container");
         assert_eq!(
-            info(ct_hn).unwrap().hostname, "web-01",
+            info(ct_hn).unwrap().hostname,
+            "web-01",
             "ContainerInfo must report hostname",
         );
         // No rootfs jail set — hostname applies regardless of chroot.
@@ -5430,9 +5511,17 @@ pub fn self_test() {
             .label("role", "web")
             .label("tier", "frontend")
             .label("role", "api"); // last-write-wins replaces "web"
-        assert_eq!(lbl_cfg.labels.len(), 2, "duplicate key must not grow the set");
         assert_eq!(
-            lbl_cfg.labels.iter().find(|(k, _)| k == "role").map(|(_, v)| v.as_str()),
+            lbl_cfg.labels.len(),
+            2,
+            "duplicate key must not grow the set"
+        );
+        assert_eq!(
+            lbl_cfg
+                .labels
+                .iter()
+                .find(|(k, _)| k == "role")
+                .map(|(_, v)| v.as_str()),
             Some("api"),
             "last-write-wins must replace the value",
         );
@@ -5512,7 +5601,8 @@ pub fn self_test() {
             "unrelated pid exit must not stop the container",
         );
         assert_eq!(
-            info(ct_exit).unwrap().exit_code, None,
+            info(ct_exit).unwrap().exit_code,
+            None,
             "unrelated pid exit must not record an exit code",
         );
 
@@ -5525,7 +5615,8 @@ pub fn self_test() {
             "init exit must stop the container",
         );
         assert_eq!(
-            info(ct_exit).unwrap().exit_code, Some(7),
+            info(ct_exit).unwrap().exit_code,
+            Some(7),
             "init exit must record the exit code",
         );
 
@@ -5535,7 +5626,8 @@ pub fn self_test() {
         notify_init_exit(INIT_PID, 99);
         assert_eq!(info(ct_exit).unwrap().state, ContainerState::Stopped);
         assert_eq!(
-            info(ct_exit).unwrap().exit_code, Some(7),
+            info(ct_exit).unwrap().exit_code,
+            Some(7),
             "a stale notification must not overwrite the recorded exit code",
         );
 
@@ -5550,7 +5642,11 @@ pub fn self_test() {
     // attaches simply no-op for a non-existent task.
     {
         let ct_top = create(&ContainerConfig::new("test-top-ct")).expect("create");
-        assert_eq!(pids(ct_top), Some(Vec::new()), "fresh container has no pids");
+        assert_eq!(
+            pids(ct_top),
+            Some(Vec::new()),
+            "fresh container has no pids"
+        );
 
         add_process(ct_top, 70001).expect("add 70001");
         add_process(ct_top, 70002).expect("add 70002");
@@ -5631,7 +5727,8 @@ pub fn self_test() {
         let long: alloc::string::String = "x".repeat(MAX_NAME_LEN + 10);
         rename(ct_rn, &long).expect("rename long");
         assert_eq!(
-            info(ct_rn).unwrap().name.len(), MAX_NAME_LEN,
+            info(ct_rn).unwrap().name.len(),
+            MAX_NAME_LEN,
             "name must be truncated to MAX_NAME_LEN",
         );
 
@@ -5659,7 +5756,8 @@ pub fn self_test() {
         add_process(ct_k, 71001).expect("add 71001");
         add_process(ct_k, 71002).expect("add 71002");
         assert_eq!(
-            kill(ct_k).expect("kill synthetic"), 0,
+            kill(ct_k).expect("kill synthetic"),
+            0,
             "synthetic PIDs have no threads to kill",
         );
 
@@ -5693,8 +5791,16 @@ pub fn self_test() {
         add_port_publish(ct_pp, NatProto::Udp, 5353, 53).expect("publish udp");
         let ports = published_ports(ct_pp).expect("ports after publish");
         assert_eq!(ports.len(), 2, "two published ports expected");
-        assert_eq!(ports[0], (NatProto::Tcp, 8080, 80), "first publish: tcp 8080->80");
-        assert_eq!(ports[1], (NatProto::Udp, 5353, 53), "second publish: udp 5353->53");
+        assert_eq!(
+            ports[0],
+            (NatProto::Tcp, 8080, 80),
+            "first publish: tcp 8080->80"
+        );
+        assert_eq!(
+            ports[1],
+            (NatProto::Udp, 5353, 53),
+            "second publish: udp 5353->53"
+        );
 
         delete(ct_pp).expect("delete port-list container");
     }
@@ -5766,9 +5872,8 @@ pub fn self_test() {
     // own teardown has already finished), so nothing races it.
     {
         // A real, compiled userspace ELF staged into the container's rootfs.
-        static EHELLO_ELF: &[u8] = include_bytes!(
-            "../../services/hello/target/x86_64-unknown-none/release/hello"
-        );
+        static EHELLO_ELF: &[u8] =
+            include_bytes!("../../services/hello/target/x86_64-unknown-none/release/hello");
 
         // wait_process on a pid that never existed → NoSuchProcess.
         assert!(
@@ -5810,8 +5915,8 @@ pub fn self_test() {
         let cg_ex = cgroup(ct_ex).expect("exec container cgroup");
 
         // Launch the real process (argv[0] = the guest command path).
-        let spawned = exec_path(ct_ex, b"/bin/hello", &[b"/bin/hello"])
-            .expect("exec hello into container");
+        let spawned =
+            exec_path(ct_ex, b"/bin/hello", &[b"/bin/hello"]).expect("exec hello into container");
 
         // Billed to the container cgroup while alive.
         assert_eq!(
@@ -5833,7 +5938,10 @@ pub fn self_test() {
                 _ => crate::sched::yield_now(),
             }
         }
-        assert!(zombified, "exec'd hello did not exit within the yield budget");
+        assert!(
+            zombified,
+            "exec'd hello did not exit within the yield budget"
+        );
 
         // wait_process now takes the already-zombie fast path (no parking of the
         // boot thread): it reads and reaps the exit code.  hello exits 0.
@@ -5911,8 +6019,7 @@ pub fn self_test() {
 
         // Once Healthy, a failure counts immediately even inside the start
         // period (Docker: a pass ends the start-period grace).
-        let (fs, fk) =
-            apply_probe_result(HealthStatus::Healthy, 0, 0, 500_000_000, &cfg, 1);
+        let (fs, fk) = apply_probe_result(HealthStatus::Healthy, 0, 0, 500_000_000, &cfg, 1);
         assert_eq!((fs, fk), (HealthStatus::Healthy, 1));
 
         // set_healthcheck / health_status APIs.
@@ -5942,9 +6049,8 @@ pub fn self_test() {
     // the probe process gets CPU.
     {
         // A real, compiled userspace ELF that exits 0 — the probe target.
-        static EHELLO_ELF: &[u8] = include_bytes!(
-            "../../services/hello/target/x86_64-unknown-none/release/hello"
-        );
+        static EHELLO_ELF: &[u8] =
+            include_bytes!("../../services/hello/target/x86_64-unknown-none/release/hello");
         // Stage the probe target (exits 0) in a fresh rootfs.
         let _ = crate::fs::vfs::Vfs::mkdir("/tmp/ct_health_root");
         let _ = crate::fs::vfs::Vfs::mkdir("/tmp/ct_health_root/bin");
@@ -5981,7 +6087,10 @@ pub fn self_test() {
             }
             crate::sched::yield_now();
         }
-        assert!(healthy, "live healthcheck did not reach Healthy within budget");
+        assert!(
+            healthy,
+            "live healthcheck did not reach Healthy within budget"
+        );
 
         // The probe was reaped and unbound: force any Dead task through reap and
         // confirm the container cgroup is empty (no probe-process leak).
@@ -6039,15 +6148,21 @@ pub fn self_test() {
         set_overlay_id(ct_d, Some(ov)).expect("set overlay id");
         let changes = diff(ct_d).expect("diff");
         assert!(
-            changes.iter().any(|c| c.kind == DiffKind::Added && c.path == PathBuf::from("/added.txt")),
+            changes
+                .iter()
+                .any(|c| c.kind == DiffKind::Added && c.path == PathBuf::from("/added.txt")),
             "added.txt must be reported as Added",
         );
         assert!(
-            changes.iter().any(|c| c.kind == DiffKind::Changed && c.path == PathBuf::from("/keep")),
+            changes
+                .iter()
+                .any(|c| c.kind == DiffKind::Changed && c.path == PathBuf::from("/keep")),
             "keep must be reported as Changed",
         );
         assert!(
-            changes.iter().any(|c| c.kind == DiffKind::Deleted && c.path == PathBuf::from("/gone")),
+            changes
+                .iter()
+                .any(|c| c.kind == DiffKind::Deleted && c.path == PathBuf::from("/gone")),
             "gone must be reported as Deleted",
         );
         // Output is sorted by path.
@@ -6075,8 +6190,7 @@ pub fn self_test() {
         let _ = Vfs::mkdir(alloc::format!("{src}/blobs"));
         Vfs::write_file(alloc::format!("{src}/oci-layout"), b"{\"v\":\"1.0.0\"}")
             .expect("write oci-layout");
-        Vfs::write_file(alloc::format!("{src}/blobs/x"), b"BLOBDATA")
-            .expect("write blob");
+        Vfs::write_file(alloc::format!("{src}/blobs/x"), b"BLOBDATA").expect("write blob");
 
         // save: tar the tree, write archive to a host file.
         let archive = tar_tree(src).expect("tar image tree");
@@ -6135,7 +6249,11 @@ pub fn self_test() {
         // Make it Running, then pause it.
         start(ct_pz).expect("start");
         add_process(ct_pz, 72001).expect("add 72001"); // synthetic tracked PID
-        assert_eq!(pause(ct_pz).expect("pause"), 0, "synthetic PID has no threads");
+        assert_eq!(
+            pause(ct_pz).expect("pause"),
+            0,
+            "synthetic PID has no threads"
+        );
         assert_eq!(is_frozen(ct_pz), Some(true), "frozen after pause");
 
         // Double-pause is rejected.
@@ -6145,7 +6263,11 @@ pub fn self_test() {
         add_process(ct_pz, 72002).expect("add 72002 while frozen");
 
         // Unpause thaws it.
-        assert_eq!(unpause(ct_pz).expect("unpause"), 0, "no live threads to resume");
+        assert_eq!(
+            unpause(ct_pz).expect("unpause"),
+            0,
+            "no live threads to resume"
+        );
         assert_eq!(is_frozen(ct_pz), Some(false), "not frozen after unpause");
         // Double-unpause is rejected.
         assert!(unpause(ct_pz).is_err(), "not frozen");
@@ -6161,9 +6283,8 @@ pub fn self_test() {
     // PID while preserving the container's configuration.  A container that was
     // never run via run_path() has no spec and cannot be restarted.
     {
-        static RHELLO_ELF: &[u8] = include_bytes!(
-            "../../services/hello/target/x86_64-unknown-none/release/hello"
-        );
+        static RHELLO_ELF: &[u8] =
+            include_bytes!("../../services/hello/target/x86_64-unknown-none/release/hello");
 
         // restart with no recorded spec is rejected.
         let ct_nr = create(&ContainerConfig::new("test-norestart-ct")).expect("create");
@@ -6183,7 +6304,8 @@ pub fn self_test() {
             .expect("create restart container");
         let pid1 = run_path(ct_rs, elf_path, &[]).expect("run_path initial launch");
         assert_eq!(
-            info(ct_rs).unwrap().init_pid, Some(pid1),
+            info(ct_rs).unwrap().init_pid,
+            Some(pid1),
             "initial launch records init pid",
         );
 
@@ -6191,7 +6313,8 @@ pub fn self_test() {
         let pid2 = restart(ct_rs).expect("restart");
         assert_ne!(pid1, pid2, "restart must spawn a fresh init process");
         assert_eq!(
-            info(ct_rs).unwrap().init_pid, Some(pid2),
+            info(ct_rs).unwrap().init_pid,
+            Some(pid2),
             "restart records the new init pid",
         );
 
@@ -6200,8 +6323,8 @@ pub fn self_test() {
         // the live init still tracked by the container.
         crate::proc::thread::kill_process_threads(pid1);
         crate::proc::pcb::destroy(pid1);
-        if let Some(init_task) = crate::proc::pcb::get_threads(pid2)
-            .and_then(|t| t.first().copied())
+        if let Some(init_task) =
+            crate::proc::pcb::get_threads(pid2).and_then(|t| t.first().copied())
         {
             let _ = remove_process_task(ct_rs, pid2, init_task);
         }
@@ -6244,7 +6367,8 @@ pub fn self_test() {
         copy_to_container(ct_cp, "/cp-test.txt", payload).expect("copy into container");
         let got = copy_from_container(ct_cp, "/cp-test.txt").expect("copy out of container");
         assert_eq!(
-            got.as_slice(), payload,
+            got.as_slice(),
+            payload,
             "round-trip copy must preserve the file bytes",
         );
 
@@ -6372,7 +6496,11 @@ pub fn self_test() {
         );
         // The new container is configured with the extracted rootfs.
         let ci = info(id).expect("imported container exists");
-        assert_eq!(ci.root_path.as_path(), Path::new("/tmp/imp-root"), "rootfs must be attached");
+        assert_eq!(
+            ci.root_path.as_path(),
+            Path::new("/tmp/imp-root"),
+            "rootfs must be attached"
+        );
 
         // A `..` member name is rejected as a jail escape and leaves no
         // container behind.
@@ -6391,7 +6519,11 @@ pub fn self_test() {
             import_rootfs("test-import-evil", &evil, "/tmp/imp-evil").is_err(),
             "`..` archive names must be rejected",
         );
-        assert_eq!(active_count(), n_before, "rejected import leaks no container");
+        assert_eq!(
+            active_count(),
+            n_before,
+            "rejected import leaks no container"
+        );
 
         // Cleanup.
         delete(id).expect("delete imported container");
@@ -6411,14 +6543,12 @@ pub fn self_test() {
         // Source rootfs with a single file.
         let src_root = "/tmp/commit-src";
         Vfs::mkdir(src_root).expect("mkdir commit src");
-        Vfs::write_file("/tmp/commit-src/data.txt", b"original")
-            .expect("write src data");
+        Vfs::write_file("/tmp/commit-src/data.txt", b"original").expect("write src data");
         let src = create(&ContainerConfig::new("test-commit-src")).expect("create src");
         set_root_path(src, src_root).expect("set src rootfs");
 
         // Commit into a new container with its own rootfs.
-        let snap = commit(src, "test-commit-snap", "/tmp/commit-dst")
-            .expect("commit snapshot");
+        let snap = commit(src, "test-commit-snap", "/tmp/commit-dst").expect("commit snapshot");
         let ci = info(snap).expect("snapshot container exists");
         assert_eq!(
             ci.root_path.as_path(),
@@ -6432,8 +6562,7 @@ pub fn self_test() {
         );
 
         // Mutating the source after the commit must not affect the snapshot.
-        Vfs::write_file("/tmp/commit-src/data.txt", b"CHANGED")
-            .expect("rewrite src data");
+        Vfs::write_file("/tmp/commit-src/data.txt", b"CHANGED").expect("rewrite src data");
         assert_eq!(
             Vfs::read_file("/tmp/commit-dst/data.txt").expect("re-read snapshot"),
             b"original",
@@ -6463,12 +6592,18 @@ pub fn self_test() {
             "delete() must refuse a running container",
         );
         force_delete(ct_run).expect("force_delete a running container");
-        assert!(info(ct_run).is_none(), "force_delete must remove the container");
+        assert!(
+            info(ct_run).is_none(),
+            "force_delete must remove the container"
+        );
 
         // force_delete also works on a non-running (Created) container.
         let ct_new = create(&ContainerConfig::new("test-forcedel-new")).expect("create");
         force_delete(ct_new).expect("force_delete a created container");
-        assert!(info(ct_new).is_none(), "force_delete removes a created container");
+        assert!(
+            info(ct_new).is_none(),
+            "force_delete removes a created container"
+        );
 
         // An invalid id is rejected.
         assert!(force_delete(9999).is_err(), "invalid id must be rejected");
@@ -6554,9 +6689,8 @@ pub fn self_test() {
     // process never executes, so the forced ABI has no runtime effect here.
     {
         use crate::fs::vfs::Vfs;
-        static HELLO_ELF: &[u8] = include_bytes!(
-            "../../services/hello/target/x86_64-unknown-none/release/hello"
-        );
+        static HELLO_ELF: &[u8] =
+            include_bytes!("../../services/hello/target/x86_64-unknown-none/release/hello");
 
         let ct = create(&ContainerConfig::new("test-logs-ct").memory(4096))
             .expect("create logs container");
@@ -6638,9 +6772,8 @@ pub fn self_test() {
     // timing-dependent flake that preemption-timing changes made observable.)
     {
         use crate::net::nat::NatProto;
-        static HELLO_ELF: &[u8] = include_bytes!(
-            "../../services/hello/target/x86_64-unknown-none/release/hello"
-        );
+        static HELLO_ELF: &[u8] =
+            include_bytes!("../../services/hello/target/x86_64-unknown-none/release/hello");
 
         // Publishing requires a network IP (the forward target).
         let netless = create(&ContainerConfig::new("test-noport-ct").memory(4096))
@@ -6651,9 +6784,12 @@ pub fn self_test() {
         );
         delete(netless).expect("delete netless container");
 
-        let port_cfg = ContainerConfig::new("test-port-ct")
-            .memory(4096)
-            .network([10, 7, 0, 9], None, None, None);
+        let port_cfg = ContainerConfig::new("test-port-ct").memory(4096).network(
+            [10, 7, 0, 9],
+            None,
+            None,
+            None,
+        );
         let ct_port = create(&port_cfg).expect("create port container");
 
         // Publish TCP 8080->80 and UDP 5353->53.
@@ -6705,8 +6841,7 @@ pub fn self_test() {
         // Tear down the init process (the thread record persists until
         // destroy, so this is safe even if the short-lived init already
         // exited; tolerate a missing thread defensively).
-        if let Some(init_task) = crate::proc::pcb::get_threads(pid)
-            .and_then(|t| t.first().copied())
+        if let Some(init_task) = crate::proc::pcb::get_threads(pid).and_then(|t| t.first().copied())
         {
             let _ = remove_process_task(ct_port, pid, init_task);
         }
@@ -6806,7 +6941,12 @@ pub fn self_test() {
         assert!(!should_auto_restart(RestartPolicy::Always, 1, true, 0));
 
         // UnlessStopped behaves identically to Always in our model.
-        assert!(should_auto_restart(RestartPolicy::UnlessStopped, 0, false, 0));
+        assert!(should_auto_restart(
+            RestartPolicy::UnlessStopped,
+            0,
+            false,
+            0
+        ));
         assert!(!should_auto_restart(
             RestartPolicy::UnlessStopped,
             0,
@@ -6815,11 +6955,36 @@ pub fn self_test() {
         ));
 
         // OnFailure(N): only non-zero exit, capped at N restarts (0 == ∞).
-        assert!(!should_auto_restart(RestartPolicy::OnFailure(2), 0, false, 0));
-        assert!(should_auto_restart(RestartPolicy::OnFailure(2), 1, false, 0));
-        assert!(should_auto_restart(RestartPolicy::OnFailure(2), 1, false, 1));
-        assert!(!should_auto_restart(RestartPolicy::OnFailure(2), 1, false, 2));
-        assert!(should_auto_restart(RestartPolicy::OnFailure(0), 1, false, 999));
+        assert!(!should_auto_restart(
+            RestartPolicy::OnFailure(2),
+            0,
+            false,
+            0
+        ));
+        assert!(should_auto_restart(
+            RestartPolicy::OnFailure(2),
+            1,
+            false,
+            0
+        ));
+        assert!(should_auto_restart(
+            RestartPolicy::OnFailure(2),
+            1,
+            false,
+            1
+        ));
+        assert!(!should_auto_restart(
+            RestartPolicy::OnFailure(2),
+            1,
+            false,
+            2
+        ));
+        assert!(should_auto_restart(
+            RestartPolicy::OnFailure(0),
+            1,
+            false,
+            999
+        ));
         assert!(!should_auto_restart(
             RestartPolicy::OnFailure(2),
             1,
@@ -6829,8 +6994,7 @@ pub fn self_test() {
 
         // A created container records and reports its policy.
         let rp = create(
-            &ContainerConfig::new("restart-policy-ct")
-                .restart_policy(RestartPolicy::OnFailure(3)),
+            &ContainerConfig::new("restart-policy-ct").restart_policy(RestartPolicy::OnFailure(3)),
         )
         .expect("create restart-policy-ct");
         let inf = info(rp).expect("info restart-policy-ct");
@@ -6862,8 +7026,8 @@ pub fn self_test() {
         );
         delete(plain).expect("cleanup rm-off-ct");
 
-        let rm = create(&ContainerConfig::new("rm-on-ct").auto_remove(true))
-            .expect("create rm-on-ct");
+        let rm =
+            create(&ContainerConfig::new("rm-on-ct").auto_remove(true)).expect("create rm-on-ct");
         assert!(
             info(rm).expect("info rm-on-ct").auto_remove,
             "auto_remove(true) must be recorded",
@@ -6905,10 +7069,22 @@ pub fn self_test() {
         assert_eq!(restart_backoff_ns(4), 800_000_000, "attempt 4 = 800 ms");
         // attempt 0 (shouldn't occur — count is >=1 when scheduled) clamps to
         // the base rather than under/overflowing.
-        assert_eq!(restart_backoff_ns(0), 100_000_000, "attempt 0 clamps to base");
+        assert_eq!(
+            restart_backoff_ns(0),
+            100_000_000,
+            "attempt 0 clamps to base"
+        );
         // High attempt counts saturate at the 30 s cap (and never overflow).
-        assert_eq!(restart_backoff_ns(20), 30_000_000_000, "high count hits cap");
-        assert_eq!(restart_backoff_ns(u32::MAX), 30_000_000_000, "u32::MAX hits cap");
+        assert_eq!(
+            restart_backoff_ns(20),
+            30_000_000_000,
+            "high count hits cap"
+        );
+        assert_eq!(
+            restart_backoff_ns(u32::MAX),
+            30_000_000_000,
+            "u32::MAX hits cap"
+        );
         // Monotonically non-decreasing across the whole range.
         let mut prev = 0u64;
         for n in 0..40u32 {
@@ -6940,9 +7116,7 @@ pub fn self_test() {
         );
 
         // Baseline: only inspect events we record from here on.
-        let base = events_snapshot(0, 0, None)
-            .last()
-            .map_or(0, |e| e.seq);
+        let base = events_snapshot(0, 0, None).last().map_or(0, |e| e.seq);
 
         // Record a deterministic burst against synthetic ids.
         let id_x: ContainerId = 30;
@@ -6960,16 +7134,26 @@ pub fn self_test() {
         assert_eq!(ours[1].kind, ContainerEventKind::Start);
         assert_eq!(ours[3].kind, ContainerEventKind::Die);
         assert_eq!(ours[3].exit_code, Some(7), "die must carry the exit code");
-        assert!(ours[0].exit_code.is_none(), "non-die events carry no exit code");
+        assert!(
+            ours[0].exit_code.is_none(),
+            "non-die events carry no exit code"
+        );
         for w in ours.windows(2) {
             assert!(w[1].seq > w[0].seq, "event seqs must strictly increase");
-            assert!(w[1].time_ns >= w[0].time_ns, "event times must be monotonic");
+            assert!(
+                w[1].time_ns >= w[0].time_ns,
+                "event times must be monotonic"
+            );
         }
 
         // limit keeps the most recent N.
         let last_two = events_snapshot(base, 2, None);
         assert_eq!(last_two.len(), 2, "limit must cap the result");
-        assert_eq!(last_two[1].kind, ContainerEventKind::Die, "limit keeps newest");
+        assert_eq!(
+            last_two[1].kind,
+            ContainerEventKind::Die,
+            "limit keeps newest"
+        );
 
         // filter_id restricts to one container.
         let only_y = events_snapshot(base, 0, Some(id_y));
@@ -6977,7 +7161,11 @@ pub fn self_test() {
         assert_eq!(only_y[0].id, id_y);
         assert_eq!(only_y[0].name, "evt-y");
         let only_x = events_snapshot(base, 0, Some(id_x));
-        assert_eq!(only_x.len(), 3, "filter_id must return all of id_x's events");
+        assert_eq!(
+            only_x.len(),
+            3,
+            "filter_id must return all of id_x's events"
+        );
     }
     serial_println!("[container]   lifecycle event log (events): OK");
 
@@ -6989,8 +7177,7 @@ pub fn self_test() {
     {
         let tf_cfg = ContainerConfig::new("test-tmpfs-ct").memory(4096);
         let ct_tf = create(&tf_cfg).expect("create tmpfs container");
-        set_root_path(ct_tf, "/containers/test-tmpfs/rootfs")
-            .expect("set rootfs");
+        set_root_path(ct_tf, "/containers/test-tmpfs/rootfs").expect("set rootfs");
 
         // Two ephemeral mounts at distinct guest prefixes.
         add_tmpfs_mount(ct_tf, "/tmp").expect("add /tmp tmpfs");
@@ -7019,13 +7206,15 @@ pub fn self_test() {
             .iter()
             .find(|(g, _, _)| g.as_path() == Path::new("/tmp"))
             .expect("tmpfs /tmp volume must exist");
-        assert!(!tmp_vol.2, "a tmpfs mount is always writable (never read-only)");
+        assert!(
+            !tmp_vol.2,
+            "a tmpfs mount is always writable (never read-only)"
+        );
 
         // The backing memfs is genuinely writable: write a file through the host
         // mountpoint and read it back byte-for-byte.
         let probe = tmp_vol.1.join("probe.txt");
-        crate::fs::vfs::Vfs::write_file(&probe, b"tmpfs-ok")
-            .expect("write into tmpfs");
+        crate::fs::vfs::Vfs::write_file(&probe, b"tmpfs-ok").expect("write into tmpfs");
         assert_eq!(
             crate::fs::vfs::Vfs::read_file(&probe).expect("read from tmpfs"),
             b"tmpfs-ok",

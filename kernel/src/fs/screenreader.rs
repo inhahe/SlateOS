@@ -23,11 +23,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -235,7 +235,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         config: ScreenReaderConfig::default(),
         elements: Vec::new(),
@@ -250,7 +252,9 @@ pub fn set_enabled(enabled: bool) -> KernelResult<()> {
     with_state(|state| {
         state.config.enabled = enabled;
         if enabled {
-            state.speech_queue.push(String::from("Screen reader enabled"));
+            state
+                .speech_queue
+                .push(String::from("Screen reader enabled"));
         }
         Ok(())
     })
@@ -261,15 +265,24 @@ pub fn is_enabled() -> bool {
 }
 
 pub fn set_speech_rate(rate: SpeechRate) -> KernelResult<()> {
-    with_state(|state| { state.config.speech_rate = rate; Ok(()) })
+    with_state(|state| {
+        state.config.speech_rate = rate;
+        Ok(())
+    })
 }
 
 pub fn set_volume(volume: u32) -> KernelResult<()> {
-    with_state(|state| { state.config.volume = volume.min(100); Ok(()) })
+    with_state(|state| {
+        state.config.volume = volume.min(100);
+        Ok(())
+    })
 }
 
 pub fn set_verbosity(verbosity: Verbosity) -> KernelResult<()> {
-    with_state(|state| { state.config.verbosity = verbosity; Ok(()) })
+    with_state(|state| {
+        state.config.verbosity = verbosity;
+        Ok(())
+    })
 }
 
 pub fn get_config() -> KernelResult<ScreenReaderConfig> {
@@ -278,17 +291,26 @@ pub fn get_config() -> KernelResult<ScreenReaderConfig> {
 
 /// Register an accessible element (from toolkit).
 pub fn register_element(
-    id: u32, role: ElementRole, name: &str, parent_id: u32,
+    id: u32,
+    role: ElementRole,
+    name: &str,
+    parent_id: u32,
 ) -> KernelResult<()> {
     with_state(|state| {
         if state.elements.iter().any(|e| e.id == id) {
             return Err(KernelError::AlreadyExists);
         }
         state.elements.push(AccessibleElement {
-            id, role, name: String::from(name),
-            value: String::new(), description: String::new(),
-            focused: false, enabled: true, checked: false,
-            shortcut: String::new(), parent_id,
+            id,
+            role,
+            name: String::from(name),
+            value: String::new(),
+            description: String::new(),
+            focused: false,
+            enabled: true,
+            checked: false,
+            shortcut: String::new(),
+            parent_id,
         });
         Ok(())
     })
@@ -297,7 +319,10 @@ pub fn register_element(
 /// Remove an element.
 pub fn unregister_element(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.elements.iter().position(|e| e.id == id)
+        let pos = state
+            .elements
+            .iter()
+            .position(|e| e.id == id)
             .ok_or(KernelError::NotFound)?;
         state.elements.remove(pos);
         Ok(())
@@ -307,7 +332,9 @@ pub fn unregister_element(id: u32) -> KernelResult<()> {
 /// Announce text (push to TTS queue).
 pub fn announce(text: &str) -> KernelResult<()> {
     with_state(|state| {
-        if !state.config.enabled { return Ok(()); }
+        if !state.config.enabled {
+            return Ok(());
+        }
         state.speech_queue.push(String::from(text));
         state.total_announcements += 1;
         // Cap queue size.
@@ -321,7 +348,9 @@ pub fn announce(text: &str) -> KernelResult<()> {
 /// Focus changed — announce the new focused element.
 pub fn focus_changed(element_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if !state.config.enabled { return Ok(()); }
+        if !state.config.enabled {
+            return Ok(());
+        }
 
         // Unfocus old.
         if state.focused_id != 0 {
@@ -339,20 +368,41 @@ pub fn focus_changed(element_id: u32) -> KernelResult<()> {
             let announcement = match state.config.verbosity {
                 Verbosity::Low => format!("{} {}", elem.name, elem.role.label()),
                 Verbosity::Medium => {
-                    let state_str = if !elem.enabled { " disabled" }
-                        else if elem.checked { " checked" }
-                        else { "" };
+                    let state_str = if !elem.enabled {
+                        " disabled"
+                    } else if elem.checked {
+                        " checked"
+                    } else {
+                        ""
+                    };
                     format!("{} {}{}", elem.name, elem.role.label(), state_str)
                 }
                 Verbosity::High => {
-                    let state_str = if !elem.enabled { " disabled" }
-                        else if elem.checked { " checked" }
-                        else { "" };
-                    let desc = if elem.description.is_empty() { String::new() }
-                        else { format!(" — {}", elem.description) };
-                    let shortcut = if elem.shortcut.is_empty() { String::new() }
-                        else { format!(" ({})", elem.shortcut) };
-                    format!("{} {}{}{}{}", elem.name, elem.role.label(), state_str, desc, shortcut)
+                    let state_str = if !elem.enabled {
+                        " disabled"
+                    } else if elem.checked {
+                        " checked"
+                    } else {
+                        ""
+                    };
+                    let desc = if elem.description.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", elem.description)
+                    };
+                    let shortcut = if elem.shortcut.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", elem.shortcut)
+                    };
+                    format!(
+                        "{} {}{}{}{}",
+                        elem.name,
+                        elem.role.label(),
+                        state_str,
+                        desc,
+                        shortcut
+                    )
                 }
             };
 
@@ -367,17 +417,20 @@ pub fn focus_changed(element_id: u32) -> KernelResult<()> {
 /// Get the focused element.
 pub fn focused_element() -> Option<AccessibleElement> {
     let guard = STATE.lock();
-    guard.as_ref().and_then(|s| {
-        s.elements.iter().find(|e| e.id == s.focused_id).cloned()
-    })
+    guard
+        .as_ref()
+        .and_then(|s| s.elements.iter().find(|e| e.id == s.focused_id).cloned())
 }
 
 /// Pop the next speech item from the queue (for TTS engine).
 pub fn next_speech() -> Option<String> {
     let mut guard = STATE.lock();
     guard.as_mut().and_then(|s| {
-        if s.speech_queue.is_empty() { None }
-        else { Some(s.speech_queue.remove(0)) }
+        if s.speech_queue.is_empty() {
+            None
+        } else {
+            Some(s.speech_queue.remove(0))
+        }
     })
 }
 
@@ -388,7 +441,10 @@ pub fn speech_queue_len() -> usize {
 
 /// List registered elements.
 pub fn list_elements() -> Vec<AccessibleElement> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.elements.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.elements.clone())
 }
 
 /// Statistics: (element_count, announcements, queue_len, enabled, speech_rate_label, ops).
@@ -396,8 +452,12 @@ pub fn stats() -> (usize, u64, usize, bool, &'static str, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => (
-            s.elements.len(), s.total_announcements, s.speech_queue.len(),
-            s.config.enabled, s.config.speech_rate.label(), s.ops,
+            s.elements.len(),
+            s.total_announcements,
+            s.speech_queue.len(),
+            s.config.enabled,
+            s.config.speech_rate.label(),
+            s.ops,
         ),
         None => (0, 0, 0, false, "N/A", 0),
     }

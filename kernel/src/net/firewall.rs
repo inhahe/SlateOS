@@ -52,12 +52,12 @@
 //! - No NAT or port forwarding.
 //! - No per-process filtering (per-namespace only).
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::interface::Ipv4Addr;
-use super::ipv6::{Ipv6Addr, NH_ICMPV6};
 use super::ipv4::{PROTO_ICMP, PROTO_TCP, PROTO_UDP};
+use super::ipv6::{Ipv6Addr, NH_ICMPV6};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 
@@ -438,7 +438,9 @@ pub fn default_policy() -> DefaultPolicy {
 /// Returns the rule index, or error if the table is full.
 pub fn add_rule(rule: Rule) -> KernelResult<usize> {
     let mut rules = RULES.lock();
-    let slot = rules.iter().position(|r| !r.active)
+    let slot = rules
+        .iter()
+        .position(|r| !r.active)
         .ok_or(KernelError::OutOfMemory)?;
 
     let mut new_rule = rule;
@@ -447,7 +449,11 @@ pub fn add_rule(rule: Rule) -> KernelResult<usize> {
 
     serial_println!(
         "[firewall] Rule added: {:?} {:?} {:?} port={} prio={}",
-        rule.direction, rule.action, rule.protocol, rule.dst_port, rule.priority
+        rule.direction,
+        rule.action,
+        rule.protocol,
+        rule.dst_port,
+        rule.priority
     );
     Ok(slot)
 }
@@ -455,8 +461,7 @@ pub fn add_rule(rule: Rule) -> KernelResult<usize> {
 /// Remove a firewall rule by index.
 pub fn remove_rule(index: usize) -> KernelResult<()> {
     let mut rules = RULES.lock();
-    let rule = rules.get_mut(index)
-        .ok_or(KernelError::InvalidArgument)?;
+    let rule = rules.get_mut(index).ok_or(KernelError::InvalidArgument)?;
     if !rule.active {
         return Err(KernelError::InvalidArgument);
     }
@@ -615,7 +620,10 @@ fn format_v4_source(ip: Ipv4Addr, prefix: u8) -> ([u8; 48], u8) {
     use core::fmt::Write;
 
     let mut buf = [0u8; 48];
-    let mut writer = FixedBufWriter { buf: &mut buf, pos: 0 };
+    let mut writer = FixedBufWriter {
+        buf: &mut buf,
+        pos: 0,
+    };
     if ip == Ipv4Addr::UNSPECIFIED && prefix == 0 {
         let _ = write!(writer, "any");
     } else if prefix >= 32 || prefix == 0 {
@@ -632,7 +640,10 @@ fn format_v6_source(ip: Ipv6Addr, prefix: u8) -> ([u8; 48], u8) {
     use core::fmt::Write;
 
     let mut buf = [0u8; 48];
-    let mut writer = FixedBufWriter { buf: &mut buf, pos: 0 };
+    let mut writer = FixedBufWriter {
+        buf: &mut buf,
+        pos: 0,
+    };
     if ip == Ipv6Addr::UNSPECIFIED && prefix == 0 {
         let _ = write!(writer, "any");
     } else if prefix >= 128 || prefix == 0 {
@@ -766,15 +777,14 @@ pub fn track_connection(protocol: u8, local_port: u16, remote_ip: Ipv4Addr, remo
     }
 
     // Find a free slot (or expire the oldest).
-    let slot = ct.iter().position(|e| !e.active)
-        .or_else(|| {
-            // Expire oldest entry.
-            ct.iter()
-                .enumerate()
-                .filter(|(_, e)| e.active)
-                .min_by_key(|(_, e)| e.last_seen_ns)
-                .map(|(i, _)| i)
-        });
+    let slot = ct.iter().position(|e| !e.active).or_else(|| {
+        // Expire oldest entry.
+        ct.iter()
+            .enumerate()
+            .filter(|(_, e)| e.active)
+            .min_by_key(|(_, e)| e.last_seen_ns)
+            .map(|(i, _)| i)
+    });
 
     if let Some(idx) = slot {
         ct[idx] = ConntrackEntry {
@@ -1035,7 +1045,10 @@ pub fn ns_add_rule(ns_id: u32, rule: Rule) -> KernelResult<usize> {
         return Err(KernelError::InvalidArgument);
     }
 
-    let slot = table[idx].rules.iter().position(|r| !r.active)
+    let slot = table[idx]
+        .rules
+        .iter()
+        .position(|r| !r.active)
         .ok_or(KernelError::OutOfMemory)?;
 
     let mut new_rule = rule;
@@ -1044,8 +1057,12 @@ pub fn ns_add_rule(ns_id: u32, rule: Rule) -> KernelResult<usize> {
 
     serial_println!(
         "[firewall] NS {} rule added: {:?} {:?} {:?} port={} prio={}",
-        ns_id, rule.direction, rule.action, rule.protocol,
-        rule.dst_port, rule.priority
+        ns_id,
+        rule.direction,
+        rule.action,
+        rule.protocol,
+        rule.dst_port,
+        rule.priority
     );
     Ok(slot)
 }
@@ -1064,7 +1081,9 @@ pub fn ns_remove_rule(ns_id: u32, rule_idx: usize) -> KernelResult<()> {
     if !table[idx].active {
         return Err(KernelError::InvalidArgument);
     }
-    let rule = table[idx].rules.get_mut(rule_idx)
+    let rule = table[idx]
+        .rules
+        .get_mut(rule_idx)
         .ok_or(KernelError::InvalidArgument)?;
     if !rule.active {
         return Err(KernelError::InvalidArgument);
@@ -1173,12 +1192,7 @@ pub fn ns_reset_stats(ns_id: u32) {
 ///   connection tracking.
 /// - If a namespace has no active firewall state, all traffic passes.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn check_outbound_ns(
-    ns_id: u32,
-    protocol: u8,
-    dst_ip: Ipv4Addr,
-    payload: &[u8],
-) -> bool {
+pub fn check_outbound_ns(ns_id: u32, protocol: u8, dst_ip: Ipv4Addr, payload: &[u8]) -> bool {
     let idx = ns_id as usize;
 
     // Root namespace uses the global firewall.
@@ -1203,7 +1217,13 @@ pub fn check_outbound_ns(
     // Check rules.  Same as check_outbound(): for outbound traffic the
     // rule's `src_ip` field is matched against the destination (remote
     // peer), not the namespace's own source IP.
-    let action = match_rules_in_table(&mut table[idx].rules, Direction::Out, protocol, dst_ip, dst_port);
+    let action = match_rules_in_table(
+        &mut table[idx].rules,
+        Direction::Out,
+        protocol,
+        dst_ip,
+        dst_port,
+    );
 
     let allowed = match action {
         Some(Action::Allow) => true,
@@ -1215,7 +1235,13 @@ pub fn check_outbound_ns(
         table[idx].allowed = table[idx].allowed.wrapping_add(1);
         // Track the connection for stateful reply filtering.
         if (protocol == PROTO_TCP || protocol == PROTO_UDP) && src_port != 0 {
-            ns_track_connection(&mut table[idx].conntrack, protocol, src_port, dst_ip, dst_port);
+            ns_track_connection(
+                &mut table[idx].conntrack,
+                protocol,
+                src_port,
+                dst_ip,
+                dst_port,
+            );
         }
     } else {
         table[idx].denied = table[idx].denied.wrapping_add(1);
@@ -1232,12 +1258,7 @@ pub fn check_outbound_ns(
 ///   connection tracking.
 /// - If a namespace has no active firewall state, all traffic passes.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn check_inbound_ns(
-    ns_id: u32,
-    protocol: u8,
-    src_ip: Ipv4Addr,
-    payload: &[u8],
-) -> bool {
+pub fn check_inbound_ns(ns_id: u32, protocol: u8, src_ip: Ipv4Addr, payload: &[u8]) -> bool {
     let idx = ns_id as usize;
 
     if idx == 0 {
@@ -1258,14 +1279,26 @@ pub fn check_inbound_ns(
 
     // Check connection tracking first — tracked replies always pass.
     if protocol == PROTO_TCP || protocol == PROTO_UDP {
-        if ns_is_tracked_reply(&mut table[idx].conntrack, protocol, src_ip, src_port, dst_port) {
+        if ns_is_tracked_reply(
+            &mut table[idx].conntrack,
+            protocol,
+            src_ip,
+            src_port,
+            dst_port,
+        ) {
             table[idx].allowed = table[idx].allowed.wrapping_add(1);
             return true;
         }
     }
 
     // Check rules.
-    let action = match_rules_in_table(&mut table[idx].rules, Direction::In, protocol, src_ip, dst_port);
+    let action = match_rules_in_table(
+        &mut table[idx].rules,
+        Direction::In,
+        protocol,
+        src_ip,
+        dst_port,
+    );
 
     match action {
         Some(Action::Allow) => {
@@ -1312,14 +1345,14 @@ fn ns_track_connection(
     }
 
     // Find a free slot (or expire the oldest).
-    let slot = conntrack.iter().position(|e| !e.active)
-        .or_else(|| {
-            conntrack.iter()
-                .enumerate()
-                .filter(|(_, e)| e.active)
-                .min_by_key(|(_, e)| e.last_seen_ns)
-                .map(|(i, _)| i)
-        });
+    let slot = conntrack.iter().position(|e| !e.active).or_else(|| {
+        conntrack
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.active)
+            .min_by_key(|(_, e)| e.last_seen_ns)
+            .map(|(i, _)| i)
+    });
 
     if let Some(i) = slot {
         conntrack[i] = ConntrackEntry {
@@ -1487,7 +1520,8 @@ fn ip_matches(packet_ip: Ipv4Addr, rule_ip: Ipv4Addr, prefix_len: u8) -> bool {
     }
 
     // Compare the first `prefix_len` bits.
-    let mask = u32::MAX.checked_shl(32u32.saturating_sub(u32::from(prefix_len)))
+    let mask = u32::MAX
+        .checked_shl(32u32.saturating_sub(u32::from(prefix_len)))
         .unwrap_or(0);
     let pkt_u32 = u32::from_be_bytes(packet_ip.0);
     let rule_u32 = u32::from_be_bytes(rule_ip.0);
@@ -1542,7 +1576,9 @@ pub fn default_policy6() -> DefaultPolicy {
 /// Returns the rule index, or error if the table is full.
 pub fn add_rule6(rule: Rule6) -> KernelResult<usize> {
     let mut rules = RULES6.lock();
-    let slot = rules.iter().position(|r| !r.active)
+    let slot = rules
+        .iter()
+        .position(|r| !r.active)
         .ok_or(KernelError::OutOfMemory)?;
 
     let mut new_rule = rule;
@@ -1551,7 +1587,11 @@ pub fn add_rule6(rule: Rule6) -> KernelResult<usize> {
 
     serial_println!(
         "[firewall] IPv6 rule added: {:?} {:?} {:?} port={} prio={}",
-        rule.direction, rule.action, rule.protocol, rule.dst_port, rule.priority
+        rule.direction,
+        rule.action,
+        rule.protocol,
+        rule.dst_port,
+        rule.priority
     );
     Ok(slot)
 }
@@ -1559,8 +1599,7 @@ pub fn add_rule6(rule: Rule6) -> KernelResult<usize> {
 /// Remove an IPv6 firewall rule by index.
 pub fn remove_rule6(index: usize) -> KernelResult<()> {
     let mut rules = RULES6.lock();
-    let rule = rules.get_mut(index)
-        .ok_or(KernelError::InvalidArgument)?;
+    let rule = rules.get_mut(index).ok_or(KernelError::InvalidArgument)?;
     if !rule.active {
         return Err(KernelError::InvalidArgument);
     }
@@ -1692,14 +1731,13 @@ fn track_connection_v6(protocol: u8, local_port: u16, remote_ip: Ipv6Addr, remot
     }
 
     // Find a free slot (or expire the oldest).
-    let slot = ct.iter().position(|e| !e.active)
-        .or_else(|| {
-            ct.iter()
-                .enumerate()
-                .filter(|(_, e)| e.active)
-                .min_by_key(|(_, e)| e.last_seen_ns)
-                .map(|(i, _)| i)
-        });
+    let slot = ct.iter().position(|e| !e.active).or_else(|| {
+        ct.iter()
+            .enumerate()
+            .filter(|(_, e)| e.active)
+            .min_by_key(|(_, e)| e.last_seen_ns)
+            .map(|(i, _)| i)
+    });
 
     if let Some(idx) = slot {
         ct[idx] = ConntrackEntry6 {
@@ -2018,8 +2056,15 @@ pub fn procfs_content() -> alloc::string::String {
             };
             out.push_str(&format!(
                 "  rule[{}]: {} {} proto={} src={}/{} dport={} prio={} matches={}\n",
-                i, act, dir, proto, rule.src_ip, rule.src_prefix,
-                rule.dst_port, rule.priority, rule.match_count,
+                i,
+                act,
+                dir,
+                proto,
+                rule.src_ip,
+                rule.src_prefix,
+                rule.dst_port,
+                rule.priority,
+                rule.match_count,
             ));
         }
     }
@@ -2063,8 +2108,15 @@ pub fn procfs_content() -> alloc::string::String {
             };
             out.push_str(&format!(
                 "  rule[{}]: {} {} proto={} src={}/{} dport={} prio={} matches={}\n",
-                i, act, dir, proto, rule.src_ip, rule.src_prefix,
-                rule.dst_port, rule.priority, rule.match_count,
+                i,
+                act,
+                dir,
+                proto,
+                rule.src_ip,
+                rule.src_prefix,
+                rule.dst_port,
+                rule.priority,
+                rule.match_count,
             ));
         }
     }
@@ -2074,7 +2126,10 @@ pub fn procfs_content() -> alloc::string::String {
         let ns_table = NS_FIREWALLS.lock();
         let active_count = ns_table.iter().filter(|ns| ns.active).count();
         if active_count > 0 {
-            out.push_str(&format!("\n=== Namespace Firewalls ({} active) ===\n", active_count));
+            out.push_str(&format!(
+                "\n=== Namespace Firewalls ({} active) ===\n",
+                active_count
+            ));
             for (i, ns) in ns_table.iter().enumerate() {
                 if !ns.active {
                     continue;
@@ -2188,7 +2243,9 @@ fn test_rule_matching() -> KernelResult<()> {
 
     // Inbound TCP to port 80 → allowed.
     // TCP header: src_port=12345 (bytes [48, 57]), dst_port=80 (bytes [0, 80]).
-    let tcp_80 = [48u8, 57, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_80 = [
+        48u8, 57, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_inbound(PROTO_TCP, Ipv4Addr([192, 168, 1, 50]), &tcp_80);
     if !allowed {
         serial_println!("[firewall]   FAIL: TCP port 80 should be allowed");
@@ -2197,7 +2254,9 @@ fn test_rule_matching() -> KernelResult<()> {
     }
 
     // Inbound TCP to port 22 → denied (default DROP).
-    let tcp_22 = [48u8, 57, 0, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_22 = [
+        48u8, 57, 0, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_inbound(PROTO_TCP, Ipv4Addr([192, 168, 1, 50]), &tcp_22);
     if allowed {
         serial_println!("[firewall]   FAIL: TCP port 22 should be denied");
@@ -2270,7 +2329,9 @@ fn test_conntrack() -> KernelResult<()> {
 
     // Simulate outbound TCP from local port 49200 to 93.184.216.34:80.
     // TCP header: src=49200 (0xC030), dst=80 (0x0050).
-    let tcp_out = [0xC0u8, 0x30, 0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_out = [
+        0xC0u8, 0x30, 0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_outbound(PROTO_TCP, Ipv4Addr([93, 184, 216, 34]), &tcp_out);
     if !allowed {
         serial_println!("[firewall]   FAIL: outbound should be allowed");
@@ -2280,7 +2341,9 @@ fn test_conntrack() -> KernelResult<()> {
 
     // Now inbound reply: from 93.184.216.34:80 → our port 49200.
     // TCP header: src=80, dst=49200.
-    let tcp_reply = [0x00u8, 0x50, 0xC0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_reply = [
+        0x00u8, 0x50, 0xC0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_inbound(PROTO_TCP, Ipv4Addr([93, 184, 216, 34]), &tcp_reply);
     if !allowed {
         serial_println!("[firewall]   FAIL: reply should be allowed via conntrack");
@@ -2289,7 +2352,9 @@ fn test_conntrack() -> KernelResult<()> {
     }
 
     // Inbound from a different IP should NOT be tracked.
-    let tcp_other = [0x00u8, 0x50, 0xC0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_other = [
+        0x00u8, 0x50, 0xC0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_inbound(PROTO_TCP, Ipv4Addr([1, 2, 3, 4]), &tcp_other);
     if allowed {
         serial_println!("[firewall]   FAIL: untracked IP should be denied");
@@ -2339,7 +2404,9 @@ fn test_ns_firewall_isolation() -> KernelResult<()> {
     ns_add_rule(ns1, rule)?;
 
     // TCP to port 80: allowed in ns1, denied in ns2.
-    let tcp_80 = [48u8, 57, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_80 = [
+        48u8, 57, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed_ns1 = check_inbound_ns(ns1, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp_80);
     let allowed_ns2 = check_inbound_ns(ns2, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp_80);
 
@@ -2402,7 +2469,9 @@ fn test_ns_firewall_conntrack() -> KernelResult<()> {
     ns_add_rule(ns, rule)?;
 
     // Outbound TCP from port 50000 to 93.184.216.34:443.
-    let tcp_out = [0xC3u8, 0x50, 0x01, 0xBB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_out = [
+        0xC3u8, 0x50, 0x01, 0xBB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_outbound_ns(ns, PROTO_TCP, Ipv4Addr([93, 184, 216, 34]), &tcp_out);
     if !allowed {
         serial_println!("[firewall]   FAIL: ns outbound should be allowed");
@@ -2411,7 +2480,9 @@ fn test_ns_firewall_conntrack() -> KernelResult<()> {
     }
 
     // Inbound reply from 93.184.216.34:443 to our port 50000.
-    let tcp_reply = [0x01u8, 0xBB, 0xC3, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_reply = [
+        0x01u8, 0xBB, 0xC3, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([93, 184, 216, 34]), &tcp_reply);
     if !allowed {
         serial_println!("[firewall]   FAIL: ns reply should be allowed via conntrack");
@@ -2420,7 +2491,9 @@ fn test_ns_firewall_conntrack() -> KernelResult<()> {
     }
 
     // Inbound from a different IP should be denied.
-    let tcp_other = [0x01u8, 0xBB, 0xC3, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_other = [
+        0x01u8, 0xBB, 0xC3, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([1, 2, 3, 4]), &tcp_other);
     if allowed {
         serial_println!("[firewall]   FAIL: ns untracked IP should be denied");
@@ -2440,7 +2513,9 @@ fn test_ns_firewall_lifecycle() -> KernelResult<()> {
     let ns: u32 = 4;
 
     // Before init, ns check passes through (no active state).
-    let tcp = [0u8, 80, 0, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp = [
+        0u8, 80, 0, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp);
     if !allowed {
         serial_println!("[firewall]   FAIL: uninit ns should pass through");
@@ -2474,8 +2549,12 @@ fn test_ns_firewall_lifecycle() -> KernelResult<()> {
     let idx = ns_add_rule(ns, rule)?;
 
     // Port 22 denied, port 80 still allowed (Accept policy).
-    let tcp_22 = [0u8, 80, 0, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    let tcp_80 = [0u8, 80, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_22 = [
+        0u8, 80, 0, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let tcp_80 = [
+        0u8, 80, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     if check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp_22) {
         serial_println!("[firewall]   FAIL: port 22 should be denied");
         ns_destroy(ns);
@@ -2537,8 +2616,8 @@ fn test_v6_disabled_passes_all() -> KernelResult<()> {
     disable6();
 
     let src = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
     ]); // 2001:db8::1
 
     let allowed = check_inbound_v6(PROTO_TCP, src, &[0, 80, 0, 22]);
@@ -2560,8 +2639,8 @@ fn test_v6_default_policy_drop() -> KernelResult<()> {
     reset_stats6();
 
     let src = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
     ]);
 
     let allowed = check_inbound_v6(PROTO_TCP, src, &[0, 80, 0, 22]);
@@ -2607,12 +2686,14 @@ fn test_v6_rule_matching() -> KernelResult<()> {
     add_rule6(rule)?;
 
     let src = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x05,
     ]); // 2001:db8::5
 
     // TCP to port 80 → allowed.
-    let tcp_80 = [48u8, 57, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_80 = [
+        48u8, 57, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_inbound_v6(PROTO_TCP, src, &tcp_80);
     if !allowed {
         serial_println!("[firewall]   FAIL: IPv6 TCP port 80 should be allowed");
@@ -2621,7 +2702,9 @@ fn test_v6_rule_matching() -> KernelResult<()> {
     }
 
     // TCP to port 22 → denied (default DROP).
-    let tcp_22 = [48u8, 57, 0, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_22 = [
+        48u8, 57, 0, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_inbound_v6(PROTO_TCP, src, &tcp_22);
     if allowed {
         serial_println!("[firewall]   FAIL: IPv6 TCP port 22 should be denied");
@@ -2648,12 +2731,12 @@ fn test_v6_rule_matching() -> KernelResult<()> {
 fn test_v6_ip6_prefix_match() -> KernelResult<()> {
     // 2001:db8:1::0/48 should match 2001:db8:1::100.
     let net = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
     ]); // 2001:db8:1::
     let host = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x00,
     ]); // 2001:db8:1::100
 
     if !ip6_matches(host, net, 48) {
@@ -2663,8 +2746,8 @@ fn test_v6_ip6_prefix_match() -> KernelResult<()> {
 
     // 2001:db8:2::1 should NOT match 2001:db8:1::/48.
     let other = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
     ]); // 2001:db8:2::1
     if ip6_matches(other, net, 48) {
         serial_println!("[firewall]   FAIL: /48 should not match different prefix");
@@ -2689,12 +2772,12 @@ fn test_v6_ip6_prefix_match() -> KernelResult<()> {
 
     // /64 prefix match — different interface IDs, same prefix.
     let host_a = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0xAB, 0xCD, 0x00, 0x12,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x20, 0x01, 0x0d, 0xb8, 0xAB, 0xCD, 0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
     ]);
     let host_b = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0xAB, 0xCD, 0x00, 0x12,
-        0xFF, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x99, 0x99,
+        0x20, 0x01, 0x0d, 0xb8, 0xAB, 0xCD, 0x00, 0x12, 0xFF, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x99,
+        0x99,
     ]);
     if !ip6_matches(host_b, host_a, 64) {
         serial_println!("[firewall]   FAIL: /64 should match same prefix");
@@ -2728,12 +2811,14 @@ fn test_v6_conntrack() -> KernelResult<()> {
     add_rule6(rule)?;
 
     let server = Ipv6Addr([
-        0x26, 0x06, 0x28, 0x00, 0x02, 0x20, 0x00, 0x01,
-        0x02, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19, 0x46,
+        0x26, 0x06, 0x28, 0x00, 0x02, 0x20, 0x00, 0x01, 0x02, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19,
+        0x46,
     ]); // example server address
 
     // Outbound TCP from local port 49200 to server port 80.
-    let tcp_out = [0xC0u8, 0x30, 0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_out = [
+        0xC0u8, 0x30, 0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_outbound_v6(PROTO_TCP, server, &tcp_out);
     if !allowed {
         serial_println!("[firewall]   FAIL: IPv6 outbound should be allowed");
@@ -2742,7 +2827,9 @@ fn test_v6_conntrack() -> KernelResult<()> {
     }
 
     // Inbound reply from server port 80 to our port 49200.
-    let tcp_reply = [0x00u8, 0x50, 0xC0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_reply = [
+        0x00u8, 0x50, 0xC0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_inbound_v6(PROTO_TCP, server, &tcp_reply);
     if !allowed {
         serial_println!("[firewall]   FAIL: IPv6 reply should pass via conntrack");
@@ -2752,10 +2839,12 @@ fn test_v6_conntrack() -> KernelResult<()> {
 
     // Inbound from a different IPv6 address should NOT be tracked.
     let other = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x99,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x99,
     ]);
-    let tcp_other = [0x00u8, 0x50, 0xC0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_other = [
+        0x00u8, 0x50, 0xC0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let allowed = check_inbound_v6(PROTO_TCP, other, &tcp_other);
     if allowed {
         serial_println!("[firewall]   FAIL: IPv6 untracked IP should be denied");

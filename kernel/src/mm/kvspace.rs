@@ -228,8 +228,12 @@ pub fn validate() {
             if a.start < b.end() && b.start < a.end() {
                 serial_println!(
                     "FATAL: kernel VA regions overlap: {} [{:#x}..{:#x}] vs {} [{:#x}..{:#x}]",
-                    a.name, a.start, a.end(),
-                    b.name, b.start, b.end()
+                    a.name,
+                    a.start,
+                    a.end(),
+                    b.name,
+                    b.start,
+                    b.end()
                 );
                 panic!("kernel VA region overlap detected");
             }
@@ -243,7 +247,10 @@ pub fn validate() {
 /// unmapped kernel space.
 #[must_use]
 pub fn identify(addr: u64) -> Option<&'static Region> {
-    ALL_REGIONS.iter().find(|&region| region.contains(addr)).map(|v| v as _)
+    ALL_REGIONS
+        .iter()
+        .find(|&region| region.contains(addr))
+        .map(|v| v as _)
 }
 
 /// Check if an address is in kernel space (above the canonical hole).
@@ -316,7 +323,10 @@ pub fn self_test() {
     // to why. Pin both ends of the kernel half.
     let shadow_of = |addr: u64| (addr >> 3).wrapping_add(KASAN_SHADOW_OFFSET);
     assert_eq!(shadow_of(0xFFFF_8000_0000_0000), KASAN_SHADOW.start);
-    assert_eq!(shadow_of(0xFFFF_FFFF_FFFF_FFFF), KASAN_SHADOW.end().wrapping_sub(1));
+    assert_eq!(
+        shadow_of(0xFFFF_FFFF_FFFF_FFFF),
+        KASAN_SHADOW.end().wrapping_sub(1)
+    );
     assert!(KASAN_SHADOW.contains(shadow_of(KASAN_SHADOW.start)));
     serial_println!("[kvspace]   KASAN shadow mapping covers kernel VA: OK");
 

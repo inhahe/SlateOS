@@ -57,8 +57,8 @@
 //! - FreeBSD `vm/uma_core.c` — zone_reclaim
 
 use crate::serial_println;
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Pressure levels
@@ -160,9 +160,8 @@ impl Shrinker {
 ///
 /// Protected by a spinlock.  Only modified during init (register) and
 /// queried during reclaim (notify).  The lock is held briefly.
-static SHRINKERS: Mutex<[Shrinker; MAX_SHRINKERS]> = Mutex::named(
-    [Shrinker::EMPTY; MAX_SHRINKERS], b"SHRINK"
-);
+static SHRINKERS: Mutex<[Shrinker; MAX_SHRINKERS]> =
+    Mutex::named([Shrinker::EMPTY; MAX_SHRINKERS], b"SHRINK");
 
 // ---------------------------------------------------------------------------
 // Pressure state tracking
@@ -223,10 +222,7 @@ pub fn unregister_shrinker(slot: usize) -> bool {
     let mut table = SHRINKERS.lock();
     if let Some(entry) = table.get_mut(slot) {
         if entry.active {
-            serial_println!(
-                "[pressure] Unregistered shrinker: {}",
-                entry.name,
-            );
+            serial_println!("[pressure] Unregistered shrinker: {}", entry.name,);
             *entry = Shrinker::EMPTY;
             return true;
         }
@@ -254,9 +250,12 @@ pub fn notify(level: PressureLevel) {
 
     // Log level transitions (avoid spamming on repeated same-level notifications).
     if level != prev_level {
-        crate::klog!(Warn, "mm.pressure",
+        crate::klog!(
+            Warn,
+            "mm.pressure",
             "level transition: {} -> {}",
-            prev_level, level
+            prev_level,
+            level
         );
         // Record pressure transition in trace buffer for timing analysis.
         crate::ktrace::record(
@@ -282,7 +281,8 @@ pub fn notify(level: PressureLevel) {
                 serial_println!(
                     "[pressure] CRITICAL: refusing to run corrupt shrinker '{}' callback={:#x} \
                      — table corruption; skipping (see B-KNULLJUMP-SIGNAL)",
-                    shrinker.name, cb_addr
+                    shrinker.name,
+                    cb_addr
                 );
                 continue;
             }
@@ -290,7 +290,9 @@ pub fn notify(level: PressureLevel) {
             if freed > 0 {
                 serial_println!(
                     "[pressure] {} freed {} objects (level={})",
-                    shrinker.name, freed, level,
+                    shrinker.name,
+                    freed,
+                    level,
                 );
                 total_freed = total_freed.saturating_add(freed as u64);
             }
@@ -440,7 +442,10 @@ pub fn self_test() {
     let info = pressure_info();
     // We had at least 3 notifications (Low, Critical, Medium after unregister).
     assert!(info.total_notifications >= 3);
-    serial_println!("[pressure]   Stats: OK (notifications={})", info.total_notifications);
+    serial_println!(
+        "[pressure]   Stats: OK (notifications={})",
+        info.total_notifications
+    );
 
     serial_println!("[pressure] Self-test PASSED");
 }

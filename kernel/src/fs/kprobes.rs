@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -119,7 +119,9 @@ where
 /// 100 misses, and 625ms of overhead.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         probes: Vec::new(),
         next_id: 1,
@@ -133,13 +135,21 @@ pub fn init_defaults() {
 /// Register a new probe.
 pub fn register(probe_type: ProbeType, name: &str, address: u64) -> KernelResult<u32> {
     with_state(|state| {
-        if state.probes.len() >= MAX_PROBES { return Err(KernelError::ResourceExhausted); }
+        if state.probes.len() >= MAX_PROBES {
+            return Err(KernelError::ResourceExhausted);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_id;
         state.next_id += 1;
         state.probes.push(Probe {
-            id, probe_type, name: String::from(name), address,
-            hits: 0, misses: 0, enabled: true, overhead_ns: 0,
+            id,
+            probe_type,
+            name: String::from(name),
+            address,
+            hits: 0,
+            misses: 0,
+            enabled: true,
+            overhead_ns: 0,
             registered_ns: now,
         });
         Ok(id)
@@ -149,7 +159,10 @@ pub fn register(probe_type: ProbeType, name: &str, address: u64) -> KernelResult
 /// Unregister a probe.
 pub fn unregister(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.probes.iter().position(|p| p.id == id)
+        let idx = state
+            .probes
+            .iter()
+            .position(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         state.probes.remove(idx);
         Ok(())
@@ -159,7 +172,10 @@ pub fn unregister(id: u32) -> KernelResult<()> {
 /// Record a probe hit.
 pub fn record_hit(id: u32, overhead_ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.probes.iter_mut().find(|p| p.id == id)
+        let p = state
+            .probes
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         if !p.enabled {
             p.misses += 1;
@@ -177,7 +193,10 @@ pub fn record_hit(id: u32, overhead_ns: u64) -> KernelResult<()> {
 /// Enable/disable a probe.
 pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.probes.iter_mut().find(|p| p.id == id)
+        let p = state
+            .probes
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         p.enabled = enabled;
         Ok(())
@@ -186,13 +205,20 @@ pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
 
 /// List all probes.
 pub fn list() -> Vec<Probe> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.probes.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.probes.clone())
 }
 
 /// Get probes by type.
 pub fn by_type(probe_type: ProbeType) -> Vec<Probe> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.probes.iter().filter(|p| p.probe_type == probe_type).cloned().collect()
+        s.probes
+            .iter()
+            .filter(|p| p.probe_type == probe_type)
+            .cloned()
+            .collect()
     })
 }
 
@@ -200,7 +226,13 @@ pub fn by_type(probe_type: ProbeType) -> Vec<Probe> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.probes.len(), s.total_hits, s.total_misses, s.total_overhead_ns, s.ops),
+        Some(s) => (
+            s.probes.len(),
+            s.total_hits,
+            s.total_misses,
+            s.total_overhead_ns,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

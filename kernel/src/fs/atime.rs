@@ -85,9 +85,8 @@ impl AtimePolicy {
     }
 
     /// All policies.
-    pub const ALL: &'static [AtimePolicy] = &[
-        Self::Always, Self::Relative, Self::NoAtime, Self::LazyDay,
-    ];
+    pub const ALL: &'static [AtimePolicy] =
+        &[Self::Always, Self::Relative, Self::NoAtime, Self::LazyDay];
 }
 
 /// Per-mount atime override entry.
@@ -180,7 +179,11 @@ pub fn add_override(mount_path: &str, policy: AtimePolicy) {
     for entry in overrides.iter_mut() {
         if entry.mount_path == mount_path {
             entry.policy = policy;
-            serial_println!("[atime] Updated override: {} → {}", mount_path, policy.label());
+            serial_println!(
+                "[atime] Updated override: {} → {}",
+                mount_path,
+                policy.label()
+            );
             return;
         }
     }
@@ -189,7 +192,11 @@ pub fn add_override(mount_path: &str, policy: AtimePolicy) {
             mount_path: String::from(mount_path),
             policy,
         });
-        serial_println!("[atime] Added override: {} → {}", mount_path, policy.label());
+        serial_println!(
+            "[atime] Added override: {} → {}",
+            mount_path,
+            policy.label()
+        );
     }
 }
 
@@ -226,8 +233,7 @@ pub fn should_update(path: &str, current_atime_ns: u64, current_mtime_ns: u64) -
         AtimePolicy::Relative => {
             // Update if atime < mtime (file modified since last access)
             // OR if atime is more than 24 hours old.
-            current_atime_ns < current_mtime_ns
-                || now.saturating_sub(current_atime_ns) > DAY_NS
+            current_atime_ns < current_mtime_ns || now.saturating_sub(current_atime_ns) > DAY_NS
         }
         AtimePolicy::LazyDay => {
             // Update only if last update was more than 24 hours ago.
@@ -280,9 +286,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
 fn test_policy_parse() {
     assert_eq!(AtimePolicy::from_name("always"), Some(AtimePolicy::Always));
-    assert_eq!(AtimePolicy::from_name("relatime"), Some(AtimePolicy::Relative));
-    assert_eq!(AtimePolicy::from_name("noatime"), Some(AtimePolicy::NoAtime));
-    assert_eq!(AtimePolicy::from_name("lazyday"), Some(AtimePolicy::LazyDay));
+    assert_eq!(
+        AtimePolicy::from_name("relatime"),
+        Some(AtimePolicy::Relative)
+    );
+    assert_eq!(
+        AtimePolicy::from_name("noatime"),
+        Some(AtimePolicy::NoAtime)
+    );
+    assert_eq!(
+        AtimePolicy::from_name("lazyday"),
+        Some(AtimePolicy::LazyDay)
+    );
     assert_eq!(AtimePolicy::from_name("bogus"), None);
     serial_println!("[atime]   policy_parse: ok");
 }

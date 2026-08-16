@@ -67,7 +67,8 @@ static NEXT_OFFSET: AtomicU64 = AtomicU64::new(FAKE_OFFSET_BASE);
 /// size but is handled rather than panicked.
 fn frames_round_up(size: u64) -> Option<u64> {
     let fs = FRAME_SIZE as u64;
-    size.checked_add(fs.wrapping_sub(1)).map(|v| v & !(fs.wrapping_sub(1)))
+    size.checked_add(fs.wrapping_sub(1))
+        .map(|v| v & !(fs.wrapping_sub(1)))
 }
 
 /// Return the fake mmap offset for a dumb buffer, allocating one on first use.
@@ -162,8 +163,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let off_a = offset_for(dev, 100, 64 * 1024).ok_or(KernelError::InternalError)?;
     let off_b = offset_for(dev, 200, 16 * 1024).ok_or(KernelError::InternalError)?;
 
-    check!(off_a.is_multiple_of(FRAME_SIZE as u64), "offset A is frame-aligned");
-    check!(off_b.is_multiple_of(FRAME_SIZE as u64), "offset B is frame-aligned");
+    check!(
+        off_a.is_multiple_of(FRAME_SIZE as u64),
+        "offset A is frame-aligned"
+    );
+    check!(
+        off_b.is_multiple_of(FRAME_SIZE as u64),
+        "offset B is frame-aligned"
+    );
     check!(off_a != off_b, "distinct buffers get distinct offsets");
 
     // Idempotent: same buffer → same offset.
@@ -171,13 +178,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     check!(off_a2 == off_a, "offset_for is idempotent per buffer");
 
     // Resolution.
-    check!(lookup(off_a) == Some((dev, 100)), "offset A resolves to buffer 100");
-    check!(lookup(off_b) == Some((dev, 200)), "offset B resolves to buffer 200");
-    check!(lookup(0xDEAD_0000).is_none(), "unknown offset resolves to None");
+    check!(
+        lookup(off_a) == Some((dev, 100)),
+        "offset A resolves to buffer 100"
+    );
+    check!(
+        lookup(off_b) == Some((dev, 200)),
+        "offset B resolves to buffer 200"
+    );
+    check!(
+        lookup(0xDEAD_0000).is_none(),
+        "unknown offset resolves to None"
+    );
 
     // Forget drops the mapping.
     forget(dev, 100);
-    check!(lookup(off_a).is_none(), "forgotten offset no longer resolves");
+    check!(
+        lookup(off_a).is_none(),
+        "forgotten offset no longer resolves"
+    );
     check!(lookup(off_b) == Some((dev, 200)), "forget is buffer-scoped");
 
     // A re-mapped handle gets a *fresh* offset (not the forgotten one).

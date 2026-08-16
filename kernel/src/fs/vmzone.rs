@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -36,11 +36,11 @@ use crate::error::{KernelError, KernelResult};
 /// Zone type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZoneType {
-    Dma,       // DMA-capable memory (< 16MB)
-    Dma32,     // 32-bit DMA (< 4GB)
-    Normal,    // Regular memory
-    HighMem,   // High memory (if applicable)
-    Movable,   // Movable pages for CMA
+    Dma,     // DMA-capable memory (< 16MB)
+    Dma32,   // 32-bit DMA (< 4GB)
+    Normal,  // Regular memory
+    HighMem, // High memory (if applicable)
+    Movable, // Movable pages for CMA
 }
 
 impl ZoneType {
@@ -121,7 +121,9 @@ where
 /// (56.01M allocs, 54.76M frees, 125.05k reclaims).)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         zones: Vec::new(),
         total_allocs: 0,
@@ -132,15 +134,34 @@ pub fn init_defaults() {
 }
 
 /// Register a zone.
-pub fn register(name: &str, zone_type: ZoneType, total_pages: u64, wmark_min: u64, wmark_low: u64, wmark_high: u64) -> KernelResult<()> {
+pub fn register(
+    name: &str,
+    zone_type: ZoneType,
+    total_pages: u64,
+    wmark_min: u64,
+    wmark_low: u64,
+    wmark_high: u64,
+) -> KernelResult<()> {
     with_state(|state| {
-        if state.zones.len() >= MAX_ZONES { return Err(KernelError::ResourceExhausted); }
-        if state.zones.iter().any(|z| z.name == name) { return Err(KernelError::AlreadyExists); }
+        if state.zones.len() >= MAX_ZONES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.zones.iter().any(|z| z.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.zones.push(ZoneStats {
-            name: String::from(name), zone_type, total_pages,
-            free_pages: total_pages, active_pages: 0, inactive_pages: 0,
-            wmark_min, wmark_low, wmark_high,
-            allocs: 0, frees: 0, reclaim_count: 0,
+            name: String::from(name),
+            zone_type,
+            total_pages,
+            free_pages: total_pages,
+            active_pages: 0,
+            inactive_pages: 0,
+            wmark_min,
+            wmark_low,
+            wmark_high,
+            allocs: 0,
+            frees: 0,
+            reclaim_count: 0,
         });
         Ok(())
     })
@@ -149,7 +170,10 @@ pub fn register(name: &str, zone_type: ZoneType, total_pages: u64, wmark_min: u6
 /// Record an allocation.
 pub fn record_alloc(name: &str, pages: u64) -> KernelResult<()> {
     with_state(|state| {
-        let z = state.zones.iter_mut().find(|z| z.name == name)
+        let z = state
+            .zones
+            .iter_mut()
+            .find(|z| z.name == name)
             .ok_or(KernelError::NotFound)?;
         z.allocs += 1;
         z.free_pages = z.free_pages.saturating_sub(pages);
@@ -162,7 +186,10 @@ pub fn record_alloc(name: &str, pages: u64) -> KernelResult<()> {
 /// Record a free.
 pub fn record_free(name: &str, pages: u64) -> KernelResult<()> {
     with_state(|state| {
-        let z = state.zones.iter_mut().find(|z| z.name == name)
+        let z = state
+            .zones
+            .iter_mut()
+            .find(|z| z.name == name)
             .ok_or(KernelError::NotFound)?;
         z.frees += 1;
         z.free_pages += pages;
@@ -175,7 +202,10 @@ pub fn record_free(name: &str, pages: u64) -> KernelResult<()> {
 /// Record a reclaim event.
 pub fn record_reclaim(name: &str, pages: u64) -> KernelResult<()> {
     with_state(|state| {
-        let z = state.zones.iter_mut().find(|z| z.name == name)
+        let z = state
+            .zones
+            .iter_mut()
+            .find(|z| z.name == name)
             .ok_or(KernelError::NotFound)?;
         z.reclaim_count += 1;
         z.inactive_pages = z.inactive_pages.saturating_sub(pages);
@@ -187,14 +217,23 @@ pub fn record_reclaim(name: &str, pages: u64) -> KernelResult<()> {
 
 /// Per-zone stats.
 pub fn per_zone() -> Vec<ZoneStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.zones.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.zones.clone())
 }
 
 /// Statistics: (zone_count, total_allocs, total_frees, total_reclaims, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.zones.len(), s.total_allocs, s.total_frees, s.total_reclaims, s.ops),
+        Some(s) => (
+            s.zones.len(),
+            s.total_allocs,
+            s.total_frees,
+            s.total_reclaims,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -219,7 +258,10 @@ pub fn self_test() {
     // 2: Register — new zone starts fully free; duplicate name errors.
     register("Test", ZoneType::Normal, 1000, 10, 50, 100).expect("register");
     assert_eq!(per_zone().len(), 1);
-    let z = per_zone().into_iter().find(|z| z.name == "Test").expect("z");
+    let z = per_zone()
+        .into_iter()
+        .find(|z| z.name == "Test")
+        .expect("z");
     assert_eq!(z.free_pages, 1000);
     assert_eq!(z.active_pages, 0);
     assert!(register("Test", ZoneType::Normal, 1000, 10, 50, 100).is_err());
@@ -227,7 +269,10 @@ pub fn self_test() {
 
     // 3: Alloc moves pages free → active.
     record_alloc("Test", 100).expect("alloc");
-    let z = per_zone().into_iter().find(|z| z.name == "Test").expect("z");
+    let z = per_zone()
+        .into_iter()
+        .find(|z| z.name == "Test")
+        .expect("z");
     assert_eq!(z.allocs, 1);
     assert_eq!(z.free_pages, 900);
     assert_eq!(z.active_pages, 100);
@@ -235,7 +280,10 @@ pub fn self_test() {
 
     // 4: Free moves pages active → free.
     record_free("Test", 50).expect("free");
-    let z = per_zone().into_iter().find(|z| z.name == "Test").expect("z");
+    let z = per_zone()
+        .into_iter()
+        .find(|z| z.name == "Test")
+        .expect("z");
     assert_eq!(z.frees, 1);
     assert_eq!(z.free_pages, 950);
     assert_eq!(z.active_pages, 50);
@@ -247,15 +295,23 @@ pub fn self_test() {
     // Move some pages into inactive by allocating then aging is out of scope
     // here; record_reclaim simply saturates inactive at 0 and adds to free.
     record_reclaim("Reclaimable", 100).expect("reclaim");
-    let z = per_zone().into_iter().find(|z| z.name == "Reclaimable").expect("z");
+    let z = per_zone()
+        .into_iter()
+        .find(|z| z.name == "Reclaimable")
+        .expect("z");
     assert_eq!(z.reclaim_count, 1);
     assert_eq!(z.inactive_pages, 0); // saturated, was 0
     assert_eq!(z.free_pages, 2100); // 2000 initial + 100 reclaimed
     crate::serial_println!("  [5/8] reclaim: OK");
 
     // 6: Allocs saturate free_pages at 0 (cannot go negative).
-    for _ in 0..20 { record_alloc("Test", 100).expect("alloc_many"); }
-    let z = per_zone().into_iter().find(|z| z.name == "Test").expect("z");
+    for _ in 0..20 {
+        record_alloc("Test", 100).expect("alloc_many");
+    }
+    let z = per_zone()
+        .into_iter()
+        .find(|z| z.name == "Test")
+        .expect("z");
     assert_eq!(z.free_pages, 0);
     crate::serial_println!("  [6/8] saturation: OK");
 

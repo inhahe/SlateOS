@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -35,14 +35,14 @@ use crate::error::{KernelError, KernelResult};
 /// Entropy source type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntropySource {
-    Hardware,        // RDRAND/RDSEED or TPM.
-    Interrupt,       // Interrupt timing jitter.
-    Disk,            // Disk I/O timing.
-    Keyboard,        // Keystroke timing.
-    Mouse,           // Mouse movement.
-    Network,         // Network packet timing.
-    Jitter,          // CPU execution jitter.
-    Seed,            // Saved seed file.
+    Hardware,  // RDRAND/RDSEED or TPM.
+    Interrupt, // Interrupt timing jitter.
+    Disk,      // Disk I/O timing.
+    Keyboard,  // Keystroke timing.
+    Mouse,     // Mouse movement.
+    Network,   // Network packet timing.
+    Jitter,    // CPU execution jitter.
+    Seed,      // Saved seed file.
 }
 
 impl EntropySource {
@@ -128,18 +128,68 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         available_bits: 256, // Start with some seed entropy.
         sources: alloc::vec![
-            SourceStats { source: EntropySource::Hardware, bits_contributed: 256, events: 1, last_event_ns: 0, enabled: true },
-            SourceStats { source: EntropySource::Interrupt, bits_contributed: 0, events: 0, last_event_ns: 0, enabled: true },
-            SourceStats { source: EntropySource::Disk, bits_contributed: 0, events: 0, last_event_ns: 0, enabled: true },
-            SourceStats { source: EntropySource::Keyboard, bits_contributed: 0, events: 0, last_event_ns: 0, enabled: true },
-            SourceStats { source: EntropySource::Mouse, bits_contributed: 0, events: 0, last_event_ns: 0, enabled: true },
-            SourceStats { source: EntropySource::Network, bits_contributed: 0, events: 0, last_event_ns: 0, enabled: true },
-            SourceStats { source: EntropySource::Jitter, bits_contributed: 0, events: 0, last_event_ns: 0, enabled: true },
-            SourceStats { source: EntropySource::Seed, bits_contributed: 0, events: 0, last_event_ns: 0, enabled: true },
+            SourceStats {
+                source: EntropySource::Hardware,
+                bits_contributed: 256,
+                events: 1,
+                last_event_ns: 0,
+                enabled: true
+            },
+            SourceStats {
+                source: EntropySource::Interrupt,
+                bits_contributed: 0,
+                events: 0,
+                last_event_ns: 0,
+                enabled: true
+            },
+            SourceStats {
+                source: EntropySource::Disk,
+                bits_contributed: 0,
+                events: 0,
+                last_event_ns: 0,
+                enabled: true
+            },
+            SourceStats {
+                source: EntropySource::Keyboard,
+                bits_contributed: 0,
+                events: 0,
+                last_event_ns: 0,
+                enabled: true
+            },
+            SourceStats {
+                source: EntropySource::Mouse,
+                bits_contributed: 0,
+                events: 0,
+                last_event_ns: 0,
+                enabled: true
+            },
+            SourceStats {
+                source: EntropySource::Network,
+                bits_contributed: 0,
+                events: 0,
+                last_event_ns: 0,
+                enabled: true
+            },
+            SourceStats {
+                source: EntropySource::Jitter,
+                bits_contributed: 0,
+                events: 0,
+                last_event_ns: 0,
+                enabled: true
+            },
+            SourceStats {
+                source: EntropySource::Seed,
+                bits_contributed: 0,
+                events: 0,
+                last_event_ns: 0,
+                enabled: true
+            },
         ],
         total_added: 256,
         total_drained: 0,
@@ -186,21 +236,32 @@ pub fn available() -> u64 {
 /// Get pool quality.
 pub fn quality() -> PoolQuality {
     let bits = available();
-    if bits == 0 { PoolQuality::Empty }
-    else if bits < LOW_THRESHOLD { PoolQuality::Low }
-    else if bits < ADEQUATE_THRESHOLD { PoolQuality::Adequate }
-    else { PoolQuality::Full }
+    if bits == 0 {
+        PoolQuality::Empty
+    } else if bits < LOW_THRESHOLD {
+        PoolQuality::Low
+    } else if bits < ADEQUATE_THRESHOLD {
+        PoolQuality::Adequate
+    } else {
+        PoolQuality::Full
+    }
 }
 
 /// List entropy sources.
 pub fn list_sources() -> Vec<SourceStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.sources.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sources.clone())
 }
 
 /// Enable/disable an entropy source.
 pub fn set_source_enabled(source: EntropySource, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let src = state.sources.iter_mut().find(|s| s.source == source)
+        let src = state
+            .sources
+            .iter_mut()
+            .find(|s| s.source == source)
             .ok_or(KernelError::NotFound)?;
         src.enabled = enabled;
         Ok(())
@@ -216,7 +277,11 @@ pub fn reseed() -> KernelResult<()> {
         state.available_bits = (state.available_bits + bits).min(POOL_SIZE_BITS);
         state.total_added += bits;
         state.reseed_count += 1;
-        if let Some(src) = state.sources.iter_mut().find(|s| s.source == EntropySource::Hardware) {
+        if let Some(src) = state
+            .sources
+            .iter_mut()
+            .find(|s| s.source == EntropySource::Hardware)
+        {
             src.bits_contributed += bits;
             src.events += 1;
             src.last_event_ns = now;
@@ -229,7 +294,14 @@ pub fn reseed() -> KernelResult<()> {
 pub fn stats() -> (u64, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.available_bits, s.total_added, s.total_drained, s.total_events, s.reseed_count, s.ops),
+        Some(s) => (
+            s.available_bits,
+            s.total_added,
+            s.total_drained,
+            s.total_events,
+            s.reseed_count,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -279,7 +351,10 @@ pub fn self_test() {
     // 7: Sources.
     let sources = list_sources();
     assert_eq!(sources.len(), 8);
-    let hw = sources.iter().find(|s| s.source == EntropySource::Hardware).expect("hw");
+    let hw = sources
+        .iter()
+        .find(|s| s.source == EntropySource::Hardware)
+        .expect("hw");
     assert!(hw.bits_contributed > 0);
     crate::serial_println!("  [7/8] sources: OK");
 

@@ -32,15 +32,15 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::path::{Path, PathBuf};
 use crate::fs::Vfs;
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -214,22 +214,13 @@ pub fn scan(config: &DedupConfig) -> KernelResult<DedupResult> {
         state.stats.active = false;
         if let Ok(ref r) = result {
             state.stats.scans_run = state.stats.scans_run.saturating_add(1);
-            state.stats.total_files = state
-                .stats
-                .total_files
-                .saturating_add(r.files_scanned);
-            state.stats.total_groups = state
-                .stats
-                .total_groups
-                .saturating_add(r.duplicate_groups);
+            state.stats.total_files = state.stats.total_files.saturating_add(r.files_scanned);
+            state.stats.total_groups = state.stats.total_groups.saturating_add(r.duplicate_groups);
             state.stats.total_duplicates = state
                 .stats
                 .total_duplicates
                 .saturating_add(r.duplicate_files);
-            state.stats.total_savings = state
-                .stats
-                .total_savings
-                .saturating_add(r.dedup_savings);
+            state.stats.total_savings = state.stats.total_savings.saturating_add(r.dedup_savings);
             state.last_result = Some(r.clone());
         }
     }
@@ -244,12 +235,7 @@ fn run_scan(config: &DedupConfig) -> KernelResult<DedupResult> {
     // Phase 1: Collect all files with their sizes.
     let mut files: Vec<(PathBuf, u64)> = Vec::new();
     for root in &config.scan_paths {
-        collect_files(
-            root,
-            config,
-            &mut files,
-            0,
-        );
+        collect_files(root, config, &mut files, 0);
     }
 
     result.files_scanned = files.len() as u64;
@@ -258,10 +244,7 @@ fn run_scan(config: &DedupConfig) -> KernelResult<DedupResult> {
     // Phase 2: Group by size (files of different sizes can't be duplicates).
     let mut size_groups: BTreeMap<u64, Vec<PathBuf>> = BTreeMap::new();
     for (path, size) in &files {
-        size_groups
-            .entry(*size)
-            .or_default()
-            .push(path.clone());
+        size_groups.entry(*size).or_default().push(path.clone());
     }
 
     // Only keep groups with 2+ files (potential duplicates).
@@ -279,10 +262,7 @@ fn run_scan(config: &DedupConfig) -> KernelResult<DedupResult> {
                 Ok(data) => {
                     let hash = crate::crypto::sha256(&data);
                     let hex = hex_encode(&hash);
-                    hash_groups
-                        .entry(hex)
-                        .or_default()
-                        .push(path.clone());
+                    hash_groups.entry(hex).or_default().push(path.clone());
                 }
                 Err(_) => continue, // Skip unreadable files.
             }
@@ -319,12 +299,7 @@ fn run_scan(config: &DedupConfig) -> KernelResult<DedupResult> {
 }
 
 /// Recursively collect files from a directory.
-fn collect_files(
-    path: &Path,
-    config: &DedupConfig,
-    out: &mut Vec<(PathBuf, u64)>,
-    depth: usize,
-) {
+fn collect_files(path: &Path, config: &DedupConfig, out: &mut Vec<(PathBuf, u64)>, depth: usize) {
     if depth > config.max_depth {
         return;
     }
@@ -358,8 +333,7 @@ fn collect_files(
         match entry.entry_type {
             crate::fs::EntryType::Directory => {
                 // Skip . and ..
-                if entry.name.as_path() != Path::new(".")
-                    && entry.name.as_path() != Path::new("..")
+                if entry.name.as_path() != Path::new(".") && entry.name.as_path() != Path::new("..")
                 {
                     collect_files(&full_path, config, out, depth + 1);
                 }
@@ -438,7 +412,8 @@ fn test_basic_duplicates() {
     Vfs::write_file("/tmp/dedup_test/a.txt", data).expect("write a");
     Vfs::write_file("/tmp/dedup_test/b.txt", data).expect("write b");
     Vfs::write_file("/tmp/dedup_test/c.txt", data).expect("write c");
-    Vfs::write_file("/tmp/dedup_test/unique.txt", b"this is different content").expect("write unique");
+    Vfs::write_file("/tmp/dedup_test/unique.txt", b"this is different content")
+        .expect("write unique");
 
     let config = DedupConfig {
         scan_paths: alloc::vec![PathBuf::from("/tmp/dedup_test")],
@@ -449,7 +424,10 @@ fn test_basic_duplicates() {
     let result = scan(&config).expect("scan failed");
     assert!(result.files_scanned >= 4, "should scan at least 4 files");
     assert!(result.duplicate_groups >= 1, "should find at least 1 group");
-    assert!(result.duplicate_files >= 2, "should find at least 2 duplicates");
+    assert!(
+        result.duplicate_files >= 2,
+        "should find at least 2 duplicates"
+    );
     assert!(result.dedup_savings > 0, "should report savings");
 
     // Verify the duplicate group.
@@ -475,7 +453,11 @@ fn test_no_duplicates() {
     let _ = Vfs::mkdir("/tmp/dedup_nd");
     Vfs::write_file("/tmp/dedup_nd/x.txt", b"unique content X").expect("write");
     Vfs::write_file("/tmp/dedup_nd/y.txt", b"unique content Y plus more").expect("write");
-    Vfs::write_file("/tmp/dedup_nd/z.txt", b"completely different Z content here").expect("write");
+    Vfs::write_file(
+        "/tmp/dedup_nd/z.txt",
+        b"completely different Z content here",
+    )
+    .expect("write");
 
     let config = DedupConfig {
         scan_paths: alloc::vec![PathBuf::from("/tmp/dedup_nd")],
@@ -497,7 +479,11 @@ fn test_no_duplicates() {
 fn test_config_filters() {
     let _ = Vfs::mkdir("/tmp/dedup_filt");
     Vfs::write_file("/tmp/dedup_filt/small.txt", b"hi").expect("write");
-    Vfs::write_file("/tmp/dedup_filt/big.txt", b"this is a bigger file with some content for size filtering").expect("write");
+    Vfs::write_file(
+        "/tmp/dedup_filt/big.txt",
+        b"this is a bigger file with some content for size filtering",
+    )
+    .expect("write");
 
     // Min size filter should skip the small file.
     let config = DedupConfig {
@@ -508,7 +494,10 @@ fn test_config_filters() {
 
     let result = scan(&config).expect("scan");
     // Only big.txt should be scanned.
-    assert!(result.files_scanned <= 2, "small file should be skipped or included based on size");
+    assert!(
+        result.files_scanned <= 2,
+        "small file should be skipped or included based on size"
+    );
 
     let _ = Vfs::remove("/tmp/dedup_filt/small.txt");
     let _ = Vfs::remove("/tmp/dedup_filt/big.txt");

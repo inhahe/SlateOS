@@ -21,11 +21,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -159,31 +159,59 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         zones: alloc::vec![
             ThermalZone {
-                id: 1, name: String::from("CPU Package"),
-                zone_type: ZoneType::Cpu, temp_mc: 45_000,
-                passive_trip_mc: 85_000, hot_trip_mc: 95_000, critical_trip_mc: 105_000,
+                id: 1,
+                name: String::from("CPU Package"),
+                zone_type: ZoneType::Cpu,
+                temp_mc: 45_000,
+                passive_trip_mc: 85_000,
+                hot_trip_mc: 95_000,
+                critical_trip_mc: 105_000,
                 throttled: false,
             },
             ThermalZone {
-                id: 2, name: String::from("GPU"),
-                zone_type: ZoneType::Gpu, temp_mc: 42_000,
-                passive_trip_mc: 80_000, hot_trip_mc: 90_000, critical_trip_mc: 100_000,
+                id: 2,
+                name: String::from("GPU"),
+                zone_type: ZoneType::Gpu,
+                temp_mc: 42_000,
+                passive_trip_mc: 80_000,
+                hot_trip_mc: 90_000,
+                critical_trip_mc: 100_000,
                 throttled: false,
             },
             ThermalZone {
-                id: 3, name: String::from("PCH/Chipset"),
-                zone_type: ZoneType::Chipset, temp_mc: 38_000,
-                passive_trip_mc: 75_000, hot_trip_mc: 85_000, critical_trip_mc: 95_000,
+                id: 3,
+                name: String::from("PCH/Chipset"),
+                zone_type: ZoneType::Chipset,
+                temp_mc: 38_000,
+                passive_trip_mc: 75_000,
+                hot_trip_mc: 85_000,
+                critical_trip_mc: 95_000,
                 throttled: false,
             },
         ],
         fans: alloc::vec![
-            Fan { id: 1, name: String::from("CPU Fan"), rpm: 800, max_rpm: 3000, duty_pct: 30, mode: FanMode::Auto },
-            Fan { id: 2, name: String::from("System Fan"), rpm: 600, max_rpm: 2000, duty_pct: 25, mode: FanMode::Auto },
+            Fan {
+                id: 1,
+                name: String::from("CPU Fan"),
+                rpm: 800,
+                max_rpm: 3000,
+                duty_pct: 30,
+                mode: FanMode::Auto
+            },
+            Fan {
+                id: 2,
+                name: String::from("System Fan"),
+                rpm: 600,
+                max_rpm: 2000,
+                duty_pct: 25,
+                mode: FanMode::Auto
+            },
         ],
         next_zone_id: 4,
         next_fan_id: 3,
@@ -196,7 +224,10 @@ pub fn init_defaults() {
 /// Read temperature of a zone (millidegrees Celsius).
 pub fn read_temp(zone_id: u32) -> KernelResult<i32> {
     with_state(|state| {
-        let zone = state.zones.iter().find(|z| z.id == zone_id)
+        let zone = state
+            .zones
+            .iter()
+            .find(|z| z.id == zone_id)
             .ok_or(KernelError::NotFound)?;
         state.total_readings += 1;
         Ok(zone.temp_mc)
@@ -206,7 +237,10 @@ pub fn read_temp(zone_id: u32) -> KernelResult<i32> {
 /// Update temperature of a zone (simulated sensor read).
 pub fn update_temp(zone_id: u32, temp_mc: i32) -> KernelResult<()> {
     with_state(|state| {
-        let zone = state.zones.iter_mut().find(|z| z.id == zone_id)
+        let zone = state
+            .zones
+            .iter_mut()
+            .find(|z| z.id == zone_id)
             .ok_or(KernelError::NotFound)?;
         zone.temp_mc = temp_mc;
         // Check for throttling.
@@ -223,7 +257,10 @@ pub fn update_temp(zone_id: u32, temp_mc: i32) -> KernelResult<()> {
 /// Set trip point temperature.
 pub fn set_trip(zone_id: u32, trip: TripType, temp_mc: i32) -> KernelResult<()> {
     with_state(|state| {
-        let zone = state.zones.iter_mut().find(|z| z.id == zone_id)
+        let zone = state
+            .zones
+            .iter_mut()
+            .find(|z| z.id == zone_id)
             .ok_or(KernelError::NotFound)?;
         match trip {
             TripType::Active => {} // No separate active trip in this simplified model.
@@ -238,7 +275,10 @@ pub fn set_trip(zone_id: u32, trip: TripType, temp_mc: i32) -> KernelResult<()> 
 /// Set fan mode.
 pub fn set_fan_mode(fan_id: u32, mode: FanMode) -> KernelResult<()> {
     with_state(|state| {
-        let fan = state.fans.iter_mut().find(|f| f.id == fan_id)
+        let fan = state
+            .fans
+            .iter_mut()
+            .find(|f| f.id == fan_id)
             .ok_or(KernelError::NotFound)?;
         fan.mode = mode;
         Ok(())
@@ -248,7 +288,10 @@ pub fn set_fan_mode(fan_id: u32, mode: FanMode) -> KernelResult<()> {
 /// Set fan duty cycle (0-100%).
 pub fn set_fan_duty(fan_id: u32, duty_pct: u8) -> KernelResult<()> {
     with_state(|state| {
-        let fan = state.fans.iter_mut().find(|f| f.id == fan_id)
+        let fan = state
+            .fans
+            .iter_mut()
+            .find(|f| f.id == fan_id)
             .ok_or(KernelError::NotFound)?;
         if duty_pct > 100 {
             return Err(KernelError::InvalidArgument);
@@ -263,12 +306,18 @@ pub fn set_fan_duty(fan_id: u32, duty_pct: u8) -> KernelResult<()> {
 
 /// Get fan info.
 pub fn get_fan(fan_id: u32) -> Option<Fan> {
-    STATE.lock().as_ref().and_then(|s| s.fans.iter().find(|f| f.id == fan_id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.fans.iter().find(|f| f.id == fan_id).cloned())
 }
 
 /// List all zones.
 pub fn list_zones() -> Vec<ThermalZone> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.zones.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.zones.clone())
 }
 
 /// List all fans.
@@ -287,7 +336,13 @@ pub fn format_temp(mc: i32) -> String {
 pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.zones.len(), s.fans.len(), s.total_readings, s.total_throttle_events, s.ops),
+        Some(s) => (
+            s.zones.len(),
+            s.fans.len(),
+            s.total_readings,
+            s.total_throttle_events,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

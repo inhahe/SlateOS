@@ -77,10 +77,22 @@ impl OpKind {
 
     /// All operation kinds.
     pub const ALL: &'static [OpKind] = &[
-        Self::Read, Self::Write, Self::Stat, Self::Readdir,
-        Self::Open, Self::Close, Self::Create, Self::Remove,
-        Self::Rename, Self::Mkdir, Self::Rmdir, Self::Symlink,
-        Self::Readlink, Self::Truncate, Self::SetAttr, Self::Xattr,
+        Self::Read,
+        Self::Write,
+        Self::Stat,
+        Self::Readdir,
+        Self::Open,
+        Self::Close,
+        Self::Create,
+        Self::Remove,
+        Self::Rename,
+        Self::Mkdir,
+        Self::Rmdir,
+        Self::Symlink,
+        Self::Readlink,
+        Self::Truncate,
+        Self::SetAttr,
+        Self::Xattr,
     ];
 }
 
@@ -102,12 +114,18 @@ pub struct OpStats {
 impl OpStats {
     /// Average operation time in nanoseconds.
     pub fn avg_ns(&self) -> u64 {
-        if self.count == 0 { 0 } else { self.total_ns / self.count }
+        if self.count == 0 {
+            0
+        } else {
+            self.total_ns / self.count
+        }
     }
 
     /// Throughput in bytes per second (for read/write).
     pub fn throughput_bps(&self) -> u64 {
-        if self.total_ns == 0 { return 0; }
+        if self.total_ns == 0 {
+            return 0;
+        }
         // bytes / (total_ns / 1e9) = bytes * 1e9 / total_ns
         self.bytes.saturating_mul(1_000_000_000) / self.total_ns
     }
@@ -137,38 +155,98 @@ pub struct ProfileReport {
 const NUM_OPS: usize = 16;
 
 static OP_COUNT: [AtomicU64; NUM_OPS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 static OP_BYTES: [AtomicU64; NUM_OPS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 static OP_TOTAL_NS: [AtomicU64; NUM_OPS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 static OP_MIN_NS: [AtomicU64; NUM_OPS] = [
-    AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX),
-    AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX),
-    AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX),
-    AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
 ];
 
 static OP_MAX_NS: [AtomicU64; NUM_OPS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Hot path tracking (uses a mutex since it allocates).
@@ -203,7 +281,10 @@ pub fn record(kind: OpKind, path: &str, duration_ns: u64, bytes: u64) {
     let mut current_min = OP_MIN_NS[idx].load(Ordering::Relaxed);
     while duration_ns < current_min {
         match OP_MIN_NS[idx].compare_exchange_weak(
-            current_min, duration_ns, Ordering::Relaxed, Ordering::Relaxed,
+            current_min,
+            duration_ns,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
         ) {
             Ok(_) => break,
             Err(v) => current_min = v,
@@ -214,7 +295,10 @@ pub fn record(kind: OpKind, path: &str, duration_ns: u64, bytes: u64) {
     let mut current_max = OP_MAX_NS[idx].load(Ordering::Relaxed);
     while duration_ns > current_max {
         match OP_MAX_NS[idx].compare_exchange_weak(
-            current_max, duration_ns, Ordering::Relaxed, Ordering::Relaxed,
+            current_max,
+            duration_ns,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
         ) {
             Ok(_) => break,
             Err(v) => current_max = v,
@@ -305,9 +389,7 @@ pub fn report() -> ProfileReport {
 
     // Get top hot paths.
     let hot_paths = if let Some(ref map) = *HOT_PATHS.lock() {
-        let mut entries: Vec<(String, u64)> = map.iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
+        let mut entries: Vec<(String, u64)> = map.iter().map(|(k, v)| (k.clone(), *v)).collect();
         entries.sort_by_key(|e| core::cmp::Reverse(e.1));
         entries.truncate(20);
         entries

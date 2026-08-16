@@ -26,10 +26,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -98,7 +98,10 @@ impl DeviceType {
 
     /// Whether this device type supports audio profiles.
     pub fn is_audio(self) -> bool {
-        matches!(self, Self::AudioHeadphones | Self::AudioSpeaker | Self::AudioHeadset)
+        matches!(
+            self,
+            Self::AudioHeadphones | Self::AudioSpeaker | Self::AudioHeadset
+        )
     }
 }
 
@@ -383,7 +386,8 @@ pub fn set_disable_on_battery(disable: bool) -> KernelResult<()> {
 /// Get current adapter configuration.
 pub fn config() -> KernelResult<BtConfig> {
     let guard = STATE.lock();
-    guard.as_ref()
+    guard
+        .as_ref()
         .map(|s| s.config.clone())
         .ok_or(KernelError::NotSupported)
 }
@@ -419,7 +423,10 @@ pub fn add_scan_result(
         if state.scan_results.len() >= MAX_SCAN_RESULTS {
             state.scan_results.remove(0);
         }
-        let paired = state.devices.iter().any(|d| d.address == address && d.paired);
+        let paired = state
+            .devices
+            .iter()
+            .any(|d| d.address == address && d.paired);
         state.scan_results.push(ScanResult {
             address: String::from(address),
             name: String::from(name),
@@ -454,7 +461,11 @@ pub fn pair(address: &str, name: &str, device_type: DeviceType) -> KernelResult<
         if !state.config.enabled {
             return Err(KernelError::NotSupported);
         }
-        if state.devices.iter().any(|d| d.address == address && d.paired) {
+        if state
+            .devices
+            .iter()
+            .any(|d| d.address == address && d.paired)
+        {
             return Err(KernelError::AlreadyExists);
         }
         if state.devices.len() >= MAX_PAIRED {
@@ -503,7 +514,9 @@ pub fn connect(address: &str) -> KernelResult<()> {
         if !state.config.enabled {
             return Err(KernelError::NotSupported);
         }
-        let dev = state.devices.iter_mut()
+        let dev = state
+            .devices
+            .iter_mut()
             .find(|d| d.address == address)
             .ok_or(KernelError::NotFound)?;
         if dev.blocked {
@@ -519,7 +532,9 @@ pub fn connect(address: &str) -> KernelResult<()> {
 /// Disconnect from a device.
 pub fn disconnect(address: &str) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut()
+        let dev = state
+            .devices
+            .iter_mut()
             .find(|d| d.address == address)
             .ok_or(KernelError::NotFound)?;
         dev.state = ConnectionState::Disconnected;
@@ -530,7 +545,9 @@ pub fn disconnect(address: &str) -> KernelResult<()> {
 /// Set a device as trusted (auto-connect on discovery).
 pub fn set_trusted(address: &str, trusted: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut()
+        let dev = state
+            .devices
+            .iter_mut()
             .find(|d| d.address == address)
             .ok_or(KernelError::NotFound)?;
         dev.trusted = trusted;
@@ -541,7 +558,9 @@ pub fn set_trusted(address: &str, trusted: bool) -> KernelResult<()> {
 /// Block a device (prevent connection).
 pub fn set_blocked(address: &str, blocked: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut()
+        let dev = state
+            .devices
+            .iter_mut()
             .find(|d| d.address == address)
             .ok_or(KernelError::NotFound)?;
         dev.blocked = blocked;
@@ -558,7 +577,9 @@ pub fn set_device_name(address: &str, name: &str) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let dev = state.devices.iter_mut()
+        let dev = state
+            .devices
+            .iter_mut()
             .find(|d| d.address == address)
             .ok_or(KernelError::NotFound)?;
         dev.name = String::from(name);
@@ -572,7 +593,9 @@ pub fn update_battery(address: &str, pct: u8) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let dev = state.devices.iter_mut()
+        let dev = state
+            .devices
+            .iter_mut()
             .find(|d| d.address == address)
             .ok_or(KernelError::NotFound)?;
         dev.battery_pct = Some(pct);
@@ -588,7 +611,9 @@ pub fn update_battery(address: &str, pct: u8) -> KernelResult<()> {
 pub fn get_device(address: &str) -> KernelResult<BtDevice> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.devices.iter()
+    state
+        .devices
+        .iter()
         .find(|d| d.address == address)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -604,7 +629,8 @@ pub fn list_devices() -> Vec<BtDevice> {
 pub fn connected_devices() -> Vec<BtDevice> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.devices.iter()
+        s.devices
+            .iter()
             .filter(|d| d.state == ConnectionState::Connected)
             .cloned()
             .collect()
@@ -615,7 +641,8 @@ pub fn connected_devices() -> Vec<BtDevice> {
 pub fn devices_by_type(dt: DeviceType) -> Vec<BtDevice> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.devices.iter()
+        s.devices
+            .iter()
             .filter(|d| d.device_type == dt)
             .cloned()
             .collect()
@@ -626,7 +653,8 @@ pub fn devices_by_type(dt: DeviceType) -> Vec<BtDevice> {
 pub fn audio_devices() -> Vec<BtDevice> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.devices.iter()
+        s.devices
+            .iter()
             .filter(|d| d.device_type.is_audio() && d.state == ConnectionState::Connected)
             .cloned()
             .collect()
@@ -670,10 +698,18 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let connected = s.devices.iter()
+            let connected = s
+                .devices
+                .iter()
                 .filter(|d| d.state == ConnectionState::Connected)
                 .count();
-            (s.devices.len(), connected, s.scan_count, s.pair_count, s.ops)
+            (
+                s.devices.len(),
+                connected,
+                s.scan_count,
+                s.pair_count,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -736,7 +772,12 @@ pub fn self_test() {
 
     // Test 5: pair device.
     {
-        pair("AA:BB:CC:DD:EE:01", "My Headphones", DeviceType::AudioHeadphones).unwrap();
+        pair(
+            "AA:BB:CC:DD:EE:01",
+            "My Headphones",
+            DeviceType::AudioHeadphones,
+        )
+        .unwrap();
         let dev = get_device("AA:BB:CC:DD:EE:01").unwrap();
         assert_eq!(dev.name, "My Headphones");
         assert!(dev.paired);
@@ -778,7 +819,13 @@ pub fn self_test() {
 
     // Test 8: scan.
     {
-        add_scan_result("FF:FF:FF:FF:FF:01", "BT Speaker", DeviceType::AudioSpeaker, -60).unwrap();
+        add_scan_result(
+            "FF:FF:FF:FF:FF:01",
+            "BT Speaker",
+            DeviceType::AudioSpeaker,
+            -60,
+        )
+        .unwrap();
         let results = scan().unwrap();
         assert!(!results.is_empty());
         assert!(results.iter().any(|r| r.name == "BT Speaker"));

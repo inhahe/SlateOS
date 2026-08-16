@@ -104,7 +104,10 @@ pub fn self_test() {
     serial_println!("[escape] Running self-test...");
 
     serial_println!("  escape::self_test 1: printable ASCII passes through");
-    assert_eq!(escape_octal(b"/usr/local-bin_1.2", &[]), "/usr/local-bin_1.2");
+    assert_eq!(
+        escape_octal(b"/usr/local-bin_1.2", &[]),
+        "/usr/local-bin_1.2"
+    );
 
     serial_println!("  escape::self_test 2: Linux mangle() escape set");
     // The exact four bytes `mangle()` escapes: space, tab, newline, backslash.

@@ -133,7 +133,10 @@ pub fn measure() -> FairnessResult {
     // JFI = (sum(x_i))^2 / (n * sum(x_i^2))
     let n = count as u64;
     let sum: u64 = task_ticks[..count].iter().sum();
-    let sum_sq: u64 = task_ticks[..count].iter().map(|&x| x.saturating_mul(x)).sum();
+    let sum_sq: u64 = task_ticks[..count]
+        .iter()
+        .map(|&x| x.saturating_mul(x))
+        .sum();
 
     let jfi_x1000 = if sum_sq == 0 || n == 0 {
         1000
@@ -141,11 +144,17 @@ pub fn measure() -> FairnessResult {
         // (sum^2 * 1000) / (n * sum_sq)
         let numerator = sum.saturating_mul(sum).saturating_mul(1000);
         let denominator = n.saturating_mul(sum_sq);
-        if denominator == 0 { 1000 } else { numerator / denominator }
+        if denominator == 0 {
+            1000
+        } else {
+            numerator / denominator
+        }
     };
 
     let max_ticks = task_ticks[..count].iter().copied().max().unwrap_or(0);
-    let min_ticks = task_ticks[..count].iter().copied()
+    let min_ticks = task_ticks[..count]
+        .iter()
+        .copied()
         .filter(|&x| x > 0)
         .min()
         .unwrap_or(0);
@@ -176,18 +185,24 @@ pub fn self_test() {
     // Test 1: Measure returns valid data.
     let r = measure();
     // JFI should be between 0 and 1000 (inclusive).
-    assert!(r.jfi_x1000 <= 1000,
-        "JFI should be <= 1000 (got {})", r.jfi_x1000);
-    serial_println!("[sched_fairness]   Measure: OK (JFI={}.{:03}, tasks={})",
-        r.jfi_x1000 / 1000, r.jfi_x1000 % 1000, r.task_count);
+    assert!(
+        r.jfi_x1000 <= 1000,
+        "JFI should be <= 1000 (got {})",
+        r.jfi_x1000
+    );
+    serial_println!(
+        "[sched_fairness]   Measure: OK (JFI={}.{:03}, tasks={})",
+        r.jfi_x1000 / 1000,
+        r.jfi_x1000 % 1000,
+        r.task_count
+    );
 
     // Test 2: JFI formula verification with known values.
     // Two tasks: [10, 10] → JFI = (20)^2 / (2 * (100+100)) = 400/400 = 1.0
     let sum = 20u64;
     let sum_sq = 200u64;
     let n = 2u64;
-    let jfi = sum.saturating_mul(sum).saturating_mul(1000)
-        / n.saturating_mul(sum_sq);
+    let jfi = sum.saturating_mul(sum).saturating_mul(1000) / n.saturating_mul(sum_sq);
     assert_eq!(jfi, 1000, "equal distribution should give JFI=1.0");
     serial_println!("[sched_fairness]   Equal distribution: JFI=1.000 (correct)");
 
@@ -195,12 +210,18 @@ pub fn self_test() {
     let sum = 100u64;
     let sum_sq = 9802u64;
     let n = 2u64;
-    let jfi = sum.saturating_mul(sum).saturating_mul(1000)
-        / n.saturating_mul(sum_sq);
-    assert!(jfi > 500 && jfi < 520,
-        "1:99 distribution should give JFI ~0.510 (got {}.{:03})", jfi/1000, jfi%1000);
-    serial_println!("[sched_fairness]   Skewed distribution: JFI={}.{:03} (correct)",
-        jfi / 1000, jfi % 1000);
+    let jfi = sum.saturating_mul(sum).saturating_mul(1000) / n.saturating_mul(sum_sq);
+    assert!(
+        jfi > 500 && jfi < 520,
+        "1:99 distribution should give JFI ~0.510 (got {}.{:03})",
+        jfi / 1000,
+        jfi % 1000
+    );
+    serial_println!(
+        "[sched_fairness]   Skewed distribution: JFI={}.{:03} (correct)",
+        jfi / 1000,
+        jfi % 1000
+    );
 
     // Test 3: Measurement count increases.
     let c1 = measurement_count();

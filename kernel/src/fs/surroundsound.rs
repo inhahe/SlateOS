@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -161,24 +161,53 @@ fn speakers_for_layout(layout: SpeakerLayout) -> Vec<SpeakerCalibration> {
     let channels = match layout {
         SpeakerLayout::Mono => alloc::vec![SpeakerChannel::Center],
         SpeakerLayout::Stereo => alloc::vec![SpeakerChannel::FrontLeft, SpeakerChannel::FrontRight],
-        SpeakerLayout::Surround21 => alloc::vec![SpeakerChannel::FrontLeft, SpeakerChannel::FrontRight, SpeakerChannel::Subwoofer],
+        SpeakerLayout::Surround21 => alloc::vec![
+            SpeakerChannel::FrontLeft,
+            SpeakerChannel::FrontRight,
+            SpeakerChannel::Subwoofer
+        ],
         SpeakerLayout::Surround51 => alloc::vec![
-            SpeakerChannel::FrontLeft, SpeakerChannel::FrontRight, SpeakerChannel::Center,
-            SpeakerChannel::Subwoofer, SpeakerChannel::RearLeft, SpeakerChannel::RearRight],
+            SpeakerChannel::FrontLeft,
+            SpeakerChannel::FrontRight,
+            SpeakerChannel::Center,
+            SpeakerChannel::Subwoofer,
+            SpeakerChannel::RearLeft,
+            SpeakerChannel::RearRight
+        ],
         SpeakerLayout::Surround71 => alloc::vec![
-            SpeakerChannel::FrontLeft, SpeakerChannel::FrontRight, SpeakerChannel::Center,
-            SpeakerChannel::Subwoofer, SpeakerChannel::SideLeft, SpeakerChannel::SideRight,
-            SpeakerChannel::RearLeft, SpeakerChannel::RearRight],
+            SpeakerChannel::FrontLeft,
+            SpeakerChannel::FrontRight,
+            SpeakerChannel::Center,
+            SpeakerChannel::Subwoofer,
+            SpeakerChannel::SideLeft,
+            SpeakerChannel::SideRight,
+            SpeakerChannel::RearLeft,
+            SpeakerChannel::RearRight
+        ],
         SpeakerLayout::Atmos714 => alloc::vec![
-            SpeakerChannel::FrontLeft, SpeakerChannel::FrontRight, SpeakerChannel::Center,
-            SpeakerChannel::Subwoofer, SpeakerChannel::SideLeft, SpeakerChannel::SideRight,
-            SpeakerChannel::RearLeft, SpeakerChannel::RearRight,
-            SpeakerChannel::TopFrontLeft, SpeakerChannel::TopFrontRight,
-            SpeakerChannel::TopRearLeft, SpeakerChannel::TopRearRight],
+            SpeakerChannel::FrontLeft,
+            SpeakerChannel::FrontRight,
+            SpeakerChannel::Center,
+            SpeakerChannel::Subwoofer,
+            SpeakerChannel::SideLeft,
+            SpeakerChannel::SideRight,
+            SpeakerChannel::RearLeft,
+            SpeakerChannel::RearRight,
+            SpeakerChannel::TopFrontLeft,
+            SpeakerChannel::TopFrontRight,
+            SpeakerChannel::TopRearLeft,
+            SpeakerChannel::TopRearRight
+        ],
     };
-    channels.into_iter().map(|ch| SpeakerCalibration {
-        channel: ch, trim_cb: 0, distance_cm: 200, active: true,
-    }).collect()
+    channels
+        .into_iter()
+        .map(|ch| SpeakerCalibration {
+            channel: ch,
+            trim_cb: 0,
+            distance_cm: 200,
+            active: true,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -187,13 +216,18 @@ fn speakers_for_layout(layout: SpeakerLayout) -> Vec<SpeakerCalibration> {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let default_config = SurroundConfig {
-        id: 1, device_name: String::from("Built-in Audio"),
+        id: 1,
+        device_name: String::from("Built-in Audio"),
         layout: SpeakerLayout::Stereo,
         speakers: speakers_for_layout(SpeakerLayout::Stereo),
-        virtual_surround: false, crossover_hz: 80, lfe_enabled: false,
+        virtual_surround: false,
+        crossover_hz: 80,
+        lfe_enabled: false,
     };
 
     *guard = Some(State {
@@ -216,9 +250,12 @@ pub fn create_config(device_name: &str, layout: SpeakerLayout) -> KernelResult<u
         state.next_id += 1;
         state.total_configs += 1;
         state.configs.push(SurroundConfig {
-            id, device_name: String::from(device_name),
-            layout, speakers: speakers_for_layout(layout),
-            virtual_surround: false, crossover_hz: 80,
+            id,
+            device_name: String::from(device_name),
+            layout,
+            speakers: speakers_for_layout(layout),
+            virtual_surround: false,
+            crossover_hz: 80,
             lfe_enabled: layout.channel_count() > 2,
         });
         Ok(id)
@@ -228,7 +265,10 @@ pub fn create_config(device_name: &str, layout: SpeakerLayout) -> KernelResult<u
 /// Change layout for a config (recalculates speakers).
 pub fn set_layout(config_id: u32, layout: SpeakerLayout) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         cfg.layout = layout;
         cfg.speakers = speakers_for_layout(layout);
@@ -238,11 +278,22 @@ pub fn set_layout(config_id: u32, layout: SpeakerLayout) -> KernelResult<()> {
 }
 
 /// Calibrate a speaker channel.
-pub fn calibrate_speaker(config_id: u32, channel: SpeakerChannel, trim_cb: i32, distance_cm: u32) -> KernelResult<()> {
+pub fn calibrate_speaker(
+    config_id: u32,
+    channel: SpeakerChannel,
+    trim_cb: i32,
+    distance_cm: u32,
+) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
-        let speaker = cfg.speakers.iter_mut().find(|s| s.channel == channel)
+        let speaker = cfg
+            .speakers
+            .iter_mut()
+            .find(|s| s.channel == channel)
             .ok_or(KernelError::NotFound)?;
         speaker.trim_cb = trim_cb.clamp(-600, 600);
         speaker.distance_cm = distance_cm;
@@ -254,7 +305,10 @@ pub fn calibrate_speaker(config_id: u32, channel: SpeakerChannel, trim_cb: i32, 
 /// Enable/disable virtual surround (headphone surround).
 pub fn set_virtual_surround(config_id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         cfg.virtual_surround = enabled;
         Ok(())
@@ -264,7 +318,10 @@ pub fn set_virtual_surround(config_id: u32, enabled: bool) -> KernelResult<()> {
 /// Set crossover frequency for subwoofer.
 pub fn set_crossover(config_id: u32, hz: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.configs.iter_mut().find(|c| c.id == config_id)
+        let cfg = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         cfg.crossover_hz = hz.clamp(40, 200);
         Ok(())
@@ -274,7 +331,10 @@ pub fn set_crossover(config_id: u32, hz: u32) -> KernelResult<()> {
 /// Remove a config.
 pub fn remove_config(config_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.configs.iter().position(|c| c.id == config_id)
+        let pos = state
+            .configs
+            .iter()
+            .position(|c| c.id == config_id)
             .ok_or(KernelError::NotFound)?;
         state.configs.remove(pos);
         Ok(())
@@ -283,13 +343,21 @@ pub fn remove_config(config_id: u32) -> KernelResult<()> {
 
 /// List all configs.
 pub fn list_configs() -> Vec<SurroundConfig> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.configs.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.configs.clone())
 }
 
 /// Get a config.
 pub fn get_config(id: u32) -> KernelResult<SurroundConfig> {
     with_state(|state| {
-        state.configs.iter().find(|c| c.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .configs
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -297,7 +365,12 @@ pub fn get_config(id: u32) -> KernelResult<SurroundConfig> {
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.configs.len(), s.total_configs, s.total_calibrations, s.ops),
+        Some(s) => (
+            s.configs.len(),
+            s.total_configs,
+            s.total_calibrations,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }
@@ -333,7 +406,11 @@ pub fn self_test() {
     // 4: Calibrate speaker.
     calibrate_speaker(id, SpeakerChannel::Center, -100, 250).expect("cal");
     let cfg = get_config(id).expect("get3");
-    let center = cfg.speakers.iter().find(|s| s.channel == SpeakerChannel::Center).expect("center");
+    let center = cfg
+        .speakers
+        .iter()
+        .find(|s| s.channel == SpeakerChannel::Center)
+        .expect("center");
     assert_eq!(center.trim_cb, -100);
     assert_eq!(center.distance_cm, 250);
     crate::serial_println!("  [4/8] calibrate: OK");

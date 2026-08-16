@@ -42,8 +42,8 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // MSR addresses
@@ -160,10 +160,14 @@ pub fn init() {
         MIN_TEMP.store(temp, Ordering::Relaxed);
         serial_println!(
             "[thermal] Initialized: Tj_max={}°C, current={}°C",
-            tj_max, temp
+            tj_max,
+            temp
         );
     } else {
-        serial_println!("[thermal] Initialized: Tj_max={}°C (initial read failed)", tj_max);
+        serial_println!(
+            "[thermal] Initialized: Tj_max={}°C (initial read failed)",
+            tj_max
+        );
     }
 }
 
@@ -222,13 +226,10 @@ pub fn periodic_check() {
         if prev_critical.is_multiple_of(10) {
             serial_println!(
                 "[thermal] CRITICAL: Package temperature {}°C (>= {}°C threshold)",
-                temp, CRITICAL_THRESHOLD
+                temp,
+                CRITICAL_THRESHOLD
             );
-            crate::kwarn::warn(
-                "CPU temperature critical",
-                "thermal.rs",
-                line!(),
-            );
+            crate::kwarn::warn("CPU temperature critical", "thermal.rs", line!());
         }
     } else if temp >= WARN_THRESHOLD {
         let prev_warn = WARN_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -236,7 +237,8 @@ pub fn periodic_check() {
             // Warn once per ~5 minutes at sustained high temp.
             serial_println!(
                 "[thermal] Warning: Package temperature {}°C (>= {}°C threshold)",
-                temp, WARN_THRESHOLD
+                temp,
+                WARN_THRESHOLD
             );
         }
     }

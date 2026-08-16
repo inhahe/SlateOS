@@ -25,12 +25,12 @@
 //! | 1        | Background      | backups, updates             |
 //! | 0        | Best Effort     | default, unclassified        |
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -194,7 +194,8 @@ impl ClassifyRule {
 }
 
 /// Classification rule table.
-static RULES: Mutex<[ClassifyRule; MAX_RULES]> = Mutex::new([const { ClassifyRule::empty() }; MAX_RULES]);
+static RULES: Mutex<[ClassifyRule; MAX_RULES]> =
+    Mutex::new([const { ClassifyRule::empty() }; MAX_RULES]);
 
 /// Whether QoS classification is enabled.
 static QOS_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -250,7 +251,8 @@ impl TokenBucket {
         }
 
         // tokens_to_add = rate_bps * elapsed_ns / 1_000_000_000.
-        let new_tokens = self.rate_bps
+        let new_tokens = self
+            .rate_bps
             .saturating_mul(elapsed_ns)
             .checked_div(1_000_000_000)
             .unwrap_or(0);
@@ -274,9 +276,8 @@ impl TokenBucket {
 }
 
 /// Rate limiter table.
-static RATE_LIMITERS: Mutex<[TokenBucket; MAX_RATE_LIMITERS]> = Mutex::new(
-    [const { TokenBucket::empty() }; MAX_RATE_LIMITERS]
-);
+static RATE_LIMITERS: Mutex<[TokenBucket; MAX_RATE_LIMITERS]> =
+    Mutex::new([const { TokenBucket::empty() }; MAX_RATE_LIMITERS]);
 
 // ---------------------------------------------------------------------------
 // Public API — Classification
@@ -537,7 +538,10 @@ pub fn procfs_content() -> String {
     let mut out = String::with_capacity(1024);
     out.push_str("QoS (Quality of Service)\n");
     out.push_str("========================\n\n");
-    out.push_str(&format!("Status: {}\n\n", if enabled { "enabled" } else { "disabled" }));
+    out.push_str(&format!(
+        "Status: {}\n\n",
+        if enabled { "enabled" } else { "disabled" }
+    ));
 
     out.push_str("Traffic Classes:\n");
     for c in &classes {
@@ -613,7 +617,10 @@ pub fn self_test() -> KernelResult<()> {
         set_enabled(true);
 
         // Add rule: port 8080 → priority 3.
-        assert!(add_rule(ClassifyMatch::DstPort(8080), 3).is_ok(), "add rule");
+        assert!(
+            add_rule(ClassifyMatch::DstPort(8080), 3).is_ok(),
+            "add rule"
+        );
         assert!(classify(6, 0, 8080, 0) == 3, "custom rule match");
 
         // Non-matching → default.
@@ -628,7 +635,10 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 4: Invalid priority ---
     {
-        assert!(add_rule(ClassifyMatch::All, 8).is_err(), "priority too high");
+        assert!(
+            add_rule(ClassifyMatch::All, 8).is_err(),
+            "priority too high"
+        );
         assert!(add_rule(ClassifyMatch::All, 7).is_ok(), "max priority ok");
         clear_rules();
 

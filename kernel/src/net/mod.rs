@@ -33,43 +33,43 @@ pub mod httpd;
 pub mod icmp;
 pub mod icmpv6;
 pub mod igmp;
+pub mod interface;
 pub mod iperf;
-pub mod mld;
+pub mod ipv4;
 pub mod ipv6;
 pub mod lldp;
+pub mod mdns;
+pub mod mld;
+pub mod nat;
 pub mod ndisc;
 pub mod netcat;
 pub mod netstack_client;
 pub mod netstat;
-pub mod mdns;
 pub mod ntp;
+pub mod pcap;
+pub mod qos;
+pub mod raw;
 pub mod smtp;
 pub mod snmp;
 pub mod socket;
 pub mod socks;
 pub mod ssh;
 pub mod syslog;
+pub mod tcp;
 pub mod telnet;
 pub mod tftp;
-pub mod interface;
-pub mod ipv4;
-pub mod tcp;
 pub mod tls;
-pub mod udp;
-pub mod pcap;
-pub mod qos;
-pub mod raw;
-pub mod nat;
 pub mod traceroute;
+pub mod udp;
 pub mod upnp;
 pub mod veth;
 pub mod vlan;
 pub mod websocket;
 pub mod wol;
 
+use crate::error::{KernelError, KernelResult};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::error::{KernelError, KernelResult};
 
 /// Minimum interval (ns) between TCP keepalive scans.
 ///
@@ -283,17 +283,23 @@ pub fn self_test() -> KernelResult<()> {
     let stats = interface::stats();
     crate::serial_println!(
         "[net]   Traffic: TX {}/{} pkts, RX {}/{} pkts, {} TX errors, {} RX drops",
-        stats.tx_bytes, stats.tx_packets,
-        stats.rx_bytes, stats.rx_packets,
-        stats.tx_errors, stats.rx_drops,
+        stats.tx_bytes,
+        stats.tx_packets,
+        stats.rx_bytes,
+        stats.rx_packets,
+        stats.tx_errors,
+        stats.rx_drops,
     );
 
     // TCP state summary.
     let tcp_stats = tcp::stats();
     crate::serial_println!(
         "[net]   TCP: {} active ({} ESTABLISHED, {} TIME_WAIT, {} CLOSE_WAIT), {} listeners",
-        tcp_stats.active_connections, tcp_stats.established,
-        tcp_stats.time_wait, tcp_stats.close_wait, tcp_stats.listeners,
+        tcp_stats.active_connections,
+        tcp_stats.established,
+        tcp_stats.time_wait,
+        tcp_stats.close_wait,
+        tcp_stats.listeners,
     );
 
     // DNS cache statistics.
@@ -301,8 +307,12 @@ pub fn self_test() -> KernelResult<()> {
     let aaaa_count = dns::aaaa_cache_count();
     crate::serial_println!(
         "[net]   DNS cache: {}/{} A entries, {} AAAA entries, {} hits, {} misses, {} evictions",
-        dns_stats.entries, dns_stats.capacity, aaaa_count,
-        dns_stats.hits, dns_stats.misses, dns_stats.evictions,
+        dns_stats.entries,
+        dns_stats.capacity,
+        aaaa_count,
+        dns_stats.hits,
+        dns_stats.misses,
+        dns_stats.evictions,
     );
 
     // ARP cache.
@@ -312,7 +322,9 @@ pub fn self_test() -> KernelResult<()> {
         if let Some(entry) = arp_entries.get(i) {
             crate::serial_println!(
                 "[net]     {} → {} (TTL {}s)",
-                entry.ip, entry.mac, entry.ttl_secs,
+                entry.ip,
+                entry.mac,
+                entry.ttl_secs,
             );
         }
     }
@@ -328,7 +340,9 @@ pub fn self_test() -> KernelResult<()> {
         if let Some(sock) = udp_socks.get(i) {
             crate::serial_println!(
                 "[net]     port {} (rx_v4={}, rx_v6={}, mcast_groups={})",
-                sock.local_port, sock.rx_queue_len, sock.rx_queue_v6_len,
+                sock.local_port,
+                sock.rx_queue_len,
+                sock.rx_queue_v6_len,
                 sock.mcast_groups,
             );
         }
@@ -342,7 +356,9 @@ pub fn self_test() -> KernelResult<()> {
             if let Some(listener) = tcp_listeners.get(i) {
                 crate::serial_println!(
                     "[net]     port {} ({}/{} backlog)",
-                    listener.port, listener.backlog_used, listener.backlog_max,
+                    listener.port,
+                    listener.backlog_used,
+                    listener.backlog_max,
                 );
             }
         }

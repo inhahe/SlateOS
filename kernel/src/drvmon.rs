@@ -36,10 +36,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -151,11 +151,11 @@ impl Default for DriverPolicy {
         Self {
             restart_policy: RestartPolicy::ExponentialBackoff,
             health_mode: HealthMode::ProcessAlive,
-            heartbeat_timeout_ns: 5_000_000_000,    // 5 seconds
+            heartbeat_timeout_ns: 5_000_000_000, // 5 seconds
             max_missed_heartbeats: 3,
             max_restarts: 5,
-            initial_backoff_ns: 1_000_000_000,       // 1 second
-            max_backoff_ns: 30_000_000_000,          // 30 seconds
+            initial_backoff_ns: 1_000_000_000, // 1 second
+            max_backoff_ns: 30_000_000_000,    // 30 seconds
             drain_io_on_restart: true,
         }
     }
@@ -285,7 +285,11 @@ pub fn register(
         bus,
         pid,
         policy,
-        health: if pid > 0 { DriverHealth::Healthy } else { DriverHealth::Stopped },
+        health: if pid > 0 {
+            DriverHealth::Healthy
+        } else {
+            DriverHealth::Stopped
+        },
         last_heartbeat_ns: now,
         missed_heartbeats: 0,
         total_crashes: 0,
@@ -298,9 +302,14 @@ pub fn register(
         registered_ns: now,
     });
 
-    crate::syslog!("driver.monitor", Info,
+    crate::syslog!(
+        "driver.monitor",
+        Info,
         "Driver '{}' registered for monitoring (id={}, bus={})",
-        name, id, bus.label());
+        name,
+        id,
+        bus.label()
+    );
 
     Ok(id)
 }
@@ -312,12 +321,19 @@ fn init_inner(state: &mut State) {
 /// Unregister a driver from monitoring.
 pub fn unregister(id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let idx = state.drivers.iter().position(|d| d.id == id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     let drv = state.drivers.remove(idx);
 
-    crate::syslog!("driver.monitor", Info,
-        "Driver '{}' unregistered from monitoring", drv.name);
+    crate::syslog!(
+        "driver.monitor",
+        Info,
+        "Driver '{}' unregistered from monitoring",
+        drv.name
+    );
 
     Ok(())
 }
@@ -325,7 +341,10 @@ pub fn unregister(id: u32) -> KernelResult<()> {
 /// Send a heartbeat from a driver (resets missed-heartbeat counter).
 pub fn heartbeat(id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let drv = state.drivers.iter_mut().find(|d| d.id == id)
+    let drv = state
+        .drivers
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     drv.last_heartbeat_ns = crate::hpet::elapsed_ns();
@@ -347,12 +366,17 @@ pub fn report_crash(id: u32) -> KernelResult<()> {
 
     // Find the driver index (avoids holding a mutable borrow on state.drivers
     // while also needing to update state-level counters).
-    let idx = state.drivers.iter().position(|d| d.id == id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     // Update driver-level crash data.
     #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-    { state.drivers[idx].total_crashes += 1; }
+    {
+        state.drivers[idx].total_crashes += 1;
+    }
     #[allow(clippy::indexing_slicing)]
     {
         state.drivers[idx].consecutive_crashes =
@@ -380,12 +404,21 @@ pub fn report_crash(id: u32) -> KernelResult<()> {
     // Check if we've exceeded max restarts.
     if consec > max {
         #[allow(clippy::indexing_slicing)]
-        { state.drivers[idx].health = DriverHealth::Failed; }
+        {
+            state.drivers[idx].health = DriverHealth::Failed;
+        }
         #[allow(clippy::arithmetic_side_effects)]
-        { state.total_crashes += 1; }
+        {
+            state.total_crashes += 1;
+        }
 
-        crate::syslog!("driver.crash", Critical,
-            "Driver '{}' permanently failed after {} crashes", name, total);
+        crate::syslog!(
+            "driver.crash",
+            Critical,
+            "Driver '{}' permanently failed after {} crashes",
+            name,
+            total
+        );
         return Ok(());
     }
 
@@ -393,12 +426,16 @@ pub fn report_crash(id: u32) -> KernelResult<()> {
     let delay_ns = match policy {
         RestartPolicy::Immediate => {
             #[allow(clippy::indexing_slicing)]
-            { state.drivers[idx].health = DriverHealth::Restarting; }
+            {
+                state.drivers[idx].health = DriverHealth::Restarting;
+            }
             0u64
         }
         RestartPolicy::Delayed(d) => {
             #[allow(clippy::indexing_slicing)]
-            { state.drivers[idx].health = DriverHealth::Restarting; }
+            {
+                state.drivers[idx].health = DriverHealth::Restarting;
+            }
             d
         }
         RestartPolicy::ExponentialBackoff => {
@@ -420,22 +457,38 @@ pub fn report_crash(id: u32) -> KernelResult<()> {
         }
         RestartPolicy::Never => {
             #[allow(clippy::indexing_slicing)]
-            { state.drivers[idx].health = DriverHealth::Failed; }
+            {
+                state.drivers[idx].health = DriverHealth::Failed;
+            }
             #[allow(clippy::arithmetic_side_effects)]
-            { state.total_crashes += 1; }
-            crate::syslog!("driver.crash", Error,
-                "Driver '{}' crashed, restart policy=Never", name);
+            {
+                state.total_crashes += 1;
+            }
+            crate::syslog!(
+                "driver.crash",
+                Error,
+                "Driver '{}' crashed, restart policy=Never",
+                name
+            );
             return Ok(());
         }
     };
 
     #[allow(clippy::arithmetic_side_effects)]
-    { state.total_crashes += 1; }
+    {
+        state.total_crashes += 1;
+    }
 
     let delay_ms = delay_ns / 1_000_000;
-    crate::syslog!("driver.crash", Warning,
+    crate::syslog!(
+        "driver.crash",
+        Warning,
         "Driver '{}' crashed (attempt {}/{}), restart in {} ms",
-        name, consec, max, delay_ms);
+        name,
+        consec,
+        max,
+        delay_ms
+    );
 
     // In a real implementation, we'd schedule a timer callback for
     // delayed/backoff restarts. For now, mark for restart.
@@ -452,7 +505,10 @@ pub fn report_crash(id: u32) -> KernelResult<()> {
 pub fn restart_driver(id: u32, new_pid: u32) -> KernelResult<()> {
     let now = crate::hpet::elapsed_ns();
     let mut state = STATE.lock();
-    let idx = state.drivers.iter().position(|d| d.id == id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     if state.drivers[idx].health == DriverHealth::Failed {
@@ -465,17 +521,26 @@ pub fn restart_driver(id: u32, new_pid: u32) -> KernelResult<()> {
     state.drivers[idx].last_heartbeat_ns = now;
     state.drivers[idx].missed_heartbeats = 0;
     #[allow(clippy::arithmetic_side_effects)]
-    { state.drivers[idx].total_restarts += 1; }
+    {
+        state.drivers[idx].total_restarts += 1;
+    }
 
     let name = state.drivers[idx].name.clone();
     let restarts = state.drivers[idx].total_restarts;
 
     #[allow(clippy::arithmetic_side_effects)]
-    { state.total_restarts += 1; }
+    {
+        state.total_restarts += 1;
+    }
 
-    crate::syslog!("driver.restart", Info,
+    crate::syslog!(
+        "driver.restart",
+        Info,
         "Driver '{}' restarted (pid={}, total restarts={})",
-        name, new_pid, restarts);
+        name,
+        new_pid,
+        restarts
+    );
 
     Ok(())
 }
@@ -483,7 +548,10 @@ pub fn restart_driver(id: u32, new_pid: u32) -> KernelResult<()> {
 /// Reset a driver's crash counter (after successful long-running period).
 pub fn reset_crash_count(id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let drv = state.drivers.iter_mut().find(|d| d.id == id)
+    let drv = state
+        .drivers
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     drv.consecutive_crashes = 0;
@@ -505,12 +573,15 @@ pub fn tick() -> Vec<u32> {
     let mut state = STATE.lock();
     state.last_tick_ns = now;
     #[allow(clippy::arithmetic_side_effects)]
-    { state.tick_count += 1; }
+    {
+        state.tick_count += 1;
+    }
 
     let mut needs_attention = Vec::new();
 
     for drv in &mut state.drivers {
-        if !drv.monitoring || drv.health == DriverHealth::Failed
+        if !drv.monitoring
+            || drv.health == DriverHealth::Failed
             || drv.health == DriverHealth::Stopped
             || drv.health == DriverHealth::Restarting
         {
@@ -536,11 +607,7 @@ pub fn tick() -> Vec<u32> {
                 // Check whether the driver's process is still alive in the
                 // process table.  A pid of 0 means the driver has no process
                 // (kernel-internal or stopped), so we skip it.
-                if drv.pid != 0
-                    && !crate::proc::pcb::is_process_running(
-                        u64::from(drv.pid),
-                    )
-                {
+                if drv.pid != 0 && !crate::proc::pcb::is_process_running(u64::from(drv.pid)) {
                     drv.health = DriverHealth::Unresponsive;
                     needs_attention.push(drv.id);
                 }
@@ -554,7 +621,10 @@ pub fn tick() -> Vec<u32> {
 /// Pause monitoring for a driver (e.g., during planned maintenance).
 pub fn pause_monitoring(id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let drv = state.drivers.iter_mut().find(|d| d.id == id)
+    let drv = state
+        .drivers
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     drv.monitoring = false;
     Ok(())
@@ -563,7 +633,10 @@ pub fn pause_monitoring(id: u32) -> KernelResult<()> {
 /// Resume monitoring for a driver.
 pub fn resume_monitoring(id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let drv = state.drivers.iter_mut().find(|d| d.id == id)
+    let drv = state
+        .drivers
+        .iter_mut()
+        .find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
     drv.monitoring = true;
     drv.last_heartbeat_ns = crate::hpet::elapsed_ns();
@@ -593,37 +666,45 @@ pub struct DriverInfo {
 /// List all monitored drivers.
 pub fn list() -> Vec<DriverInfo> {
     let state = STATE.lock();
-    state.drivers.iter().map(|d| DriverInfo {
-        id: d.id,
-        name: d.name.clone(),
-        display_name: d.display_name.clone(),
-        bus: d.bus,
-        pid: d.pid,
-        health: d.health,
-        total_crashes: d.total_crashes,
-        consecutive_crashes: d.consecutive_crashes,
-        total_restarts: d.total_restarts,
-        monitoring: d.monitoring,
-        current_backoff_ms: d.current_backoff_ns / 1_000_000,
-    }).collect()
+    state
+        .drivers
+        .iter()
+        .map(|d| DriverInfo {
+            id: d.id,
+            name: d.name.clone(),
+            display_name: d.display_name.clone(),
+            bus: d.bus,
+            pid: d.pid,
+            health: d.health,
+            total_crashes: d.total_crashes,
+            consecutive_crashes: d.consecutive_crashes,
+            total_restarts: d.total_restarts,
+            monitoring: d.monitoring,
+            current_backoff_ms: d.current_backoff_ns / 1_000_000,
+        })
+        .collect()
 }
 
 /// Find a driver by name.
 pub fn find_by_name(name: &str) -> Option<DriverInfo> {
     let state = STATE.lock();
-    state.drivers.iter().find(|d| d.name == name).map(|d| DriverInfo {
-        id: d.id,
-        name: d.name.clone(),
-        display_name: d.display_name.clone(),
-        bus: d.bus,
-        pid: d.pid,
-        health: d.health,
-        total_crashes: d.total_crashes,
-        consecutive_crashes: d.consecutive_crashes,
-        total_restarts: d.total_restarts,
-        monitoring: d.monitoring,
-        current_backoff_ms: d.current_backoff_ns / 1_000_000,
-    })
+    state
+        .drivers
+        .iter()
+        .find(|d| d.name == name)
+        .map(|d| DriverInfo {
+            id: d.id,
+            name: d.name.clone(),
+            display_name: d.display_name.clone(),
+            bus: d.bus,
+            pid: d.pid,
+            health: d.health,
+            total_crashes: d.total_crashes,
+            consecutive_crashes: d.consecutive_crashes,
+            total_restarts: d.total_restarts,
+            monitoring: d.monitoring,
+            current_backoff_ms: d.current_backoff_ns / 1_000_000,
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -662,12 +743,24 @@ pub fn stats() -> MonitorStats {
 
     for drv in &state.drivers {
         match drv.health {
-            DriverHealth::Healthy => { st.healthy += 1; }
-            DriverHealth::Degraded => { st.degraded += 1; }
-            DriverHealth::Unresponsive => { st.unresponsive += 1; }
-            DriverHealth::Restarting => { st.restarting += 1; }
-            DriverHealth::Failed => { st.failed += 1; }
-            DriverHealth::Stopped => { st.stopped += 1; }
+            DriverHealth::Healthy => {
+                st.healthy += 1;
+            }
+            DriverHealth::Degraded => {
+                st.degraded += 1;
+            }
+            DriverHealth::Unresponsive => {
+                st.unresponsive += 1;
+            }
+            DriverHealth::Restarting => {
+                st.restarting += 1;
+            }
+            DriverHealth::Failed => {
+                st.failed += 1;
+            }
+            DriverHealth::Stopped => {
+                st.stopped += 1;
+            }
         }
     }
 
@@ -694,13 +787,22 @@ pub fn procfs_content() -> String {
     out.push_str(&format!("Total restarts:{}\n", st.total_restarts));
 
     if !drivers.is_empty() {
-        out.push_str(&format!("\n{:>3} {:12} {:8} {:>6} {:12} {:>6} {:>6} {:>4}\n",
-            "ID", "Name", "Bus", "PID", "Health", "Crash", "Rstrt", "Mon"));
+        out.push_str(&format!(
+            "\n{:>3} {:12} {:8} {:>6} {:12} {:>6} {:>6} {:>4}\n",
+            "ID", "Name", "Bus", "PID", "Health", "Crash", "Rstrt", "Mon"
+        ));
         for d in &drivers {
-            out.push_str(&format!("{:>3} {:12} {:8} {:>6} {:12} {:>6} {:>6} {:>4}\n",
-                d.id, d.name, d.bus.label(), d.pid, d.health.label(),
-                d.total_crashes, d.total_restarts,
-                if d.monitoring { "yes" } else { "no" }));
+            out.push_str(&format!(
+                "{:>3} {:12} {:8} {:>6} {:12} {:>6} {:>6} {:>4}\n",
+                d.id,
+                d.name,
+                d.bus.label(),
+                d.pid,
+                d.health.label(),
+                d.total_crashes,
+                d.total_restarts,
+                if d.monitoring { "yes" } else { "no" }
+            ));
         }
     }
 
@@ -723,11 +825,23 @@ pub fn self_test() -> KernelResult<()> {
     init();
 
     // Test 1: Register drivers.
-    let nvme_id = register("nvme", "NVMe SSD Controller", BusType::Pci, 200, DriverPolicy::default())?;
-    let net_id = register("e1000", "Intel Gigabit Ethernet", BusType::Pci, 201, DriverPolicy {
-        health_mode: HealthMode::Heartbeat,
-        ..DriverPolicy::default()
-    })?;
+    let nvme_id = register(
+        "nvme",
+        "NVMe SSD Controller",
+        BusType::Pci,
+        200,
+        DriverPolicy::default(),
+    )?;
+    let net_id = register(
+        "e1000",
+        "Intel Gigabit Ethernet",
+        BusType::Pci,
+        201,
+        DriverPolicy {
+            health_mode: HealthMode::Heartbeat,
+            ..DriverPolicy::default()
+        },
+    )?;
     {
         let state = STATE.lock();
         if state.drivers.len() != 2 {
@@ -766,8 +880,11 @@ pub fn self_test() -> KernelResult<()> {
         let drv = state.drivers.iter().find(|d| d.id == nvme_id);
         if let Some(d) = drv {
             if d.total_crashes != 1 || d.health != DriverHealth::Restarting {
-                crate::serial_println!("[drvmon]   FAIL: crash not recorded properly (crashes={}, health={:?})",
-                    d.total_crashes, d.health);
+                crate::serial_println!(
+                    "[drvmon]   FAIL: crash not recorded properly (crashes={}, health={:?})",
+                    d.total_crashes,
+                    d.health
+                );
                 return Err(KernelError::InternalError);
             }
         }

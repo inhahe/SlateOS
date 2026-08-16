@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -105,7 +105,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         entries: Vec::new(),
         next_id: 1,
@@ -119,7 +121,9 @@ pub fn init_defaults() {
 /// Push content to clipboard history.
 pub fn push(content: &str, content_type: ContentType) -> KernelResult<u32> {
     with_state(|state| {
-        if !state.global_enabled { return Ok(0); }
+        if !state.global_enabled {
+            return Ok(0);
+        }
         let now = crate::hpet::elapsed_ns();
         let size = content.len().min(MAX_CONTENT_SIZE);
         let truncated = if content.len() > MAX_CONTENT_SIZE {
@@ -176,7 +180,10 @@ pub fn paste(index: usize) -> KernelResult<ClipEntry> {
 /// Paste from a named slot.
 pub fn paste_slot(name: &str) -> KernelResult<ClipEntry> {
     with_state(|state| {
-        let entry = state.entries.iter_mut().find(|e| e.slot_name == name)
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.slot_name == name)
             .ok_or(KernelError::NotFound)?;
         entry.paste_count += 1;
         state.total_pastes += 1;
@@ -187,7 +194,10 @@ pub fn paste_slot(name: &str) -> KernelResult<ClipEntry> {
 /// Pin an entry by id.
 pub fn pin(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let entry = state.entries.iter_mut().find(|e| e.id == id)
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id)
             .ok_or(KernelError::NotFound)?;
         entry.pinned = true;
         Ok(())
@@ -197,7 +207,10 @@ pub fn pin(id: u32) -> KernelResult<()> {
 /// Unpin an entry.
 pub fn unpin(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let entry = state.entries.iter_mut().find(|e| e.id == id)
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id)
             .ok_or(KernelError::NotFound)?;
         entry.pinned = false;
         Ok(())
@@ -213,7 +226,10 @@ pub fn set_slot(id: u32, name: &str) -> KernelResult<()> {
                 entry.slot_name.clear();
             }
         }
-        let entry = state.entries.iter_mut().find(|e| e.id == id)
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id)
             .ok_or(KernelError::NotFound)?;
         entry.slot_name = String::from(name);
         entry.pinned = true; // Slotted entries are auto-pinned.
@@ -226,7 +242,9 @@ pub fn remove(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.entries.len();
         state.entries.retain(|e| e.id != id);
-        if state.entries.len() == before { return Err(KernelError::NotFound); }
+        if state.entries.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -268,7 +286,11 @@ pub fn list_pinned() -> Vec<ClipEntry> {
 /// List named slots.
 pub fn list_slots() -> Vec<ClipEntry> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.entries.iter().filter(|e| !e.slot_name.is_empty()).cloned().collect()
+        s.entries
+            .iter()
+            .filter(|e| !e.slot_name.is_empty())
+            .cloned()
+            .collect()
     })
 }
 
@@ -278,7 +300,13 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
     match guard.as_ref() {
         Some(s) => {
             let pinned = s.entries.iter().filter(|e| e.pinned).count();
-            (s.entries.len(), pinned, s.total_copies, s.total_pastes, s.ops)
+            (
+                s.entries.len(),
+                pinned,
+                s.total_copies,
+                s.total_pastes,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }

@@ -44,12 +44,12 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -154,11 +154,20 @@ impl AppCategory {
     /// All categories in display order.
     pub fn all() -> &'static [AppCategory] {
         &[
-            Self::Accessories, Self::Development, Self::Education,
-            Self::FileManager, Self::Games, Self::Graphics,
-            Self::Internet, Self::Multimedia, Self::Office,
-            Self::Science, Self::Settings, Self::System,
-            Self::Terminal, Self::Other,
+            Self::Accessories,
+            Self::Development,
+            Self::Education,
+            Self::FileManager,
+            Self::Games,
+            Self::Graphics,
+            Self::Internet,
+            Self::Multimedia,
+            Self::Office,
+            Self::Science,
+            Self::Settings,
+            Self::System,
+            Self::Terminal,
+            Self::Other,
         ]
     }
 }
@@ -274,7 +283,9 @@ pub fn register(info: AppInfo) -> KernelResult<()> {
 
     // Remove old MIME index entries if updating.
     // Collect old MIME types into a local vec to avoid borrow conflict.
-    let old_mimes: Vec<String> = reg.apps.get(&info.id)
+    let old_mimes: Vec<String> = reg
+        .apps
+        .get(&info.id)
         .map(|old| old.mime_types.clone())
         .unwrap_or_default();
     for mime in &old_mimes {
@@ -285,7 +296,8 @@ pub fn register(info: AppInfo) -> KernelResult<()> {
 
     // Add MIME index entries.
     for mime in &info.mime_types {
-        reg.mime_index.entry(mime.clone())
+        reg.mime_index
+            .entry(mime.clone())
             .or_default()
             .insert(info.id.clone());
     }
@@ -328,7 +340,8 @@ pub fn list_all() -> Vec<AppInfo> {
 pub fn by_category(category: AppCategory) -> Vec<AppInfo> {
     LOOKUP_COUNT.fetch_add(1, Ordering::Relaxed);
     let reg = REGISTRY.lock();
-    reg.apps.values()
+    reg.apps
+        .values()
         .filter(|a| a.categories.contains(&category))
         .cloned()
         .collect()
@@ -418,10 +431,7 @@ pub fn search(query: &str) -> Vec<AppInfo> {
 /// Get apps that want tray icons.
 pub fn tray_apps() -> Vec<AppInfo> {
     let reg = REGISTRY.lock();
-    reg.apps.values()
-        .filter(|a| a.tray_icon)
-        .cloned()
-        .collect()
+    reg.apps.values().filter(|a| a.tray_icon).cloned().collect()
 }
 
 /// Count registered applications.
@@ -439,51 +449,102 @@ pub fn register_builtins() -> KernelResult<()> {
     let now = crate::timekeeping::clock_monotonic();
 
     let builtins = [
-        ("org.os.files", "File Manager", "Browse and manage files",
-         "/usr/bin/file-manager", "icon-files",
-         &[AppCategory::FileManager, AppCategory::System][..],
-         &["application/x-directory"][..],
-         &["explorer", "finder", "nautilus"][..]),
-        ("org.os.terminal", "Terminal", "Command-line terminal emulator",
-         "/usr/bin/terminal", "icon-terminal",
-         &[AppCategory::Terminal, AppCategory::System][..],
-         &[][..],
-         &["shell", "console", "command"][..]),
-        ("org.os.editor", "Text Editor", "Edit text files",
-         "/usr/bin/text-editor", "icon-editor",
-         &[AppCategory::Accessories][..],
-         &["text/plain", "text/html", "text/css", "application/json"][..],
-         &["notepad", "edit", "vim", "nano"][..]),
-        ("org.os.settings", "Settings", "System configuration",
-         "/usr/bin/settings", "icon-settings",
-         &[AppCategory::Settings, AppCategory::System][..],
-         &[][..],
-         &["preferences", "config", "control"][..]),
-        ("org.os.calculator", "Calculator", "Perform calculations",
-         "/usr/bin/calculator", "icon-calculator",
-         &[AppCategory::Accessories][..],
-         &[][..],
-         &["calc", "math"][..]),
-        ("org.os.sysinfo", "System Information", "View hardware and OS details",
-         "/usr/bin/system-info", "icon-sysinfo",
-         &[AppCategory::System][..],
-         &[][..],
-         &["about", "hardware", "specs"][..]),
-        ("org.os.procexp", "Process Explorer", "Monitor running processes",
-         "/usr/bin/process-explorer", "icon-procexp",
-         &[AppCategory::System][..],
-         &[][..],
-         &["task", "manager", "top", "htop"][..]),
-        ("org.os.viewer", "Image Viewer", "View images and photos",
-         "/usr/bin/image-viewer", "icon-viewer",
-         &[AppCategory::Graphics][..],
-         &["image/png", "image/jpeg", "image/gif", "image/bmp", "image/svg+xml"][..],
-         &["photo", "picture", "gallery"][..]),
-        ("org.os.player", "Media Player", "Play audio and video",
-         "/usr/bin/media-player", "icon-player",
-         &[AppCategory::Multimedia][..],
-         &["audio/mpeg", "audio/wav", "video/mp4", "audio/ogg"][..],
-         &["music", "video", "vlc", "mpv"][..]),
+        (
+            "org.os.files",
+            "File Manager",
+            "Browse and manage files",
+            "/usr/bin/file-manager",
+            "icon-files",
+            &[AppCategory::FileManager, AppCategory::System][..],
+            &["application/x-directory"][..],
+            &["explorer", "finder", "nautilus"][..],
+        ),
+        (
+            "org.os.terminal",
+            "Terminal",
+            "Command-line terminal emulator",
+            "/usr/bin/terminal",
+            "icon-terminal",
+            &[AppCategory::Terminal, AppCategory::System][..],
+            &[][..],
+            &["shell", "console", "command"][..],
+        ),
+        (
+            "org.os.editor",
+            "Text Editor",
+            "Edit text files",
+            "/usr/bin/text-editor",
+            "icon-editor",
+            &[AppCategory::Accessories][..],
+            &["text/plain", "text/html", "text/css", "application/json"][..],
+            &["notepad", "edit", "vim", "nano"][..],
+        ),
+        (
+            "org.os.settings",
+            "Settings",
+            "System configuration",
+            "/usr/bin/settings",
+            "icon-settings",
+            &[AppCategory::Settings, AppCategory::System][..],
+            &[][..],
+            &["preferences", "config", "control"][..],
+        ),
+        (
+            "org.os.calculator",
+            "Calculator",
+            "Perform calculations",
+            "/usr/bin/calculator",
+            "icon-calculator",
+            &[AppCategory::Accessories][..],
+            &[][..],
+            &["calc", "math"][..],
+        ),
+        (
+            "org.os.sysinfo",
+            "System Information",
+            "View hardware and OS details",
+            "/usr/bin/system-info",
+            "icon-sysinfo",
+            &[AppCategory::System][..],
+            &[][..],
+            &["about", "hardware", "specs"][..],
+        ),
+        (
+            "org.os.procexp",
+            "Process Explorer",
+            "Monitor running processes",
+            "/usr/bin/process-explorer",
+            "icon-procexp",
+            &[AppCategory::System][..],
+            &[][..],
+            &["task", "manager", "top", "htop"][..],
+        ),
+        (
+            "org.os.viewer",
+            "Image Viewer",
+            "View images and photos",
+            "/usr/bin/image-viewer",
+            "icon-viewer",
+            &[AppCategory::Graphics][..],
+            &[
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/bmp",
+                "image/svg+xml",
+            ][..],
+            &["photo", "picture", "gallery"][..],
+        ),
+        (
+            "org.os.player",
+            "Media Player",
+            "Play audio and video",
+            "/usr/bin/media-player",
+            "icon-player",
+            &[AppCategory::Multimedia][..],
+            &["audio/mpeg", "audio/wav", "video/mp4", "audio/ogg"][..],
+            &["music", "video", "vlc", "mpv"][..],
+        ),
     ];
 
     for (id, name, desc, path, icon, cats, mimes, kws) in &builtins {
@@ -601,7 +662,9 @@ pub fn self_test() -> KernelResult<()> {
     {
         let tree = menu_tree();
         assert!(!tree.is_empty());
-        let acc_entry = tree.iter().find(|(cat, _)| *cat == AppCategory::Accessories);
+        let acc_entry = tree
+            .iter()
+            .find(|(cat, _)| *cat == AppCategory::Accessories);
         assert!(acc_entry.is_some());
         serial_println!("[appregistry] test 5 passed: menu_tree");
     }

@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -105,12 +105,34 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
         locks: alloc::vec![
-            ActiveLock { id: 1, pid: 1, lock_type: LockType::Flock, path: String::from("/var/lock/init.lock"), start: 0, end: u64::MAX, blocking: false, contentions: 5, acquired_ns: now },
-            ActiveLock { id: 2, pid: 100, lock_type: LockType::PosixWrite, path: String::from("/tmp/data.db"), start: 0, end: 4096, blocking: true, contentions: 50, acquired_ns: now },
+            ActiveLock {
+                id: 1,
+                pid: 1,
+                lock_type: LockType::Flock,
+                path: String::from("/var/lock/init.lock"),
+                start: 0,
+                end: u64::MAX,
+                blocking: false,
+                contentions: 5,
+                acquired_ns: now
+            },
+            ActiveLock {
+                id: 2,
+                pid: 100,
+                lock_type: LockType::PosixWrite,
+                path: String::from("/tmp/data.db"),
+                start: 0,
+                end: 4096,
+                blocking: true,
+                contentions: 50,
+                acquired_ns: now
+            },
         ],
         next_id: 3,
         total_acquired: 100_000,
@@ -122,16 +144,32 @@ pub fn init_defaults() {
 }
 
 /// Acquire a lock.
-pub fn acquire(pid: u32, lock_type: LockType, path: &str, start: u64, end: u64, blocking: bool) -> KernelResult<u32> {
+pub fn acquire(
+    pid: u32,
+    lock_type: LockType,
+    path: &str,
+    start: u64,
+    end: u64,
+    blocking: bool,
+) -> KernelResult<u32> {
     with_state(|state| {
-        if state.locks.len() >= MAX_LOCKS { return Err(KernelError::ResourceExhausted); }
+        if state.locks.len() >= MAX_LOCKS {
+            return Err(KernelError::ResourceExhausted);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_id;
         state.next_id += 1;
         state.total_acquired += 1;
         state.locks.push(ActiveLock {
-            id, pid, lock_type, path: String::from(path), start, end,
-            blocking, contentions: 0, acquired_ns: now,
+            id,
+            pid,
+            lock_type,
+            path: String::from(path),
+            start,
+            end,
+            blocking,
+            contentions: 0,
+            acquired_ns: now,
         });
         Ok(id)
     })
@@ -140,7 +178,10 @@ pub fn acquire(pid: u32, lock_type: LockType, path: &str, start: u64, end: u64, 
 /// Release a lock.
 pub fn release(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.locks.iter().position(|l| l.id == id)
+        let idx = state
+            .locks
+            .iter()
+            .position(|l| l.id == id)
             .ok_or(KernelError::NotFound)?;
         state.locks.remove(idx);
         state.total_released += 1;
@@ -151,7 +192,10 @@ pub fn release(id: u32) -> KernelResult<()> {
 /// Record a contention event on a lock.
 pub fn record_contention(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let l = state.locks.iter_mut().find(|l| l.id == id)
+        let l = state
+            .locks
+            .iter_mut()
+            .find(|l| l.id == id)
             .ok_or(KernelError::NotFound)?;
         l.contentions += 1;
         state.total_contentions += 1;
@@ -169,7 +213,10 @@ pub fn record_deadlock() -> KernelResult<()> {
 
 /// List active locks.
 pub fn active_locks() -> Vec<ActiveLock> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.locks.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.locks.clone())
 }
 
 /// Locks by PID.
@@ -183,7 +230,14 @@ pub fn by_pid(pid: u32) -> Vec<ActiveLock> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.locks.len(), s.total_acquired, s.total_released, s.total_contentions, s.total_deadlocks, s.ops),
+        Some(s) => (
+            s.locks.len(),
+            s.total_acquired,
+            s.total_released,
+            s.total_contentions,
+            s.total_deadlocks,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

@@ -19,10 +19,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -34,13 +34,13 @@ use crate::error::{KernelError, KernelResult};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CvdType {
     None,
-    Protanopia,     // Red blindness.
-    Deuteranopia,   // Green blindness.
-    Tritanopia,     // Blue blindness.
-    Protanomaly,    // Red weakness.
-    Deuteranomaly,  // Green weakness.
-    Tritanomaly,    // Blue weakness.
-    Achromatopsia,  // Total color blindness.
+    Protanopia,    // Red blindness.
+    Deuteranopia,  // Green blindness.
+    Tritanopia,    // Blue blindness.
+    Protanomaly,   // Red weakness.
+    Deuteranomaly, // Green weakness.
+    Tritanomaly,   // Blue weakness.
+    Achromatopsia, // Total color blindness.
     Custom,
 }
 
@@ -80,7 +80,7 @@ pub struct FilterPreset {
     pub id: u32,
     pub name: String,
     pub cvd_type: CvdType,
-    pub intensity: u32,   // 0-100.
+    pub intensity: u32, // 0-100.
     pub description: String,
 }
 
@@ -93,10 +93,10 @@ const MAX_PRESETS: usize = 20;
 struct State {
     enabled: bool,
     active_type: CvdType,
-    intensity: u32,     // 0-100.
+    intensity: u32, // 0-100.
     presets: Vec<FilterPreset>,
     next_preset_id: u32,
-    simulate_mode: bool,    // Simulate CVD instead of correcting.
+    simulate_mode: bool, // Simulate CVD instead of correcting.
     total_activations: u64,
     total_changes: u64,
     ops: u64,
@@ -122,16 +122,42 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         enabled: false,
         active_type: CvdType::None,
         intensity: 100,
         presets: alloc::vec![
-            FilterPreset { id: 1, name: String::from("Red-Green (Full)"), cvd_type: CvdType::Deuteranopia, intensity: 100, description: String::from("Full correction for deuteranopia") },
-            FilterPreset { id: 2, name: String::from("Red-Green (Mild)"), cvd_type: CvdType::Deuteranomaly, intensity: 60, description: String::from("Mild correction for deuteranomaly") },
-            FilterPreset { id: 3, name: String::from("Blue-Yellow"), cvd_type: CvdType::Tritanopia, intensity: 100, description: String::from("Correction for tritanopia") },
-            FilterPreset { id: 4, name: String::from("Grayscale"), cvd_type: CvdType::Achromatopsia, intensity: 100, description: String::from("Full grayscale conversion") },
+            FilterPreset {
+                id: 1,
+                name: String::from("Red-Green (Full)"),
+                cvd_type: CvdType::Deuteranopia,
+                intensity: 100,
+                description: String::from("Full correction for deuteranopia")
+            },
+            FilterPreset {
+                id: 2,
+                name: String::from("Red-Green (Mild)"),
+                cvd_type: CvdType::Deuteranomaly,
+                intensity: 60,
+                description: String::from("Mild correction for deuteranomaly")
+            },
+            FilterPreset {
+                id: 3,
+                name: String::from("Blue-Yellow"),
+                cvd_type: CvdType::Tritanopia,
+                intensity: 100,
+                description: String::from("Correction for tritanopia")
+            },
+            FilterPreset {
+                id: 4,
+                name: String::from("Grayscale"),
+                cvd_type: CvdType::Achromatopsia,
+                intensity: 100,
+                description: String::from("Full grayscale conversion")
+            },
         ],
         next_preset_id: 5,
         simulate_mode: false,
@@ -145,7 +171,9 @@ pub fn init_defaults() {
 pub fn set_enabled(enabled: bool) -> KernelResult<()> {
     with_state(|state| {
         state.enabled = enabled;
-        if enabled { state.total_activations += 1; }
+        if enabled {
+            state.total_activations += 1;
+        }
         Ok(())
     })
 }
@@ -182,7 +210,10 @@ pub fn set_simulate(simulate: bool) -> KernelResult<()> {
 /// Apply a preset.
 pub fn apply_preset(preset_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let preset = state.presets.iter().find(|p| p.id == preset_id)
+        let preset = state
+            .presets
+            .iter()
+            .find(|p| p.id == preset_id)
             .ok_or(KernelError::NotFound)?;
         state.active_type = preset.cvd_type;
         state.intensity = preset.intensity;
@@ -194,7 +225,12 @@ pub fn apply_preset(preset_id: u32) -> KernelResult<()> {
 }
 
 /// Add a custom preset.
-pub fn add_preset(name: &str, cvd_type: CvdType, intensity: u32, description: &str) -> KernelResult<u32> {
+pub fn add_preset(
+    name: &str,
+    cvd_type: CvdType,
+    intensity: u32,
+    description: &str,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.presets.len() >= MAX_PRESETS {
             return Err(KernelError::ResourceExhausted);
@@ -202,7 +238,9 @@ pub fn add_preset(name: &str, cvd_type: CvdType, intensity: u32, description: &s
         let id = state.next_preset_id;
         state.next_preset_id += 1;
         state.presets.push(FilterPreset {
-            id, name: String::from(name), cvd_type,
+            id,
+            name: String::from(name),
+            cvd_type,
             intensity: intensity.min(100),
             description: String::from(description),
         });
@@ -215,7 +253,9 @@ pub fn remove_preset(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.presets.len();
         state.presets.retain(|p| p.id != id);
-        if state.presets.len() == before { return Err(KernelError::NotFound); }
+        if state.presets.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -227,14 +267,20 @@ pub fn is_enabled() -> bool {
 
 /// Get current settings: (enabled, cvd_type, intensity, simulate).
 pub fn current() -> (bool, CvdType, u32, bool) {
-    STATE.lock().as_ref().map_or((false, CvdType::None, 100, false), |s| {
-        (s.enabled, s.active_type, s.intensity, s.simulate_mode)
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .map_or((false, CvdType::None, 100, false), |s| {
+            (s.enabled, s.active_type, s.intensity, s.simulate_mode)
+        })
 }
 
 /// List presets.
 pub fn list_presets() -> Vec<FilterPreset> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.presets.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.presets.clone())
 }
 
 /// Statistics: (preset_count, total_activations, total_changes, ops).
@@ -294,7 +340,13 @@ pub fn self_test() {
     crate::serial_println!("  [6/8] apply preset: OK");
 
     // 7: Custom preset.
-    let _pid = add_preset("My Filter", CvdType::Protanomaly, 50, "Custom red-weak filter").expect("custom");
+    let _pid = add_preset(
+        "My Filter",
+        CvdType::Protanomaly,
+        50,
+        "Custom red-weak filter",
+    )
+    .expect("custom");
     assert_eq!(list_presets().len(), 5);
     crate::serial_println!("  [7/8] custom preset: OK");
 

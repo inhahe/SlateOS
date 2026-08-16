@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -170,7 +170,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         configs: Vec::new(),
         next_id: 1,
@@ -181,7 +183,11 @@ pub fn init_defaults() {
 }
 
 /// Create a time config for a user.
-pub fn create_config(username: &str, daily_limit_min: u32, weekly_limit_min: u32) -> KernelResult<u32> {
+pub fn create_config(
+    username: &str,
+    daily_limit_min: u32,
+    weekly_limit_min: u32,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.configs.len() >= MAX_CONFIGS {
             return Err(KernelError::ResourceExhausted);
@@ -192,28 +198,43 @@ pub fn create_config(username: &str, daily_limit_min: u32, weekly_limit_min: u32
         let id = state.next_id;
         state.next_id += 1;
         state.configs.push(UserTimeConfig {
-            id, username: String::from(username),
+            id,
+            username: String::from(username),
             daily_limit_minutes: daily_limit_min,
             weekly_limit_minutes: weekly_limit_min,
             schedule: [None; 7],
-            used_today_minutes: 0, used_week_minutes: 0,
-            active: true, warning_minutes: 15,
+            used_today_minutes: 0,
+            used_week_minutes: 0,
+            active: true,
+            warning_minutes: 15,
         });
         Ok(id)
     })
 }
 
 /// Set a schedule window for a day.
-pub fn set_schedule(id: u32, day: DayOfWeek, start_hour: u8, start_min: u8, end_hour: u8, end_min: u8) -> KernelResult<()> {
+pub fn set_schedule(
+    id: u32,
+    day: DayOfWeek,
+    start_hour: u8,
+    start_min: u8,
+    end_hour: u8,
+    end_min: u8,
+) -> KernelResult<()> {
     with_state(|state| {
-        let config = state.configs.iter_mut().find(|c| c.id == id)
+        let config = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == id)
             .ok_or(KernelError::NotFound)?;
         if start_hour > 23 || end_hour > 23 || start_min > 59 || end_min > 59 {
             return Err(KernelError::InvalidArgument);
         }
         config.schedule[day.index()] = Some(ScheduleWindow {
-            start_hour, start_minute: start_min,
-            end_hour, end_minute: end_min,
+            start_hour,
+            start_minute: start_min,
+            end_hour,
+            end_minute: end_min,
         });
         Ok(())
     })
@@ -222,7 +243,10 @@ pub fn set_schedule(id: u32, day: DayOfWeek, start_hour: u8, start_min: u8, end_
 /// Clear schedule for a day.
 pub fn clear_schedule(id: u32, day: DayOfWeek) -> KernelResult<()> {
     with_state(|state| {
-        let config = state.configs.iter_mut().find(|c| c.id == id)
+        let config = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == id)
             .ok_or(KernelError::NotFound)?;
         config.schedule[day.index()] = None;
         Ok(())
@@ -232,7 +256,10 @@ pub fn clear_schedule(id: u32, day: DayOfWeek) -> KernelResult<()> {
 /// Set daily limit.
 pub fn set_daily_limit(id: u32, minutes: u32) -> KernelResult<()> {
     with_state(|state| {
-        let config = state.configs.iter_mut().find(|c| c.id == id)
+        let config = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == id)
             .ok_or(KernelError::NotFound)?;
         config.daily_limit_minutes = minutes;
         Ok(())
@@ -242,7 +269,10 @@ pub fn set_daily_limit(id: u32, minutes: u32) -> KernelResult<()> {
 /// Record usage time.
 pub fn record_usage(id: u32, minutes: u32) -> KernelResult<LimitStatus> {
     with_state(|state| {
-        let config = state.configs.iter_mut().find(|c| c.id == id)
+        let config = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == id)
             .ok_or(KernelError::NotFound)?;
 
         if !config.active {
@@ -252,16 +282,21 @@ pub fn record_usage(id: u32, minutes: u32) -> KernelResult<LimitStatus> {
         config.used_today_minutes += minutes;
         config.used_week_minutes += minutes;
 
-        if config.daily_limit_minutes > 0 && config.used_today_minutes >= config.daily_limit_minutes {
+        if config.daily_limit_minutes > 0 && config.used_today_minutes >= config.daily_limit_minutes
+        {
             state.total_enforcements += 1;
             return Ok(LimitStatus::Exceeded);
         }
-        if config.weekly_limit_minutes > 0 && config.used_week_minutes >= config.weekly_limit_minutes {
+        if config.weekly_limit_minutes > 0
+            && config.used_week_minutes >= config.weekly_limit_minutes
+        {
             state.total_enforcements += 1;
             return Ok(LimitStatus::Exceeded);
         }
         if config.daily_limit_minutes > 0 {
-            let remaining = config.daily_limit_minutes.saturating_sub(config.used_today_minutes);
+            let remaining = config
+                .daily_limit_minutes
+                .saturating_sub(config.used_today_minutes);
             if remaining <= config.warning_minutes {
                 state.total_warnings += 1;
                 return Ok(LimitStatus::Warning);
@@ -274,7 +309,10 @@ pub fn record_usage(id: u32, minutes: u32) -> KernelResult<LimitStatus> {
 /// Reset daily usage.
 pub fn reset_daily(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let config = state.configs.iter_mut().find(|c| c.id == id)
+        let config = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == id)
             .ok_or(KernelError::NotFound)?;
         config.used_today_minutes = 0;
         Ok(())
@@ -284,7 +322,10 @@ pub fn reset_daily(id: u32) -> KernelResult<()> {
 /// Reset weekly usage.
 pub fn reset_weekly(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let config = state.configs.iter_mut().find(|c| c.id == id)
+        let config = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == id)
             .ok_or(KernelError::NotFound)?;
         config.used_today_minutes = 0;
         config.used_week_minutes = 0;
@@ -295,7 +336,10 @@ pub fn reset_weekly(id: u32) -> KernelResult<()> {
 /// Enable/disable enforcement.
 pub fn set_active(id: u32, active: bool) -> KernelResult<()> {
     with_state(|state| {
-        let config = state.configs.iter_mut().find(|c| c.id == id)
+        let config = state
+            .configs
+            .iter_mut()
+            .find(|c| c.id == id)
             .ok_or(KernelError::NotFound)?;
         config.active = active;
         Ok(())
@@ -305,26 +349,42 @@ pub fn set_active(id: u32, active: bool) -> KernelResult<()> {
 /// Get config by ID.
 pub fn get_config(id: u32) -> KernelResult<UserTimeConfig> {
     with_state(|state| {
-        state.configs.iter().find(|c| c.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .configs
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// Find config by username.
 pub fn find_by_user(username: &str) -> KernelResult<UserTimeConfig> {
     with_state(|state| {
-        state.configs.iter().find(|c| c.username == username).cloned().ok_or(KernelError::NotFound)
+        state
+            .configs
+            .iter()
+            .find(|c| c.username == username)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// List all configs.
 pub fn list_configs() -> Vec<UserTimeConfig> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.configs.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.configs.clone())
 }
 
 /// Remove a config.
 pub fn remove_config(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.configs.iter().position(|c| c.id == id)
+        let pos = state
+            .configs
+            .iter()
+            .position(|c| c.id == id)
             .ok_or(KernelError::NotFound)?;
         state.configs.remove(pos);
         Ok(())
@@ -335,7 +395,12 @@ pub fn remove_config(id: u32) -> KernelResult<()> {
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.configs.len(), s.total_enforcements, s.total_warnings, s.ops),
+        Some(s) => (
+            s.configs.len(),
+            s.total_enforcements,
+            s.total_warnings,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

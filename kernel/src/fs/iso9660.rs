@@ -36,8 +36,8 @@ use alloc::vec::Vec;
 
 use crate::blkdev::SECTOR_SIZE;
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 use crate::fs::path::{Path, PathBuf};
+use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -369,11 +369,7 @@ impl FileSystem for Iso9660Fs {
         let path = as_str(path)?;
         let (dir_lba, dir_size) = self.resolve_dir(path)?;
         let dir_data = self.read_extent(dir_lba, dir_size)?;
-        let records = parse_directory_records(
-            &dir_data,
-            self.has_rock_ridge,
-            self.susp_skip,
-        );
+        let records = parse_directory_records(&dir_data, self.has_rock_ridge, self.susp_skip);
 
         let joliet = self.use_joliet || self.has_joliet;
         let mut entries = Vec::new();
@@ -449,15 +445,13 @@ impl FileSystem for Iso9660Fs {
 
         // Use Rock Ridge permissions if available, otherwise default
         // read-only (r-xr-xr-x for dirs, r--r--r-- for files).
-        let permissions = resolved
-            .rr
-            .mode
-            .map(|m| (m & 0o7777) as u16)
-            .unwrap_or(if entry_type == EntryType::Directory {
+        let permissions = resolved.rr.mode.map(|m| (m & 0o7777) as u16).unwrap_or(
+            if entry_type == EntryType::Directory {
                 0o555
             } else {
                 0o444
-            });
+            },
+        );
 
         let uid = resolved.rr.uid.unwrap_or(0);
         let gid = resolved.rr.gid.unwrap_or(0);
@@ -593,11 +587,7 @@ impl Iso9660Fs {
             }
 
             let dir_data = self.read_extent(current_lba, current_size)?;
-            let records = parse_directory_records(
-                &dir_data,
-                self.has_rock_ridge,
-                self.susp_skip,
-            );
+            let records = parse_directory_records(&dir_data, self.has_rock_ridge, self.susp_skip);
 
             let found = records
                 .into_iter()
@@ -656,11 +646,7 @@ impl Iso9660Fs {
         let joliet = self.use_joliet || self.has_joliet;
         let target_name = first.display_name(joliet);
 
-        let all_records = parse_directory_records(
-            &dir_data,
-            self.has_rock_ridge,
-            self.susp_skip,
-        );
+        let all_records = parse_directory_records(&dir_data, self.has_rock_ridge, self.susp_skip);
 
         let mut extents = Vec::new();
         let mut found_start = false;
@@ -691,12 +677,7 @@ impl Iso9660Fs {
 
     /// Read an extent (contiguous block range) from the device.
     fn read_extent(&self, lba: u32, size: u32) -> KernelResult<Vec<u8>> {
-        read_extent_raw(
-            &self.device,
-            lba,
-            size,
-            self.pvd.logical_block_size,
-        )
+        read_extent_raw(&self.device, lba, size, self.pvd.logical_block_size)
     }
 }
 
@@ -731,16 +712,10 @@ fn parse_pvd(data: &[u8]) -> KernelResult<PrimaryVolumeDescriptor> {
     let root_dir_size = read_u32_le(root_rec, 10);
 
     // Volume creation date: bytes 813-829 (17-byte dec-datetime).
-    let creation_time = data
-        .get(813..830)
-        .map(parse_dec_datetime)
-        .unwrap_or(0);
+    let creation_time = data.get(813..830).map(parse_dec_datetime).unwrap_or(0);
 
     // Volume modification date: bytes 830-846.
-    let modification_time = data
-        .get(830..847)
-        .map(parse_dec_datetime)
-        .unwrap_or(0);
+    let modification_time = data.get(830..847).map(parse_dec_datetime).unwrap_or(0);
 
     Ok(PrimaryVolumeDescriptor {
         volume_id,
@@ -799,11 +774,7 @@ fn parse_directory_records(
 /// Parse a single directory record.
 ///
 /// Returns `None` for "." and ".." entries.
-fn parse_single_record(
-    rec: &[u8],
-    rock_ridge: bool,
-    susp_skip: u8,
-) -> Option<IsoDirectoryRecord> {
+fn parse_single_record(rec: &[u8], rock_ridge: bool, susp_skip: u8) -> Option<IsoDirectoryRecord> {
     if rec.len() < 33 {
         return None;
     }
@@ -815,9 +786,7 @@ fn parse_single_record(
         .unwrap_or(&[]);
 
     // Skip "." and ".." (file identifier 0x00 and 0x01).
-    if file_id_len == 1
-        && (file_id.first() == Some(&0x00) || file_id.first() == Some(&0x01))
-    {
+    if file_id_len == 1 && (file_id.first() == Some(&0x00) || file_id.first() == Some(&0x01)) {
         return None;
     }
 
@@ -1064,10 +1033,7 @@ fn parse_rock_ridge(sua: &[u8]) -> RockRidgeMeta {
 // ---------------------------------------------------------------------------
 
 /// Convert parsed records to VFS DirEntry list (used by readdir).
-fn records_to_dir_entries(
-    records: &[IsoDirectoryRecord],
-    joliet: bool,
-) -> Vec<DirEntry> {
+fn records_to_dir_entries(records: &[IsoDirectoryRecord], joliet: bool) -> Vec<DirEntry> {
     let mut entries = Vec::new();
     for rec in records {
         if rec.rr.is_relocated {
@@ -1272,10 +1238,7 @@ fn read_extent_raw(
         return Err(KernelError::IoError);
     }
 
-    let blocks_needed = (size as usize)
-        .saturating_add(block_size)
-        .saturating_sub(1)
-        / block_size;
+    let blocks_needed = (size as usize).saturating_add(block_size).saturating_sub(1) / block_size;
 
     let mut data = Vec::with_capacity(size as usize);
 
@@ -1431,7 +1394,9 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[iso9660] Integration test passed.");
         }
         None => {
-            serial_println!("[iso9660]   No ISO 9660 filesystem mounted — skipping integration test.");
+            serial_println!(
+                "[iso9660]   No ISO 9660 filesystem mounted — skipping integration test."
+            );
         }
     }
 
@@ -1454,22 +1419,17 @@ fn test_iso_filename_parsing() {
 fn test_ucs2_filename_parsing() {
     // "test.txt" in UCS-2 BE.
     let ucs2: &[u8] = &[
-        0x00, b't', 0x00, b'e', 0x00, b's', 0x00, b't',
-        0x00, b'.', 0x00, b't', 0x00, b'x', 0x00, b't',
+        0x00, b't', 0x00, b'e', 0x00, b's', 0x00, b't', 0x00, b'.', 0x00, b't', 0x00, b'x', 0x00,
+        b't',
     ];
     assert_eq!(parse_ucs2_filename(ucs2), "test.txt");
 
     // With version separator.
-    let with_ver: &[u8] = &[
-        0x00, b'A', 0x00, b'.', 0x00, b'B', 0x00, b';',
-        0x00, b'1',
-    ];
+    let with_ver: &[u8] = &[0x00, b'A', 0x00, b'.', 0x00, b'B', 0x00, b';', 0x00, b'1'];
     assert_eq!(parse_ucs2_filename(with_ver), "A.B");
 
     // Unicode character: "café" → U+0063 U+0061 U+0066 U+00E9.
-    let cafe: &[u8] = &[
-        0x00, 0x63, 0x00, 0x61, 0x00, 0x66, 0x00, 0xE9,
-    ];
+    let cafe: &[u8] = &[0x00, 0x63, 0x00, 0x61, 0x00, 0x66, 0x00, 0xE9];
     assert_eq!(parse_ucs2_filename(cafe), "caf\u{e9}");
 
     serial_println!("[iso9660]   UCS-2 filename parsing: ok");
@@ -1478,13 +1438,13 @@ fn test_ucs2_filename_parsing() {
 fn test_timestamp_parsing() {
     // 7-byte directory record datetime: 2024-03-15 10:30:45 UTC.
     let dir_dt: [u8; 7] = [
-        124,  // year-1900 = 2024-1900 = 124
-        3,    // month = March
-        15,   // day
-        10,   // hour
-        30,   // minute
-        45,   // second
-        0,    // GMT offset (UTC)
+        124, // year-1900 = 2024-1900 = 124
+        3,   // month = March
+        15,  // day
+        10,  // hour
+        30,  // minute
+        45,  // second
+        0,   // GMT offset (UTC)
     ];
     let ts = parse_dir_datetime(&dir_dt);
     // 2024-03-15 10:30:45 UTC = a specific epoch value.

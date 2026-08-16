@@ -60,10 +60,10 @@
 // that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
 #![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::error::{KernelError, KernelResult};
 use crate::limine::{MemmapEntry, memmap_type};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::{Mutex, Once};
 
 // ---------------------------------------------------------------------------
@@ -476,7 +476,11 @@ impl BuddyAllocator {
     // unused_self: kept as a method for readability at call sites
     // (allocator.frame_index(addr) reads better than frame_index(addr)).
     #[inline]
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation, clippy::unused_self)]
+    #[allow(
+        clippy::arithmetic_side_effects,
+        clippy::cast_possible_truncation,
+        clippy::unused_self
+    )]
     fn frame_index(&self, addr: u64) -> usize {
         // FRAME_SIZE is non-zero, and addr fits in u64.  On x86_64
         // (our only target), usize is 64 bits, so the cast is lossless.
@@ -498,7 +502,9 @@ impl BuddyAllocator {
     fn set_info(&mut self, idx: usize, value: u8) {
         debug_assert!(idx < self.page_info_len, "page_info index out of bounds");
         // SAFETY: same as get_info.
-        unsafe { self.page_info.add(idx).write(value); }
+        unsafe {
+            self.page_info.add(idx).write(value);
+        }
     }
 
     // -- Reference count operations -----------------------------------------
@@ -517,7 +523,9 @@ impl BuddyAllocator {
     fn set_refcount(&mut self, idx: usize, value: u16) {
         debug_assert!(idx < self.page_info_len, "refcount index out of bounds");
         // SAFETY: same as get_refcount.
-        unsafe { self.refcount.add(idx).write(value); }
+        unsafe {
+            self.refcount.add(idx).write(value);
+        }
     }
 
     // -- Free list operations ------------------------------------------------
@@ -529,7 +537,11 @@ impl BuddyAllocator {
     // cast_ptr_alignment: All frame addresses are 16 KiB aligned, which
     // exceeds FreeNode's 8-byte alignment requirement.
     // cast_possible_truncation: order is bounded by MAX_ORDER (10), fits in u8.
-    #[allow(clippy::indexing_slicing, clippy::cast_ptr_alignment, clippy::cast_possible_truncation)]
+    #[allow(
+        clippy::indexing_slicing,
+        clippy::cast_ptr_alignment,
+        clippy::cast_possible_truncation
+    )]
     fn push_free(&mut self, addr: u64, order: usize) {
         debug_assert!(order <= MAX_ORDER);
         let node_ptr = self.phys_to_virt(addr).cast::<FreeNode>();
@@ -549,7 +561,9 @@ impl BuddyAllocator {
         if old_head != 0 {
             let old_head_ptr = self.phys_to_virt(old_head).cast::<FreeNode>();
             // SAFETY: old_head is a valid free block on this order's list.
-            unsafe { (*old_head_ptr).prev = addr; }
+            unsafe {
+                (*old_head_ptr).prev = addr;
+            }
         }
 
         self.free_lists[order].head = addr;
@@ -580,7 +594,9 @@ impl BuddyAllocator {
         if prev != 0 {
             let prev_ptr = self.phys_to_virt(prev).cast::<FreeNode>();
             // SAFETY: prev is a valid free block on this list.
-            unsafe { (*prev_ptr).next = next; }
+            unsafe {
+                (*prev_ptr).next = next;
+            }
         } else {
             // This block was the list head.
             self.free_lists[order].head = next;
@@ -589,7 +605,9 @@ impl BuddyAllocator {
         if next != 0 {
             let next_ptr = self.phys_to_virt(next).cast::<FreeNode>();
             // SAFETY: next is a valid free block on this list.
-            unsafe { (*next_ptr).prev = prev; }
+            unsafe {
+                (*next_ptr).prev = prev;
+            }
         }
 
         self.free_lists[order].count = self.free_lists[order].count.saturating_sub(1);
@@ -677,7 +695,8 @@ impl BuddyAllocator {
         }
 
         // Pop from the source order's list.
-        let addr = self.pop_free(source_order)
+        let addr = self
+            .pop_free(source_order)
             .ok_or(KernelError::InternalError)?;
 
         // Split down to the requested order, putting the upper halves
@@ -740,7 +759,10 @@ impl BuddyAllocator {
             while addr != 0 {
                 // Check if the allocation (the lower portion after splitting)
                 // fits within the constraint.
-                if addr.checked_add(alloc_size).is_some_and(|end| end <= max_addr) {
+                if addr
+                    .checked_add(alloc_size)
+                    .is_some_and(|end| end <= max_addr)
+                {
                     // Found a suitable block.  Remove it from the list.
                     self.remove_free(addr, source_order);
 
@@ -1175,10 +1197,7 @@ unsafe fn zero_frame_nontemporal(ptr: *mut u8) {
     // satisfies this trivially.  We write exactly FRAME_SIZE bytes.
     unsafe {
         for i in 0..qwords {
-            core::arch::x86_64::_mm_stream_si64(
-                ptr64.add(i).cast::<i64>(),
-                0,
-            );
+            core::arch::x86_64::_mm_stream_si64(ptr64.add(i).cast::<i64>(), 0);
         }
         // sfence: ensure all non-temporal stores complete before we hand
         // this frame to another CPU.  Without this, the pool consumer
@@ -1270,7 +1289,10 @@ static ZERO_POOL_MISSES: AtomicU64 = AtomicU64::new(0);
 /// first, and `refill_zero_pool()` will populate it during idle time.
 pub fn enable_zero_pool() {
     ZERO_POOL_ENABLED.store(true, Ordering::Release);
-    serial_println!("[mm] Pre-zeroed frame pool enabled (capacity: {} frames)", ZERO_POOL_CAPACITY);
+    serial_println!(
+        "[mm] Pre-zeroed frame pool enabled (capacity: {} frames)",
+        ZERO_POOL_CAPACITY
+    );
 }
 
 /// Refill the pre-zeroed frame pool.
@@ -1501,7 +1523,9 @@ fn zero_on_free_frame(frame: PhysFrame) -> bool {
     // SAFETY: The caller has exclusive ownership (refcount confirmed ≤ 1).
     // HHDM mapping is valid for all physical memory.  `zero_frame_nontemporal`
     // writes exactly FRAME_SIZE bytes via non-temporal stores + sfence.
-    unsafe { zero_frame_nontemporal(virt); }
+    unsafe {
+        zero_frame_nontemporal(virt);
+    }
     true
 }
 
@@ -1521,7 +1545,9 @@ fn zero_on_free_block(addr: u64, order: usize) -> bool {
         let virt = (frame_addr as usize).wrapping_add(hhdm as usize) as *mut u8;
         // SAFETY: Caller has exclusive ownership of the entire block.
         // Each frame_addr is within the block.  HHDM is valid.
-        unsafe { zero_frame_nontemporal(virt); }
+        unsafe {
+            zero_frame_nontemporal(virt);
+        }
     }
     true
 }
@@ -1883,7 +1909,9 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
             // Relaxed ordering — diagnostic counter, no ordering constraint.
             PCPU_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             // SAFETY: flags from disable_interrupts() above.
-            unsafe { restore_interrupts(flags); }
+            unsafe {
+                restore_interrupts(flags);
+            }
 
             let frame = PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)?;
 
@@ -1907,7 +1935,9 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
             // SAFETY: interrupts still disabled, same cpu, exclusive access.
             let cached = unsafe { PCPU_CACHES[cpu].pop() };
             // SAFETY: flags from disable_interrupts() above.
-            unsafe { restore_interrupts(flags); }
+            unsafe {
+                restore_interrupts(flags);
+            }
             if let Some(addr) = cached {
                 let frame = PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)?;
 
@@ -1924,7 +1954,9 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
         }
 
         // SAFETY: flags from disable_interrupts() above.
-        unsafe { restore_interrupts(flags); }
+        unsafe {
+            restore_interrupts(flags);
+        }
         // Fall through to global allocator (reclamation path).
     }
 
@@ -2027,7 +2059,9 @@ pub unsafe fn zero_frame(frame: PhysFrame) -> KernelResult<()> {
     let hhdm = crate::mm::page_table::hhdm().ok_or(KernelError::NotSupported)?;
     let virt = frame.to_virt(hhdm) as *mut u8;
     // SAFETY: Caller guarantees exclusive ownership.  HHDM is valid.
-    unsafe { core::ptr::write_bytes(virt, 0, FRAME_SIZE); }
+    unsafe {
+        core::ptr::write_bytes(virt, 0, FRAME_SIZE);
+    }
     Ok(())
 }
 
@@ -2122,9 +2156,13 @@ fn alloc_order_inner(order: usize) -> KernelResult<PhysFrame> {
     let reclaimed = super::swap::try_reclaim(needed.saturating_add(2));
 
     if reclaimed > 0 {
-        crate::klog!(Info, "mm.frame",
+        crate::klog!(
+            Info,
+            "mm.frame",
             "direct reclaim: freed={} pages, needed={}, order={}",
-            reclaimed, needed, order
+            reclaimed,
+            needed,
+            order
         );
         // Retry allocation after reclamation.
         let retry: KernelResult<Option<u64>> = crate::cpu::without_interrupts(|| {
@@ -2148,9 +2186,12 @@ fn alloc_order_inner(order: usize) -> KernelResult<PhysFrame> {
     if order > 0 && super::compact::should_compact() {
         let migrated = super::compact::try_compact();
         if migrated > 0 {
-            crate::klog!(Info, "mm.frame",
+            crate::klog!(
+                Info,
+                "mm.frame",
                 "compaction: migrated={} pages, retrying order={}",
-                migrated, order
+                migrated,
+                order
             );
             let retry: KernelResult<Option<u64>> = crate::cpu::without_interrupts(|| {
                 let mut guard = allocator.lock();
@@ -2243,9 +2284,14 @@ fn alloc_order_constrained_inner(order: usize, max_addr: u64) -> KernelResult<Ph
     let reclaimed = super::swap::try_reclaim(needed.saturating_add(2));
 
     if reclaimed > 0 {
-        crate::klog!(Info, "mm.frame",
+        crate::klog!(
+            Info,
+            "mm.frame",
             "direct reclaim (constrained): freed={} pages, needed={}, order={}, max_addr={:#x}",
-            reclaimed, needed, order, max_addr
+            reclaimed,
+            needed,
+            order,
+            max_addr
         );
         let retry: KernelResult<Option<u64>> = crate::cpu::without_interrupts(|| {
             let mut guard = allocator.lock();
@@ -2316,9 +2362,7 @@ pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
                 // is bounds-checked above.  read_volatile ensures we see
                 // the latest write (ref_inc is done under the global lock
                 // which provides a memory fence on the writing side).
-                let rc = unsafe {
-                    (rc_ptr as *const u16).add(idx).read_volatile()
-                };
+                let rc = unsafe { (rc_ptr as *const u16).add(idx).read_volatile() };
                 if rc > 1 {
                     // Shared frame — go through global path for ref_dec.
                     // SAFETY: Caller guarantees frame was validly allocated.
@@ -2355,7 +2399,9 @@ pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
         // SAFETY: interrupts disabled, cpu < MAX_CPUS, exclusive access.
         let pushed = unsafe { PCPU_CACHES[cpu].push(frame.addr()) };
         // SAFETY: flags from disable_interrupts() above.
-        unsafe { restore_interrupts(flags); }
+        unsafe {
+            restore_interrupts(flags);
+        }
 
         if pushed {
             return Ok(());
@@ -2420,9 +2466,7 @@ unsafe fn free_order_inner(frame: PhysFrame, order: usize) -> KernelResult<()> {
                 let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
                 if (idx as u64) < rc_len {
                     // SAFETY: idx < rc_len; rc_ptr is a valid refcount array base.
-                    let rc = unsafe {
-                        (rc_ptr as *const u16).add(idx).read_volatile()
-                    };
+                    let rc = unsafe { (rc_ptr as *const u16).add(idx).read_volatile() };
                     rc <= 1
                 } else {
                     false // Can't verify refcount — skip zeroing.
@@ -2731,14 +2775,17 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // SAFETY: f1 was just allocated by us and is not aliased.
-    unsafe { free_frame(f1)?; }
+    unsafe {
+        free_frame(f1)?;
+    }
     serial_println!("[mm]   Free frame: OK");
 
     let after1 = stats().ok_or(KernelError::NotSupported)?;
     if after1.free_frames != initial.free_frames {
         serial_println!(
             "[mm]   FAIL: count mismatch after alloc/free: {} vs {}",
-            after1.free_frames, initial.free_frames
+            after1.free_frames,
+            initial.free_frames
         );
         return Err(KernelError::InternalError);
     }
@@ -2750,19 +2797,25 @@ pub fn self_test() -> KernelResult<()> {
     // Must be aligned to block size (64 KiB = FRAME_SIZE * 4).
     let order2_align = (FRAME_SIZE as u64) * 4;
     if !f2.addr().is_multiple_of(order2_align) {
-        serial_println!("[mm]   FAIL: order-2 block not aligned to {} KiB!", order2_align / 1024);
+        serial_println!(
+            "[mm]   FAIL: order-2 block not aligned to {} KiB!",
+            order2_align / 1024
+        );
         return Err(KernelError::BadAlignment);
     }
 
     // SAFETY: f2 was just allocated.
-    unsafe { free_order(f2, 2)?; }
+    unsafe {
+        free_order(f2, 2)?;
+    }
     serial_println!("[mm]   Free order 2: OK");
 
     let after2 = stats().ok_or(KernelError::NotSupported)?;
     if after2.free_frames != initial.free_frames {
         serial_println!(
             "[mm]   FAIL: count mismatch after order-2: {} vs {}",
-            after2.free_frames, initial.free_frames
+            after2.free_frames,
+            initial.free_frames
         );
         return Err(KernelError::InternalError);
     }
@@ -2782,7 +2835,8 @@ pub fn self_test() -> KernelResult<()> {
     if during.free_frames != expected_free {
         serial_println!(
             "[mm]   FAIL: expected {} free, got {}",
-            expected_free, during.free_frames
+            expected_free,
+            during.free_frames
         );
         return Err(KernelError::InternalError);
     }
@@ -2790,7 +2844,9 @@ pub fn self_test() -> KernelResult<()> {
     for &addr in &addrs {
         if let Some(f) = PhysFrame::from_addr(addr) {
             // SAFETY: each frame was allocated in the loop above.
-            unsafe { free_frame(f)?; }
+            unsafe {
+                free_frame(f)?;
+            }
         }
     }
     serial_println!("[mm]   Free {} frames: OK", BATCH);
@@ -2799,7 +2855,8 @@ pub fn self_test() -> KernelResult<()> {
     if after3.free_frames != initial.free_frames {
         serial_println!(
             "[mm]   FAIL: final count {} != initial {}",
-            after3.free_frames, initial.free_frames
+            after3.free_frames,
+            initial.free_frames
         );
         return Err(KernelError::InternalError);
     }
@@ -2807,7 +2864,9 @@ pub fn self_test() -> KernelResult<()> {
     // -- Test 4: Double-free detection ---------------------------------------
     let f4 = alloc_frame()?;
     // SAFETY: f4 was just allocated.
-    unsafe { free_frame(f4)?; }
+    unsafe {
+        free_frame(f4)?;
+    }
     // Second free of the same frame should be detected and return an error.
     let double_free = unsafe { free_frame(f4) };
     if double_free.is_ok() {
@@ -2856,7 +2915,9 @@ fn test_zeroed_alloc() -> KernelResult<()> {
     };
 
     // SAFETY: sole owner.
-    unsafe { free_frame(frame)?; }
+    unsafe {
+        free_frame(frame)?;
+    }
 
     if !all_zero {
         serial_println!("[mm]   FAIL: alloc_frame_zeroed returned non-zero frame!");
@@ -2875,7 +2936,9 @@ fn test_pcpu_cache() -> KernelResult<()> {
     for _ in 0..32 {
         let f = alloc_frame()?;
         // SAFETY: just allocated, sole owner.
-        unsafe { free_frame(f)?; }
+        unsafe {
+            free_frame(f)?;
+        }
     }
 
     // Free count should be unchanged (all frames returned).
@@ -2883,7 +2946,8 @@ fn test_pcpu_cache() -> KernelResult<()> {
     if after.free_frames != initial.free_frames {
         serial_println!(
             "[mm]   FAIL: pcpu cache test: free count {} != initial {}",
-            after.free_frames, initial.free_frames
+            after.free_frames,
+            initial.free_frames
         );
         return Err(KernelError::InternalError);
     }
@@ -2899,7 +2963,9 @@ fn test_pcpu_cache() -> KernelResult<()> {
     for &addr in &frames {
         if let Some(f) = PhysFrame::from_addr(addr) {
             // SAFETY: allocated in the loop above.
-            unsafe { free_frame(f)?; }
+            unsafe {
+                free_frame(f)?;
+            }
         }
     }
 
@@ -2907,7 +2973,8 @@ fn test_pcpu_cache() -> KernelResult<()> {
     if after2.free_frames != initial.free_frames {
         serial_println!(
             "[mm]   FAIL: pcpu batch test: free count {} != initial {}",
-            after2.free_frames, initial.free_frames
+            after2.free_frames,
+            initial.free_frames
         );
         return Err(KernelError::InternalError);
     }
@@ -2939,8 +3006,7 @@ pub fn test_zero_on_free() -> KernelResult<()> {
     };
 
     // Save original sysctl value and enable zero-on-free.
-    let original = crate::sysctl::get(crate::sysctl::PARAM_MM_ZERO_ON_ALLOC)
-        .unwrap_or(0);
+    let original = crate::sysctl::get(crate::sysctl::PARAM_MM_ZERO_ON_ALLOC).unwrap_or(0);
     let _ = crate::sysctl::set(crate::sysctl::PARAM_MM_ZERO_ON_ALLOC, 1);
 
     // Allocate a frame, fill with non-zero data, then free.
@@ -2951,7 +3017,9 @@ pub fn test_zero_on_free() -> KernelResult<()> {
         core::ptr::write_bytes(ptr, 0xAA, FRAME_SIZE);
     }
     // SAFETY: sole owner, just allocated.
-    unsafe { free_frame(frame)?; }
+    unsafe {
+        free_frame(frame)?;
+    }
 
     // Allocate again — high probability of getting the same frame back
     // from the per-CPU cache (LIFO).
@@ -2965,7 +3033,9 @@ pub fn test_zero_on_free() -> KernelResult<()> {
         slice.iter().all(|&b| b == 0)
     };
     // SAFETY: sole owner.
-    unsafe { free_frame(frame2)?; }
+    unsafe {
+        free_frame(frame2)?;
+    }
 
     // Restore original sysctl.
     let _ = crate::sysctl::set(crate::sysctl::PARAM_MM_ZERO_ON_ALLOC, original);
@@ -3005,9 +3075,14 @@ pub fn test_zero_on_free() -> KernelResult<()> {
     #[allow(clippy::arithmetic_side_effects)]
     let cg_idx = (cg_frame.addr() / FRAME_SIZE as u64) as usize;
     let stored_cg = get_frame_cgroup(cg_idx);
-    assert!(stored_cg == 0, "frame cgroup should be 0 when limits inactive");
+    assert!(
+        stored_cg == 0,
+        "frame cgroup should be 0 when limits inactive"
+    );
     // SAFETY: frame was just allocated.
-    unsafe { free_frame(cg_frame)?; }
+    unsafe {
+        free_frame(cg_frame)?;
+    }
     serial_println!("[mm]   Cgroup fast-exit (disabled): OK");
 
     // -----------------------------------------------------------------------
@@ -3036,10 +3111,7 @@ pub fn test_zero_on_free() -> KernelResult<()> {
     let test_cg_id = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
     if let Ok(cg_id) = test_cg_id {
         // Set a generous limit so allocations succeed.
-        let _ = crate::cgroup::set_mem_limit(
-            cg_id,
-            crate::cgroup::MemLimit { max_frames: 1000 },
-        );
+        let _ = crate::cgroup::set_mem_limit(cg_id, crate::cgroup::MemLimit { max_frames: 1000 });
 
         // Verify CGROUP_MEM_ACTIVE got set.
         assert!(
@@ -3048,18 +3120,24 @@ pub fn test_zero_on_free() -> KernelResult<()> {
         );
 
         // Check usage before charge.
-        let before = crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+        let before = crate::cgroup::stats(cg_id)
+            .map(|s| s.mem_usage)
+            .unwrap_or(0);
 
         // Manually charge and verify.
         let charge_ok = crate::cgroup::mem_charge(cg_id, 1);
         assert!(charge_ok.is_ok(), "charge should succeed within limit");
 
-        let after = crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+        let after = crate::cgroup::stats(cg_id)
+            .map(|s| s.mem_usage)
+            .unwrap_or(0);
         assert_eq!(after, before + 1, "usage should increment by 1");
 
         // Uncharge.
         crate::cgroup::mem_uncharge(cg_id, 1);
-        let final_usage = crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+        let final_usage = crate::cgroup::stats(cg_id)
+            .map(|s| s.mem_usage)
+            .unwrap_or(0);
         assert_eq!(final_usage, before, "usage should return to original");
 
         // Clean up test cgroup.
@@ -3076,10 +3154,7 @@ pub fn test_zero_on_free() -> KernelResult<()> {
     let test_cg_id2 = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
     if let Ok(cg_id) = test_cg_id2 {
         // Set a limit of 2 frames.
-        let _ = crate::cgroup::set_mem_limit(
-            cg_id,
-            crate::cgroup::MemLimit { max_frames: 2 },
-        );
+        let _ = crate::cgroup::set_mem_limit(cg_id, crate::cgroup::MemLimit { max_frames: 2 });
 
         // Charge 2 frames — should succeed.
         assert!(crate::cgroup::mem_charge(cg_id, 2).is_ok());
@@ -3118,10 +3193,7 @@ pub fn test_zero_on_free() -> KernelResult<()> {
     // uncharge+clear code the live alloc/free paths use.
     let test_cg_id3 = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
     if let Ok(cg_id) = test_cg_id3 {
-        let _ = crate::cgroup::set_mem_limit(
-            cg_id,
-            crate::cgroup::MemLimit { max_frames: 1000 },
-        );
+        let _ = crate::cgroup::set_mem_limit(cg_id, crate::cgroup::MemLimit { max_frames: 1000 });
 
         // A real, owned frame whose physical index lies within the
         // per-frame cgroup tracking array.  (alloc_frame charges the
@@ -3130,19 +3202,22 @@ pub fn test_zero_on_free() -> KernelResult<()> {
             Ok(fr) => {
                 #[allow(clippy::arithmetic_side_effects)]
                 let idx = (fr.addr() / FRAME_SIZE as u64) as usize;
-                let base =
-                    crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+                let base = crate::cgroup::stats(cg_id)
+                    .map(|s| s.mem_usage)
+                    .unwrap_or(0);
 
                 // Charge once → usage +1 and frame tagged with cg_id.
                 let charge_ok = charge_cgroup_alloc_to(fr.addr(), 1, cg_id).is_ok();
-                let u_charged =
-                    crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+                let u_charged = crate::cgroup::stats(cg_id)
+                    .map(|s| s.mem_usage)
+                    .unwrap_or(0);
                 let tag_after_charge = u32::from(get_frame_cgroup(idx));
 
                 // Uncharge once → usage back to base and tag cleared.
                 uncharge_cgroup_free(fr.addr(), 1);
-                let u_uncharged =
-                    crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+                let u_uncharged = crate::cgroup::stats(cg_id)
+                    .map(|s| s.mem_usage)
+                    .unwrap_or(0);
                 let tag_after_uncharge = u32::from(get_frame_cgroup(idx));
 
                 // SAFETY: frame was just allocated, is not mapped, and its
@@ -3150,30 +3225,31 @@ pub fn test_zero_on_free() -> KernelResult<()> {
                 // uncharge is a no-op for it).
                 let _ = unsafe { free_frame(fr) };
 
-                assert!(charge_ok, "charge_cgroup_alloc_to should succeed within limit");
-                assert_eq!(u_charged, base.saturating_add(1), "charge must add exactly +1");
+                assert!(
+                    charge_ok,
+                    "charge_cgroup_alloc_to should succeed within limit"
+                );
+                assert_eq!(
+                    u_charged,
+                    base.saturating_add(1),
+                    "charge must add exactly +1"
+                );
                 assert_eq!(tag_after_charge, cg_id, "charge must record the cgroup id");
                 assert_eq!(u_uncharged, base, "uncharge must subtract exactly -1");
                 assert_eq!(
                     tag_after_uncharge, 0,
                     "uncharge must clear the per-frame record"
                 );
-                serial_println!(
-                    "[mm]   Cgroup charge/uncharge round-trip (no double-charge): OK"
-                );
+                serial_println!("[mm]   Cgroup charge/uncharge round-trip (no double-charge): OK");
             }
             Err(_) => {
-                serial_println!(
-                    "[mm]   Cgroup charge/uncharge round-trip: SKIP (alloc failed)"
-                );
+                serial_println!("[mm]   Cgroup charge/uncharge round-trip: SKIP (alloc failed)");
             }
         }
 
         let _ = crate::cgroup::delete(cg_id);
     } else {
-        serial_println!(
-            "[mm]   Cgroup charge/uncharge round-trip: SKIP (no cgroup slots)"
-        );
+        serial_println!("[mm]   Cgroup charge/uncharge round-trip: SKIP (no cgroup slots)");
     }
 
     // -----------------------------------------------------------------------
@@ -3186,10 +3262,7 @@ pub fn test_zero_on_free() -> KernelResult<()> {
     // accounting.
     let test_cg_id4 = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
     if let Ok(cg_id) = test_cg_id4 {
-        let _ = crate::cgroup::set_mem_limit(
-            cg_id,
-            crate::cgroup::MemLimit { max_frames: 1 },
-        );
+        let _ = crate::cgroup::set_mem_limit(cg_id, crate::cgroup::MemLimit { max_frames: 1 });
         // Consume the entire limit directly (independent of any frame).
         let filled = crate::cgroup::mem_charge(cg_id, 1).is_ok();
         match alloc_frame() {
@@ -3215,24 +3288,18 @@ pub fn test_zero_on_free() -> KernelResult<()> {
             Ok(fr) => {
                 // SAFETY: frame was just allocated and is not mapped.
                 let _ = unsafe { free_frame(fr) };
-                serial_println!(
-                    "[mm]   Cgroup over-limit charge: SKIP (limit charge failed)"
-                );
+                serial_println!("[mm]   Cgroup over-limit charge: SKIP (limit charge failed)");
             }
             Err(_) => {
                 if filled {
                     crate::cgroup::mem_uncharge(cg_id, 1);
                 }
-                serial_println!(
-                    "[mm]   Cgroup over-limit charge: SKIP (alloc failed)"
-                );
+                serial_println!("[mm]   Cgroup over-limit charge: SKIP (alloc failed)");
             }
         }
         let _ = crate::cgroup::delete(cg_id);
     } else {
-        serial_println!(
-            "[mm]   Cgroup over-limit charge: SKIP (no cgroup slots)"
-        );
+        serial_println!("[mm]   Cgroup over-limit charge: SKIP (no cgroup slots)");
     }
 
     // Restore original state.

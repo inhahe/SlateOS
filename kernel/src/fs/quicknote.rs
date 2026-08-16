@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -105,7 +105,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         notes: Vec::new(),
         next_id: 1,
@@ -143,7 +145,10 @@ pub fn create(title: &str, content: &str) -> KernelResult<u32> {
 /// Edit note content.
 pub fn edit(id: u32, content: &str) -> KernelResult<()> {
     with_state(|state| {
-        let note = state.notes.iter_mut().find(|n| n.id == id)
+        let note = state
+            .notes
+            .iter_mut()
+            .find(|n| n.id == id)
             .ok_or(KernelError::NotFound)?;
         note.content = String::from(content);
         note.modified_ns = crate::hpet::elapsed_ns();
@@ -155,7 +160,10 @@ pub fn edit(id: u32, content: &str) -> KernelResult<()> {
 /// Set note title.
 pub fn set_title(id: u32, title: &str) -> KernelResult<()> {
     with_state(|state| {
-        let note = state.notes.iter_mut().find(|n| n.id == id)
+        let note = state
+            .notes
+            .iter_mut()
+            .find(|n| n.id == id)
             .ok_or(KernelError::NotFound)?;
         note.title = String::from(title);
         note.modified_ns = crate::hpet::elapsed_ns();
@@ -166,7 +174,10 @@ pub fn set_title(id: u32, title: &str) -> KernelResult<()> {
 /// Set note color.
 pub fn set_color(id: u32, color: NoteColor) -> KernelResult<()> {
     with_state(|state| {
-        let note = state.notes.iter_mut().find(|n| n.id == id)
+        let note = state
+            .notes
+            .iter_mut()
+            .find(|n| n.id == id)
             .ok_or(KernelError::NotFound)?;
         note.color = color;
         Ok(())
@@ -176,7 +187,10 @@ pub fn set_color(id: u32, color: NoteColor) -> KernelResult<()> {
 /// Pin/unpin a note.
 pub fn set_pinned(id: u32, pinned: bool) -> KernelResult<()> {
     with_state(|state| {
-        let note = state.notes.iter_mut().find(|n| n.id == id)
+        let note = state
+            .notes
+            .iter_mut()
+            .find(|n| n.id == id)
             .ok_or(KernelError::NotFound)?;
         note.pinned = pinned;
         Ok(())
@@ -186,7 +200,10 @@ pub fn set_pinned(id: u32, pinned: bool) -> KernelResult<()> {
 /// Add a tag to a note.
 pub fn add_tag(id: u32, tag: &str) -> KernelResult<()> {
     with_state(|state| {
-        let note = state.notes.iter_mut().find(|n| n.id == id)
+        let note = state
+            .notes
+            .iter_mut()
+            .find(|n| n.id == id)
             .ok_or(KernelError::NotFound)?;
         if !note.tags.iter().any(|t| t == tag) {
             note.tags.push(String::from(tag));
@@ -200,7 +217,9 @@ pub fn delete(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.notes.len();
         state.notes.retain(|n| n.id != id);
-        if state.notes.len() == before { return Err(KernelError::NotFound); }
+        if state.notes.len() == before {
+            return Err(KernelError::NotFound);
+        }
         state.total_deleted += 1;
         Ok(())
     })
@@ -208,7 +227,10 @@ pub fn delete(id: u32) -> KernelResult<()> {
 
 /// Get a note by id.
 pub fn get(id: u32) -> Option<Note> {
-    STATE.lock().as_ref().and_then(|s| s.notes.iter().find(|n| n.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.notes.iter().find(|n| n.id == id).cloned())
 }
 
 /// List notes, sorted by modified time (newest first).
@@ -225,8 +247,12 @@ pub fn list(max: usize) -> Vec<Note> {
 pub fn search(query: &str, max: usize) -> Vec<Note> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let q = query.to_lowercase();
-        let mut found: Vec<Note> = s.notes.iter()
-            .filter(|n| n.title.to_lowercase().contains(&q) || n.content.to_lowercase().contains(&q))
+        let mut found: Vec<Note> = s
+            .notes
+            .iter()
+            .filter(|n| {
+                n.title.to_lowercase().contains(&q) || n.content.to_lowercase().contains(&q)
+            })
             .cloned()
             .collect();
         found.truncate(max);

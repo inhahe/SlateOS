@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -34,10 +34,10 @@ use crate::error::{KernelError, KernelResult};
 /// Bridge operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeMode {
-    Transparent,   // Layer-2 pass-through.
-    Nat,           // Network address translation.
-    Routed,        // Layer-3 routing.
-    Isolated,      // No external connectivity.
+    Transparent, // Layer-2 pass-through.
+    Nat,         // Network address translation.
+    Routed,      // Layer-3 routing.
+    Isolated,    // No external connectivity.
 }
 
 impl BridgeMode {
@@ -153,7 +153,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         bridges: Vec::new(),
         next_id: 1,
@@ -174,9 +176,16 @@ pub fn create_bridge(name: &str, mode: BridgeMode) -> KernelResult<u32> {
         let id = state.next_id;
         state.next_id += 1;
         state.bridges.push(NetworkBridge {
-            id, name: String::from(name), mode, state: BridgeState::Down,
-            interfaces: Vec::new(), ip_address: None, subnet_mask: None,
-            mtu: 1500, stp_enabled: true, created_ns: now,
+            id,
+            name: String::from(name),
+            mode,
+            state: BridgeState::Down,
+            interfaces: Vec::new(),
+            ip_address: None,
+            subnet_mask: None,
+            mtu: 1500,
+            stp_enabled: true,
+            created_ns: now,
         });
         state.total_created += 1;
         Ok(id)
@@ -188,15 +197,25 @@ pub fn delete_bridge(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.bridges.len();
         state.bridges.retain(|b| b.id != id);
-        if state.bridges.len() == before { return Err(KernelError::NotFound); }
+        if state.bridges.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
 
 /// Add an interface to a bridge.
-pub fn add_interface(bridge_id: u32, iface_name: &str, iface_type: IfaceType, mac: &str) -> KernelResult<()> {
+pub fn add_interface(
+    bridge_id: u32,
+    iface_name: &str,
+    iface_type: IfaceType,
+    mac: &str,
+) -> KernelResult<()> {
     with_state(|state| {
-        let br = state.bridges.iter_mut().find(|b| b.id == bridge_id)
+        let br = state
+            .bridges
+            .iter_mut()
+            .find(|b| b.id == bridge_id)
             .ok_or(KernelError::NotFound)?;
         if br.interfaces.len() >= MAX_IFACES_PER_BRIDGE {
             return Err(KernelError::ResourceExhausted);
@@ -206,8 +225,10 @@ pub fn add_interface(bridge_id: u32, iface_name: &str, iface_type: IfaceType, ma
         }
         let now = crate::hpet::elapsed_ns();
         br.interfaces.push(BridgeInterface {
-            name: String::from(iface_name), iface_type,
-            mac_address: String::from(mac), added_ns: now,
+            name: String::from(iface_name),
+            iface_type,
+            mac_address: String::from(mac),
+            added_ns: now,
         });
         state.total_ifaces_added += 1;
         Ok(())
@@ -217,11 +238,16 @@ pub fn add_interface(bridge_id: u32, iface_name: &str, iface_type: IfaceType, ma
 /// Remove an interface from a bridge.
 pub fn remove_interface(bridge_id: u32, iface_name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let br = state.bridges.iter_mut().find(|b| b.id == bridge_id)
+        let br = state
+            .bridges
+            .iter_mut()
+            .find(|b| b.id == bridge_id)
             .ok_or(KernelError::NotFound)?;
         let before = br.interfaces.len();
         br.interfaces.retain(|i| i.name != iface_name);
-        if br.interfaces.len() == before { return Err(KernelError::NotFound); }
+        if br.interfaces.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -229,7 +255,10 @@ pub fn remove_interface(bridge_id: u32, iface_name: &str) -> KernelResult<()> {
 /// Set bridge state (up/down).
 pub fn set_state(bridge_id: u32, new_state: BridgeState) -> KernelResult<()> {
     with_state(|state| {
-        let br = state.bridges.iter_mut().find(|b| b.id == bridge_id)
+        let br = state
+            .bridges
+            .iter_mut()
+            .find(|b| b.id == bridge_id)
             .ok_or(KernelError::NotFound)?;
         br.state = new_state;
         Ok(())
@@ -239,7 +268,10 @@ pub fn set_state(bridge_id: u32, new_state: BridgeState) -> KernelResult<()> {
 /// Configure bridge IP.
 pub fn set_ip(bridge_id: u32, ip: &str, mask: &str) -> KernelResult<()> {
     with_state(|state| {
-        let br = state.bridges.iter_mut().find(|b| b.id == bridge_id)
+        let br = state
+            .bridges
+            .iter_mut()
+            .find(|b| b.id == bridge_id)
             .ok_or(KernelError::NotFound)?;
         br.ip_address = Some(String::from(ip));
         br.subnet_mask = Some(String::from(mask));
@@ -250,7 +282,10 @@ pub fn set_ip(bridge_id: u32, ip: &str, mask: &str) -> KernelResult<()> {
 /// Set MTU.
 pub fn set_mtu(bridge_id: u32, mtu: u32) -> KernelResult<()> {
     with_state(|state| {
-        let br = state.bridges.iter_mut().find(|b| b.id == bridge_id)
+        let br = state
+            .bridges
+            .iter_mut()
+            .find(|b| b.id == bridge_id)
             .ok_or(KernelError::NotFound)?;
         br.mtu = mtu;
         Ok(())
@@ -260,7 +295,10 @@ pub fn set_mtu(bridge_id: u32, mtu: u32) -> KernelResult<()> {
 /// Toggle STP.
 pub fn set_stp(bridge_id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let br = state.bridges.iter_mut().find(|b| b.id == bridge_id)
+        let br = state
+            .bridges
+            .iter_mut()
+            .find(|b| b.id == bridge_id)
             .ok_or(KernelError::NotFound)?;
         br.stp_enabled = enabled;
         Ok(())
@@ -269,24 +307,39 @@ pub fn set_stp(bridge_id: u32, enabled: bool) -> KernelResult<()> {
 
 /// Record forwarded packets (simulation).
 pub fn record_forwarded(count: u64) -> KernelResult<()> {
-    with_state(|state| { state.total_packets_forwarded += count; Ok(()) })
+    with_state(|state| {
+        state.total_packets_forwarded += count;
+        Ok(())
+    })
 }
 
 /// List all bridges.
 pub fn list_bridges() -> Vec<NetworkBridge> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.bridges.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.bridges.clone())
 }
 
 /// Get a specific bridge.
 pub fn get_bridge(id: u32) -> Option<NetworkBridge> {
-    STATE.lock().as_ref().and_then(|s| s.bridges.iter().find(|b| b.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.bridges.iter().find(|b| b.id == id).cloned())
 }
 
 /// Statistics: (bridge_count, total_created, total_ifaces, total_forwarded, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.bridges.len(), s.total_created, s.total_ifaces_added, s.total_packets_forwarded, s.ops),
+        Some(s) => (
+            s.bridges.len(),
+            s.total_created,
+            s.total_ifaces_added,
+            s.total_packets_forwarded,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

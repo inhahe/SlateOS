@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -116,7 +116,9 @@ where
 /// `record_*` functions as data flows.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         pipes: Vec::new(),
         next_id: 1,
@@ -129,17 +131,32 @@ pub fn init_defaults() {
 }
 
 /// Create a pipe.
-pub fn create(reader_pid: u32, writer_pid: u32, pipe_type: PipeType, buffer_size: u32) -> KernelResult<u32> {
+pub fn create(
+    reader_pid: u32,
+    writer_pid: u32,
+    pipe_type: PipeType,
+    buffer_size: u32,
+) -> KernelResult<u32> {
     with_state(|state| {
-        if state.pipes.len() >= MAX_PIPES { return Err(KernelError::ResourceExhausted); }
+        if state.pipes.len() >= MAX_PIPES {
+            return Err(KernelError::ResourceExhausted);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_id;
         state.next_id += 1;
         state.total_created += 1;
         state.pipes.push(Pipe {
-            id, pipe_type, reader_pid, writer_pid, buffer_size,
-            buffered_bytes: 0, bytes_written: 0, bytes_read: 0,
-            write_blocks: 0, read_blocks: 0, created_ns: now,
+            id,
+            pipe_type,
+            reader_pid,
+            writer_pid,
+            buffer_size,
+            buffered_bytes: 0,
+            bytes_written: 0,
+            bytes_read: 0,
+            write_blocks: 0,
+            read_blocks: 0,
+            created_ns: now,
         });
         Ok(id)
     })
@@ -148,7 +165,10 @@ pub fn create(reader_pid: u32, writer_pid: u32, pipe_type: PipeType, buffer_size
 /// Destroy a pipe.
 pub fn destroy(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.pipes.iter().position(|p| p.id == id)
+        let idx = state
+            .pipes
+            .iter()
+            .position(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         state.pipes.remove(idx);
         state.total_destroyed += 1;
@@ -159,11 +179,17 @@ pub fn destroy(id: u32) -> KernelResult<()> {
 /// Record a write to a pipe.
 pub fn record_write(id: u32, bytes: u32, blocked: bool) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.pipes.iter_mut().find(|p| p.id == id)
+        let p = state
+            .pipes
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         p.bytes_written += bytes as u64;
         p.buffered_bytes = (p.buffered_bytes + bytes).min(p.buffer_size);
-        if blocked { p.write_blocks += 1; state.total_blocks += 1; }
+        if blocked {
+            p.write_blocks += 1;
+            state.total_blocks += 1;
+        }
         state.total_bytes += bytes as u64;
         Ok(())
     })
@@ -172,11 +198,17 @@ pub fn record_write(id: u32, bytes: u32, blocked: bool) -> KernelResult<()> {
 /// Record a read from a pipe.
 pub fn record_read(id: u32, bytes: u32, blocked: bool) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.pipes.iter_mut().find(|p| p.id == id)
+        let p = state
+            .pipes
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         p.bytes_read += bytes as u64;
         p.buffered_bytes = p.buffered_bytes.saturating_sub(bytes);
-        if blocked { p.read_blocks += 1; state.total_blocks += 1; }
+        if blocked {
+            p.read_blocks += 1;
+            state.total_blocks += 1;
+        }
         state.total_bytes += bytes as u64;
         Ok(())
     })
@@ -184,13 +216,20 @@ pub fn record_read(id: u32, bytes: u32, blocked: bool) -> KernelResult<()> {
 
 /// List active pipes.
 pub fn list() -> Vec<Pipe> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.pipes.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.pipes.clone())
 }
 
 /// Pipes by PID (as reader or writer).
 pub fn by_pid(pid: u32) -> Vec<Pipe> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.pipes.iter().filter(|p| p.reader_pid == pid || p.writer_pid == pid).cloned().collect()
+        s.pipes
+            .iter()
+            .filter(|p| p.reader_pid == pid || p.writer_pid == pid)
+            .cloned()
+            .collect()
     })
 }
 
@@ -198,7 +237,14 @@ pub fn by_pid(pid: u32) -> Vec<Pipe> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.pipes.len(), s.total_created, s.total_destroyed, s.total_bytes, s.total_blocks, s.ops),
+        Some(s) => (
+            s.pipes.len(),
+            s.total_created,
+            s.total_destroyed,
+            s.total_bytes,
+            s.total_blocks,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

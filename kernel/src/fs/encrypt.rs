@@ -44,10 +44,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -104,7 +104,10 @@ fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) 
 fn chacha20_block(key: &[u8; KEY_SIZE], counter: u32, nonce: &[u8; NONCE_SIZE]) -> [u8; 64] {
     // "expand 32-byte k"
     let mut state: [u32; 16] = [
-        0x61707865, 0x3320646e, 0x79622d32, 0x6b206574,
+        0x61707865,
+        0x3320646e,
+        0x79622d32,
+        0x6b206574,
         u32::from_le_bytes([key[0], key[1], key[2], key[3]]),
         u32::from_le_bytes([key[4], key[5], key[6], key[7]]),
         u32::from_le_bytes([key[8], key[9], key[10], key[11]]),
@@ -378,20 +381,17 @@ pub fn encrypt(data: &[u8], key_name: &str) -> KernelResult<Vec<u8>> {
 
     // Build output.
     let mut output = Vec::with_capacity(HEADER_SIZE + ciphertext.len());
-    output.extend_from_slice(&MAGIC);          // 0-3: magic
-    output.push(VERSION);                       // 4: version
-    output.push(CIPHER_CHACHA20);              // 5: cipher
-    output.push(0);                             // 6-7: reserved
+    output.extend_from_slice(&MAGIC); // 0-3: magic
+    output.push(VERSION); // 4: version
+    output.push(CIPHER_CHACHA20); // 5: cipher
+    output.push(0); // 6-7: reserved
     output.push(0);
-    output.extend_from_slice(&nonce);          // 8-19: nonce
-    output.extend_from_slice(&mac);            // 20-51: HMAC
+    output.extend_from_slice(&nonce); // 8-19: nonce
+    output.extend_from_slice(&mac); // 20-51: HMAC
     output.extend_from_slice(&(data.len() as u64).to_le_bytes()); // 52-59: orig size
-    output.extend_from_slice(&ciphertext);     // 60+: ciphertext
+    output.extend_from_slice(&ciphertext); // 60+: ciphertext
 
-    STATE.lock().files_encrypted = STATE
-        .lock()
-        .files_encrypted
-        .saturating_add(1);
+    STATE.lock().files_encrypted = STATE.lock().files_encrypted.saturating_add(1);
 
     Ok(output)
 }
@@ -441,10 +441,7 @@ pub fn decrypt(data: &[u8], key_name: &str) -> KernelResult<Vec<u8>> {
     // Decrypt.
     let plaintext = chacha20_crypt(&key, &nonce, ciphertext);
 
-    STATE.lock().files_decrypted = STATE
-        .lock()
-        .files_decrypted
-        .saturating_add(1);
+    STATE.lock().files_decrypted = STATE.lock().files_decrypted.saturating_add(1);
 
     Ok(plaintext)
 }
@@ -480,7 +477,11 @@ pub fn file_info(data: &[u8]) -> EncryptInfo {
 /// Get encryption stats.
 pub fn stats() -> (u64, u64, usize) {
     let state = STATE.lock();
-    (state.files_encrypted, state.files_decrypted, state.keys.len())
+    (
+        state.files_encrypted,
+        state.files_decrypted,
+        state.keys.len(),
+    )
 }
 
 // ---------------------------------------------------------------------------

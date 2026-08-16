@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -37,7 +37,7 @@ use crate::error::{KernelError, KernelResult};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnforceMode {
     Disabled,
-    Permissive,   // Log but don't deny.
+    Permissive, // Log but don't deny.
     Enforcing,
 }
 
@@ -80,7 +80,7 @@ impl Action {
 pub enum Decision {
     Allow,
     Deny,
-    Audit,   // Allow but log.
+    Audit, // Allow but log.
 }
 
 impl Decision {
@@ -97,7 +97,7 @@ impl Decision {
 #[derive(Debug, Clone)]
 pub struct SecurityLabel {
     pub entity_id: u32,
-    pub entity_type: String,  // "process", "file", "socket"
+    pub entity_type: String, // "process", "file", "socket"
     pub label: String,
 }
 
@@ -150,16 +150,36 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         mode: EnforceMode::Permissive,
         rules: alloc::vec![
-            PolicyRule { id: 1, subject_label: String::from("system"), object_label: String::from("system"),
-                action: Action::Read, decision: Decision::Allow, priority: 100 },
-            PolicyRule { id: 2, subject_label: String::from("user"), object_label: String::from("user"),
-                action: Action::Read, decision: Decision::Allow, priority: 50 },
-            PolicyRule { id: 3, subject_label: String::from("user"), object_label: String::from("system"),
-                action: Action::Write, decision: Decision::Deny, priority: 90 },
+            PolicyRule {
+                id: 1,
+                subject_label: String::from("system"),
+                object_label: String::from("system"),
+                action: Action::Read,
+                decision: Decision::Allow,
+                priority: 100
+            },
+            PolicyRule {
+                id: 2,
+                subject_label: String::from("user"),
+                object_label: String::from("user"),
+                action: Action::Read,
+                decision: Decision::Allow,
+                priority: 50
+            },
+            PolicyRule {
+                id: 3,
+                subject_label: String::from("user"),
+                object_label: String::from("system"),
+                action: Action::Write,
+                decision: Decision::Deny,
+                priority: 90
+            },
         ],
         labels: Vec::new(),
         next_rule_id: 4,
@@ -171,7 +191,11 @@ pub fn init_defaults() {
 }
 
 /// Check access.
-pub fn check_access(subject_label: &str, object_label: &str, action: Action) -> KernelResult<Decision> {
+pub fn check_access(
+    subject_label: &str,
+    object_label: &str,
+    action: Action,
+) -> KernelResult<Decision> {
     with_state(|state| {
         state.total_checks += 1;
         if state.mode == EnforceMode::Disabled {
@@ -179,8 +203,14 @@ pub fn check_access(subject_label: &str, object_label: &str, action: Action) -> 
             return Ok(Decision::Allow);
         }
         // Find highest-priority matching rule.
-        let rule = state.rules.iter()
-            .filter(|r| r.subject_label == subject_label && r.object_label == object_label && r.action == action)
+        let rule = state
+            .rules
+            .iter()
+            .filter(|r| {
+                r.subject_label == subject_label
+                    && r.object_label == object_label
+                    && r.action == action
+            })
             .max_by_key(|r| r.priority);
         let decision = rule.map_or(Decision::Deny, |r| r.decision);
         match decision {
@@ -198,14 +228,26 @@ pub fn check_access(subject_label: &str, object_label: &str, action: Action) -> 
 }
 
 /// Add a policy rule.
-pub fn add_rule(subject: &str, object: &str, action: Action, decision: Decision, priority: u32) -> KernelResult<u32> {
+pub fn add_rule(
+    subject: &str,
+    object: &str,
+    action: Action,
+    decision: Decision,
+    priority: u32,
+) -> KernelResult<u32> {
     with_state(|state| {
-        if state.rules.len() >= MAX_RULES { return Err(KernelError::ResourceExhausted); }
+        if state.rules.len() >= MAX_RULES {
+            return Err(KernelError::ResourceExhausted);
+        }
         let id = state.next_rule_id;
         state.next_rule_id += 1;
         state.rules.push(PolicyRule {
-            id, subject_label: String::from(subject), object_label: String::from(object),
-            action, decision, priority,
+            id,
+            subject_label: String::from(subject),
+            object_label: String::from(object),
+            action,
+            decision,
+            priority,
         });
         Ok(id)
     })
@@ -216,35 +258,54 @@ pub fn remove_rule(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.rules.len();
         state.rules.retain(|r| r.id != id);
-        if state.rules.len() == before { return Err(KernelError::NotFound); }
+        if state.rules.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
 
 /// List rules.
 pub fn list_rules() -> Vec<PolicyRule> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.rules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.rules.clone())
 }
 
 /// Set enforcement mode.
 pub fn set_mode(mode: EnforceMode) -> KernelResult<()> {
-    with_state(|state| { state.mode = mode; Ok(()) })
+    with_state(|state| {
+        state.mode = mode;
+        Ok(())
+    })
 }
 
 /// Get enforcement mode.
 pub fn get_mode() -> EnforceMode {
-    STATE.lock().as_ref().map_or(EnforceMode::Disabled, |s| s.mode)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(EnforceMode::Disabled, |s| s.mode)
 }
 
 /// Assign a label.
 pub fn set_label(entity_id: u32, entity_type: &str, label: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.labels.len() >= MAX_LABELS { return Err(KernelError::ResourceExhausted); }
-        if let Some(existing) = state.labels.iter_mut().find(|l| l.entity_id == entity_id && l.entity_type == entity_type) {
+        if state.labels.len() >= MAX_LABELS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if let Some(existing) = state
+            .labels
+            .iter_mut()
+            .find(|l| l.entity_id == entity_id && l.entity_type == entity_type)
+        {
             existing.label = String::from(label);
         } else {
             state.labels.push(SecurityLabel {
-                entity_id, entity_type: String::from(entity_type), label: String::from(label),
+                entity_id,
+                entity_type: String::from(entity_type),
+                label: String::from(label),
             });
         }
         Ok(())
@@ -254,7 +315,9 @@ pub fn set_label(entity_id: u32, entity_type: &str, label: &str) -> KernelResult
 /// Get label for entity.
 pub fn get_label(entity_id: u32, entity_type: &str) -> Option<String> {
     STATE.lock().as_ref().and_then(|s| {
-        s.labels.iter().find(|l| l.entity_id == entity_id && l.entity_type == entity_type)
+        s.labels
+            .iter()
+            .find(|l| l.entity_id == entity_id && l.entity_type == entity_type)
             .map(|l| l.label.clone())
     })
 }
@@ -263,7 +326,13 @@ pub fn get_label(entity_id: u32, entity_type: &str) -> Option<String> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.rules.len(), s.total_checks, s.total_allowed, s.total_denied, s.ops),
+        Some(s) => (
+            s.rules.len(),
+            s.total_checks,
+            s.total_allowed,
+            s.total_denied,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

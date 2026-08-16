@@ -42,9 +42,9 @@
 //! - Linux `include/linux/rmap.h` — `page_vma_mapped_walk()`
 //! - Rik van Riel, "Object-based Reverse Mapping" (2004 OLS)
 
-use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex as Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -75,7 +75,10 @@ struct Mapping {
 }
 
 impl Mapping {
-    const EMPTY: Self = Self { pml4_phys: 0, virt_addr: 0 };
+    const EMPTY: Self = Self {
+        pml4_phys: 0,
+        virt_addr: 0,
+    };
 
     fn is_empty(self) -> bool {
         self.pml4_phys == 0 && self.virt_addr == 0
@@ -194,7 +197,10 @@ static TABLE_FULL_COUNT: AtomicU64 = AtomicU64::new(0);
 /// because they are never migrated or evicted.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn add(frame_phys: u64, pml4_phys: u64, virt_addr: u64) {
-    let mapping = Mapping { pml4_phys, virt_addr };
+    let mapping = Mapping {
+        pml4_phys,
+        virt_addr,
+    };
     let mut table = TABLE.lock();
 
     if let Some(idx) = table.find_or_free(frame_phys) {
@@ -240,7 +246,10 @@ pub fn add(frame_phys: u64, pml4_phys: u64, virt_addr: u64) {
 /// If the frame has no remaining mappers, the entry is freed.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn remove(frame_phys: u64, pml4_phys: u64, virt_addr: u64) {
-    let mapping = Mapping { pml4_phys, virt_addr };
+    let mapping = Mapping {
+        pml4_phys,
+        virt_addr,
+    };
     let mut table = TABLE.lock();
 
     if let Some(idx) = table.find_existing(frame_phys) {
@@ -451,7 +460,10 @@ pub fn self_test() {
     let result = lookup(frame1, &mut buf);
     assert_eq!(result.count, 2);
     assert_eq!(result.filled, 2);
-    serial_println!("[rmap]   Multiple mappers (CoW): OK (count={})", result.count);
+    serial_println!(
+        "[rmap]   Multiple mappers (CoW): OK (count={})",
+        result.count
+    );
 
     // Test 3: is_private / mapper_count.
     assert!(!is_private(frame1)); // Two mappers.
@@ -497,8 +509,12 @@ pub fn self_test() {
     assert!(st.add_count > 0);
     assert!(st.remove_count > 0);
     assert!(st.lookup_count > 0);
-    serial_println!("[rmap]   Stats: OK (adds={}, removes={}, lookups={})",
-        st.add_count, st.remove_count, st.lookup_count);
+    serial_println!(
+        "[rmap]   Stats: OK (adds={}, removes={}, lookups={})",
+        st.add_count,
+        st.remove_count,
+        st.lookup_count
+    );
 
     serial_println!("[rmap] Self-test PASSED");
 }

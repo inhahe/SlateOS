@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -69,7 +69,7 @@ pub struct ShmRegion {
     pub attached_pids: Vec<u32>,
     pub created_ns: u64,
     pub last_access_ns: u64,
-    pub persistent: bool,   // Survives owner exit.
+    pub persistent: bool, // Survives owner exit.
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +119,9 @@ pub fn init_defaults() {
     // DEFERRED PROPER FIX: wire this diagnostic view to the real kernel shared-
     // memory / IPC subsystem so /proc/shmem reflects genuinely mapped segments.
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         regions: Vec::new(),
         next_id: 1,
@@ -133,18 +135,36 @@ pub fn init_defaults() {
 }
 
 /// Create a shared memory region.
-pub fn create(name: &str, size: u64, permission: ShmPermission, owner: u32, persistent: bool) -> KernelResult<u32> {
+pub fn create(
+    name: &str,
+    size: u64,
+    permission: ShmPermission,
+    owner: u32,
+    persistent: bool,
+) -> KernelResult<u32> {
     with_state(|state| {
-        if state.regions.len() >= MAX_REGIONS { return Err(KernelError::ResourceExhausted); }
-        if state.regions.iter().any(|r| r.name == name) { return Err(KernelError::AlreadyExists); }
-        if size == 0 { return Err(KernelError::InvalidArgument); }
+        if state.regions.len() >= MAX_REGIONS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.regions.iter().any(|r| r.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if size == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_id;
         state.next_id += 1;
         state.regions.push(ShmRegion {
-            id, name: String::from(name), size, permission, owner_pid: owner,
-            attached_pids: alloc::vec![owner], created_ns: now,
-            last_access_ns: now, persistent,
+            id,
+            name: String::from(name),
+            size,
+            permission,
+            owner_pid: owner,
+            attached_pids: alloc::vec![owner],
+            created_ns: now,
+            last_access_ns: now,
+            persistent,
         });
         state.total_created += 1;
         state.total_attaches += 1;
@@ -156,7 +176,10 @@ pub fn create(name: &str, size: u64, permission: ShmPermission, owner: u32, pers
 /// Delete a shared memory region.
 pub fn delete(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.regions.iter().position(|r| r.id == id)
+        let idx = state
+            .regions
+            .iter()
+            .position(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         let region = &state.regions[idx];
         if !region.attached_pids.is_empty() && region.attached_pids.len() > 1 {
@@ -172,9 +195,14 @@ pub fn delete(id: u32) -> KernelResult<()> {
 /// Attach a process to a region.
 pub fn attach(id: u32, pid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let r = state.regions.iter_mut().find(|r| r.id == id)
+        let r = state
+            .regions
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
-        if r.attached_pids.contains(&pid) { return Err(KernelError::AlreadyExists); }
+        if r.attached_pids.contains(&pid) {
+            return Err(KernelError::AlreadyExists);
+        }
         r.attached_pids.push(pid);
         r.last_access_ns = crate::hpet::elapsed_ns();
         state.total_attaches += 1;
@@ -185,11 +213,16 @@ pub fn attach(id: u32, pid: u32) -> KernelResult<()> {
 /// Detach a process from a region.
 pub fn detach(id: u32, pid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let r = state.regions.iter_mut().find(|r| r.id == id)
+        let r = state
+            .regions
+            .iter_mut()
+            .find(|r| r.id == id)
             .ok_or(KernelError::NotFound)?;
         let before = r.attached_pids.len();
         r.attached_pids.retain(|&p| p != pid);
-        if r.attached_pids.len() == before { return Err(KernelError::NotFound); }
+        if r.attached_pids.len() == before {
+            return Err(KernelError::NotFound);
+        }
         state.total_detaches += 1;
         // Auto-delete non-persistent regions when all detached.
         if r.attached_pids.is_empty() && !r.persistent {
@@ -205,23 +238,36 @@ pub fn detach(id: u32, pid: u32) -> KernelResult<()> {
 
 /// Get region by ID.
 pub fn get_region(id: u32) -> Option<ShmRegion> {
-    STATE.lock().as_ref().and_then(|s| s.regions.iter().find(|r| r.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.regions.iter().find(|r| r.id == id).cloned())
 }
 
 /// Get region by name.
 pub fn get_by_name(name: &str) -> Option<ShmRegion> {
-    STATE.lock().as_ref().and_then(|s| s.regions.iter().find(|r| r.name == name).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.regions.iter().find(|r| r.name == name).cloned())
 }
 
 /// List all regions.
 pub fn list_regions() -> Vec<ShmRegion> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.regions.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.regions.clone())
 }
 
 /// List regions a process is attached to.
 pub fn regions_for_pid(pid: u32) -> Vec<ShmRegion> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.regions.iter().filter(|r| r.attached_pids.contains(&pid)).cloned().collect()
+        s.regions
+            .iter()
+            .filter(|r| r.attached_pids.contains(&pid))
+            .cloned()
+            .collect()
     })
 }
 
@@ -229,7 +275,15 @@ pub fn regions_for_pid(pid: u32) -> Vec<ShmRegion> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.regions.len(), s.total_created, s.total_deleted, s.total_attaches, s.total_detaches, s.total_bytes, s.ops),
+        Some(s) => (
+            s.regions.len(),
+            s.total_created,
+            s.total_deleted,
+            s.total_attaches,
+            s.total_detaches,
+            s.total_bytes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0, 0),
     }
 }
@@ -249,7 +303,14 @@ pub fn self_test() {
     // 1: Empty defaults, then build a fixture through the real create()/attach()
     //    API: a persistent region owned by pid 1, also mapped by pid 200.
     assert_eq!(list_regions().len(), 0);
-    let fb = create("/shm/compositor_fb", 8_294_400, ShmPermission::ReadWrite, 1, true).expect("fb");
+    let fb = create(
+        "/shm/compositor_fb",
+        8_294_400,
+        ShmPermission::ReadWrite,
+        1,
+        true,
+    )
+    .expect("fb");
     attach(fb, 200).expect("attach fb 200");
     assert_eq!(list_regions().len(), 1);
     crate::serial_println!("  [1/8] defaults+fixture: OK");

@@ -200,8 +200,14 @@ pub fn self_test() {
     let fp = fbuf.as_mut_ptr();
     // SAFETY: filling bytes 4..12 of a 16-byte array owned exclusively here.
     unsafe { fill_u8(fp.add(4), 0xDE, 8) };
-    assert!(fbuf[0..4] == [0; 4], "rawmem: fill_u8 wrote before the start");
-    assert!(fbuf[4..12] == [0xDE; 8], "rawmem: fill_u8 did not fill the range");
+    assert!(
+        fbuf[0..4] == [0; 4],
+        "rawmem: fill_u8 wrote before the start"
+    );
+    assert!(
+        fbuf[4..12] == [0xDE; 8],
+        "rawmem: fill_u8 did not fill the range"
+    );
     assert!(fbuf[12..16] == [0; 4], "rawmem: fill_u8 wrote past the end");
     serial_println!("[rawmem]   fill_u8 covers exactly the range: OK");
 
@@ -210,7 +216,10 @@ pub fn self_test() {
     let mut zbuf = [0x11u8; 4];
     // SAFETY: a zero-length fill dereferences nothing.
     unsafe { fill_u8(zbuf.as_mut_ptr(), 0xFF, 0) };
-    assert!(zbuf == [0x11; 4], "rawmem: zero-length fill wrote something");
+    assert!(
+        zbuf == [0x11; 4],
+        "rawmem: zero-length fill wrote something"
+    );
     serial_println!("[rawmem]   zero-length fill is a no-op: OK");
 
     serial_println!("[rawmem] Self-test PASSED");

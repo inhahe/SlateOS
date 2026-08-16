@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -155,29 +155,46 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let drivers = alloc::vec![
         InstalledDriver {
-            id: 1, name: String::from("Virtual Display Driver"),
-            category: DriverCategory::Display, version: String::from("1.2.0"),
-            available_version: String::new(), status: DriverStatus::UpToDate,
-            provider: String::from("MintOS"), install_ns: 0,
-            previous_version: String::from("1.1.0"), auto_update: true,
+            id: 1,
+            name: String::from("Virtual Display Driver"),
+            category: DriverCategory::Display,
+            version: String::from("1.2.0"),
+            available_version: String::new(),
+            status: DriverStatus::UpToDate,
+            provider: String::from("MintOS"),
+            install_ns: 0,
+            previous_version: String::from("1.1.0"),
+            auto_update: true,
         },
         InstalledDriver {
-            id: 2, name: String::from("HD Audio Driver"),
-            category: DriverCategory::Audio, version: String::from("2.0.1"),
-            available_version: String::new(), status: DriverStatus::UpToDate,
-            provider: String::from("MintOS"), install_ns: 0,
-            previous_version: String::from("2.0.0"), auto_update: true,
+            id: 2,
+            name: String::from("HD Audio Driver"),
+            category: DriverCategory::Audio,
+            version: String::from("2.0.1"),
+            available_version: String::new(),
+            status: DriverStatus::UpToDate,
+            provider: String::from("MintOS"),
+            install_ns: 0,
+            previous_version: String::from("2.0.0"),
+            auto_update: true,
         },
         InstalledDriver {
-            id: 3, name: String::from("Virtio Network Driver"),
-            category: DriverCategory::Network, version: String::from("1.0.0"),
-            available_version: String::from("1.1.0"), status: DriverStatus::UpdateAvailable,
-            provider: String::from("MintOS"), install_ns: 0,
-            previous_version: String::new(), auto_update: true,
+            id: 3,
+            name: String::from("Virtio Network Driver"),
+            category: DriverCategory::Network,
+            version: String::from("1.0.0"),
+            available_version: String::from("1.1.0"),
+            status: DriverStatus::UpdateAvailable,
+            provider: String::from("MintOS"),
+            install_ns: 0,
+            previous_version: String::new(),
+            auto_update: true,
         },
     ];
 
@@ -195,7 +212,10 @@ pub fn init_defaults() {
 
 /// Register a driver.
 pub fn register_driver(
-    name: &str, category: DriverCategory, version: &str, provider: &str,
+    name: &str,
+    category: DriverCategory,
+    version: &str,
+    provider: &str,
 ) -> KernelResult<u32> {
     with_state(|state| {
         if state.drivers.len() >= MAX_DRIVERS {
@@ -204,11 +224,16 @@ pub fn register_driver(
         let id = state.next_id;
         state.next_id += 1;
         state.drivers.push(InstalledDriver {
-            id, name: String::from(name), category,
-            version: String::from(version), available_version: String::new(),
-            status: DriverStatus::UpToDate, provider: String::from(provider),
+            id,
+            name: String::from(name),
+            category,
+            version: String::from(version),
+            available_version: String::new(),
+            status: DriverStatus::UpToDate,
+            provider: String::from(provider),
             install_ns: crate::hpet::elapsed_ns(),
-            previous_version: String::new(), auto_update: true,
+            previous_version: String::new(),
+            auto_update: true,
         });
         Ok(id)
     })
@@ -217,7 +242,10 @@ pub fn register_driver(
 /// Set an available update for a driver.
 pub fn set_available_update(id: u32, version: &str) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.drivers.iter_mut().find(|d| d.id == id)
+        let d = state
+            .drivers
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         d.available_version = String::from(version);
         d.status = DriverStatus::UpdateAvailable;
@@ -228,7 +256,10 @@ pub fn set_available_update(id: u32, version: &str) -> KernelResult<()> {
 /// Install an update for a driver.
 pub fn install_update(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.drivers.iter_mut().find(|d| d.id == id)
+        let d = state
+            .drivers
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         if d.available_version.is_empty() {
             return Err(KernelError::NotFound);
@@ -246,7 +277,10 @@ pub fn install_update(id: u32) -> KernelResult<()> {
 /// Rollback a driver to its previous version.
 pub fn rollback(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.drivers.iter_mut().find(|d| d.id == id)
+        let d = state
+            .drivers
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         if d.previous_version.is_empty() {
             return Err(KernelError::InvalidArgument);
@@ -262,20 +296,31 @@ pub fn rollback(id: u32) -> KernelResult<()> {
 
 /// List all drivers.
 pub fn list_drivers() -> Vec<InstalledDriver> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.drivers.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.drivers.clone())
 }
 
 /// Get driver by ID.
 pub fn get_driver(id: u32) -> KernelResult<InstalledDriver> {
     with_state(|state| {
-        state.drivers.iter().find(|d| d.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .drivers
+            .iter()
+            .find(|d| d.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// Count drivers with available updates.
 pub fn updates_available() -> usize {
     STATE.lock().as_ref().map_or(0, |s| {
-        s.drivers.iter().filter(|d| d.status == DriverStatus::UpdateAvailable).count()
+        s.drivers
+            .iter()
+            .filter(|d| d.status == DriverStatus::UpdateAvailable)
+            .count()
     })
 }
 
@@ -284,8 +329,18 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let updates = s.drivers.iter().filter(|d| d.status == DriverStatus::UpdateAvailable).count();
-            (s.drivers.len(), updates, s.total_updates, s.total_rollbacks, s.ops)
+            let updates = s
+                .drivers
+                .iter()
+                .filter(|d| d.status == DriverStatus::UpdateAvailable)
+                .count();
+            (
+                s.drivers.len(),
+                updates,
+                s.total_updates,
+                s.total_rollbacks,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }

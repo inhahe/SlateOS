@@ -14,9 +14,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::{FRAME_SIZE};
+use crate::mm::frame::FRAME_SIZE;
 use crate::mm::page_table;
 
+use super::DrmObjectId;
 use super::connector::{ConnectorStatus, ConnectorType, DrmConnector};
 use super::crtc::DrmCrtc;
 use super::encoder::{DrmEncoder, EncoderType};
@@ -24,11 +25,15 @@ use super::framebuffer::DrmFramebuffer;
 use super::gem::GemObject;
 use super::mode::{DrmMode, DrmModeFlags, PixelFormat};
 use super::plane::{DrmPlane, PlaneType};
-use super::DrmObjectId;
 
 /// The full set of DRM objects a driver exposes for one device: connectors,
 /// CRTCs, planes, and encoders.
-pub type DrmObjectSet = (Vec<DrmConnector>, Vec<DrmCrtc>, Vec<DrmPlane>, Vec<DrmEncoder>);
+pub type DrmObjectSet = (
+    Vec<DrmConnector>,
+    Vec<DrmCrtc>,
+    Vec<DrmPlane>,
+    Vec<DrmEncoder>,
+);
 
 // ===========================================================================
 // DrmDriver trait (documentation / testing interface)
@@ -45,10 +50,7 @@ pub trait DrmDriver: Send {
     fn name(&self) -> &'static str;
 
     /// Query hardware and return DRM objects.
-    fn enumerate(
-        &mut self,
-        alloc_id: &dyn Fn() -> DrmObjectId,
-    ) -> KernelResult<DrmObjectSet>;
+    fn enumerate(&mut self, alloc_id: &dyn Fn() -> DrmObjectId) -> KernelResult<DrmObjectSet>;
 
     /// Allocate a GPU buffer.
     fn gem_create(
@@ -132,10 +134,7 @@ impl LimineBackend {
     }
 
     /// Enumerate the single fixed display.
-    pub fn enumerate(
-        &mut self,
-        alloc_id: &dyn Fn() -> DrmObjectId,
-    ) -> KernelResult<DrmObjectSet> {
+    pub fn enumerate(&mut self, alloc_id: &dyn Fn() -> DrmObjectId) -> KernelResult<DrmObjectSet> {
         if self.fb_addr == 0 || self.width == 0 || self.height == 0 {
             return Err(KernelError::NotSupported);
         }
@@ -253,11 +252,7 @@ impl LimineBackend {
                 // src is in the HHDM range (we just allocated the frame).
                 // dst is the Limine framebuffer (mapped at init).
                 unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src_virt as *const u8,
-                        dst_row,
-                        to_copy,
-                    );
+                    core::ptr::copy_nonoverlapping(src_virt as *const u8, dst_row, to_copy);
                 }
 
                 // If the row spans a frame boundary, copy the rest from
@@ -312,20 +307,14 @@ impl LimineBackend {
             if let Some(pf) = gem.phys_frames.get(frame_idx) {
                 let src_virt = pf.addr() + hhdm + (frame_offset as u64);
                 // SAFETY: dst_base points to the framebuffer; offset is within pitch × height.
-                let dst_row = unsafe {
-                    dst_base.add(row * (self.pitch as usize) + x_start * bpp)
-                };
+                let dst_row = unsafe { dst_base.add(row * (self.pitch as usize) + x_start * bpp) };
 
                 let avail = FRAME_SIZE - frame_offset;
                 let to_copy = copy_w_bytes.min(avail);
 
                 // SAFETY: Both addresses point to valid mapped memory.
                 unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src_virt as *const u8,
-                        dst_row,
-                        to_copy,
-                    );
+                    core::ptr::copy_nonoverlapping(src_virt as *const u8, dst_row, to_copy);
                 }
             }
         }
@@ -380,10 +369,7 @@ impl VirtioGpuBackend {
     }
 
     /// Enumerate the virtio-gpu display.
-    pub fn enumerate(
-        &mut self,
-        alloc_id: &dyn Fn() -> DrmObjectId,
-    ) -> KernelResult<DrmObjectSet> {
+    pub fn enumerate(&mut self, alloc_id: &dyn Fn() -> DrmObjectId) -> KernelResult<DrmObjectSet> {
         if !self.available {
             return Err(KernelError::NotSupported);
         }
@@ -496,8 +482,7 @@ impl VirtioGpuBackend {
         }
 
         // Get the virtio-gpu framebuffer's virtual address (HHDM-mapped).
-        let dst_base = crate::virtio::gpu::framebuffer_addr()
-            .ok_or(KernelError::NotSupported)?;
+        let dst_base = crate::virtio::gpu::framebuffer_addr().ok_or(KernelError::NotSupported)?;
 
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
 
@@ -567,8 +552,7 @@ impl VirtioGpuBackend {
             return Err(KernelError::NotSupported);
         }
 
-        let dst_base = crate::virtio::gpu::framebuffer_addr()
-            .ok_or(KernelError::NotSupported)?;
+        let dst_base = crate::virtio::gpu::framebuffer_addr().ok_or(KernelError::NotSupported)?;
 
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
         let bpp = fb.format.bpp() as usize;

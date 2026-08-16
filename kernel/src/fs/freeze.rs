@@ -193,7 +193,9 @@ pub fn thaw(mountpoint: &str) -> KernelResult<ThawResult> {
     THAW_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mut table = FROZEN_TABLE.lock();
-    let idx = table.iter().position(|e| e.mountpoint == mountpoint)
+    let idx = table
+        .iter()
+        .position(|e| e.mountpoint == mountpoint)
         .ok_or(KernelError::NotFound)?;
 
     let entry = &mut table[idx];
@@ -223,7 +225,9 @@ pub fn force_thaw(mountpoint: &str) -> KernelResult<ThawResult> {
     THAW_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mut table = FROZEN_TABLE.lock();
-    let idx = table.iter().position(|e| e.mountpoint == mountpoint)
+    let idx = table
+        .iter()
+        .position(|e| e.mountpoint == mountpoint)
         .ok_or(KernelError::NotFound)?;
 
     let blocked = table[idx].blocked_writes;
@@ -277,19 +281,22 @@ pub fn list_frozen() -> Vec<FreezeStatus> {
     let now = crate::timekeeping::clock_monotonic();
     let table = FROZEN_TABLE.lock();
 
-    table.iter().map(|e| {
-        let duration = now.saturating_sub(e.frozen_at_ns);
-        let until_thaw = e.deadline_ns.saturating_sub(now);
+    table
+        .iter()
+        .map(|e| {
+            let duration = now.saturating_sub(e.frozen_at_ns);
+            let until_thaw = e.deadline_ns.saturating_sub(now);
 
-        FreezeStatus {
-            mountpoint: e.mountpoint.clone(),
-            freeze_level: e.freeze_level,
-            frozen_duration_ns: duration,
-            time_until_thaw_ns: until_thaw,
-            blocked_writes: e.blocked_writes,
-            reason: e.reason.clone(),
-        }
-    }).collect()
+            FreezeStatus {
+                mountpoint: e.mountpoint.clone(),
+                freeze_level: e.freeze_level,
+                frozen_duration_ns: duration,
+                time_until_thaw_ns: until_thaw,
+                blocked_writes: e.blocked_writes,
+                reason: e.reason.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Get the number of currently frozen filesystems.

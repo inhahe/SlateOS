@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -127,20 +127,32 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let packs = alloc::vec![
         LanguagePack {
-            code: String::from("en-US"), native_name: String::from("English (US)"),
-            english_name: String::from("English (US)"), status: PackStatus::Complete,
-            string_count: 5000, completeness_pct: 100, size_bytes: 2 * 1024 * 1024,
-            keyboard_layout: String::from("us"), rtl: false,
+            code: String::from("en-US"),
+            native_name: String::from("English (US)"),
+            english_name: String::from("English (US)"),
+            status: PackStatus::Complete,
+            string_count: 5000,
+            completeness_pct: 100,
+            size_bytes: 2 * 1024 * 1024,
+            keyboard_layout: String::from("us"),
+            rtl: false,
         },
         LanguagePack {
-            code: String::from("en-GB"), native_name: String::from("English (UK)"),
-            english_name: String::from("English (UK)"), status: PackStatus::Complete,
-            string_count: 5000, completeness_pct: 100, size_bytes: 2 * 1024 * 1024,
-            keyboard_layout: String::from("gb"), rtl: false,
+            code: String::from("en-GB"),
+            native_name: String::from("English (UK)"),
+            english_name: String::from("English (UK)"),
+            status: PackStatus::Complete,
+            string_count: 5000,
+            completeness_pct: 100,
+            size_bytes: 2 * 1024 * 1024,
+            keyboard_layout: String::from("gb"),
+            rtl: false,
         },
     ];
 
@@ -157,11 +169,18 @@ pub fn init_defaults() {
 
 /// Install a language pack.
 pub fn install(
-    code: &str, native_name: &str, english_name: &str,
-    rtl: bool, keyboard_layout: &str,
+    code: &str,
+    native_name: &str,
+    english_name: &str,
+    rtl: bool,
+    keyboard_layout: &str,
 ) -> KernelResult<()> {
     with_state(|state| {
-        if state.packs.iter().any(|p| p.code == code && p.status != PackStatus::NotInstalled) {
+        if state
+            .packs
+            .iter()
+            .any(|p| p.code == code && p.status != PackStatus::NotInstalled)
+        {
             return Err(KernelError::AlreadyExists);
         }
         if state.packs.len() >= MAX_PACKS {
@@ -195,7 +214,10 @@ pub fn uninstall(code: &str) -> KernelResult<()> {
         if code == state.system_language {
             return Err(KernelError::InvalidArgument); // Can't uninstall active language.
         }
-        let pos = state.packs.iter().position(|p| p.code == code)
+        let pos = state
+            .packs
+            .iter()
+            .position(|p| p.code == code)
             .ok_or(KernelError::NotFound)?;
         state.packs.remove(pos);
         // Remove translations for this language.
@@ -207,7 +229,11 @@ pub fn uninstall(code: &str) -> KernelResult<()> {
 /// Set the system display language.
 pub fn set_system_language(code: &str) -> KernelResult<()> {
     with_state(|state| {
-        if !state.packs.iter().any(|p| p.code == code && p.status == PackStatus::Complete) {
+        if !state
+            .packs
+            .iter()
+            .any(|p| p.code == code && p.status == PackStatus::Complete)
+        {
             return Err(KernelError::NotFound);
         }
         state.system_language = String::from(code);
@@ -217,7 +243,10 @@ pub fn set_system_language(code: &str) -> KernelResult<()> {
 
 /// Get current system language.
 pub fn system_language() -> String {
-    STATE.lock().as_ref().map_or(String::from("en-US"), |s| s.system_language.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(String::from("en-US"), |s| s.system_language.clone())
 }
 
 /// Add a translation string.
@@ -255,13 +284,21 @@ pub fn translate(key: &str) -> String {
 
 /// List installed packs.
 pub fn list_packs() -> Vec<LanguagePack> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.packs.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.packs.clone())
 }
 
 /// Get pack info.
 pub fn get_pack(code: &str) -> KernelResult<LanguagePack> {
     with_state(|state| {
-        state.packs.iter().find(|p| p.code == code).cloned().ok_or(KernelError::NotFound)
+        state
+            .packs
+            .iter()
+            .find(|p| p.code == code)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -269,7 +306,10 @@ pub fn get_pack(code: &str) -> KernelResult<LanguagePack> {
 pub fn is_rtl() -> bool {
     let guard = STATE.lock();
     guard.as_ref().is_some_and(|s| {
-        s.packs.iter().find(|p| p.code == s.system_language).is_some_and(|p| p.rtl)
+        s.packs
+            .iter()
+            .find(|p| p.code == s.system_language)
+            .is_some_and(|p| p.rtl)
     })
 }
 
@@ -278,8 +318,19 @@ pub fn stats() -> (usize, usize, String, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let installed = s.packs.iter().filter(|p| p.status == PackStatus::Complete || p.status == PackStatus::Partial).count();
-            (s.packs.len(), installed, s.system_language.clone(), s.total_lookups, s.total_misses, s.ops)
+            let installed = s
+                .packs
+                .iter()
+                .filter(|p| p.status == PackStatus::Complete || p.status == PackStatus::Partial)
+                .count();
+            (
+                s.packs.len(),
+                installed,
+                s.system_language.clone(),
+                s.total_lookups,
+                s.total_misses,
+                s.ops,
+            )
         }
         None => (0, 0, String::from("N/A"), 0, 0, 0),
     }

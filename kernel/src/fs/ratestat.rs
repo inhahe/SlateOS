@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -37,12 +37,12 @@ use crate::error::{KernelError, KernelResult};
 #[derive(Debug, Clone)]
 pub struct LimiterStats {
     pub name: String,
-    pub rate_per_sec: u32,     // Tokens per second
-    pub burst_size: u32,       // Max burst
-    pub current_tokens: u32,   // Current token count
+    pub rate_per_sec: u32,   // Tokens per second
+    pub burst_size: u32,     // Max burst
+    pub current_tokens: u32, // Current token count
     pub allows: u64,
     pub denies: u64,
-    pub burst_events: u64,     // Times burst was fully consumed
+    pub burst_events: u64, // Times burst was fully consumed
 }
 
 // ---------------------------------------------------------------------------
@@ -98,7 +98,9 @@ where
 /// limiter and the record functions on every allow/deny decision.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         limiters: Vec::new(),
         total_allows: 0,
@@ -111,11 +113,20 @@ pub fn init_defaults() {
 /// Register a rate limiter.
 pub fn register(name: &str, rate_per_sec: u32, burst_size: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.limiters.len() >= MAX_LIMITERS { return Err(KernelError::ResourceExhausted); }
-        if state.limiters.iter().any(|l| l.name == name) { return Err(KernelError::AlreadyExists); }
+        if state.limiters.len() >= MAX_LIMITERS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.limiters.iter().any(|l| l.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.limiters.push(LimiterStats {
-            name: String::from(name), rate_per_sec, burst_size,
-            current_tokens: burst_size, allows: 0, denies: 0, burst_events: 0,
+            name: String::from(name),
+            rate_per_sec,
+            burst_size,
+            current_tokens: burst_size,
+            allows: 0,
+            denies: 0,
+            burst_events: 0,
         });
         Ok(())
     })
@@ -124,7 +135,10 @@ pub fn register(name: &str, rate_per_sec: u32, burst_size: u32) -> KernelResult<
 /// Record an allow.
 pub fn record_allow(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let l = state.limiters.iter_mut().find(|l| l.name == name)
+        let l = state
+            .limiters
+            .iter_mut()
+            .find(|l| l.name == name)
             .ok_or(KernelError::NotFound)?;
         l.allows += 1;
         if l.current_tokens > 0 {
@@ -142,7 +156,10 @@ pub fn record_allow(name: &str) -> KernelResult<()> {
 /// Record a deny.
 pub fn record_deny(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let l = state.limiters.iter_mut().find(|l| l.name == name)
+        let l = state
+            .limiters
+            .iter_mut()
+            .find(|l| l.name == name)
             .ok_or(KernelError::NotFound)?;
         l.denies += 1;
         state.total_denies += 1;
@@ -153,7 +170,10 @@ pub fn record_deny(name: &str) -> KernelResult<()> {
 /// Refill tokens (simulates time passing).
 pub fn refill(name: &str, tokens: u32) -> KernelResult<()> {
     with_state(|state| {
-        let l = state.limiters.iter_mut().find(|l| l.name == name)
+        let l = state
+            .limiters
+            .iter_mut()
+            .find(|l| l.name == name)
             .ok_or(KernelError::NotFound)?;
         l.current_tokens = (l.current_tokens + tokens).min(l.burst_size);
         Ok(())
@@ -162,14 +182,23 @@ pub fn refill(name: &str, tokens: u32) -> KernelResult<()> {
 
 /// Per-limiter stats.
 pub fn per_limiter() -> Vec<LimiterStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.limiters.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.limiters.clone())
 }
 
 /// Statistics: (limiter_count, total_allows, total_denies, total_bursts, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.limiters.len(), s.total_allows, s.total_denies, s.total_bursts, s.ops),
+        Some(s) => (
+            s.limiters.len(),
+            s.total_allows,
+            s.total_denies,
+            s.total_bursts,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -197,7 +226,11 @@ pub fn self_test() {
     // 2: Register — current_tokens seeded to burst_size; dup name fails.
     register("test_rl", 10, 5).expect("register");
     assert_eq!(per_limiter().len(), 1);
-    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
+    let l = per_limiter()
+        .iter()
+        .find(|l| l.name == "test_rl")
+        .cloned()
+        .expect("find");
     assert_eq!(l.rate_per_sec, 10);
     assert_eq!(l.burst_size, 5);
     assert_eq!(l.current_tokens, 5);
@@ -207,7 +240,11 @@ pub fn self_test() {
 
     // 3: Allow — count up, one token consumed.
     record_allow("test_rl").expect("allow");
-    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
+    let l = per_limiter()
+        .iter()
+        .find(|l| l.name == "test_rl")
+        .cloned()
+        .expect("find");
     assert_eq!(l.allows, 1);
     assert_eq!(l.current_tokens, 4);
     assert_eq!(l.burst_events, 0);
@@ -215,15 +252,25 @@ pub fn self_test() {
 
     // 4: Deny — count up, tokens unchanged.
     record_deny("test_rl").expect("deny");
-    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
+    let l = per_limiter()
+        .iter()
+        .find(|l| l.name == "test_rl")
+        .cloned()
+        .expect("find");
     assert_eq!(l.denies, 1);
     assert_eq!(l.current_tokens, 4);
     crate::serial_println!("  [4/8] deny: OK");
 
     // 5: Burst detection — draining the last 4 tokens reaches 0 exactly once,
     // bumping burst_events once (only the allow that lands on 0 counts).
-    for _ in 0..4 { record_allow("test_rl").expect("allow_drain"); }
-    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
+    for _ in 0..4 {
+        record_allow("test_rl").expect("allow_drain");
+    }
+    let l = per_limiter()
+        .iter()
+        .find(|l| l.name == "test_rl")
+        .cloned()
+        .expect("find");
     assert_eq!(l.current_tokens, 0);
     assert_eq!(l.allows, 5);
     assert_eq!(l.burst_events, 1);
@@ -231,13 +278,21 @@ pub fn self_test() {
 
     // 6: Refill adds tokens without exceeding burst_size.
     refill("test_rl", 3).expect("refill");
-    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
+    let l = per_limiter()
+        .iter()
+        .find(|l| l.name == "test_rl")
+        .cloned()
+        .expect("find");
     assert_eq!(l.current_tokens, 3);
     crate::serial_println!("  [6/8] refill: OK");
 
     // 7: Refill caps at burst_size; unknown limiter → NotFound.
     refill("test_rl", 100).expect("refill_cap");
-    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
+    let l = per_limiter()
+        .iter()
+        .find(|l| l.name == "test_rl")
+        .cloned()
+        .expect("find");
     assert_eq!(l.current_tokens, 5); // capped at burst_size
     assert!(record_allow("missing").is_err());
     assert!(record_deny("missing").is_err());

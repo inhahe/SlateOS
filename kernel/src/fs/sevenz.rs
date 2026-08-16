@@ -37,10 +37,10 @@
 
 #![allow(dead_code)]
 
-use alloc::vec;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::PathBuf;
+use alloc::vec;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // 7z constants
@@ -195,7 +195,9 @@ impl<'a> SevenZReader<'a> {
 
     fn read_bytes(&mut self, n: usize) -> KernelResult<&'a [u8]> {
         let end = self.pos.checked_add(n).ok_or(KernelError::CorruptedData)?;
-        let slice = self.data.get(self.pos..end)
+        let slice = self
+            .data
+            .get(self.pos..end)
             .ok_or(KernelError::CorruptedData)?;
         self.pos = end;
         Ok(slice)
@@ -349,10 +351,7 @@ fn parse_streams_info(
     Ok(())
 }
 
-fn parse_pack_info(
-    reader: &mut SevenZReader<'_>,
-    header: &mut ArchiveHeader,
-) -> KernelResult<()> {
+fn parse_pack_info(reader: &mut SevenZReader<'_>, header: &mut ArchiveHeader) -> KernelResult<()> {
     let _pack_pos = reader.read_vli()?; // Offset of pack streams from signature end.
     let num_pack_streams = reader.read_vli()? as usize;
 
@@ -523,7 +522,9 @@ fn parse_substreams_info(
                         sizes.push(s);
                         total = total.wrapping_add(s);
                     }
-                    let folder_total = header.folders.get(fi)
+                    let folder_total = header
+                        .folders
+                        .get(fi)
                         .map(|f| f.total_unpack_size())
                         .unwrap_or(0);
                     sizes.push(folder_total.saturating_sub(total));
@@ -532,7 +533,8 @@ fn parse_substreams_info(
             }
             K_CRC => {
                 // Sub-stream CRCs.
-                let total_ss: usize = num_unpack_streams_in_folder.iter()
+                let total_ss: usize = num_unpack_streams_in_folder
+                    .iter()
                     .map(|&n| n as usize)
                     .sum();
                 let defined = reader.read_bool_vector(total_ss)?;
@@ -553,7 +555,9 @@ fn parse_substreams_info(
     if header.substream_sizes.is_empty() {
         for (fi, &n) in num_unpack_streams_in_folder.iter().enumerate() {
             if n == 1 {
-                let total = header.folders.get(fi)
+                let total = header
+                    .folders
+                    .get(fi)
                     .map(|f| f.total_unpack_size())
                     .unwrap_or(0);
                 header.substream_sizes.push(vec![total]);
@@ -564,10 +568,7 @@ fn parse_substreams_info(
     Ok(())
 }
 
-fn parse_files_info(
-    reader: &mut SevenZReader<'_>,
-    header: &mut ArchiveHeader,
-) -> KernelResult<()> {
+fn parse_files_info(reader: &mut SevenZReader<'_>, header: &mut ArchiveHeader) -> KernelResult<()> {
     let num_files = reader.read_vli()? as usize;
     header.files.clear();
     header.files.resize_with(num_files, || FileInfo {
@@ -741,15 +742,16 @@ fn decompress_folder(
             let lp = remainder % 5;
             let pb = remainder / 5;
             let dict_size = u32::from_le_bytes([
-                coder.props[1], coder.props[2],
-                coder.props[3], coder.props[4],
-            ]).max(4096);
+                coder.props[1],
+                coder.props[2],
+                coder.props[3],
+                coder.props[4],
+            ])
+            .max(4096);
 
             let mut lzma = super::xz::LzmaState::new(lc, lp, pb);
             let mut output = Vec::new();
-            super::xz::lzma_decode(
-                &mut lzma, packed_data, out_size, &mut output, dict_size,
-            )?;
+            super::xz::lzma_decode(&mut lzma, packed_data, out_size, &mut output, dict_size)?;
             Ok(output)
         }
         CODEC_LZMA2 => {
@@ -771,9 +773,7 @@ fn decompress_folder(
             let output = super::bzip2::bunzip2(packed_data)?;
             Ok(output)
         }
-        _ => {
-            Err(KernelError::NotSupported)
-        }
+        _ => Err(KernelError::NotSupported),
     }
 }
 
@@ -798,9 +798,7 @@ pub fn un7z(data: &[u8]) -> KernelResult<Vec<SevenZEntry>> {
 
     // Version (bytes 6-7): we accept any version.
     // Start header CRC (bytes 8-11): CRC of bytes 12-31.
-    let start_header_crc_stored = u32::from_le_bytes([
-        data[8], data[9], data[10], data[11],
-    ]);
+    let start_header_crc_stored = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
     let start_header_crc_computed = crc32_7z(&data[12..32]);
     if start_header_crc_stored != start_header_crc_computed {
         return Err(KernelError::CorruptedData);
@@ -811,21 +809,18 @@ pub fn un7z(data: &[u8]) -> KernelResult<Vec<SevenZEntry>> {
     // - next_header_size (u64 LE)
     // - next_header_crc (u32 LE)
     let next_header_offset = u64::from_le_bytes([
-        data[12], data[13], data[14], data[15],
-        data[16], data[17], data[18], data[19],
+        data[12], data[13], data[14], data[15], data[16], data[17], data[18], data[19],
     ]);
     let next_header_size = u64::from_le_bytes([
-        data[20], data[21], data[22], data[23],
-        data[24], data[25], data[26], data[27],
+        data[20], data[21], data[22], data[23], data[24], data[25], data[26], data[27],
     ]);
-    let _next_header_crc = u32::from_le_bytes([
-        data[28], data[29], data[30], data[31],
-    ]);
+    let _next_header_crc = u32::from_le_bytes([data[28], data[29], data[30], data[31]]);
 
     // The main header starts at (32 + next_header_offset).
     let header_start = 32u64.wrapping_add(next_header_offset) as usize;
     let header_end = header_start.wrapping_add(next_header_size as usize);
-    let header_data = data.get(header_start..header_end)
+    let header_data = data
+        .get(header_start..header_end)
         .ok_or(KernelError::CorruptedData)?;
 
     // The pack data starts right after the signature header (byte 32).
@@ -856,7 +851,8 @@ pub fn un7z(data: &[u8]) -> KernelResult<Vec<SevenZEntry>> {
 
         // The encoded header's pack data starts at pack_start (byte 32).
         let pack_size = enc_header.pack_sizes.first().copied().unwrap_or(0) as usize;
-        let pack_data = data.get(pack_start..pack_start + pack_size)
+        let pack_data = data
+            .get(pack_start..pack_start + pack_size)
             .ok_or(KernelError::CorruptedData)?;
         let unpack_size = enc_header.folders[0].total_unpack_size();
         let decompressed = decompress_folder(&enc_header.folders[0], pack_data, unpack_size)?;
@@ -888,7 +884,9 @@ pub fn un7z(data: &[u8]) -> KernelResult<Vec<SevenZEntry>> {
         if folder_idx >= header.folders.len() {
             break; // More files than folders can serve
         }
-        let folder_ss = header.substream_sizes.get(folder_idx)
+        let folder_ss = header
+            .substream_sizes
+            .get(folder_idx)
             .map(|v| v.len())
             .unwrap_or(1);
         file_to_stream[fi] = Some((folder_idx, substream_idx));
@@ -926,20 +924,30 @@ pub fn un7z(data: &[u8]) -> KernelResult<Vec<SevenZEntry>> {
         };
 
         // Ensure this folder is decompressed.
-        if folder_outputs.get(fold_idx).and_then(|o| o.as_ref()).is_none() {
+        if folder_outputs
+            .get(fold_idx)
+            .and_then(|o| o.as_ref())
+            .is_none()
+        {
             // Calculate pack data offset for this folder.
             let mut pack_offset = pack_start;
             for i in 0..fold_idx {
                 pack_offset += header.pack_sizes.get(i).copied().unwrap_or(0) as usize;
             }
             let pack_size = header.pack_sizes.get(fold_idx).copied().unwrap_or(0) as usize;
-            let pack_data = data.get(pack_offset..pack_offset + pack_size)
+            let pack_data = data
+                .get(pack_offset..pack_offset + pack_size)
                 .ok_or(KernelError::CorruptedData)?;
-            let unpack_size = header.folders.get(fold_idx)
+            let unpack_size = header
+                .folders
+                .get(fold_idx)
                 .map(|f| f.total_unpack_size())
                 .unwrap_or(0);
             let decompressed = decompress_folder(
-                header.folders.get(fold_idx).ok_or(KernelError::CorruptedData)?,
+                header
+                    .folders
+                    .get(fold_idx)
+                    .ok_or(KernelError::CorruptedData)?,
                 pack_data,
                 unpack_size,
             )?;
@@ -949,7 +957,8 @@ pub fn un7z(data: &[u8]) -> KernelResult<Vec<SevenZEntry>> {
         }
 
         // Extract this sub-stream from the folder output.
-        let folder_data = folder_outputs.get(fold_idx)
+        let folder_data = folder_outputs
+            .get(fold_idx)
             .and_then(|o| o.as_ref())
             .ok_or(KernelError::CorruptedData)?;
 
@@ -963,9 +972,11 @@ pub fn un7z(data: &[u8]) -> KernelResult<Vec<SevenZEntry>> {
         let ss_size = ss_sizes
             .and_then(|s| s.get(ss_idx))
             .copied()
-            .unwrap_or(folder_data.len().saturating_sub(offset) as u64) as usize;
+            .unwrap_or(folder_data.len().saturating_sub(offset) as u64)
+            as usize;
 
-        let file_data = folder_data.get(offset..offset + ss_size)
+        let file_data = folder_data
+            .get(offset..offset + ss_size)
             .unwrap_or(&[])
             .to_vec();
 

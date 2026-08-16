@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -143,7 +143,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         shares: Vec::new(),
         next_id: 1,
@@ -156,8 +158,13 @@ pub fn init_defaults() {
 
 /// Mount a network share.
 pub fn mount(
-    protocol: ShareProtocol, host: &str, remote_path: &str,
-    mount_point: &str, username: &str, auto_mount: bool, read_only: bool,
+    protocol: ShareProtocol,
+    host: &str,
+    remote_path: &str,
+    mount_point: &str,
+    username: &str,
+    auto_mount: bool,
+    read_only: bool,
 ) -> KernelResult<u32> {
     with_state(|state| {
         if state.shares.len() >= MAX_SHARES {
@@ -170,14 +177,17 @@ pub fn mount(
         let id = state.next_id;
         state.next_id += 1;
         state.shares.push(NetShare {
-            id, protocol,
+            id,
+            protocol,
             host: String::from(host),
             remote_path: String::from(remote_path),
             mount_point: String::from(mount_point),
             username: String::from(username),
             state: MountState::Connected,
-            auto_mount, read_only,
-            bytes_read: 0, bytes_written: 0,
+            auto_mount,
+            read_only,
+            bytes_read: 0,
+            bytes_written: 0,
             mounted_ns: crate::hpet::elapsed_ns(),
         });
         state.total_mounts += 1;
@@ -188,7 +198,10 @@ pub fn mount(
 /// Unmount a network share.
 pub fn unmount(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.shares.iter().position(|s| s.id == id)
+        let pos = state
+            .shares
+            .iter()
+            .position(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         state.shares.remove(pos);
         state.total_unmounts += 1;
@@ -199,7 +212,10 @@ pub fn unmount(id: u32) -> KernelResult<()> {
 /// Set share connection state.
 pub fn set_state(id: u32, new_state: MountState) -> KernelResult<()> {
     with_state(|state| {
-        let share = state.shares.iter_mut().find(|s| s.id == id)
+        let share = state
+            .shares
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         share.state = new_state;
         if new_state == MountState::Error {
@@ -212,7 +228,10 @@ pub fn set_state(id: u32, new_state: MountState) -> KernelResult<()> {
 /// Record I/O on a share.
 pub fn record_io(id: u32, bytes_read: u64, bytes_written: u64) -> KernelResult<()> {
     with_state(|state| {
-        let share = state.shares.iter_mut().find(|s| s.id == id)
+        let share = state
+            .shares
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         share.bytes_read += bytes_read;
         share.bytes_written += bytes_written;
@@ -223,7 +242,10 @@ pub fn record_io(id: u32, bytes_read: u64, bytes_written: u64) -> KernelResult<(
 /// Set auto-mount.
 pub fn set_auto_mount(id: u32, auto_mount: bool) -> KernelResult<()> {
     with_state(|state| {
-        let share = state.shares.iter_mut().find(|s| s.id == id)
+        let share = state
+            .shares
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         share.auto_mount = auto_mount;
         Ok(())
@@ -232,20 +254,32 @@ pub fn set_auto_mount(id: u32, auto_mount: bool) -> KernelResult<()> {
 
 /// List all shares.
 pub fn list_shares() -> Vec<NetShare> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.shares.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.shares.clone())
 }
 
 /// Get share by ID.
 pub fn get_share(id: u32) -> KernelResult<NetShare> {
     with_state(|state| {
-        state.shares.iter().find(|s| s.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .shares
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// List auto-mount shares.
 pub fn auto_mount_shares() -> Vec<NetShare> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.shares.iter().filter(|sh| sh.auto_mount).cloned().collect()
+        s.shares
+            .iter()
+            .filter(|sh| sh.auto_mount)
+            .cloned()
+            .collect()
     })
 }
 
@@ -254,8 +288,18 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let connected = s.shares.iter().filter(|sh| sh.state == MountState::Connected).count();
-            (s.shares.len(), connected, s.total_mounts, s.total_errors, s.ops)
+            let connected = s
+                .shares
+                .iter()
+                .filter(|sh| sh.state == MountState::Connected)
+                .count();
+            (
+                s.shares.len(),
+                connected,
+                s.total_mounts,
+                s.total_errors,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -274,19 +318,43 @@ pub fn self_test() {
     crate::serial_println!("  [1/11] empty initial: OK");
 
     // 2: Mount SMB share.
-    let id1 = mount(ShareProtocol::Smb3, "fileserver.local", "/share/docs",
-        "/mnt/docs", "user", true, false).expect("mount smb");
+    let id1 = mount(
+        ShareProtocol::Smb3,
+        "fileserver.local",
+        "/share/docs",
+        "/mnt/docs",
+        "user",
+        true,
+        false,
+    )
+    .expect("mount smb");
     assert!(id1 > 0);
     crate::serial_println!("  [2/11] mount SMB: OK");
 
     // 3: Mount NFS share.
-    let id2 = mount(ShareProtocol::Nfs4, "nfs.local", "/export/data",
-        "/mnt/data", "root", false, true).expect("mount nfs");
+    let id2 = mount(
+        ShareProtocol::Nfs4,
+        "nfs.local",
+        "/export/data",
+        "/mnt/data",
+        "root",
+        false,
+        true,
+    )
+    .expect("mount nfs");
     assert_eq!(list_shares().len(), 2);
     crate::serial_println!("  [3/11] mount NFS: OK");
 
     // 4: Duplicate mount point rejected.
-    let r = mount(ShareProtocol::Smb2, "other", "/other", "/mnt/docs", "user", false, false);
+    let r = mount(
+        ShareProtocol::Smb2,
+        "other",
+        "/other",
+        "/mnt/docs",
+        "user",
+        false,
+        false,
+    );
     assert!(r.is_err());
     crate::serial_println!("  [4/11] duplicate rejected: OK");
 

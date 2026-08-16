@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -101,7 +101,9 @@ where
 fn bucket_index(ns: u64) -> usize {
     let us = ns / 1000;
     for (i, &bound) in BUCKET_BOUNDS_US.iter().enumerate() {
-        if us < bound { return i; }
+        if us < bound {
+            return i;
+        }
     }
     BUCKET_COUNT - 1
 }
@@ -129,7 +131,9 @@ fn bucket_index(ns: u64) -> usize {
 /// [`record_rtt`]/[`record_processing`] as packets flow.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         ifaces: Vec::new(),
         total_rtt_samples: 0,
@@ -141,12 +145,21 @@ pub fn init_defaults() {
 /// Register an interface.
 pub fn register_iface(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.ifaces.len() >= MAX_IFACES { return Err(KernelError::ResourceExhausted); }
-        if state.ifaces.iter().any(|i| i.name == name) { return Err(KernelError::AlreadyExists); }
+        if state.ifaces.len() >= MAX_IFACES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.ifaces.iter().any(|i| i.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.ifaces.push(IfaceLatency {
             name: String::from(name),
-            rtt_samples: 0, rtt_total_ns: 0, rtt_min_ns: u64::MAX, rtt_max_ns: 0,
-            proc_samples: 0, proc_total_ns: 0, proc_max_ns: 0,
+            rtt_samples: 0,
+            rtt_total_ns: 0,
+            rtt_min_ns: u64::MAX,
+            rtt_max_ns: 0,
+            proc_samples: 0,
+            proc_total_ns: 0,
+            proc_max_ns: 0,
             rtt_histogram: [0; BUCKET_COUNT],
         });
         Ok(())
@@ -156,12 +169,19 @@ pub fn register_iface(name: &str) -> KernelResult<()> {
 /// Record an RTT sample.
 pub fn record_rtt(name: &str, _proto: Protocol, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let iface = state.ifaces.iter_mut().find(|i| i.name == name)
+        let iface = state
+            .ifaces
+            .iter_mut()
+            .find(|i| i.name == name)
             .ok_or(KernelError::NotFound)?;
         iface.rtt_samples += 1;
         iface.rtt_total_ns += ns;
-        if ns < iface.rtt_min_ns { iface.rtt_min_ns = ns; }
-        if ns > iface.rtt_max_ns { iface.rtt_max_ns = ns; }
+        if ns < iface.rtt_min_ns {
+            iface.rtt_min_ns = ns;
+        }
+        if ns > iface.rtt_max_ns {
+            iface.rtt_max_ns = ns;
+        }
         iface.rtt_histogram[bucket_index(ns)] += 1;
         state.total_rtt_samples += 1;
         Ok(())
@@ -171,11 +191,16 @@ pub fn record_rtt(name: &str, _proto: Protocol, ns: u64) -> KernelResult<()> {
 /// Record a processing latency sample.
 pub fn record_processing(name: &str, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let iface = state.ifaces.iter_mut().find(|i| i.name == name)
+        let iface = state
+            .ifaces
+            .iter_mut()
+            .find(|i| i.name == name)
             .ok_or(KernelError::NotFound)?;
         iface.proc_samples += 1;
         iface.proc_total_ns += ns;
-        if ns > iface.proc_max_ns { iface.proc_max_ns = ns; }
+        if ns > iface.proc_max_ns {
+            iface.proc_max_ns = ns;
+        }
         state.total_proc_samples += 1;
         Ok(())
     })
@@ -183,19 +208,29 @@ pub fn record_processing(name: &str, ns: u64) -> KernelResult<()> {
 
 /// Per-interface stats.
 pub fn per_interface() -> Vec<IfaceLatency> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.ifaces.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.ifaces.clone())
 }
 
 /// Get histogram bucket labels.
 pub fn bucket_labels() -> [&'static str; BUCKET_COUNT] {
-    ["<10us", "<50us", "<100us", "<500us", "<1ms", "<5ms", "<10ms", ">=10ms"]
+    [
+        "<10us", "<50us", "<100us", "<500us", "<1ms", "<5ms", "<10ms", ">=10ms",
+    ]
 }
 
 /// Statistics: (iface_count, total_rtt_samples, total_proc_samples, ops).
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.ifaces.len(), s.total_rtt_samples, s.total_proc_samples, s.ops),
+        Some(s) => (
+            s.ifaces.len(),
+            s.total_rtt_samples,
+            s.total_proc_samples,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }
@@ -228,7 +263,11 @@ pub fn self_test() {
 
     // 3: First RTT sample seeds min/max exactly (from the empty min sentinel).
     record_rtt("wlan0", Protocol::Tcp, 50_000).expect("rtt"); // 50us
-    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().expect("iface");
+    let i = per_interface()
+        .iter()
+        .find(|i| i.name == "wlan0")
+        .cloned()
+        .expect("iface");
     assert_eq!(i.rtt_samples, 1);
     assert_eq!(i.rtt_min_ns, 50_000);
     assert_eq!(i.rtt_max_ns, 50_000);
@@ -236,14 +275,22 @@ pub fn self_test() {
     crate::serial_println!("  [3/8] rtt: OK");
 
     // 4: Histogram bucketing is exact (50us → <100us bucket, index 2).
-    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().expect("iface");
+    let i = per_interface()
+        .iter()
+        .find(|i| i.name == "wlan0")
+        .cloned()
+        .expect("iface");
     assert_eq!(i.rtt_histogram[2], 1);
     crate::serial_println!("  [4/8] histogram: OK");
 
     // 5: Min/max track across samples.
     record_rtt("wlan0", Protocol::Udp, 10_000).expect("rtt2");
     record_rtt("wlan0", Protocol::Icmp, 200_000).expect("rtt3");
-    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().expect("iface");
+    let i = per_interface()
+        .iter()
+        .find(|i| i.name == "wlan0")
+        .cloned()
+        .expect("iface");
     assert_eq!(i.rtt_samples, 3);
     assert_eq!(i.rtt_min_ns, 10_000);
     assert_eq!(i.rtt_max_ns, 200_000);
@@ -251,7 +298,11 @@ pub fn self_test() {
 
     // 6: Processing latency recorded exactly.
     record_processing("wlan0", 5000).expect("proc");
-    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().expect("iface");
+    let i = per_interface()
+        .iter()
+        .find(|i| i.name == "wlan0")
+        .cloned()
+        .expect("iface");
     assert_eq!(i.proc_samples, 1);
     assert_eq!(i.proc_max_ns, 5000);
     crate::serial_println!("  [6/8] processing: OK");

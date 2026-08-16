@@ -21,11 +21,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -126,7 +126,12 @@ impl SnapPosition {
             Self::TopLeft => (0, 0, screen_w / 2, screen_h / 2),
             Self::TopRight => ((screen_w / 2) as i32, 0, screen_w / 2, screen_h / 2),
             Self::BottomLeft => (0, (screen_h / 2) as i32, screen_w / 2, screen_h / 2),
-            Self::BottomRight => ((screen_w / 2) as i32, (screen_h / 2) as i32, screen_w / 2, screen_h / 2),
+            Self::BottomRight => (
+                (screen_w / 2) as i32,
+                (screen_h / 2) as i32,
+                screen_w / 2,
+                screen_h / 2,
+            ),
             Self::LeftThird => (0, 0, screen_w / 3, screen_h),
             Self::CenterThird => ((screen_w / 3) as i32, 0, screen_w / 3, screen_h),
             Self::RightThird => ((screen_w * 2 / 3) as i32, 0, screen_w / 3, screen_h),
@@ -240,7 +245,14 @@ static SNAP_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Snap a window to a position.
 ///
 /// Saves the window's current bounds for restoration.
-pub fn snap(window_id: u64, pos: SnapPosition, cur_x: i32, cur_y: i32, cur_w: u32, cur_h: u32) -> (i32, i32, u32, u32) {
+pub fn snap(
+    window_id: u64,
+    pos: SnapPosition,
+    cur_x: i32,
+    cur_y: i32,
+    cur_w: u32,
+    cur_h: u32,
+) -> (i32, i32, u32, u32) {
     let mut state = STATE.lock();
     let (sw, sh) = (state.screen_w, state.screen_h);
 
@@ -280,12 +292,19 @@ pub fn snap(window_id: u64, pos: SnapPosition, cur_x: i32, cur_y: i32, cur_w: u3
 /// Unsnap a window (restore to pre-snap position).
 pub fn unsnap(window_id: u64) -> Option<(i32, i32, u32, u32)> {
     let mut state = STATE.lock();
-    state.windows.remove(&window_id).map(|ws| (ws.pre_snap_x, ws.pre_snap_y, ws.pre_snap_w, ws.pre_snap_h))
+    state
+        .windows
+        .remove(&window_id)
+        .map(|ws| (ws.pre_snap_x, ws.pre_snap_y, ws.pre_snap_w, ws.pre_snap_h))
 }
 
 /// Get the current snap state of a window.
 pub fn window_snap_state(window_id: u64) -> Option<SnapPosition> {
-    STATE.lock().windows.get(&window_id).and_then(|ws| ws.snapped)
+    STATE
+        .lock()
+        .windows
+        .get(&window_id)
+        .and_then(|ws| ws.snapped)
 }
 
 /// Detect which snap zone the cursor is in (for drag preview).
@@ -305,16 +324,30 @@ pub fn detect_zone(cursor_x: i32, cursor_y: i32) -> Option<SnapPosition> {
 
     // Corner detection.
     if state.config.corner_snap {
-        if at_left && at_top { return Some(SnapPosition::TopLeft); }
-        if at_right && at_top { return Some(SnapPosition::TopRight); }
-        if at_left && at_bottom { return Some(SnapPosition::BottomLeft); }
-        if at_right && at_bottom { return Some(SnapPosition::BottomRight); }
+        if at_left && at_top {
+            return Some(SnapPosition::TopLeft);
+        }
+        if at_right && at_top {
+            return Some(SnapPosition::TopRight);
+        }
+        if at_left && at_bottom {
+            return Some(SnapPosition::BottomLeft);
+        }
+        if at_right && at_bottom {
+            return Some(SnapPosition::BottomRight);
+        }
     }
 
     // Edge detection.
-    if at_left { return Some(SnapPosition::Left); }
-    if at_right { return Some(SnapPosition::Right); }
-    if at_top { return Some(SnapPosition::Maximize); }
+    if at_left {
+        return Some(SnapPosition::Left);
+    }
+    if at_right {
+        return Some(SnapPosition::Right);
+    }
+    if at_top {
+        return Some(SnapPosition::Maximize);
+    }
 
     None
 }
@@ -346,9 +379,19 @@ pub fn add_layout(name: &str, desc: &str) -> KernelResult<()> {
 }
 
 /// Add a zone to a layout (coordinates as 0-1000 representing 0%-100%).
-pub fn add_zone(layout: &str, zone_name: &str, x_pct: u32, y_pct: u32, w_pct: u32, h_pct: u32) -> KernelResult<()> {
+pub fn add_zone(
+    layout: &str,
+    zone_name: &str,
+    x_pct: u32,
+    y_pct: u32,
+    w_pct: u32,
+    h_pct: u32,
+) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let lay = state.layouts.iter_mut().find(|l| l.name == layout)
+    let lay = state
+        .layouts
+        .iter_mut()
+        .find(|l| l.name == layout)
         .ok_or(KernelError::NotFound)?;
     if lay.zones.len() >= MAX_ZONES {
         return Err(KernelError::ResourceExhausted);
@@ -368,7 +411,9 @@ pub fn remove_layout(name: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
     let len = state.layouts.len();
     state.layouts.retain(|l| l.name != name);
-    if state.layouts.len() == len { return Err(KernelError::NotFound); }
+    if state.layouts.len() == len {
+        return Err(KernelError::NotFound);
+    }
     Ok(())
 }
 
@@ -380,15 +425,29 @@ pub fn list_layouts() -> Vec<TileLayout> {
 /// Initialize default layouts.
 pub fn init_defaults() {
     let mut state = STATE.lock();
-    if !state.layouts.is_empty() { return; }
+    if !state.layouts.is_empty() {
+        return;
+    }
 
     // Two-column layout.
     state.layouts.push(TileLayout {
         name: String::from("2-col"),
         description: String::from("Two equal columns"),
         zones: alloc::vec![
-            SnapZone { name: String::from("left"), x_pct: 0, y_pct: 0, w_pct: 500, h_pct: 1000 },
-            SnapZone { name: String::from("right"), x_pct: 500, y_pct: 0, w_pct: 500, h_pct: 1000 },
+            SnapZone {
+                name: String::from("left"),
+                x_pct: 0,
+                y_pct: 0,
+                w_pct: 500,
+                h_pct: 1000
+            },
+            SnapZone {
+                name: String::from("right"),
+                x_pct: 500,
+                y_pct: 0,
+                w_pct: 500,
+                h_pct: 1000
+            },
         ],
     });
 
@@ -397,9 +456,27 @@ pub fn init_defaults() {
         name: String::from("3-col"),
         description: String::from("Three equal columns"),
         zones: alloc::vec![
-            SnapZone { name: String::from("left"), x_pct: 0, y_pct: 0, w_pct: 333, h_pct: 1000 },
-            SnapZone { name: String::from("center"), x_pct: 333, y_pct: 0, w_pct: 334, h_pct: 1000 },
-            SnapZone { name: String::from("right"), x_pct: 667, y_pct: 0, w_pct: 333, h_pct: 1000 },
+            SnapZone {
+                name: String::from("left"),
+                x_pct: 0,
+                y_pct: 0,
+                w_pct: 333,
+                h_pct: 1000
+            },
+            SnapZone {
+                name: String::from("center"),
+                x_pct: 333,
+                y_pct: 0,
+                w_pct: 334,
+                h_pct: 1000
+            },
+            SnapZone {
+                name: String::from("right"),
+                x_pct: 667,
+                y_pct: 0,
+                w_pct: 333,
+                h_pct: 1000
+            },
         ],
     });
 
@@ -408,8 +485,20 @@ pub fn init_defaults() {
         name: String::from("main-side"),
         description: String::from("Large main + sidebar"),
         zones: alloc::vec![
-            SnapZone { name: String::from("main"), x_pct: 0, y_pct: 0, w_pct: 700, h_pct: 1000 },
-            SnapZone { name: String::from("side"), x_pct: 700, y_pct: 0, w_pct: 300, h_pct: 1000 },
+            SnapZone {
+                name: String::from("main"),
+                x_pct: 0,
+                y_pct: 0,
+                w_pct: 700,
+                h_pct: 1000
+            },
+            SnapZone {
+                name: String::from("side"),
+                x_pct: 700,
+                y_pct: 0,
+                w_pct: 300,
+                h_pct: 1000
+            },
         ],
     });
 }
@@ -418,14 +507,32 @@ pub fn init_defaults() {
 // Configuration
 // ---------------------------------------------------------------------------
 
-pub fn config() -> SnapConfig { STATE.lock().config.clone() }
-pub fn set_enabled(v: bool) { STATE.lock().config.enabled = v; }
-pub fn set_edge_distance(px: u32) { STATE.lock().config.edge_distance = px.clamp(5, 100); }
-pub fn set_show_preview(v: bool) { STATE.lock().config.show_preview = v; }
-pub fn set_animation_ms(ms: u32) { STATE.lock().config.animation_ms = ms; }
-pub fn set_corner_snap(v: bool) { STATE.lock().config.corner_snap = v; }
-pub fn set_thirds(v: bool) { STATE.lock().config.thirds = v; }
-pub fn set_screen(w: u32, h: u32) { let mut s = STATE.lock(); s.screen_w = w; s.screen_h = h; }
+pub fn config() -> SnapConfig {
+    STATE.lock().config.clone()
+}
+pub fn set_enabled(v: bool) {
+    STATE.lock().config.enabled = v;
+}
+pub fn set_edge_distance(px: u32) {
+    STATE.lock().config.edge_distance = px.clamp(5, 100);
+}
+pub fn set_show_preview(v: bool) {
+    STATE.lock().config.show_preview = v;
+}
+pub fn set_animation_ms(ms: u32) {
+    STATE.lock().config.animation_ms = ms;
+}
+pub fn set_corner_snap(v: bool) {
+    STATE.lock().config.corner_snap = v;
+}
+pub fn set_thirds(v: bool) {
+    STATE.lock().config.thirds = v;
+}
+pub fn set_screen(w: u32, h: u32) {
+    let mut s = STATE.lock();
+    s.screen_w = w;
+    s.screen_h = h;
+}
 
 // ---------------------------------------------------------------------------
 // Stats
@@ -434,10 +541,16 @@ pub fn set_screen(w: u32, h: u32) { let mut s = STATE.lock(); s.screen_w = w; s.
 /// Returns (snapped_count, layout_count, snap_ops).
 pub fn stats() -> (usize, usize, u64) {
     let state = STATE.lock();
-    (state.windows.len(), state.layouts.len(), SNAP_COUNT.load(Ordering::Relaxed))
+    (
+        state.windows.len(),
+        state.layouts.len(),
+        SNAP_COUNT.load(Ordering::Relaxed),
+    )
 }
 
-pub fn reset_stats() { SNAP_COUNT.store(0, Ordering::Relaxed); }
+pub fn reset_stats() {
+    SNAP_COUNT.store(0, Ordering::Relaxed);
+}
 
 pub fn clear_all() {
     let mut state = STATE.lock();

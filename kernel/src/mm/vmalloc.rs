@@ -47,12 +47,12 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex as Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -88,7 +88,11 @@ struct VmallocEntry {
 
 impl VmallocEntry {
     const fn empty() -> Self {
-        Self { vaddr: 0, page_count: 0, active: false }
+        Self {
+            vaddr: 0,
+            page_count: 0,
+            active: false,
+        }
     }
 }
 
@@ -213,11 +217,15 @@ pub fn vmalloc(size: usize) -> KernelResult<*mut u8> {
         let mut state = STATE.lock();
 
         // Find a metadata slot.
-        let entry_idx = state.entries.iter().position(|e| !e.active)
+        let entry_idx = state
+            .entries
+            .iter()
+            .position(|e| !e.active)
             .ok_or(KernelError::OutOfMemory)?;
 
         // Find contiguous virtual pages.
-        run_start = state.find_free_run(page_count)
+        run_start = state
+            .find_free_run(page_count)
             .ok_or(KernelError::OutOfMemory)?;
 
         // The actual allocation starts after the leading guard page.
@@ -321,7 +329,9 @@ pub unsafe fn vfree(ptr: *mut u8) -> KernelResult<()> {
     let alloc_page_start;
     {
         let mut state = STATE.lock();
-        let entry = state.entries.iter_mut()
+        let entry = state
+            .entries
+            .iter_mut()
             .find(|e| e.active && e.vaddr == vaddr)
             .ok_or(KernelError::NotFound)?;
 
@@ -361,7 +371,9 @@ pub unsafe fn vfree(ptr: *mut u8) -> KernelResult<()> {
 pub fn vmalloc_size(ptr: *const u8) -> Option<usize> {
     let vaddr = ptr as u64;
     let state = STATE.lock();
-    state.entries.iter()
+    state
+        .entries
+        .iter()
         .find(|e| e.active && e.vaddr == vaddr)
         .map(|e| e.page_count as usize * FRAME_SIZE)
 }
@@ -391,7 +403,9 @@ pub struct VmallocStats {
 #[must_use]
 pub fn stats() -> VmallocStats {
     let state = STATE.lock();
-    let active_bytes: u64 = state.entries.iter()
+    let active_bytes: u64 = state
+        .entries
+        .iter()
         .filter(|e| e.active)
         .map(|e| (e.page_count as u64) * (FRAME_SIZE as u64))
         .sum();
@@ -461,7 +475,10 @@ pub fn self_test() {
             assert_eq!(val, (i as u8) + 1);
         }
     }
-    serial_println!("[vmalloc]   Multi-page (4 × 16 KiB): OK (addr={:#x})", ptr2 as u64);
+    serial_println!(
+        "[vmalloc]   Multi-page (4 × 16 KiB): OK (addr={:#x})",
+        ptr2 as u64
+    );
 
     // Test 5: Free.
     // SAFETY: ptr and ptr2 were returned by successful vmalloc calls
@@ -476,7 +493,9 @@ pub fn self_test() {
     let ptr3 = vmalloc(FRAME_SIZE).expect("re-alloc should succeed");
     assert!(!ptr3.is_null());
     // SAFETY: ptr3 was returned by vmalloc and has not been freed.
-    unsafe { vfree(ptr3).expect("vfree should succeed"); }
+    unsafe {
+        vfree(ptr3).expect("vfree should succeed");
+    }
     serial_println!("[vmalloc]   Re-alloc after free: OK");
 
     // Test 7: Zero-size rejection.
@@ -489,8 +508,12 @@ pub fn self_test() {
     assert!(st.alloc_count >= 3);
     assert!(st.free_count >= 3);
     assert_eq!(st.active, 0);
-    serial_println!("[vmalloc]   Stats: OK (allocs={}, frees={}, active={})",
-        st.alloc_count, st.free_count, st.active);
+    serial_println!(
+        "[vmalloc]   Stats: OK (allocs={}, frees={}, active={})",
+        st.alloc_count,
+        st.free_count,
+        st.active
+    );
 
     serial_println!("[vmalloc] Self-test PASSED");
 }

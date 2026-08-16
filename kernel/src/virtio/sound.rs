@@ -30,11 +30,11 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::pci::{self, PciDevice};
 use crate::serial_println;
-use crate::virtio::queue::{Virtqueue, VRING_DESC_F_WRITE};
-use crate::virtio::{VirtioLegacyPci, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK};
+use crate::virtio::queue::{VRING_DESC_F_WRITE, Virtqueue};
+use crate::virtio::{STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, VirtioLegacyPci};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -285,7 +285,9 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
 
     serial_println!(
         "[virtio-snd] Config: {} jacks, {} streams, {} chmaps",
-        num_jacks, num_streams, num_chmaps
+        num_jacks,
+        num_streams,
+        num_chmaps
     );
 
     if num_streams == 0 {
@@ -309,10 +311,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     // Queue 1: eventq
     transport.select_queue(1);
     let evt_size = transport.queue_size();
-    let (eventq, evt_pfn) = Virtqueue::new(
-        if evt_size > 0 { evt_size } else { 16 },
-        hhdm_offset,
-    )?;
+    let (eventq, evt_pfn) = Virtqueue::new(if evt_size > 0 { evt_size } else { 16 }, hhdm_offset)?;
     if evt_size > 0 {
         transport.set_queue_pfn(evt_pfn);
     }
@@ -331,10 +330,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     // Queue 3: rxq (capture)
     transport.select_queue(3);
     let rx_size = transport.queue_size();
-    let (rxq, rx_pfn) = Virtqueue::new(
-        if rx_size > 0 { rx_size } else { 16 },
-        hhdm_offset,
-    )?;
+    let (rxq, rx_pfn) = Virtqueue::new(if rx_size > 0 { rx_size } else { 16 }, hhdm_offset)?;
     if rx_size > 0 {
         transport.set_queue_pfn(rx_pfn);
     }
@@ -428,7 +424,9 @@ fn query_stream_info(dev: &mut VirtioSndDevice, num_streams: u32) -> KernelResul
 
     // Build PCM_INFO request at offset 0.
     let req = VirtioSndQueryInfo {
-        hdr: VirtioSndHdr { code: VIRTIO_SND_R_PCM_INFO },
+        hdr: VirtioSndHdr {
+            code: VIRTIO_SND_R_PCM_INFO,
+        },
         start_id: 0,
         count,
         size: core::mem::size_of::<VirtioSndPcmInfo>() as u32,
@@ -448,7 +446,7 @@ fn query_stream_info(dev: &mut VirtioSndDevice, num_streams: u32) -> KernelResul
     let req_len = core::mem::size_of::<VirtioSndQueryInfo>() as u32;
 
     dev.controlq.submit(&[
-        (req_phys, req_len, 0),                         // Device reads this
+        (req_phys, req_len, 0),                            // Device reads this
         (resp_phys, resp_size as u32, VRING_DESC_F_WRITE), // Device writes response
     ])?;
 
@@ -471,9 +469,7 @@ fn query_stream_info(dev: &mut VirtioSndDevice, num_streams: u32) -> KernelResul
     // Read response status.
     // SAFETY: resp_offset is within the DMA frame.  Volatile read because
     // the device writes this field asynchronously via DMA.
-    let status = unsafe {
-        core::ptr::read_volatile((ctl_virt.add(resp_offset)) as *const u32)
-    };
+    let status = unsafe { core::ptr::read_volatile((ctl_virt.add(resp_offset)) as *const u32) };
     if status != VIRTIO_SND_S_OK {
         serial_println!("[virtio-snd] PCM_INFO failed: status {:#x}", status);
         return Err(KernelError::IoError);
@@ -487,9 +483,8 @@ fn query_stream_info(dev: &mut VirtioSndDevice, num_streams: u32) -> KernelResul
         // SAFETY: entry_offset is within the DMA frame (resp_offset + 4 +
         // i * size < FRAME_SIZE, ensured by count ≤ MAX_STREAMS and the
         // sizes involved).  VirtioSndPcmInfo is #[repr(C)].
-        let info = unsafe {
-            core::ptr::read(ctl_virt.add(entry_offset) as *const VirtioSndPcmInfo)
-        };
+        let info =
+            unsafe { core::ptr::read(ctl_virt.add(entry_offset) as *const VirtioSndPcmInfo) };
         if info.direction == VIRTIO_SND_D_OUTPUT {
             num_output = num_output.wrapping_add(1);
         } else if info.direction == VIRTIO_SND_D_INPUT {
@@ -498,7 +493,11 @@ fn query_stream_info(dev: &mut VirtioSndDevice, num_streams: u32) -> KernelResul
         serial_println!(
             "[virtio-snd]   Stream {}: dir={} ch={}-{} fmts={:#x} rates={:#x}",
             i,
-            if info.direction == VIRTIO_SND_D_OUTPUT { "OUT" } else { "IN" },
+            if info.direction == VIRTIO_SND_D_OUTPUT {
+                "OUT"
+            } else {
+                "IN"
+            },
             info.channels_min,
             info.channels_max,
             info.formats,
@@ -539,10 +538,8 @@ fn control_stream_cmd(dev: &mut VirtioSndDevice, code: u32, stream_id: u32) -> K
     let resp_phys = ctl_phys + resp_offset as u64;
     let req_len = core::mem::size_of::<VirtioSndPcmHdr>() as u32;
 
-    dev.controlq.submit(&[
-        (req_phys, req_len, 0),
-        (resp_phys, 4, VRING_DESC_F_WRITE),
-    ])?;
+    dev.controlq
+        .submit(&[(req_phys, req_len, 0), (resp_phys, 4, VRING_DESC_F_WRITE)])?;
     dev.transport.notify_queue(0);
 
     // Poll for completion.
@@ -560,13 +557,13 @@ fn control_stream_cmd(dev: &mut VirtioSndDevice, code: u32, stream_id: u32) -> K
 
     // SAFETY: resp_offset is within the DMA frame.  Volatile read because
     // the device writes this asynchronously via DMA.
-    let status = unsafe {
-        core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32)
-    };
+    let status = unsafe { core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32) };
     if status != VIRTIO_SND_S_OK {
         serial_println!(
             "[virtio-snd] Command {:#x} for stream {} failed: status {:#x}",
-            code, stream_id, status
+            code,
+            stream_id,
+            status
         );
         return Err(KernelError::IoError);
     }
@@ -589,7 +586,9 @@ fn set_params(
     let ctl_virt = (ctl_phys + dev.hhdm_offset) as *mut u8;
 
     let req = VirtioSndPcmSetParams {
-        hdr: VirtioSndHdr { code: VIRTIO_SND_R_PCM_SET_PARAMS },
+        hdr: VirtioSndHdr {
+            code: VIRTIO_SND_R_PCM_SET_PARAMS,
+        },
         stream_id,
         buffer_bytes,
         period_bytes,
@@ -616,10 +615,8 @@ fn set_params(
     let resp_phys = ctl_phys + resp_offset as u64;
     let req_len = core::mem::size_of::<VirtioSndPcmSetParams>() as u32;
 
-    dev.controlq.submit(&[
-        (req_phys, req_len, 0),
-        (resp_phys, 4, VRING_DESC_F_WRITE),
-    ])?;
+    dev.controlq
+        .submit(&[(req_phys, req_len, 0), (resp_phys, 4, VRING_DESC_F_WRITE)])?;
     dev.transport.notify_queue(0);
 
     // Poll.
@@ -637,13 +634,12 @@ fn set_params(
 
     // SAFETY: resp_offset is within the DMA frame.  Volatile read because
     // the device writes this asynchronously.
-    let status = unsafe {
-        core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32)
-    };
+    let status = unsafe { core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32) };
     if status != VIRTIO_SND_S_OK {
         serial_println!(
             "[virtio-snd] SET_PARAMS for stream {} failed: status {:#x}",
-            stream_id, status
+            stream_id,
+            status
         );
         return Err(KernelError::IoError);
     }
@@ -659,7 +655,11 @@ fn set_params(
 /// The buffer is copied into the DMA frame and submitted to the TX queue.
 /// This is synchronous — it waits for the device to consume the buffer.
 #[allow(clippy::arithmetic_side_effects)]
-fn submit_pcm_buffer(dev: &mut VirtioSndDevice, stream_id: u32, pcm_data: &[u8]) -> KernelResult<()> {
+fn submit_pcm_buffer(
+    dev: &mut VirtioSndDevice,
+    stream_id: u32,
+    pcm_data: &[u8],
+) -> KernelResult<()> {
     let pcm_phys = dev.pcm_frame.addr();
     let pcm_virt = (pcm_phys + dev.hhdm_offset) as *mut u8;
 
@@ -683,11 +683,7 @@ fn submit_pcm_buffer(dev: &mut VirtioSndDevice, stream_id: u32, pcm_data: &[u8])
     // SAFETY: data_len ≤ max_data = FRAME_SIZE - 12, so offset 4 + data_len
     // stays within the DMA frame.  pcm_data is a valid slice of ≥ data_len bytes.
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            pcm_data.as_ptr(),
-            pcm_virt.add(4),
-            data_len,
-        );
+        core::ptr::copy_nonoverlapping(pcm_data.as_ptr(), pcm_virt.add(4), data_len);
     }
 
     // Zero the status area.
@@ -707,9 +703,9 @@ fn submit_pcm_buffer(dev: &mut VirtioSndDevice, stream_id: u32, pcm_data: &[u8])
     let status_phys = pcm_phys + status_offset as u64;
 
     dev.txq.submit(&[
-        (hdr_phys, 4, 0),                                    // Header
-        (data_phys, data_len as u32, 0),                     // PCM data
-        (status_phys, 8, VRING_DESC_F_WRITE),                // Status response
+        (hdr_phys, 4, 0),                     // Header
+        (data_phys, data_len as u32, 0),      // PCM data
+        (status_phys, 8, VRING_DESC_F_WRITE), // Status response
     ])?;
     dev.transport.notify_queue(2); // txq is queue 2
 
@@ -730,9 +726,7 @@ fn submit_pcm_buffer(dev: &mut VirtioSndDevice, stream_id: u32, pcm_data: &[u8])
     // Check status.
     // SAFETY: status_offset is within the PCM DMA frame.  Volatile read
     // because the device wrote this field asynchronously via DMA.
-    let status = unsafe {
-        core::ptr::read_volatile(pcm_virt.add(status_offset) as *const u32)
-    };
+    let status = unsafe { core::ptr::read_volatile(pcm_virt.add(status_offset) as *const u32) };
     if status != VIRTIO_SND_S_OK {
         serial_println!("[virtio-snd] TX buffer status: {:#x}", status);
         return Err(KernelError::IoError);
@@ -768,7 +762,15 @@ pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
     let stream_id: u32 = 0; // First output stream.
 
     // Set parameters: 48kHz, 16-bit signed, stereo, 8192 buffer / 4096 period.
-    set_params(dev, stream_id, 2, VIRTIO_SND_PCM_FMT_S16, VIRTIO_SND_PCM_RATE_48000, 8192, 4096)?;
+    set_params(
+        dev,
+        stream_id,
+        2,
+        VIRTIO_SND_PCM_FMT_S16,
+        VIRTIO_SND_PCM_RATE_48000,
+        8192,
+        4096,
+    )?;
     serial_println!("[virtio-snd] Stream 0: params set (48kHz/S16/stereo)");
 
     // Prepare the stream.
@@ -897,7 +899,7 @@ fn generate_sine_440(buf: &mut [u8], sample_offset: u32) {
         let bytes = sample.to_le_bytes();
         let offset = i * 4;
         if offset + 3 < buf.len() {
-            buf[offset] = bytes[0];     // Left low byte
+            buf[offset] = bytes[0]; // Left low byte
             buf[offset + 1] = bytes[1]; // Left high byte
             buf[offset + 2] = bytes[0]; // Right low byte (same as left = mono)
             buf[offset + 3] = bytes[1]; // Right high byte
@@ -917,7 +919,9 @@ pub fn self_test() {
     serial_println!("[virtio-snd] Running self-test...");
 
     if !is_available() {
-        serial_println!("[virtio-snd]   No device (skipped — add -device virtio-sound-pci to QEMU)");
+        serial_println!(
+            "[virtio-snd]   No device (skipped — add -device virtio-sound-pci to QEMU)"
+        );
         serial_println!("[virtio-snd] Self-test PASSED (no device)");
         return;
     }

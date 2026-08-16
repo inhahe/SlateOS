@@ -22,11 +22,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -282,7 +282,10 @@ pub fn get_config() -> KernelResult<UpdateConfig> {
 
 /// Set auto-check.
 pub fn set_auto_check(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.auto_check = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.auto_check = enabled;
+        Ok(())
+    })
 }
 
 /// Set check interval (hours).
@@ -290,32 +293,50 @@ pub fn set_check_interval(hours: u32) -> KernelResult<()> {
     if hours == 0 || hours > 168 {
         return Err(KernelError::InvalidArgument);
     }
-    with_state(|state| { state.config.check_interval_hours = hours; Ok(()) })
+    with_state(|state| {
+        state.config.check_interval_hours = hours;
+        Ok(())
+    })
 }
 
 /// Set auto-download.
 pub fn set_auto_download(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.auto_download = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.auto_download = enabled;
+        Ok(())
+    })
 }
 
 /// Set auto-install.
 pub fn set_auto_install(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.auto_install = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.auto_install = enabled;
+        Ok(())
+    })
 }
 
 /// Set auto-install for security updates.
 pub fn set_auto_install_security(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.auto_install_security = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.auto_install_security = enabled;
+        Ok(())
+    })
 }
 
 /// Set update channel.
 pub fn set_channel(channel: UpdateChannel) -> KernelResult<()> {
-    with_state(|state| { state.config.channel = channel; Ok(()) })
+    with_state(|state| {
+        state.config.channel = channel;
+        Ok(())
+    })
 }
 
 /// Set defer on battery.
 pub fn set_defer_on_battery(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.defer_on_battery = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.defer_on_battery = enabled;
+        Ok(())
+    })
 }
 
 /// Set active hours.
@@ -373,7 +394,9 @@ pub fn add_available_update(
 /// Start downloading an update.
 pub fn download_update(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let update = state.updates.iter_mut()
+        let update = state
+            .updates
+            .iter_mut()
             .find(|u| u.id == id)
             .ok_or(KernelError::NotFound)?;
         if update.status != UpdateStatus::Available {
@@ -388,7 +411,9 @@ pub fn download_update(id: u64) -> KernelResult<()> {
 /// Complete download.
 pub fn complete_download(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let update = state.updates.iter_mut()
+        let update = state
+            .updates
+            .iter_mut()
             .find(|u| u.id == id)
             .ok_or(KernelError::NotFound)?;
         if update.status != UpdateStatus::Downloading {
@@ -403,7 +428,9 @@ pub fn complete_download(id: u64) -> KernelResult<()> {
 /// Install an update.
 pub fn install_update(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let update = state.updates.iter_mut()
+        let update = state
+            .updates
+            .iter_mut()
             .find(|u| u.id == id)
             .ok_or(KernelError::NotFound)?;
         if update.status != UpdateStatus::Downloaded && update.status != UpdateStatus::Available {
@@ -419,7 +446,9 @@ pub fn install_update(id: u64) -> KernelResult<()> {
 /// Mark update as failed.
 pub fn fail_update(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let update = state.updates.iter_mut()
+        let update = state
+            .updates
+            .iter_mut()
             .find(|u| u.id == id)
             .ok_or(KernelError::NotFound)?;
         update.status = UpdateStatus::Failed;
@@ -430,7 +459,9 @@ pub fn fail_update(id: u64) -> KernelResult<()> {
 /// Defer an update.
 pub fn defer_update(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let update = state.updates.iter_mut()
+        let update = state
+            .updates
+            .iter_mut()
             .find(|u| u.id == id)
             .ok_or(KernelError::NotFound)?;
         update.status = UpdateStatus::Deferred;
@@ -444,7 +475,10 @@ pub fn archive_completed() -> KernelResult<usize> {
         let mut archived = 0usize;
         let mut i = 0;
         while i < state.updates.len() {
-            if matches!(state.updates[i].status, UpdateStatus::Installed | UpdateStatus::Failed) {
+            if matches!(
+                state.updates[i].status,
+                UpdateStatus::Installed | UpdateStatus::Failed
+            ) {
                 let update = state.updates.remove(i);
                 if state.history.len() >= MAX_HISTORY {
                     state.history.remove(0);
@@ -467,7 +501,9 @@ pub fn archive_completed() -> KernelResult<usize> {
 pub fn get_update(id: u64) -> KernelResult<Update> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.updates.iter()
+    state
+        .updates
+        .iter()
         .find(|u| u.id == id)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -511,7 +547,8 @@ pub fn pending_count() -> (usize, usize, usize, usize) {
 pub fn pending_size() -> u64 {
     let guard = STATE.lock();
     guard.as_ref().map_or(0, |s| {
-        s.updates.iter()
+        s.updates
+            .iter()
             .filter(|u| matches!(u.status, UpdateStatus::Available | UpdateStatus::Downloaded))
             .map(|u| u.size_bytes)
             .sum()
@@ -522,7 +559,9 @@ pub fn pending_size() -> u64 {
 pub fn check_updates() -> KernelResult<usize> {
     with_state(|state| {
         state.last_check_ns = crate::hpet::elapsed_ns();
-        let pending = state.updates.iter()
+        let pending = state
+            .updates
+            .iter()
             .filter(|u| matches!(u.status, UpdateStatus::Available | UpdateStatus::Downloaded))
             .count();
         Ok(pending)
@@ -544,7 +583,11 @@ pub fn os_version() -> String {
 
 fn format_size(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
-        format!("{}.{} GB", bytes / 1_073_741_824, (bytes % 1_073_741_824) / 107_374_182)
+        format!(
+            "{}.{} GB",
+            bytes / 1_073_741_824,
+            (bytes % 1_073_741_824) / 107_374_182
+        )
     } else if bytes >= 1_048_576 {
         format!("{}.{} MB", bytes / 1_048_576, (bytes % 1_048_576) / 104_857)
     } else if bytes >= 1024 {
@@ -617,10 +660,16 @@ pub fn self_test() {
     // Test 3: add update.
     {
         let id = add_available_update(
-            "kernel", "0.1.0", "0.1.1",
-            UpdateType::Security, UpdateSeverity::Critical,
-            5_242_880, "Critical security fix", true,
-        ).unwrap();
+            "kernel",
+            "0.1.0",
+            "0.1.1",
+            UpdateType::Security,
+            UpdateSeverity::Critical,
+            5_242_880,
+            "Critical security fix",
+            true,
+        )
+        .unwrap();
         let u = get_update(id).unwrap();
         assert_eq!(u.package, "kernel");
         assert_eq!(u.severity, UpdateSeverity::Critical);
@@ -660,10 +709,16 @@ pub fn self_test() {
     // Test 7: defer update.
     {
         let id = add_available_update(
-            "libc", "2.0", "2.1",
-            UpdateType::BugFix, UpdateSeverity::Recommended,
-            1_048_576, "Stability fixes", false,
-        ).unwrap();
+            "libc",
+            "2.0",
+            "2.1",
+            UpdateType::BugFix,
+            UpdateSeverity::Recommended,
+            1_048_576,
+            "Stability fixes",
+            false,
+        )
+        .unwrap();
         defer_update(id).unwrap();
         assert_eq!(get_update(id).unwrap().status, UpdateStatus::Deferred);
     }
@@ -671,7 +726,16 @@ pub fn self_test() {
 
     // Test 8: pending counts.
     {
-        let _ = add_available_update("gui", "1.0", "1.1", UpdateType::Feature, UpdateSeverity::Optional, 2_097_152, "New features", false);
+        let _ = add_available_update(
+            "gui",
+            "1.0",
+            "1.1",
+            UpdateType::Feature,
+            UpdateSeverity::Optional,
+            2_097_152,
+            "New features",
+            false,
+        );
         let (c, i, r, o) = pending_count();
         assert_eq!(c, 0);
         assert_eq!(i, 0);

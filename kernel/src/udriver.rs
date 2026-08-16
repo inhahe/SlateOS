@@ -56,10 +56,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -104,7 +104,11 @@ impl DeviceAddr {
     /// Create a new PCI device address.
     #[must_use]
     pub const fn new(bus: u8, device: u8, function: u8) -> Self {
-        Self { bus, device, function }
+        Self {
+            bus,
+            device,
+            function,
+        }
     }
 
     /// Compact BDF encoding for display and comparison.
@@ -138,8 +142,14 @@ pub struct MmioPerms {
 }
 
 impl MmioPerms {
-    pub const READ_ONLY: Self = Self { read: true, write: false };
-    pub const READ_WRITE: Self = Self { read: true, write: true };
+    pub const READ_ONLY: Self = Self {
+        read: true,
+        write: false,
+    };
+    pub const READ_WRITE: Self = Self {
+        read: true,
+        write: true,
+    };
 }
 
 /// A single MMIO region mapped into a driver's address space.
@@ -341,7 +351,11 @@ pub fn register_device(addr: DeviceAddr, id: DeviceId) -> KernelResult<()> {
         "udriver",
         Info,
         "device discovered: {:02x}:{:02x}.{} vendor={:04x} device={:04x}",
-        addr.bus, addr.device, addr.function, id.vendor_id, id.device_id
+        addr.bus,
+        addr.device,
+        addr.function,
+        id.vendor_id,
+        id.device_id
     );
 
     Ok(())
@@ -364,11 +378,7 @@ pub fn unclaimed_devices() -> Vec<UnclaimedDevice> {
 /// calling this function).
 ///
 /// Returns the driver binding ID on success.
-pub fn register_driver(
-    name: &str,
-    pid: u32,
-    device_addr: DeviceAddr,
-) -> KernelResult<u32> {
+pub fn register_driver(name: &str, pid: u32, device_addr: DeviceAddr) -> KernelResult<u32> {
     let now = crate::hpet::elapsed_ns();
     let mut state = STATE.lock();
 
@@ -378,14 +388,18 @@ pub fn register_driver(
     }
 
     // Device must be unclaimed.
-    let unclaimed_idx = state.unclaimed.iter()
+    let unclaimed_idx = state
+        .unclaimed
+        .iter()
         .position(|d| d.addr == device_addr)
         .ok_or(KernelError::NotFound)?;
 
     // Make sure no other driver already owns this device.
-    let already_bound = state.drivers.iter()
-        .any(|d| d.device_addr == device_addr && d.state != DriverState::Crashed
-             && d.state != DriverState::Unregistered);
+    let already_bound = state.drivers.iter().any(|d| {
+        d.device_addr == device_addr
+            && d.state != DriverState::Crashed
+            && d.state != DriverState::Unregistered
+    });
     if already_bound {
         return Err(KernelError::DeviceBusy);
     }
@@ -420,7 +434,12 @@ pub fn register_driver(
         "udriver",
         Info,
         "driver '{}' (pid={}) registered for {:02x}:{:02x}.{} → id={}",
-        name, pid, device_addr.bus, device_addr.device, device_addr.function, id
+        name,
+        pid,
+        device_addr.bus,
+        device_addr.device,
+        device_addr.function,
+        id
     );
 
     Ok(id)
@@ -430,7 +449,10 @@ pub fn register_driver(
 pub fn unregister_driver(id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
 
-    let idx = state.drivers.iter().position(|d| d.id == id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
 
     // Clean up all resources.
@@ -454,7 +476,9 @@ pub fn unregister_driver(id: u32) -> KernelResult<()> {
         "udriver",
         Info,
         "driver '{}' (id={}) unregistered, {} bytes MMIO freed",
-        name_copy, id, total_mmio
+        name_copy,
+        id,
+        total_mmio
     );
 
     Ok(())
@@ -494,7 +518,10 @@ pub fn map_mmio(
     let now = crate::hpet::elapsed_ns();
     let mut state = STATE.lock();
 
-    let idx = state.drivers.iter().position(|d| d.id == driver_id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == driver_id)
         .ok_or(KernelError::NotFound)?;
 
     if state.drivers[idx].state == DriverState::Crashed
@@ -508,7 +535,9 @@ pub fn map_mmio(
     }
 
     // Check for overlapping BAR mapping.
-    let has_bar = state.drivers[idx].mmio_mappings.iter()
+    let has_bar = state.drivers[idx]
+        .mmio_mappings
+        .iter()
         .any(|m| m.bar_index == bar_index);
     if has_bar {
         return Err(KernelError::AlreadyExists);
@@ -543,7 +572,11 @@ pub fn map_mmio(
         "udriver",
         Info,
         "driver id={}: mapped BAR{} phys={:#x} size={:#x} → virt={:#x}",
-        driver_id, bar_index, phys_base, size, virt_base
+        driver_id,
+        bar_index,
+        phys_base,
+        size,
+        virt_base
     );
 
     Ok(mapping)
@@ -553,10 +586,15 @@ pub fn map_mmio(
 pub fn unmap_mmio(driver_id: u32, bar_index: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
 
-    let idx = state.drivers.iter().position(|d| d.id == driver_id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == driver_id)
         .ok_or(KernelError::NotFound)?;
 
-    let mmio_idx = state.drivers[idx].mmio_mappings.iter()
+    let mmio_idx = state.drivers[idx]
+        .mmio_mappings
+        .iter()
         .position(|m| m.bar_index == bar_index)
         .ok_or(KernelError::NotFound)?;
 
@@ -599,7 +637,10 @@ pub fn alloc_dma(
     let now = crate::hpet::elapsed_ns();
     let mut state = STATE.lock();
 
-    let idx = state.drivers.iter().position(|d| d.id == driver_id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == driver_id)
         .ok_or(KernelError::NotFound)?;
 
     if state.drivers[idx].state == DriverState::Crashed
@@ -648,14 +689,18 @@ pub fn alloc_dma(
 
     state.drivers[idx].dma_buffers.push(buffer.clone());
     state.drivers[idx].total_dma_bytes = state.drivers[idx]
-        .total_dma_bytes.saturating_add(aligned_size);
+        .total_dma_bytes
+        .saturating_add(aligned_size);
     state.total_dma_bytes = state.total_dma_bytes.saturating_add(aligned_size);
 
     crate::syslog!(
         "udriver",
         Info,
         "driver id={}: allocated DMA buffer #{} size={:#x} dir={:?}",
-        driver_id, dma_id, aligned_size, direction
+        driver_id,
+        dma_id,
+        aligned_size,
+        direction
     );
 
     Ok(buffer)
@@ -665,17 +710,23 @@ pub fn alloc_dma(
 pub fn free_dma(driver_id: u32, buffer_id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
 
-    let drv_idx = state.drivers.iter().position(|d| d.id == driver_id)
+    let drv_idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == driver_id)
         .ok_or(KernelError::NotFound)?;
 
-    let buf_idx = state.drivers[drv_idx].dma_buffers.iter()
+    let buf_idx = state.drivers[drv_idx]
+        .dma_buffers
+        .iter()
         .position(|b| b.id == buffer_id)
         .ok_or(KernelError::NotFound)?;
 
     let freed_size = state.drivers[drv_idx].dma_buffers[buf_idx].size;
     state.drivers[drv_idx].dma_buffers.swap_remove(buf_idx);
     state.drivers[drv_idx].total_dma_bytes = state.drivers[drv_idx]
-        .total_dma_bytes.saturating_sub(freed_size);
+        .total_dma_bytes
+        .saturating_sub(freed_size);
     state.total_dma_bytes = state.total_dma_bytes.saturating_sub(freed_size);
 
     // In a full implementation:
@@ -698,7 +749,10 @@ pub fn free_dma(driver_id: u32, buffer_id: u32) -> KernelResult<()> {
 pub fn register_irq(driver_id: u32, irq: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
 
-    let idx = state.drivers.iter().position(|d| d.id == driver_id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == driver_id)
         .ok_or(KernelError::NotFound)?;
 
     if state.drivers[idx].irq_lines.contains(&irq) {
@@ -714,10 +768,15 @@ pub fn register_irq(driver_id: u32, irq: u8) -> KernelResult<()> {
 pub fn unregister_irq(driver_id: u32, irq: u8) -> KernelResult<()> {
     let mut state = STATE.lock();
 
-    let idx = state.drivers.iter().position(|d| d.id == driver_id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == driver_id)
         .ok_or(KernelError::NotFound)?;
 
-    let irq_idx = state.drivers[idx].irq_lines.iter()
+    let irq_idx = state.drivers[idx]
+        .irq_lines
+        .iter()
         .position(|&i| i == irq)
         .ok_or(KernelError::NotFound)?;
 
@@ -735,7 +794,10 @@ pub fn activate_driver(driver_id: u32) -> KernelResult<()> {
     let now = crate::hpet::elapsed_ns();
     let mut state = STATE.lock();
 
-    let idx = state.drivers.iter().position(|d| d.id == driver_id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == driver_id)
         .ok_or(KernelError::NotFound)?;
 
     match state.drivers[idx].state {
@@ -756,7 +818,10 @@ pub fn activate_driver(driver_id: u32) -> KernelResult<()> {
 pub fn driver_crashed(driver_id: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
 
-    let idx = state.drivers.iter().position(|d| d.id == driver_id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == driver_id)
         .ok_or(KernelError::NotFound)?;
 
     let name = state.drivers[idx].name.clone();
@@ -781,7 +846,12 @@ pub fn driver_crashed(driver_id: u32) -> KernelResult<()> {
         "udriver",
         Error,
         "driver '{}' (id={}) crashed — freed {} bytes, device {:02x}:{:02x}.{} unclaimed",
-        name, driver_id, freed, addr.bus, addr.device, addr.function
+        name,
+        driver_id,
+        freed,
+        addr.bus,
+        addr.device,
+        addr.function
     );
 
     Ok(())
@@ -791,11 +861,14 @@ pub fn driver_crashed(driver_id: u32) -> KernelResult<()> {
 pub fn report_io(driver_id: u32, count: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
 
-    let idx = state.drivers.iter().position(|d| d.id == driver_id)
+    let idx = state
+        .drivers
+        .iter()
+        .position(|d| d.id == driver_id)
         .ok_or(KernelError::NotFound)?;
 
-    state.drivers[idx].io_requests_served = state.drivers[idx]
-        .io_requests_served.saturating_add(count);
+    state.drivers[idx].io_requests_served =
+        state.drivers[idx].io_requests_served.saturating_add(count);
 
     Ok(())
 }
@@ -818,7 +891,10 @@ pub fn get_driver(id: u32) -> Option<DriverBinding> {
 /// Get the driver bound to a specific device address.
 #[must_use]
 pub fn driver_for_device(addr: DeviceAddr) -> Option<DriverBinding> {
-    STATE.lock().drivers.iter()
+    STATE
+        .lock()
+        .drivers
+        .iter()
         .find(|d| d.device_addr == addr && d.state == DriverState::Active)
         .cloned()
 }
@@ -826,7 +902,10 @@ pub fn driver_for_device(addr: DeviceAddr) -> Option<DriverBinding> {
 /// List all active driver bindings.
 #[must_use]
 pub fn active_drivers() -> Vec<DriverBinding> {
-    STATE.lock().drivers.iter()
+    STATE
+        .lock()
+        .drivers
+        .iter()
         .filter(|d| d.state == DriverState::Active)
         .cloned()
         .collect()
@@ -858,8 +937,11 @@ pub fn stats() -> DriverFrameworkStats {
     let state = STATE.lock();
     DriverFrameworkStats {
         total_drivers: state.drivers.len(),
-        active_drivers: state.drivers.iter()
-            .filter(|d| d.state == DriverState::Active).count(),
+        active_drivers: state
+            .drivers
+            .iter()
+            .filter(|d| d.state == DriverState::Active)
+            .count(),
         unclaimed_devices: state.unclaimed.len(),
         total_mmio_bytes: state.total_mmio_bytes,
         total_dma_bytes: state.total_dma_bytes,
@@ -883,7 +965,9 @@ fn cleanup_driver_resources(state: &mut State, idx: usize) -> u64 {
     let mut freed: u64 = 0;
 
     // Free MMIO mappings.
-    let mmio_bytes: u64 = state.drivers[idx].mmio_mappings.iter()
+    let mmio_bytes: u64 = state.drivers[idx]
+        .mmio_mappings
+        .iter()
         .map(|m| m.size)
         .sum();
     state.drivers[idx].mmio_mappings.clear();
@@ -922,17 +1006,36 @@ pub fn procfs_content() -> String {
     out.push_str("=== Userspace Driver Framework ===\n\n");
 
     // Global stats.
-    out.push_str(&format!("IOMMU: {}\n",
-        if state.iommu_available { "available" } else { "not available" }));
+    out.push_str(&format!(
+        "IOMMU: {}\n",
+        if state.iommu_available {
+            "available"
+        } else {
+            "not available"
+        }
+    ));
     out.push_str(&format!("Registered drivers: {}\n", state.drivers.len()));
-    out.push_str(&format!("Active drivers: {}\n",
-        state.drivers.iter().filter(|d| d.state == DriverState::Active).count()));
+    out.push_str(&format!(
+        "Active drivers: {}\n",
+        state
+            .drivers
+            .iter()
+            .filter(|d| d.state == DriverState::Active)
+            .count()
+    ));
     out.push_str(&format!("Unclaimed devices: {}\n", state.unclaimed.len()));
-    out.push_str(&format!("Total MMIO mapped: {} KiB\n",
-        state.total_mmio_bytes / 1024));
-    out.push_str(&format!("Total DMA allocated: {} KiB\n",
-        state.total_dma_bytes / 1024));
-    out.push_str(&format!("Total registrations: {}\n", state.total_registrations));
+    out.push_str(&format!(
+        "Total MMIO mapped: {} KiB\n",
+        state.total_mmio_bytes / 1024
+    ));
+    out.push_str(&format!(
+        "Total DMA allocated: {} KiB\n",
+        state.total_dma_bytes / 1024
+    ));
+    out.push_str(&format!(
+        "Total registrations: {}\n",
+        state.total_registrations
+    ));
     out.push_str(&format!("Total crashes: {}\n", state.total_crashes));
     out.push_str(&format!("Total cleanups: {}\n\n", state.total_cleanups));
 
@@ -942,9 +1045,13 @@ pub fn procfs_content() -> String {
         for dev in &state.unclaimed {
             out.push_str(&format!(
                 "  {:02x}:{:02x}.{}  vendor={:04x} device={:04x}  class={:02x}:{:02x}\n",
-                dev.addr.bus, dev.addr.device, dev.addr.function,
-                dev.id.vendor_id, dev.id.device_id,
-                dev.id.class, dev.id.subclass,
+                dev.addr.bus,
+                dev.addr.device,
+                dev.addr.function,
+                dev.id.vendor_id,
+                dev.id.device_id,
+                dev.id.class,
+                dev.id.subclass,
             ));
         }
         out.push('\n');
@@ -968,8 +1075,11 @@ pub fn procfs_content() -> String {
         out.push_str(&format!(
             "  PID: {}  Device: {:02x}:{:02x}.{}  vendor={:04x} device={:04x}\n",
             drv.pid,
-            drv.device_addr.bus, drv.device_addr.device, drv.device_addr.function,
-            drv.device_id.vendor_id, drv.device_id.device_id,
+            drv.device_addr.bus,
+            drv.device_addr.device,
+            drv.device_addr.function,
+            drv.device_id.vendor_id,
+            drv.device_id.device_id,
         ));
 
         if !drv.mmio_mappings.is_empty() {
@@ -977,15 +1087,21 @@ pub fn procfs_content() -> String {
             for m in &drv.mmio_mappings {
                 out.push_str(&format!(
                     "    BAR{}: phys={:#010x} virt={:#010x} size={:#x} {}\n",
-                    m.bar_index, m.phys_base, m.virt_base, m.size,
+                    m.bar_index,
+                    m.phys_base,
+                    m.virt_base,
+                    m.size,
                     if m.perms.write { "RW" } else { "RO" },
                 ));
             }
         }
 
         if !drv.dma_buffers.is_empty() {
-            out.push_str(&format!("  DMA buffers: {} ({} KiB total)\n",
-                drv.dma_buffers.len(), drv.total_dma_bytes / 1024));
+            out.push_str(&format!(
+                "  DMA buffers: {} ({} KiB total)\n",
+                drv.dma_buffers.len(),
+                drv.total_dma_bytes / 1024
+            ));
         }
 
         if !drv.irq_lines.is_empty() {
@@ -1093,7 +1209,10 @@ fn test_driver_double_bind() {
     // Re-register device (simulating it being available for testing).
     // The device is no longer unclaimed, so registering a second driver
     // should fail with NotFound (device not in unclaimed pool).
-    assert_eq!(register_driver("drv-b", 200, addr), Err(KernelError::NotFound));
+    assert_eq!(
+        register_driver("drv-b", 200, addr),
+        Err(KernelError::NotFound)
+    );
 
     crate::serial_println!("  [udriver] test_driver_double_bind: ok");
 }
@@ -1106,11 +1225,14 @@ fn test_mmio_mapping() {
     let drv_id = register_driver("mmio-test", 100, addr).unwrap();
 
     let mapping = map_mmio(
-        drv_id, 0,
-        0xFE00_0000, 0x4000, // 16 KiB at physical 0xFE000000
+        drv_id,
+        0,
+        0xFE00_0000,
+        0x4000,                // 16 KiB at physical 0xFE000000
         0x0000_7000_0000_0000, // Virtual address
         MmioPerms::READ_WRITE,
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(mapping.bar_index, 0);
     assert_eq!(mapping.phys_base, 0xFE00_0000);
@@ -1131,15 +1253,39 @@ fn test_mmio_bar_conflict() {
     register_device(addr, make_test_id()).unwrap();
     let drv_id = register_driver("bar-test", 100, addr).unwrap();
 
-    map_mmio(drv_id, 0, 0xFE00_0000, 0x4000, 0x7000_0000_0000, MmioPerms::READ_ONLY)
-        .unwrap();
+    map_mmio(
+        drv_id,
+        0,
+        0xFE00_0000,
+        0x4000,
+        0x7000_0000_0000,
+        MmioPerms::READ_ONLY,
+    )
+    .unwrap();
 
     // Mapping same BAR again should fail.
-    let err = map_mmio(drv_id, 0, 0xFE01_0000, 0x4000, 0x7000_0001_0000, MmioPerms::READ_ONLY);
+    let err = map_mmio(
+        drv_id,
+        0,
+        0xFE01_0000,
+        0x4000,
+        0x7000_0001_0000,
+        MmioPerms::READ_ONLY,
+    );
     assert!(matches!(err, Err(KernelError::AlreadyExists)));
 
     // Different BAR should work.
-    assert!(map_mmio(drv_id, 1, 0xFE01_0000, 0x4000, 0x7000_0001_0000, MmioPerms::READ_WRITE).is_ok());
+    assert!(
+        map_mmio(
+            drv_id,
+            1,
+            0xFE01_0000,
+            0x4000,
+            0x7000_0001_0000,
+            MmioPerms::READ_WRITE
+        )
+        .is_ok()
+    );
 
     crate::serial_println!("  [udriver] test_mmio_bar_conflict: ok");
 }
@@ -1151,12 +1297,7 @@ fn test_dma_allocation() {
     register_device(addr, make_test_id()).unwrap();
     let drv_id = register_driver("dma-test", 100, addr).unwrap();
 
-    let buf = alloc_dma(
-        drv_id,
-        4096,
-        DmaDirection::Bidirectional,
-        0x7000_0010_0000,
-    ).unwrap();
+    let buf = alloc_dma(drv_id, 4096, DmaDirection::Bidirectional, 0x7000_0010_0000).unwrap();
 
     assert!(buf.id > 0);
     assert!(buf.size >= 4096);
@@ -1244,10 +1385,16 @@ fn test_driver_crash_cleanup() {
     let drv_id = register_driver("crash-test", 100, addr).unwrap();
 
     // Set up resources.
-    map_mmio(drv_id, 0, 0xFE00_0000, 0x4000, 0x7000_0000_0000, MmioPerms::READ_WRITE)
-        .unwrap();
-    alloc_dma(drv_id, 4096, DmaDirection::FromDevice, 0x7000_0010_0000)
-        .unwrap();
+    map_mmio(
+        drv_id,
+        0,
+        0xFE00_0000,
+        0x4000,
+        0x7000_0000_0000,
+        MmioPerms::READ_WRITE,
+    )
+    .unwrap();
+    alloc_dma(drv_id, 4096, DmaDirection::FromDevice, 0x7000_0010_0000).unwrap();
     register_irq(drv_id, 10).unwrap();
     activate_driver(drv_id).unwrap();
 
@@ -1280,10 +1427,16 @@ fn test_unregister_cleanup() {
     register_device(addr, make_test_id()).unwrap();
     let drv_id = register_driver("unreg-test", 100, addr).unwrap();
 
-    map_mmio(drv_id, 0, 0xFE00_0000, 0x4000, 0x7000_0000_0000, MmioPerms::READ_WRITE)
-        .unwrap();
-    alloc_dma(drv_id, 8192, DmaDirection::Bidirectional, 0x7000_0010_0000)
-        .unwrap();
+    map_mmio(
+        drv_id,
+        0,
+        0xFE00_0000,
+        0x4000,
+        0x7000_0000_0000,
+        MmioPerms::READ_WRITE,
+    )
+    .unwrap();
+    alloc_dma(drv_id, 8192, DmaDirection::Bidirectional, 0x7000_0010_0000).unwrap();
 
     assert!(unregister_driver(drv_id).is_ok());
 

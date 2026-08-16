@@ -61,14 +61,14 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
-use alloc::collections::BTreeMap;
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::collections::BTreeMap;
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -200,7 +200,12 @@ pub struct Message {
 
 impl core::fmt::Debug for Message {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Message({} bytes, {} caps)", self.data.len(), self.caps.len())
+        write!(
+            f,
+            "Message({} bytes, {} caps)",
+            self.data.len(),
+            self.caps.len()
+        )
     }
 }
 
@@ -436,7 +441,8 @@ pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
 
     {
         let mut channels = CHANNELS.lock();
-        let ch = channels.get_mut(&handle.channel_id())
+        let ch = channels
+            .get_mut(&handle.channel_id())
             .ok_or(KernelError::InvalidHandle)?;
 
         // Check if OUR side is closed (can't send from a closed endpoint).
@@ -514,7 +520,8 @@ pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
 
         {
             let mut channels = CHANNELS.lock();
-            let ch = channels.get_mut(&handle.channel_id())
+            let ch = channels
+                .get_mut(&handle.channel_id())
                 .ok_or(KernelError::InvalidHandle)?;
 
             let our_side = handle.side();
@@ -617,7 +624,8 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
     // Fast path: try immediately.
     {
         let mut channels = CHANNELS.lock();
-        let ch = channels.get_mut(&handle.channel_id())
+        let ch = channels
+            .get_mut(&handle.channel_id())
             .ok_or(KernelError::InvalidHandle)?;
 
         let our_side = handle.side();
@@ -671,11 +679,8 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
         }
     }
 
-    let timer_handle = crate::hrtimer::schedule_ns(
-        timeout_ns,
-        timeout_wake,
-        sched::current_task_id(),
-    );
+    let timer_handle =
+        crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, sched::current_task_id());
 
     // Wrap in Option for retry without clone.
     let mut pending = Some(msg);
@@ -683,11 +688,10 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
     loop {
         {
             let mut channels = CHANNELS.lock();
-            let ch = channels.get_mut(&handle.channel_id())
-                .ok_or_else(|| {
-                    crate::hrtimer::cancel(timer_handle);
-                    KernelError::InvalidHandle
-                })?;
+            let ch = channels.get_mut(&handle.channel_id()).ok_or_else(|| {
+                crate::hrtimer::cancel(timer_handle);
+                KernelError::InvalidHandle
+            })?;
 
             let our_side = handle.side();
             if ch.closed[our_side] || ch.closed[handle.peer_side()] {
@@ -943,7 +947,8 @@ pub fn has_pending(handle: ChannelHandle) -> bool {
 /// [`InvalidHandle`]: KernelError::InvalidHandle
 pub fn try_recv(handle: ChannelHandle) -> KernelResult<Option<Message>> {
     let mut channels = CHANNELS.lock();
-    let ch = channels.get_mut(&handle.channel_id())
+    let ch = channels
+        .get_mut(&handle.channel_id())
         .ok_or(KernelError::InvalidHandle)?;
 
     let our_side = handle.side();
@@ -1003,7 +1008,8 @@ pub fn recv(handle: ChannelHandle) -> KernelResult<Message> {
         // First, try non-blocking receive.
         {
             let mut channels = CHANNELS.lock();
-            let ch = channels.get_mut(&handle.channel_id())
+            let ch = channels
+                .get_mut(&handle.channel_id())
                 .ok_or(KernelError::InvalidHandle)?;
 
             let our_side = handle.side();
@@ -1114,7 +1120,8 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
     loop {
         {
             let mut channels = CHANNELS.lock();
-            let ch = channels.get_mut(&handle.channel_id())
+            let ch = channels
+                .get_mut(&handle.channel_id())
                 .ok_or(KernelError::InvalidHandle)?;
 
             let our_side = handle.side();
@@ -1261,8 +1268,7 @@ fn test_basic_send_recv() -> KernelResult<()> {
     let msg = Message::from_bytes(b"hello")?;
     send(ep0, msg)?;
 
-    let received = try_recv(ep1)?
-        .ok_or(KernelError::InternalError)?;
+    let received = try_recv(ep1)?.ok_or(KernelError::InternalError)?;
     if received.data() != b"hello" {
         serial_println!("[ipc]   FAIL: basic send/recv data mismatch");
         return Err(KernelError::InternalError);
@@ -1272,8 +1278,7 @@ fn test_basic_send_recv() -> KernelResult<()> {
     let msg = Message::from_bytes(b"world")?;
     send(ep1, msg)?;
 
-    let received = try_recv(ep0)?
-        .ok_or(KernelError::InternalError)?;
+    let received = try_recv(ep0)?.ok_or(KernelError::InternalError)?;
     if received.data() != b"world" {
         serial_println!("[ipc]   FAIL: reverse send/recv data mismatch");
         return Err(KernelError::InternalError);
@@ -1295,10 +1300,13 @@ fn test_message_ordering() -> KernelResult<()> {
     }
 
     for i in 0u8..10 {
-        let received = try_recv(ep1)?
-            .ok_or(KernelError::InternalError)?;
+        let received = try_recv(ep1)?.ok_or(KernelError::InternalError)?;
         if received.data() != [i] {
-            serial_println!("[ipc]   FAIL: ordering — expected {}, got {:?}", i, received.data());
+            serial_println!(
+                "[ipc]   FAIL: ordering — expected {}, got {:?}",
+                i,
+                received.data()
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -1330,7 +1338,10 @@ fn test_close_detection() -> KernelResult<()> {
     match try_recv(ep1) {
         Err(KernelError::ChannelClosed) => {}
         other => {
-            serial_println!("[ipc]   FAIL: recv on closed empty channel returned {:?}", other);
+            serial_println!(
+                "[ipc]   FAIL: recv on closed empty channel returned {:?}",
+                other
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -1502,7 +1513,10 @@ fn test_recv_timeout() -> KernelResult<()> {
         }
     }
     if result != 1 {
-        serial_println!("[ipc]   FAIL: recv_timeout didn't time out (result={})", result);
+        serial_println!(
+            "[ipc]   FAIL: recv_timeout didn't time out (result={})",
+            result
+        );
         close(ep0);
         close(ep1);
         return Err(KernelError::InternalError);
@@ -1566,7 +1580,10 @@ fn test_recv_timeout() -> KernelResult<()> {
     match recv_timeout(ep1, 0) {
         Ok(m) if m.data() == b"instant" => {}
         other => {
-            serial_println!("[ipc]   FAIL: recv_timeout(0) with msg returned {:?}", other);
+            serial_println!(
+                "[ipc]   FAIL: recv_timeout(0) with msg returned {:?}",
+                other
+            );
             close(ep0);
             close(ep1);
             return Err(KernelError::InternalError);
@@ -1615,8 +1632,7 @@ fn test_cap_transfer_message() -> KernelResult<()> {
     send(ep0, msg)?;
 
     // Receive it on the other side.
-    let mut received = try_recv(ep1)?
-        .ok_or(KernelError::InternalError)?;
+    let mut received = try_recv(ep1)?.ok_or(KernelError::InternalError)?;
 
     // Verify data.
     if received.data() != b"hello-caps" {
@@ -1628,7 +1644,10 @@ fn test_cap_transfer_message() -> KernelResult<()> {
 
     // Verify caps survived the transfer.
     if received.cap_count() != 2 {
-        serial_println!("[ipc]   FAIL: cap_count after recv = {}", received.cap_count());
+        serial_println!(
+            "[ipc]   FAIL: cap_count after recv = {}",
+            received.cap_count()
+        );
         close(ep0);
         close(ep1);
         return Err(KernelError::InternalError);
@@ -1643,9 +1662,7 @@ fn test_cap_transfer_message() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    if received_caps[0].resource_id != 42
-        || received_caps[1].resource_id != 100
-    {
+    if received_caps[0].resource_id != 42 || received_caps[1].resource_id != 100 {
         serial_println!("[ipc]   FAIL: cap resource_id mismatch");
         close(ep0);
         close(ep1);
@@ -1654,7 +1671,10 @@ fn test_cap_transfer_message() -> KernelResult<()> {
 
     // After take_caps, message should have 0 caps.
     if received.cap_count() != 0 {
-        serial_println!("[ipc]   FAIL: cap_count after take = {}", received.cap_count());
+        serial_println!(
+            "[ipc]   FAIL: cap_count after take = {}",
+            received.cap_count()
+        );
         close(ep0);
         close(ep1);
         return Err(KernelError::InternalError);
@@ -1680,7 +1700,10 @@ fn test_sync_send_no_receiver() -> KernelResult<()> {
     match send(ep0, msg) {
         Err(KernelError::ChannelFull) => {}
         other => {
-            serial_println!("[ipc]   FAIL: sync send without receiver returned {:?}", other);
+            serial_println!(
+                "[ipc]   FAIL: sync send without receiver returned {:?}",
+                other
+            );
             close(ep0);
             close(ep1);
             return Err(KernelError::InternalError);
@@ -1762,7 +1785,10 @@ fn test_sync_rendezvous() -> KernelResult<()> {
 
     let result = SYNC_RECV_RESULT.load(Ordering::SeqCst);
     if result != 42 {
-        serial_println!("[ipc]   FAIL: sync rendezvous result={}, expected 42", result);
+        serial_println!(
+            "[ipc]   FAIL: sync rendezvous result={}, expected 42",
+            result
+        );
         close(ep0);
         close(ep1);
         return Err(KernelError::InternalError);
@@ -1785,7 +1811,10 @@ fn test_sync_close() -> KernelResult<()> {
     match send(ep1, msg) {
         Err(KernelError::ChannelClosed) => {}
         other => {
-            serial_println!("[ipc]   FAIL: sync send to closed peer returned {:?}", other);
+            serial_println!(
+                "[ipc]   FAIL: sync send to closed peer returned {:?}",
+                other
+            );
             close(ep1);
             return Err(KernelError::InternalError);
         }
@@ -1795,7 +1824,10 @@ fn test_sync_close() -> KernelResult<()> {
     match try_recv(ep1) {
         Err(KernelError::ChannelClosed) => {}
         other => {
-            serial_println!("[ipc]   FAIL: sync recv on closed channel returned {:?}", other);
+            serial_println!(
+                "[ipc]   FAIL: sync recv on closed channel returned {:?}",
+                other
+            );
             close(ep1);
             return Err(KernelError::InternalError);
         }

@@ -18,14 +18,14 @@
 //! Layer 2 broadcast or a Layer 3 subnet-directed broadcast.  This
 //! implementation uses UDP broadcast for maximum compatibility.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::KernelResult;
 use super::interface::Ipv4Addr;
+use crate::error::KernelResult;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -79,8 +79,7 @@ impl core::fmt::Display for MacAddress {
         write!(
             f,
             "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            self.0[0], self.0[1], self.0[2],
-            self.0[3], self.0[4], self.0[5],
+            self.0[0], self.0[1], self.0[2], self.0[3], self.0[4], self.0[5],
         )
     }
 }
@@ -116,10 +115,7 @@ pub fn wake(target_mac: MacAddress, broadcast_ip: Option<Ipv4Addr>) -> KernelRes
     match super::udp::send(src_port, dest, WOL_PORT, &payload) {
         Ok(()) => {
             PACKETS_SENT.fetch_add(1, Ordering::Relaxed);
-            crate::serial_println!(
-                "[wol] Magic packet sent to {} via {}",
-                target_mac, dest
-            );
+            crate::serial_println!("[wol] Magic packet sent to {} via {}", target_mac, dest);
             Ok(())
         }
         Err(e) => {
@@ -170,8 +166,14 @@ pub fn self_test() -> KernelResult<()> {
 
         assert!(MacAddress::parse("invalid").is_none(), "reject invalid");
         assert!(MacAddress::parse("AA:BB:CC").is_none(), "reject short");
-        assert!(MacAddress::parse("AA:BB:CC:DD:EE:FF:00").is_none(), "reject long");
-        assert!(MacAddress::parse("GG:HH:II:JJ:KK:LL").is_none(), "reject non-hex");
+        assert!(
+            MacAddress::parse("AA:BB:CC:DD:EE:FF:00").is_none(),
+            "reject long"
+        );
+        assert!(
+            MacAddress::parse("GG:HH:II:JJ:KK:LL").is_none(),
+            "reject non-hex"
+        );
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[wol]   test 1 (MAC parsing) PASSED");
@@ -203,7 +205,10 @@ pub fn self_test() -> KernelResult<()> {
         // Check MAC repetitions.
         for rep in 0..MAC_REPETITIONS {
             let offset = 6 + rep * 6;
-            assert!(pkt.get(offset..offset + 6) == Some(&mac.0[..]), "MAC repetition");
+            assert!(
+                pkt.get(offset..offset + 6) == Some(&mac.0[..]),
+                "MAC repetition"
+            );
         }
 
         passed = passed.saturating_add(1);

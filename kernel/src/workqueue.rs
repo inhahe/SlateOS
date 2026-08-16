@@ -31,10 +31,10 @@
 //! - Linux `kernel/workqueue.c` — `alloc_workqueue`, `queue_work`
 //! - FreeBSD `sys/kern/subr_taskqueue.c`
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::error::KernelResult;
 use crate::sched::waitqueue::WaitQueue;
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -174,9 +174,7 @@ static ITEMS_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// (F1) and the frame::stats fix (F4).
 pub fn submit(func: fn(u64), arg: u64) -> bool {
     let item = WorkItem { func, arg };
-    let enqueued = crate::cpu::without_interrupts(|| {
-        QUEUE.lock().enqueue(item)
-    });
+    let enqueued = crate::cpu::without_interrupts(|| QUEUE.lock().enqueue(item));
 
     if enqueued {
         ITEMS_SUBMITTED.fetch_add(1, Ordering::Relaxed);
@@ -277,7 +275,8 @@ extern "C" fn worker_entry(_arg: u64) {
                             "[workqueue] CRITICAL: refusing to execute corrupt work item \
                              func={:#x} arg={:#x} — queue corruption; skipping \
                              (see B-KNULLJUMP-SIGNAL)",
-                            func_addr, work.arg
+                            func_addr,
+                            work.arg
                         );
                         ITEMS_DROPPED.fetch_add(1, Ordering::Relaxed);
                     }
@@ -321,20 +320,15 @@ pub fn init() -> KernelResult<()> {
     let pml4 = crate::mm::page_table::active_pml4_phys();
     let priority = crate::sched::task::DEFAULT_PRIORITY.saturating_add(2);
 
-    let tid = crate::sched::spawn(
-        b"kworker",
-        priority,
-        worker_entry,
-        0,
-        pml4,
-    )?;
+    let tid = crate::sched::spawn(b"kworker", priority, worker_entry, 0, pml4)?;
 
     WORKER_TID.store(tid, Ordering::Release);
     SPAWNED.store(true, Ordering::Release);
 
     serial_println!(
         "[workqueue] Worker spawned as task {} (priority {})",
-        tid, priority,
+        tid,
+        priority,
     );
 
     Ok(())
@@ -409,7 +403,8 @@ pub fn self_test() {
     assert!(enqueued > 0, "Should enqueue at least some items");
     serial_println!(
         "[workqueue]   Capacity handling: OK (enqueued {}/{})",
-        enqueued, QUEUE_CAPACITY,
+        enqueued,
+        QUEUE_CAPACITY,
     );
 
     // Let worker drain.
@@ -424,7 +419,9 @@ pub fn self_test() {
     assert!(stats_executed > 0);
     serial_println!(
         "[workqueue]   Stats: submitted={}, executed={}, dropped={}",
-        stats_submitted, stats_executed, dropped_count(),
+        stats_submitted,
+        stats_executed,
+        dropped_count(),
     );
 
     serial_println!("[workqueue] Self-test PASSED");

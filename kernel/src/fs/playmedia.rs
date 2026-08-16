@@ -24,10 +24,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -149,7 +149,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         sessions: Vec::new(),
         active_session_id: None,
@@ -194,7 +196,9 @@ pub fn unregister_session(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.sessions.len();
         state.sessions.retain(|s| s.id != id);
-        if state.sessions.len() == before { return Err(KernelError::NotFound); }
+        if state.sessions.len() == before {
+            return Err(KernelError::NotFound);
+        }
         if state.active_session_id == Some(id) {
             state.active_session_id = state.sessions.first().map(|s| s.id);
         }
@@ -203,9 +207,18 @@ pub fn unregister_session(id: u32) -> KernelResult<()> {
 }
 
 /// Update track info for a session.
-pub fn set_track(id: u32, title: &str, artist: &str, album: &str, duration_ms: u64) -> KernelResult<()> {
+pub fn set_track(
+    id: u32,
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration_ms: u64,
+) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.title = String::from(title);
         session.artist = String::from(artist);
@@ -220,7 +233,10 @@ pub fn set_track(id: u32, title: &str, artist: &str, album: &str, duration_ms: u
 /// Update playback state.
 pub fn set_state(id: u32, pstate: PlaybackState) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.state = pstate;
         if pstate == PlaybackState::Playing {
@@ -234,7 +250,10 @@ pub fn set_state(id: u32, pstate: PlaybackState) -> KernelResult<()> {
 pub fn play_pause() -> KernelResult<PlaybackState> {
     with_state(|state| {
         let id = state.active_session_id.ok_or(KernelError::NotFound)?;
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.state = match session.state {
             PlaybackState::Playing => PlaybackState::Paused,
@@ -249,7 +268,10 @@ pub fn play_pause() -> KernelResult<PlaybackState> {
 pub fn next_track() -> KernelResult<()> {
     with_state(|state| {
         let id = state.active_session_id.ok_or(KernelError::NotFound)?;
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.position_ms = 0;
         state.total_track_changes += 1;
@@ -261,7 +283,10 @@ pub fn next_track() -> KernelResult<()> {
 pub fn prev_track() -> KernelResult<()> {
     with_state(|state| {
         let id = state.active_session_id.ok_or(KernelError::NotFound)?;
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.position_ms = 0;
         state.total_track_changes += 1;
@@ -273,7 +298,10 @@ pub fn prev_track() -> KernelResult<()> {
 pub fn set_shuffle(shuffle: bool) -> KernelResult<()> {
     with_state(|state| {
         let id = state.active_session_id.ok_or(KernelError::NotFound)?;
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.shuffle = shuffle;
         Ok(())
@@ -284,7 +312,10 @@ pub fn set_shuffle(shuffle: bool) -> KernelResult<()> {
 pub fn set_repeat(mode: RepeatMode) -> KernelResult<()> {
     with_state(|state| {
         let id = state.active_session_id.ok_or(KernelError::NotFound)?;
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.repeat = mode;
         Ok(())
@@ -301,14 +332,22 @@ pub fn get_now_playing() -> Option<MediaSession> {
 
 /// List all sessions.
 pub fn list_sessions() -> Vec<MediaSession> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.sessions.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sessions.clone())
 }
 
 /// Statistics: (session_count, play_commands, track_changes, ops).
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.sessions.len(), s.total_play_commands, s.total_track_changes, s.ops),
+        Some(s) => (
+            s.sessions.len(),
+            s.total_play_commands,
+            s.total_track_changes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }
@@ -331,7 +370,14 @@ pub fn self_test() {
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Set track.
-    set_track(s1, "Bohemian Rhapsody", "Queen", "Night at the Opera", 354000).expect("track");
+    set_track(
+        s1,
+        "Bohemian Rhapsody",
+        "Queen",
+        "Night at the Opera",
+        354000,
+    )
+    .expect("track");
     let np = get_now_playing().expect("np");
     assert_eq!(np.title, "Bohemian Rhapsody");
     crate::serial_println!("  [3/8] track: OK");

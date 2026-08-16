@@ -38,9 +38,9 @@ pub mod ondisk;
 pub mod superblock;
 pub mod vfs_impl;
 
-use alloc::boxed::Box;
 use crate::error::KernelResult;
 use crate::serial_println;
+use alloc::boxed::Box;
 
 /// Try to mount an ext4 filesystem from the given device at the specified path.
 ///
@@ -106,7 +106,10 @@ pub fn self_test() -> KernelResult<()> {
         }
     };
 
-    serial_println!("[ext4]   ext4 mounted at '{}' — testing...", mount_path.display());
+    serial_println!(
+        "[ext4]   ext4 mounted at '{}' — testing...",
+        mount_path.display()
+    );
 
     // List the root directory of the ext4 mount.
     let root = mount_path.clone();
@@ -121,7 +124,9 @@ pub fn self_test() -> KernelResult<()> {
         };
         serial_println!(
             "[ext4]     {} {:20} {} bytes",
-            type_str, entry.name.display(), entry.size
+            type_str,
+            entry.name.display(),
+            entry.size
         );
     }
 
@@ -129,17 +134,22 @@ pub fn self_test() -> KernelResult<()> {
     let root_stat = crate::fs::Vfs::stat(&root)?;
     serial_println!(
         "[ext4]   Root stat: type={:?}, size={}",
-        root_stat.entry_type, root_stat.size
+        root_stat.entry_type,
+        root_stat.size
     );
 
     // Try to read the first regular file we find (if any).
-    if let Some(first_file) = entries.iter().find(|e| e.entry_type == crate::fs::EntryType::File) {
+    if let Some(first_file) = entries
+        .iter()
+        .find(|e| e.entry_type == crate::fs::EntryType::File)
+    {
         let file_path = root.join(&first_file.name);
         match crate::fs::Vfs::read_file(&file_path) {
             Ok(data) => {
                 serial_println!(
                     "[ext4]   Read '{}': {} bytes",
-                    first_file.name.display(), data.len()
+                    first_file.name.display(),
+                    data.len()
                 );
                 // Show first 64 bytes as text if valid UTF-8.
                 let preview_len = data.len().min(64);
@@ -150,7 +160,8 @@ pub fn self_test() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[ext4]   WARNING: Could not read '{}': {:?}",
-                    first_file.name.display(), e
+                    first_file.name.display(),
+                    e
                 );
             }
         }
@@ -166,7 +177,10 @@ pub fn self_test() -> KernelResult<()> {
         // Initially, no xattrs should be set.
         let keys = crate::fs::Vfs::list_xattrs(&xattr_path)?;
         if !keys.is_empty() {
-            serial_println!("[ext4]   FAIL: new file should have no xattrs, got {}", keys.len());
+            serial_println!(
+                "[ext4]   FAIL: new file should have no xattrs, got {}",
+                keys.len()
+            );
             let _ = crate::fs::Vfs::remove(&xattr_path);
             return Err(crate::error::KernelError::InternalError);
         }
@@ -179,11 +193,17 @@ pub fn self_test() -> KernelResult<()> {
         // Read it back.
         let val = crate::fs::Vfs::get_xattr(&xattr_path, "user.test_key")?;
         if val != b"test_value" {
-            serial_println!("[ext4]   FAIL: get_xattr returned {:?}, expected 'test_value'", val);
+            serial_println!(
+                "[ext4]   FAIL: get_xattr returned {:?}, expected 'test_value'",
+                val
+            );
             let _ = crate::fs::Vfs::remove(&xattr_path);
             return Err(crate::error::KernelError::InternalError);
         }
-        serial_println!("[ext4]     get_xattr user.test_key: {:?} OK", core::str::from_utf8(&val).unwrap_or("?"));
+        serial_println!(
+            "[ext4]     get_xattr user.test_key: {:?} OK",
+            core::str::from_utf8(&val).unwrap_or("?")
+        );
 
         // Set a second xattr.
         crate::fs::Vfs::set_xattr(&xattr_path, "user.another", b"second value")?;
@@ -193,13 +213,19 @@ pub fn self_test() -> KernelResult<()> {
             let _ = crate::fs::Vfs::remove(&xattr_path);
             return Err(crate::error::KernelError::InternalError);
         }
-        serial_println!("[ext4]     list_xattrs after 2 sets: {} keys OK", keys.len());
+        serial_println!(
+            "[ext4]     list_xattrs after 2 sets: {} keys OK",
+            keys.len()
+        );
 
         // Overwrite the first xattr with a new value.
         crate::fs::Vfs::set_xattr(&xattr_path, "user.test_key", b"updated")?;
         let val = crate::fs::Vfs::get_xattr(&xattr_path, "user.test_key")?;
         if val != b"updated" {
-            serial_println!("[ext4]   FAIL: overwritten xattr = {:?}, expected 'updated'", val);
+            serial_println!(
+                "[ext4]   FAIL: overwritten xattr = {:?}, expected 'updated'",
+                val
+            );
             let _ = crate::fs::Vfs::remove(&xattr_path);
             return Err(crate::error::KernelError::InternalError);
         }
@@ -209,7 +235,10 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::remove_xattr(&xattr_path, "user.test_key")?;
         let keys = crate::fs::Vfs::list_xattrs(&xattr_path)?;
         if keys.len() != 1 || keys.first().map(|s| s.as_str()) != Some("user.another") {
-            serial_println!("[ext4]   FAIL: after remove, expected ['user.another'], got {:?}", keys);
+            serial_println!(
+                "[ext4]   FAIL: after remove, expected ['user.another'], got {:?}",
+                keys
+            );
             let _ = crate::fs::Vfs::remove(&xattr_path);
             return Err(crate::error::KernelError::InternalError);
         }
@@ -221,7 +250,10 @@ pub fn self_test() -> KernelResult<()> {
                 serial_println!("[ext4]     get removed xattr: NotFound OK");
             }
             other => {
-                serial_println!("[ext4]   FAIL: get removed xattr should be NotFound, got {:?}", other);
+                serial_println!(
+                    "[ext4]   FAIL: get removed xattr should be NotFound, got {:?}",
+                    other
+                );
                 let _ = crate::fs::Vfs::remove(&xattr_path);
                 return Err(crate::error::KernelError::InternalError);
             }
@@ -247,7 +279,8 @@ pub fn self_test() -> KernelResult<()> {
         if target_read != target_path {
             serial_println!(
                 "[ext4]   FAIL: readlink = '{}', expected '{}'",
-                target_read.display(), target_path.display()
+                target_read.display(),
+                target_path.display()
             );
             let _ = crate::fs::Vfs::remove(&link_path);
             let _ = crate::fs::Vfs::remove(&target_path);
@@ -258,7 +291,10 @@ pub fn self_test() -> KernelResult<()> {
         // lstat on the symlink should return Symlink type.
         let link_stat = crate::fs::Vfs::lstat(&link_path)?;
         if link_stat.entry_type != crate::fs::EntryType::Symlink {
-            serial_println!("[ext4]   FAIL: lstat on symlink should be Symlink, got {:?}", link_stat.entry_type);
+            serial_println!(
+                "[ext4]   FAIL: lstat on symlink should be Symlink, got {:?}",
+                link_stat.entry_type
+            );
             let _ = crate::fs::Vfs::remove(&link_path);
             let _ = crate::fs::Vfs::remove(&target_path);
             return Err(crate::error::KernelError::InternalError);
@@ -268,7 +304,10 @@ pub fn self_test() -> KernelResult<()> {
         // stat (follow) on the symlink should return File type.
         let target_stat = crate::fs::Vfs::stat(&link_path)?;
         if target_stat.entry_type != crate::fs::EntryType::File {
-            serial_println!("[ext4]   FAIL: stat on symlink should follow to File, got {:?}", target_stat.entry_type);
+            serial_println!(
+                "[ext4]   FAIL: stat on symlink should follow to File, got {:?}",
+                target_stat.entry_type
+            );
             let _ = crate::fs::Vfs::remove(&link_path);
             let _ = crate::fs::Vfs::remove(&target_path);
             return Err(crate::error::KernelError::InternalError);
@@ -283,7 +322,10 @@ pub fn self_test() -> KernelResult<()> {
             let _ = crate::fs::Vfs::remove(&target_path);
             return Err(crate::error::KernelError::InternalError);
         }
-        serial_println!("[ext4]     read through symlink OK ({} bytes)", content.len());
+        serial_println!(
+            "[ext4]     read through symlink OK ({} bytes)",
+            content.len()
+        );
 
         // Clean up.
         crate::fs::Vfs::remove(&link_path)?;
@@ -344,9 +386,7 @@ pub fn self_test() -> KernelResult<()> {
                     crtime_sec
                 );
             } else {
-                serial_println!(
-                    "[ext4]     new file btime unrecorded (128-byte inode) OK"
-                );
+                serial_println!("[ext4]     new file btime unrecorded (128-byte inode) OK");
             }
         }
 
@@ -357,7 +397,8 @@ pub fn self_test() -> KernelResult<()> {
         if meta2.modified_ns < meta1.modified_ns {
             serial_println!(
                 "[ext4]   FAIL: overwrite moved mtime backwards ({} -> {})",
-                meta1.modified_ns, meta2.modified_ns
+                meta1.modified_ns,
+                meta2.modified_ns
             );
             let _ = crate::fs::Vfs::remove(&ct_path);
             return Err(crate::error::KernelError::InternalError);
@@ -386,7 +427,9 @@ pub fn self_test() -> KernelResult<()> {
         if actual_atime_sec != expected_sec || actual_mtime_sec != expected_sec {
             serial_println!(
                 "[ext4]   FAIL: set_times atime_sec={}, mtime_sec={}, expected {}",
-                actual_atime_sec, actual_mtime_sec, expected_sec
+                actual_atime_sec,
+                actual_mtime_sec,
+                expected_sec
             );
             let _ = crate::fs::Vfs::remove(&ts_path);
             return Err(crate::error::KernelError::InternalError);
@@ -409,7 +452,10 @@ pub fn self_test() -> KernelResult<()> {
         // Verify initial nlinks = 1.
         let meta = crate::fs::Vfs::metadata(&file_path)?;
         if meta.nlinks != 1 {
-            serial_println!("[ext4]   FAIL: initial nlinks = {}, expected 1", meta.nlinks);
+            serial_println!(
+                "[ext4]   FAIL: initial nlinks = {}, expected 1",
+                meta.nlinks
+            );
             let _ = crate::fs::Vfs::remove(&file_path);
             return Err(crate::error::KernelError::InternalError);
         }
@@ -425,7 +471,8 @@ pub fn self_test() -> KernelResult<()> {
         if meta_src.nlinks != 2 || meta_dst.nlinks != 2 {
             serial_println!(
                 "[ext4]   FAIL: after link, src.nlinks={}, dst.nlinks={}, expected 2",
-                meta_src.nlinks, meta_dst.nlinks
+                meta_src.nlinks,
+                meta_dst.nlinks
             );
             let _ = crate::fs::Vfs::remove(&link_path);
             let _ = crate::fs::Vfs::remove(&file_path);
@@ -441,13 +488,17 @@ pub fn self_test() -> KernelResult<()> {
             let _ = crate::fs::Vfs::remove(&file_path);
             return Err(crate::error::KernelError::InternalError);
         }
-        serial_println!("[ext4]     read through hard link OK ({} bytes)", content.len());
+        serial_println!(
+            "[ext4]     read through hard link OK ({} bytes)",
+            content.len()
+        );
 
         // Both should have the same file size.
         if meta_src.size != meta_dst.size {
             serial_println!(
                 "[ext4]   FAIL: size mismatch: src={}, dst={}",
-                meta_src.size, meta_dst.size
+                meta_src.size,
+                meta_dst.size
             );
             let _ = crate::fs::Vfs::remove(&link_path);
             let _ = crate::fs::Vfs::remove(&file_path);
@@ -468,8 +519,14 @@ pub fn self_test() -> KernelResult<()> {
                 v
             }),
         );
-        if !matches!(link_dir_result, Err(crate::error::KernelError::IsADirectory)) {
-            serial_println!("[ext4]   FAIL: linking directory should return IsADirectory, got {:?}", link_dir_result);
+        if !matches!(
+            link_dir_result,
+            Err(crate::error::KernelError::IsADirectory)
+        ) {
+            serial_println!(
+                "[ext4]   FAIL: linking directory should return IsADirectory, got {:?}",
+                link_dir_result
+            );
             let _ = crate::fs::Vfs::rmdir(&dir_path);
             let _ = crate::fs::Vfs::remove(&link_path);
             let _ = crate::fs::Vfs::remove(&file_path);
@@ -481,7 +538,10 @@ pub fn self_test() -> KernelResult<()> {
         // Linking to an existing name should fail.
         let dup_result = crate::fs::Vfs::link(&file_path, &link_path);
         if !matches!(dup_result, Err(crate::error::KernelError::AlreadyExists)) {
-            serial_println!("[ext4]   FAIL: duplicate link should return AlreadyExists, got {:?}", dup_result);
+            serial_println!(
+                "[ext4]   FAIL: duplicate link should return AlreadyExists, got {:?}",
+                dup_result
+            );
             let _ = crate::fs::Vfs::remove(&link_path);
             let _ = crate::fs::Vfs::remove(&file_path);
             return Err(crate::error::KernelError::InternalError);
@@ -492,7 +552,10 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::remove(&file_path)?;
         let meta_after = crate::fs::Vfs::metadata(&link_path)?;
         if meta_after.nlinks != 1 {
-            serial_println!("[ext4]   FAIL: after removing one link, nlinks={}, expected 1", meta_after.nlinks);
+            serial_println!(
+                "[ext4]   FAIL: after removing one link, nlinks={}, expected 1",
+                meta_after.nlinks
+            );
             let _ = crate::fs::Vfs::remove(&link_path);
             return Err(crate::error::KernelError::InternalError);
         }
@@ -523,7 +586,10 @@ pub fn self_test() -> KernelResult<()> {
         // File size should still be 0 (fallocate doesn't change size).
         let stat = crate::fs::Vfs::stat(&fa_path)?;
         if stat.size != 0 {
-            serial_println!("[ext4]   FAIL: fallocate on empty file changed size to {}", stat.size);
+            serial_println!(
+                "[ext4]   FAIL: fallocate on empty file changed size to {}",
+                stat.size
+            );
             let _ = crate::fs::Vfs::remove(&fa_path);
             return Err(crate::error::KernelError::InternalError);
         }
@@ -534,7 +600,9 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::write_file(&fa_path, b"after fallocate")?;
         let data = crate::fs::Vfs::read_file(&fa_path)?;
         if data != b"after fallocate" {
-            serial_println!("[ext4]   FAIL: read after write to fallocated file returned wrong data");
+            serial_println!(
+                "[ext4]   FAIL: read after write to fallocated file returned wrong data"
+            );
             let _ = crate::fs::Vfs::remove(&fa_path);
             return Err(crate::error::KernelError::InternalError);
         }
@@ -603,7 +671,8 @@ pub fn self_test() -> KernelResult<()> {
         if data.len() != expected_len {
             serial_println!(
                 "[ext4]   FAIL: write_at crossing EOF: len={}, expected {}",
-                data.len(), expected_len
+                data.len(),
+                expected_len
             );
             let _ = crate::fs::Vfs::remove(&wa_path);
             return Err(crate::error::KernelError::InternalError);
@@ -624,7 +693,10 @@ pub fn self_test() -> KernelResult<()> {
             let _ = crate::fs::Vfs::remove(&wa_path);
             return Err(crate::error::KernelError::InternalError);
         }
-        serial_println!("[ext4]     write_at crossing EOF: OK ({} bytes)", data.len());
+        serial_println!(
+            "[ext4]     write_at crossing EOF: OK ({} bytes)",
+            data.len()
+        );
 
         crate::fs::Vfs::remove(&wa_path)?;
         serial_println!("[ext4]     write_at test file cleaned up OK");

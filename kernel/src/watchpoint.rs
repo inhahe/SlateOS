@@ -43,8 +43,8 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU8, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -109,9 +109,9 @@ pub struct WatchEvent {
 struct WatchStore(core::cell::UnsafeCell<[Watchpoint; MAX_WATCHPOINTS]>);
 unsafe impl Sync for WatchStore {}
 
-static STORE: WatchStore = WatchStore(
-    core::cell::UnsafeCell::new([Watchpoint::empty(); MAX_WATCHPOINTS])
-);
+static STORE: WatchStore = WatchStore(core::cell::UnsafeCell::new(
+    [Watchpoint::empty(); MAX_WATCHPOINTS],
+));
 
 /// Number of active watchpoints.
 static ACTIVE_COUNT: AtomicU8 = AtomicU8::new(0);
@@ -124,7 +124,13 @@ struct EventLog(core::cell::UnsafeCell<[WatchEvent; EVENT_LOG_SIZE]>);
 unsafe impl Sync for EventLog {}
 
 static EVENTS: EventLog = EventLog(core::cell::UnsafeCell::new(
-    [WatchEvent { slot: 0, address: 0, old_value: 0, new_value: 0, tick: 0 }; EVENT_LOG_SIZE]
+    [WatchEvent {
+        slot: 0,
+        address: 0,
+        old_value: 0,
+        new_value: 0,
+        tick: 0,
+    }; EVENT_LOG_SIZE],
 ));
 
 static EVENT_POS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -158,9 +164,7 @@ pub fn add(address: u64, label: &[u8]) -> Option<usize> {
         if !wp.active {
             // Read current value at the address.
             // SAFETY: We verified it's a kernel-space aligned address.
-            let current_value = unsafe {
-                core::ptr::read_volatile(address as *const u64)
-            };
+            let current_value = unsafe { core::ptr::read_volatile(address as *const u64) };
 
             let mut wp_label = [0u8; 8];
             let copy_len = label.len().min(7);
@@ -241,9 +245,7 @@ pub fn poll() -> usize {
 
         // Read current value.
         // SAFETY: Address was validated on add().
-        let current = unsafe {
-            core::ptr::read_volatile(wp.address as *const u64)
-        };
+        let current = unsafe { core::ptr::read_volatile(wp.address as *const u64) };
 
         if current != wp.last_value {
             // Value changed!
@@ -363,7 +365,11 @@ pub fn self_test() {
         assert!(slot.is_some());
         let slot = slot.unwrap();
         assert_eq!(active_count(), 1);
-        serial_println!("[watchpoint]   Add: OK (slot={}, addr={:#x})", slot, test_addr);
+        serial_println!(
+            "[watchpoint]   Add: OK (slot={}, addr={:#x})",
+            slot,
+            test_addr
+        );
 
         // Test 3: Poll with no change.
         let changes = poll();
@@ -382,7 +388,13 @@ pub fn self_test() {
         serial_println!("[watchpoint]   Poll (detected change): OK");
 
         // Test 5: Check event log.
-        let mut events = [WatchEvent { slot: 0, address: 0, old_value: 0, new_value: 0, tick: 0 }; 4];
+        let mut events = [WatchEvent {
+            slot: 0,
+            address: 0,
+            old_value: 0,
+            new_value: 0,
+            tick: 0,
+        }; 4];
         let n = recent_events(&mut events);
         assert!(n >= 1);
         assert_eq!(events[0].address, test_addr);

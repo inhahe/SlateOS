@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -36,12 +36,12 @@ use crate::error::{KernelError, KernelResult};
 /// I/O scheduling algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoAlgorithm {
-    None,        // No scheduling (direct dispatch).
-    Fifo,        // First-in-first-out.
-    Deadline,    // Deadline scheduler (read/write deadlines).
-    Bfq,         // Budget Fair Queueing.
-    Kyber,       // Kyber multiqueue scheduler.
-    Mq,          // Simple multiqueue.
+    None,     // No scheduling (direct dispatch).
+    Fifo,     // First-in-first-out.
+    Deadline, // Deadline scheduler (read/write deadlines).
+    Bfq,      // Budget Fair Queueing.
+    Kyber,    // Kyber multiqueue scheduler.
+    Mq,       // Simple multiqueue.
 }
 
 impl IoAlgorithm {
@@ -126,24 +126,36 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: alloc::vec![
             DeviceScheduler {
                 device_name: String::from("sda"),
                 algorithm: IoAlgorithm::Bfq,
-                queue_depth: 128, read_expire_ms: 500,
-                write_expire_ms: 5000, merge_enabled: true,
-                front_merge: true, nr_requests: 256,
-                total_dispatched: 0, total_merged: 0, total_requeued: 0,
+                queue_depth: 128,
+                read_expire_ms: 500,
+                write_expire_ms: 5000,
+                merge_enabled: true,
+                front_merge: true,
+                nr_requests: 256,
+                total_dispatched: 0,
+                total_merged: 0,
+                total_requeued: 0,
             },
             DeviceScheduler {
                 device_name: String::from("nvme0n1"),
                 algorithm: IoAlgorithm::Kyber,
-                queue_depth: 1024, read_expire_ms: 250,
-                write_expire_ms: 1000, merge_enabled: true,
-                front_merge: false, nr_requests: 1024,
-                total_dispatched: 0, total_merged: 0, total_requeued: 0,
+                queue_depth: 1024,
+                read_expire_ms: 250,
+                write_expire_ms: 1000,
+                merge_enabled: true,
+                front_merge: false,
+                nr_requests: 1024,
+                total_dispatched: 0,
+                total_merged: 0,
+                total_requeued: 0,
             },
         ],
         default_algo: IoAlgorithm::Bfq,
@@ -156,18 +168,27 @@ pub fn init_defaults() {
 
 /// List all device scheduler configs.
 pub fn list_devices() -> Vec<DeviceScheduler> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Get scheduler config for a device.
 pub fn get_device(name: &str) -> Option<DeviceScheduler> {
-    STATE.lock().as_ref().and_then(|s| s.devices.iter().find(|d| d.device_name == name).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.devices.iter().find(|d| d.device_name == name).cloned())
 }
 
 /// Set I/O algorithm for a device.
 pub fn set_scheduler(device: &str, algo: IoAlgorithm) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device_name == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_name == device)
             .ok_or(KernelError::NotFound)?;
         dev.algorithm = algo;
         Ok(())
@@ -180,7 +201,10 @@ pub fn set_queue_depth(device: &str, depth: u32) -> KernelResult<()> {
         if depth == 0 || depth > 65536 {
             return Err(KernelError::InvalidArgument);
         }
-        let dev = state.devices.iter_mut().find(|d| d.device_name == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_name == device)
             .ok_or(KernelError::NotFound)?;
         dev.queue_depth = depth;
         Ok(())
@@ -190,7 +214,10 @@ pub fn set_queue_depth(device: &str, depth: u32) -> KernelResult<()> {
 /// Set read/write expiry times.
 pub fn set_expiry(device: &str, read_ms: u32, write_ms: u32) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device_name == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_name == device)
             .ok_or(KernelError::NotFound)?;
         dev.read_expire_ms = read_ms;
         dev.write_expire_ms = write_ms;
@@ -201,7 +228,10 @@ pub fn set_expiry(device: &str, read_ms: u32, write_ms: u32) -> KernelResult<()>
 /// Enable/disable merge.
 pub fn set_merge(device: &str, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device_name == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_name == device)
             .ok_or(KernelError::NotFound)?;
         dev.merge_enabled = enabled;
         Ok(())
@@ -218,11 +248,17 @@ pub fn add_device(name: &str, algo: IoAlgorithm) -> KernelResult<()> {
             return Err(KernelError::AlreadyExists);
         }
         state.devices.push(DeviceScheduler {
-            device_name: String::from(name), algorithm: algo,
-            queue_depth: 128, read_expire_ms: 500,
-            write_expire_ms: 5000, merge_enabled: true,
-            front_merge: true, nr_requests: 256,
-            total_dispatched: 0, total_merged: 0, total_requeued: 0,
+            device_name: String::from(name),
+            algorithm: algo,
+            queue_depth: 128,
+            read_expire_ms: 500,
+            write_expire_ms: 5000,
+            merge_enabled: true,
+            front_merge: true,
+            nr_requests: 256,
+            total_dispatched: 0,
+            total_merged: 0,
+            total_requeued: 0,
         });
         Ok(())
     })
@@ -231,7 +267,10 @@ pub fn add_device(name: &str, algo: IoAlgorithm) -> KernelResult<()> {
 /// Simulate dispatching I/O.
 pub fn dispatch(device: &str, merged: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device_name == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device_name == device)
             .ok_or(KernelError::NotFound)?;
         dev.total_dispatched += 1;
         state.total_dispatched += 1;
@@ -253,14 +292,23 @@ pub fn set_default(algo: IoAlgorithm) -> KernelResult<()> {
 
 /// Get default algorithm.
 pub fn get_default() -> IoAlgorithm {
-    STATE.lock().as_ref().map_or(IoAlgorithm::Bfq, |s| s.default_algo)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(IoAlgorithm::Bfq, |s| s.default_algo)
 }
 
 /// Statistics: (device_count, total_dispatched, total_merged, total_requeued, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_dispatched, s.total_merged, s.total_requeued, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_dispatched,
+            s.total_merged,
+            s.total_requeued,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

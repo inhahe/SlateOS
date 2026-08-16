@@ -44,10 +44,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
@@ -147,14 +147,17 @@ pub fn init() {
         })
         .collect();
 
-    inner.namespaces.insert(ROOT_NAMESPACE, Namespace {
-        id: ROOT_NAMESPACE,
-        name: String::from("root"),
-        parent: None,
-        mounts,
-        refcount: 1, // Always at least one reference.
-        allow_nested: true,
-    });
+    inner.namespaces.insert(
+        ROOT_NAMESPACE,
+        Namespace {
+            id: ROOT_NAMESPACE,
+            name: String::from("root"),
+            parent: None,
+            mounts,
+            refcount: 1, // Always at least one reference.
+            allow_nested: true,
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -172,8 +175,7 @@ pub fn create(parent: NamespaceId, name: &str) -> KernelResult<NamespaceId> {
         return Err(KernelError::ResourceExhausted);
     }
 
-    let parent_ns = inner.namespaces.get(&parent)
-        .ok_or(KernelError::NotFound)?;
+    let parent_ns = inner.namespaces.get(&parent).ok_or(KernelError::NotFound)?;
 
     if !parent_ns.allow_nested {
         return Err(KernelError::PermissionDenied);
@@ -185,14 +187,17 @@ pub fn create(parent: NamespaceId, name: &str) -> KernelResult<NamespaceId> {
     let id = inner.next_id;
     inner.next_id = inner.next_id.wrapping_add(1);
 
-    inner.namespaces.insert(id, Namespace {
+    inner.namespaces.insert(
         id,
-        name: name.into(),
-        parent: Some(parent),
-        mounts,
-        refcount: 0,
-        allow_nested: true,
-    });
+        Namespace {
+            id,
+            name: name.into(),
+            parent: Some(parent),
+            mounts,
+            refcount: 0,
+            allow_nested: true,
+        },
+    );
 
     Ok(id)
 }
@@ -226,14 +231,18 @@ pub fn destroy(ns_id: NamespaceId) -> KernelResult<()> {
 /// List all namespaces.
 pub fn list() -> Vec<NamespaceInfo> {
     let inner = NAMESPACES.lock();
-    inner.namespaces.values().map(|ns| NamespaceInfo {
-        id: ns.id,
-        name: ns.name.clone(),
-        parent: ns.parent,
-        mount_count: ns.mounts.len(),
-        refcount: ns.refcount,
-        allow_nested: ns.allow_nested,
-    }).collect()
+    inner
+        .namespaces
+        .values()
+        .map(|ns| NamespaceInfo {
+            id: ns.id,
+            name: ns.name.clone(),
+            parent: ns.parent,
+            mount_count: ns.mounts.len(),
+            refcount: ns.refcount,
+            allow_nested: ns.allow_nested,
+        })
+        .collect()
 }
 
 /// Get info about a specific namespace.
@@ -267,7 +276,10 @@ pub fn enter(pid: u64, ns_id: NamespaceId) -> KernelResult<()> {
         }
     }
 
-    let ns = inner.namespaces.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
+    let ns = inner
+        .namespaces
+        .get_mut(&ns_id)
+        .ok_or(KernelError::NotFound)?;
     ns.refcount = ns.refcount.saturating_add(1);
     inner.pid_ns.insert(pid, ns_id);
 
@@ -286,7 +298,12 @@ pub fn leave(pid: u64) {
 
 /// Get which namespace a process is in.
 pub fn get_ns(pid: u64) -> NamespaceId {
-    NAMESPACES.lock().pid_ns.get(&pid).copied().unwrap_or(ROOT_NAMESPACE)
+    NAMESPACES
+        .lock()
+        .pid_ns
+        .get(&pid)
+        .copied()
+        .unwrap_or(ROOT_NAMESPACE)
 }
 
 // ---------------------------------------------------------------------------
@@ -302,10 +319,17 @@ pub fn ns_mount(
 ) -> KernelResult<()> {
     let mount_path = mount_path.as_ref();
     let mut inner = NAMESPACES.lock();
-    let ns = inner.namespaces.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
+    let ns = inner
+        .namespaces
+        .get_mut(&ns_id)
+        .ok_or(KernelError::NotFound)?;
 
     // Check for duplicate.
-    if ns.mounts.iter().any(|m| m.mount_path.as_path() == mount_path) {
+    if ns
+        .mounts
+        .iter()
+        .any(|m| m.mount_path.as_path() == mount_path)
+    {
         return Err(KernelError::AlreadyExists);
     }
 
@@ -322,7 +346,10 @@ pub fn ns_mount(
 pub fn ns_unmount(ns_id: NamespaceId, mount_path: impl AsRef<Path>) -> KernelResult<()> {
     let mount_path = mount_path.as_ref();
     let mut inner = NAMESPACES.lock();
-    let ns = inner.namespaces.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
+    let ns = inner
+        .namespaces
+        .get_mut(&ns_id)
+        .ok_or(KernelError::NotFound)?;
 
     let before = ns.mounts.len();
     ns.mounts.retain(|m| m.mount_path.as_path() != mount_path);
@@ -404,7 +431,10 @@ pub fn set_readonly(
 ) -> KernelResult<()> {
     let mount_path = mount_path.as_ref();
     let mut inner = NAMESPACES.lock();
-    let ns = inner.namespaces.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
+    let ns = inner
+        .namespaces
+        .get_mut(&ns_id)
+        .ok_or(KernelError::NotFound)?;
 
     for mount in &mut ns.mounts {
         if mount.mount_path.as_path() == mount_path {
@@ -419,7 +449,10 @@ pub fn set_readonly(
 /// Set whether a namespace allows nested child namespaces.
 pub fn set_allow_nested(ns_id: NamespaceId, allow: bool) -> KernelResult<()> {
     let mut inner = NAMESPACES.lock();
-    let ns = inner.namespaces.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
+    let ns = inner
+        .namespaces
+        .get_mut(&ns_id)
+        .ok_or(KernelError::NotFound)?;
     ns.allow_nested = allow;
     Ok(())
 }
@@ -472,8 +505,11 @@ pub fn self_test() -> KernelResult<()> {
         let root_mounts = ns_mounts(ROOT_NAMESPACE)?;
         let child_mounts = ns_mounts(child_id)?;
         if child_mounts.len() != root_mounts.len() {
-            serial_println!("[mount_ns]   ERROR: mount count mismatch ({} vs {})",
-                child_mounts.len(), root_mounts.len());
+            serial_println!(
+                "[mount_ns]   ERROR: mount count mismatch ({} vs {})",
+                child_mounts.len(),
+                root_mounts.len()
+            );
             let _ = destroy(child_id);
             return Err(KernelError::InternalError);
         }
@@ -486,8 +522,12 @@ pub fn self_test() -> KernelResult<()> {
         let child_mounts = ns_mounts(child_id)?;
         let root_mounts = ns_mounts(ROOT_NAMESPACE)?;
 
-        let child_has_sandbox = child_mounts.iter().any(|m| m.mount_path.as_path() == Path::new("/sandbox"));
-        let root_has_sandbox = root_mounts.iter().any(|m| m.mount_path.as_path() == Path::new("/sandbox"));
+        let child_has_sandbox = child_mounts
+            .iter()
+            .any(|m| m.mount_path.as_path() == Path::new("/sandbox"));
+        let root_has_sandbox = root_mounts
+            .iter()
+            .any(|m| m.mount_path.as_path() == Path::new("/sandbox"));
 
         if !child_has_sandbox {
             serial_println!("[mount_ns]   ERROR: /sandbox not in child");
@@ -584,7 +624,9 @@ pub fn self_test() -> KernelResult<()> {
     {
         ns_unmount(child_id, "/sandbox")?;
         let child_mounts = ns_mounts(child_id)?;
-        let has_sandbox = child_mounts.iter().any(|m| m.mount_path.as_path() == Path::new("/sandbox"));
+        let has_sandbox = child_mounts
+            .iter()
+            .any(|m| m.mount_path.as_path() == Path::new("/sandbox"));
         if has_sandbox {
             serial_println!("[mount_ns]   ERROR: /sandbox still mounted after unmount");
             let _ = destroy(child_id);

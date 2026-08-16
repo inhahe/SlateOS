@@ -34,11 +34,11 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -289,19 +289,17 @@ pub fn init_defaults() {
     ];
 
     // Default schedule: quiet hours 10 PM - 7 AM weekdays
-    let schedules = vec![
-        FocusSchedule {
-            id: 1,
-            name: String::from("Quiet Hours"),
-            enabled: false,  // Off by default per design: few things enabled by default
-            days: [false, true, true, true, true, true, false], // Mon-Fri
-            start_hour: 22,
-            start_minute: 0,
-            end_hour: 7,
-            end_minute: 0,
-            profile_id: 6, // Sleeping
-        },
-    ];
+    let schedules = vec![FocusSchedule {
+        id: 1,
+        name: String::from("Quiet Hours"),
+        enabled: false, // Off by default per design: few things enabled by default
+        days: [false, true, true, true, true, true, false], // Mon-Fri
+        start_hour: 22,
+        start_minute: 0,
+        end_hour: 7,
+        end_minute: 0,
+        profile_id: 6, // Sleeping
+    }];
 
     *guard = Some(FocusState {
         profiles,
@@ -388,7 +386,9 @@ pub fn should_suppress(app_id: &str, priority: NotifPriority) -> SuppressResult 
 /// Whether focus assist is currently active.
 pub fn is_active() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().is_some_and(|s| s.active_profile_id.is_some())
+    guard
+        .as_ref()
+        .is_some_and(|s| s.active_profile_id.is_some())
 }
 
 /// Get the currently active profile, if any.
@@ -411,7 +411,10 @@ pub fn activate(profile_id: u64) -> KernelResult<()> {
 /// Activate a focus profile with a specific trigger reason.
 pub fn activate_with_trigger(profile_id: u64, trigger: TriggerKind) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter().find(|p| p.id == profile_id)
+        let profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         if !profile.enabled {
             return Err(KernelError::NotSupported);
@@ -440,7 +443,9 @@ pub fn deactivate() -> KernelResult<Vec<MissedNotification>> {
         }
 
         let profile_id = state.active_profile_id.unwrap_or(0);
-        let show_summary = state.profiles.iter()
+        let show_summary = state
+            .profiles
+            .iter()
             .find(|p| p.id == profile_id)
             .is_some_and(|p| p.show_summary);
 
@@ -538,7 +543,10 @@ pub fn create_profile(name: &str, mode: FocusMode) -> KernelResult<u64> {
 /// Remove a custom focus profile (built-in profiles cannot be removed).
 pub fn remove_profile(profile_id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.profiles.iter().position(|p| p.id == profile_id)
+        let idx = state
+            .profiles
+            .iter()
+            .position(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         if state.profiles[idx].builtin {
             return Err(KernelError::PermissionDenied);
@@ -557,7 +565,10 @@ pub fn remove_profile(profile_id: u64) -> KernelResult<()> {
 /// Get a profile by ID.
 pub fn get_profile(profile_id: u64) -> KernelResult<FocusProfile> {
     with_state(|state| {
-        state.profiles.iter().find(|p| p.id == profile_id)
+        state
+            .profiles
+            .iter()
+            .find(|p| p.id == profile_id)
             .cloned()
             .ok_or(KernelError::NotFound)
     })
@@ -572,7 +583,10 @@ pub fn list_profiles() -> Vec<FocusProfile> {
 /// Set the mode for a profile.
 pub fn set_mode(profile_id: u64, mode: FocusMode) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         profile.mode = mode;
         Ok(())
@@ -582,7 +596,10 @@ pub fn set_mode(profile_id: u64, mode: FocusMode) -> KernelResult<()> {
 /// Set whether a profile is enabled.
 pub fn set_enabled(profile_id: u64, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         profile.enabled = enabled;
         Ok(())
@@ -592,7 +609,10 @@ pub fn set_enabled(profile_id: u64, enabled: bool) -> KernelResult<()> {
 /// Set auto-reply message for a profile (None to disable).
 pub fn set_auto_reply(profile_id: u64, message: Option<&str>) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         profile.auto_reply = message.map(String::from);
         Ok(())
@@ -602,7 +622,10 @@ pub fn set_auto_reply(profile_id: u64, message: Option<&str>) -> KernelResult<()
 /// Set whether to show missed notifications summary when focus ends.
 pub fn set_show_summary(profile_id: u64, show: bool) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         profile.show_summary = show;
         Ok(())
@@ -612,7 +635,10 @@ pub fn set_show_summary(profile_id: u64, show: bool) -> KernelResult<()> {
 /// Set whether alarms can break through for a profile.
 pub fn set_allow_alarms(profile_id: u64, allow: bool) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         profile.allow_alarms = allow;
         Ok(())
@@ -622,7 +648,10 @@ pub fn set_allow_alarms(profile_id: u64, allow: bool) -> KernelResult<()> {
 /// Set whether reminders can break through for a profile.
 pub fn set_allow_reminders(profile_id: u64, allow: bool) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         profile.allow_reminders = allow;
         Ok(())
@@ -636,7 +665,10 @@ pub fn set_allow_reminders(profile_id: u64, allow: bool) -> KernelResult<()> {
 /// Add an app to a profile's priority list (breaks through in PriorityOnly mode).
 pub fn add_priority_app(profile_id: u64, app_id: &str) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         if profile.priority_apps.len() >= MAX_PRIORITY_APPS {
             return Err(KernelError::ResourceExhausted);
@@ -652,9 +684,15 @@ pub fn add_priority_app(profile_id: u64, app_id: &str) -> KernelResult<()> {
 /// Remove an app from a profile's priority list.
 pub fn remove_priority_app(profile_id: u64, app_id: &str) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == profile_id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
-        let idx = profile.priority_apps.iter().position(|a| a == app_id)
+        let idx = profile
+            .priority_apps
+            .iter()
+            .position(|a| a == app_id)
             .ok_or(KernelError::NotFound)?;
         profile.priority_apps.remove(idx);
         Ok(())
@@ -664,7 +702,10 @@ pub fn remove_priority_app(profile_id: u64, app_id: &str) -> KernelResult<()> {
 /// List priority apps for a profile.
 pub fn priority_apps(profile_id: u64) -> KernelResult<Vec<String>> {
     with_state(|state| {
-        let profile = state.profiles.iter().find(|p| p.id == profile_id)
+        let profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == profile_id)
             .ok_or(KernelError::NotFound)?;
         Ok(profile.priority_apps.clone())
     })
@@ -717,7 +758,10 @@ pub fn add_schedule(
 /// Remove a schedule.
 pub fn remove_schedule(schedule_id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.schedules.iter().position(|s| s.id == schedule_id)
+        let idx = state
+            .schedules
+            .iter()
+            .position(|s| s.id == schedule_id)
             .ok_or(KernelError::NotFound)?;
         state.schedules.remove(idx);
         Ok(())
@@ -727,7 +771,10 @@ pub fn remove_schedule(schedule_id: u64) -> KernelResult<()> {
 /// Enable or disable a schedule.
 pub fn set_schedule_enabled(schedule_id: u64, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let sched = state.schedules.iter_mut().find(|s| s.id == schedule_id)
+        let sched = state
+            .schedules
+            .iter_mut()
+            .find(|s| s.id == schedule_id)
             .ok_or(KernelError::NotFound)?;
         sched.enabled = enabled;
         Ok(())
@@ -737,7 +784,9 @@ pub fn set_schedule_enabled(schedule_id: u64, enabled: bool) -> KernelResult<()>
 /// List all schedules.
 pub fn list_schedules() -> Vec<FocusSchedule> {
     let guard = STATE.lock();
-    guard.as_ref().map_or_else(Vec::new, |s| s.schedules.clone())
+    guard
+        .as_ref()
+        .map_or_else(Vec::new, |s| s.schedules.clone())
 }
 
 /// Check if any schedule should activate now.
@@ -843,7 +892,11 @@ pub fn notify_activity(trigger: TriggerKind) -> bool {
     }
 
     let profile_id = state.auto_profile_id;
-    if !state.profiles.iter().any(|p| p.id == profile_id && p.enabled) {
+    if !state
+        .profiles
+        .iter()
+        .any(|p| p.id == profile_id && p.enabled)
+    {
         return false;
     }
 
@@ -895,7 +948,9 @@ pub fn auto_reply() -> Option<String> {
     let guard = STATE.lock();
     let state = guard.as_ref()?;
     let id = state.active_profile_id?;
-    state.profiles.iter()
+    state
+        .profiles
+        .iter()
         .find(|p| p.id == id)
         .and_then(|p| p.auto_reply.clone())
 }
@@ -1007,8 +1062,7 @@ pub fn self_test() {
 
     // Test 7: custom profile creation and deletion
     {
-        let id = create_profile("Work Focus", FocusMode::PriorityOnly)
-            .expect("create profile");
+        let id = create_profile("Work Focus", FocusMode::PriorityOnly).expect("create profile");
         assert!(id >= 7);
         let profiles = list_profiles();
         assert!(profiles.iter().any(|p| p.name == "Work Focus"));

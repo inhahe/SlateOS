@@ -20,11 +20,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -175,7 +175,9 @@ fn store_result(state: &mut State, result: DiagResult) {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         results: Vec::new(),
         next_id: 1,
@@ -213,7 +215,10 @@ pub fn ping(host: &str, count: u32) -> KernelResult<DiagResult> {
             hops: Vec::new(),
             resolved: String::new(),
             speed_kbps: 0,
-            info: format!("{} packets sent, {} received, avg {}us", count, count, latency),
+            info: format!(
+                "{} packets sent, {} received, avg {}us",
+                count, count, latency
+            ),
             timestamp_ns: crate::hpet::elapsed_ns(),
         };
         store_result(state, result.clone());
@@ -229,10 +234,34 @@ pub fn traceroute(host: &str) -> KernelResult<DiagResult> {
         state.total_traces += 1;
 
         let hops = alloc::vec![
-            TraceHop { hop_number: 1, address: String::from("192.168.1.1"), hostname: String::from("gateway"), latency_us: 800, reached: true },
-            TraceHop { hop_number: 2, address: String::from("10.0.0.1"), hostname: String::from("isp-router"), latency_us: 5000, reached: true },
-            TraceHop { hop_number: 3, address: String::from("72.14.233.1"), hostname: String::from("backbone"), latency_us: 12000, reached: true },
-            TraceHop { hop_number: 4, address: String::from(host), hostname: String::from(host), latency_us: 25000, reached: true },
+            TraceHop {
+                hop_number: 1,
+                address: String::from("192.168.1.1"),
+                hostname: String::from("gateway"),
+                latency_us: 800,
+                reached: true
+            },
+            TraceHop {
+                hop_number: 2,
+                address: String::from("10.0.0.1"),
+                hostname: String::from("isp-router"),
+                latency_us: 5000,
+                reached: true
+            },
+            TraceHop {
+                hop_number: 3,
+                address: String::from("72.14.233.1"),
+                hostname: String::from("backbone"),
+                latency_us: 12000,
+                reached: true
+            },
+            TraceHop {
+                hop_number: 4,
+                address: String::from(host),
+                hostname: String::from(host),
+                latency_us: 25000,
+                reached: true
+            },
         ];
 
         let result = DiagResult {
@@ -310,7 +339,12 @@ pub fn list_results(count: usize) -> Vec<DiagResult> {
 /// Get a specific result.
 pub fn get_result(id: u32) -> KernelResult<DiagResult> {
     with_state(|state| {
-        state.results.iter().find(|r| r.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .results
+            .iter()
+            .find(|r| r.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -326,7 +360,13 @@ pub fn clear_results() -> KernelResult<()> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.results.len(), s.total_pings, s.total_traces, s.total_lookups, s.ops),
+        Some(s) => (
+            s.results.len(),
+            s.total_pings,
+            s.total_traces,
+            s.total_lookups,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

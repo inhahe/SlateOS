@@ -82,8 +82,8 @@
 //!   Resource Allocation", 1995.
 //! - Linux kernel `kernel/sched/fair.c` (v6.6+, EEVDF implementation).
 
+use super::task::{NUM_PRIORITIES, TaskId};
 use alloc::collections::BTreeMap;
-use super::task::{TaskId, NUM_PRIORITIES};
 
 // ---------------------------------------------------------------------------
 // Weight table
@@ -126,17 +126,17 @@ const WEIGHT_TABLE: [u32; NUM_PRIORITIES] = [
     1586,  // prio 18
     1277,  // prio 19
     1024,  // prio 20  (reference weight)
-     820,  // prio 21
-     655,  // prio 22
-     526,  // prio 23
-     423,  // prio 24
-     335,  // prio 25
-     272,  // prio 26
-     215,  // prio 27
-     172,  // prio 28
-     137,  // prio 29
-     110,  // prio 30
-      15,  // prio 31  (idle — minimal weight)
+    820,   // prio 21
+    655,   // prio 22
+    526,   // prio 23
+    423,   // prio 24
+    335,   // prio 25
+    272,   // prio 26
+    215,   // prio 27
+    172,   // prio 28
+    137,   // prio 29
+    110,   // prio 30
+    15,    // prio 31  (idle — minimal weight)
 ];
 
 // ---------------------------------------------------------------------------
@@ -337,7 +337,11 @@ impl EevdfScheduler {
     #[inline]
     fn compute_deadline(&self, vruntime: u64, priority: u8, weight: u32) -> u64 {
         let idx = (priority as usize).min(NUM_PRIORITIES.saturating_sub(1));
-        let slice_ticks = self.time_slices.get(idx).copied().unwrap_or(BASE_TIME_SLICE);
+        let slice_ticks = self
+            .time_slices
+            .get(idx)
+            .copied()
+            .unwrap_or(BASE_TIME_SLICE);
         let slice_vruntime = (slice_ticks as u64)
             .saturating_mul(VRUNTIME_UNIT)
             .checked_div(weight as u64)
@@ -464,7 +468,11 @@ impl EevdfScheduler {
 
         // Set up current task tracking.
         let idx = (entry.priority as usize).min(NUM_PRIORITIES.saturating_sub(1));
-        self.current_remaining = self.time_slices.get(idx).copied().unwrap_or(BASE_TIME_SLICE);
+        self.current_remaining = self
+            .time_slices
+            .get(idx)
+            .copied()
+            .unwrap_or(BASE_TIME_SLICE);
         self.current_weight = entry.weight;
         self.current_vruntime = entry.vruntime;
         self.current_priority = entry.priority;
@@ -626,7 +634,9 @@ impl EevdfScheduler {
         // Compute the current task's projected deadline based on its
         // accumulated vruntime (updated each tick).
         let current_deadline = self.compute_deadline(
-            self.current_vruntime, self.current_priority, self.current_weight,
+            self.current_vruntime,
+            self.current_priority,
+            self.current_weight,
         );
 
         // Preempt if the front task's deadline is earlier by more than
@@ -687,7 +697,9 @@ impl EevdfScheduler {
     /// Check if any real work (non-idle priority) is in the queue.
     #[must_use]
     pub fn has_real_work(&self) -> bool {
-        self.tree.values().any(|e| e.priority != super::task::IDLE_PRIORITY)
+        self.tree
+            .values()
+            .any(|e| e.priority != super::task::IDLE_PRIORITY)
     }
 
     /// Count the total number of runnable tasks.
@@ -797,7 +809,12 @@ impl EevdfScheduler {
         if self.nr_running as usize != self.tree.len() {
             return false;
         }
-        if self.eligible.len().saturating_add(self.ineligible_by_vrt.len()) != self.tree.len() {
+        if self
+            .eligible
+            .len()
+            .saturating_add(self.ineligible_by_vrt.len())
+            != self.tree.len()
+        {
             return false;
         }
         for (&(deadline, id), entry) in &self.tree {
@@ -835,9 +852,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let mut sched = EevdfScheduler::new();
 
         // Enqueue three tasks at different priorities.
-        sched.enqueue(1, 0);   // highest priority (biggest weight)
-        sched.enqueue(2, 15);  // medium priority
-        sched.enqueue(3, 31);  // idle priority (smallest weight)
+        sched.enqueue(1, 0); // highest priority (biggest weight)
+        sched.enqueue(2, 15); // medium priority
+        sched.enqueue(3, 31); // idle priority (smallest weight)
 
         assert_eq!(sched.nr_running, 3, "should have 3 tasks");
 
@@ -920,7 +937,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert!(
                 count >= 5 && count <= 15,
                 "task {} picked {} times (expected ~10)",
-                task_ids[i], count
+                task_ids[i],
+                count
             );
         }
     }
@@ -964,7 +982,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(
             ticks_used[0] > ticks_used[1],
             "higher-weight task should get more CPU time: A={}, B={}",
-            ticks_used[0], ticks_used[1]
+            ticks_used[0],
+            ticks_used[1]
         );
     }
 
@@ -1110,20 +1129,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             sched.enqueue(base, 5);
             sched.enqueue(base + 1, 15);
             sched.enqueue(base + 2, 25);
-            assert!(sched.partition_invariant_ok(), "invariant after enqueue r{round}");
+            assert!(
+                sched.partition_invariant_ok(),
+                "invariant after enqueue r{round}"
+            );
 
             if let Some(id) = sched.pick_next() {
-                assert!(sched.partition_invariant_ok(), "invariant after pick r{round}");
+                assert!(
+                    sched.partition_invariant_ok(),
+                    "invariant after pick r{round}"
+                );
                 // Run part of a slice, then re-enqueue with accumulated vruntime.
                 sched.tick();
-                assert!(sched.partition_invariant_ok(), "invariant after tick r{round}");
+                assert!(
+                    sched.partition_invariant_ok(),
+                    "invariant after tick r{round}"
+                );
                 sched.enqueue(id, 15);
-                assert!(sched.partition_invariant_ok(), "invariant after re-enqueue r{round}");
+                assert!(
+                    sched.partition_invariant_ok(),
+                    "invariant after re-enqueue r{round}"
+                );
             }
 
             // Dequeue one arbitrary task if present.
             let _ = sched.dequeue(base + 2, 25);
-            assert!(sched.partition_invariant_ok(), "invariant after dequeue r{round}");
+            assert!(
+                sched.partition_invariant_ok(),
+                "invariant after dequeue r{round}"
+            );
         }
     }
 
@@ -1148,7 +1182,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // Re-enqueue A: high vruntime, early deadline.  With only A present,
         // the floor advances to A's vruntime, so A ends up eligible again.
         sched.enqueue(1, 0);
-        assert!(sched.partition_invariant_ok(), "invariant after A re-enqueue");
+        assert!(
+            sched.partition_invariant_ok(),
+            "invariant after A re-enqueue"
+        );
 
         // Now add a fresh low-priority task B: it enters at the (now advanced)
         // floor, so it is eligible, but its deadline is far LATER than A's.
@@ -1158,7 +1195,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // Both eligible; A has the earlier deadline, so A is picked first.
         let first = sched.pick_next();
         assert_eq!(first, Some(1), "earliest-deadline eligible task picked");
-        assert!(sched.partition_invariant_ok(), "invariant after adversarial pick");
+        assert!(
+            sched.partition_invariant_ok(),
+            "invariant after adversarial pick"
+        );
     }
 
     serial_println!("  eevdf: min_vruntime tracks the true minimum, not earliest-deadline...");
@@ -1181,9 +1221,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let mut seen_11 = false;
         for _ in 0..40 {
             if let Some(id) = sched.pick_next() {
-                if id == 10 { seen_10 = true; } else { seen_11 = true; }
+                if id == 10 {
+                    seen_10 = true;
+                } else {
+                    seen_11 = true;
+                }
                 while !sched.tick() {}
-                assert!(sched.partition_invariant_ok(), "invariant during fairness run");
+                assert!(
+                    sched.partition_invariant_ok(),
+                    "invariant during fairness run"
+                );
                 sched.enqueue(id, if id == 10 { 0 } else { 25 });
             }
         }

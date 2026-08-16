@@ -327,12 +327,7 @@ pub fn stats() -> (u64, u64) {
 // ---------------------------------------------------------------------------
 
 /// Recursively search a directory tree.
-fn search_recursive(
-    path: &Path,
-    query: &Query,
-    results: &mut Vec<SearchResult>,
-    depth: usize,
-) {
+fn search_recursive(path: &Path, query: &Query, results: &mut Vec<SearchResult>, depth: usize) {
     if depth > query.max_depth {
         return;
     }
@@ -479,17 +474,11 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
     }
-    haystack
-        .windows(needle.len())
-        .any(|w| w == needle)
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Check metadata-based filters (requires stat data).
-fn matches_metadata_filters(
-    meta: &crate::fs::FileMeta,
-    query: &Query,
-    path: &Path,
-) -> bool {
+fn matches_metadata_filters(meta: &crate::fs::FileMeta, query: &Query, path: &Path) -> bool {
     // Size filters.
     if let Some(min) = query.size_min {
         if meta.size < min {
@@ -640,7 +629,10 @@ fn test_name_contains() {
         .execute("/tmp/search_nc")
         .expect("execute");
 
-    assert!(results.len() >= 2, "should find 2 files containing 'report'");
+    assert!(
+        results.len() >= 2,
+        "should find 2 files containing 'report'"
+    );
     for r in &results {
         let name = r.path.file_name().map_or(&[][..], Path::as_bytes);
         assert!(
@@ -689,7 +681,11 @@ fn test_extension_filter() {
 fn test_size_filter() {
     let _ = Vfs::mkdir("/tmp/search_sz");
     Vfs::write_file("/tmp/search_sz/small.txt", b"hi").expect("write");
-    Vfs::write_file("/tmp/search_sz/big.txt", b"this is a much bigger file with plenty of content").expect("write");
+    Vfs::write_file(
+        "/tmp/search_sz/big.txt",
+        b"this is a much bigger file with plenty of content",
+    )
+    .expect("write");
 
     let results = Query::new()
         .size_min(10)
@@ -699,7 +695,12 @@ fn test_size_filter() {
 
     // Only the big file should match.
     for r in &results {
-        assert!(r.size >= 10, "size should be >= 10: {} has {}", r.path.display(), r.size);
+        assert!(
+            r.size >= 10,
+            "size should be >= 10: {} has {}",
+            r.path.display(),
+            r.size
+        );
     }
 
     let _ = Vfs::remove("/tmp/search_sz/small.txt");
@@ -722,7 +723,12 @@ fn test_type_filter() {
         .expect("execute");
 
     for r in &files {
-        assert_eq!(r.entry_type, EntryType::File, "should be file: {}", r.path.display());
+        assert_eq!(
+            r.entry_type,
+            EntryType::File,
+            "should be file: {}",
+            r.path.display()
+        );
     }
 
     // Dirs only.
@@ -733,7 +739,12 @@ fn test_type_filter() {
         .expect("execute");
 
     for r in &dirs {
-        assert_eq!(r.entry_type, EntryType::Directory, "should be dir: {}", r.path.display());
+        assert_eq!(
+            r.entry_type,
+            EntryType::Directory,
+            "should be dir: {}",
+            r.path.display()
+        );
     }
 
     let _ = Vfs::remove("/tmp/search_type/file.txt");
@@ -769,7 +780,11 @@ fn test_glob_match() {
 
 fn test_compound_query() {
     let _ = Vfs::mkdir("/tmp/search_cq");
-    Vfs::write_file("/tmp/search_cq/report.txt", b"a short report file with some content").expect("write");
+    Vfs::write_file(
+        "/tmp/search_cq/report.txt",
+        b"a short report file with some content",
+    )
+    .expect("write");
     Vfs::write_file("/tmp/search_cq/report.log", b"log data").expect("write");
     Vfs::write_file("/tmp/search_cq/data.txt", b"x").expect("write");
 
@@ -783,7 +798,10 @@ fn test_compound_query() {
 
     assert!(!results.is_empty(), "should find at least 1 matching file");
     for r in &results {
-        assert!(contains_subslice(r.path.as_bytes(), b"report"), "should contain 'report'");
+        assert!(
+            contains_subslice(r.path.as_bytes(), b"report"),
+            "should contain 'report'"
+        );
         assert!(r.path.as_bytes().ends_with(b".txt"), "should be .txt");
         assert!(r.size >= 10, "size should be >= 10");
     }

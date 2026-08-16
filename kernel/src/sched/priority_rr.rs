@@ -31,10 +31,10 @@
 //! priorities get longer slices for better throughput.  Time slices
 //! are applied per-CPU.
 
+use super::task::{NUM_PRIORITIES, TaskId};
 use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
-use super::task::{TaskId, NUM_PRIORITIES};
 
 // ---------------------------------------------------------------------------
 // Stack-allocated steal buffer (avoids heap allocation under SCHED lock)
@@ -217,10 +217,10 @@ impl WorkloadProfile {
     #[must_use]
     pub const fn base(self) -> u32 {
         match self {
-            Self::Desktop     => 2,
-            Self::Server      => 4,
+            Self::Desktop => 2,
+            Self::Server => 4,
             Self::Development => 1,
-            Self::Gaming      => 1,
+            Self::Gaming => 1,
         }
     }
 
@@ -228,10 +228,10 @@ impl WorkloadProfile {
     #[must_use]
     pub const fn increment(self) -> u32 {
         match self {
-            Self::Desktop     => 1,
-            Self::Server      => 2,
+            Self::Desktop => 1,
+            Self::Server => 2,
             Self::Development => 1,
-            Self::Gaming      => 2,
+            Self::Gaming => 2,
         }
     }
 
@@ -239,10 +239,10 @@ impl WorkloadProfile {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Desktop     => "Desktop",
-            Self::Server      => "Server",
+            Self::Desktop => "Desktop",
+            Self::Server => "Server",
             Self::Development => "Development",
-            Self::Gaming      => "Gaming",
+            Self::Gaming => "Gaming",
         }
     }
 }
@@ -332,7 +332,11 @@ impl PriorityRoundRobin {
         }
 
         // Set the time slice for this task.
-        self.current_remaining = self.time_slices.get(level).copied().unwrap_or(BASE_TIME_SLICE);
+        self.current_remaining = self
+            .time_slices
+            .get(level)
+            .copied()
+            .unwrap_or(BASE_TIME_SLICE);
 
         Some(id)
     }
@@ -686,7 +690,8 @@ impl PerCpuScheduler {
     pub fn dequeue(&self, id: super::task::TaskId, priority: u8, cpu: usize) -> bool {
         let n = self.num_cpus.load(Ordering::Relaxed);
         let target = cpu.min(n.saturating_sub(1));
-        self.queues.get(target)
+        self.queues
+            .get(target)
             .is_some_and(|q| q.lock().dequeue(id, priority))
     }
 
@@ -699,7 +704,8 @@ impl PerCpuScheduler {
     pub fn dequeue_any(&self, id: super::task::TaskId, cpu: usize) -> bool {
         let n = self.num_cpus.load(Ordering::Relaxed);
         let target = cpu.min(n.saturating_sub(1));
-        self.queues.get(target)
+        self.queues
+            .get(target)
             .is_some_and(|q| q.lock().dequeue_any(id))
     }
 
@@ -712,7 +718,8 @@ impl PerCpuScheduler {
     /// the timer ISR skips this tick instead of deadlocking.  The next
     /// timer tick (10 ms later) will catch up.
     pub fn tick(&self, cpu: usize) -> bool {
-        self.queues.get(cpu)
+        self.queues
+            .get(cpu)
             .and_then(|q| q.try_lock())
             .is_some_and(|mut guard| guard.tick())
     }
@@ -721,7 +728,8 @@ impl PerCpuScheduler {
     #[must_use]
     #[allow(dead_code)] // Used by preemption accounting once implemented.
     pub fn current_remaining(&self, cpu: usize) -> u32 {
-        self.queues.get(cpu)
+        self.queues
+            .get(cpu)
             .map_or(0, |q| q.lock().current_remaining())
     }
 
@@ -841,10 +849,7 @@ impl PerCpuScheduler {
     /// ALL lock acquisitions use `try_lock`.  If any lock is contended
     /// (likely because a timer ISR is accessing it), we bail and retry
     /// on the next balance interval (100 ms).
-    pub fn try_push_balance(
-        &self,
-        cpu: usize,
-    ) -> alloc::vec::Vec<(super::task::TaskId, usize)> {
+    pub fn try_push_balance(&self, cpu: usize) -> alloc::vec::Vec<(super::task::TaskId, usize)> {
         let mut migrations = alloc::vec::Vec::new();
         let n = self.num_cpus.load(Ordering::Relaxed);
         if n <= 1 {
@@ -855,7 +860,11 @@ impl PerCpuScheduler {
         // MUST use try_lock — timer ISR can acquire this lock.
         let local_count = match self.queues.get(cpu).and_then(|m| m.try_lock()) {
             Some(guard) => {
-                if !guard.has_real_work() { 0 } else { guard.total_tasks() }
+                if !guard.has_real_work() {
+                    0
+                } else {
+                    guard.total_tasks()
+                }
             }
             None => return migrations, // Lock contended (timer ISR).
         };
@@ -959,9 +968,7 @@ impl PerCpuScheduler {
     #[allow(dead_code)] // Used by idle/wakeup decision logic.
     pub fn has_ready(&self) -> bool {
         let n = self.num_cpus.load(Ordering::Relaxed);
-        self.queues.iter()
-            .take(n)
-            .any(|m| m.lock().has_ready())
+        self.queues.iter().take(n).any(|m| m.lock().has_ready())
     }
 
     /// Check if a specific CPU's local queue has real work
@@ -972,7 +979,8 @@ impl PerCpuScheduler {
     /// Uses `try_lock` to avoid deadlock with the softirq push balancer.
     #[must_use]
     pub fn local_has_real_work(&self, cpu: usize) -> bool {
-        self.queues.get(cpu)
+        self.queues
+            .get(cpu)
             .and_then(|m| m.try_lock())
             .is_some_and(|guard| guard.has_real_work())
     }
@@ -983,7 +991,8 @@ impl PerCpuScheduler {
     /// contended (uses `try_lock` — safe in ISR context).
     #[must_use]
     pub fn queue_length(&self, cpu: usize) -> usize {
-        self.queues.get(cpu)
+        self.queues
+            .get(cpu)
             .and_then(|m| m.try_lock())
             .map_or(0, |guard| guard.total_tasks())
     }
@@ -996,7 +1005,8 @@ impl PerCpuScheduler {
     #[must_use]
     pub fn others_have_real_work(&self, cpu: usize) -> bool {
         let n = self.num_cpus.load(Ordering::Relaxed);
-        self.queues.iter()
+        self.queues
+            .iter()
             .take(n)
             .enumerate()
             .any(|(i, m)| i != cpu && m.try_lock().is_some_and(|g| g.has_real_work()))

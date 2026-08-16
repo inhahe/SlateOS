@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -71,7 +71,8 @@ pub struct ProcessRecord {
 
 impl ProcessRecord {
     pub fn duration_ms(&self) -> Option<u64> {
-        self.end_ns.map(|end| (end.saturating_sub(self.start_ns)) / 1_000_000)
+        self.end_ns
+            .map(|end| (end.saturating_sub(self.start_ns)) / 1_000_000)
     }
 
     pub fn is_running(&self) -> bool {
@@ -114,7 +115,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         history: Vec::new(),
         next_id: 1,
@@ -136,9 +139,14 @@ pub fn record_start(name: &str, pid: u32, args: &str) -> KernelResult<u32> {
         state.next_id += 1;
         state.total_started += 1;
         state.history.push(ProcessRecord {
-            entry_id: id, pid, name: String::from(name),
-            args: String::from(args), start_ns: now,
-            end_ns: None, exit_code: None, exit_reason: None,
+            entry_id: id,
+            pid,
+            name: String::from(name),
+            args: String::from(args),
+            start_ns: now,
+            end_ns: None,
+            exit_code: None,
+            exit_reason: None,
             peak_memory_kb: 0,
         });
         Ok(id)
@@ -146,11 +154,19 @@ pub fn record_start(name: &str, pid: u32, args: &str) -> KernelResult<u32> {
 }
 
 /// Record a process exit.
-pub fn record_exit(pid: u32, exit_code: i32, reason: ExitReason, peak_memory_kb: u64) -> KernelResult<()> {
+pub fn record_exit(
+    pid: u32,
+    exit_code: i32,
+    reason: ExitReason,
+    peak_memory_kb: u64,
+) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         // Find the most recent running entry for this PID.
-        let entry = state.history.iter_mut().rev()
+        let entry = state
+            .history
+            .iter_mut()
+            .rev()
             .find(|e| e.pid == pid && e.end_ns.is_none())
             .ok_or(KernelError::NotFound)?;
         entry.end_ns = Some(now);
@@ -169,7 +185,8 @@ pub fn record_exit(pid: u32, exit_code: i32, reason: ExitReason, peak_memory_kb:
 pub fn search(query: &str) -> Vec<ProcessRecord> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let q = query.to_lowercase();
-        s.history.iter()
+        s.history
+            .iter()
             .filter(|e| e.name.to_lowercase().contains(&q))
             .cloned()
             .collect()
@@ -189,15 +206,26 @@ pub fn recent(max: usize) -> Vec<ProcessRecord> {
 /// Get running processes from history.
 pub fn running() -> Vec<ProcessRecord> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.history.iter().filter(|e| e.is_running()).cloned().collect()
+        s.history
+            .iter()
+            .filter(|e| e.is_running())
+            .cloned()
+            .collect()
     })
 }
 
 /// Get crashed processes.
 pub fn crashed(max: usize) -> Vec<ProcessRecord> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let mut crashes: Vec<_> = s.history.iter()
-            .filter(|e| matches!(e.exit_reason, Some(ExitReason::Crashed) | Some(ExitReason::OutOfMemory)))
+        let mut crashes: Vec<_> = s
+            .history
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.exit_reason,
+                    Some(ExitReason::Crashed) | Some(ExitReason::OutOfMemory)
+                )
+            })
             .cloned()
             .collect();
         crashes.reverse();
@@ -210,7 +238,13 @@ pub fn crashed(max: usize) -> Vec<ProcessRecord> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.history.len(), s.total_started, s.total_exited, s.total_crashed, s.ops),
+        Some(s) => (
+            s.history.len(),
+            s.total_started,
+            s.total_exited,
+            s.total_crashed,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

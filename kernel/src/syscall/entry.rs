@@ -33,9 +33,9 @@
 //! - Intel SDM Vol. 2, SYSCALL/SYSRET instructions
 //! - AMD APM Vol. 2, "SYSCALL and SYSRET" section
 
-use core::arch::global_asm;
 use crate::cpu;
 use crate::serial_println;
+use core::arch::global_asm;
 
 // ---------------------------------------------------------------------------
 // MSR addresses
@@ -100,17 +100,14 @@ global_asm!(
     //
     ".global syscall_entry",
     "syscall_entry:",
-
     // --- Phase 1: Switch to kernel stack ---
 
     // Swap GS base: user GS ↔ IA32_KERNEL_GS_BASE.
     // After this, GS points to our PerCpuData.
     "swapgs",
-
     // Save user RSP in per-CPU scratch, load kernel RSP.
-    "mov gs:[8], rsp",       // per_cpu.user_rsp = user RSP
-    "mov rsp, gs:[0]",       // rsp = per_cpu.kernel_rsp
-
+    "mov gs:[8], rsp", // per_cpu.user_rsp = user RSP
+    "mov rsp, gs:[0]", // rsp = per_cpu.kernel_rsp
     // --- Phase 2: Save user context on kernel stack ---
     //
     // Stack layout (grows down; first push = highest offset):
@@ -131,32 +128,28 @@ global_asm!(
     //   [rsp +  2*8] = arg5  (r9)
     //   [rsp +  1*8] = syscall_nr (rax)
     //   [rsp +  0*8] = user RSP
-
-    "push rcx",              // User RIP
-    "push r11",              // User RFLAGS
+    "push rcx", // User RIP
+    "push r11", // User RFLAGS
     "push rbp",
     "push rbx",
     "push r12",
     "push r13",
     "push r14",
     "push r15",
-    "push rdi",              // arg0
-    "push rsi",              // arg1
-    "push rdx",              // arg2
-    "push r10",              // arg3
-    "push r8",               // arg4
-    "push r9",               // arg5
-    "push rax",              // syscall number
-    "push gs:[8]",           // user RSP (from per-CPU scratch)
-
+    "push rdi",    // arg0
+    "push rsi",    // arg1
+    "push rdx",    // arg2
+    "push r10",    // arg3
+    "push r8",     // arg4
+    "push r9",     // arg5
+    "push rax",    // syscall number
+    "push gs:[8]", // user RSP (from per-CPU scratch)
     // Swap GS back to user's GS base (so kernel code sees normal GS).
     "swapgs",
-
     // --- Phase 3: Call Rust handler ---
 
     // Re-enable interrupts now that we're safely on the kernel stack.
     "sti",
-
     // Call syscall_handler_inner(frame_ptr: *const SyscallFrame).
     "mov rdi, rsp",
     "call syscall_handler_inner",
@@ -167,18 +160,14 @@ global_asm!(
     // Disable interrupts for the SYSRET sequence (we'll manipulate
     // the stack and per-CPU data).
     "cli",
-
     // Swap to kernel GS for per-CPU data access.
     "swapgs",
-
     // Save user RSP from the frame into per-CPU scratch.
     // [rsp + 0] = user RSP.
     "mov rdi, [rsp]",
     "mov gs:[8], rdi",
-
     // Skip user_rsp and syscall_nr (rax already has the return value).
     "add rsp, 16",
-
     // Restore all registers in reverse order.
     "pop r9",
     "pop r8",
@@ -192,15 +181,12 @@ global_asm!(
     "pop r12",
     "pop rbx",
     "pop rbp",
-    "pop r11",               // User RFLAGS → R11
-    "pop rcx",               // User RIP → RCX
-
+    "pop r11", // User RFLAGS → R11
+    "pop rcx", // User RIP → RCX
     // Restore user RSP from per-CPU scratch.
     "mov rsp, gs:[8]",
-
     // Swap GS back to user's GS base.
     "swapgs",
-
     // Return to userspace.
     // SYSRETQ: RIP = RCX, RFLAGS = R11 (with forced bits),
     //          CS = STAR[63:48]+16 (0x20 | 3 = user CS),

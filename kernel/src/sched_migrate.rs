@@ -35,8 +35,8 @@
 //! - Linux `/proc/schedstat` (per-CPU migration counts)
 //! - perf sched: `perf sched map` visualizes task migration
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -150,8 +150,7 @@ struct PerCpuMigrate {
 
 /// Ring buffer of recent migration events.
 static RING: [MigrateSlot; RING_SIZE] = {
-    const EMPTY: MigrateSlot =
-        MigrateSlot(core::cell::UnsafeCell::new(MigrateEvent::empty()));
+    const EMPTY: MigrateSlot = MigrateSlot(core::cell::UnsafeCell::new(MigrateEvent::empty()));
     [EMPTY; RING_SIZE]
 };
 
@@ -175,7 +174,6 @@ static REASON_COUNTS: [AtomicU64; 5] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; 5]
 };
-
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -207,10 +205,14 @@ pub fn record(task_id: u32, from_cpu: u8, to_cpu: u8, reason: MigrateReason) {
 
     // Update per-CPU counters.
     if (from_cpu as usize) < MAX_CPUS {
-        PER_CPU[from_cpu as usize].migrations_out.fetch_add(1, Ordering::Relaxed);
+        PER_CPU[from_cpu as usize]
+            .migrations_out
+            .fetch_add(1, Ordering::Relaxed);
     }
     if (to_cpu as usize) < MAX_CPUS {
-        PER_CPU[to_cpu as usize].migrations_in.fetch_add(1, Ordering::Relaxed);
+        PER_CPU[to_cpu as usize]
+            .migrations_in
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     // Update totals.
@@ -361,8 +363,10 @@ pub fn self_test() {
     // Test 1: Record a migration event.
     record(42, 0, 1, MigrateReason::WorkSteal);
     let s = stats();
-    assert!(s.total > initial_total,
-        "total should increase after recording");
+    assert!(
+        s.total > initial_total,
+        "total should increase after recording"
+    );
     serial_println!("[sched_migrate]   Record event: OK (total={})", s.total);
 
     // Test 2: Verify per-CPU counters updated.
@@ -371,8 +375,10 @@ pub fn self_test() {
     serial_println!("[sched_migrate]   Per-CPU counters: OK");
 
     // Test 3: Verify per-reason counters.
-    assert!(s.by_reason[MigrateReason::WorkSteal as usize] > 0,
-        "WorkSteal count should be > 0");
+    assert!(
+        s.by_reason[MigrateReason::WorkSteal as usize] > 0,
+        "WorkSteal count should be > 0"
+    );
     serial_println!("[sched_migrate]   Per-reason counters: OK");
 
     // Test 4: Record more events with different reasons.
@@ -401,8 +407,12 @@ pub fn self_test() {
         assert_eq!(from, 2);
         assert_eq!(to, 3);
         assert!(count >= 5);
-        serial_println!("[sched_migrate]   Hottest path: CPU{}→CPU{} ({}x): OK",
-            from, to, count);
+        serial_println!(
+            "[sched_migrate]   Hottest path: CPU{}→CPU{} ({}x): OK",
+            from,
+            to,
+            count
+        );
     } else {
         panic!("hottest_path() should return Some");
     }

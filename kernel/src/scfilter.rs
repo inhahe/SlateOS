@@ -34,11 +34,11 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::boxed::Box;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -100,12 +100,16 @@ struct FilterBitmap {
 impl FilterBitmap {
     /// Create a filter that allows all syscalls.
     const fn allow_all() -> Self {
-        Self { words: [u64::MAX; BITMAP_WORDS] }
+        Self {
+            words: [u64::MAX; BITMAP_WORDS],
+        }
     }
 
     /// Create a filter that denies all syscalls.
     const fn deny_all() -> Self {
-        Self { words: [0; BITMAP_WORDS] }
+        Self {
+            words: [0; BITMAP_WORDS],
+        }
     }
 
     /// Check if a syscall number is allowed.
@@ -125,7 +129,9 @@ impl FilterBitmap {
 
     /// Allow a specific syscall number.
     fn allow(&mut self, nr: usize) {
-        if nr >= MAX_SYSCALL_NR { return; }
+        if nr >= MAX_SYSCALL_NR {
+            return;
+        }
         #[allow(clippy::arithmetic_side_effects)]
         let word_idx = nr / 64;
         #[allow(clippy::arithmetic_side_effects)]
@@ -135,7 +141,9 @@ impl FilterBitmap {
 
     /// Deny a specific syscall number.
     fn deny(&mut self, nr: usize) {
-        if nr >= MAX_SYSCALL_NR { return; }
+        if nr >= MAX_SYSCALL_NR {
+            return;
+        }
         #[allow(clippy::arithmetic_side_effects)]
         let word_idx = nr / 64;
         #[allow(clippy::arithmetic_side_effects)]
@@ -301,7 +309,9 @@ impl FilterTable {
             // bucket always exists.  The bound is belt-and-braces against a
             // future MAX_FILTERS change that violates it.
             for _ in 0..FILTER_HASH_BUCKETS {
-                let Some(cell) = self.index.get_mut(bucket) else { break };
+                let Some(cell) = self.index.get_mut(bucket) else {
+                    break;
+                };
                 if *cell == 0 {
                     // `slot < MAX_FILTERS < 255` by the const assert above, so
                     // `slot + 1` fits in a u8 without truncation.
@@ -341,9 +351,7 @@ impl FilterTable {
     /// The linear scan this index replaced, kept as the reference
     /// implementation the index must agree with.  See [`verify_index`].
     fn lookup_by_scan(&self, pid: Pid) -> Option<usize> {
-        self.filters
-            .iter()
-            .position(|e| e.active && e.pid == pid)
+        self.filters.iter().position(|e| e.active && e.pid == pid)
     }
 }
 
@@ -561,9 +569,13 @@ pub fn install_deny_all(pid: Pid) -> KernelResult<()> {
 /// (but typically it's exiting anyway).
 pub fn remove(pid: Pid) {
     let mut guard = TABLE.lock();
-    let Some(table) = guard.as_mut() else { return; };
+    let Some(table) = guard.as_mut() else {
+        return;
+    };
 
-    let Some(slot) = table.lookup(pid) else { return };
+    let Some(slot) = table.lookup(pid) else {
+        return;
+    };
     if let Some(entry) = table.filters.get_mut(slot) {
         entry.active = false;
         // Clear the identity too.  Leaving a stale `pid` on a freed slot is
@@ -683,7 +695,9 @@ pub fn tighten(pid: Pid, restrictions: &[u64]) -> KernelResult<()> {
 #[must_use]
 pub fn has_filter(pid: Pid) -> bool {
     let guard = TABLE.lock();
-    let Some(table) = guard.as_ref() else { return false; };
+    let Some(table) = guard.as_ref() else {
+        return false;
+    };
 
     table.lookup(pid).is_some()
 }
@@ -702,7 +716,9 @@ pub fn allowed_count(pid: Pid) -> Option<usize> {
 #[must_use]
 pub fn deny_count(pid: Pid) -> u64 {
     let guard = TABLE.lock();
-    let Some(table) = guard.as_ref() else { return 0; };
+    let Some(table) = guard.as_ref() else {
+        return 0;
+    };
 
     table
         .lookup(pid)
@@ -719,7 +735,9 @@ pub fn deny_count(pid: Pid) -> u64 {
 #[must_use]
 pub fn active_count() -> usize {
     let guard = TABLE.lock();
-    let Some(table) = guard.as_ref() else { return 0; };
+    let Some(table) = guard.as_ref() else {
+        return 0;
+    };
 
     table.filters.iter().filter(|e| e.active).count()
 }
@@ -946,7 +964,10 @@ pub fn self_test() {
         install(other).expect("install colliding pid");
         // Both must resolve to their own slot, and to the same answer the scan
         // gives — the collider must not shadow the entry already in the bucket.
-        assert!(!check(base_pid, 5), "deny-all base lost its filter to a collision");
+        assert!(
+            !check(base_pid, 5),
+            "deny-all base lost its filter to a collision"
+        );
         assert!(check(other, 5), "allow-all collider got the base's filter");
         assert!(has_filter(base_pid) && has_filter(other));
         verify_index("self-test, colliding pids");
@@ -954,7 +975,10 @@ pub fn self_test() {
         // tombstone-free rebuilding it cannot, and this asserts that.
         remove(base_pid);
         assert!(!has_filter(base_pid));
-        assert!(has_filter(other), "removing a colliding pid orphaned the other");
+        assert!(
+            has_filter(other),
+            "removing a colliding pid orphaned the other"
+        );
         assert!(check(other, 5));
         remove(other);
         serial_println!(

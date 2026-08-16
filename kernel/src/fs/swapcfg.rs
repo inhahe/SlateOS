@@ -27,10 +27,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -342,8 +342,18 @@ pub fn list_swaps() -> Vec<SwapArea> {
 /// Get current swap usage statistics.
 pub fn usage() -> SwapUsage {
     let state = STATE.lock();
-    let total: u64 = state.areas.iter().filter(|a| a.active).map(|a| a.size_bytes).sum();
-    let used: u64 = state.areas.iter().filter(|a| a.active).map(|a| a.used_bytes).sum();
+    let total: u64 = state
+        .areas
+        .iter()
+        .filter(|a| a.active)
+        .map(|a| a.size_bytes)
+        .sum();
+    let used: u64 = state
+        .areas
+        .iter()
+        .filter(|a| a.active)
+        .map(|a| a.used_bytes)
+        .sum();
     let active = state.areas.iter().filter(|a| a.active).count() as u32;
     SwapUsage {
         total_bytes: total,
@@ -450,7 +460,13 @@ pub fn self_test() -> KernelResult<()> {
     // Test 1: add swap areas.
     serial_println!("swapcfg::self_test 1: add swap areas");
     let s1 = add_swap(SwapType::File, "/swapfile", 4_000_000_000, 0, "main")?;
-    let s2 = add_swap(SwapType::Compressed, "/dev/zram0", 2_000_000_000, 100, "zram")?;
+    let s2 = add_swap(
+        SwapType::Compressed,
+        "/dev/zram0",
+        2_000_000_000,
+        100,
+        "zram",
+    )?;
     assert_eq!(list_swaps().len(), 2);
     // Duplicate path fails.
     assert!(add_swap(SwapType::File, "/swapfile", 1_000, 0, "dup").is_err());

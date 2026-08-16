@@ -129,7 +129,8 @@ pub fn sample() {
 
     // --- Scheduler stats ---
     let sched = crate::sched::sched_stats();
-    let runnable = sched.total_tasks_spawned
+    let runnable = sched
+        .total_tasks_spawned
         .saturating_sub(sched.total_tasks_exited) as u16;
     // Rough split: blocked = total - ready - running.
     // The sched_stats exposes state counts if available.

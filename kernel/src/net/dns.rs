@@ -74,10 +74,10 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -521,12 +521,12 @@ fn build_query_typed(name: &str, query_id: u16, qtype: u16) -> Vec<u8> {
     let mut pkt = Vec::with_capacity(64);
 
     // Header (12 bytes).
-    pkt.extend_from_slice(&query_id.to_be_bytes());       // ID.
+    pkt.extend_from_slice(&query_id.to_be_bytes()); // ID.
     pkt.extend_from_slice(&FLAGS_QUERY_RD.to_be_bytes()); // Flags.
-    pkt.extend_from_slice(&1u16.to_be_bytes());           // QDCOUNT = 1.
-    pkt.extend_from_slice(&0u16.to_be_bytes());           // ANCOUNT = 0.
-    pkt.extend_from_slice(&0u16.to_be_bytes());           // NSCOUNT = 0.
-    pkt.extend_from_slice(&0u16.to_be_bytes());           // ARCOUNT = 0.
+    pkt.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT = 1.
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT = 0.
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT = 0.
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT = 0.
 
     // Question section: encode domain name as labels.
     encode_name(&mut pkt, name);
@@ -556,7 +556,10 @@ fn build_aaaa_query(name: &str, query_id: u16) -> Vec<u8> {
 fn build_ptr_query(ip: Ipv4Addr, query_id: u16) -> Vec<u8> {
     let arpa_name = alloc::format!(
         "{}.{}.{}.{}.in-addr.arpa",
-        ip.0[3], ip.0[2], ip.0[1], ip.0[0]
+        ip.0[3],
+        ip.0[2],
+        ip.0[1],
+        ip.0[0]
     );
     build_query_typed(&arpa_name, query_id, TYPE_PTR)
 }
@@ -719,8 +722,10 @@ fn parse_response_inner(
         let rtype = u16::from_be_bytes([data[offset], data[offset + 1]]);
         let rclass = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
         let ttl = u32::from_be_bytes([
-            data[offset + 4], data[offset + 5],
-            data[offset + 6], data[offset + 7],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         let rdlength = u16::from_be_bytes([data[offset + 8], data[offset + 9]]);
         offset += 10;
@@ -737,9 +742,7 @@ fn parse_response_inner(
                 a_results.push((rr_name, Ipv4Addr(ip), ttl));
             } else if rtype == TYPE_CNAME {
                 let (cname, _) = decode_name(data, offset)?;
-                crate::serial_println!(
-                    "[dns] CNAME: {} → {}", rr_name, cname
-                );
+                crate::serial_println!("[dns] CNAME: {} → {}", rr_name, cname);
                 cname_target = Some(cname);
             }
         }
@@ -751,7 +754,10 @@ fn parse_response_inner(
     if let Some(target) = target_name {
         for (name, ip, ttl) in &a_results {
             if names_eq_case_insensitive(name, target) {
-                return Ok(DnsResult { ip: *ip, ttl_secs: *ttl });
+                return Ok(DnsResult {
+                    ip: *ip,
+                    ttl_secs: *ttl,
+                });
             }
         }
     }
@@ -761,14 +767,20 @@ fn parse_response_inner(
     if let Some(ref cname) = cname_target {
         for (name, ip, ttl) in &a_results {
             if names_eq_case_insensitive(name, cname) {
-                return Ok(DnsResult { ip: *ip, ttl_secs: *ttl });
+                return Ok(DnsResult {
+                    ip: *ip,
+                    ttl_secs: *ttl,
+                });
             }
         }
     }
 
     // If we have any A record at all, return the first one.
     if let Some((_, ip, ttl)) = a_results.first() {
-        return Ok(DnsResult { ip: *ip, ttl_secs: *ttl });
+        return Ok(DnsResult {
+            ip: *ip,
+            ttl_secs: *ttl,
+        });
     }
 
     // No A record found.  If we got a CNAME, the caller may need to
@@ -839,8 +851,10 @@ fn parse_ptr_response(data: &[u8], expected_id: u16) -> KernelResult<String> {
         let rtype = u16::from_be_bytes([data[offset], data[offset + 1]]);
         let rclass = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
         let _ttl = u32::from_be_bytes([
-            data[offset + 4], data[offset + 5],
-            data[offset + 6], data[offset + 7],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         let rdlength = u16::from_be_bytes([data[offset + 8], data[offset + 9]]);
         offset += 10;
@@ -1039,7 +1053,9 @@ pub fn resolve(name: &str) -> KernelResult<Ipv4Addr> {
                 if let Some(target) = cname_out.take() {
                     crate::serial_println!(
                         "[dns] Following CNAME: {} → {} (hop {})",
-                        current_name, target, hop + 1
+                        current_name,
+                        target,
+                        hop + 1
                     );
                     // Check cache for the CNAME target before querying.
                     let now_ns = crate::hrtimer::now_ns();
@@ -1048,7 +1064,8 @@ pub fn resolve(name: &str) -> KernelResult<Ipv4Addr> {
                             CACHE_HITS.fetch_add(1, Ordering::Relaxed);
                             crate::serial_println!(
                                 "[dns] Cache hit for CNAME target: '{}' → {}",
-                                target, ip
+                                target,
+                                ip
                             );
                             // Also cache under the original name.
                             let cache_now = crate::hrtimer::now_ns();
@@ -1075,7 +1092,8 @@ pub fn resolve(name: &str) -> KernelResult<Ipv4Addr> {
 
     crate::serial_println!(
         "[dns] CNAME loop detected for '{}' (>{} hops)",
-        name, MAX_CNAME_HOPS
+        name,
+        MAX_CNAME_HOPS
     );
     Err(KernelError::InvalidArgument)
 }
@@ -1193,7 +1211,8 @@ fn dns_query_raw(
         if attempt > 0 {
             crate::serial_println!(
                 "[dns] Retry {} for '{}' (timeout {}ms)",
-                attempt, name,
+                attempt,
+                name,
                 DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000)
             );
         }
@@ -1205,24 +1224,20 @@ fn dns_query_raw(
 
             // Check the appropriate receive queue based on server type.
             let response = match server {
-                DnsServer::V4(ip) => {
-                    super::udp::recv(sock).and_then(|dgram| {
-                        if dgram.src_ip == *ip && dgram.src_port == DNS_PORT {
-                            Some(dgram.data)
-                        } else {
-                            None
-                        }
-                    })
-                }
-                DnsServer::V6(ip) => {
-                    super::udp::recv_v6(sock).and_then(|dgram| {
-                        if dgram.src_ip == *ip && dgram.src_port == DNS_PORT {
-                            Some(dgram.data)
-                        } else {
-                            None
-                        }
-                    })
-                }
+                DnsServer::V4(ip) => super::udp::recv(sock).and_then(|dgram| {
+                    if dgram.src_ip == *ip && dgram.src_port == DNS_PORT {
+                        Some(dgram.data)
+                    } else {
+                        None
+                    }
+                }),
+                DnsServer::V6(ip) => super::udp::recv_v6(sock).and_then(|dgram| {
+                    if dgram.src_ip == *ip && dgram.src_port == DNS_PORT {
+                        Some(dgram.data)
+                    } else {
+                        None
+                    }
+                }),
             };
 
             if let Some(data) = response {
@@ -1240,7 +1255,9 @@ fn dns_query_raw(
     super::udp::close(sock);
     crate::serial_println!(
         "[dns] Query timed out for '{}' after {} attempts via {}",
-        name, MAX_DNS_ATTEMPTS, server
+        name,
+        MAX_DNS_ATTEMPTS,
+        server
     );
     Err(KernelError::TimedOut)
 }
@@ -1288,21 +1305,22 @@ fn resolve_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<Ip
         Ok(result) => {
             crate::serial_println!(
                 "[dns] Resolved '{}' → {} (TTL {}s)",
-                name, result.ip, result.ttl_secs
+                name,
+                result.ip,
+                result.ttl_secs
             );
             let cache_now = crate::hrtimer::now_ns();
-            DNS_CACHE.lock().insert(name, result.ip, result.ttl_secs, cache_now);
+            DNS_CACHE
+                .lock()
+                .insert(name, result.ip, result.ttl_secs, cache_now);
             Ok(result.ip)
         }
         Err(KernelError::NotFound) => {
             if cname_out.is_none() {
                 let cache_now = crate::hrtimer::now_ns();
-                DNS_CACHE.lock().insert(
-                    name,
-                    Ipv4Addr::UNSPECIFIED,
-                    NEGATIVE_CACHE_TTL,
-                    cache_now,
-                );
+                DNS_CACHE
+                    .lock()
+                    .insert(name, Ipv4Addr::UNSPECIFIED, NEGATIVE_CACHE_TTL, cache_now);
             }
             Err(KernelError::NotFound)
         }
@@ -1451,8 +1469,10 @@ fn parse_aaaa_response(
         let rtype = u16::from_be_bytes([data[offset], data[offset + 1]]);
         let rclass = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
         let ttl = u32::from_be_bytes([
-            data[offset + 4], data[offset + 5],
-            data[offset + 6], data[offset + 7],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         let rdlength = u16::from_be_bytes([data[offset + 8], data[offset + 9]]);
         offset += 10;
@@ -1469,9 +1489,7 @@ fn parse_aaaa_response(
                 aaaa_results.push((rr_name, Ipv6Addr(addr), ttl));
             } else if rtype == TYPE_CNAME {
                 let (cname, _) = decode_name(data, offset)?;
-                crate::serial_println!(
-                    "[dns] CNAME (AAAA): {} → {}", rr_name, cname
-                );
+                crate::serial_println!("[dns] CNAME (AAAA): {} → {}", rr_name, cname);
                 cname_target = Some(cname);
             }
         }
@@ -1483,14 +1501,20 @@ fn parse_aaaa_response(
     if let Some(ref cname) = cname_target {
         for (name, ip, ttl) in &aaaa_results {
             if names_eq_case_insensitive(name, cname) {
-                return Ok(DnsResult6 { ip: *ip, ttl_secs: *ttl });
+                return Ok(DnsResult6 {
+                    ip: *ip,
+                    ttl_secs: *ttl,
+                });
             }
         }
     }
 
     // Return the first AAAA record found.
     if let Some((_, ip, ttl)) = aaaa_results.first() {
-        return Ok(DnsResult6 { ip: *ip, ttl_secs: *ttl });
+        return Ok(DnsResult6 {
+            ip: *ip,
+            ttl_secs: *ttl,
+        });
     }
 
     // No AAAA record — propagate CNAME for follow-up.
@@ -1528,7 +1552,9 @@ pub fn resolve6(name: &str) -> KernelResult<Ipv6Addr> {
                 if let Some(target) = cname_out.take() {
                     crate::serial_println!(
                         "[dns] Following CNAME (AAAA): {} → {} (hop {})",
-                        current_name, target, hop + 1
+                        current_name,
+                        target,
+                        hop + 1
                     );
                     // Check AAAA cache for the CNAME target.
                     let now_ns = crate::hrtimer::now_ns();
@@ -1558,7 +1584,8 @@ pub fn resolve6(name: &str) -> KernelResult<Ipv6Addr> {
 
     crate::serial_println!(
         "[dns] AAAA CNAME loop for '{}' (>{} hops)",
-        name, MAX_CNAME_HOPS
+        name,
+        MAX_CNAME_HOPS
     );
     Err(KernelError::InvalidArgument)
 }
@@ -1602,10 +1629,14 @@ fn resolve6_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<I
         Ok(result) => {
             crate::serial_println!(
                 "[dns] AAAA resolved '{}' → {} (TTL {}s)",
-                name, result.ip, result.ttl_secs
+                name,
+                result.ip,
+                result.ttl_secs
             );
             let cache_now = crate::hrtimer::now_ns();
-            AAAA_CACHE.lock().insert(name, result.ip, result.ttl_secs, cache_now);
+            AAAA_CACHE
+                .lock()
+                .insert(name, result.ip, result.ttl_secs, cache_now);
             Ok(result.ip)
         }
         Err(KernelError::NotFound) => {
@@ -1711,9 +1742,7 @@ fn test_encode_name() -> KernelResult<()> {
 
     // Expected: \x07example\x03com\x00
     let expected: &[u8] = &[
-        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-        3, b'c', b'o', b'm',
-        0,
+        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
     ];
     if buf.as_slice() != expected {
         crate::serial_println!("[dns]   FAIL: encode_name mismatch (len={})", buf.len());
@@ -1731,10 +1760,7 @@ fn test_encode_name() -> KernelResult<()> {
     // Single-label name.
     let mut buf3 = Vec::new();
     encode_name(&mut buf3, "localhost");
-    let expected3: &[u8] = &[
-        9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't',
-        0,
-    ];
+    let expected3: &[u8] = &[9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0];
     if buf3.as_slice() != expected3 {
         crate::serial_println!("[dns]   FAIL: single-label encode mismatch");
         return Err(KernelError::InternalError);
@@ -1748,9 +1774,7 @@ fn test_encode_name() -> KernelResult<()> {
 fn test_decode_name() -> KernelResult<()> {
     // Wire data: \x07example\x03com\x00
     let wire: &[u8] = &[
-        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-        3, b'c', b'o', b'm',
-        0,
+        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
     ];
     let (name, end_offset) = decode_name(wire, 0)?;
     if name != "example.com" {
@@ -1767,8 +1791,8 @@ fn test_decode_name() -> KernelResult<()> {
     //         offset 13 = \x03www + compression pointer to offset 0
     let mut wire2 = Vec::from(wire);
     wire2.extend_from_slice(&[
-        3, b'w', b'w', b'w',       // "www" label
-        0xC0, 0x00,                 // compression pointer → offset 0
+        3, b'w', b'w', b'w', // "www" label
+        0xC0, 0x00, // compression pointer → offset 0
     ]);
     let (name2, end2) = decode_name(&wire2, 13)?;
     if name2 != "www.example.com" {
@@ -1789,9 +1813,7 @@ fn test_decode_name() -> KernelResult<()> {
 fn test_skip_name() -> KernelResult<()> {
     // Simple name: \x07example\x03com\x00 (13 bytes).
     let wire: &[u8] = &[
-        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-        3, b'c', b'o', b'm',
-        0,
+        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
     ];
     let after = skip_name(wire, 0)?;
     if after != 13 {
@@ -1801,8 +1823,7 @@ fn test_skip_name() -> KernelResult<()> {
 
     // Name with compression pointer at the end.
     let wire2: &[u8] = &[
-        3, b'w', b'w', b'w',
-        0xC0, 0x00, // pointer to offset 0
+        3, b'w', b'w', b'w', 0xC0, 0x00, // pointer to offset 0
     ];
     let after2 = skip_name(wire2, 0)?;
     // Should advance past the 4-byte label + 2-byte pointer = 6.
@@ -1907,10 +1928,10 @@ fn test_parse_response_a_record() -> KernelResult<()> {
     // Header.
     resp.extend_from_slice(&query_id.to_be_bytes()); // ID
     resp.extend_from_slice(&0x8180u16.to_be_bytes()); // Flags: QR=1, RD=1, RA=1
-    resp.extend_from_slice(&1u16.to_be_bytes());      // QDCOUNT = 1
-    resp.extend_from_slice(&1u16.to_be_bytes());      // ANCOUNT = 1
-    resp.extend_from_slice(&0u16.to_be_bytes());      // NSCOUNT = 0
-    resp.extend_from_slice(&0u16.to_be_bytes());      // ARCOUNT = 0
+    resp.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT = 1
+    resp.extend_from_slice(&1u16.to_be_bytes()); // ANCOUNT = 1
+    resp.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT = 0
+    resp.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT = 0
 
     // Question section: "test.dev" IN A
     encode_name(&mut resp, "test.dev");
@@ -1919,11 +1940,11 @@ fn test_parse_response_a_record() -> KernelResult<()> {
 
     // Answer section: test.dev A 300 93.184.216.34
     encode_name(&mut resp, "test.dev");
-    resp.extend_from_slice(&TYPE_A.to_be_bytes());     // TYPE
-    resp.extend_from_slice(&CLASS_IN.to_be_bytes());    // CLASS
-    resp.extend_from_slice(&300u32.to_be_bytes());      // TTL = 300s
-    resp.extend_from_slice(&4u16.to_be_bytes());        // RDLENGTH = 4
-    resp.extend_from_slice(&[93, 184, 216, 34]);        // RDATA
+    resp.extend_from_slice(&TYPE_A.to_be_bytes()); // TYPE
+    resp.extend_from_slice(&CLASS_IN.to_be_bytes()); // CLASS
+    resp.extend_from_slice(&300u32.to_be_bytes()); // TTL = 300s
+    resp.extend_from_slice(&4u16.to_be_bytes()); // RDLENGTH = 4
+    resp.extend_from_slice(&[93, 184, 216, 34]); // RDATA
 
     let mut cname_out = None;
     let result = parse_response(&resp, query_id, &mut cname_out)?;
@@ -2074,12 +2095,12 @@ fn test_parse_aaaa_response() -> KernelResult<()> {
     let mut resp = Vec::new();
 
     // Header.
-    resp.extend_from_slice(&query_id.to_be_bytes());       // ID.
-    resp.extend_from_slice(&0x8180u16.to_be_bytes());      // Flags: QR=1, RD=1, RA=1.
-    resp.extend_from_slice(&1u16.to_be_bytes());            // QDCOUNT = 1.
-    resp.extend_from_slice(&1u16.to_be_bytes());            // ANCOUNT = 1.
-    resp.extend_from_slice(&0u16.to_be_bytes());            // NSCOUNT = 0.
-    resp.extend_from_slice(&0u16.to_be_bytes());            // ARCOUNT = 0.
+    resp.extend_from_slice(&query_id.to_be_bytes()); // ID.
+    resp.extend_from_slice(&0x8180u16.to_be_bytes()); // Flags: QR=1, RD=1, RA=1.
+    resp.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT = 1.
+    resp.extend_from_slice(&1u16.to_be_bytes()); // ANCOUNT = 1.
+    resp.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT = 0.
+    resp.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT = 0.
 
     // Question section: "test.dev" IN AAAA.
     encode_name(&mut resp, "test.dev");
@@ -2088,23 +2109,19 @@ fn test_parse_aaaa_response() -> KernelResult<()> {
 
     // Answer section: test.dev AAAA 600 2001:db8::1.
     encode_name(&mut resp, "test.dev");
-    resp.extend_from_slice(&TYPE_AAAA.to_be_bytes());      // TYPE.
-    resp.extend_from_slice(&CLASS_IN.to_be_bytes());        // CLASS.
-    resp.extend_from_slice(&600u32.to_be_bytes());          // TTL = 600s.
-    resp.extend_from_slice(&16u16.to_be_bytes());           // RDLENGTH = 16.
+    resp.extend_from_slice(&TYPE_AAAA.to_be_bytes()); // TYPE.
+    resp.extend_from_slice(&CLASS_IN.to_be_bytes()); // CLASS.
+    resp.extend_from_slice(&600u32.to_be_bytes()); // TTL = 600s.
+    resp.extend_from_slice(&16u16.to_be_bytes()); // RDLENGTH = 16.
     // 2001:0db8::1 = 2001:0db8:0000:0000:0000:0000:0000:0001
     resp.extend_from_slice(&[
-        0x20, 0x01, 0x0d, 0xb8,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x01,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
     ]);
 
     let expected_ip = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x01,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
     ]);
 
     let mut cname_out = None;
@@ -2142,10 +2159,8 @@ fn test_aaaa_cache() -> KernelResult<()> {
     let mut cache = DnsAaaaCache::new();
     let now = crate::hrtimer::now_ns();
     let ip = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x01,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
     ]);
 
     // Insert and lookup.
@@ -2207,10 +2222,8 @@ fn test_aaaa_cache() -> KernelResult<()> {
 fn test_ipv6_reverse_name() -> KernelResult<()> {
     // 2001:0db8::1 = 2001:0db8:0000:0000:0000:0000:0000:0001
     let ip = Ipv6Addr([
-        0x20, 0x01, 0x0d, 0xb8,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x01,
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
     ]);
     let arpa = ipv6_to_ip6_arpa(&ip);
 

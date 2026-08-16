@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -179,18 +179,66 @@ where
 
 fn default_mappings() -> Vec<EventMapping> {
     alloc::vec![
-        EventMapping { event: HapticEvent::Click, pattern: HapticPattern::Tap, enabled: true },
-        EventMapping { event: HapticEvent::DoubleClick, pattern: HapticPattern::DoubleTap, enabled: true },
-        EventMapping { event: HapticEvent::LongPress, pattern: HapticPattern::Buzz, enabled: true },
-        EventMapping { event: HapticEvent::Swipe, pattern: HapticPattern::Impact, enabled: true },
-        EventMapping { event: HapticEvent::ScrollTick, pattern: HapticPattern::Tap, enabled: true },
-        EventMapping { event: HapticEvent::SelectionChange, pattern: HapticPattern::Tap, enabled: true },
-        EventMapping { event: HapticEvent::DragStart, pattern: HapticPattern::Impact, enabled: true },
-        EventMapping { event: HapticEvent::DragEnd, pattern: HapticPattern::Tap, enabled: true },
-        EventMapping { event: HapticEvent::Error, pattern: HapticPattern::Heartbeat, enabled: true },
-        EventMapping { event: HapticEvent::Success, pattern: HapticPattern::Rising, enabled: true },
-        EventMapping { event: HapticEvent::Warning, pattern: HapticPattern::Rumble, enabled: true },
-        EventMapping { event: HapticEvent::KeyPress, pattern: HapticPattern::None, enabled: false },
+        EventMapping {
+            event: HapticEvent::Click,
+            pattern: HapticPattern::Tap,
+            enabled: true
+        },
+        EventMapping {
+            event: HapticEvent::DoubleClick,
+            pattern: HapticPattern::DoubleTap,
+            enabled: true
+        },
+        EventMapping {
+            event: HapticEvent::LongPress,
+            pattern: HapticPattern::Buzz,
+            enabled: true
+        },
+        EventMapping {
+            event: HapticEvent::Swipe,
+            pattern: HapticPattern::Impact,
+            enabled: true
+        },
+        EventMapping {
+            event: HapticEvent::ScrollTick,
+            pattern: HapticPattern::Tap,
+            enabled: true
+        },
+        EventMapping {
+            event: HapticEvent::SelectionChange,
+            pattern: HapticPattern::Tap,
+            enabled: true
+        },
+        EventMapping {
+            event: HapticEvent::DragStart,
+            pattern: HapticPattern::Impact,
+            enabled: true
+        },
+        EventMapping {
+            event: HapticEvent::DragEnd,
+            pattern: HapticPattern::Tap,
+            enabled: true
+        },
+        EventMapping {
+            event: HapticEvent::Error,
+            pattern: HapticPattern::Heartbeat,
+            enabled: true
+        },
+        EventMapping {
+            event: HapticEvent::Success,
+            pattern: HapticPattern::Rising,
+            enabled: true
+        },
+        EventMapping {
+            event: HapticEvent::Warning,
+            pattern: HapticPattern::Rumble,
+            enabled: true
+        },
+        EventMapping {
+            event: HapticEvent::KeyPress,
+            pattern: HapticPattern::None,
+            enabled: false
+        },
     ]
 }
 
@@ -200,7 +248,9 @@ fn default_mappings() -> Vec<EventMapping> {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         mappings: default_mappings(),
@@ -220,8 +270,12 @@ pub fn add_device(name: &str, dtype: DeviceType) -> KernelResult<u32> {
         let id = state.next_id;
         state.next_id += 1;
         state.devices.push(HapticDevice {
-            id, name: String::from(name), device_type: dtype,
-            intensity: 50, enabled: true, fire_count: 0,
+            id,
+            name: String::from(name),
+            device_type: dtype,
+            intensity: 50,
+            enabled: true,
+            fire_count: 0,
         });
         Ok(id)
     })
@@ -242,7 +296,10 @@ pub fn remove_device(id: u32) -> KernelResult<()> {
 /// Set intensity for a device (0-100).
 pub fn set_intensity(device_id: u32, intensity: u32) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         dev.intensity = intensity.min(100);
         Ok(())
@@ -252,7 +309,10 @@ pub fn set_intensity(device_id: u32, intensity: u32) -> KernelResult<()> {
 /// Enable/disable a device.
 pub fn set_device_enabled(device_id: u32, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         dev.enabled = enabled;
         Ok(())
@@ -300,12 +360,18 @@ pub fn set_global_enabled(enabled: bool) -> KernelResult<()> {
 
 /// List devices.
 pub fn list_devices() -> Vec<HapticDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// List event mappings.
 pub fn list_mappings() -> Vec<EventMapping> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.mappings.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.mappings.clone())
 }
 
 /// Statistics: (device_count, mapping_count, total_fires, ops).

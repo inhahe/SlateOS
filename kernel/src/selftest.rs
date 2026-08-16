@@ -60,55 +60,82 @@ fn all_suites() -> Vec<TestSuite> {
     suites.push(TestSuite {
         name: "frame_owner",
         description: "Per-frame ownership tracking",
-        run: || { crate::mm::frame_owner::self_test(); true },
+        run: || {
+            crate::mm::frame_owner::self_test();
+            true
+        },
         category: "mm",
     });
     suites.push(TestSuite {
         name: "alloc_trace",
         description: "Allocation event ring buffer",
-        run: || { crate::mm::alloc_trace::self_test(); true },
+        run: || {
+            crate::mm::alloc_trace::self_test();
+            true
+        },
         category: "mm",
     });
     suites.push(TestSuite {
         name: "alloc_lat",
         description: "Allocation latency histogram",
-        run: || { crate::mm::alloc_lat::self_test(); true },
+        run: || {
+            crate::mm::alloc_lat::self_test();
+            true
+        },
         category: "mm",
     });
     suites.push(TestSuite {
         name: "heap_profile",
         description: "Heap size distribution profiler",
-        run: || { crate::mm::heap_profile::self_test(); true },
+        run: || {
+            crate::mm::heap_profile::self_test();
+            true
+        },
         category: "mm",
     });
     suites.push(TestSuite {
         name: "alloc_checkpoint",
         description: "Memory state checkpoints (leak detection)",
-        run: || { crate::mm::alloc_checkpoint::self_test(); true },
+        run: || {
+            crate::mm::alloc_checkpoint::self_test();
+            true
+        },
         category: "mm",
     });
     suites.push(TestSuite {
         name: "frag_history",
         description: "Fragmentation history and trend tracking",
-        run: || { crate::mm::frag_history::self_test(); true },
+        run: || {
+            crate::mm::frag_history::self_test();
+            true
+        },
         category: "mm",
     });
     suites.push(TestSuite {
         name: "fault_inject",
         description: "Controlled allocation failure injection",
-        run: || { crate::mm::fault_inject::self_test(); true },
+        run: || {
+            crate::mm::fault_inject::self_test();
+            true
+        },
         category: "mm",
     });
     suites.push(TestSuite {
         name: "watermark",
         description: "Memory usage metering (watermarks)",
-        run: || { crate::mm::watermark::self_test(); true },
+        run: || {
+            crate::mm::watermark::self_test();
+            true
+        },
         category: "mm",
     });
     suites.push(TestSuite {
         name: "poison",
         description: "Memory poison detection",
-        run: || { crate::mm::poison::self_test(); true },
+        run: || {
+            crate::mm::poison::self_test();
+            true
+        },
         category: "mm",
     });
 
@@ -116,13 +143,19 @@ fn all_suites() -> Vec<TestSuite> {
     suites.push(TestSuite {
         name: "syscall_profile",
         description: "Per-syscall invocation count/latency",
-        run: || { crate::syscall::profile::self_test(); true },
+        run: || {
+            crate::syscall::profile::self_test();
+            true
+        },
         category: "syscall",
     });
     suites.push(TestSuite {
         name: "syscall_trace",
         description: "Per-event syscall capture (strace)",
-        run: || { crate::syscall::trace::self_test(); true },
+        run: || {
+            crate::syscall::trace::self_test();
+            true
+        },
         category: "syscall",
     });
 
@@ -130,7 +163,10 @@ fn all_suites() -> Vec<TestSuite> {
     suites.push(TestSuite {
         name: "cap_audit",
         description: "Capability operation audit log",
-        run: || { crate::cap::audit::self_test(); true },
+        run: || {
+            crate::cap::audit::self_test();
+            true
+        },
         category: "cap",
     });
 
@@ -138,7 +174,10 @@ fn all_suites() -> Vec<TestSuite> {
     suites.push(TestSuite {
         name: "ipc_stats",
         description: "IPC mechanism usage counters",
-        run: || { crate::ipc::stats::self_test(); true },
+        run: || {
+            crate::ipc::stats::self_test();
+            true
+        },
         category: "ipc",
     });
 
@@ -146,109 +185,157 @@ fn all_suites() -> Vec<TestSuite> {
     suites.push(TestSuite {
         name: "kobject",
         description: "Kernel object lifecycle tracking",
-        run: || { crate::kobject::self_test(); true },
+        run: || {
+            crate::kobject::self_test();
+            true
+        },
         category: "kernel",
     });
     suites.push(TestSuite {
         name: "kevent",
         description: "Kernel event bus (pub/sub)",
-        run: || { crate::kevent::self_test(); true },
+        run: || {
+            crate::kevent::self_test();
+            true
+        },
         category: "kernel",
     });
     suites.push(TestSuite {
         name: "sysctl",
         description: "Runtime configuration parameters",
-        run: || { crate::sysctl::self_test(); true },
+        run: || {
+            crate::sysctl::self_test();
+            true
+        },
         category: "kernel",
     });
     suites.push(TestSuite {
         name: "watchpoint",
         description: "Software memory watchpoints",
-        run: || { crate::watchpoint::self_test(); true },
+        run: || {
+            crate::watchpoint::self_test();
+            true
+        },
         category: "kernel",
     });
     suites.push(TestSuite {
         name: "ksnapshot",
         description: "Comprehensive system state capture",
-        run: || { crate::ksnapshot::self_test(); true },
+        run: || {
+            crate::ksnapshot::self_test();
+            true
+        },
         category: "kernel",
     });
     suites.push(TestSuite {
         name: "rip_sample",
         description: "Statistical RIP profiler",
-        run: || { crate::rip_sample::self_test(); true },
+        run: || {
+            crate::rip_sample::self_test();
+            true
+        },
         category: "kernel",
     });
     suites.push(TestSuite {
         name: "invariant",
         description: "System-wide consistency invariant checker",
-        run: || { crate::invariant::self_test(); true },
+        run: || {
+            crate::invariant::self_test();
+            true
+        },
         category: "kernel",
     });
     suites.push(TestSuite {
         name: "sched_migrate",
         description: "Scheduler task migration tracker",
-        run: || { crate::sched_migrate::self_test(); true },
+        run: || {
+            crate::sched_migrate::self_test();
+            true
+        },
         category: "sched",
     });
     suites.push(TestSuite {
         name: "wchan",
         description: "Wait channel tracking (WCHAN for ps/top)",
-        run: || { crate::wchan::self_test(); true },
+        run: || {
+            crate::wchan::self_test();
+            true
+        },
         category: "sched",
     });
     suites.push(TestSuite {
         name: "kdiag",
         description: "Comprehensive diagnostic report generator",
-        run: || { crate::kdiag::self_test(); true },
+        run: || {
+            crate::kdiag::self_test();
+            true
+        },
         category: "kernel",
     });
     suites.push(TestSuite {
         name: "hypervisor",
         description: "Hypervisor/VM detection via CPUID",
-        run: || { crate::hypervisor::self_test(); true },
+        run: || {
+            crate::hypervisor::self_test();
+            true
+        },
         category: "kernel",
     });
     suites.push(TestSuite {
         name: "sched_fairness",
         description: "Scheduler fairness (Jain's Index)",
-        run: || { crate::sched_fairness::self_test(); true },
+        run: || {
+            crate::sched_fairness::self_test();
+            true
+        },
         category: "sched",
     });
     suites.push(TestSuite {
         name: "eevdf",
         description: "EEVDF scheduler algorithm (vruntime, deadlines, fairness)",
-        run: || { crate::sched::eevdf::self_test().is_ok() },
+        run: || crate::sched::eevdf::self_test().is_ok(),
         category: "sched",
     });
     suites.push(TestSuite {
         name: "deadline",
         description: "Deadline scheduler (EDF, admission control, throttling)",
-        run: || { crate::sched::deadline::self_test().is_ok() },
+        run: || crate::sched::deadline::self_test().is_ok(),
         category: "sched",
     });
     suites.push(TestSuite {
         name: "sched_backend",
         description: "Scheduler backend enum (selectable PriorityRR/EEVDF/Deadline)",
-        run: || { crate::sched::backend::self_test(); true },
+        run: || {
+            crate::sched::backend::self_test();
+            true
+        },
         category: "sched",
     });
     suites.push(TestSuite {
         name: "cet",
         description: "Intel CET (shadow stacks + IBT) detection",
-        run: || { crate::cet::self_test(); true },
+        run: || {
+            crate::cet::self_test();
+            true
+        },
         category: "security",
     });
     suites.push(TestSuite {
         name: "smep_smap",
         description: "SMEP/SMAP (user page execution/access prevention)",
-        run: || { crate::smep_smap::self_test(); true },
+        run: || {
+            crate::smep_smap::self_test();
+            true
+        },
         category: "security",
     });
     suites.push(TestSuite {
         name: "spectre",
         description: "Spectre/Meltdown mitigations (IBRS/STIBP/SSBD/IBPB)",
-        run: || { crate::spectre::self_test(); true },
+        run: || {
+            crate::spectre::self_test();
+            true
+        },
         category: "security",
     });
 
@@ -256,7 +343,10 @@ fn all_suites() -> Vec<TestSuite> {
     suites.push(TestSuite {
         name: "hrtimer",
         description: "High-resolution timers (nanosecond scheduling, HPET-backed)",
-        run: || { crate::hrtimer::self_test(); true },
+        run: || {
+            crate::hrtimer::self_test();
+            true
+        },
         category: "kernel",
     });
 
@@ -287,7 +377,8 @@ pub fn run_all() -> TestResults {
 /// Run tests matching a category filter.
 pub fn run_category(category: &str) -> TestResults {
     let suites = all_suites();
-    let filtered: Vec<TestSuite> = suites.into_iter()
+    let filtered: Vec<TestSuite> = suites
+        .into_iter()
         .filter(|s| s.category == category)
         .collect();
     run_filtered(&filtered)
@@ -296,9 +387,7 @@ pub fn run_category(category: &str) -> TestResults {
 /// Run a single named test.
 pub fn run_one(name: &str) -> TestResults {
     let suites = all_suites();
-    let filtered: Vec<TestSuite> = suites.into_iter()
-        .filter(|s| s.name == name)
-        .collect();
+    let filtered: Vec<TestSuite> = suites.into_iter().filter(|s| s.name == name).collect();
     run_filtered(&filtered)
 }
 
@@ -342,7 +431,11 @@ fn run_filtered(suites: &[TestSuite]) -> TestResults {
         serial_println!("[selftest] FAILED: {:?}", failed);
     }
 
-    TestResults { total, passed, failed }
+    TestResults {
+        total,
+        passed,
+        failed,
+    }
 }
 
 // ---------------------------------------------------------------------------

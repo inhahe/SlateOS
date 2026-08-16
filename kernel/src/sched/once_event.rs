@@ -104,10 +104,8 @@ impl OnceEvent {
             return true;
         }
 
-        self.wq.wait_timeout(
-            || self.fired.load(Ordering::Acquire),
-            timeout_ticks,
-        )
+        self.wq
+            .wait_timeout(|| self.fired.load(Ordering::Acquire), timeout_ticks)
     }
 
     /// Try to wait with a nanosecond-precision timeout.
@@ -119,10 +117,8 @@ impl OnceEvent {
             return true;
         }
 
-        self.wq.wait_timeout_ns(
-            || self.fired.load(Ordering::Acquire),
-            timeout_ns,
-        )
+        self.wq
+            .wait_timeout_ns(|| self.fired.load(Ordering::Acquire), timeout_ns)
     }
 }
 
@@ -216,7 +212,10 @@ pub fn self_test() {
         let e = OnceEvent::new();
         e.signal();
         let result = e.wait_timeout_ns(1_000_000); // 1ms
-        assert!(result, "wait_timeout_ns should return true when already fired");
+        assert!(
+            result,
+            "wait_timeout_ns should return true when already fired"
+        );
     }
     serial_println!("[once_event]   wait_timeout_ns (already set): OK");
 

@@ -25,10 +25,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -181,7 +181,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         notifications: Vec::new(),
@@ -198,7 +200,11 @@ pub fn init_defaults() {
 }
 
 /// Start pairing a new device. Returns (device_id, pairing_code).
-pub fn start_pairing(name: &str, platform: MobilePlatform, model: &str) -> KernelResult<(u32, u32)> {
+pub fn start_pairing(
+    name: &str,
+    platform: MobilePlatform,
+    model: &str,
+) -> KernelResult<(u32, u32)> {
     with_state(|state| {
         if state.devices.len() >= MAX_DEVICES {
             return Err(KernelError::ResourceExhausted);
@@ -233,7 +239,10 @@ pub fn start_pairing(name: &str, platform: MobilePlatform, model: &str) -> Kerne
 /// Confirm pairing with code. Changes state from Pairing to Connected.
 pub fn confirm_pairing(device_id: u32, code: u32) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         if dev.state != LinkState::Pairing {
             return Err(KernelError::InvalidArgument);
@@ -251,7 +260,10 @@ pub fn confirm_pairing(device_id: u32, code: u32) -> KernelResult<()> {
 /// Disconnect a device (keeps it paired for reconnection).
 pub fn disconnect(device_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         dev.state = LinkState::Disconnected;
         Ok(())
@@ -261,7 +273,10 @@ pub fn disconnect(device_id: u32) -> KernelResult<()> {
 /// Reconnect a previously paired device.
 pub fn reconnect(device_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         if dev.state != LinkState::Disconnected {
             return Err(KernelError::InvalidArgument);
@@ -275,7 +290,10 @@ pub fn reconnect(device_id: u32) -> KernelResult<()> {
 /// Remove (unpair) a device entirely.
 pub fn remove_device(device_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.devices.iter().position(|d| d.id == device_id)
+        let pos = state
+            .devices
+            .iter()
+            .position(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         state.devices.remove(pos);
         // Clean up notifications and messages from this device.
@@ -288,7 +306,10 @@ pub fn remove_device(device_id: u32) -> KernelResult<()> {
 /// Enable/disable a feature on a device.
 pub fn set_feature(device_id: u32, feature: LinkFeature, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         if enabled {
             if !dev.features.contains(&feature) {
@@ -304,7 +325,10 @@ pub fn set_feature(device_id: u32, feature: LinkFeature, enabled: bool) -> Kerne
 /// Update device battery level.
 pub fn update_battery(device_id: u32, percent: u8) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         dev.battery_percent = percent.min(100);
         dev.last_seen_ns = crate::hpet::elapsed_ns();
@@ -313,10 +337,18 @@ pub fn update_battery(device_id: u32, percent: u8) -> KernelResult<()> {
 }
 
 /// Mirror a notification from the mobile device.
-pub fn mirror_notification(device_id: u32, app_name: &str, title: &str, body: &str) -> KernelResult<u32> {
+pub fn mirror_notification(
+    device_id: u32,
+    app_name: &str,
+    title: &str,
+    body: &str,
+) -> KernelResult<u32> {
     with_state(|state| {
         // Verify device exists and is connected.
-        let dev = state.devices.iter().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         if dev.state != LinkState::Connected && dev.state != LinkState::Syncing {
             return Err(KernelError::InvalidArgument);
@@ -354,7 +386,10 @@ pub fn mirror_notification(device_id: u32, app_name: &str, title: &str, body: &s
 /// Dismiss a mirrored notification.
 pub fn dismiss_notification(notif_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let notif = state.notifications.iter_mut().find(|n| n.id == notif_id)
+        let notif = state
+            .notifications
+            .iter_mut()
+            .find(|n| n.id == notif_id)
             .ok_or(KernelError::NotFound)?;
         notif.dismissed = true;
         Ok(())
@@ -364,7 +399,10 @@ pub fn dismiss_notification(notif_id: u32) -> KernelResult<()> {
 /// Send an SMS message through the linked device.
 pub fn send_sms(device_id: u32, recipient: &str, body: &str) -> KernelResult<u32> {
     with_state(|state| {
-        let dev = state.devices.iter().find(|d| d.id == device_id)
+        let dev = state
+            .devices
+            .iter()
+            .find(|d| d.id == device_id)
             .ok_or(KernelError::NotFound)?;
         if dev.state != LinkState::Connected && dev.state != LinkState::Syncing {
             return Err(KernelError::InvalidArgument);
@@ -406,7 +444,10 @@ pub fn record_transfer(device_id: u32) -> KernelResult<()> {
 
 /// List all linked devices.
 pub fn list_devices() -> Vec<LinkedDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// List notifications for a device (or all if device_id is 0).
@@ -415,7 +456,11 @@ pub fn list_notifications(device_id: u32) -> Vec<MirroredNotification> {
         if device_id == 0 {
             s.notifications.clone()
         } else {
-            s.notifications.iter().filter(|n| n.device_id == device_id).cloned().collect()
+            s.notifications
+                .iter()
+                .filter(|n| n.device_id == device_id)
+                .cloned()
+                .collect()
         }
     })
 }
@@ -426,7 +471,11 @@ pub fn list_messages(device_id: u32) -> Vec<SmsMessage> {
         if device_id == 0 {
             s.messages.clone()
         } else {
-            s.messages.iter().filter(|m| m.device_id == device_id).cloned().collect()
+            s.messages
+                .iter()
+                .filter(|m| m.device_id == device_id)
+                .cloned()
+                .collect()
         }
     })
 }
@@ -435,7 +484,14 @@ pub fn list_messages(device_id: u32) -> Vec<SmsMessage> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_paired, s.total_notifications, s.total_messages, s.total_transfers, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_paired,
+            s.total_notifications,
+            s.total_messages,
+            s.total_transfers,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -453,7 +509,8 @@ pub fn self_test() {
     crate::serial_println!("  [1/10] empty initial: OK");
 
     // 2: Start pairing.
-    let (dev_id, code) = start_pairing("My Phone", MobilePlatform::Android, "Pixel 8").expect("pair");
+    let (dev_id, code) =
+        start_pairing("My Phone", MobilePlatform::Android, "Pixel 8").expect("pair");
     assert!(dev_id > 0);
     assert!(code >= 100000 && code <= 999999);
     let devs = list_devices();

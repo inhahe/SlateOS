@@ -20,11 +20,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -57,9 +57,9 @@ const DECAY_5M: u64 = 983;
 const DECAY_15M: u64 = 994;
 
 struct State {
-    avg_1m: u64,   // × 1000
-    avg_5m: u64,   // × 1000
-    avg_15m: u64,  // × 1000
+    avg_1m: u64,  // × 1000
+    avg_5m: u64,  // × 1000
+    avg_15m: u64, // × 1000
     running: u32,
     total: u32,
     history: Vec<LoadSnapshot>,
@@ -88,7 +88,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         avg_1m: 0,
         avg_5m: 0,
@@ -122,8 +124,11 @@ pub fn update(running: u32, total: u32) -> KernelResult<()> {
         }
         state.history.push(LoadSnapshot {
             timestamp_ns: now,
-            avg_1m: state.avg_1m, avg_5m: state.avg_5m, avg_15m: state.avg_15m,
-            running, total,
+            avg_1m: state.avg_1m,
+            avg_5m: state.avg_5m,
+            avg_15m: state.avg_15m,
+            running,
+            total,
         });
         Ok(())
     })
@@ -144,7 +149,10 @@ pub fn format_load(load_x1000: u64) -> String {
 
 /// Get load average history.
 pub fn history() -> Vec<LoadSnapshot> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.history.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.history.clone())
 }
 
 /// Statistics: (history_len, total_updates, ops).

@@ -30,9 +30,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::KernelResult;
 
@@ -387,12 +387,17 @@ pub fn handle_battery_update(percent: u8, minutes_left: i32, charging: bool) {
     state.battery.percent = percent.min(100);
     state.battery.minutes_left = minutes_left;
     state.battery.charging = charging;
-    state.battery.source = if charging { PowerSource::AC } else { PowerSource::Battery };
+    state.battery.source = if charging {
+        PowerSource::AC
+    } else {
+        PowerSource::Battery
+    };
 
     // Auto power-saver.
     if state.config.auto_power_saver && !charging {
         state.config.profile = PowerProfile::PowerSaver;
-    } else if state.config.auto_power_saver && charging
+    } else if state.config.auto_power_saver
+        && charging
         && state.config.profile == PowerProfile::PowerSaver
     {
         state.config.profile = PowerProfile::Balanced;
@@ -547,7 +552,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("  power::test 3: idle screen off");
     set_screen_off_minutes(2);
     set_sleep_minutes(10);
-    let a1 = check_idle(60);  // 1 min — nothing yet.
+    let a1 = check_idle(60); // 1 min — nothing yet.
     assert_eq!(a1, PowerAction::Nothing);
     let a2 = check_idle(120); // 2 min — screen off.
     assert_eq!(a2, PowerAction::ScreenOff);

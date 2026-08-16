@@ -173,8 +173,14 @@ static TOTAL_FRAMES_MIXED: AtomicU32 = AtomicU32::new(0);
 
 /// Stream slots (fixed array — no heap allocation).
 static STREAMS: [StreamSlot; MAX_STREAMS] = [
-    StreamSlot::new(), StreamSlot::new(), StreamSlot::new(), StreamSlot::new(),
-    StreamSlot::new(), StreamSlot::new(), StreamSlot::new(), StreamSlot::new(),
+    StreamSlot::new(),
+    StreamSlot::new(),
+    StreamSlot::new(),
+    StreamSlot::new(),
+    StreamSlot::new(),
+    StreamSlot::new(),
+    StreamSlot::new(),
+    StreamSlot::new(),
 ];
 
 impl StreamSlot {
@@ -200,7 +206,11 @@ impl StreamSlot {
 pub fn open_stream(name: &str) -> KernelResult<StreamId> {
     for (i, slot) in STREAMS.iter().enumerate() {
         // Try to atomically claim this slot.
-        if slot.active.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+        if slot
+            .active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
             // Initialize the slot.
             slot.volume.store(100, Ordering::Relaxed);
             slot.muted.store(false, Ordering::Relaxed);
@@ -403,7 +413,10 @@ pub fn mix_output(output: &mut [u8]) -> usize {
         }
         if slot.muted.load(Ordering::Relaxed) {
             // Drain the ring even if muted (so it doesn't accumulate).
-            let _ = slot.ring.lock().read(&mut temp[..actual_frames * FRAME_SIZE_BYTES]);
+            let _ = slot
+                .ring
+                .lock()
+                .read(&mut temp[..actual_frames * FRAME_SIZE_BYTES]);
             continue;
         }
 
@@ -475,7 +488,8 @@ pub fn mix_output(output: &mut [u8]) -> usize {
 
 /// Get mixer status: (active_streams, total_opened, total_frames_mixed, master_vol, master_muted).
 pub fn status() -> (u8, u32, u32, u8, bool) {
-    let active = STREAMS.iter()
+    let active = STREAMS
+        .iter()
         .filter(|s| s.active.load(Ordering::Relaxed))
         .count() as u8;
     (
@@ -636,8 +650,13 @@ pub fn self_test() {
 
     // Test 8: Verify stats.
     let (active, opened, _frames, mvol, mmuted) = status();
-    serial_println!("[mixer]   Stats: {} active, {} opened, vol={}, muted={}",
-        active, opened, mvol, mmuted);
+    serial_println!(
+        "[mixer]   Stats: {} active, {} opened, vol={}, muted={}",
+        active,
+        opened,
+        mvol,
+        mmuted
+    );
 
     serial_println!("[mixer] Self-test PASSED");
 }

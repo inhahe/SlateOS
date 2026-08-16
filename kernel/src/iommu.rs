@@ -40,9 +40,9 @@
 //! - Linux `drivers/iommu/amd/init.c` — IVRS table parsing
 
 use crate::acpi;
+use crate::error::{KernelError, KernelResult};
 use crate::mm;
 use crate::serial_println;
-use crate::error::{KernelError, KernelResult};
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -232,8 +232,11 @@ fn detect_intel_vtd() -> bool {
     let intr_remap = (flags & 0x01) != 0;
     INTERRUPT_REMAP.store(intr_remap, Ordering::Relaxed);
 
-    serial_println!("[iommu] VT-d: host address width={}, intr_remap={}",
-        host_width, intr_remap);
+    serial_println!(
+        "[iommu] VT-d: host address width={}, intr_remap={}",
+        host_width,
+        intr_remap
+    );
 
     // Walk remapping structures after the DMAR header.
     let struct_offset = 36 + core::mem::size_of::<DmarHeader>();
@@ -270,8 +273,13 @@ fn detect_intel_vtd() -> bool {
 
                 let include_all = (flags_byte & 0x01) != 0;
 
-                serial_println!("[iommu] DRHD unit {}: base={:#x} seg={} include_all={}",
-                    unit_count, reg_base, seg, include_all);
+                serial_println!(
+                    "[iommu] DRHD unit {}: base={:#x} seg={} include_all={}",
+                    unit_count,
+                    reg_base,
+                    seg,
+                    include_all
+                );
 
                 if (unit_count as usize) < MAX_IOMMU_UNITS {
                     let mut units = IOMMU_UNITS.lock();
@@ -293,7 +301,10 @@ fn detect_intel_vtd() -> bool {
         IOMMU_AVAILABLE.store(true, Ordering::Release);
         IOMMU_VENDOR.store(IommuVendor::IntelVtd as u8, Ordering::Relaxed);
         IOMMU_UNIT_COUNT.store(unit_count, Ordering::Relaxed);
-        serial_println!("[iommu] Intel VT-d detected: {} hardware unit(s)", unit_count);
+        serial_println!(
+            "[iommu] Intel VT-d detected: {} hardware unit(s)",
+            unit_count
+        );
         true
     } else {
         serial_println!("[iommu] DMAR table found but no DRHD units");
@@ -392,10 +403,16 @@ pub fn status_summary() -> alloc::string::String {
 
     let units = unit_count();
     let haw = host_address_width();
-    let ir = if interrupt_remapping_supported() { "yes" } else { "no" };
+    let ir = if interrupt_remapping_supported() {
+        "yes"
+    } else {
+        "no"
+    };
 
-    format!("IOMMU: {} ({} unit(s), {}bit DMA, intr_remap={})",
-        vendor_str, units, haw, ir)
+    format!(
+        "IOMMU: {} ({} unit(s), {}bit DMA, intr_remap={})",
+        vendor_str, units, haw, ir
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -424,13 +441,15 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[iommu]   FAIL: available but units=0");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[iommu]   Detection: {} with {} unit(s)",
+        serial_println!(
+            "[iommu]   Detection: {} with {} unit(s)",
             match v {
                 IommuVendor::IntelVtd => "Intel VT-d",
                 IommuVendor::AmdVi => "AMD-Vi",
                 IommuVendor::None => "None",
             },
-            units);
+            units
+        );
     } else {
         // If not available, vendor should be None and units = 0.
         if v != IommuVendor::None {

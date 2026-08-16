@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -108,15 +108,59 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         actions: alloc::vec![
-            ClipAction { id: 1, name: String::from("Open URL"), content_type: ContentType::Url, command: String::from("browser:open"), enabled: true, use_count: 0 },
-            ClipAction { id: 2, name: String::from("Copy URL"), content_type: ContentType::Url, command: String::from("clipboard:copy"), enabled: true, use_count: 0 },
-            ClipAction { id: 3, name: String::from("Send Email"), content_type: ContentType::Email, command: String::from("email:compose"), enabled: true, use_count: 0 },
-            ClipAction { id: 4, name: String::from("Open File"), content_type: ContentType::FilePath, command: String::from("files:open"), enabled: true, use_count: 0 },
-            ClipAction { id: 5, name: String::from("Format JSON"), content_type: ContentType::Json, command: String::from("editor:format_json"), enabled: true, use_count: 0 },
-            ClipAction { id: 6, name: String::from("Preview Color"), content_type: ContentType::Color, command: String::from("colorpicker:preview"), enabled: true, use_count: 0 },
+            ClipAction {
+                id: 1,
+                name: String::from("Open URL"),
+                content_type: ContentType::Url,
+                command: String::from("browser:open"),
+                enabled: true,
+                use_count: 0
+            },
+            ClipAction {
+                id: 2,
+                name: String::from("Copy URL"),
+                content_type: ContentType::Url,
+                command: String::from("clipboard:copy"),
+                enabled: true,
+                use_count: 0
+            },
+            ClipAction {
+                id: 3,
+                name: String::from("Send Email"),
+                content_type: ContentType::Email,
+                command: String::from("email:compose"),
+                enabled: true,
+                use_count: 0
+            },
+            ClipAction {
+                id: 4,
+                name: String::from("Open File"),
+                content_type: ContentType::FilePath,
+                command: String::from("files:open"),
+                enabled: true,
+                use_count: 0
+            },
+            ClipAction {
+                id: 5,
+                name: String::from("Format JSON"),
+                content_type: ContentType::Json,
+                command: String::from("editor:format_json"),
+                enabled: true,
+                use_count: 0
+            },
+            ClipAction {
+                id: 6,
+                name: String::from("Preview Color"),
+                content_type: ContentType::Color,
+                command: String::from("colorpicker:preview"),
+                enabled: true,
+                use_count: 0
+            },
         ],
         next_id: 7,
         total_detections: 0,
@@ -138,7 +182,11 @@ pub fn detect_type(content: &str) -> ContentType {
         ContentType::Color
     } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
         ContentType::Json
-    } else if trimmed.chars().all(|c| c.is_ascii_digit() || c == '+' || c == '-' || c == '(' || c == ')' || c == ' ') && trimmed.len() >= 7 {
+    } else if trimmed
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '+' || c == '-' || c == '(' || c == ')' || c == ' ')
+        && trimmed.len() >= 7
+    {
         ContentType::PhoneNumber
     } else if trimmed.parse::<f64>().is_ok() {
         ContentType::Number
@@ -153,7 +201,9 @@ pub fn get_actions(content_type: ContentType) -> Vec<ClipAction> {
     if let Some(state) = guard.as_mut() {
         state.ops += 1;
         state.total_detections += 1;
-        state.actions.iter()
+        state
+            .actions
+            .iter()
             .filter(|a| a.content_type == content_type && a.enabled)
             .cloned()
             .collect()
@@ -165,7 +215,10 @@ pub fn get_actions(content_type: ContentType) -> Vec<ClipAction> {
 /// Execute an action.
 pub fn execute_action(id: u32) -> KernelResult<String> {
     with_state(|state| {
-        let action = state.actions.iter_mut().find(|a| a.id == id)
+        let action = state
+            .actions
+            .iter_mut()
+            .find(|a| a.id == id)
             .ok_or(KernelError::NotFound)?;
         action.use_count += 1;
         state.total_executions += 1;
@@ -182,8 +235,12 @@ pub fn add_action(name: &str, content_type: ContentType, command: &str) -> Kerne
         let id = state.next_id;
         state.next_id += 1;
         state.actions.push(ClipAction {
-            id, name: String::from(name), content_type,
-            command: String::from(command), enabled: true, use_count: 0,
+            id,
+            name: String::from(name),
+            content_type,
+            command: String::from(command),
+            enabled: true,
+            use_count: 0,
         });
         Ok(id)
     })
@@ -194,21 +251,31 @@ pub fn remove_action(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.actions.len();
         state.actions.retain(|a| a.id != id);
-        if state.actions.len() == before { return Err(KernelError::NotFound); }
+        if state.actions.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
 
 /// List all actions.
 pub fn list_actions() -> Vec<ClipAction> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.actions.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.actions.clone())
 }
 
 /// Statistics: (action_count, total_detections, total_executions, ops).
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.actions.len(), s.total_detections, s.total_executions, s.ops),
+        Some(s) => (
+            s.actions.len(),
+            s.total_detections,
+            s.total_executions,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

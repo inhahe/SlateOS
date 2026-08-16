@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -86,12 +86,12 @@ pub struct Credential {
     pub id: u32,
     pub principal: String,
     pub method: AuthMethod,
-    pub hash: String,       // Credential hash (never store plaintext).
+    pub hash: String, // Credential hash (never store plaintext).
     pub created_ns: u64,
-    pub expires_ns: u64,    // 0 = never.
+    pub expires_ns: u64, // 0 = never.
     pub locked: bool,
     pub failed_attempts: u32,
-    pub max_failures: u32,  // Auto-lock after N failures (0 = unlimited).
+    pub max_failures: u32, // Auto-lock after N failures (0 = unlimited).
 }
 
 /// A capability grant record.
@@ -166,7 +166,9 @@ where
 /// backed by a real provisioned account or verified secret.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         credentials: Vec::new(),
         grants: Vec::new(),
@@ -184,11 +186,16 @@ pub fn init_defaults() {
 pub fn authenticate(principal: &str, method: AuthMethod) -> KernelResult<AuthResult> {
     with_state(|state| {
         state.total_auth_attempts += 1;
-        let cred = state.credentials.iter_mut()
+        let cred = state
+            .credentials
+            .iter_mut()
             .find(|c| c.principal == principal && c.method == method);
         let cred = match cred {
             Some(c) => c,
-            None => { state.total_denied += 1; return Ok(AuthResult::Denied); }
+            None => {
+                state.total_denied += 1;
+                return Ok(AuthResult::Denied);
+            }
         };
         if cred.locked {
             state.total_denied += 1;
@@ -209,7 +216,9 @@ pub fn authenticate(principal: &str, method: AuthMethod) -> KernelResult<AuthRes
 /// Record a failed authentication attempt.
 pub fn record_failure(principal: &str, method: AuthMethod) -> KernelResult<()> {
     with_state(|state| {
-        let cred = state.credentials.iter_mut()
+        let cred = state
+            .credentials
+            .iter_mut()
             .find(|c| c.principal == principal && c.method == method)
             .ok_or(KernelError::NotFound)?;
         cred.failed_attempts += 1;
@@ -224,14 +233,22 @@ pub fn record_failure(principal: &str, method: AuthMethod) -> KernelResult<()> {
 /// Store a new credential.
 pub fn store_credential(principal: &str, method: AuthMethod, hash: &str) -> KernelResult<u32> {
     with_state(|state| {
-        if state.credentials.len() >= MAX_CREDENTIALS { return Err(KernelError::ResourceExhausted); }
+        if state.credentials.len() >= MAX_CREDENTIALS {
+            return Err(KernelError::ResourceExhausted);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_cred_id;
         state.next_cred_id += 1;
         state.credentials.push(Credential {
-            id, principal: String::from(principal), method,
-            hash: String::from(hash), created_ns: now, expires_ns: 0,
-            locked: false, failed_attempts: 0, max_failures: 5,
+            id,
+            principal: String::from(principal),
+            method,
+            hash: String::from(hash),
+            created_ns: now,
+            expires_ns: 0,
+            locked: false,
+            failed_attempts: 0,
+            max_failures: 5,
         });
         Ok(id)
     })
@@ -242,7 +259,9 @@ pub fn remove_credential(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.credentials.len();
         state.credentials.retain(|c| c.id != id);
-        if state.credentials.len() == before { return Err(KernelError::NotFound); }
+        if state.credentials.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -250,7 +269,9 @@ pub fn remove_credential(id: u32) -> KernelResult<()> {
 /// Unlock a locked credential.
 pub fn unlock(principal: &str) -> KernelResult<()> {
     with_state(|state| {
-        let cred = state.credentials.iter_mut()
+        let cred = state
+            .credentials
+            .iter_mut()
             .find(|c| c.principal == principal)
             .ok_or(KernelError::NotFound)?;
         cred.locked = false;
@@ -262,14 +283,20 @@ pub fn unlock(principal: &str) -> KernelResult<()> {
 /// Grant a capability to a principal for a resource.
 pub fn grant_capability(principal: &str, resource: &str, ttl_ns: u64) -> KernelResult<u32> {
     with_state(|state| {
-        if state.grants.len() >= MAX_GRANTS { return Err(KernelError::ResourceExhausted); }
+        if state.grants.len() >= MAX_GRANTS {
+            return Err(KernelError::ResourceExhausted);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_grant_id;
         state.next_grant_id += 1;
         let expires = if ttl_ns > 0 { now + ttl_ns } else { 0 };
         state.grants.push(CapGrant {
-            id, principal: String::from(principal), resource: String::from(resource),
-            granted_ns: now, expires_ns: expires, revoked: false,
+            id,
+            principal: String::from(principal),
+            resource: String::from(resource),
+            granted_ns: now,
+            expires_ns: expires,
+            revoked: false,
         });
         Ok(id)
     })
@@ -278,9 +305,14 @@ pub fn grant_capability(principal: &str, resource: &str, ttl_ns: u64) -> KernelR
 /// Revoke a capability grant.
 pub fn revoke_grant(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let g = state.grants.iter_mut().find(|g| g.id == id)
+        let g = state
+            .grants
+            .iter_mut()
+            .find(|g| g.id == id)
             .ok_or(KernelError::NotFound)?;
-        if g.revoked { return Err(KernelError::AlreadyExists); }
+        if g.revoked {
+            return Err(KernelError::AlreadyExists);
+        }
         g.revoked = true;
         state.total_revoked += 1;
         Ok(())
@@ -289,22 +321,34 @@ pub fn revoke_grant(id: u32) -> KernelResult<()> {
 
 /// List credentials for a principal (or all).
 pub fn list_credentials(principal: Option<&str>) -> Vec<Credential> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        match principal {
-            Some(p) => s.credentials.iter().filter(|c| c.principal == p).cloned().collect(),
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| match principal {
+            Some(p) => s
+                .credentials
+                .iter()
+                .filter(|c| c.principal == p)
+                .cloned()
+                .collect(),
             None => s.credentials.clone(),
-        }
-    })
+        })
 }
 
 /// List active grants for a principal.
 pub fn list_grants(principal: Option<&str>) -> Vec<CapGrant> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        match principal {
-            Some(p) => s.grants.iter().filter(|g| g.principal == p && !g.revoked).cloned().collect(),
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| match principal {
+            Some(p) => s
+                .grants
+                .iter()
+                .filter(|g| g.principal == p && !g.revoked)
+                .cloned()
+                .collect(),
             None => s.grants.iter().filter(|g| !g.revoked).cloned().collect(),
-        }
-    })
+        })
 }
 
 /// Statistics: (cred_count, grant_count, auth_attempts, granted, denied, revoked, ops).
@@ -312,8 +356,13 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => (
-            s.credentials.len(), s.grants.len(),
-            s.total_auth_attempts, s.total_granted, s.total_denied, s.total_revoked, s.ops
+            s.credentials.len(),
+            s.grants.len(),
+            s.total_auth_attempts,
+            s.total_granted,
+            s.total_denied,
+            s.total_revoked,
+            s.ops,
         ),
         None => (0, 0, 0, 0, 0, 0, 0),
     }
@@ -342,8 +391,14 @@ pub fn self_test() {
     let uid = store_credential("alice", AuthMethod::Password, "hash_a").expect("store");
     assert_eq!(uid, 1);
     assert_eq!(list_credentials(Some("alice")).len(), 1);
-    assert_eq!(authenticate("alice", AuthMethod::Password).expect("auth"), AuthResult::Granted);
-    assert_eq!(authenticate("nobody", AuthMethod::Password).expect("auth2"), AuthResult::Denied);
+    assert_eq!(
+        authenticate("alice", AuthMethod::Password).expect("auth"),
+        AuthResult::Granted
+    );
+    assert_eq!(
+        authenticate("nobody", AuthMethod::Password).expect("auth2"),
+        AuthResult::Denied
+    );
     crate::serial_println!("  [2/8] store + authenticate: OK");
 
     // 3: Failed attempts + lock — alice has max_failures=5 (the store default),
@@ -351,12 +406,18 @@ pub fn self_test() {
     for _ in 0..5 {
         record_failure("alice", AuthMethod::Password).expect("fail");
     }
-    assert_eq!(authenticate("alice", AuthMethod::Password).expect("auth3"), AuthResult::Locked);
+    assert_eq!(
+        authenticate("alice", AuthMethod::Password).expect("auth3"),
+        AuthResult::Locked
+    );
     crate::serial_println!("  [3/8] lockout: OK");
 
     // 4: Unlock — clears the lock and the failure counter; auth succeeds again.
     unlock("alice").expect("unlock");
-    assert_eq!(authenticate("alice", AuthMethod::Password).expect("auth4"), AuthResult::Granted);
+    assert_eq!(
+        authenticate("alice", AuthMethod::Password).expect("auth4"),
+        AuthResult::Granted
+    );
     crate::serial_println!("  [4/8] unlock: OK");
 
     // 5: Second credential — gets id 2; per-principal listing is exact.
@@ -384,7 +445,10 @@ pub fn self_test() {
     //    granted = 2; denied = 1 (nobody) + 5 (record_failure) + 1 (locked) = 7;
     //    revoked = 1.
     let (creds, grants, attempts, granted, denied, revoked, ops) = stats();
-    assert_eq!((creds, grants, attempts, granted, denied, revoked), (2, 1, 4, 2, 7, 1));
+    assert_eq!(
+        (creds, grants, attempts, granted, denied, revoked),
+        (2, 1, 4, 2, 7, 1)
+    );
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

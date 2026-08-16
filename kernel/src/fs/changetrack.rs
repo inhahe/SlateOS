@@ -52,10 +52,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::journal::{self, JournalEntry, JournalEventType};
@@ -263,10 +263,7 @@ pub fn reset(name: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
     ensure_init(&mut state);
 
-    let cursor = state
-        .cursors
-        .get_mut(name)
-        .ok_or(KernelError::NotFound)?;
+    let cursor = state.cursors.get_mut(name).ok_or(KernelError::NotFound)?;
 
     cursor.last_seq = journal::cursor();
     cursor.last_advanced_ns = crate::timekeeping::clock_realtime();
@@ -429,9 +426,7 @@ fn query_impl(name: &str, filter: &ChangeFilter, advance: bool) -> KernelResult<
 /// Check if a journal entry matches the given filter.
 fn matches_filter(entry: &JournalEntry, filter: &ChangeFilter) -> bool {
     // Check event type filter.
-    if !filter.event_types.is_empty()
-        && !filter.event_types.contains(&entry.event_type)
-    {
+    if !filter.event_types.is_empty() && !filter.event_types.contains(&entry.event_type) {
         return false;
     }
 
@@ -446,7 +441,9 @@ fn matches_filter(entry: &JournalEntry, filter: &ChangeFilter) -> bool {
             // For renames, also check old_path.  A non-rename has none, so it
             // is simply unmatched.
             let old_matches = entry.old_path.as_ref().is_some_and(|old| {
-                filter.path_prefixes.iter()
+                filter
+                    .path_prefixes
+                    .iter()
                     .any(|pfx| crate::fs::pathutil::path_in_subtree(old, pfx))
             });
             if !old_matches {
@@ -539,19 +536,17 @@ fn json_extract_str(line: &str, prefix: &str) -> Option<String> {
     loop {
         match chars.next()? {
             '"' => break,
-            '\\' => {
-                match chars.next()? {
-                    '"' => result.push('"'),
-                    '\\' => result.push('\\'),
-                    'n' => result.push('\n'),
-                    'r' => result.push('\r'),
-                    't' => result.push('\t'),
-                    c => {
-                        result.push('\\');
-                        result.push(c);
-                    }
+            '\\' => match chars.next()? {
+                '"' => result.push('"'),
+                '\\' => result.push('\\'),
+                'n' => result.push('\n'),
+                'r' => result.push('\r'),
+                't' => result.push('\t'),
+                c => {
+                    result.push('\\');
+                    result.push(c);
                 }
-            }
+            },
             c => result.push(c),
         }
     }
@@ -608,11 +603,18 @@ fn test_changes_basic() {
     let result = changes("test_ct_2", &filter).expect("changes failed");
 
     // Should see at least the 2 entries we just created.
-    assert!(result.changes.len() >= 2, "expected at least 2 changes, got {}", result.changes.len());
+    assert!(
+        result.changes.len() >= 2,
+        "expected at least 2 changes, got {}",
+        result.changes.len()
+    );
 
     // Query again — should be empty since cursor advanced.
     let result2 = changes("test_ct_2", &filter).expect("changes 2 failed");
-    assert!(result2.changes.is_empty(), "expected 0 changes after advance");
+    assert!(
+        result2.changes.is_empty(),
+        "expected 0 changes after advance"
+    );
 
     unregister("test_ct_2").expect("unregister");
     serial_println!("[changetrack]   changes basic: ok");
@@ -668,7 +670,10 @@ fn test_filter_path() {
             c.path.display()
         );
     }
-    assert!(result.changes.len() >= 2, "expected at least 2 /etc changes");
+    assert!(
+        result.changes.len() >= 2,
+        "expected at least 2 /etc changes"
+    );
 
     unregister("test_ct_4").expect("unregister");
     serial_println!("[changetrack]   filter path: ok");
@@ -748,7 +753,10 @@ fn test_gap_detection() {
     let result = changes("test_ct_gap", &filter).expect("changes");
 
     // With a fresh cursor close to the head, there should be no gap.
-    assert!(!result.gap_detected, "should not detect gap on fresh cursor");
+    assert!(
+        !result.gap_detected,
+        "should not detect gap on fresh cursor"
+    );
 
     unregister("test_ct_gap").expect("unregister");
     serial_println!("[changetrack]   gap detection: ok");

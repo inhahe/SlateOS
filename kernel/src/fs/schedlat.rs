@@ -23,9 +23,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -91,7 +91,9 @@ where
 
 fn bucket_index(ns: u64) -> usize {
     for (i, &bound) in BUCKET_BOUNDS_NS.iter().enumerate() {
-        if ns < bound { return i; }
+        if ns < bound {
+            return i;
+        }
     }
     7
 }
@@ -122,7 +124,9 @@ fn bucket_index(ns: u64) -> usize {
 /// every wakeup/runqueue-wait/preemption event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         cpus: Vec::new(),
         total_wakeups: 0,
@@ -140,12 +144,23 @@ pub fn init_defaults() {
 /// [`KernelError::ResourceExhausted`].
 pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.cpus.len() >= MAX_CPUS { return Err(KernelError::ResourceExhausted); }
-        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
+        if state.cpus.len() >= MAX_CPUS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.cpus.push(CpuSchedLat {
-            cpu_id, wakeup_count: 0, wakeup_total_ns: 0, wakeup_max_ns: 0,
-            runq_wait_count: 0, runq_wait_total_ns: 0, runq_wait_max_ns: 0,
-            preempt_count: 0, preempt_total_ns: 0, histogram: [0; 8],
+            cpu_id,
+            wakeup_count: 0,
+            wakeup_total_ns: 0,
+            wakeup_max_ns: 0,
+            runq_wait_count: 0,
+            runq_wait_total_ns: 0,
+            runq_wait_max_ns: 0,
+            preempt_count: 0,
+            preempt_total_ns: 0,
+            histogram: [0; 8],
         });
         Ok(())
     })
@@ -154,14 +169,21 @@ pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
 /// Record a wakeup-to-run latency.
 pub fn record_wakeup(cpu_id: u32, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.wakeup_count += 1;
         cpu.wakeup_total_ns += ns;
-        if ns > cpu.wakeup_max_ns { cpu.wakeup_max_ns = ns; }
+        if ns > cpu.wakeup_max_ns {
+            cpu.wakeup_max_ns = ns;
+        }
         cpu.histogram[bucket_index(ns)] += 1;
         state.total_wakeups += 1;
-        if ns > state.global_max_ns { state.global_max_ns = ns; }
+        if ns > state.global_max_ns {
+            state.global_max_ns = ns;
+        }
         Ok(())
     })
 }
@@ -169,11 +191,16 @@ pub fn record_wakeup(cpu_id: u32, ns: u64) -> KernelResult<()> {
 /// Record a runqueue wait.
 pub fn record_runq_wait(cpu_id: u32, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.runq_wait_count += 1;
         cpu.runq_wait_total_ns += ns;
-        if ns > cpu.runq_wait_max_ns { cpu.runq_wait_max_ns = ns; }
+        if ns > cpu.runq_wait_max_ns {
+            cpu.runq_wait_max_ns = ns;
+        }
         cpu.histogram[bucket_index(ns)] += 1;
         state.total_runq_waits += 1;
         Ok(())
@@ -183,7 +210,10 @@ pub fn record_runq_wait(cpu_id: u32, ns: u64) -> KernelResult<()> {
 /// Record a preemption latency.
 pub fn record_preempt(cpu_id: u32, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.preempt_count += 1;
         cpu.preempt_total_ns += ns;
@@ -203,7 +233,9 @@ pub fn global_histogram() -> [u64; 8] {
     STATE.lock().as_ref().map_or([0; 8], |s| {
         let mut h = [0u64; 8];
         for c in &s.cpus {
-            for i in 0..8 { h[i] += c.histogram[i]; }
+            for i in 0..8 {
+                h[i] += c.histogram[i];
+            }
         }
         h
     })
@@ -213,7 +245,14 @@ pub fn global_histogram() -> [u64; 8] {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpus.len(), s.total_wakeups, s.total_runq_waits, s.total_preempts, s.global_max_ns, s.ops),
+        Some(s) => (
+            s.cpus.len(),
+            s.total_wakeups,
+            s.total_runq_waits,
+            s.total_preempts,
+            s.global_max_ns,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -246,15 +285,24 @@ pub fn self_test() {
     register_cpu(1).expect("reg1");
     assert!(register_cpu(0).is_err());
     assert_eq!(per_cpu().len(), 2);
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
-    assert_eq!((c.wakeup_count, c.runq_wait_count, c.preempt_count), (0, 0, 0));
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 0)
+        .expect("find0");
+    assert_eq!(
+        (c.wakeup_count, c.runq_wait_count, c.preempt_count),
+        (0, 0, 0)
+    );
     assert_eq!(c.histogram.iter().sum::<u64>(), 0);
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Wakeup — count/total/max rise; 5us lands in bucket 1 (<10us); the
     // global max tracks it.
     record_wakeup(0, 5_000).expect("wakeup");
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 0)
+        .expect("find0");
     assert_eq!(c.wakeup_count, 1);
     assert_eq!(c.wakeup_total_ns, 5_000);
     assert_eq!(c.wakeup_max_ns, 5_000);
@@ -265,7 +313,10 @@ pub fn self_test() {
 
     // 4: Runq wait — 50us lands in bucket 2 (<100us).
     record_runq_wait(0, 50_000).expect("runq");
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 0)
+        .expect("find0");
     assert_eq!(c.runq_wait_count, 1);
     assert_eq!(c.runq_wait_total_ns, 50_000);
     assert_eq!(c.histogram[2], 1);
@@ -274,7 +325,10 @@ pub fn self_test() {
     // 5: Preempt — 100ns lands in bucket 0 (<1us); preempt does NOT move the
     // global max (only wakeups do, per record_wakeup).
     record_preempt(0, 100).expect("preempt");
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 0)
+        .expect("find0");
     assert_eq!(c.preempt_count, 1);
     assert_eq!(c.histogram[0], 1);
     let (_, _, _, _, gmax, _) = stats();
@@ -288,7 +342,10 @@ pub fn self_test() {
     // 6: Max tracking — a 50ms wakeup lands in bucket 5 (<100ms) and raises the
     // global max and the per-CPU wakeup max.
     record_wakeup(0, 50_000_000).expect("big_wakeup");
-    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    let c = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 0)
+        .expect("find0");
     assert_eq!(c.wakeup_max_ns, 50_000_000);
     assert_eq!(c.histogram[5], 1);
     let (_, _, _, _, gmax, _) = stats();

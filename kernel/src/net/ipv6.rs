@@ -59,15 +59,13 @@ impl Ipv6Addr {
     pub const LOOPBACK: Self = Self([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
     /// All-nodes link-local multicast (ff02::1).
-    pub const ALL_NODES_LINK_LOCAL: Self = Self([
-        0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
-    ]);
+    pub const ALL_NODES_LINK_LOCAL: Self =
+        Self([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01]);
 
     /// All-routers link-local multicast (ff02::2).
     #[allow(dead_code)] // Reserved for router solicitation.
-    pub const ALL_ROUTERS_LINK_LOCAL: Self = Self([
-        0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02,
-    ]);
+    pub const ALL_ROUTERS_LINK_LOCAL: Self =
+        Self([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);
 
     /// Create an IPv6 address from 16 bytes.
     #[allow(dead_code)] // Public API.
@@ -105,8 +103,7 @@ impl Ipv6Addr {
     /// without broadcasting to all nodes.
     pub fn solicited_node_multicast(self) -> Self {
         Self([
-            0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0x01, 0xFF, self.0[13], self.0[14], self.0[15],
+            0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0xFF, self.0[13], self.0[14], self.0[15],
         ])
     }
 
@@ -194,13 +191,17 @@ impl Ipv6Addr {
         let mut groups = [0u16; 8];
         let mut idx = 0;
         for &g in &left_groups {
-            if idx >= 8 { return None; }
+            if idx >= 8 {
+                return None;
+            }
             groups[idx] = g;
             idx += 1;
         }
         idx += zeros_needed;
         for &g in &right_groups {
-            if idx >= 8 { return None; }
+            if idx >= 8 {
+                return None;
+            }
             groups[idx] = g;
             idx += 1;
         }
@@ -424,9 +425,8 @@ impl<'a> Ipv6Packet<'a> {
         let traffic_class = ((data[0] & 0x0F) << 4) | (data[1] >> 4);
 
         // Flow label: low 4 bits of byte 1 + bytes 2-3.
-        let flow_label = (u32::from(data[1] & 0x0F) << 16)
-            | (u32::from(data[2]) << 8)
-            | u32::from(data[3]);
+        let flow_label =
+            (u32::from(data[1] & 0x0F) << 16) | (u32::from(data[2]) << 8) | u32::from(data[3]);
 
         let payload_length = u16::from_be_bytes([data[4], data[5]]);
         let next_header = data[6];
@@ -774,7 +774,13 @@ pub fn process_ipv6(data: &[u8], ns_id: crate::netns::NetNsId) -> KernelResult<(
         return Ok(()); // Silently drop — firewall denied.
     }
 
-    dispatch_upper_layer(packet.upper_protocol, packet.src, packet.dst, packet.payload, ns_id)
+    dispatch_upper_layer(
+        packet.upper_protocol,
+        packet.src,
+        packet.dst,
+        packet.payload,
+        ns_id,
+    )
 }
 
 /// Dispatch a complete (reassembled or unfragmented) datagram to the
@@ -1065,8 +1071,7 @@ fn test_ipv6_addr_link_local_from_mac() -> KernelResult<()> {
     let ll = Ipv6Addr::from_mac_link_local(&mac);
 
     let expected = Ipv6Addr([
-        0xFE, 0x80, 0, 0, 0, 0, 0, 0,
-        0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
+        0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
     ]);
 
     if ll != expected {
@@ -1090,14 +1095,12 @@ fn test_ipv6_addr_link_local_from_mac() -> KernelResult<()> {
 fn test_ipv6_addr_solicited_node() -> KernelResult<()> {
     // fe80::5054:ff:fe12:3456 → ff02::1:ff12:3456
     let addr = Ipv6Addr([
-        0xFE, 0x80, 0, 0, 0, 0, 0, 0,
-        0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
+        0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
     ]);
     let snm = addr.solicited_node_multicast();
 
     let expected = Ipv6Addr([
-        0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0x01, 0xFF, 0x12, 0x34, 0x56,
+        0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0xFF, 0x12, 0x34, 0x56,
     ]);
 
     if snm != expected {
@@ -1147,7 +1150,10 @@ fn test_build_parse_roundtrip() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if parsed.payload != payload {
-        crate::serial_println!("[ipv6]   FAIL: payload mismatch (len={})", parsed.payload.len());
+        crate::serial_println!(
+            "[ipv6]   FAIL: payload mismatch (len={})",
+            parsed.payload.len()
+        );
         return Err(KernelError::InternalError);
     }
     if parsed.payload_length as usize != payload.len() {
@@ -1207,7 +1213,7 @@ fn test_extension_header_skip() -> KernelResult<()> {
     // Extension header: [next_header, hdr_ext_len, 6 padding bytes]
     let mut ext_and_payload = Vec::new();
     ext_and_payload.push(NH_ICMPV6); // Next header: ICMPv6
-    ext_and_payload.push(0);          // hdr_ext_len=0 → 8 bytes total
+    ext_and_payload.push(0); // hdr_ext_len=0 → 8 bytes total
     ext_and_payload.extend_from_slice(&[0; 6]); // Padding
     ext_and_payload.extend_from_slice(upper_payload);
 
@@ -1219,14 +1225,16 @@ fn test_extension_header_skip() -> KernelResult<()> {
     if parsed.upper_protocol != NH_ICMPV6 {
         crate::serial_println!(
             "[ipv6]   FAIL: upper_protocol = {}, expected {}",
-            parsed.upper_protocol, NH_ICMPV6
+            parsed.upper_protocol,
+            NH_ICMPV6
         );
         return Err(KernelError::InternalError);
     }
     if parsed.payload != upper_payload {
         crate::serial_println!(
             "[ipv6]   FAIL: payload len = {}, expected {}",
-            parsed.payload.len(), upper_payload.len()
+            parsed.payload.len(),
+            upper_payload.len()
         );
         return Err(KernelError::InternalError);
     }
@@ -1250,8 +1258,8 @@ fn test_fragment_header_parse() -> KernelResult<()> {
     //   offset 0 << 3 = 0, | M=1 = 0x0001
     // bytes 4-7: Identification = 0x12345678
     let mut ext_and_payload = Vec::new();
-    ext_and_payload.push(NH_UDP);    // Next Header: UDP
-    ext_and_payload.push(0);          // Reserved
+    ext_and_payload.push(NH_UDP); // Next Header: UDP
+    ext_and_payload.push(0); // Reserved
     ext_and_payload.extend_from_slice(&0x0001u16.to_be_bytes()); // offset=0, M=1
     ext_and_payload.extend_from_slice(&0x12345678u32.to_be_bytes()); // ID
     ext_and_payload.extend_from_slice(upper_payload);
@@ -1264,7 +1272,8 @@ fn test_fragment_header_parse() -> KernelResult<()> {
     if parsed.upper_protocol != NH_UDP {
         crate::serial_println!(
             "[ipv6]   FAIL: fragment upper_protocol = {}, expected {}",
-            parsed.upper_protocol, NH_UDP
+            parsed.upper_protocol,
+            NH_UDP
         );
         return Err(KernelError::InternalError);
     }
@@ -1273,7 +1282,8 @@ fn test_fragment_header_parse() -> KernelResult<()> {
     if parsed.payload != upper_payload {
         crate::serial_println!(
             "[ipv6]   FAIL: fragment payload len = {}, expected {}",
-            parsed.payload.len(), upper_payload.len()
+            parsed.payload.len(),
+            upper_payload.len()
         );
         return Err(KernelError::InternalError);
     }
@@ -1290,7 +1300,10 @@ fn test_fragment_header_parse() -> KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
             if id != 0x12345678 {
-                crate::serial_println!("[ipv6]   FAIL: frag id = 0x{:08X}, expected 0x12345678", id);
+                crate::serial_println!(
+                    "[ipv6]   FAIL: frag id = 0x{:08X}, expected 0x12345678",
+                    id
+                );
                 return Err(KernelError::InternalError);
             }
         }
@@ -1315,7 +1328,7 @@ fn test_atomic_fragment() -> KernelResult<()> {
     // Fragment header: offset=0, M=0 (atomic fragment, RFC 6946).
     let mut ext_and_payload = Vec::new();
     ext_and_payload.push(NH_ICMPV6); // Next Header
-    ext_and_payload.push(0);          // Reserved
+    ext_and_payload.push(0); // Reserved
     ext_and_payload.extend_from_slice(&0x0000u16.to_be_bytes()); // offset=0, M=0
     ext_and_payload.extend_from_slice(&0x0000ABCDu32.to_be_bytes()); // ID
     ext_and_payload.extend_from_slice(upper_payload);
@@ -1327,10 +1340,7 @@ fn test_atomic_fragment() -> KernelResult<()> {
     match parsed.fragment_info {
         Some((offset, more, _id)) => {
             if offset != 0 || more {
-                crate::serial_println!(
-                    "[ipv6]   FAIL: atomic frag: offset={}, M={}",
-                    offset, more
-                );
+                crate::serial_println!("[ipv6]   FAIL: atomic frag: offset={}, M={}", offset, more);
                 return Err(KernelError::InternalError);
             }
         }
@@ -1344,7 +1354,8 @@ fn test_atomic_fragment() -> KernelResult<()> {
     if parsed.upper_protocol != NH_ICMPV6 {
         crate::serial_println!(
             "[ipv6]   FAIL: atomic frag upper = {}, expected {}",
-            parsed.upper_protocol, NH_ICMPV6
+            parsed.upper_protocol,
+            NH_ICMPV6
         );
         return Err(KernelError::InternalError);
     }
@@ -1364,8 +1375,7 @@ fn test_multicast_mac_mapping() -> KernelResult<()> {
 
     // ff02::1:ff12:3456 → 33:33:ff:12:34:56
     let snm = Ipv6Addr([
-        0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0x01, 0xFF, 0x12, 0x34, 0x56,
+        0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0xFF, 0x12, 0x34, 0x56,
     ]);
     let mac2 = multicast_mac(&snm);
     if mac2.0 != [0x33, 0x33, 0xFF, 0x12, 0x34, 0x56] {
@@ -1394,7 +1404,7 @@ fn test_transport_checksum_roundtrip() -> KernelResult<()> {
     let total_len = 8 + data.len();
     let mut segment = Vec::with_capacity(total_len);
     segment.push(128); // Type: Echo Request
-    segment.push(0);   // Code: 0
+    segment.push(0); // Code: 0
     segment.extend_from_slice(&[0, 0]); // Checksum placeholder
     segment.extend_from_slice(&0x1234u16.to_be_bytes()); // ID
     segment.extend_from_slice(&0x0001u16.to_be_bytes()); // Seq
@@ -1487,7 +1497,8 @@ fn test_ipv6_addr_parse() -> KernelResult<()> {
         if reparsed != Some(a) {
             crate::serial_println!(
                 "[ipv6]   FAIL: round-trip mismatch: '{}' → {:?}",
-                s, reparsed
+                s,
+                reparsed
             );
             return Err(KernelError::InternalError);
         }

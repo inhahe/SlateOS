@@ -35,12 +35,12 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::PreemptSpinMutex as Mutex;
 
-use crate::console::{self, ConsoleSnapshot, ScrollbackBuffer, ScrollCell};
+use crate::console::{self, ConsoleSnapshot, ScrollCell, ScrollbackBuffer};
 use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
@@ -314,7 +314,9 @@ pub fn switch(target_id: u32) -> KernelResult<()> {
     }
 
     // Extract target session's saved state.
-    let target = table.sessions.get_mut(&target_id)
+    let target = table
+        .sessions
+        .get_mut(&target_id)
         .ok_or(KernelError::NotFound)?;
 
     let target_snapshot = target.snapshot.take();
@@ -366,8 +368,7 @@ pub fn active_id() -> u32 {
 /// Rename a session.
 pub fn rename(id: u32, new_name: &str) -> KernelResult<()> {
     let mut table = TABLE.lock();
-    let session = table.sessions.get_mut(&id)
-        .ok_or(KernelError::NotFound)?;
+    let session = table.sessions.get_mut(&id).ok_or(KernelError::NotFound)?;
     session.name.clear();
     session.name.push_str(new_name);
     Ok(())
@@ -539,7 +540,10 @@ fn test_destroy_session() -> KernelResult<()> {
 
 fn test_cannot_destroy_active() -> KernelResult<()> {
     let result = destroy(active_id());
-    assert!(result.is_err(), "should not be able to destroy active session");
+    assert!(
+        result.is_err(),
+        "should not be able to destroy active session"
+    );
     crate::serial_println!("[termsession]   Cannot destroy active: OK");
     Ok(())
 }

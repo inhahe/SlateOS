@@ -23,9 +23,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -146,11 +146,27 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         processes: alloc::vec![
-            ProcessSignalState { pid: 1, pending: Vec::new(), blocked_mask: 0, total_sent: 0, total_delivered: 5, total_blocked: 0 },
-            ProcessSignalState { pid: 100, pending: Vec::new(), blocked_mask: 0, total_sent: 0, total_delivered: 2, total_blocked: 0 },
+            ProcessSignalState {
+                pid: 1,
+                pending: Vec::new(),
+                blocked_mask: 0,
+                total_sent: 0,
+                total_delivered: 5,
+                total_blocked: 0
+            },
+            ProcessSignalState {
+                pid: 100,
+                pending: Vec::new(),
+                blocked_mask: 0,
+                total_sent: 0,
+                total_delivered: 2,
+                total_blocked: 0
+            },
         ],
         total_sent: 0,
         total_delivered: 7,
@@ -166,12 +182,21 @@ pub fn send(sender: u32, target: u32, signal: Signal, data: u64) -> KernelResult
         let proc_state = if let Some(ps) = state.processes.iter_mut().find(|p| p.pid == target) {
             ps
         } else {
-            if state.processes.len() >= MAX_PROCESSES { return Err(KernelError::ResourceExhausted); }
+            if state.processes.len() >= MAX_PROCESSES {
+                return Err(KernelError::ResourceExhausted);
+            }
             state.processes.push(ProcessSignalState {
-                pid: target, pending: Vec::new(), blocked_mask: 0,
-                total_sent: 0, total_delivered: 0, total_blocked: 0,
+                pid: target,
+                pending: Vec::new(),
+                blocked_mask: 0,
+                total_sent: 0,
+                total_delivered: 0,
+                total_blocked: 0,
             });
-            state.processes.last_mut().ok_or(KernelError::InternalError)?
+            state
+                .processes
+                .last_mut()
+                .ok_or(KernelError::InternalError)?
         };
         // Check if blocked.
         let sig_bit = 1u64 << (signal.number().min(63));
@@ -184,8 +209,12 @@ pub fn send(sender: u32, target: u32, signal: Signal, data: u64) -> KernelResult
             return Err(KernelError::ResourceExhausted);
         }
         proc_state.pending.push(QueuedSignal {
-            signal, sender_pid: sender, target_pid: target,
-            timestamp_ns: now, data, delivered: false,
+            signal,
+            sender_pid: sender,
+            target_pid: target,
+            timestamp_ns: now,
+            data,
+            delivered: false,
         });
         proc_state.total_sent += 1;
         state.total_sent += 1;
@@ -196,10 +225,15 @@ pub fn send(sender: u32, target: u32, signal: Signal, data: u64) -> KernelResult
 /// Deliver pending signals for a process. Returns count delivered.
 pub fn deliver(pid: u32) -> KernelResult<u32> {
     with_state(|state| {
-        let ps = state.processes.iter_mut().find(|p| p.pid == pid)
+        let ps = state
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
         let count = ps.pending.len() as u32;
-        for s in &mut ps.pending { s.delivered = true; }
+        for s in &mut ps.pending {
+            s.delivered = true;
+        }
         ps.total_delivered += count as u64;
         ps.pending.clear();
         state.total_delivered += count as u64;
@@ -210,7 +244,10 @@ pub fn deliver(pid: u32) -> KernelResult<u32> {
 /// Block a signal for a process.
 pub fn block(pid: u32, signal: Signal) -> KernelResult<()> {
     with_state(|state| {
-        let ps = state.processes.iter_mut().find(|p| p.pid == pid)
+        let ps = state
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
         let bit = 1u64 << (signal.number().min(63));
         ps.blocked_mask |= bit;
@@ -221,7 +258,10 @@ pub fn block(pid: u32, signal: Signal) -> KernelResult<()> {
 /// Unblock a signal.
 pub fn unblock(pid: u32, signal: Signal) -> KernelResult<()> {
     with_state(|state| {
-        let ps = state.processes.iter_mut().find(|p| p.pid == pid)
+        let ps = state
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
         let bit = 1u64 << (signal.number().min(63));
         ps.blocked_mask &= !bit;
@@ -232,21 +272,32 @@ pub fn unblock(pid: u32, signal: Signal) -> KernelResult<()> {
 /// Get pending signals for a process.
 pub fn pending(pid: u32) -> Vec<QueuedSignal> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.processes.iter().find(|p| p.pid == pid)
+        s.processes
+            .iter()
+            .find(|p| p.pid == pid)
             .map_or(Vec::new(), |p| p.pending.clone())
     })
 }
 
 /// List process signal states.
 pub fn list_processes() -> Vec<ProcessSignalState> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.processes.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.processes.clone())
 }
 
 /// Statistics: (process_count, total_sent, total_delivered, total_dropped, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.processes.len(), s.total_sent, s.total_delivered, s.total_dropped, s.ops),
+        Some(s) => (
+            s.processes.len(),
+            s.total_sent,
+            s.total_delivered,
+            s.total_dropped,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

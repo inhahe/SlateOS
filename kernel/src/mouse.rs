@@ -289,10 +289,7 @@ fn mouse_reset() -> bool {
 
     let id = wait_read_data();
     if id != 0x00 {
-        crate::serial_println!(
-            "[mouse] Reset device ID {:#04x} (expected 0x00)",
-            id
-        );
+        crate::serial_println!("[mouse] Reset device ID {:#04x} (expected 0x00)", id);
         // Not fatal — some mice report non-zero ID.
     }
 
@@ -336,7 +333,11 @@ pub fn handle_irq() {
 
     PACKET_BUF[idx as usize].store(byte, Ordering::Release);
 
-    let packet_size = if HAS_SCROLL_WHEEL.load(Ordering::Acquire) { 4u8 } else { 3u8 };
+    let packet_size = if HAS_SCROLL_WHEEL.load(Ordering::Acquire) {
+        4u8
+    } else {
+        3u8
+    };
 
     if idx + 1 >= packet_size {
         // Complete packet — assemble the event.
@@ -426,9 +427,7 @@ pub fn try_read_event() -> Option<MouseEvent> {
     let head = EVENT_HEAD.load(Ordering::Acquire);
     let tail = EVENT_TAIL.load(Ordering::Acquire);
 
-    if (head & EVENT_BUF_MASK as u32) == (tail & EVENT_BUF_MASK as u32)
-        && head == tail
-    {
+    if (head & EVENT_BUF_MASK as u32) == (tail & EVENT_BUF_MASK as u32) && head == tail {
         return None; // Empty.
     }
 
@@ -440,7 +439,12 @@ pub fn try_read_event() -> Option<MouseEvent> {
 
     EVENT_TAIL.store(tail.wrapping_add(1), Ordering::Release);
 
-    Some(MouseEvent { buttons, dx, dy, dz })
+    Some(MouseEvent {
+        buttons,
+        dx,
+        dy,
+        dz,
+    })
 }
 
 /// Read a mouse event, blocking until one is available.
@@ -528,11 +532,7 @@ fn mouse_send_cmd(cmd: u8) {
         // Some commands (like get-ID) return data after ACK; the caller
         // handles that.  For non-ACK responses during init, just log it.
         if ack != 0 {
-            crate::serial_println!(
-                "[mouse] cmd {:#04x}: got {:#04x} instead of ACK",
-                cmd,
-                ack
-            );
+            crate::serial_println!("[mouse] cmd {:#04x}: got {:#04x} instead of ACK", cmd, ack);
         }
     }
 }
@@ -589,8 +589,10 @@ pub fn self_test() -> Result<(), &'static str> {
         return Err("packet index out of range");
     }
 
-    crate::serial_println!("[mouse] Self-test passed (scroll_wheel={})",
-        HAS_SCROLL_WHEEL.load(Ordering::Acquire));
+    crate::serial_println!(
+        "[mouse] Self-test passed (scroll_wheel={})",
+        HAS_SCROLL_WHEEL.load(Ordering::Acquire)
+    );
     Ok(())
 }
 

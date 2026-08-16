@@ -47,10 +47,10 @@
 //! - Linux `mm/mmu_gather.c` — tlb_gather_mmu(), tlb_finish_mmu()
 //! - Intel SDM Vol. 3A §4.10.4 — "Invalidation of TLBs"
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::serial_println;
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
 use crate::tlb;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -293,7 +293,8 @@ impl TlbGather {
                         FREE_FAILURES.fetch_add(1, Ordering::Relaxed);
                         crate::serial_println!(
                             "[tlb_gather] free_frame({:#x}) failed: {:?} (leaked)",
-                            phys, e
+                            phys,
+                            e
                         );
                     }
                 }
@@ -407,8 +408,13 @@ pub fn self_test() {
     let s = stats();
     assert!(s.gather_ops >= 3, "expected at least 3 gather ops");
     assert!(s.pages_freed >= 4, "expected at least 4 pages freed");
-    serial_println!("[tlb_gather]   Stats: ops={}, freed={}, partial={}, full={}",
-        s.gather_ops, s.pages_freed, s.partial_flushes, s.full_flush_chosen);
+    serial_println!(
+        "[tlb_gather]   Stats: ops={}, freed={}, partial={}, full={}",
+        s.gather_ops,
+        s.pages_freed,
+        s.partial_flushes,
+        s.full_flush_chosen
+    );
 
     serial_println!("[tlb_gather] Self-test PASSED");
 }

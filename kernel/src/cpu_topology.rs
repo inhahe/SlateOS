@@ -42,9 +42,9 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, Ordering};
-use crate::smp::MAX_CPUS;
 use crate::serial_println;
+use crate::smp::MAX_CPUS;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -163,10 +163,12 @@ pub fn detect() {
     };
 
     // Decode each CPU's APIC ID using the shift widths from topology levels.
-    let smt_shift = levels.iter()
+    let smt_shift = levels
+        .iter()
         .find(|l| l.level_type == LevelType::Smt)
         .map_or(0, |l| l.shift);
-    let core_shift = levels.iter()
+    let core_shift = levels
+        .iter()
         .find(|l| l.level_type == LevelType::Core)
         .map_or(smt_shift, |l| l.shift);
 
@@ -305,9 +307,7 @@ fn finalize(num_cpus: usize) {
             let topo_j = unsafe { &CPU_TOPO[j] };
 
             // Same physical core = same package + same core_id.
-            if topo_j.package_id == topo_i.package_id
-                && topo_j.core_id == topo_i.core_id
-            {
+            if topo_j.package_id == topo_i.package_id && topo_j.core_id == topo_i.core_id {
                 smt_mask |= 1u16 << j;
             }
 
@@ -332,7 +332,9 @@ fn finalize(num_cpus: usize) {
 
     serial_println!(
         "[topo] Topology: {} package(s), {} physical core(s), {} logical CPU(s)",
-        packages, cores, num_cpus
+        packages,
+        cores,
+        num_cpus
     );
 
     // Log per-CPU details at debug level.
@@ -341,7 +343,11 @@ fn finalize(num_cpus: usize) {
         let t = unsafe { &CPU_TOPO[cpu] };
         serial_println!(
             "[topo]   CPU {}: pkg={} core={} smt={} (APIC ID={})",
-            cpu, t.package_id, t.core_id, t.smt_id, t.apic_id
+            cpu,
+            t.package_id,
+            t.core_id,
+            t.smt_id,
+            t.apic_id
         );
     }
 }

@@ -45,9 +45,9 @@
 //! - Linux `mm/page_owner.c` — per-page allocation tracking
 //! - Linux `include/linux/page_owner.h` — page_owner API
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::serial_println;
 use crate::smp::MAX_CPUS;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -254,8 +254,7 @@ fn slot(frame_idx: usize) -> Option<*mut u8> {
 ///
 /// Can be disabled at runtime to eliminate the overhead of set/clear
 /// operations on every alloc/free.
-static ENABLED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(true);
+static ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
 // ---------------------------------------------------------------------------
 // Ambient owner context
@@ -668,7 +667,10 @@ pub fn self_test() {
     // used to be a fixed 65536 frames (= 1 GiB), silently dropping every tag
     // above that.
     let tracked = tracked_frames();
-    assert!(tracked > 0, "ownership array must be published by frame::init");
+    assert!(
+        tracked > 0,
+        "ownership array must be published by frame::init"
+    );
     if let Some(st) = frame::stats() {
         assert_eq!(
             tracked, st.total_frames,
@@ -827,7 +829,10 @@ pub fn self_test() {
 
     // Test 9: statistics moved, proving the allocator hit set() and clear().
     let s2 = summary();
-    assert!(s2.total_sets > 0, "allocator must have recorded set() calls");
+    assert!(
+        s2.total_sets > 0,
+        "allocator must have recorded set() calls"
+    );
     assert!(
         s2.total_clears > 0,
         "allocator must have recorded clear() calls"

@@ -340,24 +340,25 @@ pub unsafe fn init() -> KernelResult<()> {
     // Use the ACPI MADT if available, otherwise fall back to the
     // standard default (0xFEC0_0000).
     let ioapic_base_phys = crate::acpi::io_apic_address().unwrap_or_else(|| {
-        serial_println!("[ioapic] No ACPI MADT — using default address {:#x}", IOAPIC_DEFAULT_PHYS);
+        serial_println!(
+            "[ioapic] No ACPI MADT — using default address {:#x}",
+            IOAPIC_DEFAULT_PHYS
+        );
         IOAPIC_DEFAULT_PHYS
     });
 
     let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
     let ioapic_virt = ioapic_base_phys.wrapping_add(hhdm);
 
-    let ioapic_frame = PhysFrame::from_addr(ioapic_base_phys)
-        .ok_or(KernelError::BadAlignment)?;
+    let ioapic_frame = PhysFrame::from_addr(ioapic_base_phys).ok_or(KernelError::BadAlignment)?;
     let ioapic_va = VirtAddr::new(ioapic_virt);
     let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
     let mmio_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
 
     // SAFETY: IOAPIC physical address is valid device MMIO at the
     // well-known address 0xFEC0_0000.  Mapping into the HHDM range.
-    if let Err(e) = unsafe {
-        page_table::map_frame(pml4_phys, ioapic_va, ioapic_frame, mmio_flags)
-    } {
+    if let Err(e) = unsafe { page_table::map_frame(pml4_phys, ioapic_va, ioapic_frame, mmio_flags) }
+    {
         serial_println!(
             "[ioapic] WARNING: MMIO map failed ({:?}), trying existing HHDM...",
             e,
@@ -569,10 +570,7 @@ pub unsafe fn set_irq_affinity(irq: u8, lapic_id: u8) {
         write_redir_entry(irq, entry);
     }
 
-    serial_println!(
-        "[ioapic] IRQ {} affinity → LAPIC ID {}",
-        irq, lapic_id,
-    );
+    serial_println!("[ioapic] IRQ {} affinity → LAPIC ID {}", irq, lapic_id,);
 }
 
 /// Get the current CPU target (LAPIC ID) for an IRQ.
@@ -665,12 +663,7 @@ pub fn release_irqs_for_task(task_id: u64) {
     for slot in &IRQ_WAIT_TASK {
         // CAS to avoid clearing a slot that was re-registered by
         // another task between load and store.
-        let _ = slot.compare_exchange(
-            task_id,
-            u64::MAX,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        );
+        let _ = slot.compare_exchange(task_id, u64::MAX, Ordering::AcqRel, Ordering::Relaxed);
     }
 }
 
@@ -861,10 +854,7 @@ pub fn self_test() -> KernelResult<()> {
     // Test 3: Notification counters are all zero.
     for i in 0..MAX_IRQ {
         if IRQ_PENDING[i].load(Ordering::Acquire) != 0 {
-            serial_println!(
-                "[ioapic]   FAIL: IRQ {} has nonzero pending count",
-                i,
-            );
+            serial_println!("[ioapic]   FAIL: IRQ {} has nonzero pending count", i,);
             return Err(KernelError::InternalError);
         }
     }

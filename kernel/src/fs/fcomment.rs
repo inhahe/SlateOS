@@ -35,11 +35,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -118,7 +118,9 @@ pub fn set(path: &str, comment: &str) -> KernelResult<()> {
         // Empty comment = remove.
         store.comments.remove(path);
     } else {
-        store.comments.insert(String::from(path), String::from(comment));
+        store
+            .comments
+            .insert(String::from(path), String::from(comment));
     }
     Ok(())
 }
@@ -158,7 +160,9 @@ pub fn append(path: &str, text: &str) -> KernelResult<()> {
         if text.len() > MAX_COMMENT_SIZE {
             return Err(KernelError::InvalidArgument);
         }
-        store.comments.insert(String::from(path), String::from(text));
+        store
+            .comments
+            .insert(String::from(path), String::from(text));
     }
     Ok(())
 }
@@ -214,7 +218,9 @@ pub fn search(needle: &str, root: Option<&str>) -> Vec<(String, String)> {
 /// List all files with comments (optionally under a root path).
 pub fn list(root: Option<&str>) -> Vec<(String, String)> {
     let store = STORE.lock();
-    store.comments.iter()
+    store
+        .comments
+        .iter()
         .filter(|(path, _)| {
             root.is_none_or(|r| crate::fs::pathutil::path_in_subtree(path.as_str(), r))
         })
@@ -247,7 +253,9 @@ pub fn rename_path(old_path: &str, new_path: &str) -> KernelResult<()> {
 /// deleting a directory).
 pub fn remove_under(path_prefix: &str) -> usize {
     let mut store = STORE.lock();
-    let to_remove: Vec<String> = store.comments.keys()
+    let to_remove: Vec<String> = store
+        .comments
+        .keys()
         .filter(|p| crate::fs::pathutil::path_in_subtree(p.as_str(), path_prefix))
         .cloned()
         .collect();

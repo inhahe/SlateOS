@@ -49,13 +49,15 @@
 #[allow(dead_code)]
 pub mod atomic;
 #[allow(dead_code)]
-pub mod connector;
+pub mod card_fd;
 #[allow(dead_code)]
-pub mod dumb_mmap;
+pub mod connector;
 #[allow(dead_code)]
 pub mod crtc;
 #[allow(dead_code)]
 pub mod driver;
+#[allow(dead_code)]
+pub mod dumb_mmap;
 #[allow(dead_code)]
 pub mod edid;
 #[allow(dead_code)]
@@ -72,8 +74,6 @@ pub mod mode;
 pub mod plane;
 #[allow(dead_code)]
 pub mod property;
-#[allow(dead_code)]
-pub mod card_fd;
 #[allow(dead_code)]
 pub mod syscall;
 #[allow(dead_code)]
@@ -235,9 +235,7 @@ impl DrmDevice {
         self.crtcs = crtcs;
         self.planes = planes;
         self.encoders = encoders;
-        self.cursor_states = (0..cursor_count)
-            .map(|_| CursorState::new())
-            .collect();
+        self.cursor_states = (0..cursor_count).map(|_| CursorState::new()).collect();
         Ok(())
     }
 
@@ -296,7 +294,10 @@ impl DrmDevice {
 
     /// Free a GPU buffer object.
     pub fn gem_destroy(&mut self, handle: u32) -> KernelResult<()> {
-        let idx = self.gem_objects.iter().position(|g| g.handle == handle)
+        let idx = self
+            .gem_objects
+            .iter()
+            .position(|g| g.handle == handle)
             .ok_or(KernelError::NotFound)?;
         let gem = self.gem_objects.remove(idx);
         match &mut self.backend {
@@ -308,7 +309,10 @@ impl DrmDevice {
 
     /// Get a kernel-virtual pointer to a GEM object's backing memory.
     pub fn gem_mmap(&self, handle: u32) -> KernelResult<*mut u8> {
-        let gem = self.gem_objects.iter().find(|g| g.handle == handle)
+        let gem = self
+            .gem_objects
+            .iter()
+            .find(|g| g.handle == handle)
             .ok_or(KernelError::NotFound)?;
         match &self.backend {
             DrmBackend::Limine(b) => b.gem_mmap(gem),
@@ -347,7 +351,10 @@ impl DrmDevice {
 
     /// Destroy a framebuffer object.
     pub fn fb_destroy(&mut self, fb_id: DrmObjectId) -> KernelResult<()> {
-        let idx = self.framebuffers.iter().position(|f| f.id == fb_id)
+        let idx = self
+            .framebuffers
+            .iter()
+            .position(|f| f.id == fb_id)
             .ok_or(KernelError::NotFound)?;
         self.framebuffers.remove(idx);
         Ok(())
@@ -362,18 +369,20 @@ impl DrmDevice {
     // --- Display operations ---
 
     /// Page flip: swap the framebuffer on a CRTC's primary plane.
-    pub fn page_flip(
-        &mut self,
-        crtc_id: DrmObjectId,
-        fb_id: DrmObjectId,
-    ) -> KernelResult<()> {
+    pub fn page_flip(&mut self, crtc_id: DrmObjectId, fb_id: DrmObjectId) -> KernelResult<()> {
         // Validate both IDs exist.
         if !self.crtcs.iter().any(|c| c.id == crtc_id) {
             return Err(KernelError::NotFound);
         }
-        let fb = self.framebuffers.iter().find(|f| f.id == fb_id)
+        let fb = self
+            .framebuffers
+            .iter()
+            .find(|f| f.id == fb_id)
             .ok_or(KernelError::NotFound)?;
-        let gem = self.gem_objects.iter().find(|g| g.handle == fb.gem_handle)
+        let gem = self
+            .gem_objects
+            .iter()
+            .find(|g| g.handle == fb.gem_handle)
             .ok_or(KernelError::NotFound)?;
 
         match &mut self.backend {
@@ -394,9 +403,15 @@ impl DrmDevice {
         w: u32,
         h: u32,
     ) -> KernelResult<()> {
-        let fb = self.framebuffers.iter().find(|f| f.id == fb_id)
+        let fb = self
+            .framebuffers
+            .iter()
+            .find(|f| f.id == fb_id)
             .ok_or(KernelError::NotFound)?;
-        let gem = self.gem_objects.iter().find(|g| g.handle == fb.gem_handle)
+        let gem = self
+            .gem_objects
+            .iter()
+            .find(|g| g.handle == fb.gem_handle)
             .ok_or(KernelError::NotFound)?;
 
         match &mut self.backend {
@@ -408,7 +423,8 @@ impl DrmDevice {
     /// Get the current display dimensions (width, height) of the primary output.
     #[must_use]
     pub fn display_size(&self) -> (u32, u32) {
-        self.connectors.first()
+        self.connectors
+            .first()
             .and_then(|c| c.modes.first())
             .map(|m| (m.hdisplay, m.vdisplay))
             .unwrap_or((0, 0))
@@ -422,18 +438,22 @@ impl DrmDevice {
     pub fn gem_frame_addrs(&self, handle: u32) -> KernelResult<Vec<u64>> {
         use crate::mm::page_table;
 
-        let gem = self.gem_objects.iter().find(|g| g.handle == handle)
+        let gem = self
+            .gem_objects
+            .iter()
+            .find(|g| g.handle == handle)
             .ok_or(KernelError::NotFound)?;
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
-        let addrs: Vec<u64> = gem.phys_frames.iter()
-            .map(|pf| pf.addr() + hhdm)
-            .collect();
+        let addrs: Vec<u64> = gem.phys_frames.iter().map(|pf| pf.addr() + hhdm).collect();
         Ok(addrs)
     }
 
     /// Get the pitch (bytes per row) of a GEM object.
     pub fn gem_pitch(&self, handle: u32) -> KernelResult<u32> {
-        let gem = self.gem_objects.iter().find(|g| g.handle == handle)
+        let gem = self
+            .gem_objects
+            .iter()
+            .find(|g| g.handle == handle)
             .ok_or(KernelError::NotFound)?;
         Ok(gem.pitch)
     }
@@ -448,14 +468,20 @@ impl DrmDevice {
     /// 16 KiB-frame-aligned.  Addresses remain valid as long as the GEM object
     /// is not destroyed.
     pub fn gem_phys_addrs(&self, handle: u32) -> KernelResult<Vec<u64>> {
-        let gem = self.gem_objects.iter().find(|g| g.handle == handle)
+        let gem = self
+            .gem_objects
+            .iter()
+            .find(|g| g.handle == handle)
             .ok_or(KernelError::NotFound)?;
         Ok(gem.phys_frames.iter().map(|pf| pf.addr()).collect())
     }
 
     /// Get the total byte size of a GEM object's allocation.
     pub fn gem_size(&self, handle: u32) -> KernelResult<usize> {
-        let gem = self.gem_objects.iter().find(|g| g.handle == handle)
+        let gem = self
+            .gem_objects
+            .iter()
+            .find(|g| g.handle == handle)
             .ok_or(KernelError::NotFound)?;
         Ok(gem.size)
     }
@@ -507,7 +533,10 @@ impl DrmDevice {
         hot_x: u32,
         hot_y: u32,
     ) -> KernelResult<()> {
-        let crtc_idx = self.crtcs.iter().position(|c| c.id == crtc_id)
+        let crtc_idx = self
+            .crtcs
+            .iter()
+            .position(|c| c.id == crtc_id)
             .ok_or(KernelError::NotFound)?;
 
         // Validate GEM handle if non-zero.
@@ -515,7 +544,9 @@ impl DrmDevice {
             return Err(KernelError::NotFound);
         }
 
-        let cs = self.cursor_states.get_mut(crtc_idx)
+        let cs = self
+            .cursor_states
+            .get_mut(crtc_idx)
             .ok_or(KernelError::NotFound)?;
         cs.gem_handle = gem_handle;
         cs.width = width;
@@ -531,16 +562,16 @@ impl DrmDevice {
     ///
     /// This is the hottest path in the cursor subsystem — called on
     /// every mouse movement event.  No locks beyond the device lock.
-    pub fn cursor_move(
-        &mut self,
-        crtc_id: DrmObjectId,
-        x: i32,
-        y: i32,
-    ) -> KernelResult<()> {
-        let crtc_idx = self.crtcs.iter().position(|c| c.id == crtc_id)
+    pub fn cursor_move(&mut self, crtc_id: DrmObjectId, x: i32, y: i32) -> KernelResult<()> {
+        let crtc_idx = self
+            .crtcs
+            .iter()
+            .position(|c| c.id == crtc_id)
             .ok_or(KernelError::NotFound)?;
 
-        let cs = self.cursor_states.get_mut(crtc_idx)
+        let cs = self
+            .cursor_states
+            .get_mut(crtc_idx)
             .ok_or(KernelError::NotFound)?;
         cs.x = x;
         cs.y = y;
@@ -609,7 +640,9 @@ where
     F: FnOnce(&DrmDevice) -> KernelResult<R>,
 {
     let reg = DEVICES.lock();
-    let device = reg.devices.get(index)
+    let device = reg
+        .devices
+        .get(index)
         .and_then(|d| d.as_ref())
         .ok_or(KernelError::NotFound)?;
     f(device)
@@ -621,7 +654,9 @@ where
     F: FnOnce(&mut DrmDevice) -> KernelResult<R>,
 {
     let mut reg = DEVICES.lock();
-    let device = reg.devices.get_mut(index)
+    let device = reg
+        .devices
+        .get_mut(index)
         .and_then(|d| d.as_mut())
         .ok_or(KernelError::NotFound)?;
     f(device)
@@ -634,7 +669,9 @@ where
 {
     let reg = DEVICES.lock();
     let idx = reg.primary;
-    let device = reg.devices.get(idx)
+    let device = reg
+        .devices
+        .get(idx)
         .and_then(|d| d.as_ref())
         .ok_or(KernelError::NotFound)?;
     f(device)
@@ -647,7 +684,9 @@ where
 {
     let mut reg = DEVICES.lock();
     let idx = reg.primary;
-    let device = reg.devices.get_mut(idx)
+    let device = reg
+        .devices
+        .get_mut(idx)
         .and_then(|d| d.as_mut())
         .ok_or(KernelError::NotFound)?;
     f(device)
@@ -708,7 +747,10 @@ pub fn init() {
     // Enable hotplug detection now that all backends are registered.
     hotplug::enable();
 
-    serial_println!("[drm] DRM subsystem initialized ({} devices)", device_count());
+    serial_println!(
+        "[drm] DRM subsystem initialized ({} devices)",
+        device_count()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -815,11 +857,11 @@ pub fn self_test() -> KernelResult<()> {
 
     // 10. Cursor operations.
     with_primary_mut(|dev| {
-        let crtc_id = dev.first_crtc_id()
-            .ok_or(KernelError::InternalError)?;
+        let crtc_id = dev.first_crtc_id().ok_or(KernelError::InternalError)?;
 
         // Cursor should start invisible.
-        let cs = dev.cursor_state(crtc_id)
+        let cs = dev
+            .cursor_state(crtc_id)
             .ok_or(KernelError::InternalError)?;
         if cs.visible {
             serial_println!("[drm]   FAIL: cursor visible at init");
@@ -831,7 +873,8 @@ pub fn self_test() -> KernelResult<()> {
 
         // Set cursor.
         dev.cursor_set(crtc_id, handle, 64, 64, 0, 0)?;
-        let cs = dev.cursor_state(crtc_id)
+        let cs = dev
+            .cursor_state(crtc_id)
             .ok_or(KernelError::InternalError)?;
         if !cs.visible || cs.gem_handle != handle {
             serial_println!("[drm]   FAIL: cursor_set didn't work");
@@ -841,7 +884,8 @@ pub fn self_test() -> KernelResult<()> {
 
         // Move cursor.
         dev.cursor_move(crtc_id, 100, 200)?;
-        let cs = dev.cursor_state(crtc_id)
+        let cs = dev
+            .cursor_state(crtc_id)
             .ok_or(KernelError::InternalError)?;
         if cs.x != 100 || cs.y != 200 {
             serial_println!("[drm]   FAIL: cursor_move didn't update position");
@@ -851,7 +895,8 @@ pub fn self_test() -> KernelResult<()> {
 
         // Hide cursor.
         dev.cursor_set(crtc_id, 0, 0, 0, 0, 0)?;
-        let cs = dev.cursor_state(crtc_id)
+        let cs = dev
+            .cursor_state(crtc_id)
             .ok_or(KernelError::InternalError)?;
         if cs.visible {
             serial_println!("[drm]   FAIL: cursor still visible after hide");

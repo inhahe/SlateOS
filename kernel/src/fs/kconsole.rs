@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -105,12 +105,47 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         consoles: alloc::vec![
-            Console { id: 1, name: String::from("ttyS0"), console_type: ConsoleType::Serial, cols: 80, rows: 25, active: true, bytes_written: 4096, bytes_read: 512, scrollback_lines: 100, max_scrollback: 1000 },
-            Console { id: 2, name: String::from("tty1"), console_type: ConsoleType::Framebuffer, cols: 120, rows: 40, active: false, bytes_written: 0, bytes_read: 0, scrollback_lines: 0, max_scrollback: 5000 },
-            Console { id: 3, name: String::from("tty2"), console_type: ConsoleType::Framebuffer, cols: 120, rows: 40, active: false, bytes_written: 0, bytes_read: 0, scrollback_lines: 0, max_scrollback: 5000 },
+            Console {
+                id: 1,
+                name: String::from("ttyS0"),
+                console_type: ConsoleType::Serial,
+                cols: 80,
+                rows: 25,
+                active: true,
+                bytes_written: 4096,
+                bytes_read: 512,
+                scrollback_lines: 100,
+                max_scrollback: 1000
+            },
+            Console {
+                id: 2,
+                name: String::from("tty1"),
+                console_type: ConsoleType::Framebuffer,
+                cols: 120,
+                rows: 40,
+                active: false,
+                bytes_written: 0,
+                bytes_read: 0,
+                scrollback_lines: 0,
+                max_scrollback: 5000
+            },
+            Console {
+                id: 3,
+                name: String::from("tty2"),
+                console_type: ConsoleType::Framebuffer,
+                cols: 120,
+                rows: 40,
+                active: false,
+                bytes_written: 0,
+                bytes_read: 0,
+                scrollback_lines: 0,
+                max_scrollback: 5000
+            },
         ],
         active_id: 1,
         next_id: 4,
@@ -123,8 +158,12 @@ pub fn init_defaults() {
 /// Switch active console.
 pub fn switch(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if !state.consoles.iter().any(|c| c.id == id) { return Err(KernelError::NotFound); }
-        for c in &mut state.consoles { c.active = c.id == id; }
+        if !state.consoles.iter().any(|c| c.id == id) {
+            return Err(KernelError::NotFound);
+        }
+        for c in &mut state.consoles {
+            c.active = c.id == id;
+        }
         state.active_id = id;
         state.total_switches += 1;
         Ok(())
@@ -134,7 +173,11 @@ pub fn switch(id: u32) -> KernelResult<()> {
 /// Write data to console.
 pub fn write(id: u32, data_len: u64) -> KernelResult<()> {
     with_state(|state| {
-        let c = state.consoles.iter_mut().find(|c| c.id == id).ok_or(KernelError::NotFound)?;
+        let c = state
+            .consoles
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or(KernelError::NotFound)?;
         c.bytes_written += data_len;
         state.total_writes += 1;
         Ok(())
@@ -144,14 +187,25 @@ pub fn write(id: u32, data_len: u64) -> KernelResult<()> {
 /// Create a new console.
 pub fn create(name: &str, console_type: ConsoleType, cols: u32, rows: u32) -> KernelResult<u32> {
     with_state(|state| {
-        if state.consoles.len() >= MAX_CONSOLES { return Err(KernelError::ResourceExhausted); }
-        if state.consoles.iter().any(|c| c.name == name) { return Err(KernelError::AlreadyExists); }
+        if state.consoles.len() >= MAX_CONSOLES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.consoles.iter().any(|c| c.name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         let id = state.next_id;
         state.next_id += 1;
         state.consoles.push(Console {
-            id, name: String::from(name), console_type, cols, rows,
-            active: false, bytes_written: 0, bytes_read: 0,
-            scrollback_lines: 0, max_scrollback: 5000,
+            id,
+            name: String::from(name),
+            console_type,
+            cols,
+            rows,
+            active: false,
+            bytes_written: 0,
+            bytes_read: 0,
+            scrollback_lines: 0,
+            max_scrollback: 5000,
         });
         Ok(id)
     })
@@ -160,7 +214,11 @@ pub fn create(name: &str, console_type: ConsoleType, cols: u32, rows: u32) -> Ke
 /// Resize a console.
 pub fn resize(id: u32, cols: u32, rows: u32) -> KernelResult<()> {
     with_state(|state| {
-        let c = state.consoles.iter_mut().find(|c| c.id == id).ok_or(KernelError::NotFound)?;
+        let c = state
+            .consoles
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or(KernelError::NotFound)?;
         c.cols = cols;
         c.rows = rows;
         Ok(())
@@ -169,24 +227,39 @@ pub fn resize(id: u32, cols: u32, rows: u32) -> KernelResult<()> {
 
 /// Get active console.
 pub fn active() -> Option<Console> {
-    STATE.lock().as_ref().and_then(|s| s.consoles.iter().find(|c| c.active).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.consoles.iter().find(|c| c.active).cloned())
 }
 
 /// List consoles.
 pub fn list() -> Vec<Console> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.consoles.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.consoles.clone())
 }
 
 /// Get console by ID.
 pub fn get(id: u32) -> Option<Console> {
-    STATE.lock().as_ref().and_then(|s| s.consoles.iter().find(|c| c.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.consoles.iter().find(|c| c.id == id).cloned())
 }
 
 /// Statistics: (console_count, active_id, total_switches, total_writes, ops).
 pub fn stats() -> (usize, u32, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.consoles.len(), s.active_id, s.total_switches, s.total_writes, s.ops),
+        Some(s) => (
+            s.consoles.len(),
+            s.active_id,
+            s.total_switches,
+            s.total_writes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

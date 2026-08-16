@@ -31,10 +31,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -266,7 +266,11 @@ pub fn add_printer(name: &str) -> KernelResult<u32> {
 /// Remove a printer and all its queued jobs.
 pub fn remove_printer(printer_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if let Some(pos) = state.printers.iter().position(|p| p.printer_id == printer_id) {
+        if let Some(pos) = state
+            .printers
+            .iter()
+            .position(|p| p.printer_id == printer_id)
+        {
             state.printers.remove(pos);
             Ok(())
         } else {
@@ -296,7 +300,9 @@ pub fn submit_job(
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let queue = state.printers.iter_mut()
+        let queue = state
+            .printers
+            .iter_mut()
             .find(|p| p.printer_id == printer_id)
             .ok_or(KernelError::NotFound)?;
 
@@ -330,11 +336,15 @@ pub fn submit_job(
 /// Cancel a print job.  The job must not already be completed.
 pub fn cancel_job(printer_id: u32, job_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let queue = state.printers.iter_mut()
+        let queue = state
+            .printers
+            .iter_mut()
             .find(|p| p.printer_id == printer_id)
             .ok_or(KernelError::NotFound)?;
 
-        let job = queue.jobs.iter_mut()
+        let job = queue
+            .jobs
+            .iter_mut()
             .find(|j| j.id == job_id)
             .ok_or(KernelError::NotFound)?;
 
@@ -351,11 +361,15 @@ pub fn cancel_job(printer_id: u32, job_id: u32) -> KernelResult<()> {
 /// `total_printed` page count and the global `total_pages`.
 pub fn complete_job(printer_id: u32, job_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let queue = state.printers.iter_mut()
+        let queue = state
+            .printers
+            .iter_mut()
             .find(|p| p.printer_id == printer_id)
             .ok_or(KernelError::NotFound)?;
 
-        let job = queue.jobs.iter_mut()
+        let job = queue
+            .jobs
+            .iter_mut()
             .find(|j| j.id == job_id)
             .ok_or(KernelError::NotFound)?;
 
@@ -383,7 +397,9 @@ pub fn complete_job(printer_id: u32, job_id: u32) -> KernelResult<()> {
 /// dispatched until the queue is resumed.
 pub fn pause_printer(printer_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let queue = state.printers.iter_mut()
+        let queue = state
+            .printers
+            .iter_mut()
             .find(|p| p.printer_id == printer_id)
             .ok_or(KernelError::NotFound)?;
         queue.paused = true;
@@ -394,7 +410,9 @@ pub fn pause_printer(printer_id: u32) -> KernelResult<()> {
 /// Resume a paused printer queue.
 pub fn resume_printer(printer_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let queue = state.printers.iter_mut()
+        let queue = state
+            .printers
+            .iter_mut()
             .find(|p| p.printer_id == printer_id)
             .ok_or(KernelError::NotFound)?;
         queue.paused = false;
@@ -410,7 +428,9 @@ pub fn resume_printer(printer_id: u32) -> KernelResult<()> {
 pub fn get_jobs(printer_id: u32) -> KernelResult<Vec<PrintJob>> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    let queue = state.printers.iter()
+    let queue = state
+        .printers
+        .iter()
         .find(|p| p.printer_id == printer_id)
         .ok_or(KernelError::NotFound)?;
     Ok(queue.jobs.clone())
@@ -420,7 +440,9 @@ pub fn get_jobs(printer_id: u32) -> KernelResult<Vec<PrintJob>> {
 pub fn list_printers() -> Vec<(u32, String, bool, usize)> {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(state) => state.printers.iter()
+        Some(state) => state
+            .printers
+            .iter()
             .map(|p| (p.printer_id, p.printer_name.clone(), p.paused, p.jobs.len()))
             .collect(),
         None => Vec::new(),
@@ -431,12 +453,18 @@ pub fn list_printers() -> Vec<(u32, String, bool, usize)> {
 /// queue.  Returns the number of jobs removed.
 pub fn clear_completed(printer_id: u32) -> KernelResult<usize> {
     with_state(|state| {
-        let queue = state.printers.iter_mut()
+        let queue = state
+            .printers
+            .iter_mut()
             .find(|p| p.printer_id == printer_id)
             .ok_or(KernelError::NotFound)?;
         let before = queue.jobs.len();
-        queue.jobs.retain(|j| !matches!(j.status,
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled));
+        queue.jobs.retain(|j| {
+            !matches!(
+                j.status,
+                JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+            )
+        });
         Ok(before - queue.jobs.len())
     })
 }
@@ -453,7 +481,9 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let active: u64 = s.printers.iter()
+            let active: u64 = s
+                .printers
+                .iter()
                 .flat_map(|p| p.jobs.iter())
                 .filter(|j| matches!(j.status, JobStatus::Queued | JobStatus::Printing))
                 .count() as u64;
@@ -508,9 +538,17 @@ pub fn self_test() {
     let job_id;
     {
         job_id = submit_job(
-            default_pid, "report.pdf", "alice", 10, 2,
-            PageSize::A4, true, false, 524_288,
-        ).unwrap();
+            default_pid,
+            "report.pdf",
+            "alice",
+            10,
+            2,
+            PageSize::A4,
+            true,
+            false,
+            524_288,
+        )
+        .unwrap();
         let jobs = get_jobs(default_pid).unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].id, job_id);
@@ -540,9 +578,17 @@ pub fn self_test() {
     // Test 6: cancel a job.
     {
         let jid = submit_job(
-            default_pid, "draft.txt", "bob", 3, 1,
-            PageSize::Letter, false, false, 4096,
-        ).unwrap();
+            default_pid,
+            "draft.txt",
+            "bob",
+            3,
+            1,
+            PageSize::Letter,
+            false,
+            false,
+            4096,
+        )
+        .unwrap();
         cancel_job(default_pid, jid).unwrap();
         let jobs = get_jobs(default_pid).unwrap();
         let cancelled = jobs.iter().find(|j| j.id == jid).unwrap();
@@ -594,9 +640,17 @@ pub fn self_test() {
     {
         // Submit a fresh queued job to the default printer.
         let _jid = submit_job(
-            default_pid, "final.pdf", "carol", 5, 1,
-            PageSize::Legal, false, true, 10_000,
-        ).unwrap();
+            default_pid,
+            "final.pdf",
+            "carol",
+            5,
+            1,
+            PageSize::Legal,
+            false,
+            true,
+            10_000,
+        )
+        .unwrap();
         let (printer_count, total_jobs, total_pages, active, ops) = stats();
         assert_eq!(printer_count, 2); // default + Office Laser
         assert_eq!(total_jobs, 3); // 3 submitted in total

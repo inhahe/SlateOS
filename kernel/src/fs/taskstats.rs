@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -137,7 +137,9 @@ where
 /// own fixtures explicitly via the real API (see [`self_test`]).
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         tasks: Vec::new(),
         total_cpu_ns: 0,
@@ -150,17 +152,30 @@ pub fn init_defaults() {
 /// Register a new task.
 pub fn register(pid: u32, name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.tasks.iter().any(|t| t.pid == pid) { return Err(KernelError::AlreadyExists); }
-        if state.tasks.len() >= MAX_TASKS { return Err(KernelError::ResourceExhausted); }
+        if state.tasks.iter().any(|t| t.pid == pid) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.tasks.len() >= MAX_TASKS {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.tasks.push(TaskAccounting {
-            pid, name: String::from(name), cpu_time_ns: 0,
-            user_time_ns: 0, sys_time_ns: 0,
-            read_bytes: 0, write_bytes: 0,
-            read_syscalls: 0, write_syscalls: 0,
-            rss_pages: 0, vm_pages: 0,
-            minor_faults: 0, major_faults: 0,
-            voluntary_switches: 0, involuntary_switches: 0,
-            delays_ns: [0; 6], delay_counts: [0; 6],
+            pid,
+            name: String::from(name),
+            cpu_time_ns: 0,
+            user_time_ns: 0,
+            sys_time_ns: 0,
+            read_bytes: 0,
+            write_bytes: 0,
+            read_syscalls: 0,
+            write_syscalls: 0,
+            rss_pages: 0,
+            vm_pages: 0,
+            minor_faults: 0,
+            major_faults: 0,
+            voluntary_switches: 0,
+            involuntary_switches: 0,
+            delays_ns: [0; 6],
+            delay_counts: [0; 6],
         });
         Ok(())
     })
@@ -169,7 +184,10 @@ pub fn register(pid: u32, name: &str) -> KernelResult<()> {
 /// Update CPU time.
 pub fn update_cpu(pid: u32, user_ns: u64, sys_ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.tasks.iter_mut().find(|t| t.pid == pid)
+        let t = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         t.user_time_ns += user_ns;
         t.sys_time_ns += sys_ns;
@@ -182,12 +200,19 @@ pub fn update_cpu(pid: u32, user_ns: u64, sys_ns: u64) -> KernelResult<()> {
 /// Update I/O bytes.
 pub fn update_io(pid: u32, read_bytes: u64, write_bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.tasks.iter_mut().find(|t| t.pid == pid)
+        let t = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         t.read_bytes += read_bytes;
         t.write_bytes += write_bytes;
-        if read_bytes > 0 { t.read_syscalls += 1; }
-        if write_bytes > 0 { t.write_syscalls += 1; }
+        if read_bytes > 0 {
+            t.read_syscalls += 1;
+        }
+        if write_bytes > 0 {
+            t.write_syscalls += 1;
+        }
         state.total_io_bytes += read_bytes + write_bytes;
         Ok(())
     })
@@ -196,7 +221,10 @@ pub fn update_io(pid: u32, read_bytes: u64, write_bytes: u64) -> KernelResult<()
 /// Record a delay.
 pub fn update_delay(pid: u32, delay_type: DelayType, ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.tasks.iter_mut().find(|t| t.pid == pid)
+        let t = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.pid == pid)
             .ok_or(KernelError::NotFound)?;
         let idx = delay_type.index();
         t.delays_ns[idx] += ns;
@@ -208,12 +236,18 @@ pub fn update_delay(pid: u32, delay_type: DelayType, ns: u64) -> KernelResult<()
 
 /// Get task accounting.
 pub fn get(pid: u32) -> Option<TaskAccounting> {
-    STATE.lock().as_ref().and_then(|s| s.tasks.iter().find(|t| t.pid == pid).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.tasks.iter().find(|t| t.pid == pid).cloned())
 }
 
 /// List all tasks.
 pub fn list_tasks() -> Vec<TaskAccounting> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.tasks.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.tasks.clone())
 }
 
 /// Top CPU consumers.
@@ -230,7 +264,13 @@ pub fn top_cpu(n: usize) -> Vec<TaskAccounting> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.tasks.len(), s.total_cpu_ns, s.total_io_bytes, s.total_delays_ns, s.ops),
+        Some(s) => (
+            s.tasks.len(),
+            s.total_cpu_ns,
+            s.total_io_bytes,
+            s.total_delays_ns,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

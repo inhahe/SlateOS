@@ -51,16 +51,16 @@
 //! DNS resolution + UDP-over-IPv6).  The `ntp sync6` kshell command forces
 //! an IPv6-only sync attempt.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
 use super::ipv6::Ipv6Addr;
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -149,14 +149,30 @@ impl NtpTimestamp {
 
     /// Encode into 8 bytes (network byte order).
     fn encode(&self, buf: &mut [u8]) {
-        if let Some(b) = buf.get_mut(0) { *b = (self.seconds >> 24) as u8; }
-        if let Some(b) = buf.get_mut(1) { *b = (self.seconds >> 16) as u8; }
-        if let Some(b) = buf.get_mut(2) { *b = (self.seconds >> 8) as u8; }
-        if let Some(b) = buf.get_mut(3) { *b = self.seconds as u8; }
-        if let Some(b) = buf.get_mut(4) { *b = (self.fraction >> 24) as u8; }
-        if let Some(b) = buf.get_mut(5) { *b = (self.fraction >> 16) as u8; }
-        if let Some(b) = buf.get_mut(6) { *b = (self.fraction >> 8) as u8; }
-        if let Some(b) = buf.get_mut(7) { *b = self.fraction as u8; }
+        if let Some(b) = buf.get_mut(0) {
+            *b = (self.seconds >> 24) as u8;
+        }
+        if let Some(b) = buf.get_mut(1) {
+            *b = (self.seconds >> 16) as u8;
+        }
+        if let Some(b) = buf.get_mut(2) {
+            *b = (self.seconds >> 8) as u8;
+        }
+        if let Some(b) = buf.get_mut(3) {
+            *b = self.seconds as u8;
+        }
+        if let Some(b) = buf.get_mut(4) {
+            *b = (self.fraction >> 24) as u8;
+        }
+        if let Some(b) = buf.get_mut(5) {
+            *b = (self.fraction >> 16) as u8;
+        }
+        if let Some(b) = buf.get_mut(6) {
+            *b = (self.fraction >> 8) as u8;
+        }
+        if let Some(b) = buf.get_mut(7) {
+            *b = self.fraction as u8;
+        }
     }
 
     /// Decode from 8 bytes (network byte order).
@@ -637,7 +653,7 @@ fn ephemeral_port() -> u16 {
     static PORT_COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
     // Range 49152–65535 (14 bits of space).
-    
+
     49152u16.saturating_add((n % 16384) as u16)
 }
 
@@ -716,7 +732,9 @@ pub fn sync_now() -> KernelResult<i64> {
             return Err(KernelError::NotFound);
         }
         let idx = state.next_server % state.servers.len();
-        let addr = state.servers.get(idx)
+        let addr = state
+            .servers
+            .get(idx)
             .map(|s| s.address.clone())
             .ok_or(KernelError::InternalError)?;
         (addr, idx)
@@ -854,7 +872,9 @@ pub fn sync_now_v6() -> KernelResult<i64> {
             return Err(KernelError::NotFound);
         }
         let idx = state.next_server % state.servers.len();
-        let addr = state.servers.get(idx)
+        let addr = state
+            .servers
+            .get(idx)
             .map(|s| s.address.clone())
             .ok_or(KernelError::InternalError)?;
         (addr, idx)
@@ -932,7 +952,11 @@ pub fn tick() {
 
     let (enabled, interval_ns, has_servers) = {
         let state = STATE.lock();
-        (state.enabled, state.sync_interval_ns, !state.servers.is_empty())
+        (
+            state.enabled,
+            state.sync_interval_ns,
+            !state.servers.is_empty(),
+        )
     };
 
     if !enabled || !has_servers {
@@ -1164,7 +1188,10 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 1: NTP timestamp encode/decode round-trip ---
     {
-        let ts = NtpTimestamp { seconds: 0xDEAD_BEEF, fraction: 0xCAFE_BABE };
+        let ts = NtpTimestamp {
+            seconds: 0xDEAD_BEEF,
+            fraction: 0xCAFE_BABE,
+        };
         let mut buf = [0u8; 8];
         ts.encode(&mut buf);
         let decoded = NtpTimestamp::decode(&buf);
@@ -1176,10 +1203,16 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 2: NTP timestamp to_nanos ---
     {
-        let ts = NtpTimestamp { seconds: 1, fraction: 0 };
+        let ts = NtpTimestamp {
+            seconds: 1,
+            fraction: 0,
+        };
         assert!(ts.to_nanos() == 1_000_000_000, "1 second = 1e9 ns");
 
-        let ts = NtpTimestamp { seconds: 0, fraction: 0x8000_0000 };
+        let ts = NtpTimestamp {
+            seconds: 0,
+            fraction: 0x8000_0000,
+        };
         // 0.5 seconds = 500_000_000 ns
         let ns = ts.to_nanos();
         let diff = ns.abs_diff(500_000_000);
@@ -1205,12 +1238,18 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 4: to_unix_secs ---
     {
         // NTP epoch + 70 years = Unix epoch 0.
-        let ts = NtpTimestamp { seconds: NTP_UNIX_OFFSET as u32, fraction: 0 };
+        let ts = NtpTimestamp {
+            seconds: NTP_UNIX_OFFSET as u32,
+            fraction: 0,
+        };
         assert!(ts.to_unix_secs() == 0, "NTP_UNIX_OFFSET → Unix 0");
 
         // A known date: 2024-01-01 00:00:00 UTC = Unix 1704067200
         // NTP = 1704067200 + 2208988800 = 3913056000
-        let ts2 = NtpTimestamp { seconds: 3_913_056_000, fraction: 0 };
+        let ts2 = NtpTimestamp {
+            seconds: 3_913_056_000,
+            fraction: 0,
+        };
         assert!(ts2.to_unix_secs() == 1_704_067_200, "2024-01-01 UTC");
 
         passed = passed.saturating_add(1);
@@ -1219,7 +1258,10 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 5: Packet construction ---
     {
-        let ts = NtpTimestamp { seconds: 0x12345678, fraction: 0xABCDEF01 };
+        let ts = NtpTimestamp {
+            seconds: 0x12345678,
+            fraction: 0xABCDEF01,
+        };
         let pkt = build_request(ts);
 
         // Byte 0: LI=0, VN=4, Mode=3 → 0x23
@@ -1257,10 +1299,16 @@ pub fn self_test() -> KernelResult<()> {
         pkt[3] = 0xEC;
 
         // Reference ID "GPS\0"
-        pkt[12] = b'G'; pkt[13] = b'P'; pkt[14] = b'S'; pkt[15] = 0;
+        pkt[12] = b'G';
+        pkt[13] = b'P';
+        pkt[14] = b'S';
+        pkt[15] = 0;
 
         // Transmit timestamp.
-        let tx = NtpTimestamp { seconds: 100, fraction: 200 };
+        let tx = NtpTimestamp {
+            seconds: 100,
+            fraction: 200,
+        };
         tx.encode(&mut pkt[40..48]);
 
         let resp = parse_response(&pkt)?;
@@ -1284,13 +1332,22 @@ pub fn self_test() -> KernelResult<()> {
         pkt[1] = 0; // Stratum 0
 
         // KoD code "DENY"
-        pkt[12] = b'D'; pkt[13] = b'E'; pkt[14] = b'N'; pkt[15] = b'Y';
+        pkt[12] = b'D';
+        pkt[13] = b'E';
+        pkt[14] = b'N';
+        pkt[15] = b'Y';
 
-        let origin = NtpTimestamp { seconds: 1, fraction: 2 };
+        let origin = NtpTimestamp {
+            seconds: 1,
+            fraction: 2,
+        };
         origin.encode(&mut pkt[24..32]); // Origin = our transmit.
 
         // Transmit must be non-zero.
-        let tx = NtpTimestamp { seconds: 3, fraction: 4 };
+        let tx = NtpTimestamp {
+            seconds: 3,
+            fraction: 4,
+        };
         tx.encode(&mut pkt[40..48]);
 
         let resp = parse_response(&pkt)?;
@@ -1307,9 +1364,15 @@ pub fn self_test() -> KernelResult<()> {
         // LI=3, VN=4, Mode=4 → 0b11_100_100 = 0xE4
         pkt[0] = 0xE4;
         pkt[1] = 2; // Stratum 2.
-        let origin = NtpTimestamp { seconds: 10, fraction: 20 };
+        let origin = NtpTimestamp {
+            seconds: 10,
+            fraction: 20,
+        };
         origin.encode(&mut pkt[24..32]);
-        let tx = NtpTimestamp { seconds: 11, fraction: 21 };
+        let tx = NtpTimestamp {
+            seconds: 11,
+            fraction: 21,
+        };
         tx.encode(&mut pkt[40..48]);
 
         let resp = parse_response(&pkt)?;
@@ -1327,13 +1390,22 @@ pub fn self_test() -> KernelResult<()> {
         pkt[1] = 1; // Stratum 1.
 
         // Origin doesn't match what we sent.
-        let wrong_origin = NtpTimestamp { seconds: 999, fraction: 888 };
+        let wrong_origin = NtpTimestamp {
+            seconds: 999,
+            fraction: 888,
+        };
         wrong_origin.encode(&mut pkt[24..32]);
-        let tx = NtpTimestamp { seconds: 1000, fraction: 0 };
+        let tx = NtpTimestamp {
+            seconds: 1000,
+            fraction: 0,
+        };
         tx.encode(&mut pkt[40..48]);
 
         let resp = parse_response(&pkt)?;
-        let our_origin = NtpTimestamp { seconds: 1, fraction: 2 };
+        let our_origin = NtpTimestamp {
+            seconds: 1,
+            fraction: 2,
+        };
         let result = validate_response(&resp, &our_origin);
         assert!(result.is_err(), "origin mismatch should be rejected");
 

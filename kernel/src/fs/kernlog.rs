@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -104,7 +104,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     let mut state = State {
         ring: Vec::with_capacity(256),
@@ -116,8 +118,11 @@ pub fn init_defaults() {
     };
     // Boot message.
     state.ring.push(LogEntry {
-        seq: 0, timestamp_ns: now, level: LogLevel::Info,
-        source: String::from("kernel"), message: String::from("Kernel log initialized"),
+        seq: 0,
+        timestamp_ns: now,
+        level: LogLevel::Info,
+        source: String::from("kernel"),
+        message: String::from("Kernel log initialized"),
     });
     state.total_logged = 1;
     *guard = Some(state);
@@ -137,8 +142,11 @@ pub fn log(level: LogLevel, source: &str, message: &str) -> KernelResult<u64> {
             state.total_dropped += 1;
         }
         state.ring.push(LogEntry {
-            seq, timestamp_ns: now, level,
-            source: String::from(source), message: String::from(message),
+            seq,
+            timestamp_ns: now,
+            level,
+            source: String::from(source),
+            message: String::from(message),
         });
         state.total_logged += 1;
         Ok(seq)
@@ -148,7 +156,11 @@ pub fn log(level: LogLevel, source: &str, message: &str) -> KernelResult<u64> {
 /// Read messages from a sequence number.
 pub fn read_from(from_seq: u64) -> Vec<LogEntry> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.ring.iter().filter(|e| e.seq >= from_seq).cloned().collect()
+        s.ring
+            .iter()
+            .filter(|e| e.seq >= from_seq)
+            .cloned()
+            .collect()
     })
 }
 
@@ -168,14 +180,22 @@ pub fn tail(n: usize) -> Vec<LogEntry> {
 /// Filter by level.
 pub fn filter_level(level: LogLevel) -> Vec<LogEntry> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.ring.iter().filter(|e| e.level == level).cloned().collect()
+        s.ring
+            .iter()
+            .filter(|e| e.level == level)
+            .cloned()
+            .collect()
     })
 }
 
 /// Filter by source.
 pub fn filter_source(source: &str) -> Vec<LogEntry> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.ring.iter().filter(|e| e.source == source).cloned().collect()
+        s.ring
+            .iter()
+            .filter(|e| e.source == source)
+            .cloned()
+            .collect()
     })
 }
 

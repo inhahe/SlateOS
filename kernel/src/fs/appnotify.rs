@@ -38,11 +38,11 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -211,7 +211,10 @@ pub fn register_app(app_id: &str, display_name: &str) -> KernelResult<()> {
 /// Unregister an application.
 pub fn unregister_app(app_id: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let idx = state.apps.iter().position(|a| a.app_id == app_id)
+    let idx = state
+        .apps
+        .iter()
+        .position(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
     state.apps.remove(idx);
     state.changes += 1;
@@ -222,7 +225,10 @@ pub fn unregister_app(app_id: &str) -> KernelResult<()> {
 /// Get settings for an application.
 pub fn get_app(app_id: &str) -> KernelResult<AppNotifyConfig> {
     let state = STATE.lock();
-    state.apps.iter().find(|a| a.app_id == app_id)
+    state
+        .apps
+        .iter()
+        .find(|a| a.app_id == app_id)
         .cloned()
         .ok_or(KernelError::NotFound)
 }
@@ -239,7 +245,10 @@ pub fn list_apps() -> Vec<AppNotifyConfig> {
 /// Enable or disable all notifications from an app.
 pub fn set_app_enabled(app_id: &str, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
     app.enabled = enabled;
     state.changes += 1;
@@ -250,7 +259,10 @@ pub fn set_app_enabled(app_id: &str, enabled: bool) -> KernelResult<()> {
 /// Set app-level sound.
 pub fn set_app_sound(app_id: &str, sound: SoundChoice) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
     app.sound = sound;
     state.changes += 1;
@@ -261,7 +273,10 @@ pub fn set_app_sound(app_id: &str, sound: SoundChoice) -> KernelResult<()> {
 /// Set app-level display mode.
 pub fn set_app_display_mode(app_id: &str, mode: DisplayMode) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
     app.display_mode = mode;
     state.changes += 1;
@@ -271,7 +286,10 @@ pub fn set_app_display_mode(app_id: &str, mode: DisplayMode) -> KernelResult<()>
 /// Set whether the app can send critical notifications.
 pub fn set_allow_critical(app_id: &str, allow: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
     app.allow_critical = allow;
     state.changes += 1;
@@ -281,7 +299,10 @@ pub fn set_allow_critical(app_id: &str, allow: bool) -> KernelResult<()> {
 /// Set rate limit for an app (0 = unlimited).
 pub fn set_rate_limit(app_id: &str, per_minute: u32) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
     app.rate_limit = per_minute;
     state.changes += 1;
@@ -291,7 +312,10 @@ pub fn set_rate_limit(app_id: &str, per_minute: u32) -> KernelResult<()> {
 /// Set whether to group notifications from an app.
 pub fn set_group(app_id: &str, group: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
     app.group_notifications = group;
     state.changes += 1;
@@ -310,12 +334,19 @@ pub fn register_notification_type(
     default_sound: SoundChoice,
 ) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
     if app.notification_types.len() >= MAX_TYPES_PER_APP {
         return Err(KernelError::ResourceExhausted);
     }
-    if app.notification_types.iter().any(|t| t.type_key == type_key) {
+    if app
+        .notification_types
+        .iter()
+        .any(|t| t.type_key == type_key)
+    {
         return Err(KernelError::AlreadyExists);
     }
     app.notification_types.push(NotificationType {
@@ -335,9 +366,15 @@ pub fn register_notification_type(
 /// Unregister a notification type.
 pub fn unregister_notification_type(app_id: &str, type_key: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
-    let idx = app.notification_types.iter().position(|t| t.type_key == type_key)
+    let idx = app
+        .notification_types
+        .iter()
+        .position(|t| t.type_key == type_key)
         .ok_or(KernelError::NotFound)?;
     app.notification_types.remove(idx);
     state.changes += 1;
@@ -347,9 +384,15 @@ pub fn unregister_notification_type(app_id: &str, type_key: &str) -> KernelResul
 /// Enable or disable a specific notification type.
 pub fn set_type_enabled(app_id: &str, type_key: &str, enabled: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
-    let ntype = app.notification_types.iter_mut().find(|t| t.type_key == type_key)
+    let ntype = app
+        .notification_types
+        .iter_mut()
+        .find(|t| t.type_key == type_key)
         .ok_or(KernelError::NotFound)?;
     ntype.enabled = enabled;
     state.changes += 1;
@@ -364,9 +407,15 @@ pub fn set_type_sound(
     sound: Option<SoundChoice>,
 ) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
-    let ntype = app.notification_types.iter_mut().find(|t| t.type_key == type_key)
+    let ntype = app
+        .notification_types
+        .iter_mut()
+        .find(|t| t.type_key == type_key)
         .ok_or(KernelError::NotFound)?;
     ntype.user_sound = sound;
     state.changes += 1;
@@ -381,9 +430,15 @@ pub fn set_type_priority(
     priority: PriorityOverride,
 ) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
-    let ntype = app.notification_types.iter_mut().find(|t| t.type_key == type_key)
+    let ntype = app
+        .notification_types
+        .iter_mut()
+        .find(|t| t.type_key == type_key)
         .ok_or(KernelError::NotFound)?;
     ntype.priority = priority;
     state.changes += 1;
@@ -391,15 +446,17 @@ pub fn set_type_priority(
 }
 
 /// Set display mode for a notification type.
-pub fn set_type_display(
-    app_id: &str,
-    type_key: &str,
-    mode: DisplayMode,
-) -> KernelResult<()> {
+pub fn set_type_display(app_id: &str, type_key: &str, mode: DisplayMode) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let app = state.apps.iter_mut().find(|a| a.app_id == app_id)
+    let app = state
+        .apps
+        .iter_mut()
+        .find(|a| a.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
-    let ntype = app.notification_types.iter_mut().find(|t| t.type_key == type_key)
+    let ntype = app
+        .notification_types
+        .iter_mut()
+        .find(|t| t.type_key == type_key)
         .ok_or(KernelError::NotFound)?;
     ntype.display_mode = mode;
     state.changes += 1;
@@ -435,7 +492,10 @@ pub fn list_sounds() -> Vec<SystemSound> {
 
 /// List sounds filtered by category.
 pub fn sounds_by_category(category: &str) -> Vec<SystemSound> {
-    STATE.lock().sounds.iter()
+    STATE
+        .lock()
+        .sounds
+        .iter()
         .filter(|s| s.category == category)
         .cloned()
         .collect()
@@ -471,7 +531,10 @@ pub fn effective_settings(app_id: &str, type_key: &str) -> EffectiveSettings {
     }
 
     // Find specific notification type.
-    let ntype = app.notification_types.iter().find(|t| t.type_key == type_key);
+    let ntype = app
+        .notification_types
+        .iter()
+        .find(|t| t.type_key == type_key);
 
     if let Some(ntype) = ntype {
         if !ntype.enabled {
@@ -680,13 +743,13 @@ pub fn init_defaults() {
 /// Return (app_count, sound_count, total_types, ops).
 pub fn stats() -> (usize, usize, usize, u64) {
     let state = STATE.lock();
-    let total_types: usize = state.apps.iter()
-        .map(|a| a.notification_types.len())
-        .sum();
-    (state.apps.len(),
-     state.sounds.len(),
-     total_types,
-     OP_COUNT.load(Ordering::Relaxed))
+    let total_types: usize = state.apps.iter().map(|a| a.notification_types.len()).sum();
+    (
+        state.apps.len(),
+        state.sounds.len(),
+        total_types,
+        OP_COUNT.load(Ordering::Relaxed),
+    )
 }
 
 pub fn reset_stats() {
@@ -755,7 +818,11 @@ pub fn self_test() -> KernelResult<()> {
     // Test 7: user sound override.
     serial_println!("appnotify::self_test 7: sound override");
     set_app_enabled("test-app", true)?;
-    set_type_sound("test-app", "new-msg", Some(SoundChoice::Named(String::from("ding.wav"))))?;
+    set_type_sound(
+        "test-app",
+        "new-msg",
+        Some(SoundChoice::Named(String::from("ding.wav"))),
+    )?;
     let eff = effective_settings("test-app", "new-msg");
     assert_eq!(eff.sound, Some(String::from("ding.wav")));
 

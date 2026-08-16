@@ -24,14 +24,14 @@ use core::ptr::addr_of;
 use core::ptr::addr_of_mut;
 
 use crate::cpu;
+use crate::emergency_println;
 use crate::gdt;
 use crate::mm;
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
-use crate::proc::spawn::{USER_STACK_TOP, USER_STACK_GUARD, MAX_STACK_FRAMES};
+use crate::proc::spawn::{MAX_STACK_FRAMES, USER_STACK_GUARD, USER_STACK_TOP};
 use crate::sched;
 use crate::serial_println;
-use crate::emergency_println;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -98,9 +98,13 @@ unsafe impl Sync for ExcLogSlot {}
 /// slot stores one entry.  Races on slots are benign (worst case: a
 /// partially-written entry is read, which is just slightly stale data).
 static EXCEPTION_LOG: [ExcLogSlot; EXCEPTION_LOG_SIZE] = {
-    const EMPTY: ExcLogSlot = ExcLogSlot(core::cell::UnsafeCell::new(
-        ExceptionLogEntry { vector: 0, cpu: 0, tick: 0, rip: 0, aux: 0 }
-    ));
+    const EMPTY: ExcLogSlot = ExcLogSlot(core::cell::UnsafeCell::new(ExceptionLogEntry {
+        vector: 0,
+        cpu: 0,
+        tick: 0,
+        rip: 0,
+        aux: 0,
+    }));
     [EMPTY; EXCEPTION_LOG_SIZE]
 };
 
@@ -137,7 +141,13 @@ fn log_exception(vector: u8, rip: u64, aux: u64) {
 #[must_use]
 pub fn recent_exceptions() -> ([ExceptionLogEntry; EXCEPTION_LOG_SIZE], u64) {
     let total = EXCEPTION_LOG_IDX.load(Ordering::Relaxed);
-    let mut result = [ExceptionLogEntry { vector: 0, cpu: 0, tick: 0, rip: 0, aux: 0 }; EXCEPTION_LOG_SIZE];
+    let mut result = [ExceptionLogEntry {
+        vector: 0,
+        cpu: 0,
+        tick: 0,
+        rip: 0,
+        aux: 0,
+    }; EXCEPTION_LOG_SIZE];
 
     // Read entries in chronological order.
     let count = total.min(EXCEPTION_LOG_SIZE as u64) as usize;
@@ -159,7 +169,9 @@ pub fn recent_exceptions() -> ([ExceptionLogEntry; EXCEPTION_LOG_SIZE], u64) {
 /// Get the count for a specific vector.
 #[must_use]
 pub fn vector_count(vector: usize) -> u64 {
-    VECTOR_COUNTS.get(vector).map_or(0, |c| c.load(Ordering::Relaxed))
+    VECTOR_COUNTS
+        .get(vector)
+        .map_or(0, |c| c.load(Ordering::Relaxed))
 }
 
 /// Get all vector counts as an array snapshot.
@@ -218,9 +230,11 @@ pub fn vector_rates() -> InterruptRates {
     let tick_rate = u64::from(crate::apic::TICK_RATE_HZ);
 
     for i in 0..VECTOR_STATS_SIZE {
-        let current = VECTOR_COUNTS.get(i)
+        let current = VECTOR_COUNTS
+            .get(i)
             .map_or(0, |c| c.load(Ordering::Relaxed));
-        let prev = RATE_SNAPSHOT_COUNTS.get(i)
+        let prev = RATE_SNAPSHOT_COUNTS
+            .get(i)
             .map_or(0, |c| c.swap(current, Ordering::Relaxed));
         let delta = current.saturating_sub(prev);
 
@@ -660,12 +674,12 @@ macro_rules! isr_stub_no_error {
         global_asm!(
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
-            "cld",                 // see "`cld` on entry" above
+            "cld", // see "`cld` on entry" above
             // AC is the SMAP override and an IDT gate does not clear it, so a
             // ring-3 `popfq` would otherwise disable SMAP for this handler.
             // Patched from a 3-byte NOP to `clac` at boot iff CPUID.SMAP.
             crate::alternative_site!(".byte 0x0f,0x1f,0x00", "clac", 1),
-            "push 0",              // dummy error code
+            "push 0", // dummy error code
             "push rax",
             "push rcx",
             "push rdx",
@@ -699,10 +713,12 @@ macro_rules! isr_stub_no_error {
             "pop rdx",
             "pop rcx",
             "pop rax",
-            "add rsp, 8",          // pop dummy error code
+            "add rsp, 8", // pop dummy error code
             "iretq",
         );
-        unsafe extern "C" { fn $stub(); }
+        unsafe extern "C" {
+            fn $stub();
+        }
     };
 }
 
@@ -712,7 +728,7 @@ macro_rules! isr_stub_with_error {
         global_asm!(
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
-            "cld",                 // see "`cld` on entry" above
+            "cld", // see "`cld` on entry" above
             // AC is the SMAP override and an IDT gate does not clear it, so a
             // ring-3 `popfq` would otherwise disable SMAP for this handler.
             // Patched from a 3-byte NOP to `clac` at boot iff CPUID.SMAP.
@@ -751,10 +767,12 @@ macro_rules! isr_stub_with_error {
             "pop rdx",
             "pop rcx",
             "pop rax",
-            "add rsp, 8",          // pop error code
+            "add rsp, 8", // pop error code
             "iretq",
         );
-        unsafe extern "C" { fn $stub(); }
+        unsafe extern "C" {
+            fn $stub();
+        }
     };
 }
 
@@ -800,12 +818,12 @@ macro_rules! irq_stub {
         global_asm!(
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
-            "cld",                 // see "`cld` on entry" above
+            "cld", // see "`cld` on entry" above
             // AC is the SMAP override and an IDT gate does not clear it, so a
             // ring-3 `popfq` would otherwise disable SMAP for this handler.
             // Patched from a 3-byte NOP to `clac` at boot iff CPUID.SMAP.
             crate::alternative_site!(".byte 0x0f,0x1f,0x00", "clac", 1),
-            "push 0",              // dummy error code (IRQs push none)
+            "push 0", // dummy error code (IRQs push none)
             "push rax",
             "push rcx",
             "push rdx",
@@ -839,10 +857,12 @@ macro_rules! irq_stub {
             "pop rdx",
             "pop rcx",
             "pop rax",
-            "add rsp, 8",          // pop dummy error code
+            "add rsp, 8", // pop dummy error code
             "iretq",
         );
-        unsafe extern "C" { fn $stub(); }
+        unsafe extern "C" {
+            fn $stub();
+        }
     };
 }
 
@@ -978,7 +998,7 @@ fn try_dispatch_user_exception(
     code: crate::proc::exception::ExceptionCode,
     aux: u64,
 ) -> bool {
-    use crate::proc::exception::{ExceptionContext, EXCEPTION_CONTEXT_SIZE};
+    use crate::proc::exception::{EXCEPTION_CONTEXT_SIZE, ExceptionContext};
     use crate::proc::thread;
     use core::ptr::{read_volatile, write_volatile};
 
@@ -1138,7 +1158,10 @@ fn try_dispatch_user_exception(
 
     serial_println!(
         "[exception] Dispatching {:?} to handler {:#x} for process {} (ctx at {:#x})",
-        code, handler_addr, pid, ctx_addr
+        code,
+        handler_addr,
+        pid,
+        ctx_addr
     );
 
     true
@@ -1188,11 +1211,16 @@ fn kill_userspace_task_with_info(
     let task_id = sched::current_task_id();
     serial_println!(
         "[exception] Killing task {} — {} at {:#x} (ring 3)",
-        task_id, exception_name, frame.rip
+        task_id,
+        exception_name,
+        frame.rip
     );
     serial_println!(
         "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
-        frame.cs, frame.rflags, frame.rsp, frame.ss
+        frame.cs,
+        frame.rflags,
+        frame.rsp,
+        frame.ss
     );
 
     let owner = crate::proc::thread::owner_process(task_id);
@@ -1204,7 +1232,10 @@ fn kill_userspace_task_with_info(
     if let (Some(pid), Some(info)) = (owner, crash) {
         serial_println!(
             "[exception] Recording crash: pid={} exception={} rip={:#x} aux={:#x}",
-            pid, info.exception_code, info.faulting_rip, info.aux
+            pid,
+            info.exception_code,
+            info.faulting_rip,
+            info.aux
         );
         let _ = crate::proc::pcb::set_crash_info(pid, info);
     }
@@ -1217,7 +1248,8 @@ fn kill_userspace_task_with_info(
         let killed = crate::proc::thread::kill_process_threads(pid);
         serial_println!(
             "[exception] Terminating process {} — unhandled ring-3 fault ({} thread(s))",
-            pid, killed
+            pid,
+            killed
         );
     } else {
         // A ring-3 task with no owning process (nothing but self-tests spawn
@@ -1334,9 +1366,7 @@ fn dispatch_or_kill_userspace(
 /// [`handle_page_fault`] with the precise `SEGV_MAPERR`/`SEGV_ACCERR` code,
 /// which alone knows the page-fault present bit — and for any code with no
 /// meaningful Linux signal mapping.
-fn linux_fault_mapping(
-    code: crate::proc::exception::ExceptionCode,
-) -> Option<(u32, i32)> {
+fn linux_fault_mapping(code: crate::proc::exception::ExceptionCode) -> Option<(u32, i32)> {
     use crate::proc::exception::ExceptionCode as E;
     use crate::proc::linux_sigframe::si_fault_code as F;
     use crate::proc::signal::si_code::SI_KERNEL;
@@ -1395,8 +1425,7 @@ fn try_deliver_linux_fault_signal(
 
     // Only Linux-ABI processes use rt_sigframe delivery; native processes keep
     // the SEH-style trampoline (design-decision #4).
-    if crate::proc::pcb::get_abi_mode(pid) != Some(crate::proc::pcb::AbiMode::Linux)
-    {
+    if crate::proc::pcb::get_abi_mode(pid) != Some(crate::proc::pcb::AbiMode::Linux) {
         return false;
     }
 
@@ -1471,7 +1500,11 @@ fn try_deliver_linux_fault_signal(
 
     serial_println!(
         "[exception] Delivered Linux signal {} (si_code={}, addr={:#x}) to process {} handler {:#x}",
-        sig, si_code, addr, pid, entry.rip
+        sig,
+        si_code,
+        addr,
+        pid,
+        entry.rip
     );
 
     true
@@ -1542,9 +1575,13 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
         if iochan_check {
             emergency_println!("  I/O channel check error");
         }
-        crate::klog!(Error, "hw.nmi",
+        crate::klog!(
+            Error,
+            "hw.nmi",
             "NMI hardware error at {:#x}: parity={}, iochan={}",
-            frame.rip, parity_error, iochan_check
+            frame.rip,
+            parity_error,
+            iochan_check
         );
     } else if crate::hardlockup::is_armed() {
         // No hardware-error bits and the hard-lockup watchdog is armed: the
@@ -1566,7 +1603,9 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
             // Lock-free: the wedged BSP may hold the global serial spinlock.
             emergency_println!(
                 "[hardlockup] NMI on AP cpu={} rip={:#x} rflags={:#x}",
-                cpu, frame.rip, frame.rflags
+                cpu,
+                frame.rip,
+                frame.rflags
             );
             return;
         }
@@ -1601,7 +1640,14 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
             // also uses emergency output internally.
             emergency_println!(
                 "[hardlockup] NMI WATCHDOG FIRED cpu={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} heartbeat={} kick_stale_ns={} — dumping backtrace + task table",
-                cpu, frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss, hb, stale_ns
+                cpu,
+                frame.rip,
+                frame.cs,
+                frame.rflags,
+                frame.rsp,
+                frame.ss,
+                hb,
+                stale_ns
             );
             dump_kernel_backtrace(frame);
             // klog and the task-table dump take other locks (structured-log
@@ -1609,9 +1655,15 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
             // the RIP + backtrace above, which are the irreplaceable data. If the
             // wedge is holding one of those locks these may hang, but by then the
             // marker has already escaped via the lock-free path.
-            crate::klog!(Error, "hw.nmi",
+            crate::klog!(
+                Error,
+                "hw.nmi",
                 "hardlockup NMI cpu={} rip={:#x} heartbeat={} kick_stale_ns={}",
-                cpu, frame.rip, hb, stale_ns);
+                cpu,
+                frame.rip,
+                hb,
+                stale_ns
+            );
             crate::sched::dump_task_table();
         } else {
             // Spurious: the BSP is alive and still kicking. Take a one-shot
@@ -1622,14 +1674,19 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
             if !HARDLOCKUP_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
                 emergency_println!(
                     "[hardlockup] first (spurious) NMI on cpu={} rip={:#x} rflags={:#x} kick_stale_ns={} — dumping backtrace + task table",
-                    cpu, frame.rip, frame.rflags, stale_ns
+                    cpu,
+                    frame.rip,
+                    frame.rflags,
+                    stale_ns
                 );
                 dump_kernel_backtrace(frame);
                 crate::sched::dump_task_table();
             }
             emergency_println!(
                 "[hardlockup] spurious NMI (BSP alive, heartbeat={} kick_stale_ns={}) at rip={:#x} — re-arming, resuming",
-                hb, stale_ns, frame.rip
+                hb,
+                stale_ns,
+                frame.rip
             );
             // Full re-arm, not a bare kick: QEMU's i6300esb resets (disables) the
             // counter when it fires its action, so a mere RELOAD_PING would not
@@ -1729,9 +1786,17 @@ pub(crate) fn is_kernel_text(val: u64) -> bool {
 /// `rsp=0x…27be8` faulted the scan at the guard `0x…28000`.
 fn irq_stack_top_for(addr: u64) -> u64 {
     let cpu = crate::smp::current_cpu_index();
-    let top = IRQ_STACK_TOP.get(cpu).map_or(0, |t| t.load(Ordering::Acquire));
-    let bottom = IRQ_STACK_BOTTOM.get(cpu).map_or(0, |b| b.load(Ordering::Acquire));
-    if top != 0 && addr > bottom && addr <= top { top } else { 0 }
+    let top = IRQ_STACK_TOP
+        .get(cpu)
+        .map_or(0, |t| t.load(Ordering::Acquire));
+    let bottom = IRQ_STACK_BOTTOM
+        .get(cpu)
+        .map_or(0, |b| b.load(Ordering::Acquire));
+    if top != 0 && addr > bottom && addr <= top {
+        top
+    } else {
+        0
+    }
 }
 
 fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
@@ -1743,13 +1808,19 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
     // All output here uses the lock-free `emergency_println!` — this runs in the
     // hard-lockup NMI path and the wedged code may hold the global serial lock.
     if cs & 0x3 != 0 {
-        emergency_println!("[hardlockup] backtrace: ring-3 frame (cs={:#x}), skipped", cs);
+        emergency_println!(
+            "[hardlockup] backtrace: ring-3 frame (cs={:#x}), skipped",
+            cs
+        );
         return;
     }
     if rsp < HIGHER_HALF_MIN {
         // A sane kernel stack is in the higher-half; a low rsp means we can't
         // trust it (or the wedge corrupted it) — don't risk a fault.
-        emergency_println!("[hardlockup] backtrace: rsp={:#x} not in higher-half, skipped", rsp);
+        emergency_println!(
+            "[hardlockup] backtrace: rsp={:#x} not in higher-half, skipped",
+            rsp
+        );
         return;
     }
 
@@ -1810,7 +1881,10 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
 
     // Backstop: conservative stack scan, filtered to real `.text` addresses.
     // Catches callers whose frames the RBP walk skipped (e.g. asm/naked stubs).
-    emergency_println!("[hardlockup] backtrace (stack scan, .text words from rsp={:#x}):", rsp);
+    emergency_println!(
+        "[hardlockup] backtrace (stack scan, .text words from rsp={:#x}):",
+        rsp
+    );
     const MAX_WORDS: usize = 256;
     const MAX_HITS: u32 = 40;
     let mut hits: u32 = 0;
@@ -1825,7 +1899,10 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
         let addr = rsp + (i as u64) * 8;
         // Stop before stepping onto (or past) the IRQ-stack top's guard page.
         if irq_top != 0 && addr.saturating_add(8) > irq_top {
-            emergency_println!("[hardlockup]   … (reached IRQ-stack top {:#x}, stopping scan)", irq_top);
+            emergency_println!(
+                "[hardlockup]   … (reached IRQ-stack top {:#x}, stopping scan)",
+                irq_top
+            );
             break;
         }
         // SAFETY: `addr` is within a 2 KiB window at higher addresses than the
@@ -1991,7 +2068,8 @@ pub fn ac_on_entry_self_test() {
 
     let observed_clear = !BP_ENTRY_AC.load(Ordering::Relaxed);
     assert_eq!(
-        observed_clear, expected_clear,
+        observed_clear,
+        expected_clear,
         "idt: smep_smap::entry_paths_clear_ac() says {expected_clear}, but an IDT \
          gate entered with AC {} — the constant and the ISR stubs disagree, so \
          CR4.SMAP would be enabled against an entry path that silently disables it",
@@ -2033,7 +2111,12 @@ extern "C" fn handle_bound_range(frame: &InterruptStackFrame, _error: u64) {
     count_vector(5);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
-        dispatch_or_kill_userspace("Bound Range Exceeded (#BR)", frame, ExceptionCode::BoundRangeExceeded, 0);
+        dispatch_or_kill_userspace(
+            "Bound Range Exceeded (#BR)",
+            frame,
+            ExceptionCode::BoundRangeExceeded,
+            0,
+        );
         return;
     }
     serial_println!("EXCEPTION: Bound Range Exceeded (#BR) at {:#x}", frame.rip);
@@ -2294,12 +2377,15 @@ fn report_ud_trap(trap: UdTrap) {
         UdTrap::Sanitizer { reason, len } => match sanitizer_trap_name(reason) {
             Some(name) => serial_println!(
                 "  Likely cause: UD1 sanitizer trap, reason {} = {} ({}-byte encoding)",
-                reason, name, len
+                reason,
+                name,
+                len
             ),
             None => serial_println!(
                 "  Likely cause: UD1 sanitizer trap, reason {} (unrecognised; \
                  re-measure the clang SanitizerHandler ordinals) ({}-byte encoding)",
-                reason, len
+                reason,
+                len
             ),
         },
     }
@@ -2366,13 +2452,20 @@ extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
             );
             report_ud_trap(trap);
         }
-        dispatch_or_kill_userspace("Invalid Opcode (#UD)", frame, ExceptionCode::InvalidOpcode, 0);
+        dispatch_or_kill_userspace(
+            "Invalid Opcode (#UD)",
+            frame,
+            ExceptionCode::InvalidOpcode,
+            0,
+        );
         return;
     }
     serial_println!("EXCEPTION: Invalid Opcode (#UD) at {:#x}", frame.rip);
     serial_println!(
         "  CS={:#x} RFLAGS={:#x} RSP={:#x}",
-        frame.cs, frame.rflags, frame.rsp
+        frame.cs,
+        frame.rflags,
+        frame.rsp
     );
 
     // Dump the bytes at the faulting instruction for post-mortem decode.
@@ -2385,10 +2478,22 @@ extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
         }
         serial_println!(
             "  Instruction bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
-            bytes[8], bytes[9], bytes[10], bytes[11],
-            bytes[12], bytes[13], bytes[14], bytes[15]
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7],
+            bytes[8],
+            bytes[9],
+            bytes[10],
+            bytes[11],
+            bytes[12],
+            bytes[13],
+            bytes[14],
+            bytes[15]
         );
         // Deliberate compiler traps carry their own diagnosis in the encoding:
         // `0F 0B` = `ud2`, `[67] 0F B9 /r` = clang's `-fsanitize-trap` `ud1`
@@ -2404,7 +2509,9 @@ extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
     let task_name = core::str::from_utf8(name_slice).unwrap_or("?");
     serial_println!(
         "  Task: {} ({:?}), cpu {}",
-        sched_info.current_task_id, task_name, sched::current_cpu_id()
+        sched_info.current_task_id,
+        task_name,
+        sched::current_cpu_id()
     );
 
     crate::backtrace::print_current();
@@ -2423,7 +2530,12 @@ extern "C" fn handle_device_not_avail(frame: &InterruptStackFrame, _error: u64) 
         // #NM typically means the FPU context isn't available.
         // Dispatch as invalid opcode (closest match).
         use crate::proc::exception::ExceptionCode;
-        dispatch_or_kill_userspace("Device Not Available (#NM)", frame, ExceptionCode::InvalidOpcode, 0);
+        dispatch_or_kill_userspace(
+            "Device Not Available (#NM)",
+            frame,
+            ExceptionCode::InvalidOpcode,
+            0,
+        );
         return;
     }
     serial_println!("EXCEPTION: Device Not Available (#NM) at {:#x}", frame.rip);
@@ -2445,7 +2557,9 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
     if FATAL_FAULT_IN_PROGRESS.swap(true, core::sync::atomic::Ordering::Relaxed) {
         serial_println!(
             "NESTED #DF during fatal diagnostics: rip={:#x} err={:#x} rsp={:#x} — halting.",
-            frame.rip, error, frame.rsp
+            frame.rip,
+            error,
+            frame.rsp
         );
         cpu::halt_loop();
     }
@@ -2460,7 +2574,10 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
     );
     serial_println!(
         "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
-        frame.cs, frame.rflags, frame.rsp, frame.ss
+        frame.cs,
+        frame.rflags,
+        frame.rsp,
+        frame.ss
     );
 
     // Print task context.  Use try_lock-based diagnostics to avoid
@@ -2485,7 +2602,9 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
         if frame.rsp < sched_info.stack_bottom || frame.rsp > stack_top {
             serial_println!(
                 "  RSP {:#x} is OUTSIDE task stack [{:#x}..{:#x}] — stack overflow likely",
-                frame.rsp, sched_info.stack_bottom, stack_top
+                frame.rsp,
+                sched_info.stack_bottom,
+                stack_top
             );
         }
     }
@@ -2526,7 +2645,8 @@ extern "C" fn handle_invalid_tss(frame: &InterruptStackFrame, error: u64) {
     count_vector(10);
     serial_println!(
         "EXCEPTION: Invalid TSS (#TS) at {:#x}, error={:#x}",
-        frame.rip, error
+        frame.rip,
+        error
     );
     cpu::halt_loop();
 }
@@ -2539,7 +2659,12 @@ extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
     count_vector(11);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
-        dispatch_or_kill_userspace("Segment Not Present (#NP)", frame, ExceptionCode::SegmentNotPresent, error);
+        dispatch_or_kill_userspace(
+            "Segment Not Present (#NP)",
+            frame,
+            ExceptionCode::SegmentNotPresent,
+            error,
+        );
         return;
     }
     serial_println!(
@@ -2558,7 +2683,12 @@ extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
     count_vector(12);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
-        dispatch_or_kill_userspace("Stack-Segment Fault (#SS)", frame, ExceptionCode::StackSegmentFault, error);
+        dispatch_or_kill_userspace(
+            "Stack-Segment Fault (#SS)",
+            frame,
+            ExceptionCode::StackSegmentFault,
+            error,
+        );
         return;
     }
     serial_println!(
@@ -2579,7 +2709,12 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
     log_exception(13, frame.rip, error);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
-        dispatch_or_kill_userspace("General Protection Fault (#GP)", frame, ExceptionCode::GeneralProtectionFault, error);
+        dispatch_or_kill_userspace(
+            "General Protection Fault (#GP)",
+            frame,
+            ExceptionCode::GeneralProtectionFault,
+            error,
+        );
         return;
     }
     serial_println!(
@@ -2589,7 +2724,10 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
     );
     serial_println!(
         "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
-        frame.cs, frame.rflags, frame.rsp, frame.ss
+        frame.cs,
+        frame.rflags,
+        frame.rsp,
+        frame.ss
     );
 
     // Decode the error code: for #GP, it's a selector index.
@@ -2600,13 +2738,23 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
         let selector_idx = (error >> 3) & 0x1FFF;
         let is_idt = error & 0x2 != 0;
         let is_ext = error & 0x1 != 0;
-        let table = if is_idt { "IDT" } else if error & 0x4 != 0 { "LDT" } else { "GDT" };
+        let table = if is_idt {
+            "IDT"
+        } else if error & 0x4 != 0 {
+            "LDT"
+        } else {
+            "GDT"
+        };
         serial_println!(
             "  Error decode: {} index={}, ext={}",
-            table, selector_idx, is_ext
+            table,
+            selector_idx,
+            is_ext
         );
     } else {
-        serial_println!("  Error decode: no selector (likely non-canonical address or privilege violation)");
+        serial_println!(
+            "  Error decode: no selector (likely non-canonical address or privilege violation)"
+        );
     }
 
     // Try to read the faulting instruction bytes for diagnosis.
@@ -2621,8 +2769,14 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
         }
         serial_println!(
             "  Instruction bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7]
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7]
         );
     }
 
@@ -2679,7 +2833,9 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
     if FATAL_FAULT_IN_PROGRESS.load(core::sync::atomic::Ordering::Relaxed) {
         serial_println!(
             "NESTED #PF during fatal diagnostics: rip={:#x} cr2={:#x} err={:#x} — halting.",
-            frame.rip, cr2, error
+            frame.rip,
+            cr2,
+            error
         );
         cpu::halt_loop();
     }
@@ -2731,7 +2887,7 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         // page was previously evicted to swap storage and needs to be
         // restored.  Only for not-present faults (bit 0 clear).
         if error & 1 == 0 {
-            use mm::page_table::{VirtAddr, read_cr3, cr3_to_pml4};
+            use mm::page_table::{VirtAddr, cr3_to_pml4, read_cr3};
             let pml4 = cr3_to_pml4(read_cr3());
             let frame_aligned = cr2 & !(mm::frame::FRAME_SIZE as u64 - 1);
             let virt = VirtAddr::new(frame_aligned);
@@ -2787,11 +2943,19 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         // kill.
         mm::fault::record_fatal();
         log_exception(14, frame.rip, cr2);
-        let present = if error & 1 != 0 { "present" } else { "not-present" };
+        let present = if error & 1 != 0 {
+            "present"
+        } else {
+            "not-present"
+        };
         let write = if error & 2 != 0 { "write" } else { "read" };
         serial_println!(
             "[exception] User page fault (task {}) at {:#x}, addr={:#x} ({}, {}) — trying SEH",
-            sched::current_task_id(), frame.rip, cr2, present, write
+            sched::current_task_id(),
+            frame.rip,
+            cr2,
+            present,
+            write
         );
 
         // For an AbiMode::Linux process with a SIGSEGV handler, deliver a real
@@ -2801,7 +2965,11 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         {
             use crate::proc::linux_sigframe::si_fault_code::{SEGV_ACCERR, SEGV_MAPERR};
             const SIGSEGV: u32 = 11;
-            let si_code = if error & 1 != 0 { SEGV_ACCERR } else { SEGV_MAPERR };
+            let si_code = if error & 1 != 0 {
+                SEGV_ACCERR
+            } else {
+                SEGV_MAPERR
+            };
             if try_deliver_linux_fault_signal(frame, SIGSEGV, si_code, cr2) {
                 return; // Linux signal delivered — IRETQ into the handler.
             }
@@ -2809,7 +2977,12 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
 
         // Try SEH dispatch with AccessViolation code and CR2 as aux data.
         use crate::proc::exception::ExceptionCode;
-        dispatch_or_kill_userspace("Page Fault (#PF)", frame, ExceptionCode::AccessViolation, cr2);
+        dispatch_or_kill_userspace(
+            "Page Fault (#PF)",
+            frame,
+            ExceptionCode::AccessViolation,
+            cr2,
+        );
         return; // Handler dispatched.
     }
 
@@ -2851,13 +3024,20 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         error
     );
 
-    let present = if error & 1 != 0 { "present" } else { "not-present" };
+    let present = if error & 1 != 0 {
+        "present"
+    } else {
+        "not-present"
+    };
     let write = if error & 2 != 0 { "write" } else { "read" };
     let user = if error & 4 != 0 { "user" } else { "kernel" };
     serial_println!("  Cause: {present}, {write}, {user}");
     serial_println!(
         "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
-        frame.cs, frame.rflags, frame.rsp, frame.ss
+        frame.cs,
+        frame.rflags,
+        frame.rsp,
+        frame.ss
     );
 
     // Self-identify W-KERNEL-COW-WRITE (known-issues.md).
@@ -3055,9 +3235,8 @@ fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
         // Runs in #PF exception context; use try_get (non-blocking) to avoid
         // deadlocking against a task preempted while holding the sysctl
         // REGISTRY lock (see known-issues.md B-SYSCTL-IRQ-DEADLOCK).
-        let max_frames = crate::sysctl::try_get(
-            crate::sysctl::PARAM_MM_MAX_STACK_FRAMES,
-        ).unwrap_or(MAX_STACK_FRAMES as u64);
+        let max_frames = crate::sysctl::try_get(crate::sysctl::PARAM_MM_MAX_STACK_FRAMES)
+            .unwrap_or(MAX_STACK_FRAMES as u64);
         let max_bytes = max_frames.saturating_mul(FRAME_SIZE as u64);
         USER_STACK_TOP.saturating_sub(max_bytes)
     };
@@ -3071,10 +3250,7 @@ fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
     // so the page fault handler cannot deadlock against a syscall that
     // happens to hold the process table.  See pcb.rs for rationale.
     let rlimit_guard = if pid != 0 {
-        match crate::proc::pcb::try_get_rlimit(
-            pid,
-            crate::proc::pcb::RLIMIT_STACK_INDEX as u32,
-        ) {
+        match crate::proc::pcb::try_get_rlimit(pid, crate::proc::pcb::RLIMIT_STACK_INDEX as u32) {
             Some((soft, _hard)) if soft != crate::proc::pcb::RLIM_INFINITY => {
                 USER_STACK_TOP.saturating_sub(soft)
             }
@@ -3084,9 +3260,7 @@ fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
         USER_STACK_GUARD
     };
 
-    let effective_guard = USER_STACK_GUARD
-        .max(dynamic_guard)
-        .max(rlimit_guard);
+    let effective_guard = USER_STACK_GUARD.max(dynamic_guard).max(rlimit_guard);
 
     if cr2 < effective_guard {
         return false;
@@ -3107,8 +3281,7 @@ fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
     // Allocate a zeroed physical frame for the new stack page.  A grown user
     // stack page is anonymous user memory for census purposes.
     let phys_frame = {
-        let _own =
-            crate::mm::frame_owner::OwnerScope::new(crate::mm::frame_owner::Owner::UserAnon);
+        let _own = crate::mm::frame_owner::OwnerScope::new(crate::mm::frame_owner::Owner::UserAnon);
         match frame::alloc_frame_zeroed() {
             Ok(f) => f,
             Err(_) => return false, // OOM or HHDM unavailable — can't grow stack.
@@ -3149,7 +3322,12 @@ extern "C" fn handle_x87_fp(frame: &InterruptStackFrame, _error: u64) {
     count_vector(16);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
-        dispatch_or_kill_userspace("x87 Floating-Point (#MF)", frame, ExceptionCode::FloatingPointError, 0);
+        dispatch_or_kill_userspace(
+            "x87 Floating-Point (#MF)",
+            frame,
+            ExceptionCode::FloatingPointError,
+            0,
+        );
         return;
     }
     serial_println!("EXCEPTION: x87 Floating-Point (#MF) at {:#x}", frame.rip);
@@ -3163,7 +3341,12 @@ extern "C" fn handle_alignment_check(frame: &InterruptStackFrame, error: u64) {
     // #AC can only occur in ring 3 (when CR0.AM and RFLAGS.AC are set).
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
-        dispatch_or_kill_userspace("Alignment Check (#AC)", frame, ExceptionCode::AlignmentCheck, error);
+        dispatch_or_kill_userspace(
+            "Alignment Check (#AC)",
+            frame,
+            ExceptionCode::AlignmentCheck,
+            error,
+        );
         return;
     }
     serial_println!(
@@ -3213,7 +3396,12 @@ extern "C" fn handle_machine_check(frame: &InterruptStackFrame, _error: u64) {
         if status & (1u64 << 63) != 0 {
             // VAL bit set — this bank has a logged error.
             let addr = unsafe { cpu::rdmsr(addr_msr) };
-            serial_println!("  Bank {}: STATUS={:#018x} ADDR={:#018x}", bank, status, addr);
+            serial_println!(
+                "  Bank {}: STATUS={:#018x} ADDR={:#018x}",
+                bank,
+                status,
+                addr
+            );
             if status & (1u64 << 61) != 0 {
                 serial_println!("    UC: uncorrected error");
             }
@@ -3224,7 +3412,13 @@ extern "C" fn handle_machine_check(frame: &InterruptStackFrame, _error: u64) {
     }
 
     serial_println!("FATAL: Machine check is unrecoverable. Halting.");
-    crate::klog!(Error, "hw.mce", "Machine check exception at {:#x}, MCG_STATUS={:#x}", frame.rip, mcg_status);
+    crate::klog!(
+        Error,
+        "hw.mce",
+        "Machine check exception at {:#x}, MCG_STATUS={:#x}",
+        frame.rip,
+        mcg_status
+    );
     cpu::halt_loop();
 }
 
@@ -3236,7 +3430,12 @@ extern "C" fn handle_simd_fp(frame: &InterruptStackFrame, _error: u64) {
     count_vector(19);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
-        dispatch_or_kill_userspace("SIMD Floating-Point (#XM)", frame, ExceptionCode::SimdFloatingPoint, 0);
+        dispatch_or_kill_userspace(
+            "SIMD Floating-Point (#XM)",
+            frame,
+            ExceptionCode::SimdFloatingPoint,
+            0,
+        );
         return;
     }
     serial_println!("EXCEPTION: SIMD Floating-Point (#XM) at {:#x}", frame.rip);
@@ -3307,16 +3506,16 @@ pub unsafe fn init() {
         // Vectors 33–56: External device IRQs (IOAPIC inputs 0–23).
         // Each stub calls handle_device_irq(irq_number) in ioapic.rs.
         let irq_stubs: [u64; 24] = [
-            isr_irq0  as *const () as u64,
-            isr_irq1  as *const () as u64,
-            isr_irq2  as *const () as u64,
-            isr_irq3  as *const () as u64,
-            isr_irq4  as *const () as u64,
-            isr_irq5  as *const () as u64,
-            isr_irq6  as *const () as u64,
-            isr_irq7  as *const () as u64,
-            isr_irq8  as *const () as u64,
-            isr_irq9  as *const () as u64,
+            isr_irq0 as *const () as u64,
+            isr_irq1 as *const () as u64,
+            isr_irq2 as *const () as u64,
+            isr_irq3 as *const () as u64,
+            isr_irq4 as *const () as u64,
+            isr_irq5 as *const () as u64,
+            isr_irq6 as *const () as u64,
+            isr_irq7 as *const () as u64,
+            isr_irq8 as *const () as u64,
+            isr_irq9 as *const () as u64,
             isr_irq10 as *const () as u64,
             isr_irq11 as *const () as u64,
             isr_irq12 as *const () as u64,

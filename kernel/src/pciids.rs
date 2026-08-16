@@ -29,8 +29,8 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::format;
+use alloc::string::String;
 
 // ---------------------------------------------------------------------------
 // Class codes (PCI Spec Appendix D)
@@ -481,8 +481,7 @@ pub fn usb_controller_type(prog_if: u8) -> &'static str {
 ///
 /// Falls back to hex IDs for unknown vendors/devices.
 pub fn describe(vendor_id: u16, device_id: u16, class: u8, subclass: u8) -> String {
-    let vendor = vendor_name(vendor_id)
-        .unwrap_or("Unknown vendor");
+    let vendor = vendor_name(vendor_id).unwrap_or("Unknown vendor");
     let device = device_name(vendor_id, device_id);
     let sub = subclass_name(class, subclass);
 
@@ -571,11 +570,20 @@ pub fn self_test() {
     crate::serial_println!("[pciids]   Vendor lookups: OK");
 
     // Test 4: Known device lookups.
-    assert_eq!(device_name(0x8086, 0x100E), Some("82540EM Gigabit Ethernet (e1000)"));
-    assert_eq!(device_name(0x10EC, 0x8139), Some("RTL-8100/8101L/8139 Fast Ethernet"));
+    assert_eq!(
+        device_name(0x8086, 0x100E),
+        Some("82540EM Gigabit Ethernet (e1000)")
+    );
+    assert_eq!(
+        device_name(0x10EC, 0x8139),
+        Some("RTL-8100/8101L/8139 Fast Ethernet")
+    );
     assert_eq!(device_name(0x1AF4, 0x1000), Some("virtio-net (legacy)"));
     assert_eq!(device_name(0x15AD, 0x0405), Some("SVGA II Adapter"));
-    assert_eq!(device_name(0x80EE, 0xBEEF), Some("VirtualBox Graphics Adapter"));
+    assert_eq!(
+        device_name(0x80EE, 0xBEEF),
+        Some("VirtualBox Graphics Adapter")
+    );
     assert_eq!(device_name(0x8086, 0xFFFF), None); // Unknown device.
     crate::serial_println!("[pciids]   Device lookups: OK");
 
@@ -588,13 +596,22 @@ pub fn self_test() {
     // Test 6: describe() produces reasonable output.
     let desc = describe(0x8086, 0x100E, 0x02, 0x00);
     assert!(desc.contains("Intel"), "Description should contain vendor");
-    assert!(desc.contains("82540EM"), "Description should contain device name");
-    assert!(desc.contains("Ethernet"), "Description should contain class");
+    assert!(
+        desc.contains("82540EM"),
+        "Description should contain device name"
+    );
+    assert!(
+        desc.contains("Ethernet"),
+        "Description should contain class"
+    );
     crate::serial_println!("[pciids]   describe(): {}", desc);
 
     // Test 7: describe() with unknown device.
     let desc2 = describe(0x8086, 0xFFFF, 0x02, 0x00);
-    assert!(desc2.contains("8086:ffff"), "Unknown device should show hex IDs");
+    assert!(
+        desc2.contains("8086:ffff"),
+        "Unknown device should show hex IDs"
+    );
     crate::serial_println!("[pciids]   describe(unknown): {}", desc2);
 
     // Test 8: device_label() for known and unknown.
@@ -606,7 +623,11 @@ pub fn self_test() {
 
     // Test 9: Database tables are sorted (binary search prerequisite).
     for i in 1..CLASS_NAMES.len() {
-        assert!(CLASS_NAMES[i].0 >= CLASS_NAMES[i - 1].0, "CLASS_NAMES not sorted at {}", i);
+        assert!(
+            CLASS_NAMES[i].0 >= CLASS_NAMES[i - 1].0,
+            "CLASS_NAMES not sorted at {}",
+            i
+        );
     }
     for i in 1..SUBCLASS_NAMES.len() {
         let prev = (SUBCLASS_NAMES[i - 1].0, SUBCLASS_NAMES[i - 1].1);
@@ -614,12 +635,22 @@ pub fn self_test() {
         assert!(curr >= prev, "SUBCLASS_NAMES not sorted at {}", i);
     }
     for i in 1..VENDOR_NAMES.len() {
-        assert!(VENDOR_NAMES[i].0 >= VENDOR_NAMES[i - 1].0, "VENDOR_NAMES not sorted at {}", i);
+        assert!(
+            VENDOR_NAMES[i].0 >= VENDOR_NAMES[i - 1].0,
+            "VENDOR_NAMES not sorted at {}",
+            i
+        );
     }
     for i in 1..DEVICE_NAMES.len() {
         let prev = (DEVICE_NAMES[i - 1].0, DEVICE_NAMES[i - 1].1);
         let curr = (DEVICE_NAMES[i].0, DEVICE_NAMES[i].1);
-        assert!(curr >= prev, "DEVICE_NAMES not sorted at {} ({:04x}:{:04x})", i, curr.0, curr.1);
+        assert!(
+            curr >= prev,
+            "DEVICE_NAMES not sorted at {} ({:04x}:{:04x})",
+            i,
+            curr.0,
+            curr.1
+        );
     }
     crate::serial_println!("[pciids]   Sort order: OK");
 
@@ -629,13 +660,28 @@ pub fn self_test() {
     assert!(s > 50, "Should have >50 subclass entries");
     assert!(v > 30, "Should have >30 vendor entries");
     assert!(d > 80, "Should have >80 device entries");
-    crate::serial_println!("[pciids]   DB stats: {} classes, {} subclasses, {} vendors, {} devices", c, s, v, d);
+    crate::serial_println!(
+        "[pciids]   DB stats: {} classes, {} subclasses, {} vendors, {} devices",
+        c,
+        s,
+        v,
+        d
+    );
 
     // Test 11: procfs content is non-empty and well-formed.
     let content = procfs_content();
-    assert!(content.contains("=== PCI ID Database ==="), "procfs should have header");
-    assert!(content.contains("=== Vendors ==="), "procfs should have vendors section");
-    assert!(content.contains("Intel Corporation"), "procfs should list Intel");
+    assert!(
+        content.contains("=== PCI ID Database ==="),
+        "procfs should have header"
+    );
+    assert!(
+        content.contains("=== Vendors ==="),
+        "procfs should have vendors section"
+    );
+    assert!(
+        content.contains("Intel Corporation"),
+        "procfs should list Intel"
+    );
     crate::serial_println!("[pciids]   procfs: OK ({} bytes)", content.len());
 
     crate::serial_println!("[pciids] Self-test PASSED (11 tests)");

@@ -57,8 +57,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 use crate::fs::path::{Path, PathBuf};
+use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 
 // ---------------------------------------------------------------------------
 // ProcFs implementation
@@ -687,8 +687,10 @@ fn gen_meminfo() -> Vec<u8> {
     s.push_str(&format!("MemTotal:       {total_kib} kB\n"));
     s.push_str(&format!("MemFree:        {free_kib} kB\n"));
     s.push_str(&format!("MemUsed:        {used_kib} kB\n"));
-    s.push_str(&format!("Frames:         {} total, {} free\n",
-        info.total_frames, info.free_frames));
+    s.push_str(&format!(
+        "Frames:         {} total, {} free\n",
+        info.total_frames, info.free_frames
+    ));
 
     // Zero-page pool.
     s.push_str(&format!("ZeroPool:       {} pages\n", info.zero_pool_count));
@@ -715,7 +717,10 @@ fn gen_meminfo() -> Vec<u8> {
     // kswapd.
     s.push_str(&format!("KswapdRunning:  {}\n", info.kswapd_running));
     s.push_str(&format!("KswapdCycles:   {}\n", info.kswapd_reclaim_cycles));
-    s.push_str(&format!("KswapdReclaimed:{}\n", info.kswapd_total_reclaimed));
+    s.push_str(&format!(
+        "KswapdReclaimed:{}\n",
+        info.kswapd_total_reclaimed
+    ));
 
     s.into_bytes()
 }
@@ -729,30 +734,76 @@ fn push_cpu_flags(s: &mut String, f: &crate::cpu::CpuFeatures) {
     // Baseline x86_64 features that are architecturally guaranteed.
     s.push_str(" fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov");
     s.push_str(" pat pse36 clflush mmx fxsr");
-    if f.sse       { s.push_str(" sse"); }
-    if f.sse2      { s.push_str(" sse2"); }
+    if f.sse {
+        s.push_str(" sse");
+    }
+    if f.sse2 {
+        s.push_str(" sse2");
+    }
     s.push_str(" ht syscall nx lm");
-    if f.sse3      { s.push_str(" pni"); }
-    if f.ssse3     { s.push_str(" ssse3"); }
-    if f.sse4_1    { s.push_str(" sse4_1"); }
-    if f.sse4_2    { s.push_str(" sse4_2"); }
-    if f.popcnt    { s.push_str(" popcnt"); }
-    if f.aes_ni    { s.push_str(" aes"); }
-    if f.xsave     { s.push_str(" xsave"); }
-    if f.avx       { s.push_str(" avx"); }
-    if f.f16c      { s.push_str(" f16c"); }
-    if f.rdrand    { s.push_str(" rdrand"); }
-    if f.fxsr      { s.push_str(" fxsr_opt"); }
-    if f.page_1g   { s.push_str(" pdpe1gb"); }
-    if f.rdtscp    { s.push_str(" rdtscp"); }
-    if f.bmi1      { s.push_str(" bmi1"); }
-    if f.avx2      { s.push_str(" avx2"); }
-    if f.bmi2      { s.push_str(" bmi2"); }
-    if f.rdseed    { s.push_str(" rdseed"); }
-    if f.sha       { s.push_str(" sha_ni"); }
-    if f.avx512f   { s.push_str(" avx512f"); }
-    if f.vaes      { s.push_str(" vaes"); }
-    if f.rdpid     { s.push_str(" rdpid"); }
+    if f.sse3 {
+        s.push_str(" pni");
+    }
+    if f.ssse3 {
+        s.push_str(" ssse3");
+    }
+    if f.sse4_1 {
+        s.push_str(" sse4_1");
+    }
+    if f.sse4_2 {
+        s.push_str(" sse4_2");
+    }
+    if f.popcnt {
+        s.push_str(" popcnt");
+    }
+    if f.aes_ni {
+        s.push_str(" aes");
+    }
+    if f.xsave {
+        s.push_str(" xsave");
+    }
+    if f.avx {
+        s.push_str(" avx");
+    }
+    if f.f16c {
+        s.push_str(" f16c");
+    }
+    if f.rdrand {
+        s.push_str(" rdrand");
+    }
+    if f.fxsr {
+        s.push_str(" fxsr_opt");
+    }
+    if f.page_1g {
+        s.push_str(" pdpe1gb");
+    }
+    if f.rdtscp {
+        s.push_str(" rdtscp");
+    }
+    if f.bmi1 {
+        s.push_str(" bmi1");
+    }
+    if f.avx2 {
+        s.push_str(" avx2");
+    }
+    if f.bmi2 {
+        s.push_str(" bmi2");
+    }
+    if f.rdseed {
+        s.push_str(" rdseed");
+    }
+    if f.sha {
+        s.push_str(" sha_ni");
+    }
+    if f.avx512f {
+        s.push_str(" avx512f");
+    }
+    if f.vaes {
+        s.push_str(" vaes");
+    }
+    if f.rdpid {
+        s.push_str(" rdpid");
+    }
     s.push('\n');
 }
 
@@ -855,7 +906,10 @@ fn gen_config() -> Vec<u8> {
     s.push_str("# Kernel Configuration\n");
     s.push_str("ARCH=x86_64\n");
     s.push_str(&format!("PAGE_SIZE={}\n", crate::mm::frame::FRAME_SIZE));
-    s.push_str(&format!("MAX_CPUS={}\n", crate::sched::priority_rr::MAX_CPUS));
+    s.push_str(&format!(
+        "MAX_CPUS={}\n",
+        crate::sched::priority_rr::MAX_CPUS
+    ));
     s.push_str("PREEMPTION=yes\n");
 
     // Memory subsystems.
@@ -884,7 +938,10 @@ fn gen_config() -> Vec<u8> {
     // Subsystem limits.
     // cache::MAX_ENTRIES is private (2048), hardcoded here.
     s.push_str("BUFFER_CACHE_SECTORS=2048\n");
-    s.push_str(&format!("VFS_DCACHE_SIZE={}\n", super::vfs::VFS_DCACHE_SIZE));
+    s.push_str(&format!(
+        "VFS_DCACHE_SIZE={}\n",
+        super::vfs::VFS_DCACHE_SIZE
+    ));
 
     s.into_bytes()
 }
@@ -903,9 +960,7 @@ fn gen_mounts() -> Vec<u8> {
     // own mounts, not the host's global table (same info-leak/correctness
     // reasoning as `/proc/<pid>/mountinfo`). Resolve the caller's view.
     let global = crate::fs::Vfs::mounts_full();
-    if let Some(view) =
-        crate::ipc::namespace::mount_view_for(crate::sched::current_task_id())
-    {
+    if let Some(view) = crate::ipc::namespace::mount_view_for(crate::sched::current_task_id()) {
         return render_container_mounts(&view, &global);
     }
     render_global_mounts(&global)
@@ -913,9 +968,7 @@ fn gen_mounts() -> Vec<u8> {
 
 /// Render the global VFS mount table in the `/proc/mounts` line format
 /// (`source mount_point fstype options 0 0`).
-fn render_global_mounts(
-    mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions)],
-) -> Vec<u8> {
+fn render_global_mounts(mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions)]) -> Vec<u8> {
     let mut s = String::with_capacity(256);
     for (path, fs_type, options) in mounts {
         let opts = options.to_string();
@@ -1020,10 +1073,16 @@ fn gen_stat() -> Vec<u8> {
     s.push_str(&format!("ctxt {ctxt}\n"));
 
     // Boot wall-clock time (seconds since the Unix epoch).
-    s.push_str(&format!("btime {}\n", crate::timekeeping::boot_time_epoch_secs()));
+    s.push_str(&format!(
+        "btime {}\n",
+        crate::timekeeping::boot_time_epoch_secs()
+    ));
 
     // Cumulative processes created (forks) since boot.
-    s.push_str(&format!("processes {}\n", crate::proc::pcb::processes_created()));
+    s.push_str(&format!(
+        "processes {}\n",
+        crate::proc::pcb::processes_created()
+    ));
 
     // Live scheduler state: runnable vs. blocked.
     let mut procs_running = 0u64;
@@ -1074,9 +1133,7 @@ fn gen_filesystems() -> Vec<u8> {
 fn gen_cmdline() -> Vec<u8> {
     // Build a synthetic cmdline from boot state.
     let cpu_count = crate::acpi::processor_count();
-    let text = format!(
-        "kernel=mintos cpus={cpu_count} pages=16k\n"
-    );
+    let text = format!("kernel=mintos cpus={cpu_count} pages=16k\n");
     text.into_bytes()
 }
 
@@ -1102,7 +1159,8 @@ fn gen_loadavg() -> Vec<u8> {
     // load — now they get genuine moving averages.
     let (l1, l5, l15) = crate::sched::load_averages_fixed();
 
-    let runnable = tasks.iter()
+    let runnable = tasks
+        .iter()
         .filter(|t| matches!(t.state, TaskState::Running | TaskState::Ready))
         .count();
     let total = tasks.len();
@@ -1110,9 +1168,12 @@ fn gen_loadavg() -> Vec<u8> {
 
     let text = format!(
         "{}.{:02} {}.{:02} {}.{:02} {runnable}/{total} {last_pid}\n",
-        crate::sched::load_int(l1), crate::sched::load_frac(l1),
-        crate::sched::load_int(l5), crate::sched::load_frac(l5),
-        crate::sched::load_int(l15), crate::sched::load_frac(l15),
+        crate::sched::load_int(l1),
+        crate::sched::load_frac(l1),
+        crate::sched::load_int(l5),
+        crate::sched::load_frac(l5),
+        crate::sched::load_int(l15),
+        crate::sched::load_frac(l15),
     );
     text.into_bytes()
 }
@@ -1191,7 +1252,12 @@ fn gen_locks() -> Vec<u8> {
                 super::vfs::LockType::Shared => "SHARED   ",
                 super::vfs::LockType::Exclusive => "EXCLUSIVE",
             };
-            text.push_str(&format!("FLOCK {} {:>8}  {}\n", type_str, owner, path.display()));
+            text.push_str(&format!(
+                "FLOCK {} {:>8}  {}\n",
+                type_str,
+                owner,
+                path.display()
+            ));
         }
     }
     text.into_bytes()
@@ -1273,9 +1339,7 @@ fn gen_partitions() -> Vec<u8> {
 
     for (i, dev) in devices.iter().enumerate() {
         // Calculate size in 1 KiB blocks (Linux convention).
-        let kib_blocks = dev.sector_count
-            .saturating_mul(dev.sector_size as u64)
-            / 1024;
+        let kib_blocks = dev.sector_count.saturating_mul(dev.sector_size as u64) / 1024;
         text.push_str(&format!(
             " 254    {:>4}  {:>8}  {}\n",
             i, kib_blocks, dev.name,
@@ -1296,16 +1360,32 @@ fn gen_fdinfo() -> Vec<u8> {
         for h in &handles {
             // Decode flags into a compact string.
             let mut flags_str = String::new();
-            if h.flags & 0x01 != 0 { flags_str.push('R'); }
-            if h.flags & 0x02 != 0 { flags_str.push('W'); }
-            if h.flags & 0x04 != 0 { flags_str.push('C'); }
-            if h.flags & 0x08 != 0 { flags_str.push('T'); }
-            if h.flags & 0x10 != 0 { flags_str.push('A'); }
-            if flags_str.is_empty() { flags_str.push('-'); }
+            if h.flags & 0x01 != 0 {
+                flags_str.push('R');
+            }
+            if h.flags & 0x02 != 0 {
+                flags_str.push('W');
+            }
+            if h.flags & 0x04 != 0 {
+                flags_str.push('C');
+            }
+            if h.flags & 0x08 != 0 {
+                flags_str.push('T');
+            }
+            if h.flags & 0x10 != 0 {
+                flags_str.push('A');
+            }
+            if flags_str.is_empty() {
+                flags_str.push('-');
+            }
 
             text.push_str(&format!(
                 "{:<7} {:<5} {:<12} {:<12} {}\n",
-                h.id, flags_str, h.offset, h.size, h.path.display(),
+                h.id,
+                flags_str,
+                h.offset,
+                h.size,
+                h.path.display(),
             ));
         }
     }
@@ -1353,7 +1433,11 @@ fn gen_interrupts() -> Vec<u8> {
     ];
 
     for &(irq, desc) in irq_descs {
-        let pending = if crate::ioapic::irq_is_pending(irq) { "yes" } else { "no " };
+        let pending = if crate::ioapic::irq_is_pending(irq) {
+            "yes"
+        } else {
+            "no "
+        };
         text.push_str(&format!("{:<4} {:<8} {}\n", irq, pending, desc));
     }
 
@@ -1374,8 +1458,13 @@ fn gen_devices() -> Vec<u8> {
         for dev in &devices {
             text.push_str(&format!(
                 "{:02x}   {:02x}   {:02x}   {:02x}:{:02x}      {:04x}:{:04x}\n",
-                dev.address.bus, dev.address.device, dev.address.function,
-                dev.class, dev.subclass, dev.vendor_id, dev.device_id,
+                dev.address.bus,
+                dev.address.device,
+                dev.address.function,
+                dev.class,
+                dev.subclass,
+                dev.vendor_id,
+                dev.device_id,
             ));
         }
         text.push_str(&format!("\n{} devices total\n", devices.len()));
@@ -1429,7 +1518,10 @@ fn gen_vmstat() -> Vec<u8> {
     s.push_str(&format!("heap_slab_allocs {}\n", info.heap_slab_allocs));
     s.push_str(&format!("heap_slab_frees {}\n", info.heap_slab_frees));
     s.push_str(&format!("heap_large_allocs {}\n", info.heap_large_allocs));
-    s.push_str(&format!("heap_alloc_failures {}\n", info.heap_alloc_failures));
+    s.push_str(&format!(
+        "heap_alloc_failures {}\n",
+        info.heap_alloc_failures
+    ));
 
     // Swap.
     let swap_free = crate::mm::swap::free_slots();
@@ -1439,19 +1531,40 @@ fn gen_vmstat() -> Vec<u8> {
 
     // Compression.
     let comp = crate::mm::swap::compression_stats();
-    s.push_str(&format!("zram_compressed_bytes {}\n", comp.compressed_bytes));
-    s.push_str(&format!("zram_uncompressed_bytes {}\n", comp.uncompressed_bytes));
-    s.push_str(&format!("zram_compressed_pages {}\n", comp.compressed_count));
-    s.push_str(&format!("zram_uncompressed_pages {}\n", comp.uncompressed_count));
+    s.push_str(&format!(
+        "zram_compressed_bytes {}\n",
+        comp.compressed_bytes
+    ));
+    s.push_str(&format!(
+        "zram_uncompressed_bytes {}\n",
+        comp.uncompressed_bytes
+    ));
+    s.push_str(&format!(
+        "zram_compressed_pages {}\n",
+        comp.compressed_count
+    ));
+    s.push_str(&format!(
+        "zram_uncompressed_pages {}\n",
+        comp.uncompressed_count
+    ));
     if comp.uncompressed_bytes > 0 {
         s.push_str(&format!("zram_ratio_pct {}\n", comp.ratio_percent()));
         s.push_str(&format!("zram_bytes_saved {}\n", comp.bytes_saved()));
     }
 
     // kswapd.
-    s.push_str(&format!("kswapd_running {}\n", if info.kswapd_running { 1 } else { 0 }));
-    s.push_str(&format!("kswapd_reclaim_cycles {}\n", info.kswapd_reclaim_cycles));
-    s.push_str(&format!("kswapd_total_reclaimed {}\n", info.kswapd_total_reclaimed));
+    s.push_str(&format!(
+        "kswapd_running {}\n",
+        if info.kswapd_running { 1 } else { 0 }
+    ));
+    s.push_str(&format!(
+        "kswapd_reclaim_cycles {}\n",
+        info.kswapd_reclaim_cycles
+    ));
+    s.push_str(&format!(
+        "kswapd_total_reclaimed {}\n",
+        info.kswapd_total_reclaimed
+    ));
 
     // OOM.
     s.push_str(&format!("oom_events {}\n", info.oom_events));
@@ -1601,7 +1714,8 @@ fn gen_bcache() -> Vec<u8> {
          readaheads:   {}\n\
          exp_flushes:  {}\n",
         stats.reads,
-        stats.hits, hit_rate,
+        stats.hits,
+        hit_rate,
         stats.misses,
         stats.writes,
         stats.writebacks,
@@ -1612,8 +1726,7 @@ fn gen_bcache() -> Vec<u8> {
     s.push_str(&format!(
         "entries_used: {}/{}\n\
          entries_dirty:{}/{}\n",
-        stats.entries_used, stats.capacity,
-        stats.entries_dirty, stats.capacity,
+        stats.entries_used, stats.capacity, stats.entries_dirty, stats.capacity,
     ));
 
     // Utilization percentage.
@@ -1689,7 +1802,10 @@ fn gen_cas() -> Vec<u8> {
          gc_collected:       {}\n\
          integrity_failures: {}\n",
         st.blob_count,
-        st.total_bytes, st.total_bytes, st.max_bytes, util_pct,
+        st.total_bytes,
+        st.total_bytes,
+        st.max_bytes,
+        util_pct,
         st.total_refs,
         st.dedup_hits,
         st.gc_collected,
@@ -1715,11 +1831,7 @@ fn gen_integrity() -> Vec<u8> {
          max_file_size:       {}\n\
          baseline_operations: {}\n\
          verify_operations:   {}\n",
-        st.baseline_entries,
-        st.max_entries,
-        st.max_file_size,
-        st.baseline_count,
-        st.verify_count,
+        st.baseline_entries, st.max_entries, st.max_file_size, st.baseline_count, st.verify_count,
     ));
 
     if st.baseline_timestamp > 0 {
@@ -1802,7 +1914,8 @@ fn gen_quotas() -> Vec<u8> {
             } else {
                 "ok"
             };
-            s.push_str(&format!("{:<12} {:>12} {:>12} {:>12} {:>6} {}\n",
+            s.push_str(&format!(
+                "{:<12} {:>12} {:>12} {:>12} {:>6} {}\n",
                 subj,
                 super::quota::format_bytes(info.usage.bytes_used),
                 if info.limits.soft_bytes > 0 {
@@ -1839,7 +1952,11 @@ fn gen_security() -> Vec<u8> {
     let iommu_available = crate::iommu::is_available();
     s.push_str(&format!(
         "  status:             {}\n",
-        if iommu_available { "active" } else { "not detected" }
+        if iommu_available {
+            "active"
+        } else {
+            "not detected"
+        }
     ));
     if iommu_available {
         s.push_str(&format!(
@@ -1871,10 +1988,26 @@ fn gen_security() -> Vec<u8> {
            supervisor_shstk:   {}\n\
            supervisor_ibt:     {}\n\
            cp_exceptions:      {}\n",
-        if cet.hw_shstk { "supported" } else { "not available" },
-        if cet.hw_ibt { "supported" } else { "not available" },
-        if cet.supervisor_shstk { "active" } else { "inactive" },
-        if cet.supervisor_ibt { "active" } else { "inactive" },
+        if cet.hw_shstk {
+            "supported"
+        } else {
+            "not available"
+        },
+        if cet.hw_ibt {
+            "supported"
+        } else {
+            "not available"
+        },
+        if cet.supervisor_shstk {
+            "active"
+        } else {
+            "inactive"
+        },
+        if cet.supervisor_ibt {
+            "active"
+        } else {
+            "inactive"
+        },
         cet.cp_exceptions,
     ));
     s.push('\n');
@@ -1976,7 +2109,9 @@ fn gen_security() -> Vec<u8> {
 /// the `getpid`/`getuid`/`getpgid` syscalls so the files never disagree.
 fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
     let tasks = crate::sched::task_list();
-    let task = tasks.iter().find(|t| t.id == task_id)
+    let task = tasks
+        .iter()
+        .find(|t| t.id == task_id)
         .ok_or(KernelError::NotFound)?;
     Ok(build_pid_status(task, task_id))
 }
@@ -1992,7 +2127,9 @@ fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
 /// (which would key the process-wide fields off the non-process tid).
 fn gen_thread_status(proc_id: u64, tid: u64) -> KernelResult<Vec<u8>> {
     let tasks = crate::sched::task_list();
-    let task = tasks.iter().find(|t| t.id == tid)
+    let task = tasks
+        .iter()
+        .find(|t| t.id == tid)
         .ok_or(KernelError::NotFound)?;
     Ok(build_pid_status(task, proc_id))
 }
@@ -2092,8 +2229,8 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // /proc/<pid>/comm and /proc/<pid>/stat field 2.  Use the shared helper so
     // all three surfaces agree (a tool cross-referencing Name: against comm
     // must see the same string).
-    let full_name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
-        .unwrap_or("???");
+    let full_name =
+        core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[])).unwrap_or("???");
     let name = comm_truncate(full_name);
 
     // Linux `State:` is "<char> (<word>)".  Mirror exactly the single-char
@@ -2180,7 +2317,11 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // 1 = strict, 2 = filter.  Our scfilter is an allow/deny syscall filter
     // (the filter-mode semantics), and we have no strict mode, so an installed
     // filter maps to 2 and its absence to 0.  seccomp-aware tools read this.
-    let seccomp = if crate::scfilter::has_filter(proc_id) { 2 } else { 0 };
+    let seccomp = if crate::scfilter::has_filter(proc_id) {
+        2
+    } else {
+        0
+    };
     let _ = writeln!(s, "Seccomp:\t{seccomp}");
     // Cpus_allowed / Cpus_allowed_list: the task's CPU affinity, sized to the
     // online CPU count.  Affinity is a per-thread property in Linux, so this
@@ -2273,11 +2414,12 @@ fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
 
     // 3. Fall back to task name from the scheduler.
     let tasks = crate::sched::task_list();
-    let task = tasks.iter().find(|t| t.id == task_id)
+    let task = tasks
+        .iter()
+        .find(|t| t.id == task_id)
         .ok_or(KernelError::NotFound)?;
 
-    let name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
-        .unwrap_or("???");
+    let name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[])).unwrap_or("???");
     let mut data = name.as_bytes().to_vec();
     data.push(0);
     Ok(data)
@@ -2296,8 +2438,7 @@ fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
 /// resolves to no process at all (a bare scheduler task carries no
 /// environment).
 fn gen_pid_environ(task_id: u64) -> KernelResult<Vec<u8>> {
-    let envp = crate::proc::pcb::get_proc_envp(task_id)
-        .ok_or(KernelError::NotFound)?;
+    let envp = crate::proc::pcb::get_proc_envp(task_id).ok_or(KernelError::NotFound)?;
     let cap = envp.iter().map(|e| e.len().saturating_add(1)).sum();
     let mut data = Vec::with_capacity(cap);
     for entry in &envp {
@@ -2350,7 +2491,9 @@ fn gen_pid_auxv(task_id: u64) -> KernelResult<Vec<u8>> {
 /// not the native 16 KiB frame size.
 fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
     let tasks = crate::sched::task_list();
-    let task = tasks.iter().find(|t| t.id == task_id)
+    let task = tasks
+        .iter()
+        .find(|t| t.id == task_id)
         .ok_or(KernelError::NotFound)?;
     Ok(build_pid_stat(task, task_id))
 }
@@ -2366,7 +2509,9 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
 /// the process-wide fields off the non-process tid).
 fn gen_thread_stat(proc_id: u64, tid: u64) -> KernelResult<Vec<u8>> {
     let tasks = crate::sched::task_list();
-    let task = tasks.iter().find(|t| t.id == tid)
+    let task = tasks
+        .iter()
+        .find(|t| t.id == tid)
         .ok_or(KernelError::NotFound)?;
     Ok(build_pid_stat(task, proc_id))
 }
@@ -2407,21 +2552,20 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // Field 2 (`comm`) must match `/proc/<pid>/comm` exactly, including the
     // 15-byte truncation — otherwise parsers that split on the last `)` and
     // size buffers to TASK_COMM_LEN disagree between the two files.
-    let full_name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
-        .unwrap_or("???");
+    let full_name =
+        core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[])).unwrap_or("???");
     let name = comm_truncate(full_name);
 
     let state_char = match task.state {
         TaskState::Running => 'R',
-        TaskState::Ready => 'R',    // runnable = R in Linux
-        TaskState::Blocked => 'S',  // sleeping
+        TaskState::Ready => 'R',     // runnable = R in Linux
+        TaskState::Blocked => 'S',   // sleeping
         TaskState::Suspended => 'T', // stopped
-        TaskState::Dead => 'Z',     // zombie
+        TaskState::Dead => 'Z',      // zombie
     };
 
     let ppid = crate::proc::pcb::parent(proc_id).unwrap_or(0);
-    let num_threads = crate::proc::pcb::get_threads(proc_id)
-        .map_or(1, |t| t.len());
+    let num_threads = crate::proc::pcb::get_threads(proc_id).map_or(1, |t| t.len());
 
     // utime/stime (fields 14/15): user and system CPU time in clock
     // ticks.  USER_HZ == TICK_RATE_HZ == 100, so the raw timer-tick
@@ -2467,8 +2611,8 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // it the same way `wait()` does (status << 8).  We store the raw exit
     // code, so shift it into the wait-status high byte to match the ABI.
     // This is per-task (the thread's own exit status).
-    let exit_code = crate::proc::pcb::exit_code(task.id)
-        .map_or(0i64, |c| (i64::from(c) & 0xff) << 8);
+    let exit_code =
+        crate::proc::pcb::exit_code(task.id).map_or(0i64, |c| (i64::from(c) & 0xff) << 8);
 
     // priority: Linux reports the kernel-internal priority; for normal tasks
     // this is in the 0..39 range.  nice is 0 (native scheduler has no nice).
@@ -2523,10 +2667,26 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let text = format!(
         "{} ({}) {} {} {} {} 0 -1 0 {} {} {} {} {} {} {} {} {} 0 {} 0 {} {} {} {} \
          0 0 0 0 0 0 0 0 0 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
-        task.id, name, state_char, ppid, pgrp_sid, pgrp_sid,
-        minflt, cminflt, majflt, cmajflt,
-        utime, stime, cutime, cstime, priority, num_threads, starttime,
-        vsize, rss_pages, rsslim,
+        task.id,
+        name,
+        state_char,
+        ppid,
+        pgrp_sid,
+        pgrp_sid,
+        minflt,
+        cminflt,
+        majflt,
+        cmajflt,
+        utime,
+        stime,
+        cutime,
+        cstime,
+        priority,
+        num_threads,
+        starttime,
+        vsize,
+        rss_pages,
+        rsslim,
         processor,
         exit_code,
     );
@@ -2581,8 +2741,16 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
         } else {
             '-'
         };
-        let w = if !is_guard && f.contains(PageFlags::WRITABLE) { 'w' } else { '-' };
-        let x = if !is_guard && !f.contains(PageFlags::NO_EXECUTE) { 'x' } else { '-' };
+        let w = if !is_guard && f.contains(PageFlags::WRITABLE) {
+            'w'
+        } else {
+            '-'
+        };
+        let x = if !is_guard && !f.contains(PageFlags::NO_EXECUTE) {
+            'x'
+        } else {
+            '-'
+        };
         // All current VMAs are private mappings.
         let pathname = match vma.kind {
             VmaKind::Stack => "[stack]",
@@ -2623,8 +2791,7 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
 /// file, exactly as Linux does for a task with an empty address space.
 fn gen_pid_maps(task_id: u64) -> KernelResult<Vec<u8>> {
     // VMAs are only tracked for processes, not bare scheduler tasks.
-    let vmas = crate::proc::pcb::list_vmas(task_id)
-        .ok_or(KernelError::NotFound)?;
+    let vmas = crate::proc::pcb::list_vmas(task_id).ok_or(KernelError::NotFound)?;
     Ok(render_maps(&vmas))
 }
 
@@ -2959,8 +3126,7 @@ fn gen_pid_oom_score_adj(task_id: u64) -> KernelResult<Vec<u8>> {
 /// signed integer, and bound-check.  An empty or malformed write is
 /// `InvalidArgument` (Linux returns `-EINVAL`).
 fn parse_oom_score_adj(data: &[u8]) -> KernelResult<i32> {
-    let text = core::str::from_utf8(data)
-        .map_err(|_| KernelError::InvalidArgument)?;
+    let text = core::str::from_utf8(data).map_err(|_| KernelError::InvalidArgument)?;
     let trimmed = text.trim();
     let value: i32 = trimmed.parse().map_err(|_| KernelError::InvalidArgument)?;
     if !(-1000..=1000).contains(&value) {
@@ -3020,7 +3186,9 @@ fn gen_pid_schedstat(task_id: u64) -> KernelResult<Vec<u8>> {
     const NS_PER_TICK: u64 = 1_000_000_000 / 100;
 
     let tasks = crate::sched::task_list();
-    let task = tasks.iter().find(|t| t.id == task_id)
+    let task = tasks
+        .iter()
+        .find(|t| t.id == task_id)
         .ok_or(KernelError::NotFound)?;
 
     let cpu_ns = crate::bench::cycles_to_ns(task.total_cycles);
@@ -3249,8 +3417,7 @@ fn gen_pid_caps(task_id: u64) -> KernelResult<Vec<u8>> {
     use crate::cap::{ResourceType, Rights};
     use crate::proc::pcb;
 
-    let cap_count = pcb::cap_count(task_id)
-        .ok_or(KernelError::NotFound)?;
+    let cap_count = pcb::cap_count(task_id).ok_or(KernelError::NotFound)?;
 
     let mut text = format!("Capabilities: {} total\n", cap_count);
 
@@ -3357,8 +3524,7 @@ fn gen_pid_comm(task_id: u64) -> KernelResult<Vec<u8>> {
 fn gen_pid_statm(task_id: u64) -> KernelResult<Vec<u8>> {
     // statm only applies to processes (which carry the AS charge), not
     // bare scheduler tasks.
-    let as_bytes = crate::proc::pcb::linux_as_used(task_id)
-        .ok_or(KernelError::NotFound)?;
+    let as_bytes = crate::proc::pcb::linux_as_used(task_id).ok_or(KernelError::NotFound)?;
     // Linux ABI page size (sysconf(_SC_PAGESIZE)), NOT the kernel's
     // 16 KiB frame size — see the doc comment above.
     const ABI_PAGE_SIZE: u64 = 4096;
@@ -3438,12 +3604,11 @@ fn gen_pid_limits(task_id: u64) -> KernelResult<Vec<u8>> {
     };
 
     for resource in 0..NUM_RLIMITS {
-        let (soft, hard) = pcb::get_rlimit(task_id, resource)
-            .unwrap_or_else(|| {
-                // Bare task without a PCB: report the system defaults.
-                #[allow(clippy::indexing_slicing)]
-                DEFAULT_RLIMITS[resource as usize]
-            });
+        let (soft, hard) = pcb::get_rlimit(task_id, resource).unwrap_or_else(|| {
+            // Bare task without a PCB: report the system defaults.
+            #[allow(clippy::indexing_slicing)]
+            DEFAULT_RLIMITS[resource as usize]
+        });
         #[allow(clippy::indexing_slicing)]
         let (label, units) = ROWS[resource as usize];
         s.push_str(&format!(
@@ -3513,12 +3678,15 @@ fn gen_pipes() -> Vec<u8> {
     let mut s = String::with_capacity(512);
     s.push_str(&format!("Active pipes: {}\n\n", pipes.len()));
     if !pipes.is_empty() {
-        s.push_str(&format!("{:<30} {:>8} {:>8} {:>4} {:>4} {:>12} {:>12}\n",
-            "Path", "Capacity", "Buffered", "R", "W", "BytesIn", "BytesOut"));
+        s.push_str(&format!(
+            "{:<30} {:>8} {:>8} {:>4} {:>4} {:>12} {:>12}\n",
+            "Path", "Capacity", "Buffered", "R", "W", "BytesIn", "BytesOut"
+        ));
         for p in &pipes {
-            s.push_str(&format!("{:<30} {:>8} {:>8} {:>4} {:>4} {:>12} {:>12}\n",
-                p.path, p.capacity, p.buffered, p.readers, p.writers,
-                p.bytes_written, p.bytes_read));
+            s.push_str(&format!(
+                "{:<30} {:>8} {:>8} {:>4} {:>4} {:>12} {:>12}\n",
+                p.path, p.capacity, p.buffered, p.readers, p.writers, p.bytes_written, p.bytes_read
+            ));
         }
     }
     s.into_bytes()
@@ -3549,7 +3717,10 @@ fn gen_namespaces() -> Vec<u8> {
     let mut s = String::with_capacity(512);
     s.push_str(&format!("Mount namespaces: {}\n\n", nss.len()));
     for ns in &nss {
-        let parent = ns.parent.map(|p| format!("{}", p)).unwrap_or_else(|| String::from("none"));
+        let parent = ns
+            .parent
+            .map(|p| format!("{}", p))
+            .unwrap_or_else(|| String::from("none"));
         s.push_str(&format!("ns {} ({}):\n", ns.id, ns.name));
         s.push_str(&format!("  parent:     {}\n", parent));
         s.push_str(&format!("  mounts:     {}\n", ns.mount_count));
@@ -3568,29 +3739,41 @@ fn gen_rlimits() -> Vec<u8> {
     let mut s = String::with_capacity(512);
 
     s.push_str("Global defaults:\n");
-    s.push_str(&format!("  nofile:  soft={} hard={}\n",
+    s.push_str(&format!(
+        "  nofile:  soft={} hard={}\n",
         rlimit::Rlimit::format_value(defaults.nofile.soft),
-        rlimit::Rlimit::format_value(defaults.nofile.hard)));
-    s.push_str(&format!("  fsize:   soft={} hard={}\n",
+        rlimit::Rlimit::format_value(defaults.nofile.hard)
+    ));
+    s.push_str(&format!(
+        "  fsize:   soft={} hard={}\n",
         rlimit::Rlimit::format_value(defaults.fsize.soft),
-        rlimit::Rlimit::format_value(defaults.fsize.hard)));
-    s.push_str(&format!("  locks:   soft={} hard={}\n",
+        rlimit::Rlimit::format_value(defaults.fsize.hard)
+    ));
+    s.push_str(&format!(
+        "  locks:   soft={} hard={}\n",
         rlimit::Rlimit::format_value(defaults.locks.soft),
-        rlimit::Rlimit::format_value(defaults.locks.hard)));
+        rlimit::Rlimit::format_value(defaults.locks.hard)
+    ));
 
     if !overrides.is_empty() {
         s.push_str(&format!("\nPer-UID overrides ({}):\n", overrides.len()));
         for (uid, set) in &overrides {
             s.push_str(&format!("  uid {}:\n", uid));
-            s.push_str(&format!("    nofile: soft={} hard={}\n",
+            s.push_str(&format!(
+                "    nofile: soft={} hard={}\n",
                 rlimit::Rlimit::format_value(set.nofile.soft),
-                rlimit::Rlimit::format_value(set.nofile.hard)));
-            s.push_str(&format!("    fsize:  soft={} hard={}\n",
+                rlimit::Rlimit::format_value(set.nofile.hard)
+            ));
+            s.push_str(&format!(
+                "    fsize:  soft={} hard={}\n",
                 rlimit::Rlimit::format_value(set.fsize.soft),
-                rlimit::Rlimit::format_value(set.fsize.hard)));
-            s.push_str(&format!("    locks:  soft={} hard={}\n",
+                rlimit::Rlimit::format_value(set.fsize.hard)
+            ));
+            s.push_str(&format!(
+                "    locks:  soft={} hard={}\n",
                 rlimit::Rlimit::format_value(set.locks.soft),
-                rlimit::Rlimit::format_value(set.locks.hard)));
+                rlimit::Rlimit::format_value(set.locks.hard)
+            ));
         }
     } else {
         s.push_str("\nNo per-UID overrides.\n");
@@ -3605,8 +3788,14 @@ fn gen_audit() -> Vec<u8> {
     let rules = audit::list_rules();
     let mut s = String::with_capacity(512);
 
-    s.push_str(&format!("Filesystem audit: {}\n\n", if st.enabled { "enabled" } else { "disabled" }));
-    s.push_str(&format!("  buffer:       {}/{} entries\n", st.buffer_used, st.buffer_size));
+    s.push_str(&format!(
+        "Filesystem audit: {}\n\n",
+        if st.enabled { "enabled" } else { "disabled" }
+    ));
+    s.push_str(&format!(
+        "  buffer:       {}/{} entries\n",
+        st.buffer_used, st.buffer_size
+    ));
     s.push_str(&format!("  total events: {}\n", st.total_events));
     s.push_str(&format!("  dropped:      {}\n", st.dropped_events));
     s.push_str(&format!("  rules:        {}\n\n", st.rules_count));
@@ -3614,7 +3803,10 @@ fn gen_audit() -> Vec<u8> {
     if !rules.is_empty() {
         s.push_str("Rules:\n");
         for r in &rules {
-            let uid_str = r.uid.map(|u| format!("{}", u)).unwrap_or_else(|| String::from("*"));
+            let uid_str = r
+                .uid
+                .map(|u| format!("{}", u))
+                .unwrap_or_else(|| String::from("*"));
             // The audit rule prefix is a raw byte path, so it is rendered
             // through `Path::display()` — `Path` deliberately has no `Display`
             // impl, precisely so lossy rendering is never implicit.
@@ -3623,8 +3815,10 @@ fn gen_audit() -> Vec<u8> {
             } else {
                 format!("{}", r.path_prefix.display())
             };
-            s.push_str(&format!("  rule {}: path={} mask=0x{:X} uid={} failures={} enabled={}\n",
-                r.id, prefix, r.mask.0, uid_str, r.failures_only, r.enabled));
+            s.push_str(&format!(
+                "  rule {}: path={} mask=0x{:X} uid={} failures={} enabled={}\n",
+                r.id, prefix, r.mask.0, uid_str, r.failures_only, r.enabled
+            ));
         }
     }
     s.into_bytes()
@@ -3638,18 +3832,22 @@ fn gen_snapshots() -> Vec<u8> {
     s.push_str(&format!("Filesystem snapshots: {}\n\n", snaps.len()));
 
     if !snaps.is_empty() {
-        s.push_str(&format!("{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}\n",
-            "ID", "NAME", "PATH", "FILES", "BYTES", "PARENT"));
+        s.push_str(&format!(
+            "{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}\n",
+            "ID", "NAME", "PATH", "FILES", "BYTES", "PARENT"
+        ));
         for snap in &snaps {
-            let parent_str = snap.parent
+            let parent_str = snap
+                .parent
                 .map(|p| format!("{}", p.0))
                 .unwrap_or_else(|| String::from("-"));
             // Octal-escaped: this is a fixed-column, line-oriented table, and a
             // root path containing a newline would otherwise forge a row.
             let root = mangle_mount_field(snap.root_path.as_bytes());
-            s.push_str(&format!("{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}\n",
-                snap.id.0, snap.name, root,
-                snap.file_count, snap.total_bytes, parent_str));
+            s.push_str(&format!(
+                "{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}\n",
+                snap.id.0, snap.name, root, snap.file_count, snap.total_bytes, parent_str
+            ));
         }
     }
 
@@ -3663,7 +3861,14 @@ fn gen_reclaim() -> Vec<u8> {
     let p = reclaim::phases();
     let mut out = String::with_capacity(512);
 
-    out.push_str(&format!("Space reclamation: {}\n\n", if reclaim::is_enabled() { "enabled" } else { "disabled" }));
+    out.push_str(&format!(
+        "Space reclamation: {}\n\n",
+        if reclaim::is_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
     out.push_str(&format!("  watermarks:   high={}% low={}%\n", hi, lo));
     out.push_str(&format!("  triggers:     {}\n", s.trigger_count));
     out.push_str(&format!("  total freed:  {} bytes\n", s.total_bytes_freed));
@@ -3672,8 +3877,10 @@ fn gen_reclaim() -> Vec<u8> {
     out.push_str(&format!("  trash items:  {}\n", s.total_trash_items));
     out.push_str(&format!("  journal ents: {}\n", s.total_journal_entries));
     out.push_str(&format!("  active:       {}\n\n", s.active));
-    out.push_str(&format!("  phases: cache={} cas={} tmp={} trash={} journal={}\n",
-        p.cache, p.cas_gc, p.tmpwatch, p.trash, p.journal));
+    out.push_str(&format!(
+        "  phases: cache={} cas={} tmp={} trash={} journal={}\n",
+        p.cache, p.cas_gc, p.tmpwatch, p.trash, p.journal
+    ));
 
     out.into_bytes()
 }
@@ -3684,12 +3891,19 @@ fn gen_transactions() -> Vec<u8> {
     let active = transaction::active_count();
     let mut out = String::with_capacity(512);
 
-    out.push_str(&format!("Filesystem transactions: {} total, {} active\n\n", txns.len(), active));
+    out.push_str(&format!(
+        "Filesystem transactions: {} total, {} active\n\n",
+        txns.len(),
+        active
+    ));
 
     if txns.is_empty() {
         out.push_str("(no transactions)\n");
     } else {
-        out.push_str(&format!("{:<6} {:<12} {:<6} {}\n", "ID", "STATE", "OPS", "LABEL"));
+        out.push_str(&format!(
+            "{:<6} {:<12} {:<6} {}\n",
+            "ID", "STATE", "OPS", "LABEL"
+        ));
         for t in &txns {
             let state = match t.state {
                 transaction::TxState::Active => "active",
@@ -3697,7 +3911,10 @@ fn gen_transactions() -> Vec<u8> {
                 transaction::TxState::RolledBack => "rolled-back",
                 transaction::TxState::Dirty => "DIRTY",
             };
-            out.push_str(&format!("{:<6} {:<12} {:<6} {}\n", t.id.0, state, t.ops_count, t.label));
+            out.push_str(&format!(
+                "{:<6} {:<12} {:<6} {}\n",
+                t.id.0, state, t.ops_count, t.label
+            ));
         }
     }
 
@@ -3717,13 +3934,18 @@ fn gen_certmgr() -> Vec<u8> {
     out.push_str(&format!("Root CAs:      {}\n", roots));
     out.push_str(&format!("Server certs:  {}\n", servers));
     out.push_str(&format!("ACME requests: {}\n", requests));
-    out.push_str(&format!("Threshold:     {} days\n", super::certmgr::renewal_threshold()));
+    out.push_str(&format!(
+        "Threshold:     {} days\n",
+        super::certmgr::renewal_threshold()
+    ));
     out.push_str(&format!("Operations:    {}\n", ops));
 
     let certs = super::certmgr::list_certs();
     if !certs.is_empty() {
-        out.push_str(&format!("\n{:<6} {:<28} {:<12} {:<10} {:<10} {}\n",
-            "ID", "CN", "TYPE", "SOURCE", "STATUS", "AUTO"));
+        out.push_str(&format!(
+            "\n{:<6} {:<28} {:<12} {:<10} {:<10} {}\n",
+            "ID", "CN", "TYPE", "SOURCE", "STATUS", "AUTO"
+        ));
         for c in &certs {
             let ct = match c.cert_type {
                 super::certmgr::CertType::Root => "root",
@@ -3749,8 +3971,10 @@ fn gen_certmgr() -> Vec<u8> {
                 super::certmgr::CertStatus::Disabled => "disabled",
             };
             let auto = if c.auto_renew { "yes" } else { "no" };
-            out.push_str(&format!("{:<6} {:<28} {:<12} {:<10} {:<10} {}\n",
-                c.id, c.common_name, ct, src, st, auto));
+            out.push_str(&format!(
+                "{:<6} {:<28} {:<12} {:<10} {:<10} {}\n",
+                c.id, c.common_name, ct, src, st, auto
+            ));
         }
     }
 
@@ -3773,8 +3997,10 @@ fn gen_installer() -> Vec<u8> {
 
     let sessions = super::installer::list_sessions();
     if !sessions.is_empty() {
-        out.push_str(&format!("\n{:<6} {:<12} {:<14} {:<4}% {}\n",
-            "ID", "MODE", "PHASE", "PCT", "STATUS"));
+        out.push_str(&format!(
+            "\n{:<6} {:<12} {:<14} {:<4}% {}\n",
+            "ID", "MODE", "PHASE", "PCT", "STATUS"
+        ));
         for s in &sessions {
             let mode = match s.mode {
                 super::installer::InstallMode::Easy => "easy",
@@ -3792,8 +4018,10 @@ fn gen_installer() -> Vec<u8> {
                 super::installer::InstallPhase::Complete => "complete",
                 super::installer::InstallPhase::Failed => "FAILED",
             };
-            out.push_str(&format!("{:<6} {:<12} {:<14} {:<4} {}\n",
-                s.id, mode, phase, s.progress_pct, s.status_message));
+            out.push_str(&format!(
+                "{:<6} {:<12} {:<14} {:<4} {}\n",
+                s.id, mode, phase, s.progress_pct, s.status_message
+            ));
         }
     }
 
@@ -3810,9 +4038,15 @@ fn gen_changetrack() -> Vec<u8> {
     if cursors.is_empty() {
         out.push_str("(no cursors registered)\n");
     } else {
-        out.push_str(&format!("{:<20} {:<10} {:<10}\n", "NAME", "LAST_SEQ", "ADVANCES"));
+        out.push_str(&format!(
+            "{:<20} {:<10} {:<10}\n",
+            "NAME", "LAST_SEQ", "ADVANCES"
+        ));
         for c in &cursors {
-            out.push_str(&format!("{:<20} {:<10} {:<10}\n", c.name, c.last_seq, c.advance_count));
+            out.push_str(&format!(
+                "{:<20} {:<10} {:<10}\n",
+                c.name, c.last_seq, c.advance_count
+            ));
         }
     }
 
@@ -3824,9 +4058,22 @@ fn gen_fcompress() -> Vec<u8> {
     let s = fcompress::stats();
     let mut out = String::with_capacity(512);
 
-    out.push_str(&format!("Transparent compression: {}\n", if fcompress::is_enabled() { "enabled" } else { "disabled" }));
-    out.push_str(&format!("  default algorithm: {}\n", fcompress::default_algorithm().name()));
-    out.push_str(&format!("  min file size:     {} bytes\n\n", fcompress::min_size()));
+    out.push_str(&format!(
+        "Transparent compression: {}\n",
+        if fcompress::is_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
+    out.push_str(&format!(
+        "  default algorithm: {}\n",
+        fcompress::default_algorithm().name()
+    ));
+    out.push_str(&format!(
+        "  min file size:     {} bytes\n\n",
+        fcompress::min_size()
+    ));
     out.push_str(&format!("  files compressed:  {}\n", s.files_compressed));
     out.push_str(&format!("  files decompressed:{}\n", s.files_decompressed));
     out.push_str(&format!("  files skipped:     {}\n", s.files_skipped));
@@ -3842,7 +4089,12 @@ fn gen_fcompress() -> Vec<u8> {
         } else {
             r.extensions.join(",")
         };
-        out.push_str(&format!("    {} -> {} (ext: {})\n", r.path_prefix, r.algorithm.name(), exts));
+        out.push_str(&format!(
+            "    {} -> {} (ext: {})\n",
+            r.path_prefix,
+            r.algorithm.name(),
+            exts
+        ));
     }
 
     out.into_bytes()
@@ -3874,7 +4126,14 @@ fn gen_dedup() -> Vec<u8> {
     let s = dedup::stats();
     let mut out = String::with_capacity(512);
 
-    out.push_str(&format!("Deduplication: {}\n\n", if dedup::is_enabled() { "enabled" } else { "disabled" }));
+    out.push_str(&format!(
+        "Deduplication: {}\n\n",
+        if dedup::is_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
     out.push_str(&format!("  scans run:       {}\n", s.scans_run));
     out.push_str(&format!("  total files:     {}\n", s.total_files));
     out.push_str(&format!("  dup groups:      {}\n", s.total_groups));
@@ -3907,7 +4166,14 @@ fn gen_tags() -> Vec<u8> {
     let s = tags::stats();
     let mut out = String::with_capacity(512);
 
-    out.push_str(&format!("File Tagging: {}\n\n", if tags::is_enabled() { "enabled" } else { "disabled" }));
+    out.push_str(&format!(
+        "File Tagging: {}\n\n",
+        if tags::is_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
     out.push_str(&format!("  unique tags:     {}\n", s.unique_tags));
     out.push_str(&format!("  tagged files:    {}\n", s.tagged_files));
     out.push_str(&format!("  associations:    {}\n", s.total_associations));
@@ -3933,18 +4199,33 @@ fn gen_usage() -> Vec<u8> {
     use crate::fs::usage;
     let mut out = String::with_capacity(1024);
 
-    out.push_str(&format!("Disk Usage Analyzer ({} analyses run)\n\n", usage::analyses_run()));
+    out.push_str(&format!(
+        "Disk Usage Analyzer ({} analyses run)\n\n",
+        usage::analyses_run()
+    ));
 
     if let Some(report) = usage::last_report() {
         // Paths and extensions are raw bytes; octal-escape them like the mount
         // fields, so an embedded newline cannot forge a record in this
         // line-oriented file.
-        out.push_str(&format!("Last analysis: {}\n", mangle_mount_field(report.root.as_bytes())));
-        out.push_str(&format!("  total size:   {}\n", usage::format_size(report.total_size)));
+        out.push_str(&format!(
+            "Last analysis: {}\n",
+            mangle_mount_field(report.root.as_bytes())
+        ));
+        out.push_str(&format!(
+            "  total size:   {}\n",
+            usage::format_size(report.total_size)
+        ));
         out.push_str(&format!("  files:        {}\n", report.file_count));
         out.push_str(&format!("  directories:  {}\n", report.dir_count));
-        out.push_str(&format!("  avg file:     {}\n", usage::format_size(report.avg_file_size)));
-        out.push_str(&format!("  median file:  {}\n", usage::format_size(report.median_file_size)));
+        out.push_str(&format!(
+            "  avg file:     {}\n",
+            usage::format_size(report.avg_file_size)
+        ));
+        out.push_str(&format!(
+            "  median file:  {}\n",
+            usage::format_size(report.median_file_size)
+        ));
 
         if !report.top_dirs.is_empty() {
             out.push_str("\nTop Directories:\n");
@@ -3970,16 +4251,43 @@ fn gen_usage() -> Vec<u8> {
         }
 
         out.push_str("\nAge Distribution:\n");
-        out.push_str(&format!("  <1 day:  {} files, {}\n", report.by_age.last_day.count, usage::format_size(report.by_age.last_day.size)));
-        out.push_str(&format!("  <1 week: {} files, {}\n", report.by_age.last_week.count, usage::format_size(report.by_age.last_week.size)));
-        out.push_str(&format!("  <1 month:{} files, {}\n", report.by_age.last_month.count, usage::format_size(report.by_age.last_month.size)));
-        out.push_str(&format!("  <1 year: {} files, {}\n", report.by_age.last_year.count, usage::format_size(report.by_age.last_year.size)));
-        out.push_str(&format!("  >1 year: {} files, {}\n", report.by_age.older.count, usage::format_size(report.by_age.older.size)));
+        out.push_str(&format!(
+            "  <1 day:  {} files, {}\n",
+            report.by_age.last_day.count,
+            usage::format_size(report.by_age.last_day.size)
+        ));
+        out.push_str(&format!(
+            "  <1 week: {} files, {}\n",
+            report.by_age.last_week.count,
+            usage::format_size(report.by_age.last_week.size)
+        ));
+        out.push_str(&format!(
+            "  <1 month:{} files, {}\n",
+            report.by_age.last_month.count,
+            usage::format_size(report.by_age.last_month.size)
+        ));
+        out.push_str(&format!(
+            "  <1 year: {} files, {}\n",
+            report.by_age.last_year.count,
+            usage::format_size(report.by_age.last_year.size)
+        ));
+        out.push_str(&format!(
+            "  >1 year: {} files, {}\n",
+            report.by_age.older.count,
+            usage::format_size(report.by_age.older.size)
+        ));
 
         out.push_str("\nWasted Space:\n");
         out.push_str(&format!("  empty files:  {}\n", report.wasted.empty_files));
-        out.push_str(&format!("  tiny files:   {} ({})\n", report.wasted.tiny_files, usage::format_size(report.wasted.tiny_size)));
-        out.push_str(&format!("  dup names:    {}\n", report.wasted.duplicate_names));
+        out.push_str(&format!(
+            "  tiny files:   {} ({})\n",
+            report.wasted.tiny_files,
+            usage::format_size(report.wasted.tiny_size)
+        ));
+        out.push_str(&format!(
+            "  dup names:    {}\n",
+            report.wasted.duplicate_names
+        ));
     } else {
         out.push_str("(no analysis cached; run `diskuse` to analyze)\n");
     }
@@ -3992,7 +4300,10 @@ fn gen_health() -> Vec<u8> {
     use crate::fs::health;
     let mut out = String::with_capacity(1024);
 
-    out.push_str(&format!("Filesystem Health ({} checks run)\n\n", health::checks_run()));
+    out.push_str(&format!(
+        "Filesystem Health ({} checks run)\n\n",
+        health::checks_run()
+    ));
 
     if let Some(report) = health::last_report() {
         out.push_str(&format!("Overall: {}\n", report.status.name()));
@@ -4123,26 +4434,39 @@ fn gen_profile() -> Vec<u8> {
 
     out.push_str("Filesystem I/O Profile\n");
     out.push_str("======================\n\n");
-    out.push_str(&format!("Status:      {}\n", if enabled { "enabled" } else { "disabled" }));
+    out.push_str(&format!(
+        "Status:      {}\n",
+        if enabled { "enabled" } else { "disabled" }
+    ));
     out.push_str(&format!("Total ops:   {}\n", total_ops));
     out.push_str(&format!("Total bytes: {}\n", total_bytes));
 
     if enabled && total_ops > 0 {
         let rpt = super::profile::report();
-        out.push_str(&format!("Duration:    {} ms\n\n", rpt.duration_ns / 1_000_000));
+        out.push_str(&format!(
+            "Duration:    {} ms\n\n",
+            rpt.duration_ns / 1_000_000
+        ));
 
         out.push_str("Per-Operation Breakdown\n");
         out.push_str("-----------------------\n");
         for (kind, stats) in &rpt.ops {
             out.push_str(&format!(
                 "  {:10} count={:<8} bytes={:<12} avg={:<8}ns min={:<8}ns max={}ns\n",
-                kind.label(), stats.count, stats.bytes,
-                stats.avg_ns(), stats.min_ns, stats.max_ns,
+                kind.label(),
+                stats.count,
+                stats.bytes,
+                stats.avg_ns(),
+                stats.min_ns,
+                stats.max_ns,
             ));
             if stats.bytes > 0 {
                 let bps = stats.throughput_bps();
                 if bps > 1_000_000 {
-                    out.push_str(&format!("             throughput: {} MB/s\n", bps / 1_000_000));
+                    out.push_str(&format!(
+                        "             throughput: {} MB/s\n",
+                        bps / 1_000_000
+                    ));
                 } else if bps > 1_000 {
                     out.push_str(&format!("             throughput: {} KB/s\n", bps / 1_000));
                 } else {
@@ -4173,29 +4497,41 @@ fn gen_fspolicy() -> Vec<u8> {
 
     out.push_str("Filesystem Policy Engine\n");
     out.push_str("========================\n\n");
-    out.push_str(&format!("Active profile:    {}\n",
+    out.push_str(&format!(
+        "Active profile:    {}\n",
         match profile {
             Some(p) => p.label(),
             None => "custom (manually tuned)",
-        }));
+        }
+    ));
     out.push_str(&format!("Profiles applied:  {}\n", stats.profiles_applied));
     out.push_str(&format!("Settings changed:  {}\n", stats.settings_changed));
-    out.push_str(&format!("Settings queried:  {}\n\n", stats.settings_queried));
+    out.push_str(&format!(
+        "Settings queried:  {}\n\n",
+        stats.settings_queried
+    ));
 
     out.push_str("Current Settings\n");
     out.push_str("----------------\n");
     let settings = super::policy::list_settings();
     for s in &settings {
-        out.push_str(&format!("  {:28} = {:8}  # {}\n", s.key, s.value, s.description));
+        out.push_str(&format!(
+            "  {:28} = {:8}  # {}\n",
+            s.key, s.value, s.description
+        ));
     }
 
     out.push_str("\nProfile Presets\n");
     out.push_str("---------------\n");
-    out.push_str(&format!("  {:28} {:>8} {:>8} {:>8} {:>8}\n",
-        "SETTING", "Desktop", "Server", "Dev", "Gaming"));
+    out.push_str(&format!(
+        "  {:28} {:>8} {:>8} {:>8} {:>8}\n",
+        "SETTING", "Desktop", "Server", "Dev", "Gaming"
+    ));
     for s in &settings {
-        out.push_str(&format!("  {:28} {:>8} {:>8} {:>8} {:>8}\n",
-            s.key, s.presets[0], s.presets[1], s.presets[2], s.presets[3]));
+        out.push_str(&format!(
+            "  {:28} {:>8} {:>8} {:>8} {:>8}\n",
+            s.key, s.presets[0], s.presets[1], s.presets[2], s.presets[3]
+        ));
     }
 
     out.into_bytes()
@@ -4241,8 +4577,12 @@ fn gen_ioprio() -> Vec<u8> {
     } else {
         out.push_str(&format!("{:>6} {:>12} {:>6}\n", "TASK", "CLASS", "LEVEL"));
         for (tid, prio) in &all {
-            out.push_str(&format!("{:>6} {:>12} {:>6}\n",
-                tid, prio.class.label(), prio.level));
+            out.push_str(&format!(
+                "{:>6} {:>12} {:>6}\n",
+                tid,
+                prio.class.label(),
+                prio.level
+            ));
         }
     }
 
@@ -4272,7 +4612,11 @@ fn gen_atime() -> Vec<u8> {
     if !overrides.is_empty() {
         out.push_str("\nPer-mount overrides:\n");
         for ovr in &overrides {
-            out.push_str(&format!("  {:20} → {}\n", ovr.mount_path, ovr.policy.label()));
+            out.push_str(&format!(
+                "  {:20} → {}\n",
+                ovr.mount_path,
+                ovr.policy.label()
+            ));
         }
     }
 
@@ -4319,12 +4663,30 @@ fn gen_splice() -> Vec<u8> {
 
     out.push_str("Zero-Copy I/O Transfer (splice)\n");
     out.push_str("===============================\n\n");
-    out.push_str(&format!("{:20} {:>10} {:>12}\n", "OPERATION", "OPS", "BYTES"));
-    out.push_str(&format!("{:20} {:>10} {:>12}\n", "splice", s.splice_ops, s.splice_bytes));
-    out.push_str(&format!("{:20} {:>10} {:>12}\n", "sendfile", s.sendfile_ops, s.sendfile_bytes));
-    out.push_str(&format!("{:20} {:>10} {:>12}\n", "copy_file_range", s.copy_range_ops, s.copy_range_bytes));
-    out.push_str(&format!("{:20} {:>10} {:>12}\n", "tee", s.tee_ops, s.tee_bytes));
-    out.push_str(&format!("{:20} {:>10} {:>12}\n", "TOTAL", total_ops, total_bytes));
+    out.push_str(&format!(
+        "{:20} {:>10} {:>12}\n",
+        "OPERATION", "OPS", "BYTES"
+    ));
+    out.push_str(&format!(
+        "{:20} {:>10} {:>12}\n",
+        "splice", s.splice_ops, s.splice_bytes
+    ));
+    out.push_str(&format!(
+        "{:20} {:>10} {:>12}\n",
+        "sendfile", s.sendfile_ops, s.sendfile_bytes
+    ));
+    out.push_str(&format!(
+        "{:20} {:>10} {:>12}\n",
+        "copy_file_range", s.copy_range_ops, s.copy_range_bytes
+    ));
+    out.push_str(&format!(
+        "{:20} {:>10} {:>12}\n",
+        "tee", s.tee_ops, s.tee_bytes
+    ));
+    out.push_str(&format!(
+        "{:20} {:>10} {:>12}\n",
+        "TOTAL", total_ops, total_bytes
+    ));
     out.push_str(&format!("\nErrors: {}\n", s.errors));
 
     out.into_bytes()
@@ -4340,8 +4702,14 @@ fn gen_directio() -> Vec<u8> {
 
     out.push_str("Direct I/O (Cache Bypass)\n");
     out.push_str("========================\n\n");
-    out.push_str(&format!("Read ops:       {:>10}  ({} bytes)\n", reads, rbytes));
-    out.push_str(&format!("Write ops:      {:>10}  ({} bytes)\n", writes, wbytes));
+    out.push_str(&format!(
+        "Read ops:       {:>10}  ({} bytes)\n",
+        reads, rbytes
+    ));
+    out.push_str(&format!(
+        "Write ops:      {:>10}  ({} bytes)\n",
+        writes, wbytes
+    ));
     out.push_str(&format!("Unaligned ops:  {:>10}\n", unaligned));
     out.push_str(&format!("Cache inv.:     {:>10}\n", invalidations));
     out.push_str(&format!("Registered paths: {}/{}\n\n", path_count, 128));
@@ -4364,8 +4732,7 @@ fn gen_fstrim() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (trims, bytes, queued, coalesced, overflows, pending, last_flush) =
-        super::fstrim::stats();
+    let (trims, bytes, queued, coalesced, overflows, pending, last_flush) = super::fstrim::stats();
     let mode = super::fstrim::get_mode();
 
     out.push_str("Filesystem TRIM/DISCARD\n");
@@ -4381,7 +4748,10 @@ fn gen_fstrim() -> Vec<u8> {
 
     let summary = super::fstrim::pending_summary();
     if !summary.is_empty() {
-        out.push_str(&format!("\n{:20} {:>8} {:>12}\n", "DEVICE", "RANGES", "BYTES"));
+        out.push_str(&format!(
+            "\n{:20} {:>8} {:>12}\n",
+            "DEVICE", "RANGES", "BYTES"
+        ));
         for (dev, count, bytes) in &summary {
             out.push_str(&format!("{:20} {:>8} {:>12}\n", dev, count, bytes));
         }
@@ -4406,8 +4776,10 @@ fn gen_fstune() -> Vec<u8> {
 
     let profiles = super::fstune::list_profiles();
     if !profiles.is_empty() {
-        out.push_str(&format!("\n{:<20} {:<8} {:<12} {:<10} {:<10} {}\n",
-            "NAME", "FS", "WORKLOAD", "BLOCK", "JOURNAL", "APPLIED"));
+        out.push_str(&format!(
+            "\n{:<20} {:<8} {:<12} {:<10} {:<10} {}\n",
+            "NAME", "FS", "WORKLOAD", "BLOCK", "JOURNAL", "APPLIED"
+        ));
         for p in &profiles {
             let fs = match p.fs_type {
                 super::fstune::FsType::Ext4 => "ext4",
@@ -4430,8 +4802,10 @@ fn gen_fstune() -> Vec<u8> {
                 super::fstune::JournalMode::Off => "off",
             };
             let app = if p.applied { "yes" } else { "no" };
-            out.push_str(&format!("{:<20} {:<8} {:<12} {:<10} {:<10} {}\n",
-                p.name, fs, wl, p.block_size, jm, app));
+            out.push_str(&format!(
+                "{:<20} {:<8} {:<12} {:<10} {:<10} {}\n",
+                p.name, fs, wl, p.block_size, jm, app
+            ));
         }
     }
 
@@ -4468,8 +4842,10 @@ fn gen_fontmgr() -> Vec<u8> {
 
     let fonts = super::fontmgr::list_fonts(None);
     if !fonts.is_empty() {
-        out.push_str(&format!("\n{:<6} {:<20} {:<12} {:<10} {:<8} {}\n",
-            "ID", "FAMILY", "STYLE", "FMT", "GLYPHS", "SYS"));
+        out.push_str(&format!(
+            "\n{:<6} {:<20} {:<12} {:<10} {:<8} {}\n",
+            "ID", "FAMILY", "STYLE", "FMT", "GLYPHS", "SYS"
+        ));
         for f in &fonts {
             let st = match f.style {
                 super::fontmgr::FontStyle::Regular => "regular",
@@ -4482,9 +4858,22 @@ fn gen_fontmgr() -> Vec<u8> {
                 super::fontmgr::FontStyle::ExtraBold => "extrabold",
                 super::fontmgr::FontStyle::Thin => "thin",
             };
-            let fmt = match f.format { super::fontmgr::FontFormat::TrueType => "ttf", super::fontmgr::FontFormat::OpenType => "otf", super::fontmgr::FontFormat::Woff => "woff", super::fontmgr::FontFormat::Woff2 => "woff2", super::fontmgr::FontFormat::Bitmap => "bmp" };
-            out.push_str(&format!("{:<6} {:<20} {:<12} {:<10} {:<8} {}\n",
-                f.id, f.family, st, fmt, f.glyph_count, if f.system { "yes" } else { "no" }));
+            let fmt = match f.format {
+                super::fontmgr::FontFormat::TrueType => "ttf",
+                super::fontmgr::FontFormat::OpenType => "otf",
+                super::fontmgr::FontFormat::Woff => "woff",
+                super::fontmgr::FontFormat::Woff2 => "woff2",
+                super::fontmgr::FontFormat::Bitmap => "bmp",
+            };
+            out.push_str(&format!(
+                "{:<6} {:<20} {:<12} {:<10} {:<8} {}\n",
+                f.id,
+                f.family,
+                st,
+                fmt,
+                f.glyph_count,
+                if f.system { "yes" } else { "no" }
+            ));
         }
     }
 
@@ -4496,13 +4885,15 @@ fn gen_sparse() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (punches, punch_bytes, zeros, collapses, inserts, maps, tracked) =
-        super::sparse::stats();
+    let (punches, punch_bytes, zeros, collapses, inserts, maps, tracked) = super::sparse::stats();
 
     out.push_str("Sparse File Management\n");
     out.push_str("======================\n\n");
     out.push_str(&format!("Tracked files:    {}/{}\n", tracked, 256));
-    out.push_str(&format!("Punch holes:      {} ({} bytes)\n", punches, punch_bytes));
+    out.push_str(&format!(
+        "Punch holes:      {} ({} bytes)\n",
+        punches, punch_bytes
+    ));
     out.push_str(&format!("Zero ranges:      {}\n", zeros));
     out.push_str(&format!("Collapse ranges:  {}\n", collapses));
     out.push_str(&format!("Insert ranges:    {}\n", inserts));
@@ -4535,7 +4926,10 @@ fn gen_readdir_plus() -> Vec<u8> {
     out.push_str(&format!("Metadata fetched:  {}\n", fetched));
     out.push_str(&format!("Metadata errors:   {}\n", errors));
     if calls > 0 {
-        out.push_str(&format!("Avg entries/call: {:.1}\n", entries as f64 / calls as f64));
+        out.push_str(&format!(
+            "Avg entries/call: {:.1}\n",
+            entries as f64 / calls as f64
+        ));
     }
 
     out.into_bytes()
@@ -4560,14 +4954,22 @@ fn gen_freeze() -> Vec<u8> {
     if list.is_empty() {
         out.push_str("No frozen filesystems.\n");
     } else {
-        out.push_str(&format!("{:20} {:>5} {:>12} {:>12} {:>8} {}\n",
-            "MOUNTPOINT", "LEVEL", "DURATION", "UNTIL_THAW", "BLOCKED", "REASON"));
+        out.push_str(&format!(
+            "{:20} {:>5} {:>12} {:>12} {:>8} {}\n",
+            "MOUNTPOINT", "LEVEL", "DURATION", "UNTIL_THAW", "BLOCKED", "REASON"
+        ));
         for entry in &list {
             let dur_s = entry.frozen_duration_ns / 1_000_000_000;
             let until_s = entry.time_until_thaw_ns / 1_000_000_000;
-            out.push_str(&format!("{:20} {:>5} {:>10}s {:>10}s {:>8} {}\n",
-                entry.mountpoint, entry.freeze_level,
-                dur_s, until_s, entry.blocked_writes, entry.reason));
+            out.push_str(&format!(
+                "{:20} {:>5} {:>10}s {:>10}s {:>8} {}\n",
+                entry.mountpoint,
+                entry.freeze_level,
+                dur_s,
+                until_s,
+                entry.blocked_writes,
+                entry.reason
+            ));
         }
     }
 
@@ -4609,7 +5011,10 @@ fn gen_recent() -> Vec<u8> {
 
     out.push_str("Recent Files Tracking\n");
     out.push_str("=====================\n\n");
-    out.push_str(&format!("Status:          {}\n", if enabled { "enabled" } else { "disabled" }));
+    out.push_str(&format!(
+        "Status:          {}\n",
+        if enabled { "enabled" } else { "disabled" }
+    ));
     out.push_str(&format!("Tracked entries: {}/{}\n", count, 1024));
     out.push_str(&format!("Recorded:        {}\n", recorded));
     out.push_str(&format!("Queried:         {}\n", queried));
@@ -4624,7 +5029,10 @@ fn gen_recent() -> Vec<u8> {
     if entries.is_empty() {
         out.push_str("No recent files.\n");
     } else {
-        out.push_str(&format!("{:40} {:8} {:>5} {}\n", "PATH", "TYPE", "COUNT", "SOURCE"));
+        out.push_str(&format!(
+            "{:40} {:8} {:>5} {}\n",
+            "PATH", "TYPE", "COUNT", "SOURCE"
+        ));
         for e in &entries {
             // Octal-escaped, not `.display()`: this is a one-line-per-entry
             // text table, so a path containing a newline (legal — only `/`
@@ -4729,8 +5137,15 @@ fn gen_thumbcache() -> Vec<u8> {
     out.push_str("Thumbnail Cache\n");
     out.push_str("===============\n\n");
     out.push_str(&format!("Cached:     {}/{}\n", count, 2048));
-    out.push_str(&format!("Memory:     {} / {} bytes\n", mem, 16 * 1024 * 1024));
-    out.push_str(&format!("Hit rate:   {}% ({} hits, {} misses)\n", hit_rate, hits, misses));
+    out.push_str(&format!(
+        "Memory:     {} / {} bytes\n",
+        mem,
+        16 * 1024 * 1024
+    ));
+    out.push_str(&format!(
+        "Hit rate:   {}% ({} hits, {} misses)\n",
+        hit_rate, hits, misses
+    ));
     out.push_str(&format!("Stores:     {}\n", stores));
     out.push_str(&format!("Evictions:  {}\n", evicts));
 
@@ -4751,15 +5166,20 @@ fn gen_bookmarks() -> Vec<u8> {
 
     let bookmarks = super::bookmarks::list_visible();
     if !bookmarks.is_empty() {
-        out.push_str(&format!("{:12} {:8} {:30} {}\n", "NAME", "CAT", "PATH", "LABEL"));
+        out.push_str(&format!(
+            "{:12} {:8} {:30} {}\n",
+            "NAME", "CAT", "PATH", "LABEL"
+        ));
         for bm in &bookmarks {
             // Escaped, not `.display()`: one line per bookmark, and a path
             // may legally contain a newline.
-            out.push_str(&format!("{:12} {:8} {:30} {}\n",
+            out.push_str(&format!(
+                "{:12} {:8} {:30} {}\n",
                 bm.name,
                 bm.category.label(),
                 crate::fs::escape::escape_octal(bm.path.as_bytes(), &[]),
-                bm.label));
+                bm.label
+            ));
         }
     }
 
@@ -4809,12 +5229,21 @@ fn gen_dragdrop() -> Vec<u8> {
     out.push_str(&format!("Drop zones:   {}/{}\n\n", zone_count, 256));
 
     let active = super::dragdrop::is_dragging();
-    out.push_str(&format!("Active drag:  {}\n", if active { "yes" } else { "no" }));
+    out.push_str(&format!(
+        "Active drag:  {}\n",
+        if active { "yes" } else { "no" }
+    ));
 
     if let Some(session) = super::dragdrop::current_session() {
         out.push_str(&format!("  Source:     {}\n", session.source));
-        out.push_str(&format!("  Formats:    {}\n", session.offered_formats.len()));
-        out.push_str(&format!("  Cursor:     ({}, {})\n", session.cursor.0, session.cursor.1));
+        out.push_str(&format!(
+            "  Formats:    {}\n",
+            session.offered_formats.len()
+        ));
+        out.push_str(&format!(
+            "  Cursor:     ({}, {})\n",
+            session.cursor.0, session.cursor.1
+        ));
     }
 
     out.into_bytes()
@@ -4835,7 +5264,10 @@ fn gen_fileops() -> Vec<u8> {
 
     let ops = super::fileops::list_ops();
     if !ops.is_empty() {
-        out.push_str(&format!("{:6} {:6} {:10} {}\n", "ID", "KIND", "STATE", "LABEL"));
+        out.push_str(&format!(
+            "{:6} {:6} {:10} {}\n",
+            "ID", "KIND", "STATE", "LABEL"
+        ));
         for (id, kind, state, label) in &ops {
             let state_str = match state {
                 super::fileops::OpState::Queued => "queued",
@@ -4845,7 +5277,13 @@ fn gen_fileops() -> Vec<u8> {
                 super::fileops::OpState::Cancelled => "cancelled",
                 super::fileops::OpState::Undoing => "undoing",
             };
-            out.push_str(&format!("{:6} {:6} {:10} {}\n", id, kind.label(), state_str, label));
+            out.push_str(&format!(
+                "{:6} {:6} {:10} {}\n",
+                id,
+                kind.label(),
+                state_str,
+                label
+            ));
         }
     }
 
@@ -4869,9 +5307,12 @@ fn gen_preview() -> Vec<u8> {
     if !generators.is_empty() {
         out.push_str("Custom generators:\n");
         for g in &generators {
-            out.push_str(&format!("  {} ({}): {}\n",
-                g.id, g.app_name,
-                g.mime_types.join(", ")));
+            out.push_str(&format!(
+                "  {} ({}): {}\n",
+                g.id,
+                g.app_name,
+                g.mime_types.join(", ")
+            ));
         }
     }
 
@@ -4892,10 +5333,19 @@ fn gen_templates() -> Vec<u8> {
 
     let templates = super::templates::list();
     if !templates.is_empty() {
-        out.push_str(&format!("{:6} {:12} {:24} {:8} {}\n", "ID", "CATEGORY", "NAME", "EXT", "SOURCE"));
+        out.push_str(&format!(
+            "{:6} {:12} {:24} {:8} {}\n",
+            "ID", "CATEGORY", "NAME", "EXT", "SOURCE"
+        ));
         for t in &templates {
-            out.push_str(&format!("{:6} {:12} {:24} {:8} {}\n",
-                t.id, t.category.label(), t.name, t.extension, t.source));
+            out.push_str(&format!(
+                "{:6} {:12} {:24} {:8} {}\n",
+                t.id,
+                t.category.label(),
+                t.name,
+                t.extension,
+                t.source
+            ));
         }
     }
 
@@ -4917,12 +5367,16 @@ fn gen_toolbar() -> Vec<u8> {
     let ctx = super::toolbar::ToolbarContext::default();
     let layout = super::toolbar::build(&ctx);
     out.push_str(&format!("Default buttons: {}\n\n", layout.buttons.len()));
-    out.push_str(&format!("{:16} {:12} {:8} {:8} {}\n",
-        "ACTION", "SECTION", "ENABLED", "TOGGLE", "LABEL"));
+    out.push_str(&format!(
+        "{:16} {:12} {:8} {:8} {}\n",
+        "ACTION", "SECTION", "ENABLED", "TOGGLE", "LABEL"
+    ));
     for btn in &layout.buttons {
         let sec = format!("{:?}", btn.section);
-        out.push_str(&format!("{:16} {:12} {:8} {:8} {}\n",
-            btn.action, sec, btn.enabled, btn.toggled, btn.label));
+        out.push_str(&format!(
+            "{:16} {:12} {:8} {:8} {}\n",
+            btn.action, sec, btn.enabled, btn.toggled, btn.label
+        ));
     }
 
     out.into_bytes()
@@ -4955,10 +5409,16 @@ fn gen_queryable() -> Vec<u8> {
     let schemas = super::queryable::list_schemas();
     if !schemas.is_empty() {
         out.push_str(&format!("Schemas: {}\n", schemas.len()));
-        out.push_str(&format!("{:30} {:8} {:8} {}\n", "NAME", "TYPE", "INDEXED", "DESCRIPTION"));
+        out.push_str(&format!(
+            "{:30} {:8} {:8} {}\n",
+            "NAME", "TYPE", "INDEXED", "DESCRIPTION"
+        ));
         for s in &schemas {
             let idx = if s.indexed { "yes" } else { "no" };
-            out.push_str(&format!("{:30} {:8} {:8} {}\n", s.name, s.value_type, idx, s.description));
+            out.push_str(&format!(
+                "{:30} {:8} {:8} {}\n",
+                s.name, s.value_type, idx, s.description
+            ));
         }
     }
 
@@ -4981,7 +5441,11 @@ fn gen_immutable() -> Vec<u8> {
     if !flagged_files.is_empty() {
         out.push_str(&format!("{:40} {}\n", "PATH", "FLAGS"));
         for (path, flags) in &flagged_files {
-            out.push_str(&format!("{:40} {}\n", path, super::immutable::flags_to_string(*flags)));
+            out.push_str(&format!(
+                "{:40} {}\n",
+                path,
+                super::immutable::flags_to_string(*flags)
+            ));
         }
     }
 
@@ -5041,10 +5505,14 @@ fn gen_rundialog() -> Vec<u8> {
             // An unresolved command prints `-`, which cannot be mistaken for a
             // path because a resolved path is always absolute.
             let command = mangle_mount_field(&cmd.command);
-            let resolved = cmd.resolved_path.as_ref()
+            let resolved = cmd
+                .resolved_path
+                .as_ref()
                 .map_or_else(|| String::from("-"), |p| mangle_mount_field(p.as_bytes()));
-            out.push_str(&format!("  {} (x{}) → {}\n",
-                command, cmd.run_count, resolved));
+            out.push_str(&format!(
+                "  {} (x{}) → {}\n",
+                command, cmd.run_count, resolved
+            ));
         }
         out.push('\n');
     }
@@ -5054,8 +5522,11 @@ fn gen_rundialog() -> Vec<u8> {
         out.push_str("Aliases:\n");
         for (name, target) in &aliases {
             // Octal-escaped for the same reason as the recent-command list.
-            out.push_str(&format!("  {} → {}\n",
-                mangle_mount_field(name), mangle_mount_field(target.as_bytes())));
+            out.push_str(&format!(
+                "  {} → {}\n",
+                mangle_mount_field(name),
+                mangle_mount_field(target.as_bytes())
+            ));
         }
     }
 
@@ -5078,10 +5549,16 @@ fn gen_notifcenter() -> Vec<u8> {
 
     let summaries = super::notifcenter::app_summaries();
     if !summaries.is_empty() {
-        out.push_str(&format!("{:20} {:6} {:6} {:6}\n", "APP", "TOTAL", "UNREAD", "MUTED"));
+        out.push_str(&format!(
+            "{:20} {:6} {:6} {:6}\n",
+            "APP", "TOTAL", "UNREAD", "MUTED"
+        ));
         for s in &summaries {
             let muted_s = if s.muted { "yes" } else { "no" };
-            out.push_str(&format!("{:20} {:6} {:6} {:6}\n", s.app, s.total, s.unread, muted_s));
+            out.push_str(&format!(
+                "{:20} {:6} {:6} {:6}\n",
+                s.app, s.total, s.unread, muted_s
+            ));
         }
     }
 
@@ -5129,11 +5606,16 @@ fn gen_systray() -> Vec<u8> {
 
     let visible = super::systray::visible_icons();
     if !visible.is_empty() {
-        out.push_str(&format!("{:20} {:20} {:8} {}\n", "ID", "TOOLTIP", "ORDER", "BADGE"));
+        out.push_str(&format!(
+            "{:20} {:20} {:8} {}\n",
+            "ID", "TOOLTIP", "ORDER", "BADGE"
+        ));
         for icon in &visible {
             let badge = icon.badge.as_deref().unwrap_or("-");
-            out.push_str(&format!("{:20} {:20} {:8} {}\n",
-                icon.id, icon.tooltip, icon.order, badge));
+            out.push_str(&format!(
+                "{:20} {:20} {:8} {}\n",
+                icon.id, icon.tooltip, icon.order, badge
+            ));
         }
     }
 
@@ -5177,10 +5659,22 @@ fn gen_taskbar() -> Vec<u8> {
         super::taskbar::TaskbarPosition::Right => "right",
     };
     out.push_str(&format!("Position:   {}\n", pos));
-    out.push_str(&format!("Names:      {}\n", if cfg.show_names { "yes" } else { "no" }));
-    out.push_str(&format!("Grouping:   {}\n", if cfg.group_windows { "yes" } else { "no" }));
-    out.push_str(&format!("Auto-hide:  {}\n", if cfg.auto_hide { "yes" } else { "no" }));
-    out.push_str(&format!("Small icons:{}\n\n", if cfg.small_icons { " yes" } else { " no" }));
+    out.push_str(&format!(
+        "Names:      {}\n",
+        if cfg.show_names { "yes" } else { "no" }
+    ));
+    out.push_str(&format!(
+        "Grouping:   {}\n",
+        if cfg.group_windows { "yes" } else { "no" }
+    ));
+    out.push_str(&format!(
+        "Auto-hide:  {}\n",
+        if cfg.auto_hide { "yes" } else { "no" }
+    ));
+    out.push_str(&format!(
+        "Small icons:{}\n\n",
+        if cfg.small_icons { " yes" } else { " no" }
+    ));
 
     let pinned = super::taskbar::pinned_apps();
     if !pinned.is_empty() {
@@ -5201,7 +5695,12 @@ fn gen_taskbar() -> Vec<u8> {
                 super::taskbar::EntryState::NotResponding => " [NR]",
                 super::taskbar::EntryState::Loading => " [...]",
             };
-            out.push_str(&format!("  {} ({} windows){}\n", e.name, e.windows.len(), state));
+            out.push_str(&format!(
+                "  {} ({} windows){}\n",
+                e.name,
+                e.windows.len(),
+                state
+            ));
         }
     }
 
@@ -5245,7 +5744,10 @@ fn gen_startmenu() -> Vec<u8> {
     if !recent.is_empty() {
         out.push_str("Recent:\n");
         for r in &recent {
-            out.push_str(&format!("  {} (x{}) — {}\n", r.name, r.launch_count, r.app_id));
+            out.push_str(&format!(
+                "  {} (x{}) — {}\n",
+                r.name, r.launch_count, r.app_id
+            ));
         }
     }
 
@@ -5304,7 +5806,10 @@ fn gen_theme() -> Vec<u8> {
     out.push_str(&format!("Mode:           {}\n", mode.label()));
     out.push_str(&format!("Custom themes:  {}/{}\n", custom_n, 64));
     out.push_str(&format!("Overrides:      {}/{}\n", override_n, 128));
-    out.push_str(&format!("Accent:         {}\n", super::theme::accent().to_hex()));
+    out.push_str(&format!(
+        "Accent:         {}\n",
+        super::theme::accent().to_hex()
+    ));
     out.push_str(&format!("Query ops:      {}\n", queries));
     out.push_str(&format!("Change ops:     {}\n\n", changes));
 
@@ -5345,11 +5850,15 @@ fn gen_hotkeys() -> Vec<u8> {
     if !bindings.is_empty() {
         out.push_str(&format!("{:24} {:30} {}\n", "COMBO", "ACTION", "DESC"));
         for h in &bindings {
-            let action_str = h.actions.first()
-                .map_or(String::from("-"), |a| a.label());
+            let action_str = h.actions.first().map_or(String::from("-"), |a| a.label());
             let def = if h.is_default { " [default]" } else { "" };
-            out.push_str(&format!("{:24} {:30} {}{}\n",
-                h.combo.display(), action_str, h.description, def));
+            out.push_str(&format!(
+                "{:24} {:30} {}{}\n",
+                h.combo.display(),
+                action_str,
+                h.description,
+                def
+            ));
         }
     }
 
@@ -5371,14 +5880,23 @@ fn gen_widgets() -> Vec<u8> {
 
     let widgets = super::widgets::active_widgets();
     if !widgets.is_empty() {
-        out.push_str(&format!("{:6} {:16} {:20} {:10} {:10} {}\n",
-            "ID", "KIND", "TITLE", "POS", "SIZE", "VISIBLE"));
+        out.push_str(&format!(
+            "{:6} {:16} {:20} {:10} {:10} {}\n",
+            "ID", "KIND", "TITLE", "POS", "SIZE", "VISIBLE"
+        ));
         for w in &widgets {
             let pos = format!("{},{}", w.x, w.y);
             let size = format!("{}x{}", w.width, w.height);
             let vis = if w.visible { "yes" } else { "hidden" };
-            out.push_str(&format!("{:<6} {:16} {:20} {:10} {:10} {}\n",
-                w.id, w.kind.label(), w.title, pos, size, vis));
+            out.push_str(&format!(
+                "{:<6} {:16} {:20} {:10} {:10} {}\n",
+                w.id,
+                w.kind.label(),
+                w.title,
+                pos,
+                size,
+                vis
+            ));
         }
     }
 
@@ -5395,8 +5913,15 @@ fn gen_soundmixer() -> Vec<u8> {
 
     out.push_str("Sound Mixer\n");
     out.push_str("===========\n\n");
-    out.push_str(&format!("Master:   {}%{}\n", master, if muted { " (MUTED)" } else { "" }));
-    out.push_str(&format!("Ducking:  {}\n", super::soundmixer::ducking_policy().label()));
+    out.push_str(&format!(
+        "Master:   {}%{}\n",
+        master,
+        if muted { " (MUTED)" } else { "" }
+    ));
+    out.push_str(&format!(
+        "Ducking:  {}\n",
+        super::soundmixer::ducking_policy().label()
+    ));
     out.push_str(&format!("Devices:  {}/{}\n", devices, 32));
     out.push_str(&format!("Apps:     {}/{}\n", apps, 128));
     out.push_str(&format!("Streams:  {}/{}\n", streams, 256));
@@ -5405,15 +5930,20 @@ fn gen_soundmixer() -> Vec<u8> {
 
     let app_list = super::soundmixer::app_entries();
     if !app_list.is_empty() {
-        out.push_str(&format!("{:20} {:20} {:6} {:6} {:8} {}\n",
-            "APP_ID", "NAME", "VOL", "MUTED", "STREAMS", "PLAYING"));
+        out.push_str(&format!(
+            "{:20} {:20} {:6} {:6} {:8} {}\n",
+            "APP_ID", "NAME", "VOL", "MUTED", "STREAMS", "PLAYING"
+        ));
         for a in &app_list {
-            out.push_str(&format!("{:20} {:20} {:6} {:6} {:8} {}\n",
-                a.app_id, a.app_name,
+            out.push_str(&format!(
+                "{:20} {:20} {:6} {:6} {:8} {}\n",
+                a.app_id,
+                a.app_name,
                 format!("{}%", a.volume),
                 if a.muted { "yes" } else { "no" },
                 a.stream_count,
-                if a.playing { "YES" } else { "-" }));
+                if a.playing { "YES" } else { "-" }
+            ));
         }
     }
 
@@ -5430,14 +5960,38 @@ fn gen_wallpaper() -> Vec<u8> {
     out.push_str("Desktop Wallpaper\n");
     out.push_str("=================\n\n");
     out.push_str(&format!("Kind:       {}\n", cfg.kind.label()));
-    out.push_str(&format!("Image:      {}\n", if cfg.image_path.is_empty() { "(none)" } else { &cfg.image_path }));
+    out.push_str(&format!(
+        "Image:      {}\n",
+        if cfg.image_path.is_empty() {
+            "(none)"
+        } else {
+            &cfg.image_path
+        }
+    ));
     out.push_str(&format!("Fit:        {}\n", cfg.fit_mode.label()));
     out.push_str(&format!("BG Color:   {}\n", cfg.background_color));
-    out.push_str(&format!("Login:      {}\n", if cfg.use_for_login { "same as desktop" } else { "separate" }));
-    out.push_str(&format!("Random:     boot={} daily={}\n", cfg.random_on_boot, cfg.change_daily));
-    out.push_str(&format!("Slideshow:  {} images, {}s interval, {}\n",
-        slide_count, cfg.slideshow_interval_secs,
-        if cfg.slideshow_running { "running" } else { "paused" }));
+    out.push_str(&format!(
+        "Login:      {}\n",
+        if cfg.use_for_login {
+            "same as desktop"
+        } else {
+            "separate"
+        }
+    ));
+    out.push_str(&format!(
+        "Random:     boot={} daily={}\n",
+        cfg.random_on_boot, cfg.change_daily
+    ));
+    out.push_str(&format!(
+        "Slideshow:  {} images, {}s interval, {}\n",
+        slide_count,
+        cfg.slideshow_interval_secs,
+        if cfg.slideshow_running {
+            "running"
+        } else {
+            "paused"
+        }
+    ));
     out.push_str(&format!("History:    {}/{}\n", hist_count, 64));
     out.push_str(&format!("Sets:       {}\n", sets));
     out.push_str(&format!("Advances:   {}\n", advances));
@@ -5454,7 +6008,10 @@ fn gen_credentials() -> Vec<u8> {
 
     out.push_str("Credential Store\n");
     out.push_str("================\n\n");
-    out.push_str(&format!("Status:    {}\n", if unlocked { "UNLOCKED" } else { "LOCKED" }));
+    out.push_str(&format!(
+        "Status:    {}\n",
+        if unlocked { "UNLOCKED" } else { "LOCKED" }
+    ));
     out.push_str(&format!("Stored:    {}/{}\n", cred_count, 4096));
     out.push_str(&format!("Autofill:  {}/{}\n", autofill_count, 1024));
     out.push_str(&format!("Stores:    {}\n", stores));
@@ -5463,12 +6020,19 @@ fn gen_credentials() -> Vec<u8> {
     // Only show summaries (no secrets).
     let creds = super::credentials::list_all();
     if !creds.is_empty() {
-        out.push_str(&format!("{:16} {:24} {:20} {:10} {}\n",
-            "APP", "SERVICE", "USER", "KIND", "EXPIRED"));
+        out.push_str(&format!(
+            "{:16} {:24} {:20} {:10} {}\n",
+            "APP", "SERVICE", "USER", "KIND", "EXPIRED"
+        ));
         for c in creds.iter().take(30) {
-            out.push_str(&format!("{:16} {:24} {:20} {:10} {}\n",
-                c.app_id, c.service, c.username, c.kind.label(),
-                if c.expired { "YES" } else { "-" }));
+            out.push_str(&format!(
+                "{:16} {:24} {:20} {:10} {}\n",
+                c.app_id,
+                c.service,
+                c.username,
+                c.kind.label(),
+                if c.expired { "YES" } else { "-" }
+            ));
         }
     }
 
@@ -5486,26 +6050,46 @@ fn gen_power() -> Vec<u8> {
     out.push_str("Power Management\n");
     out.push_str("================\n\n");
     out.push_str(&format!("Profile:      {}\n", cfg.profile.label()));
-    out.push_str(&format!("Power btn:    {}\n", cfg.power_button_action.label()));
+    out.push_str(&format!(
+        "Power btn:    {}\n",
+        cfg.power_button_action.label()
+    ));
     out.push_str(&format!("Lid close:    {}\n", cfg.lid_close_action.label()));
     out.push_str(&format!("Screen off:   {}min\n", cfg.screen_off_minutes));
     out.push_str(&format!("Sleep after:  {}min\n", cfg.sleep_minutes));
-    out.push_str(&format!("Screen:       {}\n", if screen_off { "OFF" } else { "ON" }));
+    out.push_str(&format!(
+        "Screen:       {}\n",
+        if screen_off { "OFF" } else { "ON" }
+    ));
     out.push_str(&format!("Events:       {}\n", events));
     out.push_str(&format!("Idle checks:  {}\n\n", idles));
 
     if bat_present {
-        out.push_str(&format!("Battery:      {}%{}\n", bat.percent,
-            if bat.charging { " (charging)" } else { "" }));
-        out.push_str(&format!("Minutes left: {}\n",
-            if bat.minutes_left < 0 { String::from("unknown") }
-            else { format!("{}", bat.minutes_left) }));
+        out.push_str(&format!(
+            "Battery:      {}%{}\n",
+            bat.percent,
+            if bat.charging { " (charging)" } else { "" }
+        ));
+        out.push_str(&format!(
+            "Minutes left: {}\n",
+            if bat.minutes_left < 0 {
+                String::from("unknown")
+            } else {
+                format!("{}", bat.minutes_left)
+            }
+        ));
         out.push_str(&format!("Health:       {}%\n", bat.health));
         out.push_str(&format!("Source:       {}\n", bat.source.label()));
-        out.push_str(&format!("Low bat:      {}% → {}\n",
-            cfg.low_battery_percent, cfg.low_battery_action.label()));
-        out.push_str(&format!("Critical:     {}min → {}\n",
-            cfg.critical_battery_minutes, cfg.critical_battery_action.label()));
+        out.push_str(&format!(
+            "Low bat:      {}% → {}\n",
+            cfg.low_battery_percent,
+            cfg.low_battery_action.label()
+        ));
+        out.push_str(&format!(
+            "Critical:     {}min → {}\n",
+            cfg.critical_battery_minutes,
+            cfg.critical_battery_action.label()
+        ));
     } else {
         out.push_str("Battery:      not present\n");
     }
@@ -5538,17 +6122,26 @@ fn gen_display() -> Vec<u8> {
                 super::display::Orientation::LandscapeFlipped => "landscape-flip",
                 super::display::Orientation::PortraitFlipped => "portrait-flip",
             };
-            out.push_str(&format!("{}{}: {} — {} scale={}% orient={} pos=({},{}) {}\n",
+            out.push_str(&format!(
+                "{}{}: {} — {} scale={}% orient={} pos=({},{}) {}\n",
                 if m.primary { "*" } else { " " },
-                m.id, m.name, active, m.scale_percent, orient,
-                m.pos_x, m.pos_y,
-                if m.enabled { "ON" } else { "OFF" }));
+                m.id,
+                m.name,
+                active,
+                m.scale_percent,
+                orient,
+                m.pos_x,
+                m.pos_y,
+                if m.enabled { "ON" } else { "OFF" }
+            ));
         }
     }
 
     if let Some(p) = super::display::pending_change() {
-        out.push_str(&format!("\nPending change: monitor={} revert in {}s\n",
-            p.monitor_id, p.timeout_secs));
+        out.push_str(&format!(
+            "\nPending change: monitor={} revert in {}s\n",
+            p.monitor_id, p.timeout_secs
+        ));
     }
 
     out.into_bytes()
@@ -5568,16 +6161,29 @@ fn gen_vdesktop() -> Vec<u8> {
     out.push_str(&format!("Switches:   {}\n", switches));
     out.push_str(&format!("Moves:      {}\n", moves));
     out.push_str(&format!("Current:    {}\n", super::vdesktop::current()));
-    out.push_str(&format!("Animation:  {}\n", super::vdesktop::animation().label()));
-    out.push_str(&format!("Wrap:       {}\n\n", super::vdesktop::wrap_around()));
+    out.push_str(&format!(
+        "Animation:  {}\n",
+        super::vdesktop::animation().label()
+    ));
+    out.push_str(&format!(
+        "Wrap:       {}\n\n",
+        super::vdesktop::wrap_around()
+    ));
 
     let desktops = super::vdesktop::list();
     for d in &desktops {
-        out.push_str(&format!("{}{}: {} ({} windows){}\n",
+        out.push_str(&format!(
+            "{}{}: {} ({} windows){}\n",
             if d.active { "*" } else { " " },
-            d.id, d.name, d.windows.len(),
-            if d.wallpaper.is_empty() { String::new() }
-            else { format!(" wp={}", d.wallpaper) }));
+            d.id,
+            d.name,
+            d.windows.len(),
+            if d.wallpaper.is_empty() {
+                String::new()
+            } else {
+                format!(" wp={}", d.wallpaper)
+            }
+        ));
     }
 
     out.into_bytes()
@@ -5597,15 +6203,26 @@ fn gen_keylayout() -> Vec<u8> {
     out.push_str(&format!("Switches:    {}\n", sc));
     out.push_str(&format!("Active:      {}\n\n", {
         let a = super::keylayout::active();
-        if a.is_empty() { String::from("(none)") } else { a }
+        if a.is_empty() {
+            String::from("(none)")
+        } else {
+            a
+        }
     }));
 
     let layouts = super::keylayout::list_layouts();
     for (name, desc, builtin) in &layouts {
-        out.push_str(&format!("{}{}: {}{}\n",
-            if *name == super::keylayout::active() { "*" } else { " " },
-            name, desc,
-            if *builtin { " [built-in]" } else { "" }));
+        out.push_str(&format!(
+            "{}{}: {}{}\n",
+            if *name == super::keylayout::active() {
+                "*"
+            } else {
+                " "
+            },
+            name,
+            desc,
+            if *builtin { " [built-in]" } else { "" }
+        ));
     }
 
     out.into_bytes()
@@ -5622,7 +6239,14 @@ fn gen_screenshot() -> Vec<u8> {
     out.push_str("==========\n\n");
     out.push_str(&format!("History:    {}\n", hc));
     out.push_str(&format!("Captures:   {}\n", cc));
-    out.push_str(&format!("Save dir:   {}\n", if cfg.save_dir.is_empty() { "(default)" } else { &cfg.save_dir }));
+    out.push_str(&format!(
+        "Save dir:   {}\n",
+        if cfg.save_dir.is_empty() {
+            "(default)"
+        } else {
+            &cfg.save_dir
+        }
+    ));
     out.push_str(&format!("Format:     {}\n", cfg.format.label()));
     out.push_str(&format!("Cursor:     {}\n", cfg.include_cursor));
     out.push_str(&format!("Clipboard:  {}\n", cfg.copy_to_clipboard));
@@ -5630,8 +6254,14 @@ fn gen_screenshot() -> Vec<u8> {
 
     let shots = super::screenshot::recent(10);
     for s in &shots {
-        out.push_str(&format!("#{}: {} {}x{} {}\n",
-            s.id, s.kind.label(), s.width, s.height, s.path));
+        out.push_str(&format!(
+            "#{}: {} {}x{} {}\n",
+            s.id,
+            s.kind.label(),
+            s.width,
+            s.height,
+            s.path
+        ));
     }
 
     out.into_bytes()
@@ -5661,9 +6291,13 @@ fn gen_a11y() -> Vec<u8> {
 
     let tools = super::a11y::list_tools();
     for t in &tools {
-        out.push_str(&format!("  #{}: {} [{}]{}\n",
-            t.id, t.name, t.kind.label(),
-            if t.active { "" } else { " (inactive)" }));
+        out.push_str(&format!(
+            "  #{}: {} [{}]{}\n",
+            t.id,
+            t.name,
+            t.kind.label(),
+            if t.active { "" } else { " (inactive)" }
+        ));
     }
 
     out.into_bytes()
@@ -5681,22 +6315,42 @@ fn gen_ime() -> Vec<u8> {
     out.push_str(&format!("Emoji:    {}\n", ec));
     out.push_str(&format!("Commits:  {}\n", cc));
     out.push_str(&format!("Keys:     {}\n", kc));
-    out.push_str(&format!("Active:   {} [{}]\n\n",
-        { let a = super::ime::active(); if a.is_empty() { String::from("(none)") } else { a } },
-        super::ime::active_indicator()));
+    out.push_str(&format!(
+        "Active:   {} [{}]\n\n",
+        {
+            let a = super::ime::active();
+            if a.is_empty() {
+                String::from("(none)")
+            } else {
+                a
+            }
+        },
+        super::ime::active_indicator()
+    ));
 
     let methods = super::ime::list_methods();
     for m in &methods {
-        out.push_str(&format!("{}{}: {} ({}){}\n",
-            if m.id == super::ime::active() { "*" } else { " " },
-            m.id, m.name, m.language,
-            if m.builtin { " [built-in]" } else { "" }));
+        out.push_str(&format!(
+            "{}{}: {} ({}){}\n",
+            if m.id == super::ime::active() {
+                "*"
+            } else {
+                " "
+            },
+            m.id,
+            m.name,
+            m.language,
+            if m.builtin { " [built-in]" } else { "" }
+        ));
     }
 
     let comp = super::ime::composition();
     if comp.active {
-        out.push_str(&format!("\nComposing: '{}' ({} candidates)\n",
-            comp.buffer, comp.candidates.len()));
+        out.push_str(&format!(
+            "\nComposing: '{}' ({} candidates)\n",
+            comp.buffer,
+            comp.candidates.len()
+        ));
     }
 
     out.into_bytes()
@@ -5717,16 +6371,29 @@ fn gen_netindicator() -> Vec<u8> {
     out.push_str(&format!("Profiles:   {}\n", pc));
     out.push_str(&format!("Scans:      {}\n", sc));
     out.push_str(&format!("Connects:   {}\n", cc));
-    out.push_str(&format!("Airplane:   {}\n\n", super::netindicator::airplane_mode()));
+    out.push_str(&format!(
+        "Airplane:   {}\n\n",
+        super::netindicator::airplane_mode()
+    ));
 
     let ifaces = super::netindicator::list_interfaces();
     for i in &ifaces {
-        out.push_str(&format!("{}: {} [{}] {}{}\n",
-            i.name, i.iface_type.label(), i.state.label(),
-            if i.ipv4.is_empty() { String::new() } else { format!("ip={} ", i.ipv4) },
+        out.push_str(&format!(
+            "{}: {} [{}] {}{}\n",
+            i.name,
+            i.iface_type.label(),
+            i.state.label(),
+            if i.ipv4.is_empty() {
+                String::new()
+            } else {
+                format!("ip={} ", i.ipv4)
+            },
             if i.iface_type == super::netindicator::InterfaceType::Wifi && !i.ssid.is_empty() {
                 format!("ssid={} signal={}%", i.ssid, i.signal)
-            } else { String::new() }));
+            } else {
+                String::new()
+            }
+        ));
     }
 
     out.into_bytes()
@@ -5753,10 +6420,17 @@ fn gen_winsnap() -> Vec<u8> {
 
     let layouts = super::winsnap::list_layouts();
     for l in &layouts {
-        out.push_str(&format!("{}: {} ({} zones)\n", l.name, l.description, l.zones.len()));
+        out.push_str(&format!(
+            "{}: {} ({} zones)\n",
+            l.name,
+            l.description,
+            l.zones.len()
+        ));
         for z in &l.zones {
-            out.push_str(&format!("  {} ({},{} {}x{})\n",
-                z.name, z.x_pct, z.y_pct, z.w_pct, z.h_pct));
+            out.push_str(&format!(
+                "  {} ({},{} {}x{})\n",
+                z.name, z.x_pct, z.y_pct, z.w_pct, z.h_pct
+            ));
         }
     }
 
@@ -5805,14 +6479,26 @@ fn gen_cursorsettings() -> Vec<u8> {
     out.push_str(&format!("Active theme:     {}\n", cfg.active_theme));
     out.push_str(&format!("Cursor size:      {}px\n", cfg.cursor_size));
     out.push_str(&format!("Speed:            {}\n", cfg.speed));
-    out.push_str(&format!("Accel profile:    {}\n", cfg.accel_profile.label()));
-    out.push_str(&format!("Button layout:    {}\n", cfg.button_layout.label()));
+    out.push_str(&format!(
+        "Accel profile:    {}\n",
+        cfg.accel_profile.label()
+    ));
+    out.push_str(&format!(
+        "Button layout:    {}\n",
+        cfg.button_layout.label()
+    ));
     out.push_str(&format!("Double-click:     {}ms\n", cfg.double_click_ms));
     out.push_str(&format!("Scroll speed:     {}\n", cfg.scroll_speed));
     out.push_str(&format!("Natural scroll:   {}\n", cfg.natural_scroll));
-    out.push_str(&format!("Trail:            {}{}\n",
+    out.push_str(&format!(
+        "Trail:            {}{}\n",
         cfg.show_trail,
-        if cfg.show_trail { alloc::format!(" (len={})", cfg.trail_length) } else { String::new() }));
+        if cfg.show_trail {
+            alloc::format!(" (len={})", cfg.trail_length)
+        } else {
+            String::new()
+        }
+    ));
     out.push_str(&format!("Locate on Ctrl:   {}\n", cfg.locate_on_ctrl));
     out.push_str(&format!("Hide while typing:{}\n", cfg.hide_while_typing));
     out.push_str(&format!("Themes:           {}\n", theme_count));
@@ -5820,9 +6506,14 @@ fn gen_cursorsettings() -> Vec<u8> {
 
     let themes = super::cursorsettings::list_themes();
     for t in &themes {
-        out.push_str(&format!("{}: {} ({}px, {} cursors{})\n",
-            t.name, t.description, t.base_size, t.cursors.len(),
-            if t.builtin { ", builtin" } else { "" }));
+        out.push_str(&format!(
+            "{}: {} ({}px, {} cursors{})\n",
+            t.name,
+            t.description,
+            t.base_size,
+            t.cursors.len(),
+            if t.builtin { ", builtin" } else { "" }
+        ));
     }
 
     out.into_bytes()
@@ -5842,13 +6533,38 @@ fn gen_kbsettings() -> Vec<u8> {
     out.push_str(&format!("Repeat rate:     {}ms\n", cfg.repeat_rate_ms));
     out.push_str(&format!("NumLock boot:    {}\n", cfg.numlock_boot.label()));
     out.push_str(&format!("CapsLock toggle: {}\n", cfg.caps_lock_toggle));
-    out.push_str(&format!("Sticky Keys:     {}{}\n", cfg.sticky_keys,
-        if cfg.sticky_lock_on_double { " (lock on double)" } else { "" }));
-    out.push_str(&format!("Filter Keys:     {}{}\n", cfg.filter_keys,
-        if cfg.filter_keys { alloc::format!(" (hold={}ms debounce={}ms)", cfg.filter_min_hold_ms, cfg.filter_debounce_ms) } else { String::new() }));
+    out.push_str(&format!(
+        "Sticky Keys:     {}{}\n",
+        cfg.sticky_keys,
+        if cfg.sticky_lock_on_double {
+            " (lock on double)"
+        } else {
+            ""
+        }
+    ));
+    out.push_str(&format!(
+        "Filter Keys:     {}{}\n",
+        cfg.filter_keys,
+        if cfg.filter_keys {
+            alloc::format!(
+                " (hold={}ms debounce={}ms)",
+                cfg.filter_min_hold_ms,
+                cfg.filter_debounce_ms
+            )
+        } else {
+            String::new()
+        }
+    ));
     out.push_str(&format!("Toggle sounds:   {}\n", cfg.toggle_keys_sound));
-    out.push_str(&format!("Bounce Keys:     {}{}\n", cfg.bounce_keys,
-        if cfg.bounce_keys { alloc::format!(" ({}ms)", cfg.bounce_ms) } else { String::new() }));
+    out.push_str(&format!(
+        "Bounce Keys:     {}{}\n",
+        cfg.bounce_keys,
+        if cfg.bounce_keys {
+            alloc::format!(" ({}ms)", cfg.bounce_ms)
+        } else {
+            String::new()
+        }
+    ));
     out.push_str(&format!("Compose key:     {}\n", cfg.compose_key));
     out.push_str(&format!("Ctrl+Alt=AltGr:  {}\n", cfg.ctrl_alt_as_altgr));
     out.push_str(&format!("Profiles:        {}\n", prof_count));
@@ -5857,9 +6573,14 @@ fn gen_kbsettings() -> Vec<u8> {
 
     let profiles = super::kbsettings::list_profiles();
     for p in &profiles {
-        out.push_str(&format!("{}: {} delay={}ms rate={}ms{}\n",
-            p.name, p.preset.label(), p.repeat_delay_ms, p.repeat_rate_ms,
-            if p.active { " [active]" } else { "" }));
+        out.push_str(&format!(
+            "{}: {} delay={}ms rate={}ms{}\n",
+            p.name,
+            p.preset.label(),
+            p.repeat_delay_ms,
+            p.repeat_rate_ms,
+            if p.active { " [active]" } else { "" }
+        ));
     }
 
     out.into_bytes()
@@ -5880,7 +6601,11 @@ fn gen_detailcols() -> Vec<u8> {
 
     let bindings = super::detailcols::list_bindings();
     for b in &bindings {
-        out.push_str(&format!("{} → {} columns\n", b.mime_pattern, b.column_ids.len()));
+        out.push_str(&format!(
+            "{} → {} columns\n",
+            b.mime_pattern,
+            b.column_ids.len()
+        ));
     }
 
     out.into_bytes()
@@ -5897,23 +6622,44 @@ fn gen_partmgr() -> Vec<u8> {
     out.push_str(&format!("Disks:      {}\n", disk_count));
     out.push_str(&format!("Partitions: {}\n", part_count));
     out.push_str(&format!("Operations: {}\n", ops));
-    out.push_str(&format!("Confirm:    {}\n\n", super::partmgr::confirmation_required()));
+    out.push_str(&format!(
+        "Confirm:    {}\n\n",
+        super::partmgr::confirmation_required()
+    ));
 
     let disks = super::partmgr::list_disks();
     for d in &disks {
         let gb = d.size_bytes / (1024 * 1024 * 1024);
-        out.push_str(&format!("{}: {} {} {}GB [{}]{}{}\n",
-            d.name, d.model, d.serial, gb, d.table_type.label(),
+        out.push_str(&format!(
+            "{}: {} {} {}GB [{}]{}{}\n",
+            d.name,
+            d.model,
+            d.serial,
+            gb,
+            d.table_type.label(),
             if d.removable { " removable" } else { "" },
-            if d.read_only { " ro" } else { "" }));
+            if d.read_only { " ro" } else { "" }
+        ));
         let parts = super::partmgr::list_partitions(d.id);
         for p in &parts {
             let mb = p.size_bytes / (1024 * 1024);
-            out.push_str(&format!("  #{}: {} {}MB {} [{}]{}\n",
-                p.number, p.label, mb, p.fs_type.label(),
-                p.flags.iter().map(|f| f.label()).collect::<Vec<_>>().join(","),
-                if p.mount_point.is_empty() { String::new() }
-                else { alloc::format!(" → {}", p.mount_point) }));
+            out.push_str(&format!(
+                "  #{}: {} {}MB {} [{}]{}\n",
+                p.number,
+                p.label,
+                mb,
+                p.fs_type.label(),
+                p.flags
+                    .iter()
+                    .map(|f| f.label())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                if p.mount_point.is_empty() {
+                    String::new()
+                } else {
+                    alloc::format!(" → {}", p.mount_point)
+                }
+            ));
         }
     }
 
@@ -5933,9 +6679,20 @@ fn gen_locale() -> Vec<u8> {
     out.push_str(&format!("Fallback:      {}\n", cfg.fallback_language));
     out.push_str(&format!("Region format: {}\n", cfg.region_format));
     out.push_str(&format!("Numbers:       {}\n", cfg.number_format.label()));
-    out.push_str(&format!("Currency:      {}{}\n", cfg.currency_symbol,
-        if cfg.currency_before { " (before)" } else { " (after)" }));
-    out.push_str(&format!("Date:          {} ({})\n", cfg.date_order.label(), cfg.date_separator.label()));
+    out.push_str(&format!(
+        "Currency:      {}{}\n",
+        cfg.currency_symbol,
+        if cfg.currency_before {
+            " (before)"
+        } else {
+            " (after)"
+        }
+    ));
+    out.push_str(&format!(
+        "Date:          {} ({})\n",
+        cfg.date_order.label(),
+        cfg.date_separator.label()
+    ));
     out.push_str(&format!("Time:          {}\n", cfg.time_format.label()));
     out.push_str(&format!("First day:     {}\n", cfg.first_day.label()));
     out.push_str(&format!("Measurement:   {}\n", cfg.measurement.label()));
@@ -5943,9 +6700,15 @@ fn gen_locale() -> Vec<u8> {
     // `offset_minutes as f32 / 60.0`, which printed `UTC+5.5` for India and
     // dragged floating point — and therefore SSE register state — into a
     // kernel print path.
-    out.push_str(&format!("Timezone:      {} (UTC{})\n", cfg.timezone,
-        super::locale::format_utc_offset(super::locale::timezone_offset_minutes())));
-    out.push_str(&format!("Paper:         {}\n", if cfg.paper_a4 { "A4" } else { "Letter" }));
+    out.push_str(&format!(
+        "Timezone:      {} (UTC{})\n",
+        cfg.timezone,
+        super::locale::format_utc_offset(super::locale::timezone_offset_minutes())
+    ));
+    out.push_str(&format!(
+        "Paper:         {}\n",
+        if cfg.paper_a4 { "A4" } else { "Letter" }
+    ));
     out.push_str(&format!("Languages:     {}\n", lang_count));
     out.push_str(&format!("Timezones:     {}\n", tz_count));
     out.push_str(&format!("Changes:       {}\n", changes));
@@ -6010,7 +6773,10 @@ fn gen_progmgr() -> Vec<u8> {
 
     out.push_str("Program Manager\n");
     out.push_str("===============\n\n");
-    out.push_str(&format!("Programs:   {} ({} installed)\n", total, installed));
+    out.push_str(&format!(
+        "Programs:   {} ({} installed)\n",
+        total, installed
+    ));
     out.push_str(&format!("Snapshots:  {}\n", snaps));
     out.push_str(&format!("Operations: {}\n", ops));
 
@@ -6029,7 +6795,12 @@ fn gen_progmgr() -> Vec<u8> {
             let status = if p.installed { "installed" } else { "removed" };
             out.push_str(&format!(
                 "  {} v{} [{}] prio={} caps={} snaps={}\n",
-                p.name, p.version, status, prio, p.capabilities.len(), p.snapshots.len()
+                p.name,
+                p.version,
+                status,
+                prio,
+                p.capabilities.len(),
+                p.snapshots.len()
             ));
         }
     }
@@ -6070,7 +6841,11 @@ fn gen_scriptlang() -> Vec<u8> {
             let status = if e.enabled { "on" } else { "off" };
             out.push_str(&format!(
                 "  {} v{} [{}] type={} sandbox={} exts={}\n",
-                e.name, e.version, status, etype, sandbox,
+                e.name,
+                e.version,
+                status,
+                etype,
+                sandbox,
                 e.extensions.len()
             ));
         }
@@ -6140,7 +6915,10 @@ fn gen_bootcfg() -> Vec<u8> {
     out.push_str(&format!("Console:   {}\n", console));
     out.push_str(&format!("Activity:  {}\n", cfg.show_boot_activity));
     out.push_str(&format!("Entries:   {}\n", entry_count));
-    out.push_str(&format!("Boot log:  {} events ({} total)\n", event_count, boots));
+    out.push_str(&format!(
+        "Boot log:  {} events ({} total)\n",
+        event_count, boots
+    ));
 
     let entries = super::bootcfg::list_entries();
     if !entries.is_empty() {
@@ -6148,7 +6926,10 @@ fn gen_bootcfg() -> Vec<u8> {
         for e in &entries {
             let def = if e.is_default { " [DEFAULT]" } else { "" };
             let hid = if e.hidden { " (hidden)" } else { "" };
-            out.push_str(&format!("  #{} {} — {}{}{}\n", e.position, e.name, e.kernel_path, def, hid));
+            out.push_str(&format!(
+                "  #{} {} — {}{}{}\n",
+                e.position, e.name, e.kernel_path, def, hid
+            ));
         }
     }
 
@@ -6168,10 +6949,19 @@ fn gen_swapcfg() -> Vec<u8> {
     out.push_str(&format!("Enabled:      {}\n", cfg.enabled));
     out.push_str(&format!("Swappiness:   {}\n", cfg.swappiness));
     out.push_str(&format!("Min free:     {} bytes\n", cfg.min_free_bytes));
-    out.push_str(&format!("zswap:        {} ({})\n", cfg.zswap_enabled, cfg.zswap_algorithm));
-    out.push_str(&format!("Areas:        {} ({} active)\n", area_count, active_count));
+    out.push_str(&format!(
+        "zswap:        {} ({})\n",
+        cfg.zswap_enabled, cfg.zswap_algorithm
+    ));
+    out.push_str(&format!(
+        "Areas:        {} ({} active)\n",
+        area_count, active_count
+    ));
     out.push_str(&format!("Total:        {} bytes\n", total_bytes));
-    out.push_str(&format!("Used:         {} / {} bytes\n", usage.used_bytes, usage.total_bytes));
+    out.push_str(&format!(
+        "Used:         {} / {} bytes\n",
+        usage.used_bytes, usage.total_bytes
+    ));
     out.push_str(&format!("Operations:   {}\n", ops));
 
     let areas = super::swapcfg::list_swaps();
@@ -6220,10 +7010,15 @@ fn gen_timezone() -> Vec<u8> {
 
     let servers = super::timezone::list_ntp_servers();
     if !servers.is_empty() {
-        out.push_str(&format!("\n{:<30} {:<6} {:<10} {}\n", "SERVER", "PORT", "ENABLED", "OFFSET_US"));
+        out.push_str(&format!(
+            "\n{:<30} {:<6} {:<10} {}\n",
+            "SERVER", "PORT", "ENABLED", "OFFSET_US"
+        ));
         for s in &servers {
-            out.push_str(&format!("{:<30} {:<6} {:<10} {}\n",
-                s.hostname, s.port, s.enabled, s.offset_us));
+            out.push_str(&format!(
+                "{:<30} {:<6} {:<10} {}\n",
+                s.hostname, s.port, s.enabled, s.offset_us
+            ));
         }
     }
 
@@ -6245,17 +7040,21 @@ fn gen_autostart() -> Vec<u8> {
 
     let items = super::autostart::list_items();
     if !items.is_empty() {
-        out.push_str(&format!("\n{:<4} {:<20} {:<16} {:<10} {:<8} {:<6} {}\n",
-            "ID", "NAME", "PHASE", "CONDITION", "ENABLED", "ORDER", "COMMAND"));
+        out.push_str(&format!(
+            "\n{:<4} {:<20} {:<16} {:<10} {:<8} {:<6} {}\n",
+            "ID", "NAME", "PHASE", "CONDITION", "ENABLED", "ORDER", "COMMAND"
+        ));
         for it in &items {
-            out.push_str(&format!("{:<4} {:<20} {:<16} {:<10} {:<8} {:<6} {}\n",
+            out.push_str(&format!(
+                "{:<4} {:<20} {:<16} {:<10} {:<8} {:<6} {}\n",
                 it.id,
                 it.name,
                 format!("{:?}", it.phase),
                 format!("{:?}", it.condition),
                 it.enabled,
                 it.order,
-                it.command));
+                it.command
+            ));
         }
     }
 
@@ -6287,15 +7086,20 @@ fn gen_schedtune() -> Vec<u8> {
 
     let profiles = super::schedtune::list_profiles();
     if !profiles.is_empty() {
-        out.push_str(&format!("\n{:<4} {:<25} {:<12} {:<18} {:<8} {}\n",
-            "ID", "NAME", "WORKLOAD", "MODEL", "ACTIVE", "PREEMPT"));
+        out.push_str(&format!(
+            "\n{:<4} {:<25} {:<12} {:<18} {:<8} {}\n",
+            "ID", "NAME", "WORKLOAD", "MODEL", "ACTIVE", "PREEMPT"
+        ));
         for p in &profiles {
-            out.push_str(&format!("{:<4} {:<25} {:<12} {:<18} {:<8} {:?}\n",
-                p.id, p.name,
+            out.push_str(&format!(
+                "{:<4} {:<25} {:<12} {:<18} {:<8} {:?}\n",
+                p.id,
+                p.name,
                 format!("{:?}", p.workload),
                 format!("{:?}", p.model),
                 p.active,
-                p.preempt));
+                p.preempt
+            ));
         }
     }
 
@@ -6319,25 +7123,36 @@ fn gen_mmtune() -> Vec<u8> {
         out.push_str(&format!("\nActive: {} ({:?})\n", a.name, a.workload));
         out.push_str(&format!("  Allocator:   {:?}\n", a.alloc_model));
         out.push_str(&format!("  Reclaim:     {:?}\n", a.reclaim));
-        out.push_str(&format!("  Overcommit:  {:?} ({}%)\n", a.overcommit, a.overcommit_ratio));
+        out.push_str(&format!(
+            "  Overcommit:  {:?} ({}%)\n",
+            a.overcommit, a.overcommit_ratio
+        ));
         out.push_str(&format!("  Huge pages:  {:?}\n", a.huge_pages));
         out.push_str(&format!("  Compaction:  {:?}\n", a.compact_level));
         out.push_str(&format!("  Swappiness:  {}\n", a.swappiness));
-        out.push_str(&format!("  Dirty ratio: {}/{}\n", a.dirty_ratio, a.dirty_bg_ratio));
+        out.push_str(&format!(
+            "  Dirty ratio: {}/{}\n",
+            a.dirty_ratio, a.dirty_bg_ratio
+        ));
         out.push_str(&format!("  ZRAM:        {}\n", a.zram_enabled));
     }
 
     let profiles = super::mmtune::list_profiles();
     if !profiles.is_empty() {
-        out.push_str(&format!("\n{:<4} {:<25} {:<12} {:<12} {:<12} {}\n",
-            "ID", "NAME", "WORKLOAD", "ALLOCATOR", "RECLAIM", "ACTIVE"));
+        out.push_str(&format!(
+            "\n{:<4} {:<25} {:<12} {:<12} {:<12} {}\n",
+            "ID", "NAME", "WORKLOAD", "ALLOCATOR", "RECLAIM", "ACTIVE"
+        ));
         for p in &profiles {
-            out.push_str(&format!("{:<4} {:<25} {:<12} {:<12} {:<12} {}\n",
-                p.id, p.name,
+            out.push_str(&format!(
+                "{:<4} {:<25} {:<12} {:<12} {:<12} {}\n",
+                p.id,
+                p.name,
                 format!("{:?}", p.workload),
                 format!("{:?}", p.alloc_model),
                 format!("{:?}", p.reclaim),
-                p.active));
+                p.active
+            ));
         }
     }
 
@@ -6360,10 +7175,18 @@ fn gen_capsettings() -> Vec<u8> {
 
     let group_list = super::capsettings::list_groups();
     if !group_list.is_empty() {
-        out.push_str(&format!("\n{:<4} {:<20} {:<8} {}\n", "ID", "NAME", "CAPS", "BUILTIN"));
+        out.push_str(&format!(
+            "\n{:<4} {:<20} {:<8} {}\n",
+            "ID", "NAME", "CAPS", "BUILTIN"
+        ));
         for g in &group_list {
-            out.push_str(&format!("{:<4} {:<20} {:<8} {}\n",
-                g.id, g.name, g.caps.len(), g.builtin));
+            out.push_str(&format!(
+                "{:<4} {:<20} {:<8} {}\n",
+                g.id,
+                g.name,
+                g.caps.len(),
+                g.builtin
+            ));
         }
     }
 
@@ -6395,13 +7218,20 @@ fn gen_vpn() -> Vec<u8> {
 
     let profiles = super::vpn::list_profiles();
     if !profiles.is_empty() {
-        out.push_str(&format!("\n{:<4} {:<20} {:<12} {:<20} {:<6} {}\n",
-            "ID", "NAME", "PROTOCOL", "SERVER", "PORT", "AUTO"));
+        out.push_str(&format!(
+            "\n{:<4} {:<20} {:<12} {:<20} {:<6} {}\n",
+            "ID", "NAME", "PROTOCOL", "SERVER", "PORT", "AUTO"
+        ));
         for p in &profiles {
-            out.push_str(&format!("{:<4} {:<20} {:<12} {:<20} {:<6} {}\n",
-                p.id, p.name,
+            out.push_str(&format!(
+                "{:<4} {:<20} {:<12} {:<20} {:<6} {}\n",
+                p.id,
+                p.name,
                 format!("{:?}", p.protocol),
-                p.server, p.port, p.auto_connect));
+                p.server,
+                p.port,
+                p.auto_connect
+            ));
         }
     }
 
@@ -6418,7 +7248,10 @@ fn gen_dyndns() -> Vec<u8> {
     out.push_str("=============================\n\n");
     out.push_str(&format!("DDNS entries:  {}\n", entry_count));
     out.push_str(&format!("Forwards:      {}\n", forward_count));
-    out.push_str(&format!("Router:        {}\n", if router_detected { "detected" } else { "none" }));
+    out.push_str(&format!(
+        "Router:        {}\n",
+        if router_detected { "detected" } else { "none" }
+    ));
     out.push_str(&format!("Operations:    {}\n", ops));
 
     if let Some(ri) = super::dyndns::router_info() {
@@ -6430,15 +7263,20 @@ fn gen_dyndns() -> Vec<u8> {
 
     let entries = super::dyndns::list_entries();
     if !entries.is_empty() {
-        out.push_str(&format!("\n{:<4} {:<15} {:<10} {:<25} {:<10} {}\n",
-            "ID", "NAME", "PROVIDER", "HOSTNAME", "STATUS", "IP"));
+        out.push_str(&format!(
+            "\n{:<4} {:<15} {:<10} {:<25} {:<10} {}\n",
+            "ID", "NAME", "PROVIDER", "HOSTNAME", "STATUS", "IP"
+        ));
         for e in &entries {
-            out.push_str(&format!("{:<4} {:<15} {:<10} {:<25} {:<10} {}\n",
-                e.id, e.name,
+            out.push_str(&format!(
+                "{:<4} {:<15} {:<10} {:<25} {:<10} {}\n",
+                e.id,
+                e.name,
                 format!("{:?}", e.provider),
                 e.hostname,
                 format!("{:?}", e.status),
-                e.last_ip));
+                e.last_ip
+            ));
         }
     }
 
@@ -6485,9 +7323,13 @@ fn gen_appnotify() -> Vec<u8> {
         out.push_str("\nApps:\n");
         for app in &apps {
             let status = if app.enabled { "on" } else { "off" };
-            out.push_str(&format!("  {} ({}) [{}] types={}\n",
-                app.display_name, app.app_id, status,
-                app.notification_types.len()));
+            out.push_str(&format!(
+                "  {} ({}) [{}] types={}\n",
+                app.display_name,
+                app.app_id,
+                status,
+                app.notification_types.len()
+            ));
         }
     }
 
@@ -6511,8 +7353,13 @@ fn gen_kernelbuild() -> Vec<u8> {
     if !comps.is_empty() {
         out.push_str("\nComponents:\n");
         for c in &comps {
-            out.push_str(&format!("  {} ({:?}) [{:?}] params={}\n",
-                c.name, c.comp_type, c.status, c.params.len()));
+            out.push_str(&format!(
+                "  {} ({:?}) [{:?}] params={}\n",
+                c.name,
+                c.comp_type,
+                c.status,
+                c.params.len()
+            ));
         }
     }
 
@@ -6528,8 +7375,14 @@ fn gen_wakesensor() -> Vec<u8> {
     out.push_str("Wake Sensors\n");
     out.push_str("============\n\n");
     out.push_str(&format!("Global enabled: {}\n", global));
-    out.push_str(&format!("Camera:         {}\n", if cam { "on" } else { "off" }));
-    out.push_str(&format!("Microphone:     {}\n", if mic { "on" } else { "off" }));
+    out.push_str(&format!(
+        "Camera:         {}\n",
+        if cam { "on" } else { "off" }
+    ));
+    out.push_str(&format!(
+        "Microphone:     {}\n",
+        if mic { "on" } else { "off" }
+    ));
     out.push_str(&format!("Wake events:    {}\n", events));
     out.push_str(&format!("Operations:     {}\n", ops));
 
@@ -6545,11 +7398,24 @@ fn gen_netsettings() -> Vec<u8> {
 
     out.push_str("Network Settings\n");
     out.push_str("================\n\n");
-    out.push_str(&format!("Hostname:    {}\n", super::netsettings::hostname()));
-    out.push_str(&format!("Interfaces:  {} ({} connected)\n", ifaces, connected));
+    out.push_str(&format!(
+        "Hostname:    {}\n",
+        super::netsettings::hostname()
+    ));
+    out.push_str(&format!(
+        "Interfaces:  {} ({} connected)\n",
+        ifaces, connected
+    ));
     out.push_str(&format!("Saved WiFi:  {}\n", saved));
-    out.push_str(&format!("Gateway:     {} {}\n", ri.gateway_ip,
-        if ri.reachable { "(reachable)" } else { "(unreachable)" }));
+    out.push_str(&format!(
+        "Gateway:     {} {}\n",
+        ri.gateway_ip,
+        if ri.reachable {
+            "(reachable)"
+        } else {
+            "(unreachable)"
+        }
+    ));
     if !ri.external_ipv4.is_empty() {
         out.push_str(&format!("External IP: {}\n", ri.external_ipv4));
     }
@@ -6559,8 +7425,10 @@ fn gen_netsettings() -> Vec<u8> {
     if !interfaces.is_empty() {
         out.push_str("\nInterfaces:\n");
         for i in &interfaces {
-            out.push_str(&format!("  {} ({:?}) {:?} {}\n",
-                i.name, i.iface_type, i.link_state, i.ipv4.address));
+            out.push_str(&format!(
+                "  {} ({:?}) {:?} {}\n",
+                i.name, i.iface_type, i.link_state, i.ipv4.address
+            ));
         }
     }
 
@@ -6578,15 +7446,30 @@ fn gen_sysinfo() -> Vec<u8> {
 
     out.push_str("System Information\n");
     out.push_str("==================\n\n");
-    out.push_str(&format!("OS:         {} {} ({})\n", os.name, os.version, os.codename));
+    out.push_str(&format!(
+        "OS:         {} {} ({})\n",
+        os.name, os.version, os.codename
+    ));
     out.push_str(&format!("Arch:       {}\n", os.arch));
     out.push_str(&format!("Kernel:     {}\n", os.kernel_version));
-    out.push_str(&format!("CPU:        {} ({} cores / {} threads)\n", cpu.model, cpu.cores, cpu.threads));
-    out.push_str(&format!("Memory:     {} {} @ {} MT/s\n", mem.mem_type, mem.dimm_count, mem.speed_mts));
+    out.push_str(&format!(
+        "CPU:        {} ({} cores / {} threads)\n",
+        cpu.model, cpu.cores, cpu.threads
+    ));
+    out.push_str(&format!(
+        "Memory:     {} {} @ {} MT/s\n",
+        mem.mem_type, mem.dimm_count, mem.speed_mts
+    ));
     out.push_str(&format!("Page size:  {} B\n", kp.page_size));
     out.push_str(&format!("Scheduler:  {}\n", kp.sched_model));
-    out.push_str(&format!("Storage:    {} devices\n", super::sysinfo::storage_info().len()));
-    out.push_str(&format!("GPUs:       {}\n", super::sysinfo::gpu_info().len()));
+    out.push_str(&format!(
+        "Storage:    {} devices\n",
+        super::sysinfo::storage_info().len()
+    ));
+    out.push_str(&format!(
+        "GPUs:       {}\n",
+        super::sysinfo::gpu_info().len()
+    ));
 
     out.into_bytes()
 }
@@ -6601,16 +7484,34 @@ fn gen_perfmon() -> Vec<u8> {
     out.push_str("Performance Monitor\n");
     out.push_str("===================\n\n");
     out.push_str(&format!("Interval:    {} ms\n", cfg.sample_interval_ms));
-    out.push_str(&format!("CPU samples: {} ({})\n", cpu_n, if cfg.cpu_enabled { "on" } else { "off" }));
-    out.push_str(&format!("Mem samples: {} ({})\n", mem_n, if cfg.mem_enabled { "on" } else { "off" }));
-    out.push_str(&format!("Disk samples:{} ({})\n", disk_n, if cfg.disk_enabled { "on" } else { "off" }));
-    out.push_str(&format!("Net samples: {} ({})\n", net_n, if cfg.net_enabled { "on" } else { "off" }));
+    out.push_str(&format!(
+        "CPU samples: {} ({})\n",
+        cpu_n,
+        if cfg.cpu_enabled { "on" } else { "off" }
+    ));
+    out.push_str(&format!(
+        "Mem samples: {} ({})\n",
+        mem_n,
+        if cfg.mem_enabled { "on" } else { "off" }
+    ));
+    out.push_str(&format!(
+        "Disk samples:{} ({})\n",
+        disk_n,
+        if cfg.disk_enabled { "on" } else { "off" }
+    ));
+    out.push_str(&format!(
+        "Net samples: {} ({})\n",
+        net_n,
+        if cfg.net_enabled { "on" } else { "off" }
+    ));
     out.push_str(&format!("Alerts:      {}\n", alerts_n));
     out.push_str(&format!("Operations:  {}\n", ops));
 
     if let Some(cpu) = super::perfmon::cpu_latest() {
-        out.push_str(&format!("\nLatest CPU: {}% ({} MHz, {} procs, {} threads)\n",
-            cpu.usage_pct, cpu.freq_mhz, cpu.process_count, cpu.thread_count));
+        out.push_str(&format!(
+            "\nLatest CPU: {}% ({} MHz, {} procs, {} threads)\n",
+            cpu.usage_pct, cpu.freq_mhz, cpu.process_count, cpu.thread_count
+        ));
     }
 
     out.into_bytes()
@@ -6623,7 +7524,10 @@ fn gen_focusassist() -> Vec<u8> {
     let (profile_count, schedule_count, active, missed, sessions, ops) =
         super::focusassist::stats();
 
-    out.push_str(&format!("status: {}\n", if active { "active" } else { "off" }));
+    out.push_str(&format!(
+        "status: {}\n",
+        if active { "active" } else { "off" }
+    ));
     out.push_str(&format!("profiles: {}\n", profile_count));
     out.push_str(&format!("schedules: {}\n", schedule_count));
     out.push_str(&format!("missed_this_session: {}\n", missed));
@@ -6631,7 +7535,10 @@ fn gen_focusassist() -> Vec<u8> {
     out.push_str(&format!("ops: {}\n", ops));
 
     if let Some(profile) = super::focusassist::active_profile() {
-        out.push_str(&format!("\nactive_profile: {} (id={})\n", profile.name, profile.id));
+        out.push_str(&format!(
+            "\nactive_profile: {} (id={})\n",
+            profile.name, profile.id
+        ));
         out.push_str(&format!("mode: {:?}\n", profile.mode));
         out.push_str(&format!("priority_apps: {}\n", profile.priority_apps.len()));
         if let Some(ref reply) = profile.auto_reply {
@@ -6643,8 +7550,10 @@ fn gen_focusassist() -> Vec<u8> {
     if !profiles.is_empty() {
         out.push_str("\nprofiles:\n");
         for p in &profiles {
-            out.push_str(&format!("  id={} name={:?} mode={:?} enabled={} builtin={}\n",
-                p.id, p.name, p.mode, p.enabled, p.builtin));
+            out.push_str(&format!(
+                "  id={} name={:?} mode={:?} enabled={} builtin={}\n",
+                p.id, p.name, p.mode, p.enabled, p.builtin
+            ));
         }
     }
 
@@ -6652,9 +7561,17 @@ fn gen_focusassist() -> Vec<u8> {
     if !schedules.is_empty() {
         out.push_str("\nschedules:\n");
         for s in &schedules {
-            out.push_str(&format!("  id={} name={:?} {:02}:{:02}-{:02}:{:02} enabled={} profile={}\n",
-                s.id, s.name, s.start_hour, s.start_minute,
-                s.end_hour, s.end_minute, s.enabled, s.profile_id));
+            out.push_str(&format!(
+                "  id={} name={:?} {:02}:{:02}-{:02}:{:02} enabled={} profile={}\n",
+                s.id,
+                s.name,
+                s.start_hour,
+                s.start_minute,
+                s.end_hour,
+                s.end_minute,
+                s.enabled,
+                s.profile_id
+            ));
         }
     }
 
@@ -6667,32 +7584,45 @@ fn gen_storageclean() -> Vec<u8> {
 
     let (items, freed, scans, cleans, ops) = super::storageclean::stats();
     out.push_str(&format!("cached_items: {}\n", items));
-    out.push_str(&format!("total_freed: {} ({})\n", freed,
-        super::storageclean::format_size(freed)));
+    out.push_str(&format!(
+        "total_freed: {} ({})\n",
+        freed,
+        super::storageclean::format_size(freed)
+    ));
     out.push_str(&format!("scans: {}\n", scans));
     out.push_str(&format!("cleanups: {}\n", cleans));
     out.push_str(&format!("ops: {}\n", ops));
 
     if let Ok(cfg) = super::storageclean::config() {
         out.push_str(&format!("\nauto_enabled: {}\n", cfg.auto_enabled));
-        out.push_str(&format!("auto_threshold: {}%\n", cfg.auto_clean_threshold_pct));
-        out.push_str(&format!("large_threshold: {}\n",
-            super::storageclean::format_size(cfg.large_file_threshold)));
+        out.push_str(&format!(
+            "auto_threshold: {}%\n",
+            cfg.auto_clean_threshold_pct
+        ));
+        out.push_str(&format!(
+            "large_threshold: {}\n",
+            super::storageclean::format_size(cfg.large_file_threshold)
+        ));
         out.push_str(&format!("old_download_days: {}\n", cfg.old_download_days));
         out.push_str(&format!("log_retention_days: {}\n", cfg.log_retention_days));
     }
 
     if let Some(report) = super::storageclean::last_report() {
         out.push_str("\nlast_scan:\n");
-        out.push_str(&format!("  reclaimable: {} ({})\n",
+        out.push_str(&format!(
+            "  reclaimable: {} ({})\n",
             report.total_reclaimable_bytes,
-            super::storageclean::format_size(report.total_reclaimable_bytes)));
+            super::storageclean::format_size(report.total_reclaimable_bytes)
+        ));
         out.push_str(&format!("  items: {}\n", report.total_items));
         out.push_str(&format!("  duration: {} us\n", report.scan_duration_us));
         for cat in &report.categories {
-            out.push_str(&format!("  {}: {} items, {}\n",
-                cat.category.label(), cat.item_count,
-                super::storageclean::format_size(cat.total_bytes)));
+            out.push_str(&format!(
+                "  {}: {} items, {}\n",
+                cat.category.label(),
+                cat.item_count,
+                super::storageclean::format_size(cat.total_bytes)
+            ));
         }
     }
 
@@ -6703,8 +7633,7 @@ fn gen_sysdiag() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (issue_count, total_runs, total_issues_found, history_count, ops) =
-        super::sysdiag::stats();
+    let (issue_count, total_runs, total_issues_found, history_count, ops) = super::sysdiag::stats();
 
     out.push_str(&format!("issue_count: {}\n", issue_count));
     out.push_str(&format!("total_runs: {}\n", total_runs));
@@ -6721,7 +7650,9 @@ fn gen_sysdiag() -> Vec<u8> {
         for issue in &issues {
             out.push_str(&format!(
                 "  [{:?}] {}: {}\n",
-                issue.severity, issue.category.label(), issue.title
+                issue.severity,
+                issue.category.label(),
+                issue.title
             ));
         }
     }
@@ -6745,12 +7676,14 @@ fn gen_nightlight() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (enabled, current_temp, toggle_count, check_count, ops) =
-        super::nightlight::stats();
+    let (enabled, current_temp, toggle_count, check_count, ops) = super::nightlight::stats();
 
     out.push_str(&format!("enabled: {}\n", enabled));
     out.push_str(&format!("current_temp: {}K\n", current_temp));
-    out.push_str(&format!("state: {}\n", super::nightlight::current_state().label()));
+    out.push_str(&format!(
+        "state: {}\n",
+        super::nightlight::current_state().label()
+    ));
     out.push_str(&format!("toggle_count: {}\n", toggle_count));
     out.push_str(&format!("check_count: {}\n", check_count));
     out.push_str(&format!("ops: {}\n", ops));
@@ -6759,15 +7692,21 @@ fn gen_nightlight() -> Vec<u8> {
         out.push_str(&format!("schedule_mode: {}\n", cfg.schedule_mode.label()));
         out.push_str(&format!("night_temp: {}K\n", cfg.night_temp));
         out.push_str(&format!("day_temp: {}K\n", cfg.day_temp));
-        out.push_str(&format!("start_time: {:02}:{:02}\n",
-            cfg.start_time.hour, cfg.start_time.minute));
-        out.push_str(&format!("end_time: {:02}:{:02}\n",
-            cfg.end_time.hour, cfg.end_time.minute));
+        out.push_str(&format!(
+            "start_time: {:02}:{:02}\n",
+            cfg.start_time.hour, cfg.start_time.minute
+        ));
+        out.push_str(&format!(
+            "end_time: {:02}:{:02}\n",
+            cfg.end_time.hour, cfg.end_time.minute
+        ));
         out.push_str(&format!("transition_minutes: {}\n", cfg.transition_minutes));
         out.push_str(&format!("disable_on_battery: {}\n", cfg.disable_on_battery));
         if let Some(loc) = &cfg.location {
-            out.push_str(&format!("location: lat={} lon={}\n",
-                loc.latitude, loc.longitude));
+            out.push_str(&format!(
+                "location: lat={} lon={}\n",
+                loc.latitude, loc.longitude
+            ));
         }
     }
 
@@ -6781,8 +7720,7 @@ fn gen_tasksched() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (task_count, total_runs, total_failures, hist_count, ops) =
-        super::tasksched::stats();
+    let (task_count, total_runs, total_failures, hist_count, ops) = super::tasksched::stats();
 
     out.push_str(&format!("task_count: {}\n", task_count));
     out.push_str(&format!("total_runs: {}\n", total_runs));
@@ -6792,14 +7730,24 @@ fn gen_tasksched() -> Vec<u8> {
 
     let tasks = super::tasksched::list_tasks();
     for task in &tasks {
-        out.push_str(&format!("task {}: {} [{}] {} {:02}:{:02} runs={} {}\n",
-            task.id, task.name, task.schedule_type.label(),
-            task.status.label(), task.hour, task.minute,
-            task.run_count, task.command));
+        out.push_str(&format!(
+            "task {}: {} [{}] {} {:02}:{:02} runs={} {}\n",
+            task.id,
+            task.name,
+            task.schedule_type.label(),
+            task.status.label(),
+            task.hour,
+            task.minute,
+            task.run_count,
+            task.command
+        ));
     }
 
     if let Some((id, name, h, m)) = super::tasksched::next_due() {
-        out.push_str(&format!("next_due: {} ({}) at {:02}:{:02}\n", name, id, h, m));
+        out.push_str(&format!(
+            "next_due: {} ({}) at {:02}:{:02}\n",
+            name, id, h, m
+        ));
     }
 
     out.into_bytes()
@@ -6837,7 +7785,11 @@ fn gen_bluetooth() -> Vec<u8> {
     out.push_str(&format!("ops: {}\n", ops));
 
     if let Ok(cfg) = super::bluetooth::config() {
-        out.push_str(&format!("adapter: {} [{}]\n", cfg.adapter_name, cfg.adapter_state.label()));
+        out.push_str(&format!(
+            "adapter: {} [{}]\n",
+            cfg.adapter_name,
+            cfg.adapter_state.label()
+        ));
         out.push_str(&format!("bt_version: {}\n", cfg.bt_version));
         out.push_str(&format!("discoverable: {}\n", cfg.discoverable));
         out.push_str(&format!("auto_connect: {}\n", cfg.auto_connect));
@@ -6845,10 +7797,18 @@ fn gen_bluetooth() -> Vec<u8> {
 
     let devices = super::bluetooth::list_devices();
     for dev in &devices {
-        let bat = dev.battery_pct.map_or(String::new(), |b| format!(" bat={}%", b));
-        out.push_str(&format!("{} {} [{}] {} {}{}\n",
-            dev.address, dev.name, dev.device_type.label(),
-            dev.state.label(), dev.device_type.icon(), bat));
+        let bat = dev
+            .battery_pct
+            .map_or(String::new(), |b| format!(" bat={}%", b));
+        out.push_str(&format!(
+            "{} {} [{}] {} {}{}\n",
+            dev.address,
+            dev.name,
+            dev.device_type.label(),
+            dev.state.label(),
+            dev.device_type.icon(),
+            bat
+        ));
     }
 
     out.into_bytes()
@@ -6872,9 +7832,16 @@ fn gen_printmgr() -> Vec<u8> {
     let printers = super::printmgr::list_printers();
     for p in &printers {
         let def = if p.is_default { " *" } else { "" };
-        out.push_str(&format!("{}: {} [{}] {} jobs={} pages={}{}\n",
-            p.id, p.name, p.printer_type.label(),
-            p.status.label(), p.total_jobs, p.total_pages, def));
+        out.push_str(&format!(
+            "{}: {} [{}] {} jobs={} pages={}{}\n",
+            p.id,
+            p.name,
+            p.printer_type.label(),
+            p.status.label(),
+            p.total_jobs,
+            p.total_pages,
+            def
+        ));
     }
 
     out.into_bytes()
@@ -6887,7 +7854,10 @@ fn gen_screenrec() -> Vec<u8> {
     let (count, active, total, total_sec, total_bytes, ops) = super::screenrec::stats();
     out.push_str(&format!("recordings: {}\n", count));
     out.push_str(&format!("active: {}\n", active));
-    out.push_str(&format!("is_recording: {}\n", super::screenrec::is_recording()));
+    out.push_str(&format!(
+        "is_recording: {}\n",
+        super::screenrec::is_recording()
+    ));
     out.push_str(&format!("total_recordings: {}\n", total));
     out.push_str(&format!("total_seconds: {}\n", total_sec));
     out.push_str(&format!("total_bytes: {}\n", total_bytes));
@@ -6914,22 +7884,36 @@ fn gen_datausage() -> Vec<u8> {
     out.push_str(&format!("daily_records: {}\n", daily));
     out.push_str(&format!("total_rx: {}\n", rx));
     out.push_str(&format!("total_tx: {}\n", tx));
-    out.push_str(&format!("total_rx_human: {}\n", super::datausage::format_bytes(rx)));
-    out.push_str(&format!("total_tx_human: {}\n", super::datausage::format_bytes(tx)));
+    out.push_str(&format!(
+        "total_rx_human: {}\n",
+        super::datausage::format_bytes(rx)
+    ));
+    out.push_str(&format!(
+        "total_tx_human: {}\n",
+        super::datausage::format_bytes(tx)
+    ));
     out.push_str(&format!("limits: {}\n", limits));
-    out.push_str(&format!("metered: {}\n", super::datausage::metered_status().label()));
-    out.push_str(&format!("restrict_background: {}\n", super::datausage::should_restrict_background()));
+    out.push_str(&format!(
+        "metered: {}\n",
+        super::datausage::metered_status().label()
+    ));
+    out.push_str(&format!(
+        "restrict_background: {}\n",
+        super::datausage::should_restrict_background()
+    ));
     out.push_str(&format!("ops: {}\n", ops));
 
     let top_apps = super::datausage::app_usage();
     if !top_apps.is_empty() {
         out.push_str("top_apps:\n");
         for app in top_apps.iter().take(10) {
-            out.push_str(&format!("  {}: rx={} tx={} total={}\n",
+            out.push_str(&format!(
+                "  {}: rx={} tx={} total={}\n",
                 app.app_id,
                 super::datausage::format_bytes(app.rx_bytes),
                 super::datausage::format_bytes(app.tx_bytes),
-                super::datausage::format_bytes(app.total_bytes())));
+                super::datausage::format_bytes(app.total_bytes())
+            ));
         }
     }
 
@@ -6976,7 +7960,10 @@ fn gen_touchpad() -> Vec<u8> {
         out.push_str(&format!("enabled: {}\n", cfg.enabled));
         out.push_str(&format!("scroll_method: {}\n", cfg.scroll_method.label()));
         out.push_str(&format!("click_method: {}\n", cfg.click_method.label()));
-        out.push_str(&format!("disable_while_typing: {}\n", cfg.disable_while_typing));
+        out.push_str(&format!(
+            "disable_while_typing: {}\n",
+            cfg.disable_while_typing
+        ));
         out.push_str(&format!("palm_rejection: {}\n", cfg.palm_rejection));
     }
 
@@ -6993,9 +7980,18 @@ fn gen_powerprofile() -> Vec<u8> {
     out.push_str(&format!("switches: {}\n", switches));
     out.push_str(&format!("battery_pct: {}\n", batt_pct));
     out.push_str(&format!("battery_state: {}\n", batt_state));
-    out.push_str(&format!("reduce_background: {}\n", super::powerprofile::should_reduce_background()));
-    out.push_str(&format!("disable_animations: {}\n", super::powerprofile::should_disable_animations()));
-    out.push_str(&format!("cpu_governor: {}\n", super::powerprofile::active_cpu_governor().label()));
+    out.push_str(&format!(
+        "reduce_background: {}\n",
+        super::powerprofile::should_reduce_background()
+    ));
+    out.push_str(&format!(
+        "disable_animations: {}\n",
+        super::powerprofile::should_disable_animations()
+    ));
+    out.push_str(&format!(
+        "cpu_governor: {}\n",
+        super::powerprofile::active_cpu_governor().label()
+    ));
     out.push_str(&format!("ops: {}\n", ops));
 
     out.into_bytes()
@@ -7040,10 +8036,20 @@ fn gen_monitors() -> Vec<u8> {
     for m in &monitors {
         let primary = if m.primary { " [primary]" } else { "" };
         let enabled_str = if m.enabled { "" } else { " [disabled]" };
-        out.push_str(&format!("{}: {} {}x{}@{}Hz pos=({},{}) scale={}% {}{}{}\n",
-            m.id, m.name, m.width, m.height, m.refresh_hz,
-            m.x, m.y, m.scale_pct,
-            m.connector.label(), primary, enabled_str));
+        out.push_str(&format!(
+            "{}: {} {}x{}@{}Hz pos=({},{}) scale={}% {}{}{}\n",
+            m.id,
+            m.name,
+            m.width,
+            m.height,
+            m.refresh_hz,
+            m.x,
+            m.y,
+            m.scale_pct,
+            m.connector.label(),
+            primary,
+            enabled_str
+        ));
     }
 
     out.into_bytes()
@@ -7055,7 +8061,10 @@ fn gen_fwsettings() -> Vec<u8> {
 
     let (rules, apps, blocked, allowed, enabled, ops) = super::fwsettings::stats();
     out.push_str(&format!("enabled: {}\n", enabled));
-    out.push_str(&format!("zone: {}\n", super::fwsettings::active_zone().label()));
+    out.push_str(&format!(
+        "zone: {}\n",
+        super::fwsettings::active_zone().label()
+    ));
     out.push_str(&format!("rules: {}\n", rules));
     out.push_str(&format!("app_permissions: {}\n", apps));
     out.push_str(&format!("total_blocked: {}\n", blocked));
@@ -7075,7 +8084,10 @@ fn gen_updatemgr() -> Vec<u8> {
     out.push_str(&format!("auto_check: {}\n", auto));
     out.push_str(&format!("pending_updates: {}\n", pending));
     out.push_str(&format!("history: {}\n", history));
-    out.push_str(&format!("pending_size: {}\n", super::updatemgr::format_update_size(super::updatemgr::pending_size())));
+    out.push_str(&format!(
+        "pending_size: {}\n",
+        super::updatemgr::format_update_size(super::updatemgr::pending_size())
+    ));
     out.push_str(&format!("ops: {}\n", ops));
 
     let (crit, imp, rec, opt) = super::updatemgr::pending_count();
@@ -7104,9 +8116,15 @@ fn gen_notifprefs() -> Vec<u8> {
     if !prefs.is_empty() {
         out.push_str("apps:\n");
         for p in &prefs {
-            out.push_str(&format!("  {}: enabled={} banner={} sound={} priority={} total={}\n",
-                p.app_id, p.enabled, p.banner_style.label(),
-                p.sound, p.priority.label(), p.total_count));
+            out.push_str(&format!(
+                "  {}: enabled={} banner={} sound={} priority={} total={}\n",
+                p.app_id,
+                p.enabled,
+                p.banner_style.label(),
+                p.sound,
+                p.priority.label(),
+                p.total_count
+            ));
         }
     }
 
@@ -7128,8 +8146,15 @@ fn gen_fileshare() -> Vec<u8> {
     let shares = super::fileshare::list_shares();
     for s in &shares {
         let en = if s.enabled { "" } else { " [disabled]" };
-        out.push_str(&format!("{}: {} → {} [{}] {}{}\n",
-            s.id, s.name, s.path, s.protocol.label(), s.access.label(), en));
+        out.push_str(&format!(
+            "{}: {} → {} [{}] {}{}\n",
+            s.id,
+            s.name,
+            s.path,
+            s.protocol.label(),
+            s.access.label(),
+            en
+        ));
     }
 
     out.into_bytes()
@@ -7147,8 +8172,14 @@ fn gen_parental() -> Vec<u8> {
     let profiles = super::parental::list_profiles();
     for p in &profiles {
         let en = if p.enabled { "enabled" } else { "disabled" };
-        out.push_str(&format!("{}: uid={} filter={} apps={} [{}]\n",
-            p.name, p.uid, p.filter_level.label(), p.app_mode.label(), en));
+        out.push_str(&format!(
+            "{}: uid={} filter={} apps={} [{}]\n",
+            p.name,
+            p.uid,
+            p.filter_level.label(),
+            p.app_mode.label(),
+            en
+        ));
     }
 
     out.into_bytes()
@@ -7171,8 +8202,15 @@ fn gen_audiodevice() -> Vec<u8> {
     for d in &devices {
         let muted = if d.muted { " [muted]" } else { "" };
         let def = if d.is_default { " *" } else { "" };
-        out.push_str(&format!("{}: {} ({}) vol={}{}{}\n",
-            d.id, d.name, d.direction.label(), d.volume, muted, def));
+        out.push_str(&format!(
+            "{}: {} ({}) vol={}{}{}\n",
+            d.id,
+            d.name,
+            d.direction.label(),
+            d.volume,
+            muted,
+            def
+        ));
     }
 
     out.into_bytes()
@@ -7192,9 +8230,15 @@ fn gen_sessionmgr() -> Vec<u8> {
     let sessions = super::sessionmgr::list_sessions();
     for s in &sessions {
         let active = if s.is_active { " *active" } else { "" };
-        out.push_str(&format!("{}: {} ({}) {} [{}]{}\n",
-            s.id, s.username, s.uid, s.session_type.label(),
-            s.state.label(), active));
+        out.push_str(&format!(
+            "{}: {} ({}) {} [{}]{}\n",
+            s.id,
+            s.username,
+            s.uid,
+            s.session_type.label(),
+            s.state.label(),
+            active
+        ));
     }
 
     out.into_bytes()
@@ -7213,9 +8257,14 @@ fn gen_crashreport() -> Vec<u8> {
 
     let reports = super::crashreport::list_reports();
     for r in reports.iter().take(20) {
-        out.push_str(&format!("{}: pid={} {} {} [{}]\n",
-            r.id, r.pid, r.process_name, r.signal.label(),
-            r.severity.label()));
+        out.push_str(&format!(
+            "{}: pid={} {} {} [{}]\n",
+            r.id,
+            r.pid,
+            r.process_name,
+            r.signal.label(),
+            r.severity.label()
+        ));
     }
 
     out.into_bytes()
@@ -7235,7 +8284,13 @@ fn gen_netproxy() -> Vec<u8> {
     let proxies = super::netproxy::list_proxies();
     for p in &proxies {
         let en = if p.enabled { "" } else { " [disabled]" };
-        out.push_str(&format!("{}: {}:{}{}\n", p.protocol.label(), p.host, p.port, en));
+        out.push_str(&format!(
+            "{}: {}:{}{}\n",
+            p.protocol.label(),
+            p.host,
+            p.port,
+            en
+        ));
     }
 
     out.into_bytes()
@@ -7274,9 +8329,19 @@ fn gen_devicemgr() -> Vec<u8> {
 
     let devices = super::devicemgr::list_devices();
     for d in &devices {
-        let drv = if d.driver.is_empty() { "no driver" } else { &d.driver };
-        out.push_str(&format!("{}: {} [{}] {} ({})\n",
-            d.id, d.name, d.bus.label(), d.status.label(), drv));
+        let drv = if d.driver.is_empty() {
+            "no driver"
+        } else {
+            &d.driver
+        };
+        out.push_str(&format!(
+            "{}: {} [{}] {} ({})\n",
+            d.id,
+            d.name,
+            d.bus.label(),
+            d.status.label(),
+            drv
+        ));
     }
 
     out.into_bytes()
@@ -7302,8 +8367,15 @@ fn gen_location() -> Vec<u8> {
         let lat_frac = (fix.latitude_ud % 1_000_000).unsigned_abs();
         let lon_deg = fix.longitude_ud / 1_000_000;
         let lon_frac = (fix.longitude_ud % 1_000_000).unsigned_abs();
-        out.push_str(&format!("current: {}.{:06},{}.{:06} ±{}m ({})\n",
-            lat_deg, lat_frac, lon_deg, lon_frac, fix.accuracy_m, fix.source.label()));
+        out.push_str(&format!(
+            "current: {}.{:06},{}.{:06} ±{}m ({})\n",
+            lat_deg,
+            lat_frac,
+            lon_deg,
+            lon_frac,
+            fix.accuracy_m,
+            fix.source.label()
+        ));
     }
 
     out.into_bytes()
@@ -7322,8 +8394,14 @@ fn gen_diskencrypt() -> Vec<u8> {
 
     let vols = super::diskencrypt::list_volumes();
     for v in &vols {
-        out.push_str(&format!("{}: {} ({}) {} [{}]\n",
-            v.id, v.label, v.device, v.algorithm.label(), v.status.label()));
+        out.push_str(&format!(
+            "{}: {} ({}) {} [{}]\n",
+            v.id,
+            v.label,
+            v.device,
+            v.algorithm.label(),
+            v.status.label()
+        ));
     }
 
     out.into_bytes()
@@ -7347,7 +8425,13 @@ fn gen_pkgmgr() -> Vec<u8> {
         } else {
             String::new()
         };
-        out.push_str(&format!("{} {} [{}]{}\n", p.name, p.version, p.section.label(), up));
+        out.push_str(&format!(
+            "{} {} [{}]{}\n",
+            p.name,
+            p.version,
+            p.section.label(),
+            up
+        ));
     }
 
     out.into_bytes()
@@ -7366,9 +8450,14 @@ fn gen_remotedesktop() -> Vec<u8> {
 
     let sessions = super::remotedesktop::list_sessions();
     for s in &sessions {
-        out.push_str(&format!("{}: {} {} [{}] {}\n",
-            s.id, s.direction.label(), s.remote_host,
-            s.state.label(), s.protocol.label()));
+        out.push_str(&format!(
+            "{}: {} {} [{}] {}\n",
+            s.id,
+            s.direction.label(),
+            s.remote_host,
+            s.state.label(),
+            s.protocol.label()
+        ));
     }
 
     out.into_bytes()
@@ -7387,8 +8476,13 @@ fn gen_restorepoint() -> Vec<u8> {
 
     let points = super::restorepoint::list_points();
     for p in points.iter().take(10) {
-        out.push_str(&format!("{}: {} [{}] {}\n",
-            p.id, p.description, p.restore_type.label(), p.status.label()));
+        out.push_str(&format!(
+            "{}: {} [{}] {}\n",
+            p.id,
+            p.description,
+            p.restore_type.label(),
+            p.status.label()
+        ));
     }
 
     out.into_bytes()
@@ -7408,8 +8502,14 @@ fn gen_battery() -> Vec<u8> {
 
     let sources = super::battery::list_sources();
     for s in &sources {
-        out.push_str(&format!("{}: {} ({}) {}% [{}]\n",
-            s.id, s.name, s.source_type.label(), s.charge_pct, s.state.label()));
+        out.push_str(&format!(
+            "{}: {} ({}) {}% [{}]\n",
+            s.id,
+            s.name,
+            s.source_type.label(),
+            s.charge_pct,
+            s.state.label()
+        ));
     }
 
     out.into_bytes()
@@ -7434,7 +8534,8 @@ fn gen_screenreader() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (elements, announcements, queue_len, enabled, rate_label, ops) = super::screenreader::stats();
+    let (elements, announcements, queue_len, enabled, rate_label, ops) =
+        super::screenreader::stats();
     out.push_str(&format!("enabled: {}\n", enabled));
     out.push_str(&format!("speech_rate: {}\n", rate_label));
     out.push_str(&format!("elements: {}\n", elements));
@@ -7479,7 +8580,8 @@ fn gen_screentime() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (app_count, active_secs, idle_secs, switches, focus_events, ops) = super::screentime::stats();
+    let (app_count, active_secs, idle_secs, switches, focus_events, ops) =
+        super::screentime::stats();
     out.push_str(&format!("tracked_apps: {}\n", app_count));
     out.push_str(&format!("active_secs_today: {}\n", active_secs));
     out.push_str(&format!("idle_secs_today: {}\n", idle_secs));
@@ -7711,7 +8813,8 @@ fn gen_printqueue() -> Vec<u8> {
 
 fn gen_servicemgr() -> Vec<u8> {
     use crate::fs::servicemgr;
-    let (total_count, running_count, total_starts, total_stops, total_failures, ops) = servicemgr::stats();
+    let (total_count, running_count, total_starts, total_stops, total_failures, ops) =
+        servicemgr::stats();
     let mut out = String::from("service_count: ");
     out.push_str(&format!("{}\n", total_count));
     out.push_str(&format!("running: {}\n", running_count));
@@ -7748,7 +8851,8 @@ fn gen_appsandbox() -> Vec<u8> {
 
 fn gen_gamepadinput() -> Vec<u8> {
     use crate::fs::gamepadinput;
-    let (gamepad_count, connected_count, total_connected, total_inputs, ops) = gamepadinput::stats();
+    let (gamepad_count, connected_count, total_connected, total_inputs, ops) =
+        gamepadinput::stats();
     let mut out = String::from("gamepad_count: ");
     out.push_str(&format!("{}\n", gamepad_count));
     out.push_str(&format!("connected: {}\n", connected_count));
@@ -7971,8 +9075,8 @@ fn gen_netdiag() -> Vec<u8> {
 }
 
 fn gen_sharesheet() -> Vec<u8> {
-    use alloc::format;
     use super::sharesheet;
+    use alloc::format;
     let (target_count, total_shares, ops) = sharesheet::stats();
     let mut out = String::from("target_count: ");
     out.push_str(&format!("{}\n", target_count));
@@ -7982,8 +9086,8 @@ fn gen_sharesheet() -> Vec<u8> {
 }
 
 fn gen_oobe() -> Vec<u8> {
-    use alloc::format;
     use super::oobe;
+    use alloc::format;
     let (step, completed, skipped, ops) = oobe::stats();
     let mut out = String::from("current_step: ");
     out.push_str(&format!("{}\n", step));
@@ -7994,8 +9098,8 @@ fn gen_oobe() -> Vec<u8> {
 }
 
 fn gen_hdrdisplay() -> Vec<u8> {
-    use alloc::format;
     use super::hdrdisplay;
+    use alloc::format;
     let (display_count, hdr_enabled, total_switches, ops) = hdrdisplay::stats();
     let mut out = String::from("display_count: ");
     out.push_str(&format!("{}\n", display_count));
@@ -8006,8 +9110,8 @@ fn gen_hdrdisplay() -> Vec<u8> {
 }
 
 fn gen_surroundsound() -> Vec<u8> {
-    use alloc::format;
     use super::surroundsound;
+    use alloc::format;
     let (config_count, total_configs, total_cals, ops) = surroundsound::stats();
     let mut out = String::from("config_count: ");
     out.push_str(&format!("{}\n", config_count));
@@ -8018,8 +9122,8 @@ fn gen_surroundsound() -> Vec<u8> {
 }
 
 fn gen_audioeq() -> Vec<u8> {
-    use alloc::format;
     use super::audioeq;
+    use alloc::format;
     let (config_count, total_adj, total_presets, ops) = audioeq::stats();
     let mut out = String::from("config_count: ");
     out.push_str(&format!("{}\n", config_count));
@@ -8030,8 +9134,8 @@ fn gen_audioeq() -> Vec<u8> {
 }
 
 fn gen_screensaver() -> Vec<u8> {
-    use alloc::format;
     use super::screensaver;
+    use alloc::format;
     let (saver_count, total_acts, total_deacts, ops) = screensaver::stats();
     let mut out = String::from("saver_count: ");
     out.push_str(&format!("{}\n", saver_count));
@@ -8042,8 +9146,8 @@ fn gen_screensaver() -> Vec<u8> {
 }
 
 fn gen_colortemp() -> Vec<u8> {
-    use alloc::format;
     use super::colortemp;
+    use alloc::format;
     let (profile_count, active_id, total_adj, ops) = colortemp::stats();
     let mut out = String::from("profile_count: ");
     out.push_str(&format!("{}\n", profile_count));
@@ -8054,8 +9158,8 @@ fn gen_colortemp() -> Vec<u8> {
 }
 
 fn gen_gamemode() -> Vec<u8> {
-    use alloc::format;
     use super::gamemode;
+    use alloc::format;
     let (game_count, total_acts, active, ops) = gamemode::stats();
     let mut out = String::from("game_count: ");
     out.push_str(&format!("{}\n", game_count));
@@ -8066,8 +9170,8 @@ fn gen_gamemode() -> Vec<u8> {
 }
 
 fn gen_dpiscaling() -> Vec<u8> {
-    use alloc::format;
     use super::dpiscaling;
+    use alloc::format;
     let (display_count, override_count, total_changes, ops) = dpiscaling::stats();
     let mut out = String::from("display_count: ");
     out.push_str(&format!("{}\n", display_count));
@@ -8078,8 +9182,8 @@ fn gen_dpiscaling() -> Vec<u8> {
 }
 
 fn gen_netprofile() -> Vec<u8> {
-    use alloc::format;
     use super::netprofile;
+    use alloc::format;
     let (profile_count, active_id, total_switches, ops) = netprofile::stats();
     let mut out = String::from("profile_count: ");
     out.push_str(&format!("{}\n", profile_count));
@@ -8090,8 +9194,8 @@ fn gen_netprofile() -> Vec<u8> {
 }
 
 fn gen_apppermissions() -> Vec<u8> {
-    use alloc::format;
     use super::apppermissions;
+    use alloc::format;
     let (entries, checks, grants, denials, ops) = apppermissions::stats();
     let mut out = String::from("entry_count: ");
     out.push_str(&format!("{}\n", entries));
@@ -8103,8 +9207,8 @@ fn gen_apppermissions() -> Vec<u8> {
 }
 
 fn gen_kbshortcuts() -> Vec<u8> {
-    use alloc::format;
     use super::kbshortcuts;
+    use alloc::format;
     let (count, binds, triggers, ops) = kbshortcuts::stats();
     let mut out = String::from("shortcut_count: ");
     out.push_str(&format!("{}\n", count));
@@ -8115,8 +9219,8 @@ fn gen_kbshortcuts() -> Vec<u8> {
 }
 
 fn gen_displayarrange() -> Vec<u8> {
-    use alloc::format;
     use super::displayarrange;
+    use alloc::format;
     let (count, topo, rearrangements, ops) = displayarrange::stats();
     let mut out = String::from("display_count: ");
     out.push_str(&format!("{}\n", count));
@@ -8127,8 +9231,8 @@ fn gen_displayarrange() -> Vec<u8> {
 }
 
 fn gen_sysanimations() -> Vec<u8> {
-    use alloc::format;
     use super::sysanimations;
+    use alloc::format;
     let (count, enabled, changes, ops) = sysanimations::stats();
     let mut out = String::from("animation_count: ");
     out.push_str(&format!("{}\n", count));
@@ -8139,8 +9243,8 @@ fn gen_sysanimations() -> Vec<u8> {
 }
 
 fn gen_filevault() -> Vec<u8> {
-    use alloc::format;
     use super::filevault;
+    use alloc::format;
     let (count, unlocked, unlocks, failed, ops) = filevault::stats();
     let mut out = String::from("vault_count: ");
     out.push_str(&format!("{}\n", count));
@@ -8152,8 +9256,8 @@ fn gen_filevault() -> Vec<u8> {
 }
 
 fn gen_mousegestures() -> Vec<u8> {
-    use alloc::format;
     use super::mousegestures;
+    use alloc::format;
     let (count, gestures, recognized, ops) = mousegestures::stats();
     let mut out = String::from("binding_count: ");
     out.push_str(&format!("{}\n", count));
@@ -8164,24 +9268,33 @@ fn gen_mousegestures() -> Vec<u8> {
 }
 
 fn gen_fontsettings() -> Vec<u8> {
-    use alloc::format;
     use super::fontsettings;
+    use alloc::format;
     let (changes, ops) = fontsettings::stats();
     let cfg = fontsettings::get_config();
     let mut out = String::from("antialiasing: ");
     out.push_str(cfg.as_ref().map_or("N/A", |c| c.antialiasing.label()));
     out.push('\n');
-    out.push_str(&format!("hinting: {}\n", cfg.as_ref().map_or("N/A", |c| c.hinting.label())));
-    out.push_str(&format!("default_size_dp: {}\n", cfg.as_ref().map_or(0, |c| c.default_size_dp)));
-    out.push_str(&format!("text_scale_percent: {}\n", cfg.as_ref().map_or(100, |c| c.text_scale_percent)));
+    out.push_str(&format!(
+        "hinting: {}\n",
+        cfg.as_ref().map_or("N/A", |c| c.hinting.label())
+    ));
+    out.push_str(&format!(
+        "default_size_dp: {}\n",
+        cfg.as_ref().map_or(0, |c| c.default_size_dp)
+    ));
+    out.push_str(&format!(
+        "text_scale_percent: {}\n",
+        cfg.as_ref().map_or(100, |c| c.text_scale_percent)
+    ));
     out.push_str(&format!("total_changes: {}\n", changes));
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
 }
 
 fn gen_notifbadge() -> Vec<u8> {
-    use alloc::format;
     use super::notifbadge;
+    use alloc::format;
     let (count, visible, updates, ops) = notifbadge::stats();
     let mut out = String::from("badge_count: ");
     out.push_str(&format!("{}\n", count));
@@ -8192,14 +9305,18 @@ fn gen_notifbadge() -> Vec<u8> {
 }
 
 fn gen_lockwallpaper() -> Vec<u8> {
-    use alloc::format;
     use super::lockwallpaper;
+    use alloc::format;
     let (rotations, changes, ops) = lockwallpaper::stats();
     let cfg = lockwallpaper::get_config();
     let mut out = String::from("mode: ");
     out.push_str(cfg.as_ref().map_or("N/A", |c| c.mode.label()));
     out.push('\n');
-    out.push_str(&format!("current_image: {}\n", cfg.as_ref().map_or_else(String::new, |c| c.current_image.clone())));
+    out.push_str(&format!(
+        "current_image: {}\n",
+        cfg.as_ref()
+            .map_or_else(String::new, |c| c.current_image.clone())
+    ));
     out.push_str(&format!("total_rotations: {}\n", rotations));
     out.push_str(&format!("total_changes: {}\n", changes));
     out.push_str(&format!("ops: {}\n", ops));
@@ -8207,8 +9324,8 @@ fn gen_lockwallpaper() -> Vec<u8> {
 }
 
 fn gen_systemsounds() -> Vec<u8> {
-    use alloc::format;
     use super::systemsounds;
+    use alloc::format;
     let (schemes, events, plays, ops) = systemsounds::stats();
     let mut out = String::from("active_scheme: ");
     out.push_str(&systemsounds::active_scheme());
@@ -8221,14 +9338,20 @@ fn gen_systemsounds() -> Vec<u8> {
 }
 
 fn gen_hotcorners() -> Vec<u8> {
-    use alloc::format;
     use super::hotcorners;
+    use alloc::format;
     let (enabled, triggers, ops) = hotcorners::stats();
     let all = hotcorners::get_all();
     let mut out = String::from("enabled_corners: ");
     out.push_str(&format!("{}\n", enabled));
     for c in &all {
-        out.push_str(&format!("{}: {} (delay={}ms, enabled={})\n", c.corner.label(), c.action.label(), c.delay_ms, c.enabled));
+        out.push_str(&format!(
+            "{}: {} (delay={}ms, enabled={})\n",
+            c.corner.label(),
+            c.action.label(),
+            c.delay_ms,
+            c.enabled
+        ));
     }
     out.push_str(&format!("total_triggers: {}\n", triggers));
     out.push_str(&format!("ops: {}\n", ops));
@@ -8236,8 +9359,8 @@ fn gen_hotcorners() -> Vec<u8> {
 }
 
 fn gen_dynlock() -> Vec<u8> {
-    use alloc::format;
     use super::dynlock;
+    use alloc::format;
     let (devs, locks, unlocks, ops) = dynlock::stats();
     let mut out = String::from("state: ");
     out.push_str(dynlock::lock_state().label());
@@ -8250,8 +9373,8 @@ fn gen_dynlock() -> Vec<u8> {
 }
 
 fn gen_snaplayout() -> Vec<u8> {
-    use alloc::format;
     use super::snaplayout;
+    use alloc::format;
     let (layouts, groups, snaps, ops) = snaplayout::stats();
     let active = snaplayout::get_active();
     let mut out = String::from("active_layout: ");
@@ -8265,8 +9388,8 @@ fn gen_snaplayout() -> Vec<u8> {
 }
 
 fn gen_haptfeedback() -> Vec<u8> {
-    use alloc::format;
     use super::haptfeedback;
+    use alloc::format;
     let (devs, maps, fires, ops) = haptfeedback::stats();
     let mut out = String::from("device_count: ");
     out.push_str(&format!("{}\n", devs));
@@ -8277,14 +9400,17 @@ fn gen_haptfeedback() -> Vec<u8> {
 }
 
 fn gen_eyeprotect() -> Vec<u8> {
-    use alloc::format;
     use super::eyeprotect;
+    use alloc::format;
     let (profiles, breaks, snoozes, skips, ops) = eyeprotect::stats();
     let active = eyeprotect::get_active();
     let mut out = String::from("state: ");
     out.push_str(eyeprotect::break_state().label());
     out.push('\n');
-    out.push_str(&format!("active_profile: {}\n", active.map_or_else(|| String::from("none"), |a| a.name)));
+    out.push_str(&format!(
+        "active_profile: {}\n",
+        active.map_or_else(|| String::from("none"), |a| a.name)
+    ));
     out.push_str(&format!("profile_count: {}\n", profiles));
     out.push_str(&format!("total_breaks: {}\n", breaks));
     out.push_str(&format!("total_snoozes: {}\n", snoozes));
@@ -8294,8 +9420,8 @@ fn gen_eyeprotect() -> Vec<u8> {
 }
 
 fn gen_pinnedapps() -> Vec<u8> {
-    use alloc::format;
     use super::pinnedapps;
+    use alloc::format;
     let (total, taskbar, start, launches, ops) = pinnedapps::stats();
     let mut out = String::from("total_pinned: ");
     out.push_str(&format!("{}\n", total));
@@ -8307,8 +9433,8 @@ fn gen_pinnedapps() -> Vec<u8> {
 }
 
 fn gen_inputmethod() -> Vec<u8> {
-    use alloc::format;
     use super::inputmethod;
+    use alloc::format;
     let (engines, commits, switches, ops) = inputmethod::stats();
     let mut out = String::from("active_engine: ");
     out.push_str(&inputmethod::active_engine_name());
@@ -8321,22 +9447,25 @@ fn gen_inputmethod() -> Vec<u8> {
 }
 
 fn gen_storagesense() -> Vec<u8> {
-    use alloc::format;
     use super::storagesense;
+    use alloc::format;
     let (policies, runs, freed, ops) = storagesense::stats();
     let mut out = String::from("schedule: ");
     out.push_str(storagesense::get_schedule().label());
     out.push('\n');
     out.push_str(&format!("policy_count: {}\n", policies));
     out.push_str(&format!("total_runs: {}\n", runs));
-    out.push_str(&format!("total_freed: {}\n", storagesense::format_bytes(freed)));
+    out.push_str(&format!(
+        "total_freed: {}\n",
+        storagesense::format_bytes(freed)
+    ));
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
 }
 
 fn gen_autofix() -> Vec<u8> {
-    use alloc::format;
     use super::autofix;
+    use alloc::format;
     let (issues, scans, fixes, ignored, ops) = autofix::stats();
     let mut out = String::from("issue_count: ");
     out.push_str(&format!("{}\n", issues));
@@ -8348,8 +9477,8 @@ fn gen_autofix() -> Vec<u8> {
 }
 
 fn gen_recentsearch() -> Vec<u8> {
-    use alloc::format;
     use super::recentsearch;
+    use alloc::format;
     let (entries, pinned, searches, suggestions, ops) = recentsearch::stats();
     let mut out = String::from("entry_count: ");
     out.push_str(&format!("{}\n", entries));
@@ -8361,8 +9490,8 @@ fn gen_recentsearch() -> Vec<u8> {
 }
 
 fn gen_sysmaint() -> Vec<u8> {
-    use alloc::format;
     use super::sysmaint;
+    use alloc::format;
     let (tasks, runs, failures, ops) = sysmaint::stats();
     let mut out = String::from("task_count: ");
     out.push_str(&format!("{}\n", tasks));
@@ -8373,8 +9502,8 @@ fn gen_sysmaint() -> Vec<u8> {
 }
 
 fn gen_multiclip() -> Vec<u8> {
-    use alloc::format;
     use super::multiclip;
+    use alloc::format;
     let (entries, pinned, copies, pastes, ops) = multiclip::stats();
     let mut out = String::from("entry_count: ");
     out.push_str(&format!("{}\n", entries));
@@ -8395,8 +9524,14 @@ fn gen_focussession() -> Vec<u8> {
         out.push_str(&format!("focus_mins: {}\n", cfg.focus_mins));
         out.push_str(&format!("short_break_mins: {}\n", cfg.short_break_mins));
         out.push_str(&format!("long_break_mins: {}\n", cfg.long_break_mins));
-        out.push_str(&format!("sessions_before_long: {}\n", cfg.sessions_before_long));
-        out.push_str(&format!("block_notifications: {}\n", cfg.block_notifications));
+        out.push_str(&format!(
+            "sessions_before_long: {}\n",
+            cfg.sessions_before_long
+        ));
+        out.push_str(&format!(
+            "block_notifications: {}\n",
+            cfg.block_notifications
+        ));
     }
     let (sessions, abandoned, focus_mins, ops) = super::focussession::stats();
     out.push_str(&format!("total_sessions: {}\n", sessions));
@@ -8454,8 +9589,13 @@ fn gen_appcompat() -> Vec<u8> {
     out.push_str(&format!("total_shim_activations: {}\n", shim_acts));
     let list = super::appcompat::list_profiles();
     for p in &list {
-        out.push_str(&format!("  {} — {:?} shims={} enabled={}\n",
-            p.app_name, p.compat_level, p.shims.len(), p.enabled));
+        out.push_str(&format!(
+            "  {} — {:?} shims={} enabled={}\n",
+            p.app_name,
+            p.compat_level,
+            p.shims.len(),
+            p.enabled
+        ));
     }
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
@@ -8472,9 +9612,15 @@ fn gen_windowrules() -> Vec<u8> {
     out.push_str(&format!("total_applied: {}\n", applied));
     let list = super::windowrules::list_rules();
     for r in &list {
-        out.push_str(&format!("  [{}] {} — {} '{}' ({} actions, {})\n",
-            r.id, r.name, r.match_type.label(), r.match_value,
-            r.actions.len(), if r.enabled { "on" } else { "off" }));
+        out.push_str(&format!(
+            "  [{}] {} — {} '{}' ({} actions, {})\n",
+            r.id,
+            r.name,
+            r.match_type.label(),
+            r.match_value,
+            r.actions.len(),
+            if r.enabled { "on" } else { "off" }
+        ));
     }
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
@@ -8486,11 +9632,18 @@ fn gen_spatialaudio() -> Vec<u8> {
     out.push_str("=== Spatial Audio ===\n");
     if let Some(cfg) = super::spatialaudio::get_config() {
         out.push_str(&format!("enabled: {}\n", cfg.global_enabled));
-        out.push_str(&format!("layout: {} ({}ch)\n", cfg.layout.label(), cfg.layout.channel_count()));
+        out.push_str(&format!(
+            "layout: {} ({}ch)\n",
+            cfg.layout.label(),
+            cfg.layout.channel_count()
+        ));
         out.push_str(&format!("room: {}\n", cfg.room_size.label()));
         out.push_str(&format!("head_tracking: {}\n", cfg.head_tracking));
         out.push_str(&format!("reverb: {}%\n", cfg.reverb_level));
-        out.push_str(&format!("distance_attenuation: {}\n", cfg.distance_attenuation));
+        out.push_str(&format!(
+            "distance_attenuation: {}\n",
+            cfg.distance_attenuation
+        ));
         out.push_str(&format!("doppler: {}\n", cfg.doppler_effect));
     }
     let (apps, streams, changes, ops) = super::spatialaudio::stats();
@@ -8510,16 +9663,27 @@ fn gen_filetransfer() -> Vec<u8> {
     let devices = super::filetransfer::list_devices();
     out.push_str(&format!("nearby_devices: {}\n", devices.len()));
     for d in &devices {
-        out.push_str(&format!("  [{}] {} ({}, {})\n",
-            d.id, d.name, d.device_type, d.transport.label()));
+        out.push_str(&format!(
+            "  [{}] {} ({}, {})\n",
+            d.id,
+            d.name,
+            d.device_type,
+            d.transport.label()
+        ));
     }
     let transfers = super::filetransfer::list_transfers(10);
     if !transfers.is_empty() {
         out.push_str("recent_transfers:\n");
         for t in &transfers {
             let dir = if t.outgoing { "→" } else { "←" };
-            out.push_str(&format!("  [{}] {} {} {} ({})\n",
-                t.id, dir, t.device_name, t.file_name, t.status.label()));
+            out.push_str(&format!(
+                "  [{}] {} {} {} ({})\n",
+                t.id,
+                dir,
+                t.device_name,
+                t.file_name,
+                t.status.label()
+            ));
         }
     }
     let (_devs, sent, recv, _bytes_s, _bytes_r, ops) = super::filetransfer::stats();
@@ -8540,14 +9704,23 @@ fn gen_startupopt() -> Vec<u8> {
     out.push_str(&format!("stages: {}\n", stages));
     let sorted = super::startupopt::get_stages_by_duration();
     for s in sorted.iter().take(10) {
-        out.push_str(&format!("  {} ({}) — {}ms\n",
-            s.name, s.category.label(), s.duration_ms));
+        out.push_str(&format!(
+            "  {} ({}) — {}ms\n",
+            s.name,
+            s.category.label(),
+            s.duration_ms
+        ));
     }
     let suggestions = super::startupopt::get_suggestions();
     if !suggestions.is_empty() {
         out.push_str(&format!("suggestions: {}\n", suggestions.len()));
         for s in &suggestions {
-            out.push_str(&format!("  [{}] [{}] {}\n", s.id, s.priority.label(), s.description));
+            out.push_str(&format!(
+                "  [{}] [{}] {}\n",
+                s.id,
+                s.priority.label(),
+                s.description
+            ));
         }
     }
     out.push_str(&format!("total_analyses: {}\n", analyses));
@@ -8568,8 +9741,10 @@ fn gen_usagetime() -> Vec<u8> {
     for a in &top {
         let hrs = a.total_foreground_ms / 3_600_000;
         let mins = (a.total_foreground_ms % 3_600_000) / 60_000;
-        out.push_str(&format!("  {} — {}h {}m ({} sessions)\n",
-            a.app_name, hrs, mins, a.session_count));
+        out.push_str(&format!(
+            "  {} — {}h {}m ({} sessions)\n",
+            a.app_name, hrs, mins, a.session_count
+        ));
     }
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
@@ -8606,8 +9781,14 @@ fn gen_devpair() -> Vec<u8> {
     out.push_str(&format!("total_failed: {}\n", total_failed));
     let list = super::devpair::list_devices();
     for d in &list {
-        out.push_str(&format!("  [{}] {} ({}) — {} signal={}\n",
-            d.id, d.name, d.device_type.label(), d.state.label(), d.signal_strength));
+        out.push_str(&format!(
+            "  [{}] {} ({}) — {} signal={}\n",
+            d.id,
+            d.name,
+            d.device_type.label(),
+            d.state.label(),
+            d.signal_strength
+        ));
     }
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
@@ -8626,10 +9807,14 @@ fn gen_notifgroup() -> Vec<u8> {
     out.push_str(&format!("total_dismissed: {}\n", dismissed));
     let group_list = super::notifgroup::get_groups();
     for g in &group_list {
-        out.push_str(&format!("  [{}] {} — {} notifs ({}{})\n",
-            g.group_id, g.app_name, g.notifications.len(),
+        out.push_str(&format!(
+            "  [{}] {} — {} notifs ({}{})\n",
+            g.group_id,
+            g.app_name,
+            g.notifications.len(),
             if g.expanded { "expanded" } else { "collapsed" },
-            if g.muted { ", muted" } else { "" }));
+            if g.muted { ", muted" } else { "" }
+        ));
     }
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
@@ -8640,10 +9825,21 @@ fn gen_playmedia() -> Vec<u8> {
     let mut out = String::new();
     out.push_str("=== Play Media ===\n");
     if let Some(np) = super::playmedia::get_now_playing() {
-        out.push_str(&format!("now_playing: {} — {} ({})\n", np.artist, np.title, np.album));
+        out.push_str(&format!(
+            "now_playing: {} — {} ({})\n",
+            np.artist, np.title, np.album
+        ));
         out.push_str(&format!("state: {}\n", np.state.label()));
-        out.push_str(&format!("app: {} ({})\n", np.app_name, np.media_type.label()));
-        out.push_str(&format!("shuffle: {}, repeat: {}\n", np.shuffle, np.repeat.label()));
+        out.push_str(&format!(
+            "app: {} ({})\n",
+            np.app_name,
+            np.media_type.label()
+        ));
+        out.push_str(&format!(
+            "shuffle: {}, repeat: {}\n",
+            np.shuffle,
+            np.repeat.label()
+        ));
     } else {
         out.push_str("now_playing: none\n");
     }
@@ -8668,8 +9864,14 @@ fn gen_kbmacro() -> Vec<u8> {
     let list = super::kbmacro::list_macros();
     for m in &list {
         let hk = m.hotkey.as_deref().unwrap_or("none");
-        out.push_str(&format!("  [{}] {} — {} events, hotkey={}, plays={}\n",
-            m.id, m.name, m.events.len(), hk, m.play_count));
+        out.push_str(&format!(
+            "  [{}] {} — {} events, hotkey={}, plays={}\n",
+            m.id,
+            m.name,
+            m.events.len(),
+            hk,
+            m.play_count
+        ));
     }
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
@@ -8681,12 +9883,27 @@ fn gen_sysresource() -> Vec<u8> {
     out.push_str("=== System Resources ===\n");
     if let Some(snap) = super::sysresource::get_current() {
         out.push_str(&format!("cpu: {}%\n", snap.cpu_percent));
-        out.push_str(&format!("memory: {}/{} KB\n", snap.memory_used_kb, snap.memory_total_kb));
-        out.push_str(&format!("swap: {}/{} KB\n", snap.swap_used_kb, snap.swap_total_kb));
-        out.push_str(&format!("disk_io: {}KB/s read, {}KB/s write\n", snap.disk_read_kb_s, snap.disk_write_kb_s));
-        out.push_str(&format!("net_io: {}KB/s rx, {}KB/s tx\n", snap.net_rx_kb_s, snap.net_tx_kb_s));
+        out.push_str(&format!(
+            "memory: {}/{} KB\n",
+            snap.memory_used_kb, snap.memory_total_kb
+        ));
+        out.push_str(&format!(
+            "swap: {}/{} KB\n",
+            snap.swap_used_kb, snap.swap_total_kb
+        ));
+        out.push_str(&format!(
+            "disk_io: {}KB/s read, {}KB/s write\n",
+            snap.disk_read_kb_s, snap.disk_write_kb_s
+        ));
+        out.push_str(&format!(
+            "net_io: {}KB/s rx, {}KB/s tx\n",
+            snap.net_rx_kb_s, snap.net_tx_kb_s
+        ));
         out.push_str(&format!("gpu: {}%\n", snap.gpu_percent));
-        out.push_str(&format!("processes: {}, threads: {}\n", snap.process_count, snap.thread_count));
+        out.push_str(&format!(
+            "processes: {}, threads: {}\n",
+            snap.process_count, snap.thread_count
+        ));
     }
     let (samples, hist_size, _alerts, total_alerts, ops) = super::sysresource::stats();
     out.push_str(&format!("total_samples: {}\n", samples));
@@ -8707,8 +9924,10 @@ fn gen_faceunlock() -> Vec<u8> {
     let enrollments = super::faceunlock::list_enrollments();
     out.push_str(&format!("enrollments: {}\n", enrollments.len()));
     for e in &enrollments {
-        out.push_str(&format!("  user {} ({}) — verified={}, failed={}\n",
-            e.user_id, e.user_name, e.verify_count, e.fail_count));
+        out.push_str(&format!(
+            "  user {} ({}) — verified={}, failed={}\n",
+            e.user_id, e.user_name, e.verify_count, e.fail_count
+        ));
     }
     let (_enr, verifications, matches, rejections, ops) = super::faceunlock::stats();
     out.push_str(&format!("total_verifications: {}\n", verifications));
@@ -8776,7 +9995,8 @@ fn gen_netusage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (app_count, iface_count, total_sent, total_received, total_connections, cap_warnings, ops) = super::netusage::stats();
+    let (app_count, iface_count, total_sent, total_received, total_connections, cap_warnings, ops) =
+        super::netusage::stats();
     out.push_str("subsystem: netusage\n");
     out.push_str(&format!("app_count: {}\n", app_count));
     out.push_str(&format!("interface_count: {}\n", iface_count));
@@ -8792,7 +10012,8 @@ fn gen_touchscreen() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (device_count, gesture_count, total_touches, total_gestures, calibrations, ops) = super::touchscreen::stats();
+    let (device_count, gesture_count, total_touches, total_gestures, calibrations, ops) =
+        super::touchscreen::stats();
     out.push_str("subsystem: touchscreen\n");
     out.push_str(&format!("device_count: {}\n", device_count));
     out.push_str(&format!("gesture_count: {}\n", gesture_count));
@@ -8835,7 +10056,8 @@ fn gen_policyengine() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (rule_count, audit_size, total_evals, total_denials, total_audits, ops) = super::policyengine::stats();
+    let (rule_count, audit_size, total_evals, total_denials, total_audits, ops) =
+        super::policyengine::stats();
     out.push_str("subsystem: policyengine\n");
     out.push_str(&format!("rule_count: {}\n", rule_count));
     out.push_str(&format!("audit_log_size: {}\n", audit_size));
@@ -8863,7 +10085,8 @@ fn gen_wifiscan() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (network_count, saved_count, total_scans, total_connections, total_failures, ops) = super::wifiscan::stats();
+    let (network_count, saved_count, total_scans, total_connections, total_failures, ops) =
+        super::wifiscan::stats();
     out.push_str("subsystem: wifiscan\n");
     out.push_str(&format!("network_count: {}\n", network_count));
     out.push_str(&format!("saved_count: {}\n", saved_count));
@@ -8892,7 +10115,8 @@ fn gen_iotdevice() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (device_count, group_count, online_count, total_commands, total_discoveries, ops) = super::iotdevice::stats();
+    let (device_count, group_count, online_count, total_commands, total_discoveries, ops) =
+        super::iotdevice::stats();
     out.push_str("subsystem: iotdevice\n");
     out.push_str(&format!("device_count: {}\n", device_count));
     out.push_str(&format!("group_count: {}\n", group_count));
@@ -8907,7 +10131,8 @@ fn gen_prochistory() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (history_size, total_started, total_exited, total_crashed, ops) = super::prochistory::stats();
+    let (history_size, total_started, total_exited, total_crashed, ops) =
+        super::prochistory::stats();
     out.push_str("subsystem: prochistory\n");
     out.push_str(&format!("history_size: {}\n", history_size));
     out.push_str(&format!("total_started: {}\n", total_started));
@@ -8921,7 +10146,8 @@ fn gen_notiffilter() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (rule_count, total_evaluated, total_allowed, total_blocked, total_silenced, ops) = super::notiffilter::stats();
+    let (rule_count, total_evaluated, total_allowed, total_blocked, total_silenced, ops) =
+        super::notiffilter::stats();
     out.push_str("subsystem: notiffilter\n");
     out.push_str(&format!("rule_count: {}\n", rule_count));
     out.push_str(&format!("total_evaluated: {}\n", total_evaluated));
@@ -8966,7 +10192,8 @@ fn gen_energysaver() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Energy Saver ===\n");
-    let (throttled_count, mode_changes, total_throttles, estimated_min, ops) = crate::fs::energysaver::stats();
+    let (throttled_count, mode_changes, total_throttles, estimated_min, ops) =
+        crate::fs::energysaver::stats();
     out.push_str(&format!("throttled_count: {}\n", throttled_count));
     out.push_str(&format!("mode_changes: {}\n", mode_changes));
     out.push_str(&format!("total_throttles: {}\n", total_throttles));
@@ -8979,7 +10206,8 @@ fn gen_filerules() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== File Rules ===\n");
-    let (rule_count, total_evaluations, total_matches, total_applied, ops) = crate::fs::filerules::stats();
+    let (rule_count, total_evaluations, total_matches, total_applied, ops) =
+        crate::fs::filerules::stats();
     out.push_str(&format!("rule_count: {}\n", rule_count));
     out.push_str(&format!("total_evaluations: {}\n", total_evaluations));
     out.push_str(&format!("total_matches: {}\n", total_matches));
@@ -8992,7 +10220,8 @@ fn gen_secureboot() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Secure Boot ===\n");
-    let (key_count, record_count, total_verified, total_rejected, ops) = crate::fs::secureboot::stats();
+    let (key_count, record_count, total_verified, total_rejected, ops) =
+        crate::fs::secureboot::stats();
     out.push_str(&format!("key_count: {}\n", key_count));
     out.push_str(&format!("record_count: {}\n", record_count));
     out.push_str(&format!("total_verified: {}\n", total_verified));
@@ -9005,7 +10234,8 @@ fn gen_eventlog() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Event Log ===\n");
-    let (event_count, total_logged, total_cleared, total_queries, ops) = crate::fs::eventlog::stats();
+    let (event_count, total_logged, total_cleared, total_queries, ops) =
+        crate::fs::eventlog::stats();
     out.push_str(&format!("event_count: {}\n", event_count));
     out.push_str(&format!("total_logged: {}\n", total_logged));
     out.push_str(&format!("total_cleared: {}\n", total_cleared));
@@ -9174,7 +10404,8 @@ fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== System Image ===\n");
-    let (image_count, total_created, total_restored, total_verified, total_bytes, ops) = crate::fs::systemimage::stats();
+    let (image_count, total_created, total_restored, total_verified, total_bytes, ops) =
+        crate::fs::systemimage::stats();
     out.push_str(&format!("image_count: {}\n", image_count));
     out.push_str(&format!("total_created: {}\n", total_created));
     out.push_str(&format!("total_restored: {}\n", total_restored));
@@ -9188,7 +10419,8 @@ fn gen_raidmgr() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== RAID Manager ===\n");
-    let (array_count, total_created, total_rebuilds, total_failures, ops) = crate::fs::raidmgr::stats();
+    let (array_count, total_created, total_rebuilds, total_failures, ops) =
+        crate::fs::raidmgr::stats();
     out.push_str(&format!("array_count: {}\n", array_count));
     out.push_str(&format!("total_created: {}\n", total_created));
     out.push_str(&format!("total_rebuilds: {}\n", total_rebuilds));
@@ -9201,7 +10433,8 @@ fn gen_networkbridge() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Network Bridge ===\n");
-    let (bridge_count, total_created, total_ifaces, total_forwarded, ops) = crate::fs::networkbridge::stats();
+    let (bridge_count, total_created, total_ifaces, total_forwarded, ops) =
+        crate::fs::networkbridge::stats();
     out.push_str(&format!("bridge_count: {}\n", bridge_count));
     out.push_str(&format!("total_created: {}\n", total_created));
     out.push_str(&format!("total_ifaces_added: {}\n", total_ifaces));
@@ -9214,7 +10447,8 @@ fn gen_secureerase() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Secure Erase ===\n");
-    let (job_count, total_started, total_completed, total_bytes, ops) = crate::fs::secureerase::stats();
+    let (job_count, total_started, total_completed, total_bytes, ops) =
+        crate::fs::secureerase::stats();
     out.push_str(&format!("job_count: {}\n", job_count));
     out.push_str(&format!("total_started: {}\n", total_started));
     out.push_str(&format!("total_completed: {}\n", total_completed));
@@ -9227,7 +10461,8 @@ fn gen_dnssettings() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== DNS Settings ===\n");
-    let (server_count, cache_size, total_queries, cache_hits, failures, ops) = crate::fs::dnssettings::stats();
+    let (server_count, cache_size, total_queries, cache_hits, failures, ops) =
+        crate::fs::dnssettings::stats();
     out.push_str(&format!("server_count: {}\n", server_count));
     out.push_str(&format!("cache_size: {}\n", cache_size));
     out.push_str(&format!("total_queries: {}\n", total_queries));
@@ -9241,7 +10476,8 @@ fn gen_backupsched() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Backup Scheduler ===\n");
-    let (sched_count, hist_size, total_runs, successful, failed, bytes, ops) = crate::fs::backupsched::stats();
+    let (sched_count, hist_size, total_runs, successful, failed, bytes, ops) =
+        crate::fs::backupsched::stats();
     out.push_str(&format!("schedule_count: {}\n", sched_count));
     out.push_str(&format!("history_size: {}\n", hist_size));
     out.push_str(&format!("total_runs: {}\n", total_runs));
@@ -9268,7 +10504,8 @@ fn gen_vpnprofile() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== VPN Profiles ===\n");
-    let (profile_count, total_connects, total_disconnects, total_errors, ops) = crate::fs::vpnprofile::stats();
+    let (profile_count, total_connects, total_disconnects, total_errors, ops) =
+        crate::fs::vpnprofile::stats();
     out.push_str(&format!("profile_count: {}\n", profile_count));
     out.push_str(&format!("total_connects: {}\n", total_connects));
     out.push_str(&format!("total_disconnects: {}\n", total_disconnects));
@@ -9281,7 +10518,8 @@ fn gen_diskhealth() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Disk Health ===\n");
-    let (disk_count, total_checks, total_warnings, total_failures, ops) = crate::fs::diskhealth::stats();
+    let (disk_count, total_checks, total_warnings, total_failures, ops) =
+        crate::fs::diskhealth::stats();
     out.push_str(&format!("disk_count: {}\n", disk_count));
     out.push_str(&format!("total_checks: {}\n", total_checks));
     out.push_str(&format!("total_warnings: {}\n", total_warnings));
@@ -9294,7 +10532,8 @@ fn gen_recoverypart() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Recovery Partition ===\n");
-    let (tool_count, total_repairs, total_verifications, total_boots, ops) = crate::fs::recoverypart::stats();
+    let (tool_count, total_repairs, total_verifications, total_boots, ops) =
+        crate::fs::recoverypart::stats();
     out.push_str(&format!("tool_count: {}\n", tool_count));
     out.push_str(&format!("total_repairs: {}\n", total_repairs));
     out.push_str(&format!("total_verifications: {}\n", total_verifications));
@@ -9319,7 +10558,8 @@ fn gen_diskclean() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Disk Cleanup ===\n");
-    let (item_count, total_scans, cleaned_bytes, cleaned_items, ops) = crate::fs::diskclean::stats();
+    let (item_count, total_scans, cleaned_bytes, cleaned_items, ops) =
+        crate::fs::diskclean::stats();
     out.push_str(&format!("item_count: {}\n", item_count));
     out.push_str(&format!("total_scans: {}\n", total_scans));
     out.push_str(&format!("cleaned_bytes: {}\n", cleaned_bytes));
@@ -9355,7 +10595,8 @@ fn gen_logrotate() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Log Rotation ===\n");
-    let (rule_count, total_rotations, bytes_rotated, total_cleanups, ops) = crate::fs::logrotate::stats();
+    let (rule_count, total_rotations, bytes_rotated, total_cleanups, ops) =
+        crate::fs::logrotate::stats();
     out.push_str(&format!("rule_count: {}\n", rule_count));
     out.push_str(&format!("total_rotations: {}\n", total_rotations));
     out.push_str(&format!("bytes_rotated: {}\n", bytes_rotated));
@@ -9447,7 +10688,11 @@ fn gen_thermal() -> Vec<u8> {
     out.push_str(&format!("throttle_events: {}\n", throttles));
     out.push_str(&format!("ops: {}\n", ops));
     for zone in crate::fs::thermal::list_zones() {
-        out.push_str(&format!("{}: {}\n", zone.name, crate::fs::thermal::format_temp(zone.temp_mc)));
+        out.push_str(&format!(
+            "{}: {}\n",
+            zone.name,
+            crate::fs::thermal::format_temp(zone.temp_mc)
+        ));
     }
     out.into_bytes()
 }
@@ -9461,7 +10706,8 @@ fn gen_swapmon() -> Vec<u8> {
     // a fabricated parallel device table.  processes_swapped / total_swap_out /
     // swap_out_bytes / ops are honest zeros — the real subsystem does not yet
     // track those (see swapmon::stats).
-    let (dev_count, proc_count, swap_in, swap_out, in_bytes, out_bytes, ops) = crate::fs::swapmon::stats();
+    let (dev_count, proc_count, swap_in, swap_out, in_bytes, out_bytes, ops) =
+        crate::fs::swapmon::stats();
     let (total, used) = crate::fs::swapmon::total_usage();
     out.push_str(&format!("device_count: {}\n", dev_count));
     out.push_str(&format!("total_bytes: {}\n", total));
@@ -9508,7 +10754,11 @@ fn gen_memlayout() -> Vec<u8> {
     out.push_str("=== Memory Layout ===\n");
     let (regions, ram, reserved, kernel, queries, ops) = crate::fs::memlayout::stats();
     out.push_str(&format!("region_count: {}\n", regions));
-    out.push_str(&format!("total_ram: {} ({})\n", ram, crate::fs::memlayout::format_size(ram)));
+    out.push_str(&format!(
+        "total_ram: {} ({})\n",
+        ram,
+        crate::fs::memlayout::format_size(ram)
+    ));
     out.push_str(&format!("total_reserved: {}\n", reserved));
     out.push_str(&format!("total_kernel: {}\n", kernel));
     out.push_str(&format!("queries: {}\n", queries));
@@ -9546,11 +10796,14 @@ fn gen_fs_loadavg() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (a1, a5, a15, running, total) = crate::fs::loadavg::get();
-    out.push_str(&format!("{} {} {} {}/{}\n",
+    out.push_str(&format!(
+        "{} {} {} {}/{}\n",
         crate::fs::loadavg::format_load(a1),
         crate::fs::loadavg::format_load(a5),
         crate::fs::loadavg::format_load(a15),
-        running, total));
+        running,
+        total
+    ));
     out.into_bytes()
 }
 
@@ -9618,9 +10871,15 @@ fn gen_kmod() -> Vec<u8> {
     out.push_str(&format!("total_errors: {}\n", errors));
     out.push_str(&format!("ops: {}\n", ops));
     for m in crate::fs::kmod::list_modules() {
-        out.push_str(&format!("  {} {} [{}] {} {}B refs={}\n",
-            m.name, m.version, m.state.label(), m.mod_type.label(),
-            m.size_bytes, m.ref_count));
+        out.push_str(&format!(
+            "  {} {} [{}] {} {}B refs={}\n",
+            m.name,
+            m.version,
+            m.state.label(),
+            m.mod_type.label(),
+            m.size_bytes,
+            m.ref_count
+        ));
     }
     out.into_bytes()
 }
@@ -9654,8 +10913,13 @@ fn gen_iosched() -> Vec<u8> {
     out.push_str(&format!("total_requeued: {}\n", requeued));
     out.push_str(&format!("ops: {}\n", ops));
     for d in crate::fs::iosched::list_devices() {
-        out.push_str(&format!("  {} algo={} depth={} merge={}\n",
-            d.device_name, d.algorithm.label(), d.queue_depth, d.merge_enabled));
+        out.push_str(&format!(
+            "  {} algo={} depth={} merge={}\n",
+            d.device_name,
+            d.algorithm.label(),
+            d.queue_depth,
+            d.merge_enabled
+        ));
     }
     out.into_bytes()
 }
@@ -9672,10 +10936,17 @@ fn gen_netmon() -> Vec<u8> {
     out.push_str(&format!("total_bytes_recv: {}\n", recv));
     out.push_str(&format!("ops: {}\n", ops));
     for c in crate::fs::netmon::list_connections() {
-        out.push_str(&format!("  {} {}:{} → {}:{} [{}] pid={} ({})\n",
-            c.protocol.label(), c.local_addr, c.local_port,
-            c.remote_addr, c.remote_port, c.state.label(),
-            c.pid, c.process_name));
+        out.push_str(&format!(
+            "  {} {}:{} → {}:{} [{}] pid={} ({})\n",
+            c.protocol.label(),
+            c.local_addr,
+            c.local_port,
+            c.remote_addr,
+            c.remote_port,
+            c.state.label(),
+            c.pid,
+            c.process_name
+        ));
     }
     out.into_bytes()
 }
@@ -9692,8 +10963,13 @@ fn gen_groupmgr() -> Vec<u8> {
     out.push_str(&format!("ops: {}\n", ops));
     for g in crate::fs::groupmgr::list_groups() {
         let members: Vec<_> = g.members.iter().map(|m| format!("{}", m)).collect();
-        out.push_str(&format!("  {}({}) [{}] members=[{}]\n",
-            g.name, g.gid, g.group_type.label(), members.join(",")));
+        out.push_str(&format!(
+            "  {}({}) [{}] members=[{}]\n",
+            g.name,
+            g.gid,
+            g.group_type.label(),
+            members.join(",")
+        ));
     }
     out.into_bytes()
 }
@@ -9710,8 +10986,14 @@ fn gen_sysrq() -> Vec<u8> {
     out.push_str(&format!("ops: {}\n", ops));
     for h in crate::fs::sysrq::list_handlers() {
         let en = if h.enabled { "ON" } else { "OFF" };
-        out.push_str(&format!("  '{}' [{}] {} — {} (triggers={})\n",
-            h.key, en, h.category.label(), h.description, h.trigger_count));
+        out.push_str(&format!(
+            "  '{}' [{}] {} — {} (triggers={})\n",
+            h.key,
+            en,
+            h.category.label(),
+            h.description,
+            h.trigger_count
+        ));
     }
     out.into_bytes()
 }
@@ -9727,9 +11009,20 @@ fn gen_telemetry() -> Vec<u8> {
     out.push_str(&format!("collection_enabled: {}\n", enabled));
     out.push_str(&format!("ops: {}\n", ops));
     for m in crate::fs::telemetry::list_metrics() {
-        let avg = if m.sample_count > 0 { m.total_sum / m.sample_count } else { 0 };
-        out.push_str(&format!("  {} [{}] = {} {} (avg={}, samples={})\n",
-            m.name, m.metric_type.label(), m.value, m.unit, avg, m.sample_count));
+        let avg = if m.sample_count > 0 {
+            m.total_sum / m.sample_count
+        } else {
+            0
+        };
+        out.push_str(&format!(
+            "  {} [{}] = {} {} (avg={}, samples={})\n",
+            m.name,
+            m.metric_type.label(),
+            m.value,
+            m.unit,
+            avg,
+            m.sample_count
+        ));
     }
     out.into_bytes()
 }
@@ -9745,9 +11038,15 @@ fn gen_fscache() -> Vec<u8> {
     out.push_str(&format!("total_evictions: {}\n", evictions));
     out.push_str(&format!("ops: {}\n", ops));
     for d in crate::fs::fscache::list_devices() {
-        out.push_str(&format!("  {} policy={} ra={} dirty={}/{} cached={}\n",
-            d.device_name, d.policy.label(), d.readahead_pages,
-            d.dirty_pages, d.dirty_ratio_pct, d.cached_pages));
+        out.push_str(&format!(
+            "  {} policy={} ra={} dirty={}/{} cached={}\n",
+            d.device_name,
+            d.policy.label(),
+            d.readahead_pages,
+            d.dirty_pages,
+            d.dirty_ratio_pct,
+            d.cached_pages
+        ));
     }
     out.into_bytes()
 }
@@ -9784,8 +11083,10 @@ fn gen_oomkiller() -> Vec<u8> {
     for s in crate::fs::oomkiller::list_scores() {
         let eff = (s.score + s.adj).max(0);
         let ex = if s.exempt { " [EXEMPT]" } else { "" };
-        out.push_str(&format!("  pid={} {} score={} adj={} eff={}{}\n",
-            s.pid, s.process_name, s.score, s.adj, eff, ex));
+        out.push_str(&format!(
+            "  pid={} {} score={} adj={} eff={}{}\n",
+            s.pid, s.process_name, s.score, s.adj, eff, ex
+        ));
     }
     out.into_bytes()
 }
@@ -9802,8 +11103,10 @@ fn gen_blktrace() -> Vec<u8> {
     out.push_str(&format!("ops: {}\n", ops));
     for d in crate::fs::blktrace::list_devices() {
         let st = if d.active { "ACTIVE" } else { "STOPPED" };
-        out.push_str(&format!("  {} [{}] events={} bytes={}\n",
-            d.device, st, d.total_events, d.total_bytes));
+        out.push_str(&format!(
+            "  {} [{}] events={} bytes={}\n",
+            d.device, st, d.total_events, d.total_bytes
+        ));
     }
     out.into_bytes()
 }
@@ -9812,11 +11115,20 @@ fn gen_cgroupfs() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (count, created, deleted, changes, ops) = crate::fs::cgroupfs::stats();
-    out.push_str(&format!("groups: {}\ncreated: {}\ndeleted: {}\nlimit_changes: {}\nops: {}\n",
-        count, created, deleted, changes, ops));
+    out.push_str(&format!(
+        "groups: {}\ncreated: {}\ndeleted: {}\nlimit_changes: {}\nops: {}\n",
+        count, created, deleted, changes, ops
+    ));
     for g in crate::fs::cgroupfs::list_groups() {
-        out.push_str(&format!("  {} cpu_w={} mem_max={} pids={}/{} procs={}\n",
-            g.path, g.cpu_weight, g.memory_max, g.pids_current, g.pids_max, g.processes.len()));
+        out.push_str(&format!(
+            "  {} cpu_w={} mem_max={} pids={}/{} procs={}\n",
+            g.path,
+            g.cpu_weight,
+            g.memory_max,
+            g.pids_current,
+            g.pids_max,
+            g.processes.len()
+        ));
     }
     out.into_bytes()
 }
@@ -9826,11 +11138,24 @@ fn gen_secpolicy() -> Vec<u8> {
     let mut out = String::new();
     let (rules, checks, allowed, denied, ops) = crate::fs::secpolicy::stats();
     let mode = crate::fs::secpolicy::get_mode();
-    out.push_str(&format!("mode: {}\nrules: {}\nchecks: {}\nallowed: {}\ndenied: {}\nops: {}\n",
-        mode.label(), rules, checks, allowed, denied, ops));
+    out.push_str(&format!(
+        "mode: {}\nrules: {}\nchecks: {}\nallowed: {}\ndenied: {}\nops: {}\n",
+        mode.label(),
+        rules,
+        checks,
+        allowed,
+        denied,
+        ops
+    ));
     for r in crate::fs::secpolicy::list_rules() {
-        out.push_str(&format!("  rule#{} {}->{} {} {}\n",
-            r.id, r.subject_label, r.object_label, r.action.label(), r.decision.label()));
+        out.push_str(&format!(
+            "  rule#{} {}->{} {} {}\n",
+            r.id,
+            r.subject_label,
+            r.object_label,
+            r.action.label(),
+            r.decision.label()
+        ));
     }
     out.into_bytes()
 }
@@ -9839,10 +11164,20 @@ fn gen_procstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (count, updates, ops) = crate::fs::procstat::stats();
-    out.push_str(&format!("processes: {}\nupdates: {}\nops: {}\n", count, updates, ops));
+    out.push_str(&format!(
+        "processes: {}\nupdates: {}\nops: {}\n",
+        count, updates, ops
+    ));
     for p in crate::fs::procstat::list_processes() {
-        out.push_str(&format!("  pid={} {} [{}] cpu={}us mem={} threads={}\n",
-            p.pid, p.name, p.state.label(), p.cpu_time_us, p.memory_bytes, p.threads));
+        out.push_str(&format!(
+            "  pid={} {} [{}] cpu={}us mem={} threads={}\n",
+            p.pid,
+            p.name,
+            p.state.label(),
+            p.cpu_time_us,
+            p.memory_bytes,
+            p.threads
+        ));
     }
     out.into_bytes()
 }
@@ -9851,13 +11186,20 @@ fn gen_kernparam() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (count, lookups, sets, unconsumed, ops) = crate::fs::kernparam::stats();
-    out.push_str(&format!("params: {}\nlookups: {}\nsets: {}\nunconsumed: {}\nops: {}\n",
-        count, lookups, sets, unconsumed, ops));
+    out.push_str(&format!(
+        "params: {}\nlookups: {}\nsets: {}\nunconsumed: {}\nops: {}\n",
+        count, lookups, sets, unconsumed, ops
+    ));
     out.push_str(&format!("cmdline: {}\n", crate::fs::kernparam::cmdline()));
     for p in crate::fs::kernparam::list_params() {
         let consumer = p.consumed_by.as_deref().unwrap_or("-");
-        out.push_str(&format!("  {}={} [{}] consumer={}\n",
-            p.key, p.value, p.origin.label(), consumer));
+        out.push_str(&format!(
+            "  {}={} [{}] consumer={}\n",
+            p.key,
+            p.value,
+            p.origin.label(),
+            consumer
+        ));
     }
     out.into_bytes()
 }
@@ -9866,11 +11208,19 @@ fn gen_tracemon() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (tp_count, ev_count, total, dropped, enabled, ops) = crate::fs::tracemon::stats();
-    out.push_str(&format!("tracepoints: {}\nbuffered: {}\ntotal_events: {}\ndropped: {}\nenabled: {}\nops: {}\n",
-        tp_count, ev_count, total, dropped, enabled, ops));
+    out.push_str(&format!(
+        "tracepoints: {}\nbuffered: {}\ntotal_events: {}\ndropped: {}\nenabled: {}\nops: {}\n",
+        tp_count, ev_count, total, dropped, enabled, ops
+    ));
     for tp in crate::fs::tracemon::list_tracepoints() {
         let st = if tp.enabled { "ON" } else { "off" };
-        out.push_str(&format!("  {} [{}] {} hits={}\n", tp.name, tp.category.label(), st, tp.hit_count));
+        out.push_str(&format!(
+            "  {} [{}] {} hits={}\n",
+            tp.name,
+            tp.category.label(),
+            st,
+            tp.hit_count
+        ));
     }
     out.into_bytes()
 }
@@ -9883,7 +11233,13 @@ fn gen_authbroker() -> Vec<u8> {
         creds, grants, attempts, granted, denied, revoked, ops));
     for c in crate::fs::authbroker::list_credentials(None) {
         let locked = if c.locked { " LOCKED" } else { "" };
-        out.push_str(&format!("  {} [{}] fails={}{}\n", c.principal, c.method.label(), c.failed_attempts, locked));
+        out.push_str(&format!(
+            "  {} [{}] fails={}{}\n",
+            c.principal,
+            c.method.label(),
+            c.failed_attempts,
+            locked
+        ));
     }
     out.into_bytes()
 }
@@ -9892,12 +11248,21 @@ fn gen_prociso() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (ns_count, cont_count, attaches, detaches, ops) = crate::fs::prociso::stats();
-    out.push_str(&format!("namespaces: {}\ncontainers: {}\nattaches: {}\ndetaches: {}\nops: {}\n",
-        ns_count, cont_count, attaches, detaches, ops));
+    out.push_str(&format!(
+        "namespaces: {}\ncontainers: {}\nattaches: {}\ndetaches: {}\nops: {}\n",
+        ns_count, cont_count, attaches, detaches, ops
+    ));
     for ns in crate::fs::prociso::list_namespaces() {
         let parent = ns.parent_id.map_or(String::from("-"), |p| format!("{}", p));
-        out.push_str(&format!("  ns#{} {} [{}] iso={} parent={} procs={}\n",
-            ns.id, ns.name, ns.ns_type.label(), ns.isolation.label(), parent, ns.processes.len()));
+        out.push_str(&format!(
+            "  ns#{} {} [{}] iso={} parent={} procs={}\n",
+            ns.id,
+            ns.name,
+            ns.ns_type.label(),
+            ns.isolation.label(),
+            parent,
+            ns.processes.len()
+        ));
     }
     out.into_bytes()
 }
@@ -9906,11 +11271,19 @@ fn gen_dmevent() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (devs, evs, rules, total, matched, ops) = crate::fs::dmevent::stats();
-    out.push_str(&format!("devices: {}\nbuffered_events: {}\nrules: {}\ntotal_events: {}\nmatched: {}\nops: {}\n",
-        devs, evs, rules, total, matched, ops));
+    out.push_str(&format!(
+        "devices: {}\nbuffered_events: {}\nrules: {}\ntotal_events: {}\nmatched: {}\nops: {}\n",
+        devs, evs, rules, total, matched, ops
+    ));
     for d in crate::fs::dmevent::list_devices() {
         let st = if d.online { "online" } else { "offline" };
-        out.push_str(&format!("  {} [{}] {} {}\n", d.devname, d.subsystem.label(), st, d.devpath));
+        out.push_str(&format!(
+            "  {} [{}] {} {}\n",
+            d.devname,
+            d.subsystem.label(),
+            st,
+            d.devpath
+        ));
     }
     out.into_bytes()
 }
@@ -9919,11 +11292,15 @@ fn gen_pftrack() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (procs, evs, total, minor, major, ops) = crate::fs::pftrack::stats();
-    out.push_str(&format!("processes: {}\nbuffered: {}\ntotal_faults: {}\nminor: {}\nmajor: {}\nops: {}\n",
-        procs, evs, total, minor, major, ops));
+    out.push_str(&format!(
+        "processes: {}\nbuffered: {}\ntotal_faults: {}\nminor: {}\nmajor: {}\nops: {}\n",
+        procs, evs, total, minor, major, ops
+    ));
     for p in crate::fs::pftrack::list_processes() {
-        out.push_str(&format!("  pid={} {} total={} minor={} major={} cow={}\n",
-            p.pid, p.name, p.total, p.minor, p.major, p.cow));
+        out.push_str(&format!(
+            "  pid={} {} total={} minor={} major={} cow={}\n",
+            p.pid, p.name, p.total, p.minor, p.major, p.cow
+        ));
     }
     out.into_bytes()
 }
@@ -9935,8 +11312,15 @@ fn gen_ipclog() -> Vec<u8> {
     out.push_str(&format!("channels: {}\nbuffered: {}\ntotal_msgs: {}\ntotal_bytes: {}\nerrors: {}\nenabled: {}\nops: {}\n",
         channels, msgs, total, bytes, errors, enabled, ops));
     for ch in crate::fs::ipclog::list_channels() {
-        out.push_str(&format!("  ch#{} {} sent={} recv={} lat={}us err={}\n",
-            ch.channel_id, ch.name, ch.messages_sent, ch.messages_received, ch.avg_latency_us, ch.errors));
+        out.push_str(&format!(
+            "  ch#{} {} sent={} recv={} lat={}us err={}\n",
+            ch.channel_id,
+            ch.name,
+            ch.messages_sent,
+            ch.messages_received,
+            ch.avg_latency_us,
+            ch.errors
+        ));
     }
     out.into_bytes()
 }
@@ -9948,9 +11332,17 @@ fn gen_numastat() -> Vec<u8> {
     out.push_str(&format!("nodes: {}\ntotal_allocs: {}\nremote_allocs: {}\nmigrations: {}\nremote_pct: {}%\nops: {}\n",
         nodes, allocs, remote, migrations, pct, ops));
     for n in crate::fs::numastat::list_nodes() {
-        out.push_str(&format!("  node{} [{}] mem={}/{} local={} remote={} lat={}ns cpus={}\n",
-            n.id, n.state.label(), n.used_memory, n.total_memory,
-            n.local_allocs, n.remote_allocs, n.avg_latency_ns, n.cpus.len()));
+        out.push_str(&format!(
+            "  node{} [{}] mem={}/{} local={} remote={} lat={}ns cpus={}\n",
+            n.id,
+            n.state.label(),
+            n.used_memory,
+            n.total_memory,
+            n.local_allocs,
+            n.remote_allocs,
+            n.avg_latency_ns,
+            n.cpus.len()
+        ));
     }
     out.into_bytes()
 }
@@ -9963,8 +11355,16 @@ fn gen_shmem() -> Vec<u8> {
         regions, created, deleted, attaches, detaches, bytes, ops));
     for r in crate::fs::shmem::list_regions() {
         let pers = if r.persistent { " PERSIST" } else { "" };
-        out.push_str(&format!("  #{} {} size={} [{}] owner={} attached={}{}\n",
-            r.id, r.name, r.size, r.permission.label(), r.owner_pid, r.attached_pids.len(), pers));
+        out.push_str(&format!(
+            "  #{} {} size={} [{}] owner={} attached={}{}\n",
+            r.id,
+            r.name,
+            r.size,
+            r.permission.label(),
+            r.owner_pid,
+            r.attached_pids.len(),
+            pers
+        ));
     }
     out.into_bytes()
 }
@@ -9973,11 +11373,21 @@ fn gen_wqstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (count, enqueued, completed, cancelled, ops) = crate::fs::wqstat::stats();
-    out.push_str(&format!("workqueues: {}\ntotal_enqueued: {}\ntotal_completed: {}\ncancelled: {}\nops: {}\n",
-        count, enqueued, completed, cancelled, ops));
+    out.push_str(&format!(
+        "workqueues: {}\ntotal_enqueued: {}\ntotal_completed: {}\ncancelled: {}\nops: {}\n",
+        count, enqueued, completed, cancelled, ops
+    ));
     for q in crate::fs::wqstat::list() {
-        out.push_str(&format!("  {} [{}] pend={} active={} done={} lat={}us workers={}\n",
-            q.name, q.wq_type.label(), q.pending, q.active, q.completed, q.avg_latency_us, q.workers));
+        out.push_str(&format!(
+            "  {} [{}] pend={} active={} done={} lat={}us workers={}\n",
+            q.name,
+            q.wq_type.label(),
+            q.pending,
+            q.active,
+            q.completed,
+            q.avg_latency_us,
+            q.workers
+        ));
     }
     out.into_bytes()
 }
@@ -9986,11 +11396,20 @@ fn gen_slabstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (count, allocs, frees, reclaims, ops) = crate::fs::slabstat::stats();
-    out.push_str(&format!("caches: {}\ntotal_allocs: {}\ntotal_frees: {}\nreclaims: {}\nops: {}\n",
-        count, allocs, frees, reclaims, ops));
+    out.push_str(&format!(
+        "caches: {}\ntotal_allocs: {}\ntotal_frees: {}\nreclaims: {}\nops: {}\n",
+        count, allocs, frees, reclaims, ops
+    ));
     for c in crate::fs::slabstat::list() {
-        out.push_str(&format!("  {} size={} active={}/{} util={}% hwm={}\n",
-            c.name, c.object_size, c.active_objects, c.total_objects, c.utilization_pct(), c.high_watermark));
+        out.push_str(&format!(
+            "  {} size={} active={}/{} util={}% hwm={}\n",
+            c.name,
+            c.object_size,
+            c.active_objects,
+            c.total_objects,
+            c.utilization_pct(),
+            c.high_watermark
+        ));
     }
     out.into_bytes()
 }
@@ -9999,11 +11418,19 @@ fn gen_timerq() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (total, pending, created, fired, cancelled, overruns, ops) = crate::fs::timerq::stats();
-    out.push_str(&format!("timers: {}\npending: {}\ncreated: {}\nfired: {}\ncancelled: {}\noverruns: {}\nops: {}\n",
-        total, pending, created, fired, cancelled, overruns, ops));
+    out.push_str(&format!(
+        "timers: {}\npending: {}\ncreated: {}\nfired: {}\ncancelled: {}\noverruns: {}\nops: {}\n",
+        total, pending, created, fired, cancelled, overruns, ops
+    ));
     for t in crate::fs::timerq::list_pending() {
-        out.push_str(&format!("  #{} {} [{}] deadline={} fires={}\n",
-            t.id, t.name, t.timer_type.label(), t.deadline_ns, t.fire_count));
+        out.push_str(&format!(
+            "  #{} {} [{}] deadline={} fires={}\n",
+            t.id,
+            t.name,
+            t.timer_type.label(),
+            t.deadline_ns,
+            t.fire_count
+        ));
     }
     out.into_bytes()
 }
@@ -10012,8 +11439,10 @@ fn gen_fdtable() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (tables, opens, closes, dups, ops) = crate::fs::fdtable::stats();
-    out.push_str(&format!("tables: {}\ntotal_opens: {}\ntotal_closes: {}\ntotal_dups: {}\nops: {}\n",
-        tables, opens, closes, dups, ops));
+    out.push_str(&format!(
+        "tables: {}\ntotal_opens: {}\ntotal_closes: {}\ntotal_dups: {}\nops: {}\n",
+        tables, opens, closes, dups, ops
+    ));
     for (pid, count, max) in crate::fs::fdtable::list_tables() {
         out.push_str(&format!("  pid={} fds={}/{}\n", pid, count, max));
     }
@@ -10031,8 +11460,10 @@ fn gen_rcustat() -> Vec<u8> {
     out.push_str(&format!("total_stalls: {}\n", stalls));
     out.push_str(&format!("ops: {}\n", ops));
     for cs in crate::fs::rcustat::cpu_stats() {
-        out.push_str(&format!("cpu{}: pending={} invoked={} qs={}\n",
-            cs.cpu_id, cs.callbacks_pending, cs.callbacks_invoked, cs.quiescent_states));
+        out.push_str(&format!(
+            "cpu{}: pending={} invoked={} qs={}\n",
+            cs.cpu_id, cs.callbacks_pending, cs.callbacks_invoked, cs.quiescent_states
+        ));
     }
     out.into_bytes()
 }
@@ -10047,8 +11478,16 @@ fn gen_kconsole() -> Vec<u8> {
     out.push_str(&format!("total_writes: {}\n", writes));
     out.push_str(&format!("ops: {}\n", ops));
     for c in crate::fs::kconsole::list() {
-        out.push_str(&format!("{}: {} type={} {}x{} active={} written={}\n",
-            c.id, c.name, c.console_type.label(), c.cols, c.rows, c.active, c.bytes_written));
+        out.push_str(&format!(
+            "{}: {} type={} {}x{} active={} written={}\n",
+            c.id,
+            c.name,
+            c.console_type.label(),
+            c.cols,
+            c.rows,
+            c.active,
+            c.bytes_written
+        ));
     }
     out.into_bytes()
 }
@@ -10063,8 +11502,13 @@ fn gen_signalq() -> Vec<u8> {
     out.push_str(&format!("total_dropped: {}\n", dropped));
     out.push_str(&format!("ops: {}\n", ops));
     for ps in crate::fs::signalq::list_processes() {
-        out.push_str(&format!("pid={}: pending={} delivered={} blocked_mask={:#x}\n",
-            ps.pid, ps.pending.len(), ps.total_delivered, ps.blocked_mask));
+        out.push_str(&format!(
+            "pid={}: pending={} delivered={} blocked_mask={:#x}\n",
+            ps.pid,
+            ps.pending.len(),
+            ps.total_delivered,
+            ps.blocked_mask
+        ));
     }
     out.into_bytes()
 }
@@ -10080,8 +11524,10 @@ fn gen_memcg() -> Vec<u8> {
     out.push_str(&format!("total_oom: {}\n", oom));
     out.push_str(&format!("ops: {}\n", ops));
     for g in crate::fs::memcg::list() {
-        out.push_str(&format!("{}: usage={} limit={} swap={} oom_kills={}\n",
-            g.path, g.usage_bytes, g.limit_bytes, g.swap_usage, g.oom_kills));
+        out.push_str(&format!(
+            "{}: usage={} limit={} swap={} oom_kills={}\n",
+            g.path, g.usage_bytes, g.limit_bytes, g.swap_usage, g.oom_kills
+        ));
     }
     out.into_bytes()
 }
@@ -10098,8 +11544,10 @@ fn gen_tlbstat() -> Vec<u8> {
     out.push_str(&format!("total_flushes: {}\n", flushes));
     out.push_str(&format!("ops: {}\n", ops));
     for cs in crate::fs::tlbstat::cpu_stats() {
-        out.push_str(&format!("cpu{}: hits={} misses={} shootdowns_sent={} flushes={}\n",
-            cs.cpu_id, cs.hits, cs.misses, cs.shootdowns_sent, cs.flushes));
+        out.push_str(&format!(
+            "cpu{}: hits={} misses={} shootdowns_sent={} flushes={}\n",
+            cs.cpu_id, cs.hits, cs.misses, cs.shootdowns_sent, cs.flushes
+        ));
     }
     out.into_bytes()
 }
@@ -10115,10 +11563,19 @@ fn gen_pagestat() -> Vec<u8> {
     out.push_str(&format!("total_fails: {}\n", fails));
     out.push_str(&format!("ops: {}\n", ops));
     let (hp_total, hp_free, hp_res) = crate::fs::pagestat::hugepage_info();
-    out.push_str(&format!("hugepages: total={} free={} reserved={}\n", hp_total, hp_free, hp_res));
+    out.push_str(&format!(
+        "hugepages: total={} free={} reserved={}\n",
+        hp_total, hp_free, hp_res
+    ));
     for zs in crate::fs::pagestat::zone_stats() {
-        out.push_str(&format!("{}: total={} free={} alloc={} frag={}%\n",
-            zs.zone.label(), zs.total_pages, zs.free_pages, zs.allocated, zs.fragmentation_pct));
+        out.push_str(&format!(
+            "{}: total={} free={} alloc={} frag={}%\n",
+            zs.zone.label(),
+            zs.total_pages,
+            zs.free_pages,
+            zs.allocated,
+            zs.fragmentation_pct
+        ));
     }
     out.into_bytes()
 }
@@ -10134,8 +11591,10 @@ fn gen_dmastat() -> Vec<u8> {
     out.push_str(&format!("total_faults: {}\n", faults));
     out.push_str(&format!("ops: {}\n", ops));
     for d in crate::fs::dmastat::device_stats() {
-        out.push_str(&format!("{}: maps={} active={} xfer={} faults={} iommu={}\n",
-            d.name, d.maps, d.active_mappings, d.bytes_transferred, d.faults, d.iommu_enabled));
+        out.push_str(&format!(
+            "{}: maps={} active={} xfer={} faults={} iommu={}\n",
+            d.name, d.maps, d.active_mappings, d.bytes_transferred, d.faults, d.iommu_enabled
+        ));
     }
     out.into_bytes()
 }
@@ -10149,11 +11608,21 @@ fn gen_compstat() -> Vec<u8> {
     out.push_str(&format!("total_migrations: {}\n", migrations));
     out.push_str(&format!("total_stalls: {}\n", stalls));
     out.push_str(&format!("total_stall_ns: {}\n", stall_ns));
-    out.push_str(&format!("success_rate: {}%\n", crate::fs::compstat::success_rate()));
+    out.push_str(&format!(
+        "success_rate: {}%\n",
+        crate::fs::compstat::success_rate()
+    ));
     out.push_str(&format!("ops: {}\n", ops));
     for zs in crate::fs::compstat::zone_stats() {
-        out.push_str(&format!("{}: attempts={} success={} failed={} migrated={} stalls={}\n",
-            zs.zone.label(), zs.attempts, zs.successes, zs.failures, zs.pages_migrated, zs.stalls));
+        out.push_str(&format!(
+            "{}: attempts={} success={} failed={} migrated={} stalls={}\n",
+            zs.zone.label(),
+            zs.attempts,
+            zs.successes,
+            zs.failures,
+            zs.pages_migrated,
+            zs.stalls
+        ));
     }
     out.into_bytes()
 }
@@ -10168,12 +11637,25 @@ fn gen_irqstat() -> Vec<u8> {
     out.push_str(&format!("total_spurious: {}\n", spurious));
     out.push_str(&format!("ops: {}\n", ops));
     for line in crate::fs::irqstat::irq_lines() {
-        out.push_str(&format!("IRQ{}: {} ({}) count={} spurious={}\n",
-            line.irq_num, line.name, line.irq_type.label(), line.count, line.spurious));
+        out.push_str(&format!(
+            "IRQ{}: {} ({}) count={} spurious={}\n",
+            line.irq_num,
+            line.name,
+            line.irq_type.label(),
+            line.count,
+            line.spurious
+        ));
     }
     for cs in crate::fs::irqstat::per_cpu() {
-        out.push_str(&format!("cpu{}: total={} ipi={} timer={} avg_lat={}ns max_lat={}ns\n",
-            cs.cpu_id, cs.total_irqs, cs.total_ipi, cs.total_timer, cs.avg_latency_ns, cs.max_latency_ns));
+        out.push_str(&format!(
+            "cpu{}: total={} ipi={} timer={} avg_lat={}ns max_lat={}ns\n",
+            cs.cpu_id,
+            cs.total_irqs,
+            cs.total_ipi,
+            cs.total_timer,
+            cs.avg_latency_ns,
+            cs.max_latency_ns
+        ));
     }
     out.into_bytes()
 }
@@ -10189,8 +11671,10 @@ fn gen_epollstat() -> Vec<u8> {
     out.push_str(&format!("total_timeouts: {}\n", timeouts));
     out.push_str(&format!("ops: {}\n", ops));
     for inst in crate::fs::epollstat::list_instances() {
-        out.push_str(&format!("epoll#{}: pid={} fds={} waits={} events={}\n",
-            inst.id, inst.owner_pid, inst.registered_fds, inst.wait_calls, inst.events_delivered));
+        out.push_str(&format!(
+            "epoll#{}: pid={} fds={} waits={} events={}\n",
+            inst.id, inst.owner_pid, inst.registered_fds, inst.wait_calls, inst.events_delivered
+        ));
     }
     out.into_bytes()
 }
@@ -10205,7 +11689,10 @@ fn gen_vmmap() -> Vec<u8> {
     out.push_str(&format!("total_unmaps: {}\n", unmaps));
     out.push_str(&format!("ops: {}\n", ops));
     for (pid, vma_count, mapped) in crate::fs::vmmap::list_processes() {
-        out.push_str(&format!("pid={}: vmas={} mapped={}\n", pid, vma_count, mapped));
+        out.push_str(&format!(
+            "pid={}: vmas={} mapped={}\n",
+            pid, vma_count, mapped
+        ));
     }
     out.into_bytes()
 }
@@ -10221,8 +11708,13 @@ fn gen_softirq() -> Vec<u8> {
     out.push_str(&format!("total_tasklets: {}\n", tasklets));
     out.push_str(&format!("ops: {}\n", ops));
     for ts in crate::fs::softirq::type_stats() {
-        out.push_str(&format!("{}: raised={} executed={} total_ns={}\n",
-            ts.softirq_type.label(), ts.raised, ts.executed, ts.total_ns));
+        out.push_str(&format!(
+            "{}: raised={} executed={} total_ns={}\n",
+            ts.softirq_type.label(),
+            ts.raised,
+            ts.executed,
+            ts.total_ns
+        ));
     }
     out.into_bytes()
 }
@@ -10238,8 +11730,15 @@ fn gen_netfilter() -> Vec<u8> {
     out.push_str(&format!("total_dropped: {}\n", dropped));
     out.push_str(&format!("ops: {}\n", ops));
     for r in crate::fs::netfilter::list_rules() {
-        out.push_str(&format!("#{}: {} {} {} matches={} enabled={}\n",
-            r.id, r.chain.label(), r.action.label(), r.description, r.matches, r.enabled));
+        out.push_str(&format!(
+            "#{}: {} {} {} matches={} enabled={}\n",
+            r.id,
+            r.chain.label(),
+            r.action.label(),
+            r.description,
+            r.matches,
+            r.enabled
+        ));
     }
     out.into_bytes()
 }
@@ -10254,8 +11753,14 @@ fn gen_schedclass() -> Vec<u8> {
     out.push_str(&format!("total_migrations: {}\n", migrations));
     out.push_str(&format!("ops: {}\n", ops));
     for cs in crate::fs::schedclass::class_stats() {
-        out.push_str(&format!("{}: tasks={} switches={} runtime={}ns avg_slice={}ns\n",
-            cs.class.label(), cs.task_count, cs.context_switches, cs.total_runtime_ns, cs.avg_slice_ns));
+        out.push_str(&format!(
+            "{}: tasks={} switches={} runtime={}ns avg_slice={}ns\n",
+            cs.class.label(),
+            cs.task_count,
+            cs.context_switches,
+            cs.total_runtime_ns,
+            cs.avg_slice_ns
+        ));
     }
     out.into_bytes()
 }
@@ -10269,8 +11774,13 @@ fn gen_cpuidle() -> Vec<u8> {
     out.push_str(&format!("total_idle_ns: {}\n", idle_ns));
     out.push_str(&format!("ops: {}\n", ops));
     for cs in crate::fs::cpuidle::per_cpu() {
-        out.push_str(&format!("cpu{}: state={} idle={}% idle_ns={}\n",
-            cs.cpu_id, cs.current_state.label(), crate::fs::cpuidle::idle_pct(cs.cpu_id), cs.total_idle_ns));
+        out.push_str(&format!(
+            "cpu{}: state={} idle={}% idle_ns={}\n",
+            cs.cpu_id,
+            cs.current_state.label(),
+            crate::fs::cpuidle::idle_pct(cs.cpu_id),
+            cs.total_idle_ns
+        ));
     }
     out.into_bytes()
 }
@@ -10286,8 +11796,10 @@ fn gen_futexstat() -> Vec<u8> {
     out.push_str(&format!("total_timeouts: {}\n", timeouts));
     out.push_str(&format!("ops: {}\n", ops));
     for h in crate::fs::futexstat::hotspots(10) {
-        out.push_str(&format!("{:#x}: waits={} wakes={} waiters={} max={}\n",
-            h.address, h.waits, h.wakes, h.current_waiters, h.max_waiters));
+        out.push_str(&format!(
+            "{:#x}: waits={} wakes={} waiters={} max={}\n",
+            h.address, h.waits, h.wakes, h.current_waiters, h.max_waiters
+        ));
     }
     out.into_bytes()
 }
@@ -10303,9 +11815,16 @@ fn gen_writeback() -> Vec<u8> {
     out.push_str(&format!("dirty_threshold_pct: {}\n", threshold));
     out.push_str(&format!("ops: {}\n", ops));
     for d in crate::fs::writeback::device_stats() {
-        out.push_str(&format!("{}: dirty={} wb={} written={} bytes={} flushes={} cong={}\n",
-            d.device, d.dirty_pages, d.writeback_pages, d.written_pages,
-            d.written_bytes, d.flushes, d.congestion_count));
+        out.push_str(&format!(
+            "{}: dirty={} wb={} written={} bytes={} flushes={} cong={}\n",
+            d.device,
+            d.dirty_pages,
+            d.writeback_pages,
+            d.written_pages,
+            d.written_bytes,
+            d.flushes,
+            d.congestion_count
+        ));
     }
     out.into_bytes()
 }
@@ -10320,9 +11839,17 @@ fn gen_iolatency() -> Vec<u8> {
     out.push_str(&format!("slow_threshold_ns: {}\n", threshold));
     out.push_str(&format!("ops: {}\n", ops));
     for d in crate::fs::iolatency::per_device() {
-        out.push_str(&format!("{}: rd={}/{} wr={}/{} max_rd={} max_wr={} slow={}\n",
-            d.device, d.read_count, d.read_avg_ns, d.write_count, d.write_avg_ns,
-            d.read_max_ns, d.write_max_ns, d.slow_count));
+        out.push_str(&format!(
+            "{}: rd={}/{} wr={}/{} max_rd={} max_wr={} slow={}\n",
+            d.device,
+            d.read_count,
+            d.read_avg_ns,
+            d.write_count,
+            d.write_avg_ns,
+            d.read_max_ns,
+            d.write_max_ns,
+            d.slow_count
+        ));
     }
     out.into_bytes()
 }
@@ -10337,9 +11864,16 @@ fn gen_taskstats() -> Vec<u8> {
     out.push_str(&format!("total_delays_ns: {}\n", delays));
     out.push_str(&format!("ops: {}\n", ops));
     for t in crate::fs::taskstats::top_cpu(10) {
-        out.push_str(&format!("pid={} {}: cpu={}ns usr={}ns sys={}ns rd={} wr={}\n",
-            t.pid, t.name, t.cpu_time_ns, t.user_time_ns, t.sys_time_ns,
-            t.read_bytes, t.write_bytes));
+        out.push_str(&format!(
+            "pid={} {}: cpu={}ns usr={}ns sys={}ns rd={} wr={}\n",
+            t.pid,
+            t.name,
+            t.cpu_time_ns,
+            t.user_time_ns,
+            t.sys_time_ns,
+            t.read_bytes,
+            t.write_bytes
+        ));
     }
     out.into_bytes()
 }
@@ -10354,9 +11888,16 @@ fn gen_kprobes() -> Vec<u8> {
     out.push_str(&format!("total_overhead_ns: {}\n", overhead));
     out.push_str(&format!("ops: {}\n", ops));
     for p in crate::fs::kprobes::list() {
-        out.push_str(&format!("[{}] {} {:#x}: hits={} misses={} overhead={}ns {}\n",
-            p.probe_type.label(), p.name, p.address, p.hits, p.misses,
-            p.overhead_ns, if p.enabled { "enabled" } else { "disabled" }));
+        out.push_str(&format!(
+            "[{}] {} {:#x}: hits={} misses={} overhead={}ns {}\n",
+            p.probe_type.label(),
+            p.name,
+            p.address,
+            p.hits,
+            p.misses,
+            p.overhead_ns,
+            if p.enabled { "enabled" } else { "disabled" }
+        ));
     }
     out.into_bytes()
 }
@@ -10373,9 +11914,18 @@ fn gen_netsock() -> Vec<u8> {
     out.push_str(&format!("total_retransmits: {}\n", retrans));
     out.push_str(&format!("ops: {}\n", ops));
     for s in crate::fs::netsock::list() {
-        out.push_str(&format!("{} pid={} {}:{} -> {}:{} {} rx={} tx={}\n",
-            s.proto.label(), s.pid, s.local_addr, s.local_port,
-            s.remote_addr, s.remote_port, s.state.label(), s.rx_bytes, s.tx_bytes));
+        out.push_str(&format!(
+            "{} pid={} {}:{} -> {}:{} {} rx={} tx={}\n",
+            s.proto.label(),
+            s.pid,
+            s.local_addr,
+            s.local_port,
+            s.remote_addr,
+            s.remote_port,
+            s.state.label(),
+            s.rx_bytes,
+            s.tx_bytes
+        ));
     }
     out.into_bytes()
 }
@@ -10391,10 +11941,18 @@ fn gen_blkqueue() -> Vec<u8> {
     out.push_str(&format!("total_plugs: {}\n", plugs));
     out.push_str(&format!("ops: {}\n", ops));
     for d in crate::fs::blkqueue::device_queues() {
-        out.push_str(&format!("{}: depth={}/{} sub={} comp={} merged={} plugs={}/{} {}\n",
-            d.device, d.queue_depth, d.max_depth, d.submitted, d.completed,
-            d.merged, d.plug_count, d.unplug_count,
-            if d.plugged { "PLUGGED" } else { "unplugged" }));
+        out.push_str(&format!(
+            "{}: depth={}/{} sub={} comp={} merged={} plugs={}/{} {}\n",
+            d.device,
+            d.queue_depth,
+            d.max_depth,
+            d.submitted,
+            d.completed,
+            d.merged,
+            d.plug_count,
+            d.unplug_count,
+            if d.plugged { "PLUGGED" } else { "unplugged" }
+        ));
     }
     out.into_bytes()
 }
@@ -10409,9 +11967,15 @@ fn gen_powerstat() -> Vec<u8> {
     out.push_str(&format!("total_wakes: {}\n", wakes));
     out.push_str(&format!("ops: {}\n", ops));
     for d in crate::fs::powerstat::domain_stats() {
-        out.push_str(&format!("{}: {} energy={}uJ trans={} active={}ns idle={}ns\n",
-            d.domain.label(), d.current_state.label(), d.energy_uj,
-            d.transitions, d.active_time_ns, d.idle_time_ns));
+        out.push_str(&format!(
+            "{}: {} energy={}uJ trans={} active={}ns idle={}ns\n",
+            d.domain.label(),
+            d.current_state.label(),
+            d.energy_uj,
+            d.transitions,
+            d.active_time_ns,
+            d.idle_time_ns
+        ));
     }
     out.into_bytes()
 }
@@ -10428,12 +11992,25 @@ fn gen_inodestat() -> Vec<u8> {
     out.push_str(&format!("ops: {}\n", ops));
     let d = crate::fs::inodestat::dcache_stats();
     let rate = crate::fs::inodestat::dcache_hit_rate();
-    out.push_str(&format!("dcache: entries={} hits={} misses={} rate={}.{}%\n",
-        d.entries, d.hits, d.misses, rate / 100, rate % 100));
+    out.push_str(&format!(
+        "dcache: entries={} hits={} misses={} rate={}.{}%\n",
+        d.entries,
+        d.hits,
+        d.misses,
+        rate / 100,
+        rate % 100
+    ));
     for f in crate::fs::inodestat::fs_stats() {
-        out.push_str(&format!("{} ({}): active={} alloc={} free={} evict={} dirty={}\n",
-            f.mount_point, f.fs_type.label(), f.active, f.allocated, f.freed,
-            f.evicted, f.dirty));
+        out.push_str(&format!(
+            "{} ({}): active={} alloc={} free={} evict={} dirty={}\n",
+            f.mount_point,
+            f.fs_type.label(),
+            f.active,
+            f.allocated,
+            f.freed,
+            f.evicted,
+            f.dirty
+        ));
     }
     out.into_bytes()
 }
@@ -10451,8 +12028,10 @@ fn gen_migstat() -> Vec<u8> {
         out.push_str(&format!("{}: {}\n", reason.label(), count));
     }
     for c in crate::fs::migstat::per_cpu() {
-        out.push_str(&format!("cpu{}: in={} out={} numa={}\n",
-            c.cpu_id, c.migrations_in, c.migrations_out, c.numa_crosses));
+        out.push_str(&format!(
+            "cpu{}: in={} out={} numa={}\n",
+            c.cpu_id, c.migrations_in, c.migrations_out, c.numa_crosses
+        ));
     }
     out.into_bytes()
 }
@@ -10470,8 +12049,10 @@ fn gen_pagecache() -> Vec<u8> {
     out.push_str(&format!("hit_rate: {}.{}%\n", rate / 100, rate % 100));
     out.push_str(&format!("ops: {}\n", ops));
     for d in crate::fs::pagecache::per_device() {
-        out.push_str(&format!("{}: cached={} hits={} misses={} evict={} dirty={}\n",
-            d.device, d.cached_pages, d.hits, d.misses, d.evictions, d.dirty_pages));
+        out.push_str(&format!(
+            "{}: cached={} hits={} misses={} evict={} dirty={}\n",
+            d.device, d.cached_pages, d.hits, d.misses, d.evictions, d.dirty_pages
+        ));
     }
     out.into_bytes()
 }
@@ -10487,10 +12068,20 @@ fn gen_netdev() -> Vec<u8> {
     out.push_str(&format!("total_drops: {}\n", drops));
     out.push_str(&format!("ops: {}\n", ops));
     for i in crate::fs::netdev::list() {
-        out.push_str(&format!("{} ({}) {}: rx={}/{} tx={}/{} err={}/{} drop={}/{}\n",
-            i.name, i.nic_type.label(), if i.link_up { "UP" } else { "DOWN" },
-            i.rx_bytes, i.rx_packets, i.tx_bytes, i.tx_packets,
-            i.rx_errors, i.tx_errors, i.rx_drops, i.tx_drops));
+        out.push_str(&format!(
+            "{} ({}) {}: rx={}/{} tx={}/{} err={}/{} drop={}/{}\n",
+            i.name,
+            i.nic_type.label(),
+            if i.link_up { "UP" } else { "DOWN" },
+            i.rx_bytes,
+            i.rx_packets,
+            i.tx_bytes,
+            i.tx_packets,
+            i.rx_errors,
+            i.tx_errors,
+            i.rx_drops,
+            i.tx_drops
+        ));
     }
     out.into_bytes()
 }
@@ -10505,13 +12096,22 @@ fn gen_cpustat() -> Vec<u8> {
     out.push_str(&format!("context_switches: {}\n", ctxsw));
     out.push_str(&format!("interrupts: {}\n", irqs));
     out.push_str(&format!("ops: {}\n", ops));
-    let modes = ["user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal"];
+    let modes = [
+        "user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal",
+    ];
     for c in crate::fs::cpustat::per_cpu() {
-        let parts: Vec<_> = modes.iter().zip(c.times_ns.iter())
+        let parts: Vec<_> = modes
+            .iter()
+            .zip(c.times_ns.iter())
             .map(|(m, ns)| format!("{}={}ns", m, ns))
             .collect();
-        out.push_str(&format!("cpu{}: {} ctxsw={} irq={}\n",
-            c.cpu_id, parts.join(" "), c.context_switches, c.interrupts));
+        out.push_str(&format!(
+            "cpu{}: {} ctxsw={} irq={}\n",
+            c.cpu_id,
+            parts.join(" "),
+            c.context_switches,
+            c.interrupts
+        ));
     }
     out.into_bytes()
 }
@@ -10527,10 +12127,20 @@ fn gen_filelock() -> Vec<u8> {
     out.push_str(&format!("total_deadlocks: {}\n", deadlocks));
     out.push_str(&format!("ops: {}\n", ops));
     for l in crate::fs::filelock::active_locks() {
-        out.push_str(&format!("[{}] pid={} {} {}-{} {} cont={}\n",
-            l.lock_type.label(), l.pid, l.path, l.start,
-            if l.end == u64::MAX { String::from("EOF") } else { format!("{}", l.end) },
-            if l.blocking { "BLOCK" } else { "NONBLOCK" }, l.contentions));
+        out.push_str(&format!(
+            "[{}] pid={} {} {}-{} {} cont={}\n",
+            l.lock_type.label(),
+            l.pid,
+            l.path,
+            l.start,
+            if l.end == u64::MAX {
+                String::from("EOF")
+            } else {
+                format!("{}", l.end)
+            },
+            if l.blocking { "BLOCK" } else { "NONBLOCK" },
+            l.contentions
+        ));
     }
     out.into_bytes()
 }
@@ -10545,9 +12155,17 @@ fn gen_pidstat() -> Vec<u8> {
     out.push_str(&format!("total_reuses: {}\n", reuses));
     out.push_str(&format!("ops: {}\n", ops));
     for ns in crate::fs::pidstat::ns_list() {
-        out.push_str(&format!("ns{}: parent={} active={} max={} alloc={} free={} hwm={}\n",
-            ns.ns_id, ns.parent_id.map_or(String::from("none"), |p| format!("{}", p)),
-            ns.active_pids, ns.max_pid, ns.allocated, ns.freed, ns.high_watermark));
+        out.push_str(&format!(
+            "ns{}: parent={} active={} max={} alloc={} free={} hwm={}\n",
+            ns.ns_id,
+            ns.parent_id
+                .map_or(String::from("none"), |p| format!("{}", p)),
+            ns.active_pids,
+            ns.max_pid,
+            ns.allocated,
+            ns.freed,
+            ns.high_watermark
+        ));
     }
     out.into_bytes()
 }
@@ -10561,8 +12179,14 @@ fn gen_binfmt() -> Vec<u8> {
     out.push_str(&format!("total_errors: {}\n", errors));
     out.push_str(&format!("ops: {}\n", ops));
     for f in crate::fs::binfmt::format_stats() {
-        out.push_str(&format!("{}: loads={} errors={} avg={}ns max={}ns\n",
-            f.format.label(), f.loads, f.errors, f.avg_load_ns, f.max_load_ns));
+        out.push_str(&format!(
+            "{}: loads={} errors={} avg={}ns max={}ns\n",
+            f.format.label(),
+            f.loads,
+            f.errors,
+            f.avg_load_ns,
+            f.max_load_ns
+        ));
     }
     for (err, count) in crate::fs::binfmt::error_breakdown() {
         if count > 0 {
@@ -10583,9 +12207,17 @@ fn gen_pipestat() -> Vec<u8> {
     out.push_str(&format!("total_blocks: {}\n", blocks));
     out.push_str(&format!("ops: {}\n", ops));
     for p in crate::fs::pipestat::list() {
-        out.push_str(&format!("[{}] {} rd={} wr={} buf={}/{} written={} read={}\n",
-            p.pipe_type.label(), p.id, p.reader_pid, p.writer_pid,
-            p.buffered_bytes, p.buffer_size, p.bytes_written, p.bytes_read));
+        out.push_str(&format!(
+            "[{}] {} rd={} wr={} buf={}/{} written={} read={}\n",
+            p.pipe_type.label(),
+            p.id,
+            p.reader_pid,
+            p.writer_pid,
+            p.buffered_bytes,
+            p.buffer_size,
+            p.bytes_written,
+            p.bytes_read
+        ));
     }
     out.into_bytes()
 }
@@ -10601,8 +12233,16 @@ fn gen_sockbuf() -> Vec<u8> {
     out.push_str(&format!("total_bytes: {}\n", bytes));
     out.push_str(&format!("ops: {}\n", ops));
     for p in crate::fs::sockbuf::pool_stats() {
-        out.push_str(&format!("{}: active={} bytes={} allocs={} frees={} drops={} peak={}\n",
-            p.pool.label(), p.active_buffers, p.total_bytes, p.allocs, p.frees, p.drops, p.peak_buffers));
+        out.push_str(&format!(
+            "{}: active={} bytes={} allocs={} frees={} drops={} peak={}\n",
+            p.pool.label(),
+            p.active_buffers,
+            p.total_bytes,
+            p.allocs,
+            p.frees,
+            p.drops,
+            p.peak_buffers
+        ));
     }
     out.into_bytes()
 }
@@ -10617,7 +12257,9 @@ fn gen_schedlat() -> Vec<u8> {
     out.push_str(&format!("total_preempts: {}\n", preempts));
     out.push_str(&format!("global_max_ns: {}\n", max_ns));
     out.push_str(&format!("ops: {}\n", ops));
-    let labels = ["<1us", "<10us", "<100us", "<1ms", "<10ms", "<100ms", "<1s", ">=1s"];
+    let labels = [
+        "<1us", "<10us", "<100us", "<1ms", "<10ms", "<100ms", "<1s", ">=1s",
+    ];
     let hist = crate::fs::schedlat::global_histogram();
     for (i, count) in hist.iter().enumerate() {
         out.push_str(&format!("{}: {}\n", labels[i], count));
@@ -10649,13 +12291,27 @@ fn gen_cpucache() -> Vec<u8> {
     out.push_str(&format!("total_hits: {}\n", hits));
     out.push_str(&format!("total_misses: {}\n", misses));
     let rate = crate::fs::cpucache::overall_hit_rate();
-    out.push_str(&format!("overall_hit_rate: {}.{}%\n", rate / 100, rate % 100));
+    out.push_str(&format!(
+        "overall_hit_rate: {}.{}%\n",
+        rate / 100,
+        rate % 100
+    ));
     out.push_str(&format!("ops: {}\n", ops));
     for c in crate::fs::cpucache::topology() {
         let r = crate::fs::cpucache::hit_rate(c.level);
-        out.push_str(&format!("{}: {}KB {}B/line {}way {}set shared={} hits={} miss={} rate={}.{}%\n",
-            c.level.label(), c.size_kb, c.line_size, c.ways, c.sets, c.shared_cpus,
-            c.hits, c.misses, r / 100, r % 100));
+        out.push_str(&format!(
+            "{}: {}KB {}B/line {}way {}set shared={} hits={} miss={} rate={}.{}%\n",
+            c.level.label(),
+            c.size_kb,
+            c.line_size,
+            c.ways,
+            c.sets,
+            c.shared_cpus,
+            c.hits,
+            c.misses,
+            r / 100,
+            r % 100
+        ));
     }
     out.into_bytes()
 }
@@ -10665,7 +12321,10 @@ fn gen_aiostat() -> Vec<u8> {
     let mut out = String::new();
     let (rings, submitted, completed, overflows, ops) = super::aiostat::stats();
     out.push_str("=== Async I/O Stats ===\n");
-    out.push_str(&format!("Rings: {}  Submitted: {}  Completed: {}  Overflows: {}  Ops: {}\n\n", rings, submitted, completed, overflows, ops));
+    out.push_str(&format!(
+        "Rings: {}  Submitted: {}  Completed: {}  Overflows: {}  Ops: {}\n\n",
+        rings, submitted, completed, overflows, ops
+    ));
     for r in super::aiostat::ring_stats() {
         out.push_str(&format!("Ring {} (pid {})  SQ {}/{}  CQ pending {}  submitted {}  completed {}  overflows {}  sq_full {}\n",
             r.ring_id, r.pid, r.sq_pending, r.sq_size, r.cq_pending,
@@ -10679,10 +12338,20 @@ fn gen_kthread() -> Vec<u8> {
     let mut out = String::new();
     let (threads, created, exited, ops) = super::kthread::stats();
     out.push_str("=== Kernel Thread Stats ===\n");
-    out.push_str(&format!("Active: {}  Created: {}  Exited: {}  Ops: {}\n\n", threads, created, exited, ops));
+    out.push_str(&format!(
+        "Active: {}  Created: {}  Exited: {}  Ops: {}\n\n",
+        threads, created, exited, ops
+    ));
     for t in super::kthread::list() {
-        out.push_str(&format!("  [{}] {} cpu={} state={} cpu_time={}ns wakeups={}\n",
-            t.id, t.name, t.cpu, t.state.label(), t.cpu_time_ns, t.wakeups));
+        out.push_str(&format!(
+            "  [{}] {} cpu={} state={} cpu_time={}ns wakeups={}\n",
+            t.id,
+            t.name,
+            t.cpu,
+            t.state.label(),
+            t.cpu_time_ns,
+            t.wakeups
+        ));
     }
     out.into_bytes()
 }
@@ -10692,15 +12361,20 @@ fn gen_mmapstat() -> Vec<u8> {
     let mut out = String::new();
     let (procs, maps, unmaps, protects, bytes, ops) = super::mmapstat::stats();
     out.push_str("=== Mmap Stats ===\n");
-    out.push_str(&format!("Processes: {}  Maps: {}  Unmaps: {}  Protects: {}  Bytes: {}  Ops: {}\n\n", procs, maps, unmaps, protects, bytes, ops));
+    out.push_str(&format!(
+        "Processes: {}  Maps: {}  Unmaps: {}  Protects: {}  Bytes: {}  Ops: {}\n\n",
+        procs, maps, unmaps, protects, bytes, ops
+    ));
     out.push_str("Type breakdown:\n");
     for (mt, count) in &super::mmapstat::type_breakdown() {
         out.push_str(&format!("  {:<12} {}\n", mt.label(), count));
     }
     out.push_str("\nPer-process:\n");
     for p in super::mmapstat::per_process() {
-        out.push_str(&format!("  pid={:<6} {:<12} regions={} bytes={} maps={} unmaps={} protects={}\n",
-            p.pid, p.name, p.regions, p.total_bytes, p.maps, p.unmaps, p.protects));
+        out.push_str(&format!(
+            "  pid={:<6} {:<12} regions={} bytes={} maps={} unmaps={} protects={}\n",
+            p.pid, p.name, p.regions, p.total_bytes, p.maps, p.unmaps, p.protects
+        ));
     }
     out.into_bytes()
 }
@@ -10710,12 +12384,27 @@ fn gen_rqstat() -> Vec<u8> {
     let mut out = String::new();
     let (cpus, enqueues, dequeues, balances, ops) = super::rqstat::stats();
     out.push_str("=== Runqueue Stats ===\n");
-    out.push_str(&format!("CPUs: {}  Enqueues: {}  Dequeues: {}  Balances: {}  Ops: {}\n\n", cpus, enqueues, dequeues, balances, ops));
+    out.push_str(&format!(
+        "CPUs: {}  Enqueues: {}  Dequeues: {}  Balances: {}  Ops: {}\n\n",
+        cpus, enqueues, dequeues, balances, ops
+    ));
     for c in super::rqstat::per_cpu() {
-        let avg_wait = if c.dequeues > 0 { c.total_wait_ns / c.dequeues } else { 0 };
-        out.push_str(&format!("  CPU {} depth={}/{} enq={} deq={} pull={} push={} avg_wait={}ns\n",
-            c.cpu_id, c.current_depth, c.max_depth, c.enqueues, c.dequeues,
-            c.balance_pulls, c.balance_pushes, avg_wait));
+        let avg_wait = if c.dequeues > 0 {
+            c.total_wait_ns / c.dequeues
+        } else {
+            0
+        };
+        out.push_str(&format!(
+            "  CPU {} depth={}/{} enq={} deq={} pull={} push={} avg_wait={}ns\n",
+            c.cpu_id,
+            c.current_depth,
+            c.max_depth,
+            c.enqueues,
+            c.dequeues,
+            c.balance_pulls,
+            c.balance_pushes,
+            avg_wait
+        ));
     }
     out.into_bytes()
 }
@@ -10725,16 +12414,34 @@ fn gen_thpstat() -> Vec<u8> {
     let mut out = String::new();
     let (promos, demos, scans, collapses, ops) = super::thpstat::stats();
     out.push_str("=== Transparent Huge Pages Stats ===\n");
-    out.push_str(&format!("Promotions: {}  Demotions: {}  Khugepaged scans: {}  Collapses: {}  Ops: {}\n\n", promos, demos, scans, collapses, ops));
+    out.push_str(&format!(
+        "Promotions: {}  Demotions: {}  Khugepaged scans: {}  Collapses: {}  Ops: {}\n\n",
+        promos, demos, scans, collapses, ops
+    ));
     out.push_str("Per-size:\n");
     for s in super::thpstat::per_size() {
-        let success_rate = if s.alloc_attempts > 0 { s.promotions * 10000 / s.alloc_attempts } else { 0 };
-        out.push_str(&format!("  {:<6} promo={} demo={} split={} attempts={} failures={} success={}.{}%\n",
-            s.size.label(), s.promotions, s.demotions, s.splits,
-            s.alloc_attempts, s.alloc_failures, success_rate / 100, success_rate % 100));
+        let success_rate = if s.alloc_attempts > 0 {
+            s.promotions * 10000 / s.alloc_attempts
+        } else {
+            0
+        };
+        out.push_str(&format!(
+            "  {:<6} promo={} demo={} split={} attempts={} failures={} success={}.{}%\n",
+            s.size.label(),
+            s.promotions,
+            s.demotions,
+            s.splits,
+            s.alloc_attempts,
+            s.alloc_failures,
+            success_rate / 100,
+            success_rate % 100
+        ));
     }
     let (cs, cf, cd, ck) = super::thpstat::compaction_stats();
-    out.push_str(&format!("\nCompaction: success={} failed={} deferred={} skipped={}\n", cs, cf, cd, ck));
+    out.push_str(&format!(
+        "\nCompaction: success={} failed={} deferred={} skipped={}\n",
+        cs, cf, cd, ck
+    ));
     out.into_bytes()
 }
 
@@ -10743,11 +12450,27 @@ fn gen_cgiostat() -> Vec<u8> {
     let mut out = String::new();
     let (cgs, rbytes, wbytes, throttles, ops) = super::cgiostat::stats();
     out.push_str("=== Cgroup I/O Stats ===\n");
-    out.push_str(&format!("Cgroups: {}  Read: {} bytes  Write: {} bytes  Throttles: {}  Ops: {}\n\n", cgs, rbytes, wbytes, throttles, ops));
+    out.push_str(&format!(
+        "Cgroups: {}  Read: {} bytes  Write: {} bytes  Throttles: {}  Ops: {}\n\n",
+        cgs, rbytes, wbytes, throttles, ops
+    ));
     for cg in super::cgiostat::per_cgroup() {
-        let bw = if cg.bw_limit_bps > 0 { alloc::format!("{}B/s", cg.bw_limit_bps) } else { String::from("unlimited") };
-        out.push_str(&format!("  [{}] {:<16} R: {} bytes ({} ios)  W: {} bytes ({} ios)  throttle={} bw={}\n",
-            cg.cg_id, cg.name, cg.read_bytes, cg.read_ios, cg.write_bytes, cg.write_ios, cg.throttle_count, bw));
+        let bw = if cg.bw_limit_bps > 0 {
+            alloc::format!("{}B/s", cg.bw_limit_bps)
+        } else {
+            String::from("unlimited")
+        };
+        out.push_str(&format!(
+            "  [{}] {:<16} R: {} bytes ({} ios)  W: {} bytes ({} ios)  throttle={} bw={}\n",
+            cg.cg_id,
+            cg.name,
+            cg.read_bytes,
+            cg.read_ios,
+            cg.write_bytes,
+            cg.write_ios,
+            cg.throttle_count,
+            bw
+        ));
     }
     out.into_bytes()
 }
@@ -10757,17 +12480,34 @@ fn gen_bpfstat() -> Vec<u8> {
     let mut out = String::new();
     let (progs, maps, loaded, runs, verr, ops) = super::bpfstat::stats();
     out.push_str("=== BPF Stats ===\n");
-    out.push_str(&format!("Programs: {}  Maps: {}  Total loaded: {}  Runs: {}  Verifier errors: {}  Ops: {}\n\n", progs, maps, loaded, runs, verr, ops));
+    out.push_str(&format!(
+        "Programs: {}  Maps: {}  Total loaded: {}  Runs: {}  Verifier errors: {}  Ops: {}\n\n",
+        progs, maps, loaded, runs, verr, ops
+    ));
     out.push_str("Programs:\n");
     for p in super::bpfstat::list_programs() {
-        let avg_ns = if p.run_count > 0 { p.run_time_ns / p.run_count } else { 0 };
-        out.push_str(&format!("  [{}] {:<20} type={:<14} insns={} runs={} avg={}ns maps={}\n",
-            p.id, p.name, p.prog_type.label(), p.insn_count, p.run_count, avg_ns, p.map_count));
+        let avg_ns = if p.run_count > 0 {
+            p.run_time_ns / p.run_count
+        } else {
+            0
+        };
+        out.push_str(&format!(
+            "  [{}] {:<20} type={:<14} insns={} runs={} avg={}ns maps={}\n",
+            p.id,
+            p.name,
+            p.prog_type.label(),
+            p.insn_count,
+            p.run_count,
+            avg_ns,
+            p.map_count
+        ));
     }
     out.push_str("\nMaps:\n");
     for m in super::bpfstat::list_maps() {
-        out.push_str(&format!("  [{}] {:<24} entries={}/{} key={}B val={}B\n",
-            m.id, m.name, m.used_entries, m.max_entries, m.key_size, m.value_size));
+        out.push_str(&format!(
+            "  [{}] {:<24} entries={}/{} key={}B val={}B\n",
+            m.id, m.name, m.used_entries, m.max_entries, m.key_size, m.value_size
+        ));
     }
     out.into_bytes()
 }
@@ -10777,14 +12517,30 @@ fn gen_pgtable() -> Vec<u8> {
     let mut out = String::new();
     let (pages, walks, flushes, avg, ops) = super::pgtable::stats();
     out.push_str("=== Page Table Stats ===\n");
-    out.push_str(&format!("Pages used: {}  Walks: {}  TLB flushes: {}  Avg depth: {}.{}  Ops: {}\n\n", pages, walks, flushes, avg / 100, avg % 100, ops));
+    out.push_str(&format!(
+        "Pages used: {}  Walks: {}  TLB flushes: {}  Avg depth: {}.{}  Ops: {}\n\n",
+        pages,
+        walks,
+        flushes,
+        avg / 100,
+        avg % 100,
+        ops
+    ));
     out.push_str("Per-level:\n");
     for l in super::pgtable::per_level() {
-        out.push_str(&format!("  {:<6} alloc={} freed={} active={}\n",
-            l.level.label(), l.allocated, l.freed, l.active));
+        out.push_str(&format!(
+            "  {:<6} alloc={} freed={} active={}\n",
+            l.level.label(),
+            l.allocated,
+            l.freed,
+            l.active
+        ));
     }
     let (fs, fr, ff, fg) = super::pgtable::flush_stats();
-    out.push_str(&format!("\nTLB flushes: single={} range={} full={} global={}\n", fs, fr, ff, fg));
+    out.push_str(&format!(
+        "\nTLB flushes: single={} range={} full={} global={}\n",
+        fs, fr, ff, fg
+    ));
     out.into_bytes()
 }
 
@@ -10794,13 +12550,36 @@ fn gen_zramstat() -> Vec<u8> {
     let (devs, orig, compr, reads, writes, ops) = super::zramstat::stats();
     let ratio = if compr > 0 { orig * 100 / compr } else { 0 };
     out.push_str("=== ZRAM Stats ===\n");
-    out.push_str(&format!("Devices: {}  Orig: {}  Compr: {}  Ratio: {}.{}x  Reads: {}  Writes: {}  Ops: {}\n\n",
-        devs, orig, compr, ratio / 100, ratio % 100, reads, writes, ops));
+    out.push_str(&format!(
+        "Devices: {}  Orig: {}  Compr: {}  Ratio: {}.{}x  Reads: {}  Writes: {}  Ops: {}\n\n",
+        devs,
+        orig,
+        compr,
+        ratio / 100,
+        ratio % 100,
+        reads,
+        writes,
+        ops
+    ));
     for d in super::zramstat::per_device() {
-        let r = if d.compr_data_size > 0 { d.orig_data_size * 100 / d.compr_data_size } else { 0 };
-        out.push_str(&format!("  {} disk={}  orig={}  compr={}  ratio={}.{}x  mem={}  R={} W={} D={}\n",
-            d.name, d.disk_size, d.orig_data_size, d.compr_data_size,
-            r / 100, r % 100, d.mem_used, d.reads, d.writes, d.discards));
+        let r = if d.compr_data_size > 0 {
+            d.orig_data_size * 100 / d.compr_data_size
+        } else {
+            0
+        };
+        out.push_str(&format!(
+            "  {} disk={}  orig={}  compr={}  ratio={}.{}x  mem={}  R={} W={} D={}\n",
+            d.name,
+            d.disk_size,
+            d.orig_data_size,
+            d.compr_data_size,
+            r / 100,
+            r % 100,
+            d.mem_used,
+            d.reads,
+            d.writes,
+            d.discards
+        ));
     }
     out.into_bytes()
 }
@@ -10811,12 +12590,20 @@ fn gen_ksmstat() -> Vec<u8> {
     let (shared, sharing, merges, unmerges, saved, ops) = super::ksmstat::stats();
     let (scans, pages_scanned) = super::ksmstat::scan_stats();
     out.push_str("=== KSM Stats ===\n");
-    out.push_str(&format!("Shared: {}  Sharing: {}  Merges: {}  Unmerges: {}  Saved: {} bytes  Ops: {}\n", shared, sharing, merges, unmerges, saved, ops));
-    out.push_str(&format!("Scans: {}  Pages scanned: {}\n\n", scans, pages_scanned));
+    out.push_str(&format!(
+        "Shared: {}  Sharing: {}  Merges: {}  Unmerges: {}  Saved: {} bytes  Ops: {}\n",
+        shared, sharing, merges, unmerges, saved, ops
+    ));
+    out.push_str(&format!(
+        "Scans: {}  Pages scanned: {}\n\n",
+        scans, pages_scanned
+    ));
     out.push_str("Per-process:\n");
     for p in super::ksmstat::per_process() {
-        out.push_str(&format!("  pid={:<6} {:<12} shared={} unshared={} volatile={}\n",
-            p.pid, p.name, p.shared_pages, p.unshared_pages, p.volatile_pages));
+        out.push_str(&format!(
+            "  pid={:<6} {:<12} shared={} unshared={} volatile={}\n",
+            p.pid, p.name, p.shared_pages, p.unshared_pages, p.volatile_pages
+        ));
     }
     out.into_bytes()
 }
@@ -10826,12 +12613,29 @@ fn gen_clocksrc() -> Vec<u8> {
     let mut out = String::new();
     let (sources, reads, skews, ops) = super::clocksrc::stats();
     out.push_str("=== Clock Source Stats ===\n");
-    out.push_str(&format!("Sources: {}  Reads: {}  Skew corrections: {}  Ops: {}\n\n", sources, reads, skews, ops));
+    out.push_str(&format!(
+        "Sources: {}  Reads: {}  Skew corrections: {}  Ops: {}\n\n",
+        sources, reads, skews, ops
+    ));
     for s in super::clocksrc::list() {
         let cur = if s.is_current { " [CURRENT]" } else { "" };
-        let _avg_skew = if s.skew_corrections > 0 { s.total_skew_ns / s.skew_corrections } else { 0 };
-        out.push_str(&format!("  [{}] {:<10} {}Hz rating={} reads={} skew_corr={} max_skew={}ns latency={}ns{}\n",
-            s.id, s.name, s.freq_hz, s.rating.label(), s.reads, s.skew_corrections, s.max_skew_ns, s.read_latency_ns, cur));
+        let _avg_skew = if s.skew_corrections > 0 {
+            s.total_skew_ns / s.skew_corrections
+        } else {
+            0
+        };
+        out.push_str(&format!(
+            "  [{}] {:<10} {}Hz rating={} reads={} skew_corr={} max_skew={}ns latency={}ns{}\n",
+            s.id,
+            s.name,
+            s.freq_hz,
+            s.rating.label(),
+            s.reads,
+            s.skew_corrections,
+            s.max_skew_ns,
+            s.read_latency_ns,
+            cur
+        ));
     }
     out.into_bytes()
 }
@@ -10842,9 +12646,27 @@ fn gen_pmcstat() -> Vec<u8> {
     let (cpus, samples, mx, ipc, ops) = super::pmcstat::stats();
     let cmr = super::pmcstat::cache_miss_rate_x10000();
     out.push_str("=== PMC Stats ===\n");
-    out.push_str(&format!("CPUs: {}  Samples: {}  Multiplex: {}  IPC: {}.{}  Cache miss: {}.{}%  Ops: {}\n\n",
-        cpus, samples, mx, ipc / 100, ipc % 100, cmr / 100, cmr % 100, ops));
-    let events = ["cycles", "insns", "cache-miss", "cache-ref", "br-miss", "br-insn", "bus-cyc", "stall-fe"];
+    out.push_str(&format!(
+        "CPUs: {}  Samples: {}  Multiplex: {}  IPC: {}.{}  Cache miss: {}.{}%  Ops: {}\n\n",
+        cpus,
+        samples,
+        mx,
+        ipc / 100,
+        ipc % 100,
+        cmr / 100,
+        cmr % 100,
+        ops
+    ));
+    let events = [
+        "cycles",
+        "insns",
+        "cache-miss",
+        "cache-ref",
+        "br-miss",
+        "br-insn",
+        "bus-cyc",
+        "stall-fe",
+    ];
     for c in super::pmcstat::per_cpu() {
         out.push_str(&format!("  CPU {}:", c.cpu_id));
         for (i, label) in events.iter().enumerate() {
@@ -10860,14 +12682,31 @@ fn gen_cputhr() -> Vec<u8> {
     let mut out = String::new();
     let (cpus, events, ms, caps, ops) = super::cputhr::stats();
     out.push_str("=== CPU Thermal Throttle Stats ===\n");
-    out.push_str(&format!("CPUs: {}  Throttle events: {}  Total: {}ms  Freq caps: {}  Ops: {}\n\n", cpus, events, ms, caps, ops));
+    out.push_str(&format!(
+        "CPUs: {}  Throttle events: {}  Total: {}ms  Freq caps: {}  Ops: {}\n\n",
+        cpus, events, ms, caps, ops
+    ));
     for c in super::cputhr::per_cpu() {
         let temp = c.temp_mc / 1000;
         let temp_frac = (c.temp_mc % 1000) / 100;
-        let cap = if c.freq_cap_mhz > 0 { alloc::format!("{}MHz", c.freq_cap_mhz) } else { String::from("none") };
+        let cap = if c.freq_cap_mhz > 0 {
+            alloc::format!("{}MHz", c.freq_cap_mhz)
+        } else {
+            String::from("none")
+        };
         let throttled = if c.is_throttled { " [THROTTLED]" } else { "" };
-        out.push_str(&format!("  CPU {} pkg={} temp={}.{}°C throttle={} total={}ms max={}ms cap={}{}\n",
-            c.cpu_id, c.package_id, temp, temp_frac, c.throttle_count, c.total_throttle_ms, c.max_throttle_ms, cap, throttled));
+        out.push_str(&format!(
+            "  CPU {} pkg={} temp={}.{}°C throttle={} total={}ms max={}ms cap={}{}\n",
+            c.cpu_id,
+            c.package_id,
+            temp,
+            temp_frac,
+            c.throttle_count,
+            c.total_throttle_ms,
+            c.max_throttle_ms,
+            cap,
+            throttled
+        ));
     }
     out.into_bytes()
 }
@@ -10877,10 +12716,22 @@ fn gen_ipcns() -> Vec<u8> {
     let mut out = String::new();
     let (nss, shm, sem, msg, ops) = super::ipcns::stats();
     out.push_str("=== IPC Namespace Stats ===\n");
-    out.push_str(&format!("Namespaces: {}  SHM: {}  SEM: {}  MSG: {}  Ops: {}\n\n", nss, shm, sem, msg, ops));
+    out.push_str(&format!(
+        "Namespaces: {}  SHM: {}  SEM: {}  MSG: {}  Ops: {}\n\n",
+        nss, shm, sem, msg, ops
+    ));
     for ns in super::ipcns::ns_list() {
-        out.push_str(&format!("  [{}] {:<16} shm={}({} bytes) sem={}({}) msg={}({} bytes)\n",
-            ns.ns_id, ns.name, ns.shm_segments, ns.shm_bytes, ns.sem_sets, ns.sem_total, ns.msg_queues, ns.msg_bytes));
+        out.push_str(&format!(
+            "  [{}] {:<16} shm={}({} bytes) sem={}({}) msg={}({} bytes)\n",
+            ns.ns_id,
+            ns.name,
+            ns.shm_segments,
+            ns.shm_bytes,
+            ns.sem_sets,
+            ns.sem_total,
+            ns.msg_queues,
+            ns.msg_bytes
+        ));
     }
     out.into_bytes()
 }
@@ -10890,10 +12741,23 @@ fn gen_netqueue() -> Vec<u8> {
     let mut out = String::new();
     let (queues, rx, tx, napi, drops, ops) = super::netqueue::stats();
     out.push_str("=== Network Queue Stats ===\n");
-    out.push_str(&format!("Queues: {}  RX: {} pkts  TX: {} pkts  NAPI: {}  Drops: {}  Ops: {}\n\n", queues, rx, tx, napi, drops, ops));
+    out.push_str(&format!(
+        "Queues: {}  RX: {} pkts  TX: {} pkts  NAPI: {}  Drops: {}  Ops: {}\n\n",
+        queues, rx, tx, napi, drops, ops
+    ));
     for q in super::netqueue::per_queue() {
-        out.push_str(&format!("  {} q{} {:<3} pkts={} bytes={} drops={} napi={} budget_ex={} backlog={}\n",
-            q.iface, q.queue_id, q.direction.label(), q.packets, q.bytes, q.drops, q.napi_polls, q.napi_budget_exhausted, q.backlog_len));
+        out.push_str(&format!(
+            "  {} q{} {:<3} pkts={} bytes={} drops={} napi={} budget_ex={} backlog={}\n",
+            q.iface,
+            q.queue_id,
+            q.direction.label(),
+            q.packets,
+            q.bytes,
+            q.drops,
+            q.napi_polls,
+            q.napi_budget_exhausted,
+            q.backlog_len
+        ));
     }
     out.into_bytes()
 }
@@ -10902,17 +12766,44 @@ fn gen_secmod() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (mods, checks, denials, audits, ops) = super::secmod::stats();
-    let deny_rate = if checks > 0 { denials * 10000 / checks } else { 0 };
+    let deny_rate = if checks > 0 {
+        denials * 10000 / checks
+    } else {
+        0
+    };
     out.push_str("=== Security Module Stats ===\n");
-    out.push_str(&format!("Modules: {}  Checks: {}  Denials: {} ({}.{}%)  Audits: {}  Ops: {}\n\n",
-        mods, checks, denials, deny_rate / 100, deny_rate % 100, audits, ops));
-    let hooks = ["file_open", "file_perm", "inode_cr", "inode_rm", "task_al", "task_kl", "sock_cr", "sock_cn"];
+    out.push_str(&format!(
+        "Modules: {}  Checks: {}  Denials: {} ({}.{}%)  Audits: {}  Ops: {}\n\n",
+        mods,
+        checks,
+        denials,
+        deny_rate / 100,
+        deny_rate % 100,
+        audits,
+        ops
+    ));
+    let hooks = [
+        "file_open",
+        "file_perm",
+        "inode_cr",
+        "inode_rm",
+        "task_al",
+        "task_kl",
+        "sock_cr",
+        "sock_cn",
+    ];
     for m in super::secmod::per_module() {
         let status = if m.enabled { "on" } else { "off" };
-        out.push_str(&format!("  {} [{}] checks={} denials={} audits={}\n", m.name, status, m.total_checks, m.total_denials, m.audit_events));
+        out.push_str(&format!(
+            "  {} [{}] checks={} denials={} audits={}\n",
+            m.name, status, m.total_checks, m.total_denials, m.audit_events
+        ));
         for (i, h) in hooks.iter().enumerate() {
             if m.checks[i] > 0 {
-                out.push_str(&format!("    {:<10} checks={} denials={}\n", h, m.checks[i], m.denials[i]));
+                out.push_str(&format!(
+                    "    {:<10} checks={} denials={}\n",
+                    h, m.checks[i], m.denials[i]
+                ));
             }
         }
     }
@@ -10924,12 +12815,17 @@ fn gen_vmballoon() -> Vec<u8> {
     let mut out = String::new();
     let (cur, target, inf, def, oom, ops) = super::vmballoon::stats();
     out.push_str("=== VM Balloon Stats ===\n");
-    out.push_str(&format!("Current: {} pages  Target: {} pages  Inflates: {}  Deflates: {}  OOM: {}  Ops: {}\n",
-        cur, target, inf, def, oom, ops));
+    out.push_str(&format!(
+        "Current: {} pages  Target: {} pages  Inflates: {}  Deflates: {}  OOM: {}  Ops: {}\n",
+        cur, target, inf, def, oom, ops
+    ));
     if let Some(s) = super::vmballoon::status() {
         let cur_mb = s.current_pages * 16 / 1024;
         let max_mb = s.max_pages * 16 / 1024;
-        out.push_str(&format!("Size: {} MiB / {} MiB  Hints: {}\n", cur_mb, max_mb, s.free_page_hints));
+        out.push_str(&format!(
+            "Size: {} MiB / {} MiB  Hints: {}\n",
+            cur_mb, max_mb, s.free_page_hints
+        ));
     }
     out.into_bytes()
 }
@@ -10939,10 +12835,21 @@ fn gen_devfreq() -> Vec<u8> {
     let mut out = String::new();
     let (devs, trans, ops) = super::devfreq::stats();
     out.push_str("=== Device Frequency Stats ===\n");
-    out.push_str(&format!("Devices: {}  Transitions: {}  Ops: {}\n\n", devs, trans, ops));
+    out.push_str(&format!(
+        "Devices: {}  Transitions: {}  Ops: {}\n\n",
+        devs, trans, ops
+    ));
     for d in super::devfreq::list() {
-        out.push_str(&format!("  [{}] {:<12} {}-{} kHz  cur={} kHz  gov={}  trans={}\n",
-            d.id, d.name, d.min_freq_khz, d.max_freq_khz, d.cur_freq_khz, d.governor.label(), d.transitions));
+        out.push_str(&format!(
+            "  [{}] {:<12} {}-{} kHz  cur={} kHz  gov={}  trans={}\n",
+            d.id,
+            d.name,
+            d.min_freq_khz,
+            d.max_freq_khz,
+            d.cur_freq_khz,
+            d.governor.label(),
+            d.transitions
+        ));
     }
     out.into_bytes()
 }
@@ -10954,11 +12861,18 @@ fn gen_hwrng() -> Vec<u8> {
     let ps = super::hwrng::pool_status();
     let ready = if ps.ready { "YES" } else { "NO" };
     out.push_str("=== Hardware RNG Stats ===\n");
-    out.push_str(&format!("Generated: {} B  Requested: {} B  Reseeds: {}  Pool: {}/{} bits  Ready: {}  Ops: {}\n\n",
-        generated, requested, reseeds, bits, ps.pool_size_bits, ready, ops));
+    out.push_str(&format!(
+        "Generated: {} B  Requested: {} B  Reseeds: {}  Pool: {}/{} bits  Ready: {}  Ops: {}\n\n",
+        generated, requested, reseeds, bits, ps.pool_size_bits, ready, ops
+    ));
     out.push_str("Sources:\n");
     for (src, bytes, failures) in super::hwrng::source_breakdown() {
-        out.push_str(&format!("  {:<12} {} bytes  {} failures\n", src.label(), bytes, failures));
+        out.push_str(&format!(
+            "  {:<12} {} bytes  {} failures\n",
+            src.label(),
+            bytes,
+            failures
+        ));
     }
     out.into_bytes()
 }
@@ -10968,7 +12882,10 @@ fn gen_acpistat() -> Vec<u8> {
     let mut out = String::new();
     let (events, gpes, suspends, resumes, ops) = super::acpistat::stats();
     out.push_str("=== ACPI Stats ===\n");
-    out.push_str(&format!("Events: {}  GPEs: {}  Suspends: {}  Resumes: {}  Ops: {}\n\n", events, gpes, suspends, resumes, ops));
+    out.push_str(&format!(
+        "Events: {}  GPEs: {}  Suspends: {}  Resumes: {}  Ops: {}\n\n",
+        events, gpes, suspends, resumes, ops
+    ));
     out.push_str("Event types:\n");
     for (ev, count) in &super::acpistat::event_counts() {
         out.push_str(&format!("  {:<14} {}\n", ev.label(), count));
@@ -10976,7 +12893,10 @@ fn gen_acpistat() -> Vec<u8> {
     out.push_str("\nGPEs:\n");
     for g in super::acpistat::gpe_list() {
         let en = if g.enabled { "on" } else { "off" };
-        out.push_str(&format!("  GPE 0x{:02x}  count={}  [{}]\n", g.gpe_num, g.count, en));
+        out.push_str(&format!(
+            "  GPE 0x{:02x}  count={}  [{}]\n",
+            g.gpe_num, g.count, en
+        ));
     }
     out.into_bytes()
 }
@@ -10986,11 +12906,17 @@ fn gen_userfault() -> Vec<u8> {
     let mut out = String::new();
     let (handlers, faults, resolves, copies, zeros, ops) = super::userfault::stats();
     out.push_str("=== Userfaultfd Stats ===\n");
-    out.push_str(&format!("Handlers: {}  Faults: {}  Resolves: {}  Copies: {}  Zeros: {}  Ops: {}\n\n",
-        handlers, faults, resolves, copies, zeros, ops));
+    out.push_str(&format!(
+        "Handlers: {}  Faults: {}  Resolves: {}  Copies: {}  Zeros: {}  Ops: {}\n\n",
+        handlers, faults, resolves, copies, zeros, ops
+    ));
     out.push_str("Per-process:\n");
     for h in super::userfault::per_process() {
-        let avg_ns = if h.resolves > 0 { h.total_resolve_ns / h.resolves } else { 0 };
+        let avg_ns = if h.resolves > 0 {
+            h.total_resolve_ns / h.resolves
+        } else {
+            0
+        };
         out.push_str(&format!("  PID {:>5}  ranges={}  miss={}  wp={}  minor={}  resolves={}  avg_ns={}  max_ns={}  copy={}  zero={}\n",
             h.pid, h.registered_ranges, h.faults_missing, h.faults_wp, h.faults_minor,
             h.resolves, avg_ns, h.max_resolve_ns, h.copy_pages, h.zero_pages));
@@ -11003,12 +12929,22 @@ fn gen_ioport() -> Vec<u8> {
     let mut out = String::new();
     let (regions, reads, writes, ur, uw, ops) = super::ioport::stats();
     out.push_str("=== I/O Port Stats ===\n");
-    out.push_str(&format!("Regions: {}  Reads: {}  Writes: {}  Untracked R: {}  Untracked W: {}  Ops: {}\n\n",
-        regions, reads, writes, ur, uw, ops));
+    out.push_str(&format!(
+        "Regions: {}  Reads: {}  Writes: {}  Untracked R: {}  Untracked W: {}  Ops: {}\n\n",
+        regions, reads, writes, ur, uw, ops
+    ));
     out.push_str("Per-region:\n");
     for r in super::ioport::per_region() {
-        out.push_str(&format!("  {:<6} 0x{:04x}-0x{:04x}  reads={}  writes={}  rbytes={}  wbytes={}\n",
-            r.name, r.base, r.base + r.length - 1, r.reads, r.writes, r.read_bytes, r.write_bytes));
+        out.push_str(&format!(
+            "  {:<6} 0x{:04x}-0x{:04x}  reads={}  writes={}  rbytes={}  wbytes={}\n",
+            r.name,
+            r.base,
+            r.base + r.length - 1,
+            r.reads,
+            r.writes,
+            r.read_bytes,
+            r.write_bytes
+        ));
     }
     out.into_bytes()
 }
@@ -11018,12 +12954,21 @@ fn gen_msivec() -> Vec<u8> {
     let mut out = String::new();
     let (devs, vecs, ints, allocs, frees, ops) = super::msivec::stats();
     out.push_str("=== MSI Vector Stats ===\n");
-    out.push_str(&format!("Devices: {}  Vectors: {}  Interrupts: {}  Allocs: {}  Frees: {}  Ops: {}\n\n",
-        devs, vecs, ints, allocs, frees, ops));
+    out.push_str(&format!(
+        "Devices: {}  Vectors: {}  Interrupts: {}  Allocs: {}  Frees: {}  Ops: {}\n\n",
+        devs, vecs, ints, allocs, frees, ops
+    ));
     out.push_str("Per-device:\n");
     for d in super::msivec::per_device() {
-        out.push_str(&format!("  {:<10} {:<5}  alloc={}  active={}  ints={}  cpu={}\n",
-            d.device, d.msi_type.label(), d.vectors_allocated, d.vectors_active, d.interrupts, d.target_cpu));
+        out.push_str(&format!(
+            "  {:<10} {:<5}  alloc={}  active={}  ints={}  cpu={}\n",
+            d.device,
+            d.msi_type.label(),
+            d.vectors_allocated,
+            d.vectors_active,
+            d.interrupts,
+            d.target_cpu
+        ));
     }
     out.into_bytes()
 }
@@ -11033,13 +12978,17 @@ fn gen_cpuset() -> Vec<u8> {
     let mut out = String::new();
     let (sets, assignments, affinity, ops) = super::cpuset::stats();
     out.push_str("=== CPU Set Stats ===\n");
-    out.push_str(&format!("Sets: {}  Assignments: {}  Affinity changes: {}  Ops: {}\n\n",
-        sets, assignments, affinity, ops));
+    out.push_str(&format!(
+        "Sets: {}  Assignments: {}  Affinity changes: {}  Ops: {}\n\n",
+        sets, assignments, affinity, ops
+    ));
     out.push_str("CPU sets:\n");
     for s in super::cpuset::list() {
         let excl = if s.exclusive { "excl" } else { "shared" };
-        out.push_str(&format!("  [{}] {:<10} cpus=0x{:x}  mem=0x{:x}  procs={}  affinity={}  [{}]\n",
-            s.id, s.name, s.cpu_mask, s.mem_mask, s.processes, s.affinity_changes, excl));
+        out.push_str(&format!(
+            "  [{}] {:<10} cpus=0x{:x}  mem=0x{:x}  procs={}  affinity={}  [{}]\n",
+            s.id, s.name, s.cpu_mask, s.mem_mask, s.processes, s.affinity_changes, excl
+        ));
     }
     out.into_bytes()
 }
@@ -11048,16 +12997,30 @@ fn gen_ftrace() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (probes, hits, misses, overhead, ops) = super::ftrace::stats();
-    let enabled = if super::ftrace::is_enabled() { "ON" } else { "OFF" };
+    let enabled = if super::ftrace::is_enabled() {
+        "ON"
+    } else {
+        "OFF"
+    };
     out.push_str("=== Function Trace Stats ===\n");
-    out.push_str(&format!("Tracing: {}  Probes: {}  Hits: {}  Misses: {}  Overhead: {} ns  Ops: {}\n\n",
-        enabled, probes, hits, misses, overhead, ops));
+    out.push_str(&format!(
+        "Tracing: {}  Probes: {}  Hits: {}  Misses: {}  Overhead: {} ns  Ops: {}\n\n",
+        enabled, probes, hits, misses, overhead, ops
+    ));
     out.push_str("Probes:\n");
     for p in super::ftrace::per_probe() {
         let avg = if p.hits > 0 { p.total_ns / p.hits } else { 0 };
         let en = if p.enabled { "on" } else { "off" };
-        out.push_str(&format!("  {:<20} {:<4}  hits={}  miss={}  avg={}ns  max={}ns  [{}]\n",
-            p.func_name, p.kind.label(), p.hits, p.misses, avg, p.max_ns, en));
+        out.push_str(&format!(
+            "  {:<20} {:<4}  hits={}  miss={}  avg={}ns  max={}ns  [{}]\n",
+            p.func_name,
+            p.kind.label(),
+            p.hits,
+            p.misses,
+            avg,
+            p.max_ns,
+            en
+        ));
     }
     out.into_bytes()
 }
@@ -11067,14 +13030,33 @@ fn gen_kstack() -> Vec<u8> {
     let mut out = String::new();
     let (cpus, overflows, guards, samples, ops) = super::kstack::stats();
     out.push_str("=== Kernel Stack Stats ===\n");
-    out.push_str(&format!("CPUs: {}  Overflows: {}  Guard hits: {}  Samples: {}  Ops: {}\n\n",
-        cpus, overflows, guards, samples, ops));
+    out.push_str(&format!(
+        "CPUs: {}  Overflows: {}  Guard hits: {}  Samples: {}  Ops: {}\n\n",
+        cpus, overflows, guards, samples, ops
+    ));
     out.push_str("Per-CPU:\n");
     for c in super::kstack::per_cpu() {
-        let avg = if c.samples > 0 { c.total_used_samples / c.samples } else { 0 };
-        let pct = if c.stack_size > 0 { (c.high_water as u64) * 100 / (c.stack_size as u64) } else { 0 };
-        out.push_str(&format!("  CPU {:>2}  size={}  cur={}  hwm={}  ({}%)  avg={}  overflows={}  guards={}\n",
-            c.cpu_id, c.stack_size, c.current_used, c.high_water, pct, avg, c.overflows, c.guard_hits));
+        let avg = if c.samples > 0 {
+            c.total_used_samples / c.samples
+        } else {
+            0
+        };
+        let pct = if c.stack_size > 0 {
+            (c.high_water as u64) * 100 / (c.stack_size as u64)
+        } else {
+            0
+        };
+        out.push_str(&format!(
+            "  CPU {:>2}  size={}  cur={}  hwm={}  ({}%)  avg={}  overflows={}  guards={}\n",
+            c.cpu_id,
+            c.stack_size,
+            c.current_used,
+            c.high_water,
+            pct,
+            avg,
+            c.overflows,
+            c.guard_hits
+        ));
     }
     out.into_bytes()
 }
@@ -11084,11 +13066,21 @@ fn gen_fnotify() -> Vec<u8> {
     let mut out = String::new();
     let (watches, events, overflows, ops) = super::fnotify::stats();
     out.push_str("=== File Notification Stats ===\n");
-    out.push_str(&format!("Watches: {}  Events: {}  Overflows: {}  Ops: {}\n\n", watches, events, overflows, ops));
+    out.push_str(&format!(
+        "Watches: {}  Events: {}  Overflows: {}  Ops: {}\n\n",
+        watches, events, overflows, ops
+    ));
     for t in &super::fnotify::per_type() {
-        out.push_str(&format!("{}: watches={}/{}  events={}  overflows={}  queue={}/{}\n",
-            t.notify_type.label(), t.watches, t.max_watches, t.events, t.overflows,
-            t.queue_depth, t.max_queue_depth));
+        out.push_str(&format!(
+            "{}: watches={}/{}  events={}  overflows={}  queue={}/{}\n",
+            t.notify_type.label(),
+            t.watches,
+            t.max_watches,
+            t.events,
+            t.overflows,
+            t.queue_depth,
+            t.max_queue_depth
+        ));
     }
     out.into_bytes()
 }
@@ -11098,16 +13090,30 @@ fn gen_netlat() -> Vec<u8> {
     let mut out = String::new();
     let (ifaces, rtt, proc_s, ops) = super::netlat::stats();
     out.push_str("=== Network Latency Stats ===\n");
-    out.push_str(&format!("Interfaces: {}  RTT samples: {}  Processing samples: {}  Ops: {}\n\n",
-        ifaces, rtt, proc_s, ops));
+    out.push_str(&format!(
+        "Interfaces: {}  RTT samples: {}  Processing samples: {}  Ops: {}\n\n",
+        ifaces, rtt, proc_s, ops
+    ));
     let labels = super::netlat::bucket_labels();
     for i in super::netlat::per_interface() {
-        let avg_rtt = if i.rtt_samples > 0 { i.rtt_total_ns / i.rtt_samples } else { 0 };
-        let avg_proc = if i.proc_samples > 0 { i.proc_total_ns / i.proc_samples } else { 0 };
-        out.push_str(&format!("{}:  rtt: avg={}ns  min={}ns  max={}ns  ({} samples)\n",
-            i.name, avg_rtt, i.rtt_min_ns, i.rtt_max_ns, i.rtt_samples));
-        out.push_str(&format!("      proc: avg={}ns  max={}ns  ({} samples)\n",
-            avg_proc, i.proc_max_ns, i.proc_samples));
+        let avg_rtt = if i.rtt_samples > 0 {
+            i.rtt_total_ns / i.rtt_samples
+        } else {
+            0
+        };
+        let avg_proc = if i.proc_samples > 0 {
+            i.proc_total_ns / i.proc_samples
+        } else {
+            0
+        };
+        out.push_str(&format!(
+            "{}:  rtt: avg={}ns  min={}ns  max={}ns  ({} samples)\n",
+            i.name, avg_rtt, i.rtt_min_ns, i.rtt_max_ns, i.rtt_samples
+        ));
+        out.push_str(&format!(
+            "      proc: avg={}ns  max={}ns  ({} samples)\n",
+            avg_proc, i.proc_max_ns, i.proc_samples
+        ));
         out.push_str("      histogram:");
         for (j, &count) in i.rtt_histogram.iter().enumerate() {
             out.push_str(&format!(" {}={}", labels[j], count));
@@ -11122,12 +13128,18 @@ fn gen_diskstat() -> Vec<u8> {
     let mut out = String::new();
     let (devs, reads, writes, rb, wb, ops) = super::diskstat::stats();
     out.push_str("=== Disk Stats ===\n");
-    out.push_str(&format!("Devices: {}  Reads: {}  Writes: {}  ReadBytes: {}  WriteBytes: {}  Ops: {}\n\n",
-        devs, reads, writes, rb, wb, ops));
+    out.push_str(&format!(
+        "Devices: {}  Reads: {}  Writes: {}  ReadBytes: {}  WriteBytes: {}  Ops: {}\n\n",
+        devs, reads, writes, rb, wb, ops
+    ));
     out.push_str("Per-device:\n");
     for d in super::diskstat::per_device() {
         let avg_r = if d.reads > 0 { d.read_ns / d.reads } else { 0 };
-        let avg_w = if d.writes > 0 { d.write_ns / d.writes } else { 0 };
+        let avg_w = if d.writes > 0 {
+            d.write_ns / d.writes
+        } else {
+            0
+        };
         out.push_str(&format!("  {:<10} R: {}({} B, avg {}ns)  W: {}({} B, avg {}ns)  disc={}  flush={}  merges: r={} w={}\n",
             d.name, d.reads, d.read_bytes, avg_r, d.writes, d.write_bytes, avg_w,
             d.discards, d.flushes, d.merges_read, d.merges_write));
@@ -11140,8 +13152,10 @@ fn gen_taskio() -> Vec<u8> {
     let mut out = String::new();
     let (tasks, rb, wb, cancelled, io_wait, ops) = super::taskio::stats();
     out.push_str("=== Per-Task I/O Stats ===\n");
-    out.push_str(&format!("Tasks: {}  ReadBytes: {}  WriteBytes: {}  Cancelled: {}  IOWait: {} ns  Ops: {}\n\n",
-        tasks, rb, wb, cancelled, io_wait, ops));
+    out.push_str(&format!(
+        "Tasks: {}  ReadBytes: {}  WriteBytes: {}  Cancelled: {}  IOWait: {} ns  Ops: {}\n\n",
+        tasks, rb, wb, cancelled, io_wait, ops
+    ));
     out.push_str("Per-task:\n");
     for t in super::taskio::per_task() {
         out.push_str(&format!("  PID {:>5}  read={}({} calls)  write={}({} calls)  cancel={}  iowait={}ns  majflt={}\n",
@@ -11156,11 +13170,17 @@ fn gen_ttystat() -> Vec<u8> {
     let mut out = String::new();
     let (ttys, rb, wb, sigs, overruns, ops) = super::ttystat::stats();
     out.push_str("=== TTY Stats ===\n");
-    out.push_str(&format!("TTYs: {}  ReadBytes: {}  WriteBytes: {}  Signals: {}  Overruns: {}  Ops: {}\n\n",
-        ttys, rb, wb, sigs, overruns, ops));
+    out.push_str(&format!(
+        "TTYs: {}  ReadBytes: {}  WriteBytes: {}  Signals: {}  Overruns: {}  Ops: {}\n\n",
+        ttys, rb, wb, sigs, overruns, ops
+    ));
     out.push_str("Per-TTY:\n");
     for t in super::ttystat::per_tty() {
-        let pct = if t.buf_size > 0 { (t.buf_used as u64) * 100 / (t.buf_size as u64) } else { 0 };
+        let pct = if t.buf_size > 0 {
+            (t.buf_used as u64) * 100 / (t.buf_size as u64)
+        } else {
+            0
+        };
         out.push_str(&format!("  {:<10} [{}]  read={}({} ops)  write={}({} ops)  sigs={}  overruns={}  buf={}/{}({}%)\n",
             t.name, t.tty_type.label(), t.read_bytes, t.read_ops, t.write_bytes, t.write_ops,
             t.signals_sent, t.overruns, t.buf_used, t.buf_size, pct));
@@ -11173,13 +13193,27 @@ fn gen_swapact() -> Vec<u8> {
     let mut out = String::new();
     let (areas, si, so, sip, sop, ops) = super::swapact::stats();
     out.push_str("=== Swap Activity Stats ===\n");
-    out.push_str(&format!("Areas: {}  SwapIn: {}  SwapOut: {}  InPages: {}  OutPages: {}  Ops: {}\n\n",
-        areas, si, so, sip, sop, ops));
+    out.push_str(&format!(
+        "Areas: {}  SwapIn: {}  SwapOut: {}  InPages: {}  OutPages: {}  Ops: {}\n\n",
+        areas, si, so, sip, sop, ops
+    ));
     out.push_str("Per-area:\n");
     for a in super::swapact::per_area() {
-        let pct = if a.total_pages > 0 { a.used_pages * 100 / a.total_pages } else { 0 };
-        let avg_in = if a.swap_in_count > 0 { a.swap_in_ns / a.swap_in_count } else { 0 };
-        let avg_out = if a.swap_out_count > 0 { a.swap_out_ns / a.swap_out_count } else { 0 };
+        let pct = if a.total_pages > 0 {
+            a.used_pages * 100 / a.total_pages
+        } else {
+            0
+        };
+        let avg_in = if a.swap_in_count > 0 {
+            a.swap_in_ns / a.swap_in_count
+        } else {
+            0
+        };
+        let avg_out = if a.swap_out_count > 0 {
+            a.swap_out_ns / a.swap_out_count
+        } else {
+            0
+        };
         out.push_str(&format!("  {:<15} [{}] prio={}  used={}/{}({}%)  in: {}({} pg, avg {}ns)  out: {}({} pg, avg {}ns)\n",
             a.name, a.swap_type.label(), a.priority, a.used_pages, a.total_pages, pct,
             a.swap_in_count, a.swap_in_pages, avg_in,
@@ -11194,12 +13228,21 @@ fn gen_schedwait() -> Vec<u8> {
     let (waits, ns, ops) = super::schedwait::stats();
     let avg = if waits > 0 { ns / waits } else { 0 };
     out.push_str("=== Scheduler Wait Stats ===\n");
-    out.push_str(&format!("Total waits: {}  Total ns: {}  Avg ns: {}  Ops: {}\n\n", waits, ns, avg, ops));
+    out.push_str(&format!(
+        "Total waits: {}  Total ns: {}  Avg ns: {}  Ops: {}\n\n",
+        waits, ns, avg, ops
+    ));
     out.push_str("Per-reason:\n");
     for (reason, count, total, max) in super::schedwait::per_reason() {
         let avg_r = if count > 0 { total / count } else { 0 };
-        out.push_str(&format!("  {:<10} count={}  total={}ns  avg={}ns  max={}ns\n",
-            reason.label(), count, total, avg_r, max));
+        out.push_str(&format!(
+            "  {:<10} count={}  total={}ns  avg={}ns  max={}ns\n",
+            reason.label(),
+            count,
+            total,
+            avg_r,
+            max
+        ));
     }
     let (labels, counts) = super::schedwait::histogram();
     out.push_str("\nHistogram:");
@@ -11215,14 +13258,29 @@ fn gen_ratestat() -> Vec<u8> {
     let mut out = String::new();
     let (limiters, allows, denies, bursts, ops) = super::ratestat::stats();
     out.push_str("=== Rate Limiter Stats ===\n");
-    out.push_str(&format!("Limiters: {}  Allows: {}  Denies: {}  Bursts: {}  Ops: {}\n\n",
-        limiters, allows, denies, bursts, ops));
+    out.push_str(&format!(
+        "Limiters: {}  Allows: {}  Denies: {}  Bursts: {}  Ops: {}\n\n",
+        limiters, allows, denies, bursts, ops
+    ));
     out.push_str("Per-limiter:\n");
     for l in super::ratestat::per_limiter() {
-        let deny_pct = if l.allows + l.denies > 0 { l.denies * 10000 / (l.allows + l.denies) } else { 0 };
-        out.push_str(&format!("  {:<15} rate={}/s  burst={}  tokens={}  allow={}  deny={}  ({}.{}%)  bursts={}\n",
-            l.name, l.rate_per_sec, l.burst_size, l.current_tokens,
-            l.allows, l.denies, deny_pct / 100, deny_pct % 100, l.burst_events));
+        let deny_pct = if l.allows + l.denies > 0 {
+            l.denies * 10000 / (l.allows + l.denies)
+        } else {
+            0
+        };
+        out.push_str(&format!(
+            "  {:<15} rate={}/s  burst={}  tokens={}  allow={}  deny={}  ({}.{}%)  bursts={}\n",
+            l.name,
+            l.rate_per_sec,
+            l.burst_size,
+            l.current_tokens,
+            l.allows,
+            l.denies,
+            deny_pct / 100,
+            deny_pct % 100,
+            l.burst_events
+        ));
     }
     out.into_bytes()
 }
@@ -11232,13 +13290,25 @@ fn gen_iomem() -> Vec<u8> {
     let mut out = String::new();
     let (regs, reads, writes, ops) = super::iomem::stats();
     out.push_str("=== I/O Memory Stats ===\n");
-    out.push_str(&format!("Regions: {}  Reads: {}  Writes: {}  Ops: {}\n\n", regs, reads, writes, ops));
+    out.push_str(&format!(
+        "Regions: {}  Reads: {}  Writes: {}  Ops: {}\n\n",
+        regs, reads, writes, ops
+    ));
     out.push_str("Regions:\n");
     for r in super::iomem::regions() {
         let cache = if r.cacheable { "C" } else { "UC" };
         let pf = if r.prefetchable { "+PF" } else { "" };
-        out.push_str(&format!("  {:<12} 0x{:016x}-0x{:016x} ({} B)  reads={}  writes={}  [{}{}]\n",
-            r.name, r.base, r.base + r.size - 1, r.size, r.reads, r.writes, cache, pf));
+        out.push_str(&format!(
+            "  {:<12} 0x{:016x}-0x{:016x} ({} B)  reads={}  writes={}  [{}{}]\n",
+            r.name,
+            r.base,
+            r.base + r.size - 1,
+            r.size,
+            r.reads,
+            r.writes,
+            cache,
+            pf
+        ));
     }
     out.into_bytes()
 }
@@ -11248,11 +13318,17 @@ fn gen_vmzone() -> Vec<u8> {
     let mut out = String::new();
     let (zones, allocs, frees, reclaims, ops) = super::vmzone::stats();
     out.push_str("=== VM Zone Stats ===\n");
-    out.push_str(&format!("Zones: {}  Allocs: {}  Frees: {}  Reclaims: {}  Ops: {}\n\n",
-        zones, allocs, frees, reclaims, ops));
+    out.push_str(&format!(
+        "Zones: {}  Allocs: {}  Frees: {}  Reclaims: {}  Ops: {}\n\n",
+        zones, allocs, frees, reclaims, ops
+    ));
     out.push_str("Per-zone:\n");
     for z in super::vmzone::per_zone() {
-        let pct = if z.total_pages > 0 { z.free_pages * 100 / z.total_pages } else { 0 };
+        let pct = if z.total_pages > 0 {
+            z.free_pages * 100 / z.total_pages
+        } else {
+            0
+        };
         out.push_str(&format!("  {:<10} [{}]  total={}  free={}({}%)  active={}  inactive={}  wmark: {}/{}/{}  alloc={}  free={}  reclaim={}\n",
             z.name, z.zone_type.label(), z.total_pages, z.free_pages, pct,
             z.active_pages, z.inactive_pages, z.wmark_min, z.wmark_low, z.wmark_high,
@@ -11266,14 +13342,23 @@ fn gen_budstat() -> Vec<u8> {
     let mut out = String::new();
     let (zones, splits, coalesces, ops) = super::budstat::stats();
     out.push_str("=== Buddy Allocator Stats ===\n");
-    out.push_str(&format!("Zones: {}  Splits: {}  Coalesces: {}  Ops: {}\n\n", zones, splits, coalesces, ops));
+    out.push_str(&format!(
+        "Zones: {}  Splits: {}  Coalesces: {}  Ops: {}\n\n",
+        zones, splits, coalesces, ops
+    ));
     for z in super::budstat::per_zone() {
         out.push_str(&format!("{}:\n  Free:  ", z.zone_name));
-        for (i, &c) in z.free_counts.iter().enumerate() { out.push_str(&format!(" O{}={}", i, c)); }
+        for (i, &c) in z.free_counts.iter().enumerate() {
+            out.push_str(&format!(" O{}={}", i, c));
+        }
         out.push_str("\n  Split: ");
-        for (i, &s) in z.splits.iter().enumerate() { out.push_str(&format!(" O{}={}", i, s)); }
+        for (i, &s) in z.splits.iter().enumerate() {
+            out.push_str(&format!(" O{}={}", i, s));
+        }
         out.push_str("\n  Coal:  ");
-        for (i, &c) in z.coalesces.iter().enumerate() { out.push_str(&format!(" O{}={}", i, c)); }
+        for (i, &c) in z.coalesces.iter().enumerate() {
+            out.push_str(&format!(" O{}={}", i, c));
+        }
         out.push('\n');
     }
     out.into_bytes()
@@ -11284,14 +13369,34 @@ fn gen_cgmem() -> Vec<u8> {
     let mut out = String::new();
     let (cgroups, charges, uncharges, ooms, ops) = super::cgmem::stats();
     out.push_str("=== Cgroup Memory Stats ===\n");
-    out.push_str(&format!("Cgroups: {}  Charges: {}  Uncharges: {}  OOM kills: {}  Ops: {}\n\n",
-        cgroups, charges, uncharges, ooms, ops));
+    out.push_str(&format!(
+        "Cgroups: {}  Charges: {}  Uncharges: {}  OOM kills: {}  Ops: {}\n\n",
+        cgroups, charges, uncharges, ooms, ops
+    ));
     for c in super::cgmem::per_cgroup() {
-        let pct = if c.limit_pages < u64::MAX && c.limit_pages > 0 { c.usage_pages * 100 / c.limit_pages } else { 0 };
-        let limit = if c.limit_pages == u64::MAX { "unlimited".into() } else { format!("{}", c.limit_pages) };
-        out.push_str(&format!("  [{}] {:<10} usage={}/{}({}%)  rss={}  cache={}  swap={}  charges={}  oom={}\n",
-            c.cg_id, c.name, c.usage_pages, limit, pct, c.rss_pages, c.cache_pages,
-            c.swap_pages, c.charges, c.oom_kills));
+        let pct = if c.limit_pages < u64::MAX && c.limit_pages > 0 {
+            c.usage_pages * 100 / c.limit_pages
+        } else {
+            0
+        };
+        let limit = if c.limit_pages == u64::MAX {
+            "unlimited".into()
+        } else {
+            format!("{}", c.limit_pages)
+        };
+        out.push_str(&format!(
+            "  [{}] {:<10} usage={}/{}({}%)  rss={}  cache={}  swap={}  charges={}  oom={}\n",
+            c.cg_id,
+            c.name,
+            c.usage_pages,
+            limit,
+            pct,
+            c.rss_pages,
+            c.cache_pages,
+            c.swap_pages,
+            c.charges,
+            c.oom_kills
+        ));
     }
     out.into_bytes()
 }
@@ -11300,13 +13405,26 @@ fn gen_vmfrag() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (zones, compactions, success, fail, ops) = super::vmfrag::stats();
-    let rate = if compactions > 0 { success * 100 / compactions } else { 0 };
+    let rate = if compactions > 0 {
+        success * 100 / compactions
+    } else {
+        0
+    };
     out.push_str("=== VM Fragmentation Index ===\n");
-    out.push_str(&format!("Zones: {}  Compactions: {}  Success: {}({}%)  Fail: {}  Ops: {}\n\n",
-        zones, compactions, success, rate, fail, ops));
+    out.push_str(&format!(
+        "Zones: {}  Compactions: {}  Success: {}({}%)  Fail: {}  Ops: {}\n\n",
+        zones, compactions, success, rate, fail, ops
+    ));
     for z in super::vmfrag::per_zone() {
-        let rate_z = if z.compactions > 0 { z.compact_success * 100 / z.compactions } else { 0 };
-        out.push_str(&format!("{}:  compact: {}/{}({}% ok)\n  Index:", z.zone_name, z.compact_success, z.compactions, rate_z));
+        let rate_z = if z.compactions > 0 {
+            z.compact_success * 100 / z.compactions
+        } else {
+            0
+        };
+        out.push_str(&format!(
+            "{}:  compact: {}/{}({}% ok)\n  Index:",
+            z.zone_name, z.compact_success, z.compactions, rate_z
+        ));
         for (i, &idx) in z.frag_index.iter().enumerate() {
             out.push_str(&format!(" O{}={}.{}", i, idx / 10, idx % 10));
         }
@@ -11320,12 +13438,16 @@ fn gen_pidfd() -> Vec<u8> {
     let mut out = String::new();
     let (pids, creates, polls, signals, waits, closes, ops) = super::pidfd::stats();
     out.push_str("=== Pidfd Stats ===\n");
-    out.push_str(&format!("Tracked PIDs: {}  Creates: {}  Polls: {}  Signals: {}  Waits: {}  Closes: {}  Ops: {}\n\n",
-        pids, creates, polls, signals, waits, closes, ops));
+    out.push_str(&format!(
+        "Tracked PIDs: {}  Creates: {}  Polls: {}  Signals: {}  Waits: {}  Closes: {}  Ops: {}\n\n",
+        pids, creates, polls, signals, waits, closes, ops
+    ));
     out.push_str("Per-PID:\n");
     for p in super::pidfd::per_pid() {
-        out.push_str(&format!("  PID {:>5}  creates={}  polls={}  signals={}  waits={}  closes={}\n",
-            p.pid, p.creates, p.polls, p.signals, p.waits, p.close_count));
+        out.push_str(&format!(
+            "  PID {:>5}  creates={}  polls={}  signals={}  waits={}  closes={}\n",
+            p.pid, p.creates, p.polls, p.signals, p.waits, p.close_count
+        ));
     }
     out.into_bytes()
 }
@@ -11344,8 +13466,10 @@ fn gen_columnview() -> Vec<u8> {
 
     let cols = super::columnview::list_columns();
     if !cols.is_empty() {
-        out.push_str(&format!("{:24} {:16} {:8} {:6} {}\n",
-            "ID", "HEADER", "TYPE", "WIDTH", "APPLIES TO"));
+        out.push_str(&format!(
+            "{:24} {:16} {:8} {:6} {}\n",
+            "ID", "HEADER", "TYPE", "WIDTH", "APPLIES TO"
+        ));
         for c in cols.iter().take(30) {
             let type_str = match c.col_type {
                 super::columnview::ColumnType::Text => "text",
@@ -11361,8 +13485,10 @@ fn gen_columnview() -> Vec<u8> {
             } else {
                 format!("{}", c.applies_to.len())
             };
-            out.push_str(&format!("{:24} {:16} {:8} {:6} {}\n",
-                c.id, c.header, type_str, c.default_width, applies));
+            out.push_str(&format!(
+                "{:24} {:16} {:8} {:6} {}\n",
+                c.id, c.header, type_str, c.default_width, applies
+            ));
         }
     }
 
@@ -11387,8 +13513,14 @@ fn gen_pathbar() -> Vec<u8> {
         "Current:       {}\n",
         mangle_mount_field(super::pathbar::current().as_bytes())
     ));
-    out.push_str(&format!("Can go back:   {}\n", super::pathbar::can_go_back()));
-    out.push_str(&format!("Can go forward:{}\n", super::pathbar::can_go_forward()));
+    out.push_str(&format!(
+        "Can go back:   {}\n",
+        super::pathbar::can_go_back()
+    ));
+    out.push_str(&format!(
+        "Can go forward:{}\n",
+        super::pathbar::can_go_forward()
+    ));
 
     out.into_bytes()
 }
@@ -11425,8 +13557,13 @@ fn gen_contextmenu() -> Vec<u8> {
     if !exts.is_empty() {
         out.push_str("\nRegistered Extensions:\n");
         for (id, name, enabled, items) in &exts {
-            out.push_str(&format!("  #{}: {} ({} items) {}\n", id, name, items,
-                                  if *enabled { "enabled" } else { "disabled" }));
+            out.push_str(&format!(
+                "  #{}: {} ({} items) {}\n",
+                id,
+                name,
+                items,
+                if *enabled { "enabled" } else { "disabled" }
+            ));
         }
     }
 
@@ -11448,7 +13585,10 @@ fn gen_deskicons() -> Vec<u8> {
     if let Some(layout) = super::deskicons::get_layout() {
         out.push_str(&format!("Mode:     {:?}\n", layout.mode));
         out.push_str(&format!("Sort:     {:?}\n", layout.sort_by));
-        out.push_str(&format!("Screen:   {}x{}\n", layout.screen_w, layout.screen_h));
+        out.push_str(&format!(
+            "Screen:   {}x{}\n",
+            layout.screen_w, layout.screen_h
+        ));
     }
 
     out.into_bytes()
@@ -11512,10 +13652,12 @@ fn gen_sidebar() -> Vec<u8> {
 
     let sidebar = super::sidebar::build();
     for section in &sidebar.sections {
-        out.push_str(&format!("\n[{}] {} ({} items)\n",
-                              if section.expanded { "v" } else { ">" },
-                              section.label,
-                              section.items.len()));
+        out.push_str(&format!(
+            "\n[{}] {} ({} items)\n",
+            if section.expanded { "v" } else { ">" },
+            section.label,
+            section.items.len()
+        ));
     }
 
     out.into_bytes()
@@ -12263,8 +14405,7 @@ fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
         // would imply a knob with no backing (violates the "never advertise an
         // unhonored feature" rule, design-decisions.md §1).
         "vm/overcommit_memory" => {
-            let lazy = crate::sysctl::get(crate::sysctl::PARAM_MM_LINUX_LAZY_DEFAULT)
-                != Some(0);
+            let lazy = crate::sysctl::get(crate::sysctl::PARAM_MM_LINUX_LAZY_DEFAULT) != Some(0);
             if lazy {
                 String::from("0\n")
             } else {
@@ -12551,8 +14692,7 @@ impl FileSystem for ProcFs {
             }
             ProcPath::PidTaskDir(pid) => {
                 // `/proc/<pid>/task` — one subdirectory per live thread tid.
-                let threads = crate::proc::pcb::get_threads(pid)
-                    .ok_or(KernelError::NotFound)?;
+                let threads = crate::proc::pcb::get_threads(pid).ok_or(KernelError::NotFound)?;
                 let entries = threads
                     .iter()
                     .map(|tid| DirEntry {
@@ -12571,8 +14711,7 @@ impl FileSystem for ProcFs {
                 let entries = TASK_FILES
                     .iter()
                     .map(|name| {
-                        let size = generate_task(pid, tid, name)
-                            .map_or(0, |d| d.len() as u64);
+                        let size = generate_task(pid, tid, name).map_or(0, |d| d.len() as u64);
                         DirEntry {
                             name: PathBuf::from(*name),
                             entry_type: EntryType::File,
@@ -12583,12 +14722,14 @@ impl FileSystem for ProcFs {
                 Ok(entries)
             }
             ProcPath::SysDir(rel) => Ok(sys_children(rel)),
-            ProcPath::RootFile(_) | ProcPath::PidFile(_, _)
-            | ProcPath::PidLink(_, _) | ProcPath::SelfLink
-            | ProcPath::PidTaskFile(_, _, _) | ProcPath::PidFdLink(_, _)
-            | ProcPath::PidFdInfoFile(_, _) | ProcPath::SysFile(_) => {
-                Err(KernelError::NotADirectory)
-            }
+            ProcPath::RootFile(_)
+            | ProcPath::PidFile(_, _)
+            | ProcPath::PidLink(_, _)
+            | ProcPath::SelfLink
+            | ProcPath::PidTaskFile(_, _, _)
+            | ProcPath::PidFdLink(_, _)
+            | ProcPath::PidFdInfoFile(_, _)
+            | ProcPath::SysFile(_) => Err(KernelError::NotADirectory),
             ProcPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -12597,12 +14738,13 @@ impl FileSystem for ProcFs {
         let rel = strip_root(path)?;
 
         match classify_path(rel) {
-            ProcPath::Root | ProcPath::PidDir(_)
-            | ProcPath::PidTaskDir(_) | ProcPath::PidTaskTidDir(_, _)
-            | ProcPath::PidFdDir(_) | ProcPath::PidFdInfoDir(_)
-            | ProcPath::SysDir(_) => {
-                Err(KernelError::IsADirectory)
-            }
+            ProcPath::Root
+            | ProcPath::PidDir(_)
+            | ProcPath::PidTaskDir(_)
+            | ProcPath::PidTaskTidDir(_, _)
+            | ProcPath::PidFdDir(_)
+            | ProcPath::PidFdInfoDir(_)
+            | ProcPath::SysDir(_) => Err(KernelError::IsADirectory),
             ProcPath::SysFile(rel) => gen_sys(rel),
             ProcPath::RootFile(name) => generate(name),
             ProcPath::PidFile(pid, file_name) => {
@@ -12620,8 +14762,7 @@ impl FileSystem for ProcFs {
             // Reading a symlink's bytes directly is invalid; the VFS follows
             // it via readlink instead.  Mirrors Linux read() → EINVAL on a
             // symlink opened without O_PATH.
-            ProcPath::PidLink(_, _) | ProcPath::SelfLink
-            | ProcPath::PidFdLink(_, _) => {
+            ProcPath::PidLink(_, _) | ProcPath::SelfLink | ProcPath::PidFdLink(_, _) => {
                 Err(KernelError::InvalidArgument)
             }
             ProcPath::PidFdInfoFile(pid, fd) => {
@@ -12751,8 +14892,7 @@ impl FileSystem for ProcFs {
             ProcPath::PidFdLink(pid, fd) => {
                 // Only a currently-open fd is a valid symlink; an absent
                 // fd (or a process with no kernel fd table) is NotFound.
-                crate::proc::pcb::linux_fd_lookup(pid, fd)
-                    .ok_or(KernelError::NotFound)?;
+                crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
                 Ok(DirEntry {
                     name: PathBuf::from(format!("{fd}")),
                     entry_type: EntryType::Symlink,
@@ -12822,16 +14962,14 @@ impl FileSystem for ProcFs {
                 // through `String::from_utf8` and fail with InvalidArgument,
                 // so a process whose cwd contained one non-UTF-8 byte had a
                 // `/proc/<pid>/cwd` that could not be read at all.
-                let cwd = crate::proc::pcb::get_cwd(pid)
-                    .ok_or(KernelError::NotFound)?;
+                let cwd = crate::proc::pcb::get_cwd(pid).ok_or(KernelError::NotFound)?;
                 Ok(PathBuf::from(cwd))
             }
             ProcPath::PidLink(pid, "exe") => {
                 // Empty path means the process has not exec'd a binary
                 // (e.g. a bare scheduler task or a not-yet-exec'd child):
                 // Linux reports no /proc/<pid>/exe target in that case.
-                let exe = crate::proc::pcb::get_exe_path(pid)
-                    .ok_or(KernelError::NotFound)?;
+                let exe = crate::proc::pcb::get_exe_path(pid).ok_or(KernelError::NotFound)?;
                 if exe.is_empty() {
                     return Err(KernelError::NotFound);
                 }
@@ -12843,15 +14981,16 @@ impl FileSystem for ProcFs {
             ProcPath::PidLink(_, _) => Err(KernelError::NotFound),
             // `/proc/<pid>/fd/<n>` → the backing object of fd n.
             ProcPath::PidFdLink(pid, fd) => {
-                let entry = crate::proc::pcb::linux_fd_lookup(pid, fd)
-                    .ok_or(KernelError::NotFound)?;
+                let entry =
+                    crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
                 Ok(fd_link_target(&entry))
             }
             // `/proc/self` → the caller's pid, as a relative target (Linux
             // returns the bare pid number, e.g. "7", resolved against /proc).
-            ProcPath::SelfLink => {
-                Ok(PathBuf::from(format!("{}", crate::sched::current_task_id())))
-            }
+            ProcPath::SelfLink => Ok(PathBuf::from(format!(
+                "{}",
+                crate::sched::current_task_id()
+            ))),
             _ => Err(KernelError::InvalidArgument),
         }
     }
@@ -12936,7 +15075,8 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     // Count PID directories.
-    let pid_dirs = entries.iter()
+    let pid_dirs = entries
+        .iter()
         .filter(|e| e.entry_type == EntryType::Directory)
         .count();
     serial_println!(
@@ -12989,8 +15129,7 @@ pub fn self_test() -> KernelResult<()> {
     // block-counting parsers; pin the new shape so it can't regress.
     {
         let cpu_data = fs.read_file(Path::new("/cpuinfo"))?;
-        let cpu_text = core::str::from_utf8(&cpu_data)
-            .map_err(|_| KernelError::InternalError)?;
+        let cpu_text = core::str::from_utf8(&cpu_data).map_err(|_| KernelError::InternalError)?;
         // `grep -c ^processor` — count lines that start a processor block.
         let block_count = cpu_text
             .lines()
@@ -13000,7 +15139,8 @@ pub fn self_test() -> KernelResult<()> {
         if block_count != want {
             serial_println!(
                 "[procfs]   FAIL: cpuinfo has {} processor blocks, want {} (online CPUs)",
-                block_count, want
+                block_count,
+                want
             );
             return Err(KernelError::InternalError);
         }
@@ -13014,13 +15154,20 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // Per-block keys consumers scrape must each appear once per CPU.
-        for key in ["vendor_id\t:", "cpu family\t:", "model name\t:",
-                    "flags\t\t:", "cpu cores\t:"] {
+        for key in [
+            "vendor_id\t:",
+            "cpu family\t:",
+            "model name\t:",
+            "flags\t\t:",
+            "cpu cores\t:",
+        ] {
             let n = cpu_text.lines().filter(|l| l.starts_with(key)).count();
             if n != want {
                 serial_println!(
                     "[procfs]   FAIL: cpuinfo key {:?} appears {} times, want {}",
-                    key, n, want
+                    key,
+                    n,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -13031,7 +15178,8 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[procfs]   cpuinfo: {} Linux-format processor block(s) OK", block_count
+            "[procfs]   cpuinfo: {} Linux-format processor block(s) OK",
+            block_count
         );
     }
 
@@ -13064,9 +15212,7 @@ pub fn self_test() -> KernelResult<()> {
         let probe_tid = crate::sched::current_task_id();
         let bad_path = format!("/{probe_tid}/oom_score_adj");
         if fs.write_file(Path::new(&bad_path), b"not-a-number").is_ok() {
-            serial_println!(
-                "[procfs]   FAIL: oom_score_adj accepted malformed write"
-            );
+            serial_println!("[procfs]   FAIL: oom_score_adj accepted malformed write");
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   oom_score_adj write: rejects malformed OK");
@@ -13131,7 +15277,9 @@ pub fn self_test() -> KernelResult<()> {
             if got != *want {
                 serial_println!(
                     "[procfs]   FAIL: classify_path({:?}) = {}, want {}",
-                    path, got, want
+                    path,
+                    got,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -13148,12 +15296,11 @@ pub fn self_test() -> KernelResult<()> {
     {
         let probe = crate::sched::current_task_id();
         let dir_entries = fs.readdir(Path::new(&format!("/{probe}")))?;
-        if !dir_entries.iter().any(|e| {
-            e.name.as_path() == Path::new("task") && e.entry_type == EntryType::Directory
-        }) {
-            serial_println!(
-                "[procfs]   FAIL: /{}/ missing `task` subdirectory", probe
-            );
+        if !dir_entries
+            .iter()
+            .any(|e| e.name.as_path() == Path::new("task") && e.entry_type == EntryType::Directory)
+        {
+            serial_println!("[procfs]   FAIL: /{}/ missing `task` subdirectory", probe);
             return Err(KernelError::InternalError);
         }
         // A non-existent thread under any pid must be NotFound.
@@ -13161,7 +15308,8 @@ pub fn self_test() -> KernelResult<()> {
             Err(KernelError::NotFound) => {}
             other => {
                 serial_println!(
-                    "[procfs]   FAIL: bogus thread file = {:?}, want NotFound", other
+                    "[procfs]   FAIL: bogus thread file = {:?}, want NotFound",
+                    other
                 );
                 return Err(KernelError::InternalError);
             }
@@ -13169,11 +15317,10 @@ pub fn self_test() -> KernelResult<()> {
         // Listing task/ for the bare task (no thread list) is NotFound;
         // for a real process it would enumerate tids.  Tolerate both.
         match fs.readdir(Path::new(&format!("/{probe}/task"))) {
-            Ok(tids) => serial_println!(
-                "[procfs]   /{}/task: {} thread(s) OK", probe, tids.len()
-            ),
+            Ok(tids) => serial_println!("[procfs]   /{}/task: {} thread(s) OK", probe, tids.len()),
             Err(KernelError::NotFound) => serial_println!(
-                "[procfs]   /{}/task: NotFound (bare task, no thread list) OK", probe
+                "[procfs]   /{}/task: NotFound (bare task, no thread list) OK",
+                probe
             ),
             Err(e) => {
                 serial_println!("[procfs]   FAIL: /task readdir error {:?}", e);
@@ -13193,8 +15340,8 @@ pub fn self_test() -> KernelResult<()> {
             ("5/fd", "fddir"),
             ("5/fd/0", "fdlink"),
             ("5/fd/255", "fdlink"),
-            ("5/fd/abc", "notfound"),  // non-numeric fd
-            ("5/fd/0/x", "notfound"),  // nested beyond an fd
+            ("5/fd/abc", "notfound"), // non-numeric fd
+            ("5/fd/0/x", "notfound"), // nested beyond an fd
         ];
         for (path, want) in cases {
             let got = match classify_path(path) {
@@ -13206,7 +15353,9 @@ pub fn self_test() -> KernelResult<()> {
             if got != *want {
                 serial_println!(
                     "[procfs]   FAIL: classify_path({:?}) = {}, want {}",
-                    path, got, want
+                    path,
+                    got,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -13225,7 +15374,9 @@ pub fn self_test() -> KernelResult<()> {
             let got = fd_link_target(entry);
             if got.as_path() != Path::new(*want) {
                 serial_println!(
-                    "[procfs]   FAIL: fd_link_target = {:?}, want {:?}", got, want
+                    "[procfs]   FAIL: fd_link_target = {:?}, want {:?}",
+                    got,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -13238,7 +15389,8 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[procfs]   fd/ classify: {} cases OK; link render OK", cases.len()
+            "[procfs]   fd/ classify: {} cases OK; link render OK",
+            cases.len()
         );
     }
 
@@ -13250,9 +15402,10 @@ pub fn self_test() -> KernelResult<()> {
     {
         let probe = crate::sched::current_task_id();
         let dir_entries = fs.readdir(Path::new(&format!("/{probe}")))?;
-        if !dir_entries.iter().any(|e| {
-            e.name.as_path() == Path::new("fd") && e.entry_type == EntryType::Directory
-        }) {
+        if !dir_entries
+            .iter()
+            .any(|e| e.name.as_path() == Path::new("fd") && e.entry_type == EntryType::Directory)
+        {
             serial_println!("[procfs]   FAIL: /{}/ missing `fd` subdirectory", probe);
             return Err(KernelError::InternalError);
         }
@@ -13266,7 +15419,8 @@ pub fn self_test() -> KernelResult<()> {
             other => {
                 serial_println!(
                     "[procfs]   FAIL: /{}/fd/0 readlink = {:?}, want NotFound",
-                    probe, other
+                    probe,
+                    other
                 );
                 return Err(KernelError::InternalError);
             }
@@ -13284,8 +15438,8 @@ pub fn self_test() -> KernelResult<()> {
             ("5/fdinfo", "fdinfodir"),
             ("5/fdinfo/0", "fdinfofile"),
             ("5/fdinfo/255", "fdinfofile"),
-            ("5/fdinfo/abc", "notfound"),  // non-numeric fd
-            ("5/fdinfo/0/x", "notfound"),  // nested beyond an fd
+            ("5/fdinfo/abc", "notfound"), // non-numeric fd
+            ("5/fdinfo/0/x", "notfound"), // nested beyond an fd
         ];
         for (path, want) in cases {
             let got = match classify_path(path) {
@@ -13297,7 +15451,9 @@ pub fn self_test() -> KernelResult<()> {
             if got != *want {
                 serial_println!(
                     "[procfs]   FAIL: classify_path({:?}) = {}, want {}",
-                    path, got, want
+                    path,
+                    got,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -13313,7 +15469,7 @@ pub fn self_test() -> KernelResult<()> {
 
         // fdinfo_flags folds the descriptor's FD_CLOEXEC into O_CLOEXEC and
         // never double-counts a stale O_CLOEXEC already in status_flags.
-        use crate::proc::linux_fd::{FdEntry, FD_CLOEXEC, O_CLOEXEC};
+        use crate::proc::linux_fd::{FD_CLOEXEC, FdEntry, O_CLOEXEC};
         // file(handle, status_flags): O_RDWR(2), no cloexec on the fd.
         let no_cloexec = FdEntry::file(1, 0o2);
         if fdinfo_flags(&no_cloexec) != 0o2 {
@@ -13334,7 +15490,8 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[procfs]   fdinfo/ classify: {} cases OK; render+flags OK", cases.len()
+            "[procfs]   fdinfo/ classify: {} cases OK; render+flags OK",
+            cases.len()
         );
     }
 
@@ -13359,7 +15516,8 @@ pub fn self_test() -> KernelResult<()> {
             other => {
                 serial_println!(
                     "[procfs]   FAIL: /{}/fdinfo/0 read = {:?}, want NotFound",
-                    probe, other.map(|d| d.len())
+                    probe,
+                    other.map(|d| d.len())
                 );
                 return Err(KernelError::InternalError);
             }
@@ -13389,7 +15547,9 @@ pub fn self_test() -> KernelResult<()> {
         let field1 = text.split(' ').next().unwrap_or("");
         if field1 != format!("{probe}") {
             serial_println!(
-                "[procfs]   FAIL: thread stat field1 = {:?}, want {}", field1, probe
+                "[procfs]   FAIL: thread stat field1 = {:?}, want {}",
+                field1,
+                probe
             );
             return Err(KernelError::InternalError);
         }
@@ -13413,15 +15573,11 @@ pub fn self_test() -> KernelResult<()> {
         let want_pid = format!("Pid:\t{probe}");
         let want_tgid = format!("Tgid:\t{probe}");
         if !stext.lines().any(|l| l == want_pid) {
-            serial_println!(
-                "[procfs]   FAIL: thread status missing {:?}", want_pid
-            );
+            serial_println!("[procfs]   FAIL: thread status missing {:?}", want_pid);
             return Err(KernelError::InternalError);
         }
         if !stext.lines().any(|l| l == want_tgid) {
-            serial_println!(
-                "[procfs]   FAIL: thread status missing {:?}", want_tgid
-            );
+            serial_println!("[procfs]   FAIL: thread status missing {:?}", want_tgid);
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   thread status: Pid/Tgid=={} OK", probe);
@@ -13468,8 +15624,13 @@ pub fn self_test() -> KernelResult<()> {
         let line = text.strip_suffix('\n').unwrap_or(text);
         let close = line.rfind(')').unwrap_or(0);
         let tail = line.get(close..).unwrap_or("");
-        let rest: Vec<&str> = tail.strip_prefix(')').unwrap_or(tail)
-            .trim_start().split(' ').filter(|s| !s.is_empty()).collect();
+        let rest: Vec<&str> = tail
+            .strip_prefix(')')
+            .unwrap_or(tail)
+            .trim_start()
+            .split(' ')
+            .filter(|s| !s.is_empty())
+            .collect();
         // field 22 sits at index 22 - 3 == 19 of the post-comm fields.
         if rest.get(19).and_then(|f| f.parse::<u64>().ok()) != Some(99_999) {
             serial_println!(
@@ -13594,7 +15755,8 @@ pub fn self_test() -> KernelResult<()> {
         if cut.len() != 15 || cut != "0123456789abcde" {
             serial_println!(
                 "[procfs]   FAIL: comm_truncate(\"{long}\") = {:?} (len {}), want \"0123456789abcde\"",
-                cut, cut.len()
+                cut,
+                cut.len()
             );
             return Err(KernelError::InternalError);
         }
@@ -13636,7 +15798,8 @@ pub fn self_test() -> KernelResult<()> {
         if comm != cut {
             serial_println!(
                 "[procfs]   FAIL: stat comm field = {:?}, want truncated {:?}",
-                comm, cut
+                comm,
+                cut
             );
             return Err(KernelError::InternalError);
         }
@@ -13651,7 +15814,8 @@ pub fn self_test() -> KernelResult<()> {
         if status_name != cut {
             serial_println!(
                 "[procfs]   FAIL: status Name: field = {:?}, want truncated {:?}",
-                status_name, cut
+                status_name,
+                cut
             );
             return Err(KernelError::InternalError);
         }
@@ -13740,7 +15904,8 @@ pub fn self_test() -> KernelResult<()> {
             if got != want {
                 serial_println!(
                     "[procfs]   FAIL: format_bitmap_hex({mask:#x}, {nbits}) = {:?}, want {:?}",
-                    got, want
+                    got,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -13760,7 +15925,8 @@ pub fn self_test() -> KernelResult<()> {
             if got != want {
                 serial_println!(
                     "[procfs]   FAIL: format_bitmap_list({mask:#x}, {nbits}) = {:?}, want {:?}",
-                    got, want
+                    got,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -13791,23 +15957,31 @@ pub fn self_test() -> KernelResult<()> {
     if pid_entries.len() != expected_pid_entries {
         serial_println!(
             "[procfs]   FAIL: readdir {} returned {} entries, expected {}",
-            pid_path, pid_entries.len(), expected_pid_entries
+            pid_path,
+            pid_entries.len(),
+            expected_pid_entries
         );
         return Err(KernelError::InternalError);
     }
     // The extra entries must be the `task`, `fd` and `fdinfo` directories.
     for subdir in ["task", "fd", "fdinfo"] {
-        if !pid_entries.iter().any(|e| {
-            e.name.as_path() == Path::new(subdir) && e.entry_type == EntryType::Directory
-        }) {
+        if !pid_entries
+            .iter()
+            .any(|e| e.name.as_path() == Path::new(subdir) && e.entry_type == EntryType::Directory)
+        {
             serial_println!(
                 "[procfs]   FAIL: readdir {} missing `{}` subdirectory",
-                pid_path, subdir
+                pid_path,
+                subdir
             );
             return Err(KernelError::InternalError);
         }
     }
-    serial_println!("[procfs]   readdir {}: {} entries OK", pid_path, pid_entries.len());
+    serial_println!(
+        "[procfs]   readdir {}: {} entries OK",
+        pid_path,
+        pid_entries.len()
+    );
 
     // read_file on status.
     let status_data = fs.read_file(Path::new(&status_path))?;
@@ -13815,12 +15989,19 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   FAIL: read_file {} returned empty", status_path);
         return Err(KernelError::InternalError);
     }
-    let status_text = core::str::from_utf8(&status_data)
-        .map_err(|_| KernelError::InternalError)?;
+    let status_text = core::str::from_utf8(&status_data).map_err(|_| KernelError::InternalError)?;
     // Verify the Linux /proc/<pid>/status shape: the well-known tab-separated
     // keys that ps/htop/glibc/WINE scrape must be present.
-    for key in ["Name:\t", "State:\t", "Tgid:\t", "Pid:\t", "PPid:\t",
-                "Uid:\t", "Gid:\t", "Threads:\t"] {
+    for key in [
+        "Name:\t",
+        "State:\t",
+        "Tgid:\t",
+        "Pid:\t",
+        "PPid:\t",
+        "Uid:\t",
+        "Gid:\t",
+        "Threads:\t",
+    ] {
         if !status_text.contains(key) {
             serial_println!("[procfs]   FAIL: status missing key {:?}", key);
             return Err(KernelError::InternalError);
@@ -13846,8 +16027,11 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   FAIL: status State: not a Linux state string");
         return Err(KernelError::InternalError);
     }
-    serial_println!("[procfs]   {}/status: Linux format, {} bytes OK",
-        current_tid, status_data.len());
+    serial_println!(
+        "[procfs]   {}/status: Linux format, {} bytes OK",
+        current_tid,
+        status_data.len()
+    );
 
     // read_file on PID directory should fail (IsADirectory).
     if fs.read_file(Path::new(&pid_path)).is_ok() {
@@ -13871,14 +16055,17 @@ pub fn self_test() -> KernelResult<()> {
     let self_stat = fs.stat(Path::new("/self"))?;
     if self_stat.entry_type != EntryType::Symlink {
         serial_println!(
-            "[procfs]   FAIL: /self is {:?}, expected Symlink", self_stat.entry_type
+            "[procfs]   FAIL: /self is {:?}, expected Symlink",
+            self_stat.entry_type
         );
         return Err(KernelError::InternalError);
     }
     let self_target = fs.readlink(Path::new("/self"))?;
     if self_target.to_str().and_then(|s| s.parse::<u64>().ok()) != Some(current_tid) {
         serial_println!(
-            "[procfs]   FAIL: /self -> {:?}, expected pid {}", self_target, current_tid
+            "[procfs]   FAIL: /self -> {:?}, expected pid {}",
+            self_target,
+            current_tid
         );
         return Err(KernelError::InternalError);
     }
@@ -13950,8 +16137,7 @@ pub fn self_test() -> KernelResult<()> {
             },
         ];
         let rendered = render_maps(&vmas);
-        let maps_text = core::str::from_utf8(&rendered)
-            .map_err(|_| KernelError::InternalError)?;
+        let maps_text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
         let lines: Vec<&str> = maps_text.lines().collect();
         // Start/end zero-padded to a minimum of 8 hex digits, matching Linux's
         // %08lx; the wide address keeps its natural 12-digit width.
@@ -13965,14 +16151,17 @@ pub fn self_test() -> KernelResult<()> {
         if lines.len() != expected.len() {
             serial_println!(
                 "[procfs]   FAIL: maps rendered {} lines, expected {}",
-                lines.len(), expected.len()
+                lines.len(),
+                expected.len()
             );
             return Err(KernelError::InternalError);
         }
         for (got, want) in lines.iter().zip(expected.iter()) {
             if got != want {
                 serial_println!(
-                    "[procfs]   FAIL: maps line {:?} != expected {:?}", got, want
+                    "[procfs]   FAIL: maps line {:?} != expected {:?}",
+                    got,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -13988,7 +16177,11 @@ pub fn self_test() -> KernelResult<()> {
     {
         use crate::fs::vfs::MountOptions;
         let mounts = [
-            (PathBuf::from("/"), String::from("ext4"), MountOptions::defaults()),
+            (
+                PathBuf::from("/"),
+                String::from("ext4"),
+                MountOptions::defaults(),
+            ),
             (
                 PathBuf::from("/tmp"),
                 String::from("tmpfs"),
@@ -14004,8 +16197,7 @@ pub fn self_test() -> KernelResult<()> {
             ),
         ];
         let rendered = render_mountinfo(&mounts);
-        let mi_text = core::str::from_utf8(&rendered)
-            .map_err(|_| KernelError::InternalError)?;
+        let mi_text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
         let lines: Vec<&str> = mi_text.lines().collect();
         let expected = [
             "20 20 0:1 / / rw - ext4 none rw",
@@ -14015,19 +16207,25 @@ pub fn self_test() -> KernelResult<()> {
         if lines.len() != expected.len() {
             serial_println!(
                 "[procfs]   FAIL: mountinfo rendered {} lines, expected {}",
-                lines.len(), expected.len()
+                lines.len(),
+                expected.len()
             );
             return Err(KernelError::InternalError);
         }
         for (got, want) in lines.iter().zip(expected.iter()) {
             if got != want {
                 serial_println!(
-                    "[procfs]   FAIL: mountinfo line {:?} != expected {:?}", got, want
+                    "[procfs]   FAIL: mountinfo line {:?} != expected {:?}",
+                    got,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
         }
-        serial_println!("[procfs]   mountinfo render: {} mount lines OK", lines.len());
+        serial_println!(
+            "[procfs]   mountinfo render: {} mount lines OK",
+            lines.len()
+        );
     }
 
     // --- mangle_mount_field over arbitrary path bytes ---
@@ -14087,7 +16285,11 @@ pub fn self_test() -> KernelResult<()> {
         // Host mount table the container's targets resolve their fstype against:
         // the rootfs overlay, the ext4 host root, and a tmpfs-backing memfs.
         let global = [
-            (PathBuf::from("/"), String::from("ext4"), MountOptions::defaults()),
+            (
+                PathBuf::from("/"),
+                String::from("ext4"),
+                MountOptions::defaults(),
+            ),
             (
                 PathBuf::from("/containers/c1/rootfs"),
                 String::from("overlay"),
@@ -14119,8 +16321,7 @@ pub fn self_test() -> KernelResult<()> {
             },
         ];
         let rendered = render_container_mountinfo(&view, &global);
-        let text = core::str::from_utf8(&rendered)
-            .map_err(|_| KernelError::InternalError)?;
+        let text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
         let lines: Vec<&str> = text.lines().collect();
         let expected = [
             // rootfs `/` → overlay, read-only, source hidden.
@@ -14133,14 +16334,17 @@ pub fn self_test() -> KernelResult<()> {
         if lines.len() != expected.len() {
             serial_println!(
                 "[procfs]   FAIL: container mountinfo {} lines, expected {}",
-                lines.len(), expected.len()
+                lines.len(),
+                expected.len()
             );
             return Err(KernelError::InternalError);
         }
         for (got, want) in lines.iter().zip(expected.iter()) {
             if got != want {
                 serial_println!(
-                    "[procfs]   FAIL: container mountinfo {:?} != {:?}", got, want
+                    "[procfs]   FAIL: container mountinfo {:?} != {:?}",
+                    got,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -14151,17 +16355,22 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[procfs]   FAIL: /data must not cover /database");
             return Err(KernelError::InternalError);
         }
-        if !mount_path_covers(Path::new("/data"), Path::new("/data/x")) || !mount_path_covers(Path::new("/"), Path::new("/anything")) {
+        if !mount_path_covers(Path::new("/data"), Path::new("/data/x"))
+            || !mount_path_covers(Path::new("/"), Path::new("/anything"))
+        {
             serial_println!("[procfs]   FAIL: mount_path_covers parent/root check");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[procfs]   container mountinfo render: {} lines OK", lines.len());
+        serial_println!(
+            "[procfs]   container mountinfo render: {} lines OK",
+            lines.len()
+        );
 
         // The `/proc/mounts` line format for the same container view:
         // `none <mount_point> <fstype> <opts> 0 0`, source hidden.
         let mounts_rendered = render_container_mounts(&view, &global);
-        let mounts_text = core::str::from_utf8(&mounts_rendered)
-            .map_err(|_| KernelError::InternalError)?;
+        let mounts_text =
+            core::str::from_utf8(&mounts_rendered).map_err(|_| KernelError::InternalError)?;
         let mounts_lines: Vec<&str> = mounts_text.lines().collect();
         let mounts_expected = [
             "none / overlay ro 0 0",
@@ -14171,19 +16380,21 @@ pub fn self_test() -> KernelResult<()> {
         if mounts_lines.len() != mounts_expected.len() {
             serial_println!(
                 "[procfs]   FAIL: container mounts {} lines, expected {}",
-                mounts_lines.len(), mounts_expected.len()
+                mounts_lines.len(),
+                mounts_expected.len()
             );
             return Err(KernelError::InternalError);
         }
         for (got, want) in mounts_lines.iter().zip(mounts_expected.iter()) {
             if got != want {
-                serial_println!(
-                    "[procfs]   FAIL: container mounts {:?} != {:?}", got, want
-                );
+                serial_println!("[procfs]   FAIL: container mounts {:?} != {:?}", got, want);
                 return Err(KernelError::InternalError);
             }
         }
-        serial_println!("[procfs]   container mounts render: {} lines OK", mounts_lines.len());
+        serial_println!(
+            "[procfs]   container mounts render: {} lines OK",
+            mounts_lines.len()
+        );
     }
 
     // --- /proc/<pid>/cgroup rendering ---
@@ -14196,25 +16407,37 @@ pub fn self_test() -> KernelResult<()> {
         let groups = [
             Cgroup {
                 path: String::from("/"),
-                cpu_weight: 100, cpu_max_us: 0, memory_max: 0, memory_current: 0,
-                io_weight: 100, pids_max: 0, pids_current: 0,
-                processes: Vec::new(), created_ns: 0,
+                cpu_weight: 100,
+                cpu_max_us: 0,
+                memory_max: 0,
+                memory_current: 0,
+                io_weight: 100,
+                pids_max: 0,
+                pids_current: 0,
+                processes: Vec::new(),
+                created_ns: 0,
                 kernel_id: crate::cgroup::ROOT_CGROUP,
             },
             Cgroup {
                 path: String::from("/app.slice"),
-                cpu_weight: 100, cpu_max_us: 0, memory_max: 0, memory_current: 0,
-                io_weight: 100, pids_max: 0, pids_current: 1,
-                processes: alloc::vec![42u32], created_ns: 0,
+                cpu_weight: 100,
+                cpu_max_us: 0,
+                memory_max: 0,
+                memory_current: 0,
+                io_weight: 100,
+                pids_max: 0,
+                pids_current: 1,
+                processes: alloc::vec![42u32],
+                created_ns: 0,
                 kernel_id: crate::cgroup::ROOT_CGROUP,
             },
         ];
         let assigned = render_cgroup(42, &groups);
         let unassigned = render_cgroup(99, &groups);
-        let assigned_text = core::str::from_utf8(&assigned)
-            .map_err(|_| KernelError::InternalError)?;
-        let unassigned_text = core::str::from_utf8(&unassigned)
-            .map_err(|_| KernelError::InternalError)?;
+        let assigned_text =
+            core::str::from_utf8(&assigned).map_err(|_| KernelError::InternalError)?;
+        let unassigned_text =
+            core::str::from_utf8(&unassigned).map_err(|_| KernelError::InternalError)?;
         if assigned_text != "0::/app.slice\n" {
             serial_println!(
                 "[procfs]   FAIL: cgroup assigned {:?} != \"0::/app.slice\\n\"",
@@ -14236,10 +16459,10 @@ pub fn self_test() -> KernelResult<()> {
         // line (no "0::" prefix).  Reuse the same synthetic group list.
         let cs_assigned = render_cpuset(42, &groups);
         let cs_unassigned = render_cpuset(99, &groups);
-        let cs_assigned_text = core::str::from_utf8(&cs_assigned)
-            .map_err(|_| KernelError::InternalError)?;
-        let cs_unassigned_text = core::str::from_utf8(&cs_unassigned)
-            .map_err(|_| KernelError::InternalError)?;
+        let cs_assigned_text =
+            core::str::from_utf8(&cs_assigned).map_err(|_| KernelError::InternalError)?;
+        let cs_unassigned_text =
+            core::str::from_utf8(&cs_unassigned).map_err(|_| KernelError::InternalError)?;
         if cs_assigned_text != "/app.slice\n" {
             serial_println!(
                 "[procfs]   FAIL: cpuset assigned {:?} != \"/app.slice\\n\"",
@@ -14263,22 +16486,22 @@ pub fn self_test() -> KernelResult<()> {
     {
         let cases = [
             (render_oom_score(500, 0), "500\n"),
-            (render_oom_score(800, 200), "1000\n"),   // capped at 1000
-            (render_oom_score(100, -500), "0\n"),     // floored at 0
+            (render_oom_score(800, 200), "1000\n"), // capped at 1000
+            (render_oom_score(100, -500), "0\n"),   // floored at 0
             (render_oom_score_adj(-1000), "-1000\n"),
             (render_oom_score_adj(200), "200\n"),
         ];
         for (got, want) in &cases {
-            let got_text = core::str::from_utf8(got)
-                .map_err(|_| KernelError::InternalError)?;
+            let got_text = core::str::from_utf8(got).map_err(|_| KernelError::InternalError)?;
             if got_text != *want {
-                serial_println!(
-                    "[procfs]   FAIL: oom render {:?} != {:?}", got_text, want
-                );
+                serial_println!("[procfs]   FAIL: oom render {:?} != {:?}", got_text, want);
                 return Err(KernelError::InternalError);
             }
         }
-        serial_println!("[procfs]   oom_score/oom_score_adj render: {} cases OK", cases.len());
+        serial_println!(
+            "[procfs]   oom_score/oom_score_adj render: {} cases OK",
+            cases.len()
+        );
     }
 
     // --- /proc/<pid>/oom_score_adj write parsing ---
@@ -14301,7 +16524,9 @@ pub fn self_test() -> KernelResult<()> {
                 other => {
                     serial_println!(
                         "[procfs]   FAIL: parse_oom_score_adj({:?}) = {:?}, want {}",
-                        input, other, want
+                        input,
+                        other,
+                        want
                     );
                     return Err(KernelError::InternalError);
                 }
@@ -14320,7 +16545,8 @@ pub fn self_test() -> KernelResult<()> {
         }
         serial_println!(
             "[procfs]   oom_score_adj parse: {} accept + {} reject OK",
-            ok_cases.len(), bad_cases.len()
+            ok_cases.len(),
+            bad_cases.len()
         );
     }
 
@@ -14329,8 +16555,7 @@ pub fn self_test() -> KernelResult<()> {
     // timeslices) on one line, newline-terminated.
     {
         let rendered = render_schedstat(12_500_000, 3_000_000, 7);
-        let sched_text = core::str::from_utf8(&rendered)
-            .map_err(|_| KernelError::InternalError)?;
+        let sched_text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
         if sched_text != "12500000 3000000 7\n" {
             serial_println!(
                 "[procfs]   FAIL: schedstat render {:?} != \"12500000 3000000 7\\n\"",
@@ -14347,8 +16572,7 @@ pub fn self_test() -> KernelResult<()> {
     // counters are always 0 (untracked — we never fabricate them).
     {
         let rendered = render_pid_io(4096, 1024, 12, 3);
-        let io_text = core::str::from_utf8(&rendered)
-            .map_err(|_| KernelError::InternalError)?;
+        let io_text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
         let expected = "rchar: 4096\n\
                         wchar: 1024\n\
                         syscr: 12\n\
@@ -14365,15 +16589,22 @@ pub fn self_test() -> KernelResult<()> {
         // a bare scheduler task with no PCB legitimately returns NotFound.
         match fs.read_file(Path::new(&format!("/{current_tid}/io"))) {
             Ok(io_data) => {
-                let live = core::str::from_utf8(&io_data)
-                    .map_err(|_| KernelError::InternalError)?;
+                let live =
+                    core::str::from_utf8(&io_data).map_err(|_| KernelError::InternalError)?;
                 for key in [
-                    "rchar:", "wchar:", "syscr:", "syscw:",
-                    "read_bytes:", "write_bytes:", "cancelled_write_bytes:",
+                    "rchar:",
+                    "wchar:",
+                    "syscr:",
+                    "syscw:",
+                    "read_bytes:",
+                    "write_bytes:",
+                    "cancelled_write_bytes:",
                 ] {
                     if !live.contains(key) {
                         serial_println!(
-                            "[procfs]   FAIL: /{}/io missing key {:?}", current_tid, key
+                            "[procfs]   FAIL: /{}/io missing key {:?}",
+                            current_tid,
+                            key
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -14387,7 +16618,11 @@ pub fn self_test() -> KernelResult<()> {
                 );
             }
             Err(e) => {
-                serial_println!("[procfs]   FAIL: /{}/io unexpected error {:?}", current_tid, e);
+                serial_println!(
+                    "[procfs]   FAIL: /{}/io unexpected error {:?}",
+                    current_tid,
+                    e
+                );
                 return Err(KernelError::InternalError);
             }
         }
@@ -14403,16 +16638,20 @@ pub fn self_test() -> KernelResult<()> {
             (render_audit_id(1000), "1000"),
         ];
         for (got, want) in &cases {
-            let got_text = core::str::from_utf8(got)
-                .map_err(|_| KernelError::InternalError)?;
+            let got_text = core::str::from_utf8(got).map_err(|_| KernelError::InternalError)?;
             if got_text != *want {
                 serial_println!(
-                    "[procfs]   FAIL: audit_id render {:?} != {:?}", got_text, want
+                    "[procfs]   FAIL: audit_id render {:?} != {:?}",
+                    got_text,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
         }
-        serial_println!("[procfs]   loginuid/sessionid render: {} cases OK", cases.len());
+        serial_println!(
+            "[procfs]   loginuid/sessionid render: {} cases OK",
+            cases.len()
+        );
     }
 
     // --- New per-PID files: comm, statm, limits ---
@@ -14420,24 +16659,25 @@ pub fn self_test() -> KernelResult<()> {
     // /proc/<pid>/comm — non-empty, newline-terminated, <= 16 bytes
     // (TASK_COMM_LEN), matching Linux's `comm` shape.
     let comm_data = fs.read_file(Path::new(&format!("/{current_tid}/comm")))?;
-    if comm_data.is_empty()
-        || comm_data.last() != Some(&b'\n')
-        || comm_data.len() > 16
-    {
+    if comm_data.is_empty() || comm_data.last() != Some(&b'\n') || comm_data.len() > 16 {
         serial_println!(
             "[procfs]   FAIL: comm malformed (len={}, last={:?})",
-            comm_data.len(), comm_data.last()
+            comm_data.len(),
+            comm_data.last()
         );
         return Err(KernelError::InternalError);
     }
-    serial_println!("[procfs]   {}/comm: {} bytes OK", current_tid, comm_data.len());
+    serial_println!(
+        "[procfs]   {}/comm: {} bytes OK",
+        current_tid,
+        comm_data.len()
+    );
 
     // /proc/<pid>/limits — works for any live task (falls back to
     // DEFAULT_RLIMITS without a PCB).  Must carry the Linux header and
     // the well-known rows tools scrape.
     let limits_data = fs.read_file(Path::new(&format!("/{current_tid}/limits")))?;
-    let limits_text = core::str::from_utf8(&limits_data)
-        .map_err(|_| KernelError::InternalError)?;
+    let limits_text = core::str::from_utf8(&limits_data).map_err(|_| KernelError::InternalError)?;
     if !limits_text.contains("Soft Limit")
         || !limits_text.contains("Max open files")
         || !limits_text.contains("Max stack size")
@@ -14445,23 +16685,23 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   FAIL: limits missing expected rows");
         return Err(KernelError::InternalError);
     }
-    serial_println!("[procfs]   {}/limits: {} bytes OK", current_tid, limits_data.len());
+    serial_println!(
+        "[procfs]   {}/limits: {} bytes OK",
+        current_tid,
+        limits_data.len()
+    );
 
     // /proc/<pid>/statm — only processes carry the address-space charge,
     // so a bare scheduler task legitimately returns NotFound.  When it
     // does succeed, it must be seven space-separated integers + newline.
     match fs.read_file(Path::new(&format!("/{current_tid}/statm"))) {
         Ok(statm_data) => {
-            let statm_text = core::str::from_utf8(&statm_data)
-                .map_err(|_| KernelError::InternalError)?;
+            let statm_text =
+                core::str::from_utf8(&statm_data).map_err(|_| KernelError::InternalError)?;
             let trimmed = statm_text.strip_suffix('\n').unwrap_or(statm_text);
             let fields: Vec<&str> = trimmed.split(' ').collect();
-            if fields.len() != 7
-                || !fields.iter().all(|f| f.parse::<u64>().is_ok())
-            {
-                serial_println!(
-                    "[procfs]   FAIL: statm not 7 integers ({:?})", trimmed
-                );
+            if fields.len() != 7 || !fields.iter().all(|f| f.parse::<u64>().is_ok()) {
+                serial_println!("[procfs]   FAIL: statm not 7 integers ({:?})", trimmed);
                 return Err(KernelError::InternalError);
             }
             serial_println!("[procfs]   {}/statm: 7 fields OK", current_tid);
@@ -14484,20 +16724,19 @@ pub fn self_test() -> KernelResult<()> {
     // mandatory positional fields that precede the super-options.
     match fs.read_file(Path::new(&format!("/{current_tid}/mountinfo"))) {
         Ok(mi_data) => {
-            let mi_text = core::str::from_utf8(&mi_data)
-                .map_err(|_| KernelError::InternalError)?;
+            let mi_text = core::str::from_utf8(&mi_data).map_err(|_| KernelError::InternalError)?;
             for line in mi_text.lines() {
                 let fields: Vec<&str> = line.split(' ').collect();
                 // mount_id parent maj:min root mp opts - fstype src superopts
                 if fields.len() < 10 || !fields.contains(&"-") {
-                    serial_println!(
-                        "[procfs]   FAIL: mountinfo line malformed ({:?})", line
-                    );
+                    serial_println!("[procfs]   FAIL: mountinfo line malformed ({:?})", line);
                     return Err(KernelError::InternalError);
                 }
             }
             serial_println!(
-                "[procfs]   {}/mountinfo: {} bytes OK", current_tid, mi_data.len()
+                "[procfs]   {}/mountinfo: {} bytes OK",
+                current_tid,
+                mi_data.len()
             );
         }
         Err(KernelError::NotFound) => {
@@ -14517,16 +16756,15 @@ pub fn self_test() -> KernelResult<()> {
     // single cgroup v2 line "0::<path>\n".
     match fs.read_file(Path::new(&format!("/{current_tid}/cgroup"))) {
         Ok(cg_data) => {
-            let cg_text = core::str::from_utf8(&cg_data)
-                .map_err(|_| KernelError::InternalError)?;
+            let cg_text = core::str::from_utf8(&cg_data).map_err(|_| KernelError::InternalError)?;
             if !cg_text.starts_with("0::/") || cg_text.lines().count() != 1 {
-                serial_println!(
-                    "[procfs]   FAIL: cgroup malformed ({:?})", cg_text
-                );
+                serial_println!("[procfs]   FAIL: cgroup malformed ({:?})", cg_text);
                 return Err(KernelError::InternalError);
             }
             serial_println!(
-                "[procfs]   {}/cgroup: {} bytes OK", current_tid, cg_data.len()
+                "[procfs]   {}/cgroup: {} bytes OK",
+                current_tid,
+                cg_data.len()
             );
         }
         Err(KernelError::NotFound) => {
@@ -14546,16 +16784,15 @@ pub fn self_test() -> KernelResult<()> {
     // bare cgroup path shared with the cgroup file.
     match fs.read_file(Path::new(&format!("/{current_tid}/cpuset"))) {
         Ok(cs_data) => {
-            let cs_text = core::str::from_utf8(&cs_data)
-                .map_err(|_| KernelError::InternalError)?;
+            let cs_text = core::str::from_utf8(&cs_data).map_err(|_| KernelError::InternalError)?;
             if !cs_text.starts_with('/') || cs_text.lines().count() != 1 {
-                serial_println!(
-                    "[procfs]   FAIL: cpuset malformed ({:?})", cs_text
-                );
+                serial_println!("[procfs]   FAIL: cpuset malformed ({:?})", cs_text);
                 return Err(KernelError::InternalError);
             }
             serial_println!(
-                "[procfs]   {}/cpuset: {} bytes OK", current_tid, cs_data.len()
+                "[procfs]   {}/cpuset: {} bytes OK",
+                current_tid,
+                cs_data.len()
             );
         }
         Err(KernelError::NotFound) => {
@@ -14576,8 +16813,7 @@ pub fn self_test() -> KernelResult<()> {
     for (name, lo, hi) in [("oom_score", 0i32, 1000i32), ("oom_score_adj", -1000, 1000)] {
         match fs.read_file(Path::new(&format!("/{current_tid}/{name}"))) {
             Ok(data) => {
-                let text = core::str::from_utf8(&data)
-                    .map_err(|_| KernelError::InternalError)?;
+                let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
                 let trimmed = text.strip_suffix('\n').unwrap_or(text);
                 match trimmed.parse::<i32>() {
                     Ok(v) if (lo..=hi).contains(&v) => {
@@ -14585,7 +16821,9 @@ pub fn self_test() -> KernelResult<()> {
                     }
                     _ => {
                         serial_println!(
-                            "[procfs]   FAIL: {} out of range/parse ({:?})", name, trimmed
+                            "[procfs]   FAIL: {} out of range/parse ({:?})",
+                            name,
+                            trimmed
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -14593,7 +16831,9 @@ pub fn self_test() -> KernelResult<()> {
             }
             Err(KernelError::NotFound) => {
                 serial_println!(
-                    "[procfs]   {}/{}: NotFound (bare task, no PCB) OK", current_tid, name
+                    "[procfs]   {}/{}: NotFound (bare task, no PCB) OK",
+                    current_tid,
+                    name
                 );
             }
             Err(e) => {
@@ -14607,21 +16847,20 @@ pub fn self_test() -> KernelResult<()> {
     // exactly three space-separated integers, newline-terminated.
     match fs.read_file(Path::new(&format!("/{current_tid}/schedstat"))) {
         Ok(sched_data) => {
-            let sched_text = core::str::from_utf8(&sched_data)
-                .map_err(|_| KernelError::InternalError)?;
+            let sched_text =
+                core::str::from_utf8(&sched_data).map_err(|_| KernelError::InternalError)?;
             let trimmed = sched_text.strip_suffix('\n').unwrap_or(sched_text);
             let fields: Vec<&str> = trimmed.split(' ').collect();
             if fields.len() != 3 || !fields.iter().all(|f| f.parse::<u64>().is_ok()) {
-                serial_println!(
-                    "[procfs]   FAIL: schedstat not 3 integers ({:?})", trimmed
-                );
+                serial_println!("[procfs]   FAIL: schedstat not 3 integers ({:?})", trimmed);
                 return Err(KernelError::InternalError);
             }
             serial_println!("[procfs]   {}/schedstat: 3 fields OK", current_tid);
         }
         Err(KernelError::NotFound) => {
             serial_println!(
-                "[procfs]   {}/schedstat: NotFound (no scheduler task) OK", current_tid
+                "[procfs]   {}/schedstat: NotFound (no scheduler task) OK",
+                current_tid
             );
         }
         Err(e) => {
@@ -14636,19 +16875,18 @@ pub fn self_test() -> KernelResult<()> {
     for name in ["loginuid", "sessionid"] {
         match fs.read_file(Path::new(&format!("/{current_tid}/{name}"))) {
             Ok(data) => {
-                let text = core::str::from_utf8(&data)
-                    .map_err(|_| KernelError::InternalError)?;
+                let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
                 if text.ends_with('\n') || text.parse::<u32>().is_err() {
-                    serial_println!(
-                        "[procfs]   FAIL: {} not a bare decimal ({:?})", name, text
-                    );
+                    serial_println!("[procfs]   FAIL: {} not a bare decimal ({:?})", name, text);
                     return Err(KernelError::InternalError);
                 }
                 serial_println!("[procfs]   {}/{}: {} OK", current_tid, name, text);
             }
             Err(KernelError::NotFound) => {
                 serial_println!(
-                    "[procfs]   {}/{}: NotFound (bare task, no PCB) OK", current_tid, name
+                    "[procfs]   {}/{}: NotFound (bare task, no PCB) OK",
+                    current_tid,
+                    name
                 );
             }
             Err(e) => {
@@ -14665,11 +16903,16 @@ pub fn self_test() -> KernelResult<()> {
     if cmdline_data.is_empty() || cmdline_data.last() != Some(&0) {
         serial_println!(
             "[procfs]   FAIL: cmdline malformed (len={}, last={:?})",
-            cmdline_data.len(), cmdline_data.last()
+            cmdline_data.len(),
+            cmdline_data.last()
         );
         return Err(KernelError::InternalError);
     }
-    serial_println!("[procfs]   {}/cmdline: {} bytes OK", current_tid, cmdline_data.len());
+    serial_println!(
+        "[procfs]   {}/cmdline: {} bytes OK",
+        current_tid,
+        cmdline_data.len()
+    );
 
     // /proc/<pid>/environ — served from the persistent envp snapshot.  Like
     // statm, only real processes carry an environment, so a bare scheduler
@@ -14685,7 +16928,9 @@ pub fn self_test() -> KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
             serial_println!(
-                "[procfs]   {}/environ: {} bytes OK", current_tid, environ_data.len()
+                "[procfs]   {}/environ: {} bytes OK",
+                current_tid,
+                environ_data.len()
             );
         }
         Err(KernelError::NotFound) => {
@@ -14703,7 +16948,10 @@ pub fn self_test() -> KernelResult<()> {
     // /proc/<pid>/root — always resolves to "/" for a live task.
     let root_link = fs.readlink(Path::new(&format!("/{current_tid}/root")))?;
     if root_link.as_bytes() != b"/" {
-        serial_println!("[procfs]   FAIL: root link = {:?}, expected \"/\"", root_link);
+        serial_println!(
+            "[procfs]   FAIL: root link = {:?}, expected \"/\"",
+            root_link
+        );
         return Err(KernelError::InternalError);
     }
     serial_println!("[procfs]   {}/root -> {:?} OK", current_tid, root_link);
@@ -14714,24 +16962,32 @@ pub fn self_test() -> KernelResult<()> {
     // directly is rejected (EINVAL-style) and that lstat reports a symlink.
     let cwd_lstat = fs.stat(Path::new(&format!("/{current_tid}/cwd")))?;
     if cwd_lstat.entry_type != EntryType::Symlink {
-        serial_println!("[procfs]   FAIL: cwd not a symlink ({:?})", cwd_lstat.entry_type);
+        serial_println!(
+            "[procfs]   FAIL: cwd not a symlink ({:?})",
+            cwd_lstat.entry_type
+        );
         return Err(KernelError::InternalError);
     }
-    if fs.read_file(Path::new(&format!("/{current_tid}/cwd"))) != Err(KernelError::InvalidArgument) {
+    if fs.read_file(Path::new(&format!("/{current_tid}/cwd"))) != Err(KernelError::InvalidArgument)
+    {
         serial_println!("[procfs]   FAIL: read_file on cwd symlink should be InvalidArgument");
         return Err(KernelError::InternalError);
     }
     match fs.readlink(Path::new(&format!("/{current_tid}/cwd"))) {
         Ok(target) => {
             if !target.is_absolute() {
-                serial_println!("[procfs]   FAIL: cwd target {} not absolute", target.display());
+                serial_println!(
+                    "[procfs]   FAIL: cwd target {} not absolute",
+                    target.display()
+                );
                 return Err(KernelError::InternalError);
             }
             serial_println!("[procfs]   {}/cwd -> {:?} OK", current_tid, target);
         }
         Err(KernelError::NotFound) => {
             serial_println!(
-                "[procfs]   {}/cwd: NotFound (bare task, no cwd) OK", current_tid
+                "[procfs]   {}/cwd: NotFound (bare task, no cwd) OK",
+                current_tid
             );
         }
         Err(e) => {
@@ -14748,24 +17004,32 @@ pub fn self_test() -> KernelResult<()> {
     // symlink regardless.
     let exe_lstat = fs.stat(Path::new(&format!("/{current_tid}/exe")))?;
     if exe_lstat.entry_type != EntryType::Symlink {
-        serial_println!("[procfs]   FAIL: exe not a symlink ({:?})", exe_lstat.entry_type);
+        serial_println!(
+            "[procfs]   FAIL: exe not a symlink ({:?})",
+            exe_lstat.entry_type
+        );
         return Err(KernelError::InternalError);
     }
-    if fs.read_file(Path::new(&format!("/{current_tid}/exe"))) != Err(KernelError::InvalidArgument) {
+    if fs.read_file(Path::new(&format!("/{current_tid}/exe"))) != Err(KernelError::InvalidArgument)
+    {
         serial_println!("[procfs]   FAIL: read_file on exe symlink should be InvalidArgument");
         return Err(KernelError::InternalError);
     }
     match fs.readlink(Path::new(&format!("/{current_tid}/exe"))) {
         Ok(target) => {
             if !target.is_absolute() {
-                serial_println!("[procfs]   FAIL: exe target {} not absolute", target.display());
+                serial_println!(
+                    "[procfs]   FAIL: exe target {} not absolute",
+                    target.display()
+                );
                 return Err(KernelError::InternalError);
             }
             serial_println!("[procfs]   {}/exe -> {:?} OK", current_tid, target);
         }
         Err(KernelError::NotFound) => {
             serial_println!(
-                "[procfs]   {}/exe: NotFound (task never exec'd a binary) OK", current_tid
+                "[procfs]   {}/exe: NotFound (task never exec'd a binary) OK",
+                current_tid
             );
         }
         Err(e) => {
@@ -14783,8 +17047,7 @@ pub fn self_test() -> KernelResult<()> {
     // spaces, so split on the *last* ')' to isolate the post-comm fields the
     // way real /proc parsers do.
     let stat_data = fs.read_file(Path::new(&format!("/{current_tid}/stat")))?;
-    let stat_text = core::str::from_utf8(&stat_data)
-        .map_err(|_| KernelError::InternalError)?;
+    let stat_text = core::str::from_utf8(&stat_data).map_err(|_| KernelError::InternalError)?;
     let stat_line = stat_text.strip_suffix('\n').unwrap_or(stat_text);
     // Field 1 (pid) and field 2 (comm) come before the last ')'.
     let close = stat_line.rfind(')').ok_or_else(|| {
@@ -14801,7 +17064,8 @@ pub fn self_test() -> KernelResult<()> {
     if pid_field.parse::<u64>() != Ok(current_tid) {
         serial_println!(
             "[procfs]   FAIL: stat field 1 = {:?}, expected pid {}",
-            pid_field, current_tid
+            pid_field,
+            current_tid
         );
         return Err(KernelError::InternalError);
     }
@@ -14827,7 +17091,9 @@ pub fn self_test() -> KernelResult<()> {
     // All fields after the state char (4..=52) are integers.  Most are
     // signed (tpgid is -1), but rsslim can be RLIM_INFINITY == u64::MAX,
     // which overflows i64 — accept either signed or unsigned.
-    if !rest_fields.iter().skip(1)
+    if !rest_fields
+        .iter()
+        .skip(1)
         .all(|f| f.parse::<i64>().is_ok() || f.parse::<u64>().is_ok())
     {
         serial_println!("[procfs]   FAIL: stat has a non-integer numeric field");
@@ -14847,7 +17113,10 @@ pub fn self_test() -> KernelResult<()> {
     if pgrp_field != Some(expected_pgrp) || session_field != Some(expected_pgrp) {
         serial_println!(
             "[procfs]   FAIL: stat pgrp/session = {:?}/{:?}, expected {}/{}",
-            pgrp_field, session_field, expected_pgrp, expected_pgrp
+            pgrp_field,
+            session_field,
+            expected_pgrp,
+            expected_pgrp
         );
         return Err(KernelError::InternalError);
     }
@@ -14864,12 +17133,15 @@ pub fn self_test() -> KernelResult<()> {
         if starttime_field != Some(expected) {
             serial_println!(
                 "[procfs]   FAIL: stat starttime (field 22) = {:?}, expected {}",
-                starttime_field, expected
+                starttime_field,
+                expected
             );
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[procfs]   {}/stat: starttime field 22 == {} OK", current_tid, expected
+            "[procfs]   {}/stat: starttime field 22 == {} OK",
+            current_tid,
+            expected
         );
     }
     serial_println!("[procfs]   {}/stat: 52 fields OK", current_tid);
@@ -14886,7 +17158,10 @@ pub fn self_test() -> KernelResult<()> {
         // TWO spaces (Linux quirk), then exactly 10 jiffy columns.
         let first = text.lines().next().unwrap_or("");
         if !first.starts_with("cpu  ") {
-            serial_println!("[procfs]   FAIL: /stat first line {:?}, want 'cpu  ...'", first);
+            serial_println!(
+                "[procfs]   FAIL: /stat first line {:?}, want 'cpu  ...'",
+                first
+            );
             return Err(KernelError::InternalError);
         }
         let cols: Vec<&str> = first.split(' ').filter(|s| !s.is_empty()).collect();
@@ -14907,19 +17182,30 @@ pub fn self_test() -> KernelResult<()> {
         if cols.get(1) != Some(&"0") || cols.get(2) != Some(&"0") {
             serial_println!(
                 "[procfs]   FAIL: /stat user/nice cols = {:?}/{:?}, want 0/0 (untracked)",
-                cols.get(1), cols.get(2)
+                cols.get(1),
+                cols.get(2)
             );
             return Err(KernelError::InternalError);
         }
         // The mandatory summary keys every parser expects, each on its own line.
-        for key in ["\nintr ", "\nctxt ", "\nbtime ", "\nprocesses ",
-                    "\nprocs_running ", "\nprocs_blocked ", "\nsoftirq "] {
+        for key in [
+            "\nintr ",
+            "\nctxt ",
+            "\nbtime ",
+            "\nprocesses ",
+            "\nprocs_running ",
+            "\nprocs_blocked ",
+            "\nsoftirq ",
+        ] {
             if !text.contains(key) {
                 serial_println!("[procfs]   FAIL: /stat missing line {:?}", key);
                 return Err(KernelError::InternalError);
             }
         }
-        serial_println!("[procfs]   /stat: Linux show_stat layout OK ({} bytes)", data.len());
+        serial_println!(
+            "[procfs]   /stat: Linux show_stat layout OK ({} bytes)",
+            data.len()
+        );
     }
 
     // --- system-wide /proc/uptime Linux layout ---
@@ -14947,7 +17233,8 @@ pub fn self_test() -> KernelResult<()> {
             let centis_ok = centis.is_some_and(|c| c.len() == 2 && c.parse::<u64>().is_ok());
             if secs.is_none() || parts.next().is_some() || !centis_ok {
                 serial_println!(
-                    "[procfs]   FAIL: /uptime field {:?} not '<secs>.<2-digit-centis>'", f
+                    "[procfs]   FAIL: /uptime field {:?} not '<secs>.<2-digit-centis>'",
+                    f
                 );
                 return Err(KernelError::InternalError);
             }
@@ -14966,7 +17253,8 @@ pub fn self_test() -> KernelResult<()> {
         let fields: Vec<&str> = line.split(' ').filter(|s| !s.is_empty()).collect();
         if fields.len() != 5 {
             serial_println!(
-                "[procfs]   FAIL: /loadavg has {} fields, want 5", fields.len()
+                "[procfs]   FAIL: /loadavg has {} fields, want 5",
+                fields.len()
             );
             return Err(KernelError::InternalError);
         }
@@ -14978,7 +17266,8 @@ pub fn self_test() -> KernelResult<()> {
             let frac_ok = frac.is_some_and(|c| c.len() == 2 && c.parse::<u64>().is_ok());
             if int_part.is_none() || parts.next().is_some() || !frac_ok {
                 serial_println!(
-                    "[procfs]   FAIL: /loadavg load field {:?} not '<int>.<2-digit-frac>'", f
+                    "[procfs]   FAIL: /loadavg load field {:?} not '<int>.<2-digit-frac>'",
+                    f
                 );
                 return Err(KernelError::InternalError);
             }
@@ -14991,7 +17280,8 @@ pub fn self_test() -> KernelResult<()> {
             let total = rt.next().and_then(|s| s.parse::<u64>().ok());
             if runnable.is_none() || total.is_none() || rt.next().is_some() {
                 serial_println!(
-                    "[procfs]   FAIL: /loadavg field 4 {:?} not '<runnable>/<total>'", rt_field
+                    "[procfs]   FAIL: /loadavg field 4 {:?} not '<runnable>/<total>'",
+                    rt_field
                 );
                 return Err(KernelError::InternalError);
             }
@@ -15000,11 +17290,15 @@ pub fn self_test() -> KernelResult<()> {
         let pid_field = fields.get(4).copied().unwrap_or("");
         if pid_field.parse::<u64>().is_err() {
             serial_println!(
-                "[procfs]   FAIL: /loadavg last_pid {:?} not an integer", pid_field
+                "[procfs]   FAIL: /loadavg last_pid {:?} not an integer",
+                pid_field
             );
             return Err(KernelError::InternalError);
         }
-        serial_println!("[procfs]   /loadavg: five-field Linux layout OK ({:?})", line);
+        serial_println!(
+            "[procfs]   /loadavg: five-field Linux layout OK ({:?})",
+            line
+        );
     }
 
     // --- system-wide /proc/buddyinfo Linux layout ---
@@ -15016,7 +17310,10 @@ pub fn self_test() -> KernelResult<()> {
         let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
         let line = text.lines().next().unwrap_or("");
         if !line.starts_with("Node 0, zone") {
-            serial_println!("[procfs]   FAIL: /buddyinfo missing 'Node 0, zone' prefix: {:?}", line);
+            serial_println!(
+                "[procfs]   FAIL: /buddyinfo missing 'Node 0, zone' prefix: {:?}",
+                line
+            );
             return Err(KernelError::InternalError);
         }
         // Tokenise; the zone-name token ("Normal") is followed by the per-order
@@ -15025,7 +17322,10 @@ pub fn self_test() -> KernelResult<()> {
         let tokens: Vec<&str> = line.split_whitespace().collect();
         let counts = tokens.get(4..).unwrap_or(&[]);
         if counts.is_empty() {
-            serial_println!("[procfs]   FAIL: /buddyinfo has no per-order columns: {:?}", line);
+            serial_println!(
+                "[procfs]   FAIL: /buddyinfo has no per-order columns: {:?}",
+                line
+            );
             return Err(KernelError::InternalError);
         }
         for c in counts {
@@ -15037,11 +17337,17 @@ pub fn self_test() -> KernelResult<()> {
         // And no stray non-zone lines (the old comment block) should remain.
         for extra in text.lines().skip(1) {
             if !extra.trim().is_empty() && !extra.starts_with("Node ") {
-                serial_println!("[procfs]   FAIL: /buddyinfo has non-Linux trailing line: {:?}", extra);
+                serial_println!(
+                    "[procfs]   FAIL: /buddyinfo has non-Linux trailing line: {:?}",
+                    extra
+                );
                 return Err(KernelError::InternalError);
             }
         }
-        serial_println!("[procfs]   /buddyinfo: Linux frag_show layout OK ({} columns)", counts.len());
+        serial_println!(
+            "[procfs]   /buddyinfo: Linux frag_show layout OK ({} columns)",
+            counts.len()
+        );
     }
 
     // --- /proc/sys sysctl tree ---
@@ -15062,9 +17368,9 @@ pub fn self_test() -> KernelResult<()> {
             ("sys/kernel/random/boot_id", "sysfile"),
             ("sys/vm/overcommit_memory", "sysfile"),
             ("sys/fs/nr_open", "sysfile"),
-            ("sys/bogus", "notfound"),             // unknown subdir
-            ("sys/kernel/bogus", "notfound"),      // unknown file
-            ("sys/kernel/osrelease/x", "notfound"),// nested beyond a file
+            ("sys/bogus", "notfound"),              // unknown subdir
+            ("sys/kernel/bogus", "notfound"),       // unknown file
+            ("sys/kernel/osrelease/x", "notfound"), // nested beyond a file
         ];
         for (path, want) in cases {
             let got = match classify_path(path) {
@@ -15076,14 +17382,22 @@ pub fn self_test() -> KernelResult<()> {
             if got != *want {
                 serial_println!(
                     "[procfs]   FAIL: classify_path({:?}) = {}, want {}",
-                    path, got, want
+                    path,
+                    got,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
         }
 
         // 2. stat: /proc/sys and an interior dir are directories.
-        for d in ["/sys", "/sys/kernel", "/sys/kernel/random", "/sys/vm", "/sys/fs"] {
+        for d in [
+            "/sys",
+            "/sys/kernel",
+            "/sys/kernel/random",
+            "/sys/vm",
+            "/sys/fs",
+        ] {
             if fs.stat(Path::new(d))?.entry_type != EntryType::Directory {
                 serial_println!("[procfs]   FAIL: stat {} not a directory", d);
                 return Err(KernelError::InternalError);
@@ -15094,7 +17408,10 @@ pub fn self_test() -> KernelResult<()> {
         //    sit directly at the root) — order: dirs before files.
         let root = fs.readdir(Path::new("/sys"))?;
         for d in ["kernel", "vm", "fs"] {
-            if !root.iter().any(|e| e.name.as_path() == Path::new(d) && e.entry_type == EntryType::Directory) {
+            if !root
+                .iter()
+                .any(|e| e.name.as_path() == Path::new(d) && e.entry_type == EntryType::Directory)
+            {
                 serial_println!("[procfs]   FAIL: /sys missing dir {}", d);
                 return Err(KernelError::InternalError);
             }
@@ -15106,12 +17423,24 @@ pub fn self_test() -> KernelResult<()> {
 
         // 4. readdir /proc/sys/kernel: the `random` subdir + the six files.
         let kern = fs.readdir(Path::new("/sys/kernel"))?;
-        if !kern.iter().any(|e| e.name.as_path() == Path::new("random") && e.entry_type == EntryType::Directory) {
+        if !kern.iter().any(|e| {
+            e.name.as_path() == Path::new("random") && e.entry_type == EntryType::Directory
+        }) {
             serial_println!("[procfs]   FAIL: /sys/kernel missing `random` subdir");
             return Err(KernelError::InternalError);
         }
-        for f in ["ostype", "osrelease", "version", "hostname", "domainname", "pid_max"] {
-            if !kern.iter().any(|e| e.name.as_path() == Path::new(f) && e.entry_type == EntryType::File) {
+        for f in [
+            "ostype",
+            "osrelease",
+            "version",
+            "hostname",
+            "domainname",
+            "pid_max",
+        ] {
+            if !kern
+                .iter()
+                .any(|e| e.name.as_path() == Path::new(f) && e.entry_type == EntryType::File)
+            {
                 serial_println!("[procfs]   FAIL: /sys/kernel missing file {}", f);
                 return Err(KernelError::InternalError);
             }
@@ -15129,17 +17458,29 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         let nr_open = core::str::from_utf8(&fs.read_file(Path::new("/sys/fs/nr_open"))?)
-            .unwrap_or("").trim().parse::<usize>().ok();
+            .unwrap_or("")
+            .trim()
+            .parse::<usize>()
+            .ok();
         if nr_open != Some(crate::proc::linux_fd::MAX_FDS) {
-            serial_println!("[procfs]   FAIL: fs/nr_open = {:?}, want {}",
-                nr_open, crate::proc::linux_fd::MAX_FDS);
+            serial_println!(
+                "[procfs]   FAIL: fs/nr_open = {:?}, want {}",
+                nr_open,
+                crate::proc::linux_fd::MAX_FDS
+            );
             return Err(KernelError::InternalError);
         }
         let pid_max = core::str::from_utf8(&fs.read_file(Path::new("/sys/kernel/pid_max"))?)
-            .unwrap_or("").trim().parse::<usize>().ok();
+            .unwrap_or("")
+            .trim()
+            .parse::<usize>()
+            .ok();
         if pid_max != Some(crate::pidns::MAX_PIDS_PER_NS) {
-            serial_println!("[procfs]   FAIL: kernel/pid_max = {:?}, want {}",
-                pid_max, crate::pidns::MAX_PIDS_PER_NS);
+            serial_println!(
+                "[procfs]   FAIL: kernel/pid_max = {:?}, want {}",
+                pid_max,
+                crate::pidns::MAX_PIDS_PER_NS
+            );
             return Err(KernelError::InternalError);
         }
 
@@ -15150,18 +17491,23 @@ pub fn self_test() -> KernelResult<()> {
         //     lazy/overcommit allocation idiom they expect. overcommit_ratio /
         //     overcommit_kbytes are deliberately absent (no commit accounting).
         let vm = fs.readdir(Path::new("/sys/vm"))?;
-        if !vm.iter().any(|e| e.name.as_path() == Path::new("overcommit_memory")
-            && e.entry_type == EntryType::File)
-        {
+        if !vm.iter().any(|e| {
+            e.name.as_path() == Path::new("overcommit_memory") && e.entry_type == EntryType::File
+        }) {
             serial_println!("[procfs]   FAIL: /sys/vm missing overcommit_memory");
             return Err(KernelError::InternalError);
         }
-        let overcommit = core::str::from_utf8(
-            &fs.read_file(Path::new("/sys/vm/overcommit_memory"))?)
-            .unwrap_or("").trim().parse::<u32>().ok();
+        let overcommit =
+            core::str::from_utf8(&fs.read_file(Path::new("/sys/vm/overcommit_memory"))?)
+                .unwrap_or("")
+                .trim()
+                .parse::<u32>()
+                .ok();
         if overcommit != Some(0) {
-            serial_println!("[procfs]   FAIL: vm/overcommit_memory = {:?}, want 0",
-                overcommit);
+            serial_println!(
+                "[procfs]   FAIL: vm/overcommit_memory = {:?}, want 0",
+                overcommit
+            );
             return Err(KernelError::InternalError);
         }
 
@@ -15178,23 +17524,40 @@ pub fn self_test() -> KernelResult<()> {
         //     /sys/kernel/random lists all four files.
         let rnd = fs.readdir(Path::new("/sys/kernel/random"))?;
         for f in ["uuid", "boot_id", "poolsize", "entropy_avail"] {
-            if !rnd.iter().any(|e| e.name.as_path() == Path::new(f) && e.entry_type == EntryType::File) {
+            if !rnd
+                .iter()
+                .any(|e| e.name.as_path() == Path::new(f) && e.entry_type == EntryType::File)
+            {
                 serial_println!("[procfs]   FAIL: /sys/kernel/random missing file {}", f);
                 return Err(KernelError::InternalError);
             }
         }
-        let poolsize = core::str::from_utf8(&fs.read_file(Path::new("/sys/kernel/random/poolsize"))?)
-            .unwrap_or("").trim().parse::<u32>().ok();
+        let poolsize =
+            core::str::from_utf8(&fs.read_file(Path::new("/sys/kernel/random/poolsize"))?)
+                .unwrap_or("")
+                .trim()
+                .parse::<u32>()
+                .ok();
         if poolsize != Some(256) {
-            serial_println!("[procfs]   FAIL: random/poolsize = {:?}, want 256", poolsize);
+            serial_println!(
+                "[procfs]   FAIL: random/poolsize = {:?}, want 256",
+                poolsize
+            );
             return Err(KernelError::InternalError);
         }
-        let entropy = core::str::from_utf8(&fs.read_file(Path::new("/sys/kernel/random/entropy_avail"))?)
-            .unwrap_or("").trim().parse::<u32>().ok();
+        let entropy =
+            core::str::from_utf8(&fs.read_file(Path::new("/sys/kernel/random/entropy_avail"))?)
+                .unwrap_or("")
+                .trim()
+                .parse::<u32>()
+                .ok();
         match entropy {
             Some(e) if e == 0 || e == 256 => {}
             _ => {
-                serial_println!("[procfs]   FAIL: random/entropy_avail = {:?}, want 0 or 256", entropy);
+                serial_println!(
+                    "[procfs]   FAIL: random/entropy_avail = {:?}, want 0 or 256",
+                    entropy
+                );
                 return Err(KernelError::InternalError);
             }
         }
@@ -15204,7 +17567,10 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[procfs]   FAIL: read_file(/sys/kernel) not IsADirectory");
             return Err(KernelError::InternalError);
         }
-        if !matches!(fs.readdir(Path::new("/sys/kernel/osrelease")), Err(KernelError::NotADirectory)) {
+        if !matches!(
+            fs.readdir(Path::new("/sys/kernel/osrelease")),
+            Err(KernelError::NotADirectory)
+        ) {
             serial_println!("[procfs]   FAIL: readdir(/sys/kernel/osrelease) not NotADirectory");
             return Err(KernelError::InternalError);
         }
@@ -15212,16 +17578,18 @@ pub fn self_test() -> KernelResult<()> {
         // 8. Deterministic UUID formatter: version nibble forced to 4, variant
         //    bits to 10xx, regardless of input bytes.
         let uuid = format_uuid_v4([
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+            0xcd, 0xef,
         ]);
         if uuid != "01234567-89ab-4def-8123-456789abcdef" {
             serial_println!("[procfs]   FAIL: format_uuid_v4 = {:?}", uuid);
             return Err(KernelError::InternalError);
         }
 
-        serial_println!("[procfs]   /proc/sys: {} classify cases, listings, values, UUID OK",
-            cases.len());
+        serial_println!(
+            "[procfs]   /proc/sys: {} classify cases, listings, values, UUID OK",
+            cases.len()
+        );
     }
 
     serial_println!("[procfs] Self-test PASSED");

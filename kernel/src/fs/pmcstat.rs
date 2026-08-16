@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -137,7 +137,9 @@ where
 /// the PMU overflows/samples fire.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         cpus: Vec::new(),
         enabled_events: [false; NUM_EVENTS],
@@ -172,7 +174,10 @@ pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
 /// Record a counter sample.
 pub fn record_sample(cpu_id: u32, event: PmcEvent, value: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.counters[event.index()] += value;
         cpu.samples += 1;
@@ -208,7 +213,11 @@ pub fn ipc_x100() -> u64 {
     guard.as_ref().map_or(0, |s| {
         let total_cycles: u64 = s.cpus.iter().map(|c| c.counters[0]).sum();
         let total_insns: u64 = s.cpus.iter().map(|c| c.counters[1]).sum();
-        if total_cycles > 0 { total_insns * 100 / total_cycles } else { 0 }
+        if total_cycles > 0 {
+            total_insns * 100 / total_cycles
+        } else {
+            0
+        }
     })
 }
 
@@ -229,8 +238,18 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
         Some(s) => {
             let total_cycles: u64 = s.cpus.iter().map(|c| c.counters[0]).sum();
             let total_insns: u64 = s.cpus.iter().map(|c| c.counters[1]).sum();
-            let ipc = if total_cycles > 0 { total_insns * 100 / total_cycles } else { 0 };
-            (s.cpus.len(), s.total_samples, s.multiplex_switches, ipc, s.ops)
+            let ipc = if total_cycles > 0 {
+                total_insns * 100 / total_cycles
+            } else {
+                0
+            };
+            (
+                s.cpus.len(),
+                s.total_samples,
+                s.multiplex_switches,
+                ipc,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -268,7 +287,11 @@ pub fn self_test() {
 
     // 3: Record sample accumulates into the right event slot + sample count.
     record_sample(0, PmcEvent::Cycles, 1000).expect("sample");
-    let cpu0 = per_cpu().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let cpu0 = per_cpu()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(cpu0.counters[PmcEvent::Cycles.index()], 1000);
     assert_eq!(cpu0.samples, 1);
     crate::serial_println!("  [3/8] sample: OK");

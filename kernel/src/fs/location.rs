@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -243,9 +243,9 @@ pub fn update_location(
 /// Get the current location (if available and enabled).
 pub fn current_location() -> Option<LocationFix> {
     let guard = STATE.lock();
-    guard.as_ref().and_then(|s| {
-        if s.enabled { s.current.clone() } else { None }
-    })
+    guard
+        .as_ref()
+        .and_then(|s| if s.enabled { s.current.clone() } else { None })
 }
 
 /// Request location access for an app. Returns the fix or an error.
@@ -312,7 +312,10 @@ pub fn set_app_permission(app_id: &str, permission: LocationPermission) -> Kerne
 /// Get per-app permission.
 pub fn get_app_permission(app_id: &str) -> KernelResult<AppLocationPerm> {
     with_state(|state| {
-        state.app_perms.iter().find(|p| p.app_id == app_id)
+        state
+            .app_perms
+            .iter()
+            .find(|p| p.app_id == app_id)
             .cloned()
             .ok_or(KernelError::NotFound)
     })
@@ -365,7 +368,14 @@ pub fn set_default_accuracy(level: AccuracyLevel) -> KernelResult<()> {
 pub fn stats() -> (bool, usize, u64, u64, usize, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.enabled, s.app_perms.len(), s.total_requests, s.total_denied, s.history.len(), s.ops),
+        Some(s) => (
+            s.enabled,
+            s.app_perms.len(),
+            s.total_requests,
+            s.total_denied,
+            s.history.len(),
+            s.ops,
+        ),
         None => (false, 0, 0, 0, 0, 0),
     }
 }

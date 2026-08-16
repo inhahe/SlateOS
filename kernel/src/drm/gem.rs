@@ -22,9 +22,9 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
-use crate::mm::page_table;
 use crate::error::{KernelError, KernelResult};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+use crate::mm::page_table;
 
 use super::DrmObjectId;
 use super::mode::PixelFormat;
@@ -97,7 +97,9 @@ impl GemObject {
                     // Cleanup: free already-allocated frames.
                     for pf in phys_frames {
                         // SAFETY: we just allocated these frames.
-                        unsafe { let _ = frame::free_frame(pf); }
+                        unsafe {
+                            let _ = frame::free_frame(pf);
+                        }
                     }
                     return Err(e);
                 }
@@ -107,7 +109,9 @@ impl GemObject {
         // Zero the buffer via HHDM.
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
         for pf in &phys_frames {
-            let virt = pf.addr().checked_add(hhdm)
+            let virt = pf
+                .addr()
+                .checked_add(hhdm)
                 .ok_or(KernelError::InvalidAddress)?;
             // SAFETY: The frame was just allocated (we own it exclusively)
             // and the HHDM mapping covers all physical memory.
@@ -141,10 +145,11 @@ impl GemObject {
     /// For buffers within one frame, this is the entire buffer.
     /// For multi-frame buffers, callers must handle frame boundaries.
     pub fn virt_addr(&self) -> KernelResult<*mut u8> {
-        let first = self.phys_frames.first()
-            .ok_or(KernelError::InternalError)?;
+        let first = self.phys_frames.first().ok_or(KernelError::InternalError)?;
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
-        let virt = first.addr().checked_add(hhdm)
+        let virt = first
+            .addr()
+            .checked_add(hhdm)
             .ok_or(KernelError::InvalidAddress)?;
         Ok(virt as *mut u8)
     }
@@ -153,7 +158,9 @@ impl GemObject {
     pub fn free_backing(&mut self) {
         for pf in self.phys_frames.drain(..) {
             // SAFETY: We allocated these frames in alloc_2d and own them.
-            unsafe { let _ = frame::free_frame(pf); }
+            unsafe {
+                let _ = frame::free_frame(pf);
+            }
         }
     }
 }

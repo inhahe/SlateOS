@@ -35,12 +35,12 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::PreemptSpinMutex as Mutex;
 
-use crate::mm::rlimits::ResourceLimits;
 use crate::error::{KernelError, KernelResult};
+use crate::mm::rlimits::ResourceLimits;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -117,7 +117,8 @@ pub fn set_service_limits(name: &str, limits: ResourceLimits) -> KernelResult<()
     }
 
     // Find a free slot.
-    let slot = table.iter_mut()
+    let slot = table
+        .iter_mut()
         .find(|e| !e.active)
         .ok_or(KernelError::OutOfMemory)?;
 
@@ -164,10 +165,7 @@ pub fn list_all() -> Vec<(String, ResourceLimits)> {
     let mut result = Vec::new();
     for entry in table.iter() {
         if entry.active {
-            result.push((
-                String::from(entry.name_str()),
-                entry.limits,
-            ));
+            result.push((String::from(entry.name_str()), entry.limits));
         }
     }
     result
@@ -206,25 +204,25 @@ impl ServiceProfile {
     pub const fn to_limits(self) -> ResourceLimits {
         match self {
             Self::Daemon => ResourceLimits {
-                max_rss_frames: 1024,     // 16 MiB @ 16 KiB/frame
+                max_rss_frames: 1024, // 16 MiB @ 16 KiB/frame
                 cpu_quota_pct: 10,
                 max_threads: 4,
                 max_handles: 64,
             },
             Self::NetworkService => ResourceLimits {
-                max_rss_frames: 4096,     // 64 MiB @ 16 KiB/frame
+                max_rss_frames: 4096, // 64 MiB @ 16 KiB/frame
                 cpu_quota_pct: 25,
                 max_threads: 16,
                 max_handles: 256,
             },
             Self::SystemService => ResourceLimits {
-                max_rss_frames: 16384,    // 256 MiB @ 16 KiB/frame
+                max_rss_frames: 16384, // 256 MiB @ 16 KiB/frame
                 cpu_quota_pct: 50,
                 max_threads: 64,
                 max_handles: 512,
             },
             Self::Sandboxed => ResourceLimits {
-                max_rss_frames: 512,      // 8 MiB @ 16 KiB/frame
+                max_rss_frames: 512, // 8 MiB @ 16 KiB/frame
                 cpu_quota_pct: 5,
                 max_threads: 2,
                 max_handles: 32,
@@ -274,7 +272,8 @@ fn test_set_get() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     let g = got.unwrap_or_default();
-    if g.max_rss_frames != 100 || g.cpu_quota_pct != 25 || g.max_threads != 8 || g.max_handles != 64 {
+    if g.max_rss_frames != 100 || g.cpu_quota_pct != 25 || g.max_threads != 8 || g.max_handles != 64
+    {
         serial_println!("[slimits]   FAIL: limits mismatch after set");
         remove_service_limits("test.slimit1").ok();
         return Err(KernelError::InternalError);

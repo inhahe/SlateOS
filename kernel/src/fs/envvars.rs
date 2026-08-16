@@ -28,11 +28,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -95,7 +95,8 @@ pub struct ResolvedEnv {
 impl ResolvedEnv {
     /// Get a variable value by name.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.vars.iter()
+        self.vars
+            .iter()
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.as_str())
     }
@@ -163,38 +164,47 @@ pub fn init_defaults() {
 
     // Standard system environment variables.
     let defaults: &[(&str, &str, bool, &str)] = &[
-        ("PATH", "/bin:/usr/bin:/usr/local/bin", false,
-            "Executable search path"),
-        ("HOME", "/home", true,
-            "Default home directory base"),
-        ("TERM", "xterm-256color", false,
-            "Terminal type"),
-        ("SHELL", "/bin/sh", false,
-            "Default shell"),
-        ("LANG", "en_US.UTF-8", false,
-            "Default locale"),
-        ("LC_ALL", "", false,
-            "Override all locale categories"),
-        ("EDITOR", "nano", false,
-            "Default text editor"),
-        ("VISUAL", "nano", false,
-            "Default visual editor"),
-        ("PAGER", "less", false,
-            "Default pager"),
-        ("TMPDIR", "/tmp", true,
-            "Temporary file directory"),
-        ("XDG_CONFIG_HOME", "", false,
-            "User config directory (default: ~/.config)"),
-        ("XDG_DATA_HOME", "", false,
-            "User data directory (default: ~/.local/share)"),
-        ("XDG_CACHE_HOME", "", false,
-            "User cache directory (default: ~/.cache)"),
-        ("XDG_RUNTIME_DIR", "/run/user", true,
-            "User runtime directory"),
-        ("DISPLAY", ":0", false,
-            "Display server connection"),
-        ("HOSTNAME", "", false,
-            "System hostname"),
+        (
+            "PATH",
+            "/bin:/usr/bin:/usr/local/bin",
+            false,
+            "Executable search path",
+        ),
+        ("HOME", "/home", true, "Default home directory base"),
+        ("TERM", "xterm-256color", false, "Terminal type"),
+        ("SHELL", "/bin/sh", false, "Default shell"),
+        ("LANG", "en_US.UTF-8", false, "Default locale"),
+        ("LC_ALL", "", false, "Override all locale categories"),
+        ("EDITOR", "nano", false, "Default text editor"),
+        ("VISUAL", "nano", false, "Default visual editor"),
+        ("PAGER", "less", false, "Default pager"),
+        ("TMPDIR", "/tmp", true, "Temporary file directory"),
+        (
+            "XDG_CONFIG_HOME",
+            "",
+            false,
+            "User config directory (default: ~/.config)",
+        ),
+        (
+            "XDG_DATA_HOME",
+            "",
+            false,
+            "User data directory (default: ~/.local/share)",
+        ),
+        (
+            "XDG_CACHE_HOME",
+            "",
+            false,
+            "User cache directory (default: ~/.cache)",
+        ),
+        (
+            "XDG_RUNTIME_DIR",
+            "/run/user",
+            true,
+            "User runtime directory",
+        ),
+        ("DISPLAY", ":0", false, "Display server connection"),
+        ("HOSTNAME", "", false, "System hostname"),
     ];
 
     for (name, value, read_only, desc) in defaults {
@@ -252,7 +262,9 @@ pub fn set_system(name: &str, value: &str) -> KernelResult<()> {
 pub fn get_system(name: &str) -> KernelResult<String> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.system_vars.iter()
+    state
+        .system_vars
+        .iter()
         .find(|v| v.name == name)
         .map(|v| v.value.clone())
         .ok_or(KernelError::NotFound)
@@ -276,30 +288,36 @@ pub fn remove_system(name: &str) -> KernelResult<()> {
 /// List all system variables.
 pub fn list_system() -> Vec<EnvVar> {
     let guard = STATE.lock();
-    guard.as_ref().map_or_else(Vec::new, |s| s.system_vars.clone())
+    guard
+        .as_ref()
+        .map_or_else(Vec::new, |s| s.system_vars.clone())
 }
 
 /// Set a system variable's description.
 pub fn set_description(name: &str, scope: VarScope, uid: u32, desc: &str) -> KernelResult<()> {
-    with_state(|state| {
-        match scope {
-            VarScope::System => {
-                let var = state.system_vars.iter_mut()
-                    .find(|v| v.name == name)
-                    .ok_or(KernelError::NotFound)?;
-                var.description = String::from(desc);
-                Ok(())
-            }
-            VarScope::User => {
-                let uv = state.user_vars.iter_mut()
-                    .find(|u| u.uid == uid)
-                    .ok_or(KernelError::NotFound)?;
-                let var = uv.vars.iter_mut()
-                    .find(|v| v.name == name)
-                    .ok_or(KernelError::NotFound)?;
-                var.description = String::from(desc);
-                Ok(())
-            }
+    with_state(|state| match scope {
+        VarScope::System => {
+            let var = state
+                .system_vars
+                .iter_mut()
+                .find(|v| v.name == name)
+                .ok_or(KernelError::NotFound)?;
+            var.description = String::from(desc);
+            Ok(())
+        }
+        VarScope::User => {
+            let uv = state
+                .user_vars
+                .iter_mut()
+                .find(|u| u.uid == uid)
+                .ok_or(KernelError::NotFound)?;
+            let var = uv
+                .vars
+                .iter_mut()
+                .find(|v| v.name == name)
+                .ok_or(KernelError::NotFound)?;
+            var.description = String::from(desc);
+            Ok(())
         }
     })
 }
@@ -326,7 +344,10 @@ pub fn set_user(uid: u32, name: &str, value: &str) -> KernelResult<()> {
                 uid,
                 vars: Vec::new(),
             });
-            state.user_vars.last_mut().ok_or(KernelError::InternalError)?
+            state
+                .user_vars
+                .last_mut()
+                .ok_or(KernelError::InternalError)?
         };
 
         if let Some(var) = user_entry.vars.iter_mut().find(|v| v.name == name) {
@@ -352,7 +373,9 @@ pub fn set_user(uid: u32, name: &str, value: &str) -> KernelResult<()> {
 pub fn get_user(uid: u32, name: &str) -> KernelResult<String> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.user_vars.iter()
+    state
+        .user_vars
+        .iter()
         .find(|u| u.uid == uid)
         .and_then(|u| u.vars.iter().find(|v| v.name == name))
         .map(|v| v.value.clone())
@@ -362,7 +385,9 @@ pub fn get_user(uid: u32, name: &str) -> KernelResult<String> {
 /// Remove a per-user variable.
 pub fn remove_user(uid: u32, name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let user_entry = state.user_vars.iter_mut()
+        let user_entry = state
+            .user_vars
+            .iter_mut()
             .find(|u| u.uid == uid)
             .ok_or(KernelError::NotFound)?;
         if let Some(pos) = user_entry.vars.iter().position(|v| v.name == name) {
@@ -378,7 +403,8 @@ pub fn remove_user(uid: u32, name: &str) -> KernelResult<()> {
 pub fn list_user(uid: u32) -> Vec<EnvVar> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.user_vars.iter()
+        s.user_vars
+            .iter()
             .find(|u| u.uid == uid)
             .map_or_else(Vec::new, |u| u.vars.clone())
     })
@@ -536,7 +562,9 @@ pub fn search(query: &str) -> Vec<EnvVar> {
 /// Append a directory to the system PATH.
 pub fn path_append(dir: &str) -> KernelResult<()> {
     with_state(|state| {
-        let path_var = state.system_vars.iter_mut()
+        let path_var = state
+            .system_vars
+            .iter_mut()
             .find(|v| v.name == "PATH")
             .ok_or(KernelError::NotFound)?;
         if path_var.value.is_empty() {
@@ -551,7 +579,9 @@ pub fn path_append(dir: &str) -> KernelResult<()> {
 /// Prepend a directory to the system PATH.
 pub fn path_prepend(dir: &str) -> KernelResult<()> {
     with_state(|state| {
-        let path_var = state.system_vars.iter_mut()
+        let path_var = state
+            .system_vars
+            .iter_mut()
             .find(|v| v.name == "PATH")
             .ok_or(KernelError::NotFound)?;
         if path_var.value.is_empty() {
@@ -566,12 +596,12 @@ pub fn path_prepend(dir: &str) -> KernelResult<()> {
 /// Remove a directory from the system PATH.
 pub fn path_remove(dir: &str) -> KernelResult<()> {
     with_state(|state| {
-        let path_var = state.system_vars.iter_mut()
+        let path_var = state
+            .system_vars
+            .iter_mut()
             .find(|v| v.name == "PATH")
             .ok_or(KernelError::NotFound)?;
-        let parts: Vec<&str> = path_var.value.split(':')
-            .filter(|p| *p != dir)
-            .collect();
+        let parts: Vec<&str> = path_var.value.split(':').filter(|p| *p != dir).collect();
         path_var.value = parts.join(":");
         Ok(())
     })
@@ -581,10 +611,12 @@ pub fn path_remove(dir: &str) -> KernelResult<()> {
 pub fn path_list() -> Vec<String> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.system_vars.iter()
+        s.system_vars
+            .iter()
             .find(|v| v.name == "PATH")
             .map_or_else(Vec::new, |v| {
-                v.value.split(':')
+                v.value
+                    .split(':')
                     .filter(|p| !p.is_empty())
                     .map(String::from)
                     .collect()

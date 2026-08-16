@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -127,7 +127,9 @@ where
 /// proximity 15, and 5000 level changes — all fictional.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         level: PressureLevel::None,
         some_total_ns: 0,
@@ -146,7 +148,9 @@ pub fn init_defaults() {
 pub fn record_stall(is_full: bool, ns: u64) -> KernelResult<()> {
     with_state(|state| {
         state.some_total_ns += ns;
-        if is_full { state.full_total_ns += ns; }
+        if is_full {
+            state.full_total_ns += ns;
+        }
         state.total_stall_ns += ns;
         state.stall_events += 1;
         Ok(())
@@ -206,7 +210,15 @@ pub fn current() -> PressureState {
 pub fn stats() -> (u64, u64, u64, u64, u64, u32, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.stall_events, s.reclaim_events, s.total_stall_ns, s.total_reclaim_pages, s.level_changes, s.oom_proximity, s.ops),
+        Some(s) => (
+            s.stall_events,
+            s.reclaim_events,
+            s.total_stall_ns,
+            s.total_reclaim_pages,
+            s.level_changes,
+            s.oom_proximity,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0, 0),
     }
 }
@@ -229,7 +241,10 @@ pub fn self_test() {
     assert_eq!(c.total_reclaim_pages, 0);
     assert_eq!(c.oom_proximity, 0);
     let (stalls0, reclaims0, ns0, pages0, changes0, oom0, _) = stats();
-    assert_eq!((stalls0, reclaims0, ns0, pages0, changes0, oom0), (0, 0, 0, 0, 0, 0));
+    assert_eq!(
+        (stalls0, reclaims0, ns0, pages0, changes0, oom0),
+        (0, 0, 0, 0, 0, 0)
+    );
     crate::serial_println!("  [1/8] empty defaults: OK");
 
     // 2: "some" stall (not full) — counts a stall event and accrues time.

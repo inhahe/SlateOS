@@ -21,15 +21,15 @@
 //! nc -z <host> <port-range>  — port scan
 //! ```
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
 use super::interface::{IpAddr, Ipv4Addr};
 use super::ipv6::Ipv6Addr;
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -178,7 +178,11 @@ pub fn udp_send_v6(dst: Ipv6Addr, port: u16, data: &[u8]) -> KernelResult<()> {
 /// source address (as a string), source port, and payload.
 pub fn udp_recv_any(port: u16, timeout_polls: u32) -> KernelResult<(String, u16, Vec<u8>)> {
     let handle = super::udp::bind(crate::netns::ROOT_NS, port)?;
-    let timeout = if timeout_polls == 0 { RECV_TIMEOUT_POLLS } else { timeout_polls };
+    let timeout = if timeout_polls == 0 {
+        RECV_TIMEOUT_POLLS
+    } else {
+        timeout_polls
+    };
 
     for _ in 0..timeout {
         super::poll();
@@ -231,7 +235,8 @@ pub fn scan_ports(host: Ipv4Addr, start: u16, end: u16) -> Vec<PortScanResult> {
         end
     };
 
-    let mut results = Vec::with_capacity((actual_end.saturating_sub(start).saturating_add(1)) as usize);
+    let mut results =
+        Vec::with_capacity((actual_end.saturating_sub(start).saturating_add(1)) as usize);
 
     let mut port = start;
     loop {
@@ -383,11 +388,17 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 2: Port scan result structure ---
     {
-        let result = PortScanResult { port: 80, open: true };
+        let result = PortScanResult {
+            port: 80,
+            open: true,
+        };
         assert!(result.port == 80, "port");
         assert!(result.open, "open");
 
-        let result2 = PortScanResult { port: 81, open: false };
+        let result2 = PortScanResult {
+            port: 81,
+            open: false,
+        };
         assert!(!result2.open, "closed");
 
         passed = passed.saturating_add(1);
@@ -430,9 +441,10 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 6: Service name coverage ---
     {
         // Verify all well-known ports return non-empty.
-        let known_ports = [7, 9, 13, 20, 21, 22, 23, 25, 53, 67, 68, 69,
-            80, 110, 123, 143, 161, 162, 443, 514, 993, 995, 3306,
-            5432, 5900, 6379, 8080, 8443];
+        let known_ports = [
+            7, 9, 13, 20, 21, 22, 23, 25, 53, 67, 68, 69, 80, 110, 123, 143, 161, 162, 443, 514,
+            993, 995, 3306, 5432, 5900, 6379, 8080, 8443,
+        ];
         for &p in &known_ports {
             assert!(!service_name(p).is_empty(), "known port name");
         }

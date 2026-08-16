@@ -39,10 +39,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -350,7 +350,11 @@ pub fn set_slideshow(paths: &[&str], interval_secs: u64) -> KernelResult<()> {
     let mut state = WALLPAPER.lock();
     state.config.kind = WallpaperKind::Slideshow;
     state.config.slideshow_paths = paths.iter().map(|p| String::from(*p)).collect();
-    state.config.slideshow_interval_secs = if interval_secs == 0 { 300 } else { interval_secs };
+    state.config.slideshow_interval_secs = if interval_secs == 0 {
+        300
+    } else {
+        interval_secs
+    };
     state.config.slideshow_index = 0;
     state.config.slideshow_running = true;
     if let Some(first) = paths.first() {
@@ -396,10 +400,13 @@ pub fn slideshow_next() -> KernelResult<String> {
     if state.config.slideshow_paths.is_empty() {
         return Err(KernelError::NotFound);
     }
-    let next_idx = (state.config.slideshow_index.wrapping_add(1))
-        % state.config.slideshow_paths.len();
+    let next_idx =
+        (state.config.slideshow_index.wrapping_add(1)) % state.config.slideshow_paths.len();
     state.config.slideshow_index = next_idx;
-    let path = state.config.slideshow_paths.get(next_idx)
+    let path = state
+        .config
+        .slideshow_paths
+        .get(next_idx)
         .cloned()
         .unwrap_or_default();
     state.config.image_path = path.clone();
@@ -420,7 +427,10 @@ pub fn slideshow_prev() -> KernelResult<String> {
         state.config.slideshow_index.saturating_sub(1)
     };
     state.config.slideshow_index = prev_idx;
-    let path = state.config.slideshow_paths.get(prev_idx)
+    let path = state
+        .config
+        .slideshow_paths
+        .get(prev_idx)
         .cloned()
         .unwrap_or_default();
     state.config.image_path = path.clone();
@@ -509,7 +519,10 @@ pub fn set_per_monitor(monitor_id: &str, path: &str) -> KernelResult<()> {
             return Ok(());
         }
     }
-    state.config.per_monitor.push((String::from(monitor_id), String::from(path)));
+    state
+        .config
+        .per_monitor
+        .push((String::from(monitor_id), String::from(path)));
     Ok(())
 }
 

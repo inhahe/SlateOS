@@ -148,19 +148,26 @@ pub fn request_capability(
     let mut requests = REQUESTS.lock();
 
     // Check system-wide limit.
-    let pending_count = requests.iter().filter(|r| r.status == RequestStatus::Pending).count();
+    let pending_count = requests
+        .iter()
+        .filter(|r| r.status == RequestStatus::Pending)
+        .count();
     if pending_count >= MAX_PENDING_REQUESTS {
         serial_println!("[cap-request] Queue full ({} pending)", pending_count);
         return Err(KernelError::ResourceExhausted);
     }
 
     // Check per-process limit.
-    let proc_pending = requests.iter()
+    let proc_pending = requests
+        .iter()
         .filter(|r| r.pid == pid && r.status == RequestStatus::Pending)
         .count();
     if proc_pending >= MAX_PENDING_PER_PROCESS {
-        serial_println!("[cap-request] Process {} has too many pending requests ({})",
-            pid, proc_pending);
+        serial_println!(
+            "[cap-request] Process {} has too many pending requests ({})",
+            pid,
+            proc_pending
+        );
         return Err(KernelError::ResourceExhausted);
     }
 
@@ -186,8 +193,14 @@ pub fn request_capability(
         resolved_at_ms: 0,
     };
 
-    serial_println!("[cap-request] #{}: pid={} requests {:?}/{:?} -- {:?}",
-        id, pid, resource_type, rights, req.reason);
+    serial_println!(
+        "[cap-request] #{}: pid={} requests {:?}/{:?} -- {:?}",
+        id,
+        pid,
+        resource_type,
+        rights,
+        req.reason
+    );
 
     requests.push(req);
 
@@ -210,7 +223,8 @@ pub fn request_capability(
 /// This just marks the request as approved for audit purposes.
 pub fn approve(request_id: RequestId) -> KernelResult<CapRequest> {
     let mut requests = REQUESTS.lock();
-    let req = requests.iter_mut()
+    let req = requests
+        .iter_mut()
         .find(|r| r.id == request_id)
         .ok_or(KernelError::NotFound)?;
 
@@ -221,8 +235,13 @@ pub fn approve(request_id: RequestId) -> KernelResult<CapRequest> {
     req.status = RequestStatus::Approved;
     req.resolved_at_ms = now_ms();
 
-    serial_println!("[cap-request] #{}: APPROVED (pid={}, {:?}/{:?})",
-        request_id, req.pid, req.resource_type, req.rights);
+    serial_println!(
+        "[cap-request] #{}: APPROVED (pid={}, {:?}/{:?})",
+        request_id,
+        req.pid,
+        req.resource_type,
+        req.rights
+    );
 
     Ok(req.clone())
 }
@@ -230,7 +249,8 @@ pub fn approve(request_id: RequestId) -> KernelResult<CapRequest> {
 /// Deny a pending request.
 pub fn deny(request_id: RequestId) -> KernelResult<()> {
     let mut requests = REQUESTS.lock();
-    let req = requests.iter_mut()
+    let req = requests
+        .iter_mut()
         .find(|r| r.id == request_id)
         .ok_or(KernelError::NotFound)?;
 
@@ -241,8 +261,13 @@ pub fn deny(request_id: RequestId) -> KernelResult<()> {
     req.status = RequestStatus::Denied;
     req.resolved_at_ms = now_ms();
 
-    serial_println!("[cap-request] #{}: DENIED (pid={}, {:?}/{:?})",
-        request_id, req.pid, req.resource_type, req.rights);
+    serial_println!(
+        "[cap-request] #{}: DENIED (pid={}, {:?}/{:?})",
+        request_id,
+        req.pid,
+        req.resource_type,
+        req.rights
+    );
 
     Ok(())
 }
@@ -250,7 +275,8 @@ pub fn deny(request_id: RequestId) -> KernelResult<()> {
 /// Cancel a request (by the requesting process).
 pub fn cancel(request_id: RequestId, pid: u64) -> KernelResult<()> {
     let mut requests = REQUESTS.lock();
-    let req = requests.iter_mut()
+    let req = requests
+        .iter_mut()
         .find(|r| r.id == request_id && r.pid == pid)
         .ok_or(KernelError::NotFound)?;
 
@@ -267,7 +293,10 @@ pub fn cancel(request_id: RequestId, pid: u64) -> KernelResult<()> {
 #[must_use]
 pub fn get_status(request_id: RequestId) -> Option<RequestStatus> {
     let requests = REQUESTS.lock();
-    requests.iter().find(|r| r.id == request_id).map(|r| r.status)
+    requests
+        .iter()
+        .find(|r| r.id == request_id)
+        .map(|r| r.status)
 }
 
 /// Get a request by ID.
@@ -281,7 +310,8 @@ pub fn get_request(request_id: RequestId) -> Option<CapRequest> {
 #[must_use]
 pub fn list_pending() -> Vec<CapRequest> {
     let requests = REQUESTS.lock();
-    requests.iter()
+    requests
+        .iter()
         .filter(|r| r.status == RequestStatus::Pending)
         .cloned()
         .collect()
@@ -298,7 +328,10 @@ pub fn list_all() -> Vec<CapRequest> {
 #[must_use]
 pub fn pending_count() -> usize {
     let requests = REQUESTS.lock();
-    requests.iter().filter(|r| r.status == RequestStatus::Pending).count()
+    requests
+        .iter()
+        .filter(|r| r.status == RequestStatus::Pending)
+        .count()
 }
 
 /// Register a policy handler.
@@ -322,7 +355,10 @@ pub fn unregister_handler() {
         if req.status == RequestStatus::Pending {
             req.status = RequestStatus::Denied;
             req.resolved_at_ms = now;
-            serial_println!("[cap-request] #{}: auto-denied (handler unregistered)", req.id);
+            serial_println!(
+                "[cap-request] #{}: auto-denied (handler unregistered)",
+                req.id
+            );
         }
     }
 }
@@ -385,7 +421,11 @@ pub fn self_test() -> KernelResult<()> {
     )?;
     assert!(id > 0);
     let status = get_status(id).unwrap();
-    assert_eq!(status, RequestStatus::Denied, "Should be auto-denied without handler");
+    assert_eq!(
+        status,
+        RequestStatus::Denied,
+        "Should be auto-denied without handler"
+    );
     serial_println!("[cap-request]   Auto-deny without handler: OK");
 
     // Test 2: Register handler, submit request (stays pending).
@@ -398,7 +438,11 @@ pub fn self_test() -> KernelResult<()> {
         "Connect to update server",
     )?;
     let status2 = get_status(id2).unwrap();
-    assert_eq!(status2, RequestStatus::Pending, "Should be pending with handler");
+    assert_eq!(
+        status2,
+        RequestStatus::Pending,
+        "Should be pending with handler"
+    );
     serial_println!("[cap-request]   Pending with handler: OK");
 
     // Test 3: Approve.
@@ -459,7 +503,11 @@ pub fn self_test() -> KernelResult<()> {
     let pending_after = pending_count();
     assert_eq!(pending_after, 0, "All pending should be denied");
     assert!(pending_before > 0);
-    serial_println!("[cap-request]   Unregister auto-deny: OK ({}->{})", pending_before, pending_after);
+    serial_println!(
+        "[cap-request]   Unregister auto-deny: OK ({}->{})",
+        pending_before,
+        pending_after
+    );
 
     // Cleanup: GC all entries.
     gc(0);

@@ -27,10 +27,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -83,24 +83,45 @@ impl ConnectionType {
 /// Standard gamepad button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GamepadButton {
-    A, B, X, Y,
-    LeftBumper, RightBumper,
-    LeftTrigger, RightTrigger,
-    LeftStick, RightStick,
-    DpadUp, DpadDown, DpadLeft, DpadRight,
-    Start, Select, Home,
+    A,
+    B,
+    X,
+    Y,
+    LeftBumper,
+    RightBumper,
+    LeftTrigger,
+    RightTrigger,
+    LeftStick,
+    RightStick,
+    DpadUp,
+    DpadDown,
+    DpadLeft,
+    DpadRight,
+    Start,
+    Select,
+    Home,
 }
 
 impl GamepadButton {
     pub fn label(self) -> &'static str {
         match self {
-            Self::A => "A", Self::B => "B", Self::X => "X", Self::Y => "Y",
-            Self::LeftBumper => "LB", Self::RightBumper => "RB",
-            Self::LeftTrigger => "LT", Self::RightTrigger => "RT",
-            Self::LeftStick => "LS", Self::RightStick => "RS",
-            Self::DpadUp => "D-Up", Self::DpadDown => "D-Down",
-            Self::DpadLeft => "D-Left", Self::DpadRight => "D-Right",
-            Self::Start => "Start", Self::Select => "Select", Self::Home => "Home",
+            Self::A => "A",
+            Self::B => "B",
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::LeftBumper => "LB",
+            Self::RightBumper => "RB",
+            Self::LeftTrigger => "LT",
+            Self::RightTrigger => "RT",
+            Self::LeftStick => "LS",
+            Self::RightStick => "RS",
+            Self::DpadUp => "D-Up",
+            Self::DpadDown => "D-Down",
+            Self::DpadLeft => "D-Left",
+            Self::DpadRight => "D-Right",
+            Self::Start => "Start",
+            Self::Select => "Select",
+            Self::Home => "Home",
         }
     }
 }
@@ -182,7 +203,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         gamepads: Vec::new(),
         next_id: 1,
@@ -195,7 +218,10 @@ pub fn init_defaults() {
 
 /// Register a new gamepad.
 pub fn register_gamepad(
-    name: &str, gamepad_type: GamepadType, connection: ConnectionType, battery: u8,
+    name: &str,
+    gamepad_type: GamepadType,
+    connection: ConnectionType,
+    battery: u8,
 ) -> KernelResult<u32> {
     with_state(|state| {
         if state.gamepads.len() >= MAX_GAMEPADS {
@@ -212,15 +238,33 @@ pub fn register_gamepad(
                 assigned[(g.player_number - 1) as usize] = true;
             }
         }
-        let player = assigned.iter().position(|a| !a).map(|p| (p + 1) as u8).unwrap_or(0);
+        let player = assigned
+            .iter()
+            .position(|a| !a)
+            .map(|p| (p + 1) as u8)
+            .unwrap_or(0);
 
         state.gamepads.push(Gamepad {
-            id, name: String::from(name), gamepad_type, connection,
-            battery_percent: battery, connected: true,
+            id,
+            name: String::from(name),
+            gamepad_type,
+            connection,
+            battery_percent: battery,
+            connected: true,
             buttons: 0,
-            axes: AxisState { left_x: 0, left_y: 0, right_x: 0, right_y: 0, left_trigger: 0, right_trigger: 0 },
-            dead_zone: 1500, rumble_intensity: 0, player_number: player,
-            total_presses: 0, connected_ns: crate::hpet::elapsed_ns(),
+            axes: AxisState {
+                left_x: 0,
+                left_y: 0,
+                right_x: 0,
+                right_y: 0,
+                left_trigger: 0,
+                right_trigger: 0,
+            },
+            dead_zone: 1500,
+            rumble_intensity: 0,
+            player_number: player,
+            total_presses: 0,
+            connected_ns: crate::hpet::elapsed_ns(),
         });
         Ok(id)
     })
@@ -229,7 +273,10 @@ pub fn register_gamepad(
 /// Disconnect a gamepad.
 pub fn disconnect_gamepad(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let gp = state.gamepads.iter_mut().find(|g| g.id == id)
+        let gp = state
+            .gamepads
+            .iter_mut()
+            .find(|g| g.id == id)
             .ok_or(KernelError::NotFound)?;
         gp.connected = false;
         state.total_disconnected += 1;
@@ -240,7 +287,10 @@ pub fn disconnect_gamepad(id: u32) -> KernelResult<()> {
 /// Remove a gamepad entirely.
 pub fn remove_gamepad(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.gamepads.iter().position(|g| g.id == id)
+        let pos = state
+            .gamepads
+            .iter()
+            .position(|g| g.id == id)
             .ok_or(KernelError::NotFound)?;
         state.gamepads.remove(pos);
         Ok(())
@@ -250,7 +300,10 @@ pub fn remove_gamepad(id: u32) -> KernelResult<()> {
 /// Update button state (bitmask).
 pub fn update_buttons(id: u32, buttons: u32) -> KernelResult<()> {
     with_state(|state| {
-        let gp = state.gamepads.iter_mut().find(|g| g.id == id)
+        let gp = state
+            .gamepads
+            .iter_mut()
+            .find(|g| g.id == id)
             .ok_or(KernelError::NotFound)?;
         // Count new presses (bits that changed from 0 to 1).
         let new_presses = buttons & !gp.buttons;
@@ -264,7 +317,10 @@ pub fn update_buttons(id: u32, buttons: u32) -> KernelResult<()> {
 /// Update axis state.
 pub fn update_axes(id: u32, axes: AxisState) -> KernelResult<()> {
     with_state(|state| {
-        let gp = state.gamepads.iter_mut().find(|g| g.id == id)
+        let gp = state
+            .gamepads
+            .iter_mut()
+            .find(|g| g.id == id)
             .ok_or(KernelError::NotFound)?;
         gp.axes = axes;
         state.total_inputs += 1;
@@ -275,7 +331,10 @@ pub fn update_axes(id: u32, axes: AxisState) -> KernelResult<()> {
 /// Set dead zone.
 pub fn set_dead_zone(id: u32, dead_zone: i32) -> KernelResult<()> {
     with_state(|state| {
-        let gp = state.gamepads.iter_mut().find(|g| g.id == id)
+        let gp = state
+            .gamepads
+            .iter_mut()
+            .find(|g| g.id == id)
             .ok_or(KernelError::NotFound)?;
         gp.dead_zone = dead_zone.clamp(0, 5000);
         Ok(())
@@ -285,7 +344,10 @@ pub fn set_dead_zone(id: u32, dead_zone: i32) -> KernelResult<()> {
 /// Set rumble intensity (0-10000).
 pub fn set_rumble(id: u32, intensity: u32) -> KernelResult<()> {
     with_state(|state| {
-        let gp = state.gamepads.iter_mut().find(|g| g.id == id)
+        let gp = state
+            .gamepads
+            .iter_mut()
+            .find(|g| g.id == id)
             .ok_or(KernelError::NotFound)?;
         gp.rumble_intensity = intensity.min(10000);
         Ok(())
@@ -295,13 +357,21 @@ pub fn set_rumble(id: u32, intensity: u32) -> KernelResult<()> {
 /// Get gamepad info.
 pub fn get_gamepad(id: u32) -> KernelResult<Gamepad> {
     with_state(|state| {
-        state.gamepads.iter().find(|g| g.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .gamepads
+            .iter()
+            .find(|g| g.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// List all gamepads.
 pub fn list_gamepads() -> Vec<Gamepad> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.gamepads.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.gamepads.clone())
 }
 
 /// Statistics: (gamepad_count, connected_count, total_connected, total_inputs, ops).
@@ -310,7 +380,13 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
     match guard.as_ref() {
         Some(s) => {
             let connected = s.gamepads.iter().filter(|g| g.connected).count();
-            (s.gamepads.len(), connected, s.total_connected, s.total_inputs, s.ops)
+            (
+                s.gamepads.len(),
+                connected,
+                s.total_connected,
+                s.total_inputs,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0),
     }
@@ -329,8 +405,13 @@ pub fn self_test() {
     crate::serial_println!("  [1/11] empty initial: OK");
 
     // 2: Register Xbox controller.
-    let id1 = register_gamepad("Xbox Wireless", GamepadType::Xbox, ConnectionType::Bluetooth, 85)
-        .expect("register xbox");
+    let id1 = register_gamepad(
+        "Xbox Wireless",
+        GamepadType::Xbox,
+        ConnectionType::Bluetooth,
+        85,
+    )
+    .expect("register xbox");
     assert!(id1 > 0);
     crate::serial_println!("  [2/11] register xbox: OK");
 
@@ -340,8 +421,13 @@ pub fn self_test() {
     crate::serial_println!("  [3/11] player assignment: OK");
 
     // 4: Register second controller.
-    let id2 = register_gamepad("DualSense", GamepadType::PlayStation, ConnectionType::Usb, 255)
-        .expect("register ps");
+    let id2 = register_gamepad(
+        "DualSense",
+        GamepadType::PlayStation,
+        ConnectionType::Usb,
+        255,
+    )
+    .expect("register ps");
     let gp2 = get_gamepad(id2).expect("get2");
     assert_eq!(gp2.player_number, 2);
     crate::serial_println!("  [4/11] second controller: OK");
@@ -354,7 +440,14 @@ pub fn self_test() {
     crate::serial_println!("  [5/11] button input: OK");
 
     // 6: Axis input.
-    let axes = AxisState { left_x: 5000, left_y: -3000, right_x: 0, right_y: 0, left_trigger: 8000, right_trigger: 0 };
+    let axes = AxisState {
+        left_x: 5000,
+        left_y: -3000,
+        right_x: 0,
+        right_y: 0,
+        left_trigger: 8000,
+        right_trigger: 0,
+    };
     update_axes(id1, axes).expect("axes");
     let gp = get_gamepad(id1).expect("get4");
     assert_eq!(gp.axes.left_x, 5000);

@@ -41,8 +41,8 @@ static OWNER: AtomicU64 = AtomicU64::new(NO_OWNER);
 /// Is a process considered dead (gone or zombied) for claim-ownership purposes?
 fn owner_is_dead(pid: u64) -> bool {
     match crate::proc::pcb::state(pid) {
-        None => true,                        // no such process
-        Some(ProcessState::Zombie) => true,  // exited, not yet reaped
+        None => true,                       // no such process
+        Some(ProcessState::Zombie) => true, // exited, not yet reaped
         Some(_) => false,
     }
 }

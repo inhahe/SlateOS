@@ -27,8 +27,8 @@ use alloc::vec::Vec;
 
 use crate::blkdev::SECTOR_SIZE;
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
 use crate::fs::path::{Path, PathBuf};
+use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
 
 // ---------------------------------------------------------------------------
 // FAT type detection
@@ -130,9 +130,7 @@ impl FatBpb {
 
         // Data sectors and cluster count determine the FAT type.
         let data_sectors = total_sectors.saturating_sub(
-            u32::from(reserved_sectors)
-                + u32::from(num_fats) * sectors_per_fat
-                + root_dir_sectors,
+            u32::from(reserved_sectors) + u32::from(num_fats) * sectors_per_fat + root_dir_sectors,
         );
         let _total_clusters = if sectors_per_cluster > 0 {
             data_sectors / u32::from(sectors_per_cluster)
@@ -175,8 +173,16 @@ impl FatBpb {
             sectors_per_fat_16,
             total_sectors_32,
             sectors_per_fat_32,
-            root_cluster: if fat_type == FatType::Fat32 { root_cluster } else { 0 },
-            fsinfo_sector: if fat_type == FatType::Fat32 { fsinfo_sector_raw } else { 0 },
+            root_cluster: if fat_type == FatType::Fat32 {
+                root_cluster
+            } else {
+                0
+            },
+            fsinfo_sector: if fat_type == FatType::Fat32 {
+                fsinfo_sector_raw
+            } else {
+                0
+            },
             volume_label,
         })
     }
@@ -207,8 +213,7 @@ impl FatBpb {
     /// LBA of the root directory (FAT16 only; meaningless for FAT32).
     #[allow(clippy::arithmetic_side_effects)]
     fn root_dir_start_lba(&self) -> u32 {
-        self.fat_start_lba()
-            + u32::from(self.num_fats) * self.sectors_per_fat()
+        self.fat_start_lba() + u32::from(self.num_fats) * self.sectors_per_fat()
     }
 
     /// Number of sectors occupied by the root directory.
@@ -231,8 +236,7 @@ impl FatBpb {
     /// Cluster numbering starts at 2 (clusters 0 and 1 are reserved).
     #[allow(clippy::arithmetic_side_effects)]
     fn cluster_to_lba(&self, cluster: u32) -> u32 {
-        self.data_start_lba()
-            + (cluster - 2) * u32::from(self.sectors_per_cluster)
+        self.data_start_lba() + (cluster - 2) * u32::from(self.sectors_per_cluster)
     }
 
     /// Check if a cluster number is a valid data cluster
@@ -251,11 +255,11 @@ impl FatBpb {
 
 /// Attribute flags for FAT directory entries.
 const ATTR_READ_ONLY: u8 = 0x01;
-const ATTR_HIDDEN: u8    = 0x02;
-const ATTR_SYSTEM: u8    = 0x04;
+const ATTR_HIDDEN: u8 = 0x02;
+const ATTR_SYSTEM: u8 = 0x04;
 const ATTR_VOLUME_ID: u8 = 0x08;
 const ATTR_DIRECTORY: u8 = 0x10;
-const ATTR_ARCHIVE: u8   = 0x20;
+const ATTR_ARCHIVE: u8 = 0x20;
 /// Combination that indicates a long filename entry.
 const ATTR_LONG_NAME: u8 = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID;
 
@@ -306,9 +310,7 @@ fn lfn_checksum(name83: &[u8; 11]) -> u8 {
     let mut sum: u8 = 0;
     for &b in name83.iter() {
         // Rotate right 1 bit, then add.
-        sum = ((sum & 1) << 7)
-            .wrapping_add(sum >> 1)
-            .wrapping_add(b);
+        sum = ((sum & 1) << 7).wrapping_add(sum >> 1).wrapping_add(b);
     }
     sum
 }
@@ -352,9 +354,10 @@ fn assemble_lfn(lfn_parts: &[[u16; LFN_CHARS_PER_ENTRY]]) -> Option<String> {
             // 0x0000 is the null terminator, 0xFFFF is padding.
             if ch == 0x0000 || ch == 0xFFFF {
                 // Convert collected UCS-2 to UTF-8.
-                let s: String = chars.iter().filter_map(|&c| {
-                    char::from_u32(u32::from(c))
-                }).collect();
+                let s: String = chars
+                    .iter()
+                    .filter_map(|&c| char::from_u32(u32::from(c)))
+                    .collect();
                 return if s.is_empty() { None } else { Some(s) };
             }
             chars.push(ch);
@@ -362,9 +365,10 @@ fn assemble_lfn(lfn_parts: &[[u16; LFN_CHARS_PER_ENTRY]]) -> Option<String> {
     }
 
     // No null terminator found — convert what we have.
-    let s: String = chars.iter().filter_map(|&c| {
-        char::from_u32(u32::from(c))
-    }).collect();
+    let s: String = chars
+        .iter()
+        .filter_map(|&c| char::from_u32(u32::from(c)))
+        .collect();
     if s.is_empty() { None } else { Some(s) }
 }
 
@@ -481,9 +485,24 @@ fn generate_basis_name(name: &str) -> [u8; 11] {
     for ch in base_part.bytes() {
         match ch {
             b' ' | b'.' => {} // Skip.
-            b'A'..=b'Z' | b'0'..=b'9' | b'!' | b'#' | b'$' | b'%'
-            | b'&' | b'\'' | b'(' | b')' | b'-' | b'@' | b'^'
-            | b'_' | b'`' | b'{' | b'}' | b'~' => {
+            b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'!'
+            | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'('
+            | b')'
+            | b'-'
+            | b'@'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'{'
+            | b'}'
+            | b'~' => {
                 if base_clean.len() < 6 {
                     base_clean.push(ch);
                 }
@@ -514,11 +533,15 @@ fn generate_basis_name(name: &str) -> [u8; 11] {
     }
 
     // Extension (max 3 chars).
-    let ext_clean: Vec<u8> = ext_part.bytes().filter(|b| {
-        matches!(b, b'A'..=b'Z' | b'0'..=b'9' | b'!' | b'#' | b'$'
+    let ext_clean: Vec<u8> = ext_part
+        .bytes()
+        .filter(|b| {
+            matches!(b, b'A'..=b'Z' | b'0'..=b'9' | b'!' | b'#' | b'$'
             | b'%' | b'&' | b'\'' | b'(' | b')' | b'-' | b'@'
             | b'^' | b'_' | b'`' | b'{' | b'}' | b'~')
-    }).take(3).collect();
+        })
+        .take(3)
+        .collect();
 
     for (i, &b) in ext_clean.iter().enumerate() {
         result[8 + i] = b;
@@ -763,12 +786,12 @@ fn dos_datetime_to_ns(date: u16, time: u16) -> u64 {
         return 0;
     }
 
-    let day   = u64::from(date & 0x1F);
+    let day = u64::from(date & 0x1F);
     let month = u64::from((date >> 5) & 0x0F);
-    let year  = u64::from((date >> 9) & 0x7F).wrapping_add(1980);
+    let year = u64::from((date >> 9) & 0x7F).wrapping_add(1980);
 
     let secs2 = u64::from(time & 0x1F);
-    let mins  = u64::from((time >> 5) & 0x3F);
+    let mins = u64::from((time >> 5) & 0x3F);
     let hours = u64::from((time >> 11) & 0x1F);
 
     // Rough days-since-epoch using the common formula.
@@ -784,8 +807,13 @@ fn dos_datetime_to_ns(date: u16, time: u16) -> u64 {
     let month_days: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut m = 1u64;
     while m < month && m <= 12 {
-        let md = if m == 2 && is_leap(year) { 29 } else {
-            month_days.get(m.wrapping_sub(1) as usize).copied().unwrap_or(30)
+        let md = if m == 2 && is_leap(year) {
+            29
+        } else {
+            month_days
+                .get(m.wrapping_sub(1) as usize)
+                .copied()
+                .unwrap_or(30)
         };
         days = days.wrapping_add(md);
         m = m.wrapping_add(1);
@@ -840,7 +868,9 @@ fn ns_to_dos_datetime(ns: u64) -> (u16, u16) {
     let month_days: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut month = 1u64;
     for m in 0..12u64 {
-        let md = if m == 1 && is_leap(year) { 29 } else {
+        let md = if m == 1 && is_leap(year) {
+            29
+        } else {
             month_days.get(m as usize).copied().unwrap_or(30)
         };
         if days < md {
@@ -858,7 +888,11 @@ fn ns_to_dos_datetime(ns: u64) -> (u16, u16) {
     let mins = (day_secs % 3600) / 60;
     let secs = day_secs % 60;
 
-    let dos_year = if year > 2107 { 127u16 } else { (year - 1980) as u16 };
+    let dos_year = if year > 2107 {
+        127u16
+    } else {
+        (year - 1980) as u16
+    };
     let date: u16 = (dos_year << 9) | ((month as u16) << 5) | (day as u16);
     let time: u16 = ((hours as u16) << 11) | ((mins as u16) << 5) | ((secs as u16) >> 1);
 
@@ -880,14 +914,11 @@ fn rtc_to_dos_datetime(dt: &crate::rtc::DateTime) -> (u16, u16) {
         dt.year - 1980
     };
 
-    let date: u16 = (dos_year << 9)
-        | (u16::from(dt.month) << 5)
-        | u16::from(dt.day);
+    let date: u16 = (dos_year << 9) | (u16::from(dt.month) << 5) | u16::from(dt.day);
 
     // DOS time packs hours (5 bits), minutes (6 bits), seconds/2 (5 bits).
-    let time: u16 = (u16::from(dt.hour) << 11)
-        | (u16::from(dt.minute) << 5)
-        | (u16::from(dt.second) >> 1); // 2-second granularity.
+    let time: u16 =
+        (u16::from(dt.hour) << 11) | (u16::from(dt.minute) << 5) | (u16::from(dt.second) >> 1); // 2-second granularity.
 
     (date, time)
 }
@@ -1050,7 +1081,8 @@ impl FatFs {
         if let Some(fc) = free_clusters {
             crate::serial_println!(
                 "[fat]   FSInfo: {} free clusters, next-free hint: {}",
-                fc, next_free_hint,
+                fc,
+                next_free_hint,
             );
         }
 
@@ -1133,10 +1165,11 @@ impl FatFs {
     /// Read the clean-shutdown bit from FAT entry 1.
     fn read_clean_shutdown_bit(&mut self) -> KernelResult<bool> {
         let bps = u32::from(self.bpb.bytes_per_sector);
-        let fat_sector = self.bpb.fat_start_lba() + match self.bpb.fat_type {
-            FatType::Fat16 => 2 / bps, // entry 1 at offset 2 (2 bytes/entry)
-            FatType::Fat32 => 4 / bps, // entry 1 at offset 4 (4 bytes/entry)
-        };
+        let fat_sector = self.bpb.fat_start_lba()
+            + match self.bpb.fat_type {
+                FatType::Fat16 => 2 / bps, // entry 1 at offset 2 (2 bytes/entry)
+                FatType::Fat32 => 4 / bps, // entry 1 at offset 4 (4 bytes/entry)
+            };
         let offset = match self.bpb.fat_type {
             FatType::Fat16 => (2 % bps) as usize,
             FatType::Fat32 => (4 % bps) as usize,
@@ -1165,14 +1198,13 @@ impl FatFs {
     fn set_clean_shutdown_bit(&mut self, clean: bool) -> KernelResult<()> {
         let bps = u32::from(self.bpb.bytes_per_sector);
         let entry_offset = match self.bpb.fat_type {
-            FatType::Fat16 => 2u32,  // entry 1 at byte offset 2
-            FatType::Fat32 => 4u32,  // entry 1 at byte offset 4
+            FatType::Fat16 => 2u32, // entry 1 at byte offset 2
+            FatType::Fat32 => 4u32, // entry 1 at byte offset 4
         };
 
         // Update all FAT copies.
         for fat_idx in 0..u32::from(self.bpb.num_fats) {
-            let fat_base = self.bpb.fat_start_lba()
-                + fat_idx * self.bpb.sectors_per_fat();
+            let fat_base = self.bpb.fat_start_lba() + fat_idx * self.bpb.sectors_per_fat();
             let sector_num = fat_base + entry_offset / bps;
             let offset = (entry_offset % bps) as usize;
 
@@ -1183,7 +1215,7 @@ impl FatFs {
                 FatType::Fat16 => {
                     let mut val = read_u16(&buf, offset);
                     if clean {
-                        val |= 0x8000;  // set bit 15
+                        val |= 0x8000; // set bit 15
                     } else {
                         val &= !0x8000; // clear bit 15
                     }
@@ -1197,7 +1229,7 @@ impl FatFs {
                 FatType::Fat32 => {
                     let mut val = read_u32(&buf, offset);
                     if clean {
-                        val |= 0x0800_0000;  // set bit 27
+                        val |= 0x0800_0000; // set bit 27
                     } else {
                         val &= !0x0800_0000; // clear bit 27
                     }
@@ -1227,10 +1259,7 @@ impl FatFs {
         let sig2 = read_u32(sector, 484);
         let sig3 = read_u32(sector, 508);
 
-        if sig1 != Self::FSINFO_SIG1
-            || sig2 != Self::FSINFO_SIG2
-            || sig3 != Self::FSINFO_SIG3
-        {
+        if sig1 != Self::FSINFO_SIG1 || sig2 != Self::FSINFO_SIG2 || sig3 != Self::FSINFO_SIG3 {
             return (None, 0);
         }
 
@@ -1357,7 +1386,12 @@ impl FatFs {
     /// Used after mutating operations to ensure stale data isn't served.
     fn dcache_invalidate_prefix(&mut self, prefix: &str) {
         for entry in self.dcache.iter_mut() {
-            if entry.valid && entry.path.to_uppercase().starts_with(&prefix.to_uppercase()) {
+            if entry.valid
+                && entry
+                    .path
+                    .to_uppercase()
+                    .starts_with(&prefix.to_uppercase())
+            {
                 entry.valid = false;
             }
         }
@@ -1384,7 +1418,9 @@ impl FatFs {
     /// Returns `(free_clusters, total_clusters)`.
     #[allow(clippy::arithmetic_side_effects)]
     fn count_clusters(&mut self) -> KernelResult<(u64, u64)> {
-        let data_sectors = self.bpb.total_sectors()
+        let data_sectors = self
+            .bpb
+            .total_sectors()
             .saturating_sub(u32::from(self.bpb.reserved_sectors))
             .saturating_sub(u32::from(self.bpb.num_fats) * self.bpb.sectors_per_fat())
             .saturating_sub(self.bpb.root_dir_sectors());
@@ -1455,7 +1491,9 @@ impl FatFs {
             return Ok(0);
         }
 
-        let data_sectors = self.bpb.total_sectors()
+        let data_sectors = self
+            .bpb
+            .total_sectors()
             .saturating_sub(u32::from(self.bpb.reserved_sectors))
             .saturating_sub(u32::from(self.bpb.num_fats) * self.bpb.sectors_per_fat())
             .saturating_sub(self.bpb.root_dir_sectors());
@@ -1505,17 +1543,23 @@ impl FatFs {
                 }
                 run_len += 1;
             } else if run_len > 0 {
-                total_discarded = total_discarded.saturating_add(
-                    self.discard_cluster_run(run_start, run_len, sectors_per_cluster, sector_size)?,
-                );
+                total_discarded = total_discarded.saturating_add(self.discard_cluster_run(
+                    run_start,
+                    run_len,
+                    sectors_per_cluster,
+                    sector_size,
+                )?);
                 run_len = 0;
             }
         }
         // Flush a trailing run.
         if run_len > 0 {
-            total_discarded = total_discarded.saturating_add(
-                self.discard_cluster_run(run_start, run_len, sectors_per_cluster, sector_size)?,
-            );
+            total_discarded = total_discarded.saturating_add(self.discard_cluster_run(
+                run_start,
+                run_len,
+                sectors_per_cluster,
+                sector_size,
+            )?);
         }
 
         Ok(total_discarded)
@@ -1582,8 +1626,11 @@ impl FatFs {
         let mut lfn_checksum_expected: u8 = 0;
 
         'outer: for sec in 0..root_sectors {
-            let lba = u64::from(root_lba.checked_add(sec)
-                .ok_or(KernelError::InvalidArgument)?);
+            let lba = u64::from(
+                root_lba
+                    .checked_add(sec)
+                    .ok_or(KernelError::InvalidArgument)?,
+            );
 
             self.read_sector(lba, &mut sector_buf)?;
 
@@ -1888,8 +1935,8 @@ impl FatFs {
         let mut data = vec![0u8; file_size];
         let mut cluster = entry.first_cluster;
         let mut bytes_read: usize = 0;
-        let cluster_bytes = usize::from(self.bpb.sectors_per_cluster)
-            * usize::from(self.bpb.bytes_per_sector);
+        let cluster_bytes =
+            usize::from(self.bpb.sectors_per_cluster) * usize::from(self.bpb.bytes_per_sector);
 
         let mut iterations = 0u32;
         let max_iterations = 65536u32; // Prevent infinite loops on corrupt FAT.
@@ -1967,8 +2014,7 @@ impl FatFs {
 
         // Update both FAT copies.
         for fat_idx in 0..u32::from(self.bpb.num_fats) {
-            let fat_base = self.bpb.fat_start_lba()
-                + fat_idx * self.bpb.sectors_per_fat();
+            let fat_base = self.bpb.fat_start_lba() + fat_idx * self.bpb.sectors_per_fat();
             let sector_num = fat_base + fat_offset / bps;
 
             let mut sector_buf = [0u8; SECTOR_SIZE];
@@ -2012,7 +2058,9 @@ impl FatFs {
         }
 
         // Use saturating_sub to avoid underflow panic on corrupted BPBs.
-        let data_sectors = self.bpb.total_sectors()
+        let data_sectors = self
+            .bpb
+            .total_sectors()
             .saturating_sub(u32::from(self.bpb.reserved_sectors))
             .saturating_sub(u32::from(self.bpb.num_fats).saturating_mul(self.bpb.sectors_per_fat()))
             .saturating_sub(self.bpb.root_dir_sectors());
@@ -2040,19 +2088,29 @@ impl FatFs {
         };
 
         // Scan from hint to end, then wrap around from 2 to hint.
-        let found = self.scan_free_cluster(
-            start, max_cluster, fat_start, bps, entry_bytes,
-            &mut sector_buf, &mut last_sector,
-        )?.or(
-            if start > 2 {
+        let found = self
+            .scan_free_cluster(
+                start,
+                max_cluster,
+                fat_start,
+                bps,
+                entry_bytes,
+                &mut sector_buf,
+                &mut last_sector,
+            )?
+            .or(if start > 2 {
                 self.scan_free_cluster(
-                    2, start, fat_start, bps, entry_bytes,
-                    &mut sector_buf, &mut last_sector,
+                    2,
+                    start,
+                    fat_start,
+                    bps,
+                    entry_bytes,
+                    &mut sector_buf,
+                    &mut last_sector,
                 )?
             } else {
                 None
-            }
-        );
+            });
 
         match found {
             Some(cluster) => {
@@ -2156,8 +2214,8 @@ impl FatFs {
             return Ok(0); // Empty file — no clusters needed.
         }
 
-        let cluster_bytes = usize::from(self.bpb.sectors_per_cluster)
-            * usize::from(self.bpb.bytes_per_sector);
+        let cluster_bytes =
+            usize::from(self.bpb.sectors_per_cluster) * usize::from(self.bpb.bytes_per_sector);
         let clusters_needed = data.len().div_ceil(cluster_bytes);
 
         // End-of-chain marker depends on FAT type.
@@ -2266,10 +2324,7 @@ impl FatFs {
     /// within sector).  Otherwise finds the first free or end-of-directory
     /// slot.
     #[allow(clippy::arithmetic_side_effects)]
-    fn find_or_create_dir_slot(
-        &mut self,
-        name83: &[u8; 11],
-    ) -> KernelResult<(u64, usize, bool)> {
+    fn find_or_create_dir_slot(&mut self, name83: &[u8; 11]) -> KernelResult<(u64, usize, bool)> {
         // Returns (sector_lba, byte_offset_in_sector, already_exists).
         let root_lba = self.bpb.root_dir_start_lba();
         let root_sectors = self.bpb.root_dir_sectors();
@@ -2517,7 +2572,12 @@ impl FatFs {
     /// Scans backward from the given slot looking for LFN entries with
     /// matching checksum.  Marks each one as deleted (0xE5).
     #[allow(clippy::arithmetic_side_effects)]
-    fn delete_lfn_entries(&mut self, lba: u64, offset: usize, name83: &[u8; 11]) -> KernelResult<()> {
+    fn delete_lfn_entries(
+        &mut self,
+        lba: u64,
+        offset: usize,
+        name83: &[u8; 11],
+    ) -> KernelResult<()> {
         let checksum = lfn_checksum(name83);
         let entries_per_sector = usize::from(self.bpb.bytes_per_sector) / 32;
         let mut cur_lba = lba;
@@ -2599,11 +2659,8 @@ impl FatFs {
         // Check if we need LFN.
         if !needs_lfn(filename) {
             // Simple 8.3 path.
-            let name83 = Self::to_83_name(filename)
-                .ok_or(KernelError::InvalidArgument)?;
-            let (lba, offset, exists) = self.find_or_create_slot_in(
-                parent_cluster, &name83,
-            )?;
+            let name83 = Self::to_83_name(filename).ok_or(KernelError::InvalidArgument)?;
+            let (lba, offset, exists) = self.find_or_create_slot_in(parent_cluster, &name83)?;
             self.write_dir_entry(lba, offset, &name83, first_cluster, file_size, attr)?;
             return Ok((lba, offset, exists));
         }
@@ -2621,17 +2678,17 @@ impl FatFs {
 
         for tail_num in 1..10000u32 {
             set_basis_tail(&mut basis, tail_num);
-            let has_collision = dir_entries.iter().any(|e| {
-                !e.is_volume_label() && e.name == basis
-            });
+            let has_collision = dir_entries
+                .iter()
+                .any(|e| !e.is_volume_label() && e.name == basis);
             if !has_collision {
                 break;
             }
         }
 
         // Build LFN entries.
-        let lfn_entries = build_lfn_entries(filename, &basis)
-            .ok_or(KernelError::InvalidArgument)?;
+        let lfn_entries =
+            build_lfn_entries(filename, &basis).ok_or(KernelError::InvalidArgument)?;
         let total_slots = lfn_entries.len() + 1; // LFN + short.
 
         // Find contiguous free slots.  We need `total_slots` adjacent
@@ -2657,7 +2714,14 @@ impl FatFs {
         // Write the short entry in the last slot.
         let (short_lba, short_idx) = slots[lfn_entries.len()];
         let short_offset = short_idx * 32;
-        self.write_dir_entry(short_lba, short_offset, &basis, first_cluster, file_size, attr)?;
+        self.write_dir_entry(
+            short_lba,
+            short_offset,
+            &basis,
+            first_cluster,
+            file_size,
+            attr,
+        )?;
 
         // Suppress unused variable warning.
         let _ = entries_per_sector;
@@ -2835,10 +2899,7 @@ impl FileSystem for FatFs {
         let _ = write!(
             s,
             "dcache: {}/{} slots used, {} hits, {} misses",
-            valid,
-            DCACHE_MAX_ENTRIES,
-            self.dcache_hits,
-            self.dcache_misses,
+            valid, DCACHE_MAX_ENTRIES, self.dcache_hits, self.dcache_misses,
         );
         let total = self.dcache_hits + self.dcache_misses;
         if total > 0 {
@@ -2883,7 +2944,11 @@ impl FileSystem for FatFs {
         label_bytes[..copy_len].copy_from_slice(&src[..copy_len]);
 
         // 1. Update the BPB boot sector label field.
-        let label_offset = if self.bpb.fat_type == FatType::Fat32 { 71 } else { 43 };
+        let label_offset = if self.bpb.fat_type == FatType::Fat32 {
+            71
+        } else {
+            43
+        };
         let mut boot_sector = [0u8; SECTOR_SIZE];
         self.read_sector(0, &mut boot_sector)?;
         boot_sector[label_offset..label_offset + 11].copy_from_slice(&label_bytes);
@@ -2954,8 +3019,8 @@ impl FileSystem for FatFs {
     }
 
     fn statvfs(&mut self) -> KernelResult<FsInfo> {
-        let cluster_bytes = u64::from(self.bpb.sectors_per_cluster)
-            * u64::from(self.bpb.bytes_per_sector);
+        let cluster_bytes =
+            u64::from(self.bpb.sectors_per_cluster) * u64::from(self.bpb.bytes_per_sector);
 
         let (free_clusters, total_clusters) = self.count_clusters()?;
 
@@ -3000,9 +3065,7 @@ impl FileSystem for FatFs {
                     self.read_dir_cluster(parent_cluster)?
                 }
             }
-            Some(ref e) if e.is_directory() => {
-                self.read_dir_cluster(e.first_cluster)?
-            }
+            Some(ref e) if e.is_directory() => self.read_dir_cluster(e.first_cluster)?,
             Some(_) => {
                 return Err(KernelError::NotADirectory);
             }
@@ -3037,9 +3100,7 @@ impl FileSystem for FatFs {
                     self.read_dir_cluster(parent_cluster)?
                 }
             }
-            Some(ref e) if e.is_directory() => {
-                self.read_dir_cluster(e.first_cluster)?
-            }
+            Some(ref e) if e.is_directory() => self.read_dir_cluster(e.first_cluster)?,
             Some(_) => {
                 return Err(KernelError::NotADirectory);
             }
@@ -3085,7 +3146,10 @@ impl FileSystem for FatFs {
                     // Use the last path component as the name.  `file_name`
                     // already ignores trailing separators and yields `None`
                     // only for the root, which the branch above handles.
-                    Path::new(path).file_name().unwrap_or(Path::new("/")).to_path_buf()
+                    Path::new(path)
+                        .file_name()
+                        .unwrap_or(Path::new("/"))
+                        .to_path_buf()
                 };
                 Ok(DirEntry {
                     name,
@@ -3170,16 +3234,14 @@ impl FileSystem for FatFs {
                     nlinks: 1,
                     // Allocated sectors: file occupies whole clusters.
                     blocks: {
-                        let csize = u64::from(self.bpb.sectors_per_cluster)
-                            .saturating_mul(512);
+                        let csize = u64::from(self.bpb.sectors_per_cluster).saturating_mul(512);
                         if e.file_size == 0 || e.first_cluster < 2 || csize == 0 {
                             0
                         } else {
                             let clusters = (u64::from(e.file_size)
-                                .saturating_add(csize.saturating_sub(1))) / csize;
-                            clusters.saturating_mul(
-                                u64::from(self.bpb.sectors_per_cluster)
-                            )
+                                .saturating_add(csize.saturating_sub(1)))
+                                / csize;
+                            clusters.saturating_mul(u64::from(self.bpb.sectors_per_cluster))
                         }
                     },
                     xattrs: Vec::new(),
@@ -3210,9 +3272,7 @@ impl FileSystem for FatFs {
 
         // Find the on-disk location of the 8.3 entry.
         let name83 = entry.name;
-        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(
-            parent_cluster, &name83,
-        )?;
+        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(parent_cluster, &name83)?;
         if !exists {
             return Err(KernelError::NotFound);
         }
@@ -3221,7 +3281,8 @@ impl FileSystem for FatFs {
         let mut sector_buf = [0u8; SECTOR_SIZE];
         self.read_sector(dir_lba, &mut sector_buf)?;
 
-        let ent = sector_buf.get_mut(dir_offset..dir_offset + 32)
+        let ent = sector_buf
+            .get_mut(dir_offset..dir_offset + 32)
             .ok_or(KernelError::IoError)?;
 
         // Update modification time (bytes 22-25: write_time + write_date).
@@ -3277,8 +3338,8 @@ impl FileSystem for FatFs {
         let (parent_path, filename) = split_path(path);
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;
 
-        let cluster_bytes = u64::from(self.bpb.sectors_per_cluster)
-            * u64::from(self.bpb.bytes_per_sector);
+        let cluster_bytes =
+            u64::from(self.bpb.sectors_per_cluster) * u64::from(self.bpb.bytes_per_sector);
         if cluster_bytes == 0 {
             return Err(KernelError::IoError);
         }
@@ -3300,9 +3361,7 @@ impl FileSystem for FatFs {
             name83 = entry.name;
             first_cluster = entry.first_cluster;
 
-            let (lba, off, found) = self.find_or_create_slot_in(
-                parent_cluster, &name83,
-            )?;
+            let (lba, off, found) = self.find_or_create_slot_in(parent_cluster, &name83)?;
             dir_lba = lba;
             dir_offset = off;
             exists = found;
@@ -3310,7 +3369,9 @@ impl FileSystem for FatFs {
             // File doesn't exist — will create it.
             first_cluster = 0;
             #[allow(unused_assignments)]
-            { name83 = [0u8; 11]; }
+            {
+                name83 = [0u8; 11];
+            }
             dir_lba = 0;
             dir_offset = 0;
             exists = false;
@@ -3364,10 +3425,7 @@ impl FileSystem for FatFs {
         // Update the directory entry's first cluster (size stays the same).
         if !exists {
             // Create a new zero-length entry with the allocated chain (LFN-aware).
-            self.create_entry_with_lfn(
-                parent_cluster, filename,
-                first_cluster, 0, ATTR_ARCHIVE,
-            )?;
+            self.create_entry_with_lfn(parent_cluster, filename, first_cluster, 0, ATTR_ARCHIVE)?;
         } else {
             // Update the existing entry's first cluster if it changed
             // (only if the file was previously empty).
@@ -3387,7 +3445,9 @@ impl FileSystem for FatFs {
 
         crate::serial_println!(
             "[fat] fallocate '{}': {} clusters allocated (needed {})",
-            path, extra, needed_clusters,
+            path,
+            extra,
+            needed_clusters,
         );
 
         Ok(())
@@ -3415,9 +3475,9 @@ impl FileSystem for FatFs {
             } else {
                 self.read_dir_cluster(parent_cluster)?
             };
-            entries.into_iter().find(|e| {
-                !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(filename)
-            })
+            entries
+                .into_iter()
+                .find(|e| !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(filename))
         };
 
         if let Some(existing_entry) = existing {
@@ -3436,17 +3496,21 @@ impl FileSystem for FatFs {
 
             // Find the existing short entry's slot and update it.
             let name83 = existing_entry.name;
-            let (dir_lba, dir_offset, _) = self.find_or_create_slot_in(
-                parent_cluster, &name83,
-            )?;
+            let (dir_lba, dir_offset, _) = self.find_or_create_slot_in(parent_cluster, &name83)?;
             self.write_dir_entry(
-                dir_lba, dir_offset, &name83,
-                first_cluster, data.len() as u32, 0x20,
+                dir_lba,
+                dir_offset,
+                &name83,
+                first_cluster,
+                data.len() as u32,
+                0x20,
             )?;
 
             crate::serial_println!(
                 "[fat] Overwrote '{}' ({} bytes, cluster {})",
-                path, data.len(), first_cluster
+                path,
+                data.len(),
+                first_cluster
             );
         } else {
             // New file — write data first, then create entry.
@@ -3454,13 +3518,18 @@ impl FileSystem for FatFs {
 
             // Create entry with LFN if needed.
             self.create_entry_with_lfn(
-                parent_cluster, filename,
-                first_cluster, data.len() as u32, 0x20,
+                parent_cluster,
+                filename,
+                first_cluster,
+                data.len() as u32,
+                0x20,
             )?;
 
             crate::serial_println!(
                 "[fat] Created '{}' ({} bytes, cluster {})",
-                path, data.len(), first_cluster
+                path,
+                data.len(),
+                first_cluster
             );
         }
 
@@ -3488,9 +3557,7 @@ impl FileSystem for FatFs {
 
         // Find the short entry slot using the 8.3 name.
         let name83 = entry.name;
-        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(
-            parent_cluster, &name83,
-        )?;
+        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(parent_cluster, &name83)?;
 
         if !exists {
             return Err(KernelError::NotFound);
@@ -3536,9 +3603,7 @@ impl FileSystem for FatFs {
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;
 
         // Find the short entry's on-disk location.
-        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(
-            parent_cluster, &name83,
-        )?;
+        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(parent_cluster, &name83)?;
 
         if !exists {
             return Err(KernelError::NotFound);
@@ -3579,9 +3644,9 @@ impl FileSystem for FatFs {
         } else {
             self.read_dir_cluster(parent_cluster)?
         };
-        let already_exists = dir_entries.iter().any(|e| {
-            !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(dirname)
-        });
+        let already_exists = dir_entries
+            .iter()
+            .any(|e| !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(dirname));
         if already_exists {
             return Err(KernelError::AlreadyExists);
         }
@@ -3640,7 +3705,8 @@ impl FileSystem for FatFs {
 
         crate::serial_println!(
             "[fat] Created directory '{}' (cluster {})",
-            path, new_cluster
+            path,
+            new_cluster
         );
 
         // Invalidate dcache: new directory entry added.
@@ -3695,9 +3761,10 @@ impl FileSystem for FatFs {
         } else {
             self.read_dir_cluster(to_parent_cluster)?
         };
-        if let Some(dest_entry) = dest_entries.iter().find(|e| {
-            !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(to_filename)
-        }) {
+        if let Some(dest_entry) = dest_entries
+            .iter()
+            .find(|e| !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(to_filename))
+        {
             if dest_entry.is_directory() {
                 // Can't replace a directory via rename (POSIX: EISDIR if
                 // source is a file and dest is a directory).
@@ -3777,8 +3844,8 @@ impl FileSystem for FatFs {
             return Ok(Vec::new());
         }
 
-        let cluster_bytes = usize::from(self.bpb.sectors_per_cluster)
-            * usize::from(self.bpb.bytes_per_sector);
+        let cluster_bytes =
+            usize::from(self.bpb.sectors_per_cluster) * usize::from(self.bpb.bytes_per_sector);
 
         // Which cluster in the chain contains `offset`?
         let target_cluster_idx = offset as usize / cluster_bytes;
@@ -3886,9 +3953,7 @@ impl FileSystem for FatFs {
             name83 = entry.name;
             old_cluster = entry.first_cluster;
             old_size = entry.file_size;
-            let (lba, off, found) = self.find_or_create_slot_in(
-                parent_cluster, &name83,
-            )?;
+            let (lba, off, found) = self.find_or_create_slot_in(parent_cluster, &name83)?;
             dir_lba = lba;
             dir_offset = off;
             exists = found;
@@ -3910,11 +3975,13 @@ impl FileSystem for FatFs {
             return Err(KernelError::InvalidArgument);
         }
 
-        let cluster_bytes = usize::from(self.bpb.sectors_per_cluster)
-            * usize::from(self.bpb.bytes_per_sector);
+        let cluster_bytes =
+            usize::from(self.bpb.sectors_per_cluster) * usize::from(self.bpb.bytes_per_sector);
 
         // Calculate how many clusters are needed for the new size.
-        let clusters_needed = if new_size == 0 { 0 } else {
+        let clusters_needed = if new_size == 0 {
+            0
+        } else {
             new_size.div_ceil(cluster_bytes)
         };
 
@@ -4002,7 +4069,8 @@ impl FileSystem for FatFs {
                 let avail = SECTOR_SIZE - sector_offset;
                 let to_write = (data.len() - written).min(avail);
                 if let Some(src) = data.get(written..written + to_write) {
-                    if let Some(dest) = sector_buf.get_mut(sector_offset..sector_offset + to_write) {
+                    if let Some(dest) = sector_buf.get_mut(sector_offset..sector_offset + to_write)
+                    {
                         dest.copy_from_slice(src);
                     }
                 }
@@ -4022,13 +4090,20 @@ impl FileSystem for FatFs {
         if !exists {
             // New file — create with LFN support.
             self.create_entry_with_lfn(
-                parent_cluster, filename,
-                first_cluster, new_size as u32, ATTR_ARCHIVE,
+                parent_cluster,
+                filename,
+                first_cluster,
+                new_size as u32,
+                ATTR_ARCHIVE,
             )?;
         } else {
             self.write_dir_entry(
-                dir_lba, dir_offset, &name83,
-                first_cluster, new_size as u32, ATTR_ARCHIVE,
+                dir_lba,
+                dir_offset,
+                &name83,
+                first_cluster,
+                new_size as u32,
+                ATTR_ARCHIVE,
             )?;
         }
 
@@ -4063,8 +4138,7 @@ impl FileSystem for FatFs {
         }
 
         let name83 = entry.name;
-        let (dir_lba, dir_offset, exists) =
-            self.find_or_create_slot_in(parent_cluster, &name83)?;
+        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(parent_cluster, &name83)?;
         if !exists {
             return Err(KernelError::NotFound);
         }
@@ -4082,14 +4156,16 @@ impl FileSystem for FatFs {
         let old_size = read_u32(&sector_buf, dir_offset + 28);
 
         let new_size = size as u32;
-        let cluster_bytes = usize::from(self.bpb.sectors_per_cluster)
-            * usize::from(self.bpb.bytes_per_sector);
+        let cluster_bytes =
+            usize::from(self.bpb.sectors_per_cluster) * usize::from(self.bpb.bytes_per_sector);
         let eoc = match self.bpb.fat_type {
             FatType::Fat16 => 0xFFFF,
             FatType::Fat32 => 0x0FFF_FFFF,
         };
 
-        let clusters_needed = if new_size == 0 { 0 } else {
+        let clusters_needed = if new_size == 0 {
+            0
+        } else {
             (new_size as usize).div_ceil(cluster_bytes)
         };
 
@@ -4132,7 +4208,11 @@ impl FileSystem for FatFs {
             }
         } else if clusters_needed > chain.len() {
             // Grow: allocate more clusters, zero-fill.
-            let mut last = if chain.is_empty() { 0u32 } else { chain[chain.len() - 1] };
+            let mut last = if chain.is_empty() {
+                0u32
+            } else {
+                chain[chain.len() - 1]
+            };
             let extra = clusters_needed - chain.len();
             for _ in 0..extra {
                 let new_c = self.alloc_cluster()?;
@@ -4189,10 +4269,7 @@ impl FileSystem for FatFs {
         }
 
         // Update directory entry.
-        self.write_dir_entry(
-            dir_lba, dir_offset, &name83,
-            first_cluster, new_size, attr,
-        )?;
+        self.write_dir_entry(dir_lba, dir_offset, &name83, first_cluster, new_size, attr)?;
 
         // Invalidate dcache: file metadata (size, cluster chain) changed.
         self.dcache_invalidate_prefix(path);
@@ -4224,8 +4301,7 @@ impl FileSystem for FatFs {
 
         // Find the on-disk location of the 8.3 entry.
         let name83 = entry.name;
-        let (dir_lba, dir_offset, exists) =
-            self.find_or_create_slot_in(parent_cluster, &name83)?;
+        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(parent_cluster, &name83)?;
         if !exists {
             return Err(KernelError::NotFound);
         }
@@ -4234,10 +4310,7 @@ impl FileSystem for FatFs {
         let mut sector_buf = [0u8; SECTOR_SIZE];
         self.read_sector(dir_lba, &mut sector_buf)?;
 
-        let old_attr = sector_buf
-            .get(dir_offset + 11)
-            .copied()
-            .unwrap_or(0);
+        let old_attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
 
         // Preserve structural flags, clear user-controllable bits, then
         // set them based on the requested VFS attributes.
@@ -4266,7 +4339,9 @@ impl FileSystem for FatFs {
 
         crate::serial_println!(
             "[fat] set_attributes '{}': 0x{:02X} → 0x{:02X}",
-            path, old_attr, new_attr,
+            path,
+            old_attr,
+            new_attr,
         );
 
         Ok(())
@@ -4324,7 +4399,9 @@ pub fn self_test() -> KernelResult<()> {
         };
         crate::serial_println!(
             "[fat]     {} {:12} {} bytes",
-            type_str, entry.name.display(), entry.size
+            type_str,
+            entry.name.display(),
+            entry.size
         );
     }
 
@@ -4394,10 +4471,9 @@ pub fn self_test() -> KernelResult<()> {
 
     // Verify the directory appears in root listing.
     let entries = crate::fs::Vfs::readdir("/")?;
-    let has_testdir = entries.iter().any(|e| {
-        e.name.eq_ignore_ascii_case("TESTDIR")
-            && e.entry_type == EntryType::Directory
-    });
+    let has_testdir = entries
+        .iter()
+        .any(|e| e.name.eq_ignore_ascii_case("TESTDIR") && e.entry_type == EntryType::Directory);
     if !has_testdir {
         crate::serial_println!("[fat]   mkdir FAILED: TESTDIR not in root listing");
         return Err(KernelError::IoError);
@@ -4418,14 +4494,17 @@ pub fn self_test() -> KernelResult<()> {
         );
         return Err(KernelError::IoError);
     }
-    crate::serial_println!("[fat]   Subdir write+read verified: {} bytes", sub_data.len());
+    crate::serial_println!(
+        "[fat]   Subdir write+read verified: {} bytes",
+        sub_data.len()
+    );
 
     // List subdirectory contents.
     let sub_entries = crate::fs::Vfs::readdir("/TESTDIR")?;
     crate::serial_println!("[fat]   TESTDIR has {} entries", sub_entries.len());
-    let has_sub_txt = sub_entries.iter().any(|e| {
-        e.name.eq_ignore_ascii_case("SUB.TXT")
-    });
+    let has_sub_txt = sub_entries
+        .iter()
+        .any(|e| e.name.eq_ignore_ascii_case("SUB.TXT"));
     if !has_sub_txt {
         crate::serial_println!("[fat]   Subdir listing FAILED: SUB.TXT not found");
         return Err(KernelError::IoError);
@@ -4469,7 +4548,8 @@ pub fn self_test() -> KernelResult<()> {
     if dos_epoch_ns != expected_dos_epoch_ns {
         crate::serial_println!(
             "[fat]   dos_datetime_to_ns FAILED: DOS epoch = {}, expected {}",
-            dos_epoch_ns, expected_dos_epoch_ns
+            dos_epoch_ns,
+            expected_dos_epoch_ns
         );
         return Err(KernelError::IoError);
     }
@@ -4485,7 +4565,8 @@ pub fn self_test() -> KernelResult<()> {
     if y2k_ns != expected_y2k_ns {
         crate::serial_println!(
             "[fat]   dos_datetime_to_ns FAILED: 2000-06-15 14:30 = {}, expected {}",
-            y2k_ns, expected_y2k_ns
+            y2k_ns,
+            expected_y2k_ns
         );
         return Err(KernelError::IoError);
     }
@@ -4504,7 +4585,8 @@ pub fn self_test() -> KernelResult<()> {
     if meta.size != meta_test_data.len() as u64 {
         crate::serial_println!(
             "[fat]   metadata FAILED: size = {}, expected {}",
-            meta.size, meta_test_data.len()
+            meta.size,
+            meta_test_data.len()
         );
         crate::fs::Vfs::remove("/METATST.TXT")?;
         return Err(KernelError::IoError);
@@ -4516,7 +4598,11 @@ pub fn self_test() -> KernelResult<()> {
     }
     // FAT has no ownership — uid/gid should be 0.
     if meta.uid != 0 || meta.gid != 0 {
-        crate::serial_println!("[fat]   metadata FAILED: uid={}, gid={}", meta.uid, meta.gid);
+        crate::serial_println!(
+            "[fat]   metadata FAILED: uid={}, gid={}",
+            meta.uid,
+            meta.gid
+        );
         crate::fs::Vfs::remove("/METATST.TXT")?;
         return Err(KernelError::IoError);
     }
@@ -4543,7 +4629,10 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!(
         "[fat]   metadata OK: size={}, type=File, created_ns={}, modified_ns={}, accessed_ns={}",
-        meta.size, meta.created_ns, meta.modified_ns, meta.accessed_ns
+        meta.size,
+        meta.created_ns,
+        meta.modified_ns,
+        meta.accessed_ns
     );
 
     // Test round-trip: rtc_to_dos_datetime → dos_datetime_to_ns should
@@ -4553,13 +4642,14 @@ pub fn self_test() -> KernelResult<()> {
     let rt_ns = dos_datetime_to_ns(rt_date, rt_time);
     crate::serial_println!(
         "[fat]   RTC round-trip: {} → date=0x{:04X} time=0x{:04X} → {} ns",
-        dt, rt_date, rt_time, rt_ns
+        dt,
+        rt_date,
+        rt_time,
+        rt_ns
     );
     // Sanity check: the round-tripped timestamp should be >= DOS epoch.
     if rt_ns < dos_epoch_ns {
-        crate::serial_println!(
-            "[fat]   RTC round-trip WARNING: result before DOS epoch"
-        );
+        crate::serial_println!("[fat]   RTC round-trip WARNING: result before DOS epoch");
     }
 
     // Test directory metadata.
@@ -4610,9 +4700,7 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::set_attributes("/ATTRTST.TXT", new_attrs)?;
 
     let m2 = crate::fs::Vfs::metadata("/ATTRTST.TXT")?;
-    if !m2.attributes.contains(FileAttr::IMMUTABLE)
-        || !m2.attributes.contains(FileAttr::HIDDEN)
-    {
+    if !m2.attributes.contains(FileAttr::IMMUTABLE) || !m2.attributes.contains(FileAttr::HIDDEN) {
         crate::serial_println!(
             "[fat]   set_attributes FAILED: expected IMMUTABLE|HIDDEN, got {:?}",
             m2.attributes
@@ -4644,7 +4732,10 @@ pub fn self_test() -> KernelResult<()> {
             crate::serial_println!("[fat]   set_permissions correctly returns NotSupported");
         }
         other => {
-            crate::serial_println!("[fat]   set_permissions FAILED: expected NotSupported, got {:?}", other);
+            crate::serial_println!(
+                "[fat]   set_permissions FAILED: expected NotSupported, got {:?}",
+                other
+            );
             crate::fs::Vfs::remove("/ATTRTST.TXT")?;
             return Err(KernelError::IoError);
         }
@@ -4654,7 +4745,10 @@ pub fn self_test() -> KernelResult<()> {
             crate::serial_println!("[fat]   set_owner correctly returns NotSupported");
         }
         other => {
-            crate::serial_println!("[fat]   set_owner FAILED: expected NotSupported, got {:?}", other);
+            crate::serial_println!(
+                "[fat]   set_owner FAILED: expected NotSupported, got {:?}",
+                other
+            );
             crate::fs::Vfs::remove("/ATTRTST.TXT")?;
             return Err(KernelError::IoError);
         }
@@ -4677,7 +4771,10 @@ pub fn self_test() -> KernelResult<()> {
         if rt_date != orig_date || rt_time != orig_time {
             crate::serial_println!(
                 "[fat]   ns_to_dos_datetime round-trip FAILED: ({:#06X},{:#06X}) → ns → ({:#06X},{:#06X})",
-                orig_date, orig_time, rt_date, rt_time
+                orig_date,
+                orig_time,
+                rt_date,
+                rt_time
             );
             return Err(KernelError::IoError);
         }
@@ -4770,10 +4867,10 @@ pub fn self_test() -> KernelResult<()> {
     // Unit test: needs_lfn
     assert!(!needs_lfn("HELLO.TXT"));
     assert!(!needs_lfn("FILE"));
-    assert!(needs_lfn("Hello.txt"));      // lowercase
+    assert!(needs_lfn("Hello.txt")); // lowercase
     assert!(needs_lfn("long filename.txt")); // spaces + lowercase
-    assert!(needs_lfn("document.docx"));   // lowercase
-    assert!(needs_lfn("a.b.c"));           // multiple dots
+    assert!(needs_lfn("document.docx")); // lowercase
+    assert!(needs_lfn("a.b.c")); // multiple dots
     assert!(needs_lfn("verylongbasename.txt")); // base > 8
     crate::serial_println!("[fat]   needs_lfn checks passed");
 
@@ -4787,7 +4884,8 @@ pub fn self_test() -> KernelResult<()> {
         if let Some(lfn_entries) = build_lfn_entries(test_name, &test83) {
             crate::serial_println!(
                 "[fat]   LFN encode/build: '{}' → {} LFN entries",
-                test_name, lfn_entries.len()
+                test_name,
+                lfn_entries.len()
             );
 
             // Verify checksum in entries matches.
@@ -4797,7 +4895,8 @@ pub fn self_test() -> KernelResult<()> {
                 if entry_cksum != expected_cksum {
                     crate::serial_println!(
                         "[fat]   LFN checksum FAILED: entry has 0x{:02X}, expected 0x{:02X}",
-                        entry_cksum, expected_cksum
+                        entry_cksum,
+                        expected_cksum
                     );
                     return Err(KernelError::IoError);
                 }
@@ -4819,21 +4918,23 @@ pub fn self_test() -> KernelResult<()> {
     if lfn_readback.as_slice() != lfn_test_data.as_slice() {
         crate::serial_println!(
             "[fat]   LFN write FAILED: expected {} bytes, got {}",
-            lfn_test_data.len(), lfn_readback.len()
+            lfn_test_data.len(),
+            lfn_readback.len()
         );
         let _ = crate::fs::Vfs::remove(lfn_path);
         return Err(KernelError::IoError);
     }
     crate::serial_println!(
         "[fat]   LFN write+read verified: '{}' ({} bytes)",
-        lfn_path, lfn_readback.len()
+        lfn_path,
+        lfn_readback.len()
     );
 
     // Verify the long name appears in directory listing.
     let root_entries = crate::fs::Vfs::readdir("/")?;
-    let has_lfn = root_entries.iter().any(|e| {
-        e.name.as_path() == Path::new("Hello World.txt")
-    });
+    let has_lfn = root_entries
+        .iter()
+        .any(|e| e.name.as_path() == Path::new("Hello World.txt"));
     if !has_lfn {
         crate::serial_println!("[fat]   LFN listing FAILED: 'Hello World.txt' not in root");
         // Check if it appears under the short name instead.
@@ -4908,7 +5009,9 @@ pub fn self_test() -> KernelResult<()> {
 
     // Verify the directory is gone.
     let root_after = crate::fs::Vfs::readdir("/")?;
-    let still_has = root_after.iter().any(|e| e.name.as_path() == Path::new("My Documents"));
+    let still_has = root_after
+        .iter()
+        .any(|e| e.name.as_path() == Path::new("My Documents"));
     if still_has {
         crate::serial_println!("[fat]   LFN rmdir FAILED: 'My Documents' still in root");
         return Err(KernelError::IoError);
@@ -4948,13 +5051,19 @@ pub fn self_test() -> KernelResult<()> {
 
     // Verify the long destination name appears in directory listing.
     let root_entries = crate::fs::Vfs::readdir("/")?;
-    let has_renamed = root_entries.iter().any(|e| e.name.as_path() == Path::new("renamed file.txt"));
+    let has_renamed = root_entries
+        .iter()
+        .any(|e| e.name.as_path() == Path::new("renamed file.txt"));
     if !has_renamed {
         crate::serial_println!("[fat]   LFN rename FAILED: 'renamed file.txt' not in root");
         let _ = crate::fs::Vfs::remove(lfn_dst);
         return Err(KernelError::IoError);
     }
-    crate::serial_println!("[fat]   LFN rename verified: '{}' -> '{}'", lfn_src, lfn_dst);
+    crate::serial_println!(
+        "[fat]   LFN rename verified: '{}' -> '{}'",
+        lfn_src,
+        lfn_dst
+    );
 
     // --- rename overwrite test (POSIX semantics) ---
     // Rename should replace an existing destination file.
@@ -5003,7 +5112,8 @@ pub fn self_test() -> KernelResult<()> {
     if wa_read.as_slice() != expected_wa.as_slice() {
         crate::serial_println!(
             "[fat]   LFN write_at FAILED: expected {:?}, got {:?}",
-            expected_wa, wa_read.as_slice()
+            expected_wa,
+            wa_read.as_slice()
         );
         let _ = crate::fs::Vfs::remove(lfn_wa_path);
         return Err(KernelError::IoError);
@@ -5036,7 +5146,10 @@ pub fn self_test() -> KernelResult<()> {
         let _ = crate::fs::Vfs::remove(lfn_trunc_path);
         return Err(KernelError::IoError);
     }
-    crate::serial_println!("[fat]   LFN truncate verified: {} -> 12 bytes", trunc_data.len());
+    crate::serial_println!(
+        "[fat]   LFN truncate verified: {} -> 12 bytes",
+        trunc_data.len()
+    );
 
     crate::fs::Vfs::remove(lfn_trunc_path)?;
 
@@ -5071,7 +5184,9 @@ pub fn self_test() -> KernelResult<()> {
 
     // Verify long name in listing.
     let root_entries = crate::fs::Vfs::readdir("/")?;
-    let has_falloc = root_entries.iter().any(|e| e.name.as_path() == Path::new("preallocated file.bin"));
+    let has_falloc = root_entries
+        .iter()
+        .any(|e| e.name.as_path() == Path::new("preallocated file.bin"));
     if !has_falloc {
         crate::serial_println!("[fat]   LFN fallocate FAILED: file not in root listing");
         let _ = crate::fs::Vfs::remove(lfn_falloc_path);
@@ -5099,7 +5214,7 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::write_file("/TARTEST/sub/deep.txt", b"Nested file content.\n")?;
 
         // Build tar archive in memory using the fs::tar module.
-        use crate::fs::tar::{self, TarWriteEntry, EntryKind};
+        use crate::fs::tar::{self, EntryKind, TarWriteEntry};
 
         let hello_data = b"Hello from tar test!\n";
         let deep_data = b"Nested file content.\n";
@@ -5110,28 +5225,40 @@ pub fn self_test() -> KernelResult<()> {
                 data: alloc::vec::Vec::new(),
                 kind: EntryKind::Directory,
                 link_target: crate::fs::path::PathBuf::new(),
-                mode: 0o755, uid: 0, gid: 0, mtime: 0,
+                mode: 0o755,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
             },
             TarWriteEntry {
                 name: crate::fs::path::PathBuf::from("TARTEST/hello.txt"),
                 data: hello_data.to_vec(),
                 kind: EntryKind::File,
                 link_target: crate::fs::path::PathBuf::new(),
-                mode: 0o644, uid: 0, gid: 0, mtime: 0,
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
             },
             TarWriteEntry {
                 name: crate::fs::path::PathBuf::from("TARTEST/sub/"),
                 data: alloc::vec::Vec::new(),
                 kind: EntryKind::Directory,
                 link_target: crate::fs::path::PathBuf::new(),
-                mode: 0o755, uid: 0, gid: 0, mtime: 0,
+                mode: 0o755,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
             },
             TarWriteEntry {
                 name: crate::fs::path::PathBuf::from("TARTEST/sub/deep.txt"),
                 data: deep_data.to_vec(),
                 kind: EntryKind::File,
                 link_target: crate::fs::path::PathBuf::new(),
-                mode: 0o644, uid: 0, gid: 0, mtime: 0,
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
             },
         ];
         let file_count = entries.len() as u32;
@@ -5141,7 +5268,8 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::write_file("/test.tar", &archive)?;
         crate::serial_println!(
             "[fat]     Created test.tar: {} entries, {} bytes",
-            file_count, archive.len()
+            file_count,
+            archive.len()
         );
 
         // Verify the archive can be parsed.
@@ -5170,22 +5298,22 @@ pub fn self_test() -> KernelResult<()> {
             };
             crate::serial_println!(
                 "[fat]     tar entry: '{}' type={} size={}",
-                pe.name.display(), type_ch, pe.size
+                pe.name.display(),
+                type_ch,
+                pe.size
             );
         }
 
         if parsed_count != file_count {
             crate::serial_println!(
                 "[fat]   tar FAILED: parsed {} entries, expected {}",
-                parsed_count, file_count
+                parsed_count,
+                file_count
             );
             let _ = crate::fs::Vfs::remove("/test.tar");
             return Err(KernelError::IoError);
         }
-        crate::serial_println!(
-            "[fat]   tar round-trip verified: {} entries",
-            parsed_count
-        );
+        crate::serial_println!("[fat]   tar round-trip verified: {} entries", parsed_count);
 
         // Clean up.
         let _ = crate::fs::Vfs::remove("/test.tar");
@@ -5214,8 +5342,11 @@ pub fn self_test() -> KernelResult<()> {
             }
             crate::serial_println!(
                 "[fat]     fsck summary: {} files, {} dirs, {} errors, {} lost, {} cross-linked",
-                report.files, report.dirs, report.errors,
-                report.lost_clusters, report.cross_linked
+                report.files,
+                report.dirs,
+                report.errors,
+                report.lost_clusters,
+                report.cross_linked
             );
             // A clean volume should have no cross-linked clusters.
             // Lost clusters may exist from previous incomplete operations,
@@ -5340,7 +5471,9 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
     // Get device info.
     let info = {
         let devices = blkdev::list_devices_full();
-        devices.into_iter().find(|d| d.name == device)
+        devices
+            .into_iter()
+            .find(|d| d.name == device)
             .ok_or(KernelError::NoSuchDevice)?
     };
 
@@ -5365,11 +5498,17 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
     };
 
     // Choose sectors per cluster (power of 2, target cluster_size ≤ 32K).
-    let spc: u8 = if total_mb <= 8 { 2 }
-        else if total_mb <= 32 { 4 }
-        else if total_mb <= 256 { 8 }
-        else if total_mb <= 2048 { 16 }
-        else { 32 };
+    let spc: u8 = if total_mb <= 8 {
+        2
+    } else if total_mb <= 32 {
+        4
+    } else if total_mb <= 256 {
+        8
+    } else if total_mb <= 2048 {
+        16
+    } else {
+        32
+    };
 
     let num_fats: u8 = 2;
     let reserved_sectors: u16 = match fat_type {
@@ -5404,7 +5543,7 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
     let spf = {
         let max_clusters = data_sectors_available / u32::from(spc);
         let needed_entries = max_clusters + 2; // +2 for reserved entries 0 and 1
-        
+
         needed_entries.div_ceil(entries_per_fat_sector)
     };
 
@@ -5449,16 +5588,24 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
     }
 
     boot[21] = 0xF8; // Media type: hard disk.
-    write_u16_le(&mut boot, 22, if fat_type == FatType::Fat16 { spf as u16 } else { 0 });
-    write_u16_le(&mut boot, 24, 63);   // Sectors per track (dummy).
-    write_u16_le(&mut boot, 26, 255);  // Number of heads (dummy).
-    write_u32_le(&mut boot, 28, 0);    // Hidden sectors.
+    write_u16_le(
+        &mut boot,
+        22,
+        if fat_type == FatType::Fat16 {
+            spf as u16
+        } else {
+            0
+        },
+    );
+    write_u16_le(&mut boot, 24, 63); // Sectors per track (dummy).
+    write_u16_le(&mut boot, 26, 255); // Number of heads (dummy).
+    write_u32_le(&mut boot, 28, 0); // Hidden sectors.
 
     match fat_type {
         FatType::Fat16 => {
             // Extended boot record (FAT16, offset 36-61).
             boot[36] = 0x80; // Drive number.
-            boot[37] = 0;    // Reserved.
+            boot[37] = 0; // Reserved.
             boot[38] = 0x29; // Extended boot signature.
             // Volume serial number (use a simple counter).
             write_u32_le(&mut boot, 39, 0x1234_5678);
@@ -5468,14 +5615,14 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
         FatType::Fat32 => {
             // FAT32-specific BPB (offset 36-89).
             write_u32_le(&mut boot, 36, spf); // Sectors per FAT (32-bit).
-            write_u16_le(&mut boot, 40, 0);   // Flags.
-            write_u16_le(&mut boot, 42, 0);   // Version.
-            write_u32_le(&mut boot, 44, 2);   // Root directory cluster (always 2).
-            write_u16_le(&mut boot, 48, 1);   // FSInfo sector.
-            write_u16_le(&mut boot, 50, 6);   // Backup boot sector.
+            write_u16_le(&mut boot, 40, 0); // Flags.
+            write_u16_le(&mut boot, 42, 0); // Version.
+            write_u32_le(&mut boot, 44, 2); // Root directory cluster (always 2).
+            write_u16_le(&mut boot, 48, 1); // FSInfo sector.
+            write_u16_le(&mut boot, 50, 6); // Backup boot sector.
             // Bytes 52-63: reserved (already zero).
             boot[64] = 0x80; // Drive number.
-            boot[65] = 0;    // Reserved.
+            boot[65] = 0; // Reserved.
             boot[66] = 0x29; // Extended boot signature.
             write_u32_le(&mut boot, 67, 0x1234_5678); // Serial.
             boot[71..82].copy_from_slice(&vol_label);
@@ -5506,8 +5653,8 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
 
         // FSInfo sector.
         let mut fsinfo = [0u8; SECTOR_SIZE];
-        write_u32_le(&mut fsinfo, 0, 0x4161_5252);   // Signature 1.
-        write_u32_le(&mut fsinfo, 484, 0x6141_7272);  // Signature 2.
+        write_u32_le(&mut fsinfo, 0, 0x4161_5252); // Signature 1.
+        write_u32_le(&mut fsinfo, 484, 0x6141_7272); // Signature 2.
         // Free count: total data clusters minus 1 (root dir uses cluster 2).
         let data_secs = total_sectors
             .saturating_sub(u32::from(reserved_sectors))
@@ -5515,7 +5662,7 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
         let total_clusters = data_secs / u32::from(spc);
         write_u32_le(&mut fsinfo, 488, total_clusters.saturating_sub(1));
         write_u32_le(&mut fsinfo, 492, 3); // Next free hint (after root dir).
-        write_u32_le(&mut fsinfo, 508, 0xAA55_0000);  // Signature 3.
+        write_u32_le(&mut fsinfo, 508, 0xAA55_0000); // Signature 3.
         super::cache::write_sector(device, 1, &fsinfo)?;
     }
 
@@ -5581,7 +5728,11 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
     crate::serial_println!(
         "[fat] mkfs: formatted '{}' as {} ({} sectors, {} bytes/sector, {} sectors/cluster)",
         device,
-        if fat_type == FatType::Fat32 { "FAT32" } else { "FAT16" },
+        if fat_type == FatType::Fat32 {
+            "FAT32"
+        } else {
+            "FAT16"
+        },
         total_sectors,
         bytes_per_sector,
         spc,
@@ -5613,7 +5764,10 @@ pub fn format_self_test() -> KernelResult<()> {
     let _ = crate::blkdev::unregister(dev);
 
     // 8192 sectors * 512 B = 4 MiB → mkfs auto-selects FAT16.
-    crate::blkdev::register(dev, alloc::boxed::Box::new(crate::blkdev::RamBlockDevice::new(8192)));
+    crate::blkdev::register(
+        dev,
+        alloc::boxed::Box::new(crate::blkdev::RamBlockDevice::new(8192)),
+    );
 
     // Format it.
     if let Err(e) = mkfs_fat(dev, Some("SELFTEST")) {
@@ -5681,7 +5835,10 @@ pub fn fsck_self_test() -> KernelResult<()> {
     let _ = crate::blkdev::unregister(dev);
 
     // 8192 sectors * 512 B = 4 MiB → mkfs auto-selects FAT16.
-    crate::blkdev::register(dev, alloc::boxed::Box::new(crate::blkdev::RamBlockDevice::new(8192)));
+    crate::blkdev::register(
+        dev,
+        alloc::boxed::Box::new(crate::blkdev::RamBlockDevice::new(8192)),
+    );
 
     // Run the whole check inside a closure so teardown happens on every path.
     let result = (|| -> KernelResult<()> {
@@ -5745,7 +5902,10 @@ pub fn trim_self_test() -> KernelResult<()> {
     let _ = crate::blkdev::unregister(dev);
 
     // 8192 sectors * 512 B = 4 MiB → mkfs auto-selects FAT16.
-    crate::blkdev::register(dev, alloc::boxed::Box::new(crate::blkdev::RamBlockDevice::new(8192)));
+    crate::blkdev::register(
+        dev,
+        alloc::boxed::Box::new(crate::blkdev::RamBlockDevice::new(8192)),
+    );
 
     let result = (|| -> KernelResult<()> {
         mkfs_fat(dev, Some("TRIMTEST"))?;
@@ -5880,7 +6040,10 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
         .trim_end();
 
     report.warn(alloc::format!(
-        "{} filesystem '{}' on device '{}'", type_str, label, device
+        "{} filesystem '{}' on device '{}'",
+        type_str,
+        label,
+        device
     ));
 
     // -----------------------------------------------------------------------
@@ -5891,12 +6054,11 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
             report.warn("Clean-shutdown bit: set (clean)".to_string());
         }
         Ok(false) => {
-            report.warn("Clean-shutdown bit: NOT set (volume was not cleanly unmounted)".to_string());
+            report
+                .warn("Clean-shutdown bit: NOT set (volume was not cleanly unmounted)".to_string());
         }
         Err(e) => {
-            report.error(alloc::format!(
-                "Could not read clean-shutdown bit: {:?}", e
-            ));
+            report.error(alloc::format!("Could not read clean-shutdown bit: {:?}", e));
         }
     }
 
@@ -5950,7 +6112,9 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
     // -----------------------------------------------------------------------
     // cluster_owner[cluster - 2] = 0 means free/unclaimed by directory walk.
     // Non-zero values encode an owner ID (allocated sequentially).
-    let data_sectors = fs.bpb.total_sectors()
+    let data_sectors = fs
+        .bpb
+        .total_sectors()
         .saturating_sub(u32::from(fs.bpb.reserved_sectors))
         .saturating_sub(u32::from(fs.bpb.num_fats) * fs.bpb.sectors_per_fat())
         .saturating_sub(fs.bpb.root_dir_sectors());
@@ -5962,7 +6126,11 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
     };
 
     // Owner map: 0 = unclaimed, non-zero = owner ID.
-    let map_size = if max_cluster >= 2 { (max_cluster - 2) as usize } else { 0 };
+    let map_size = if max_cluster >= 2 {
+        (max_cluster - 2) as usize
+    } else {
+        0
+    };
     let mut cluster_owner: Vec<u32> = vec![0u32; map_size];
     let mut next_owner_id: u32 = 1;
 
@@ -5985,7 +6153,9 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
             Ok(e) => e,
             Err(err) => {
                 report.error(alloc::format!(
-                    "{}: could not read directory: {:?}", dir_path, err
+                    "{}: could not read directory: {:?}",
+                    dir_path,
+                    err
                 ));
                 continue;
             }
@@ -6013,7 +6183,9 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
                         report.cross_linked = report.cross_linked.saturating_add(1);
                         report.error(alloc::format!(
                             "{}: cluster {} cross-linked (dir chain vs owner #{})",
-                            dir_path, c, cluster_owner[idx]
+                            dir_path,
+                            c,
+                            cluster_owner[idx]
                         ));
                         break;
                     }
@@ -6026,7 +6198,8 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
                     Err(_) => {
                         report.error(alloc::format!(
                             "{}: read error following dir cluster chain at cluster {}",
-                            dir_path, c
+                            dir_path,
+                            c
                         ));
                         break;
                     }
@@ -6066,7 +6239,9 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
             if entry.first_cluster < 2 && entry.file_size > 0 {
                 report.error(alloc::format!(
                     "{}: non-zero size ({}) but no cluster chain (first_cluster={})",
-                    child_path, entry.file_size, entry.first_cluster
+                    child_path,
+                    entry.file_size,
+                    entry.first_cluster
                 ));
                 continue;
             }
@@ -6076,8 +6251,8 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
                 continue;
             }
 
-            let cluster_bytes = u32::from(fs.bpb.sectors_per_cluster)
-                * u32::from(fs.bpb.bytes_per_sector);
+            let cluster_bytes =
+                u32::from(fs.bpb.sectors_per_cluster) * u32::from(fs.bpb.bytes_per_sector);
             let mut chain_clusters: u32 = 0;
             let mut c = entry.first_cluster;
             let mut seen = 0u32;
@@ -6092,7 +6267,9 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
                         report.cross_linked = report.cross_linked.saturating_add(1);
                         report.error(alloc::format!(
                             "{}: cluster {} cross-linked (file vs owner #{})",
-                            child_path, c, cluster_owner[idx]
+                            child_path,
+                            c,
+                            cluster_owner[idx]
                         ));
                         break;
                     }
@@ -6105,7 +6282,8 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
                     Err(_) => {
                         report.error(alloc::format!(
                             "{}: read error following cluster chain at cluster {}",
-                            child_path, c
+                            child_path,
+                            c
                         ));
                         break;
                     }
@@ -6119,8 +6297,11 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
                 if u64::from(entry.file_size) > chain_bytes {
                     report.error(alloc::format!(
                         "{}: size {} exceeds chain capacity {} ({} clusters × {} bytes)",
-                        child_path, entry.file_size, chain_bytes,
-                        chain_clusters, cluster_bytes
+                        child_path,
+                        entry.file_size,
+                        chain_bytes,
+                        chain_clusters,
+                        cluster_bytes
                     ));
                 }
             }
@@ -6204,10 +6385,11 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
                     FatType::Fat32 => read_u32(&sector_buf, offset_r) & 0x0FFF_FFFF,
                 };
 
-                let is_alloc = fat_val_r != 0 && match fs.bpb.fat_type {
-                    FatType::Fat16 => fat_val_r != 0xFFF7,
-                    FatType::Fat32 => fat_val_r != 0x0FFF_FFF7,
-                };
+                let is_alloc = fat_val_r != 0
+                    && match fs.bpb.fat_type {
+                        FatType::Fat16 => fat_val_r != 0xFFF7,
+                        FatType::Fat32 => fat_val_r != 0x0FFF_FFF7,
+                    };
 
                 if is_alloc {
                     let idx = (cluster - 2) as usize;
@@ -6218,9 +6400,7 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
                     }
                 }
             }
-            report.fixed(alloc::format!(
-                "{} lost clusters freed", freed
-            ));
+            report.fixed(alloc::format!("{} lost clusters freed", freed));
         } else {
             report.error(alloc::format!(
                 "{} lost clusters found — use -a to free them",
@@ -6232,11 +6412,11 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
     // -----------------------------------------------------------------------
     // Phase 5: Summary
     // -----------------------------------------------------------------------
-    let cluster_bytes = u32::from(fs.bpb.sectors_per_cluster)
-        * u32::from(fs.bpb.bytes_per_sector);
+    let cluster_bytes = u32::from(fs.bpb.sectors_per_cluster) * u32::from(fs.bpb.bytes_per_sector);
     report.warn(alloc::format!(
         "{} files, {} directories",
-        report.files, report.dirs
+        report.files,
+        report.dirs
     ));
     report.warn(alloc::format!(
         "{}/{} clusters used ({}/{} KiB)",
@@ -6269,7 +6449,9 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
         let unrepaired = report.errors.saturating_sub(report.repaired);
         report.warn(alloc::format!(
             "{} errors found, {} repaired, {} remaining.",
-            report.errors, report.repaired, unrepaired
+            report.errors,
+            report.repaired,
+            unrepaired
         ));
     }
 

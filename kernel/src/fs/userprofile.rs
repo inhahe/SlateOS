@@ -20,11 +20,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -106,23 +106,39 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
         profiles: alloc::vec![
             UserProfile {
-                id: 1, username: String::from("root"), display_name: String::from("System Administrator"),
-                account_type: AccountType::Admin, avatar_path: None,
-                home_dir: String::from("/root"), shell: String::from("/bin/kshell"),
-                login_count: 1, last_login_ns: now, created_ns: now,
-                is_active: true, is_locked: false,
+                id: 1,
+                username: String::from("root"),
+                display_name: String::from("System Administrator"),
+                account_type: AccountType::Admin,
+                avatar_path: None,
+                home_dir: String::from("/root"),
+                shell: String::from("/bin/kshell"),
+                login_count: 1,
+                last_login_ns: now,
+                created_ns: now,
+                is_active: true,
+                is_locked: false,
             },
             UserProfile {
-                id: 2, username: String::from("user"), display_name: String::from("Default User"),
-                account_type: AccountType::Standard, avatar_path: None,
-                home_dir: String::from("/home/user"), shell: String::from("/bin/kshell"),
-                login_count: 0, last_login_ns: 0, created_ns: now,
-                is_active: false, is_locked: false,
+                id: 2,
+                username: String::from("user"),
+                display_name: String::from("Default User"),
+                account_type: AccountType::Standard,
+                avatar_path: None,
+                home_dir: String::from("/home/user"),
+                shell: String::from("/bin/kshell"),
+                login_count: 0,
+                last_login_ns: 0,
+                created_ns: now,
+                is_active: false,
+                is_locked: false,
             },
         ],
         active_user: Some(1),
@@ -134,7 +150,11 @@ pub fn init_defaults() {
 }
 
 /// Create a new profile.
-pub fn create_profile(username: &str, display_name: &str, account_type: AccountType) -> KernelResult<u32> {
+pub fn create_profile(
+    username: &str,
+    display_name: &str,
+    account_type: AccountType,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.profiles.len() >= MAX_PROFILES {
             return Err(KernelError::ResourceExhausted);
@@ -147,10 +167,18 @@ pub fn create_profile(username: &str, display_name: &str, account_type: AccountT
         state.next_id += 1;
         let home = format!("/home/{}", username);
         state.profiles.push(UserProfile {
-            id, username: String::from(username), display_name: String::from(display_name),
-            account_type, avatar_path: None, home_dir: home,
-            shell: String::from("/bin/kshell"), login_count: 0, last_login_ns: 0,
-            created_ns: now, is_active: false, is_locked: false,
+            id,
+            username: String::from(username),
+            display_name: String::from(display_name),
+            account_type,
+            avatar_path: None,
+            home_dir: home,
+            shell: String::from("/bin/kshell"),
+            login_count: 0,
+            last_login_ns: 0,
+            created_ns: now,
+            is_active: false,
+            is_locked: false,
         });
         Ok(id)
     })
@@ -164,7 +192,9 @@ pub fn delete_profile(id: u32) -> KernelResult<()> {
         }
         let before = state.profiles.len();
         state.profiles.retain(|p| p.id != id);
-        if state.profiles.len() == before { return Err(KernelError::NotFound); }
+        if state.profiles.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -173,7 +203,10 @@ pub fn delete_profile(id: u32) -> KernelResult<()> {
 pub fn switch_user(id: u32) -> KernelResult<()> {
     with_state(|state| {
         // Check target exists and is not locked (immutable borrow).
-        let target = state.profiles.iter().find(|p| p.id == id)
+        let target = state
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         if target.is_locked {
             return Err(KernelError::PermissionDenied);
@@ -186,7 +219,10 @@ pub fn switch_user(id: u32) -> KernelResult<()> {
             }
         }
         // Now activate the new user.
-        let profile = state.profiles.iter_mut().find(|p| p.id == id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         profile.is_active = true;
         profile.login_count += 1;
@@ -201,7 +237,10 @@ pub fn switch_user(id: u32) -> KernelResult<()> {
 /// Lock/unlock a profile.
 pub fn set_locked(id: u32, locked: bool) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         profile.is_locked = locked;
         Ok(())
@@ -211,7 +250,10 @@ pub fn set_locked(id: u32, locked: bool) -> KernelResult<()> {
 /// Update display name.
 pub fn set_display_name(id: u32, name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         profile.display_name = String::from(name);
         Ok(())
@@ -221,7 +263,10 @@ pub fn set_display_name(id: u32, name: &str) -> KernelResult<()> {
 /// Set avatar path.
 pub fn set_avatar(id: u32, path: &str) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.id == id)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         profile.avatar_path = Some(String::from(path));
         Ok(())
@@ -230,19 +275,26 @@ pub fn set_avatar(id: u32, path: &str) -> KernelResult<()> {
 
 /// Get a profile.
 pub fn get_profile(id: u32) -> Option<UserProfile> {
-    STATE.lock().as_ref().and_then(|s| s.profiles.iter().find(|p| p.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.profiles.iter().find(|p| p.id == id).cloned())
 }
 
 /// Get active user.
 pub fn active_user() -> Option<UserProfile> {
     STATE.lock().as_ref().and_then(|s| {
-        s.active_user.and_then(|id| s.profiles.iter().find(|p| p.id == id).cloned())
+        s.active_user
+            .and_then(|id| s.profiles.iter().find(|p| p.id == id).cloned())
     })
 }
 
 /// List profiles.
 pub fn list_profiles() -> Vec<UserProfile> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.profiles.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.profiles.clone())
 }
 
 /// Statistics: (profile_count, total_logins, total_switches, ops).

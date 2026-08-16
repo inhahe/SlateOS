@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -52,7 +52,12 @@ impl Corner {
     }
 
     pub fn all() -> [Corner; 4] {
-        [Self::TopLeft, Self::TopRight, Self::BottomLeft, Self::BottomRight]
+        [
+            Self::TopLeft,
+            Self::TopRight,
+            Self::BottomLeft,
+            Self::BottomRight,
+        ]
     }
 }
 
@@ -154,13 +159,43 @@ fn corner_index(c: Corner) -> usize {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         corners: [
-            CornerConfig { corner: Corner::TopLeft, action: CornerAction::ShowAllWindows, delay_ms: 300, require_modifier: false, enabled: true, trigger_count: 0 },
-            CornerConfig { corner: Corner::TopRight, action: CornerAction::ShowDesktop, delay_ms: 300, require_modifier: false, enabled: true, trigger_count: 0 },
-            CornerConfig { corner: Corner::BottomLeft, action: CornerAction::OpenLauncher, delay_ms: 0, require_modifier: false, enabled: true, trigger_count: 0 },
-            CornerConfig { corner: Corner::BottomRight, action: CornerAction::None, delay_ms: 300, require_modifier: false, enabled: false, trigger_count: 0 },
+            CornerConfig {
+                corner: Corner::TopLeft,
+                action: CornerAction::ShowAllWindows,
+                delay_ms: 300,
+                require_modifier: false,
+                enabled: true,
+                trigger_count: 0,
+            },
+            CornerConfig {
+                corner: Corner::TopRight,
+                action: CornerAction::ShowDesktop,
+                delay_ms: 300,
+                require_modifier: false,
+                enabled: true,
+                trigger_count: 0,
+            },
+            CornerConfig {
+                corner: Corner::BottomLeft,
+                action: CornerAction::OpenLauncher,
+                delay_ms: 0,
+                require_modifier: false,
+                enabled: true,
+                trigger_count: 0,
+            },
+            CornerConfig {
+                corner: Corner::BottomRight,
+                action: CornerAction::None,
+                delay_ms: 300,
+                require_modifier: false,
+                enabled: false,
+                trigger_count: 0,
+            },
         ],
         global_enabled: true,
         total_triggers: 0,
@@ -232,12 +267,18 @@ pub fn set_global_enabled(enabled: bool) -> KernelResult<()> {
 
 /// Get config for a specific corner.
 pub fn get_corner(corner: Corner) -> Option<CornerConfig> {
-    STATE.lock().as_ref().map(|s| s.corners[corner_index(corner)].clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map(|s| s.corners[corner_index(corner)].clone())
 }
 
 /// Get all corner configs.
 pub fn get_all() -> Vec<CornerConfig> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.corners.to_vec())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.corners.to_vec())
 }
 
 /// Statistics: (enabled_count, total_triggers, ops).

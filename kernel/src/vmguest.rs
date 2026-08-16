@@ -46,13 +46,13 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::format;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 use crate::hypervisor::{self, Hypervisor};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants — MSRs and I/O ports
@@ -543,7 +543,7 @@ unsafe fn wrmsr(msr: u32, val: u64) {
 #[cfg(target_arch = "x86_64")]
 unsafe fn vmware_backdoor(cmd: u32, arg: u32) -> (u32, u32, u32, u32) {
     let eax: u32;
-    
+
     let ecx: u32;
     let edx: u32;
     // SAFETY: The VMware backdoor uses a reserved I/O port that is only
@@ -638,7 +638,11 @@ pub fn init() {
             serial_println!(
                 "[vmguest]   {}: {}",
                 fs.feature.label(),
-                if fs.active { "active" } else { "supported (not activated)" }
+                if fs.active {
+                    "active"
+                } else {
+                    "supported (not activated)"
+                }
             );
         }
     }
@@ -888,7 +892,10 @@ pub fn tick() {
 
 /// Send a heartbeat to the host.
 fn send_heartbeat(state: &mut State, now_ns: u64) {
-    if !state.feature(GuestFeature::Heartbeat).is_some_and(|f| f.active) {
+    if !state
+        .feature(GuestFeature::Heartbeat)
+        .is_some_and(|f| f.active)
+    {
         return;
     }
 
@@ -908,7 +915,10 @@ fn send_heartbeat(state: &mut State, now_ns: u64) {
 
 /// Check if host has requested balloon size change.
 fn check_balloon(state: &mut State) {
-    if !state.feature(GuestFeature::MemoryBalloon).is_some_and(|f| f.supported) {
+    if !state
+        .feature(GuestFeature::MemoryBalloon)
+        .is_some_and(|f| f.supported)
+    {
         return;
     }
     if !state.balloon.auto_enabled {
@@ -947,7 +957,10 @@ fn check_balloon(state: &mut State) {
 
 /// Monitor clock drift between host and guest.
 fn check_clock_drift(state: &mut State, now_ns: u64) {
-    if !state.feature(GuestFeature::TimeSynchronization).is_some_and(|f| f.active) {
+    if !state
+        .feature(GuestFeature::TimeSynchronization)
+        .is_some_and(|f| f.active)
+    {
         return;
     }
 
@@ -968,7 +981,10 @@ fn check_clock_drift(state: &mut State, now_ns: u64) {
 
 /// Report guest information to the host.
 fn report_guest_info(state: &mut State) {
-    if !state.feature(GuestFeature::GuestInfo).is_some_and(|f| f.active) {
+    if !state
+        .feature(GuestFeature::GuestInfo)
+        .is_some_and(|f| f.active)
+    {
         return;
     }
 
@@ -989,7 +1005,10 @@ fn report_guest_info(state: &mut State) {
 
 /// Check for host-initiated shutdown/reboot requests.
 fn check_host_requests(state: &mut State) {
-    if !state.feature(GuestFeature::GracefulShutdown).is_some_and(|f| f.active) {
+    if !state
+        .feature(GuestFeature::GracefulShutdown)
+        .is_some_and(|f| f.active)
+    {
         return;
     }
 
@@ -1093,7 +1112,11 @@ pub fn clock_source() -> &'static str {
 /// Get clock drift statistics.
 pub fn clock_stats() -> (u64, i64, u64) {
     let state = STATE.lock();
-    (state.clock.reads, state.clock.last_drift_ns, state.clock.corrections)
+    (
+        state.clock.reads,
+        state.clock.last_drift_ns,
+        state.clock.corrections,
+    )
 }
 
 /// Request the host to resize the display.
@@ -1106,7 +1129,10 @@ pub fn request_display_resize(width: u32, height: u32) -> (u32, u32) {
     }
 
     let mut state = STATE.lock();
-    if !state.feature(GuestFeature::DisplayResize).is_some_and(|f| f.supported) {
+    if !state
+        .feature(GuestFeature::DisplayResize)
+        .is_some_and(|f| f.supported)
+    {
         return (0, 0);
     }
 
@@ -1178,7 +1204,13 @@ pub fn stats() -> (bool, &'static str, u32, u32, u64) {
     let supported = state.features.iter().filter(|f| f.supported).count() as u32;
     let active = state.features.iter().filter(|f| f.active).count() as u32;
     let hv_name = state.hypervisor.name();
-    (state.initialized, hv_name, supported, active, state.tick_count)
+    (
+        state.initialized,
+        hv_name,
+        supported,
+        active,
+        state.tick_count,
+    )
 }
 
 /// Generate content for `/proc/vmguest`.
@@ -1200,13 +1232,18 @@ pub fn procfs_content() -> String {
                 fs.feature.label(),
                 if fs.active { "active" } else { "supported" },
                 fs.ops_count,
-                fs.last_error.as_ref().map_or(String::new(), |e| format!(", last_error: {}", e)),
+                fs.last_error
+                    .as_ref()
+                    .map_or(String::new(), |e| format!(", last_error: {}", e)),
             ));
         }
     }
 
     // Clock.
-    out.push_str(&format!("\n=== Clock ===\nsource: {}\n", state.clock.source.label()));
+    out.push_str(&format!(
+        "\n=== Clock ===\nsource: {}\n",
+        state.clock.source.label()
+    ));
     out.push_str(&format!("reads: {}\n", state.clock.reads));
     out.push_str(&format!("drift_ns: {}\n", state.clock.last_drift_ns));
     out.push_str(&format!("corrections: {}\n", state.clock.corrections));
@@ -1214,26 +1251,44 @@ pub fn procfs_content() -> String {
 
     // Balloon.
     out.push_str("\n=== Balloon ===\n");
-    out.push_str(&format!("inflated_pages: {}\n", state.balloon.inflated_pages));
+    out.push_str(&format!(
+        "inflated_pages: {}\n",
+        state.balloon.inflated_pages
+    ));
     out.push_str(&format!("target_pages: {}\n", state.balloon.target_pages));
-    out.push_str(&format!("total_inflated: {}\n", state.balloon.total_inflated));
-    out.push_str(&format!("total_deflated: {}\n", state.balloon.total_deflated));
+    out.push_str(&format!(
+        "total_inflated: {}\n",
+        state.balloon.total_inflated
+    ));
+    out.push_str(&format!(
+        "total_deflated: {}\n",
+        state.balloon.total_deflated
+    ));
     out.push_str(&format!("max_pages: {}\n", state.balloon.max_pages));
     out.push_str(&format!("auto: {}\n", state.balloon.auto_enabled));
 
     // Heartbeat.
     out.push_str("\n=== Heartbeat ===\n");
-    out.push_str(&format!("interval_secs: {}\n", state.heartbeat.interval_secs));
+    out.push_str(&format!(
+        "interval_secs: {}\n",
+        state.heartbeat.interval_secs
+    ));
     out.push_str(&format!("sent: {}\n", state.heartbeat.sent_count));
     out.push_str(&format!("failed: {}\n", state.heartbeat.failed_count));
     out.push_str(&format!("host_ack: {}\n", state.heartbeat.host_ack));
 
     // Guest info.
     out.push_str("\n=== Guest Info ===\n");
-    out.push_str(&format!("os: {} {}\n", state.guest_info.os_name, state.guest_info.os_version));
+    out.push_str(&format!(
+        "os: {} {}\n",
+        state.guest_info.os_name, state.guest_info.os_version
+    ));
     out.push_str(&format!("kernel: {}\n", state.guest_info.kernel_version));
     out.push_str(&format!("cpus: {}\n", state.guest_info.cpu_count));
-    out.push_str(&format!("memory: {} bytes\n", state.guest_info.total_memory));
+    out.push_str(&format!(
+        "memory: {} bytes\n",
+        state.guest_info.total_memory
+    ));
     out.push_str(&format!("hostname: {}\n", state.guest_info.hostname));
     out.push_str(&format!("reports: {}\n", state.guest_info.report_count));
 
@@ -1279,9 +1334,18 @@ pub fn self_test() {
 
     // Test 4: Balloon state is consistent.
     let (inflated, target, total_in, _total_out, max_pages, auto) = balloon_info();
-    assert!(inflated <= max_pages || max_pages == 0, "Inflated should not exceed max");
+    assert!(
+        inflated <= max_pages || max_pages == 0,
+        "Inflated should not exceed max"
+    );
     assert!(total_in >= inflated, "Total inflated should be >= current");
-    crate::serial_println!("[vmguest]   Balloon: inflated={}, target={}, max={}, auto={}", inflated, target, max_pages, auto);
+    crate::serial_println!(
+        "[vmguest]   Balloon: inflated={}, target={}, max={}, auto={}",
+        inflated,
+        target,
+        max_pages,
+        auto
+    );
 
     // Test 5: Heartbeat stats are consistent.
     let (sent, failed, _last_ns, _ack) = heartbeat_stats();
@@ -1290,7 +1354,10 @@ pub fn self_test() {
 
     // Test 6: Clock source matches hypervisor.
     let clk_src = clock_source();
-    assert!(!clk_src.is_empty(), "Clock source label should not be empty");
+    assert!(
+        !clk_src.is_empty(),
+        "Clock source label should not be empty"
+    );
     crate::serial_println!("[vmguest]   Clock source: {}", clk_src);
 
     // Test 7: Guest info is populated (if initialized).
@@ -1303,7 +1370,12 @@ pub fn self_test() {
         assert!(!hostname.is_empty(), "Hostname should be set");
         crate::serial_println!(
             "[vmguest]   Guest info: {} {} ({}cpus, {} MB, host={}, reports={})",
-            os_name, os_ver, cpus, mem / (1024 * 1024), hostname, reports
+            os_name,
+            os_ver,
+            cpus,
+            mem / (1024 * 1024),
+            hostname,
+            reports
         );
     }
 
@@ -1360,9 +1432,18 @@ pub fn self_test() {
 
     // Test 13: procfs content is non-empty and well-formed.
     let content = procfs_content();
-    assert!(content.contains("=== VM Guest Integration ==="), "procfs should have header");
-    assert!(content.contains("hypervisor:"), "procfs should have hypervisor field");
-    assert!(content.contains("=== Features ==="), "procfs should have features section");
+    assert!(
+        content.contains("=== VM Guest Integration ==="),
+        "procfs should have header"
+    );
+    assert!(
+        content.contains("hypervisor:"),
+        "procfs should have hypervisor field"
+    );
+    assert!(
+        content.contains("=== Features ==="),
+        "procfs should have features section"
+    );
     crate::serial_println!("[vmguest]   procfs content: OK ({} bytes)", content.len());
 
     // Test 14: Feature query API consistency.
@@ -1379,7 +1460,11 @@ pub fn self_test() {
     tick();
     tick();
     let after = TICK_COUNTER.load(Ordering::Relaxed);
-    assert_eq!(after, before.saturating_add(3), "Tick counter should increment by 3");
+    assert_eq!(
+        after,
+        before.saturating_add(3),
+        "Tick counter should increment by 3"
+    );
     crate::serial_println!("[vmguest]   Tick processing: OK");
 
     crate::serial_println!("[vmguest] Self-test PASSED (15 tests)");

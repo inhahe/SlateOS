@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -228,7 +228,15 @@ static OP_COUNT: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 
 /// Register a disk.
-pub fn register_disk(name: &str, model: &str, serial: &str, size_bytes: u64, sector_size: u32, table_type: TableType, removable: bool) -> KernelResult<u64> {
+pub fn register_disk(
+    name: &str,
+    model: &str,
+    serial: &str,
+    size_bytes: u64,
+    sector_size: u32,
+    table_type: TableType,
+    removable: bool,
+) -> KernelResult<u64> {
     let mut state = STATE.lock();
     if state.disks.len() >= MAX_DISKS {
         return Err(KernelError::ResourceExhausted);
@@ -253,7 +261,9 @@ pub fn unregister_disk(disk_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
     let len = state.disks.len();
     state.disks.retain(|d| d.id != disk_id);
-    if state.disks.len() == len { return Err(KernelError::NotFound); }
+    if state.disks.len() == len {
+        return Err(KernelError::NotFound);
+    }
     // Remove associated partitions.
     state.partitions.retain(|p| p.disk_id != disk_id);
     Ok(())
@@ -266,15 +276,26 @@ pub fn list_disks() -> Vec<DiskInfo> {
 
 /// Get disk info.
 pub fn get_disk(disk_id: u64) -> KernelResult<DiskInfo> {
-    STATE.lock().disks.iter().find(|d| d.id == disk_id).cloned().ok_or(KernelError::NotFound)
+    STATE
+        .lock()
+        .disks
+        .iter()
+        .find(|d| d.id == disk_id)
+        .cloned()
+        .ok_or(KernelError::NotFound)
 }
 
 /// Set partition table type for a disk.
 pub fn set_table_type(disk_id: u64, table_type: TableType) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let disk = state.disks.iter_mut().find(|d| d.id == disk_id)
+    let disk = state
+        .disks
+        .iter_mut()
+        .find(|d| d.id == disk_id)
         .ok_or(KernelError::NotFound)?;
-    if disk.read_only { return Err(KernelError::ReadOnlyFilesystem); }
+    if disk.read_only {
+        return Err(KernelError::ReadOnlyFilesystem);
+    }
     disk.table_type = table_type;
     OP_COUNT.fetch_add(1, Ordering::Relaxed);
     Ok(())
@@ -285,14 +306,28 @@ pub fn set_table_type(disk_id: u64, table_type: TableType) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Create a partition.
-pub fn create_partition(disk_id: u64, start_bytes: u64, size_bytes: u64, fs_type: FsType, label: &str) -> KernelResult<u64> {
+pub fn create_partition(
+    disk_id: u64,
+    start_bytes: u64,
+    size_bytes: u64,
+    fs_type: FsType,
+    label: &str,
+) -> KernelResult<u64> {
     let mut state = STATE.lock();
-    let disk = state.disks.iter().find(|d| d.id == disk_id)
+    let disk = state
+        .disks
+        .iter()
+        .find(|d| d.id == disk_id)
         .ok_or(KernelError::NotFound)?;
-    if disk.read_only { return Err(KernelError::ReadOnlyFilesystem); }
+    if disk.read_only {
+        return Err(KernelError::ReadOnlyFilesystem);
+    }
 
-    let disk_parts: Vec<&PartitionInfo> = state.partitions.iter()
-        .filter(|p| p.disk_id == disk_id).collect();
+    let disk_parts: Vec<&PartitionInfo> = state
+        .partitions
+        .iter()
+        .filter(|p| p.disk_id == disk_id)
+        .collect();
     if disk_parts.len() >= MAX_PARTITIONS_PER_DISK {
         return Err(KernelError::ResourceExhausted);
     }
@@ -334,13 +369,22 @@ pub fn create_partition(disk_id: u64, start_bytes: u64, size_bytes: u64, fs_type
 /// Delete a partition.
 pub fn delete_partition(disk_id: u64, part_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let disk = state.disks.iter().find(|d| d.id == disk_id)
+    let disk = state
+        .disks
+        .iter()
+        .find(|d| d.id == disk_id)
         .ok_or(KernelError::NotFound)?;
-    if disk.read_only { return Err(KernelError::ReadOnlyFilesystem); }
+    if disk.read_only {
+        return Err(KernelError::ReadOnlyFilesystem);
+    }
 
     let len = state.partitions.len();
-    state.partitions.retain(|p| !(p.disk_id == disk_id && p.id == part_id));
-    if state.partitions.len() == len { return Err(KernelError::NotFound); }
+    state
+        .partitions
+        .retain(|p| !(p.disk_id == disk_id && p.id == part_id));
+    if state.partitions.len() == len {
+        return Err(KernelError::NotFound);
+    }
 
     // Renumber remaining partitions.
     for (num, p) in (1u32..).zip(state.partitions.iter_mut().filter(|p| p.disk_id == disk_id)) {
@@ -353,13 +397,20 @@ pub fn delete_partition(disk_id: u64, part_id: u64) -> KernelResult<()> {
 /// Resize a partition (grow or shrink).
 pub fn resize_partition(disk_id: u64, part_id: u64, new_size_bytes: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let disk = state.disks.iter().find(|d| d.id == disk_id)
+    let disk = state
+        .disks
+        .iter()
+        .find(|d| d.id == disk_id)
         .ok_or(KernelError::NotFound)?;
-    if disk.read_only { return Err(KernelError::ReadOnlyFilesystem); }
+    if disk.read_only {
+        return Err(KernelError::ReadOnlyFilesystem);
+    }
     let disk_size = disk.size_bytes;
 
     // Find partition and check new size validity.
-    let part = state.partitions.iter_mut()
+    let part = state
+        .partitions
+        .iter_mut()
         .find(|p| p.disk_id == disk_id && p.id == part_id)
         .ok_or(KernelError::NotFound)?;
 
@@ -373,7 +424,9 @@ pub fn resize_partition(disk_id: u64, part_id: u64, new_size_bytes: u64) -> Kern
     part.size_bytes = new_size_bytes;
 
     // Check overlap with other partitions (drop part borrow first).
-    let overlaps = state.partitions.iter()
+    let overlaps = state
+        .partitions
+        .iter()
         .filter(|p| p.disk_id == disk_id && p.id != old_id)
         .any(|p| {
             let p_end = p.start_bytes.saturating_add(p.size_bytes);
@@ -396,7 +449,9 @@ pub fn resize_partition(disk_id: u64, part_id: u64, new_size_bytes: u64) -> Kern
 /// Set partition label.
 pub fn set_label(disk_id: u64, part_id: u64, label: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let part = state.partitions.iter_mut()
+    let part = state
+        .partitions
+        .iter_mut()
         .find(|p| p.disk_id == disk_id && p.id == part_id)
         .ok_or(KernelError::NotFound)?;
     part.label = String::from(label);
@@ -406,11 +461,15 @@ pub fn set_label(disk_id: u64, part_id: u64, label: &str) -> KernelResult<()> {
 /// Set partition flags.
 pub fn set_flag(disk_id: u64, part_id: u64, flag: PartFlag, value: bool) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let part = state.partitions.iter_mut()
+    let part = state
+        .partitions
+        .iter_mut()
         .find(|p| p.disk_id == disk_id && p.id == part_id)
         .ok_or(KernelError::NotFound)?;
     if value {
-        if !part.flags.contains(&flag) { part.flags.push(flag); }
+        if !part.flags.contains(&flag) {
+            part.flags.push(flag);
+        }
     } else {
         part.flags.retain(|f| *f != flag);
     }
@@ -420,7 +479,9 @@ pub fn set_flag(disk_id: u64, part_id: u64, flag: PartFlag, value: bool) -> Kern
 /// Set mount point for a partition.
 pub fn set_mount_point(disk_id: u64, part_id: u64, mount: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let part = state.partitions.iter_mut()
+    let part = state
+        .partitions
+        .iter_mut()
         .find(|p| p.disk_id == disk_id && p.id == part_id)
         .ok_or(KernelError::NotFound)?;
     part.mount_point = String::from(mount);
@@ -429,7 +490,10 @@ pub fn set_mount_point(disk_id: u64, part_id: u64, mount: &str) -> KernelResult<
 
 /// List partitions on a disk.
 pub fn list_partitions(disk_id: u64) -> Vec<PartitionInfo> {
-    STATE.lock().partitions.iter()
+    STATE
+        .lock()
+        .partitions
+        .iter()
         .filter(|p| p.disk_id == disk_id)
         .cloned()
         .collect()
@@ -437,7 +501,10 @@ pub fn list_partitions(disk_id: u64) -> Vec<PartitionInfo> {
 
 /// Get partition info.
 pub fn get_partition(disk_id: u64, part_id: u64) -> KernelResult<PartitionInfo> {
-    STATE.lock().partitions.iter()
+    STATE
+        .lock()
+        .partitions
+        .iter()
         .find(|p| p.disk_id == disk_id && p.id == part_id)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -446,9 +513,14 @@ pub fn get_partition(disk_id: u64, part_id: u64) -> KernelResult<PartitionInfo> 
 /// Calculate free space on a disk (unpartitioned space).
 pub fn free_space(disk_id: u64) -> KernelResult<u64> {
     let state = STATE.lock();
-    let disk = state.disks.iter().find(|d| d.id == disk_id)
+    let disk = state
+        .disks
+        .iter()
+        .find(|d| d.id == disk_id)
         .ok_or(KernelError::NotFound)?;
-    let used: u64 = state.partitions.iter()
+    let used: u64 = state
+        .partitions
+        .iter()
         .filter(|p| p.disk_id == disk_id)
         .map(|p| p.size_bytes)
         .sum();
@@ -458,10 +530,17 @@ pub fn free_space(disk_id: u64) -> KernelResult<u64> {
 /// Format a partition (set its filesystem type, simulated).
 pub fn format_partition(disk_id: u64, part_id: u64, fs_type: FsType) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let disk = state.disks.iter().find(|d| d.id == disk_id)
+    let disk = state
+        .disks
+        .iter()
+        .find(|d| d.id == disk_id)
         .ok_or(KernelError::NotFound)?;
-    if disk.read_only { return Err(KernelError::ReadOnlyFilesystem); }
-    let part = state.partitions.iter_mut()
+    if disk.read_only {
+        return Err(KernelError::ReadOnlyFilesystem);
+    }
+    let part = state
+        .partitions
+        .iter_mut()
         .find(|p| p.disk_id == disk_id && p.id == part_id)
         .ok_or(KernelError::NotFound)?;
     part.fs_type = fs_type;
@@ -474,10 +553,14 @@ pub fn format_partition(disk_id: u64, part_id: u64, fs_type: FsType) -> KernelRe
 // ---------------------------------------------------------------------------
 
 /// Check if confirmation is required.
-pub fn confirmation_required() -> bool { STATE.lock().require_confirmation }
+pub fn confirmation_required() -> bool {
+    STATE.lock().require_confirmation
+}
 
 /// Set confirmation requirement.
-pub fn set_confirmation(v: bool) { STATE.lock().require_confirmation = v; }
+pub fn set_confirmation(v: bool) {
+    STATE.lock().require_confirmation = v;
+}
 
 // ---------------------------------------------------------------------------
 // Stats
@@ -486,10 +569,16 @@ pub fn set_confirmation(v: bool) { STATE.lock().require_confirmation = v; }
 /// Returns (disk_count, partition_count, ops).
 pub fn stats() -> (usize, usize, u64) {
     let state = STATE.lock();
-    (state.disks.len(), state.partitions.len(), OP_COUNT.load(Ordering::Relaxed))
+    (
+        state.disks.len(),
+        state.partitions.len(),
+        OP_COUNT.load(Ordering::Relaxed),
+    )
 }
 
-pub fn reset_stats() { OP_COUNT.store(0, Ordering::Relaxed); }
+pub fn reset_stats() {
+    OP_COUNT.store(0, Ordering::Relaxed);
+}
 
 pub fn clear_all() {
     let mut state = STATE.lock();
@@ -509,7 +598,15 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: Register disk.
     serial_println!("  partmgr::self_test 1: register disk");
-    let d1 = register_disk("sda", "Virtual Disk", "SN001", 100 * 1024 * 1024 * 1024, 512, TableType::Gpt, false)?;
+    let d1 = register_disk(
+        "sda",
+        "Virtual Disk",
+        "SN001",
+        100 * 1024 * 1024 * 1024,
+        512,
+        TableType::Gpt,
+        false,
+    )?;
     let disk = get_disk(d1)?;
     assert_eq!(disk.name, "sda");
     assert_eq!(disk.table_type, TableType::Gpt);

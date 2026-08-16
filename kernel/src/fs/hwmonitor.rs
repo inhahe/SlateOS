@@ -37,10 +37,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -212,7 +212,12 @@ where
 /// For fan speed, *low* values are bad (fan stalling), so warning fires
 /// when `value < warning_threshold` and critical when `value < critical_threshold`.
 /// For all other sensor types, *high* values are bad.
-fn evaluate_status(sensor_type: SensorType, value: i64, warning: i64, critical: i64) -> SensorStatus {
+fn evaluate_status(
+    sensor_type: SensorType,
+    value: i64,
+    warning: i64,
+    critical: i64,
+) -> SensorStatus {
     match sensor_type {
         SensorType::FanSpeed => {
             if value < critical {
@@ -258,7 +263,12 @@ fn add_sensor_inner(
     let id = state.next_sensor_id;
     state.next_sensor_id = state.next_sensor_id.wrapping_add(1);
 
-    let status = evaluate_status(sensor_type, initial_value, warning_threshold, critical_threshold);
+    let status = evaluate_status(
+        sensor_type,
+        initial_value,
+        warning_threshold,
+        critical_threshold,
+    );
 
     state.sensors.push(Sensor {
         id,
@@ -367,7 +377,15 @@ pub fn add_sensor(
         if name.is_empty() {
             return Err(KernelError::InvalidArgument);
         }
-        add_sensor_inner(state, component_id, name, sensor_type, 0, warning_threshold, critical_threshold)
+        add_sensor_inner(
+            state,
+            component_id,
+            name,
+            sensor_type,
+            0,
+            warning_threshold,
+            critical_threshold,
+        )
     })
 }
 
@@ -555,13 +573,19 @@ pub fn self_test() {
     // 5: Update sensor — warning threshold (temperature > 85 000).
     let result = update_sensor(cpu_temp_id, 87_000).expect("update warn");
     assert_eq!(result, Some(false));
-    assert_eq!(get_sensor(cpu_temp_id).expect("get").status, SensorStatus::Warning);
+    assert_eq!(
+        get_sensor(cpu_temp_id).expect("get").status,
+        SensorStatus::Warning
+    );
     crate::serial_println!("  [5/11] temperature warning: OK");
 
     // 6: Update sensor — critical threshold (temperature > 100 000).
     let result = update_sensor(cpu_temp_id, 105_000).expect("update crit");
     assert_eq!(result, Some(true));
-    assert_eq!(get_sensor(cpu_temp_id).expect("get").status, SensorStatus::Critical);
+    assert_eq!(
+        get_sensor(cpu_temp_id).expect("get").status,
+        SensorStatus::Critical
+    );
     crate::serial_println!("  [6/11] temperature critical: OK");
 
     // 7: Fan speed — inverted thresholds (low = bad).

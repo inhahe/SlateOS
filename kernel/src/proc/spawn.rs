@@ -39,22 +39,21 @@
 //!
 //! - No dynamic linking (only static executables).
 
-use alloc::boxed::Box;
-use crate::cap::{Rights, ResourceType};
+use crate::cap::{ResourceType, Rights};
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::Path;
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
-use crate::proc::{elf, pcb, thread};
 use crate::proc::pcb::ProcessId;
-use crate::sched::task::{TaskId, DEFAULT_PRIORITY};
-use crate::serial_println;
+use crate::proc::{elf, pcb, thread};
+use crate::sched::task::{DEFAULT_PRIORITY, TaskId};
 use crate::serial_print;
+use crate::serial_println;
+use alloc::boxed::Box;
 
 /// How many Path-Z rungs declined to run this boot because `rootfs.ext4` did
 /// not carry a file they need.  Reported by [`pathz_report_skips`].
-static PATHZ_SKIPPED: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+static PATHZ_SKIPPED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Record — *loudly* — that a Path-Z rung did not run for want of a staged
 /// prerequisite.
@@ -78,7 +77,11 @@ static PATHZ_SKIPPED: core::sync::atomic::AtomicUsize =
 /// failure gets investigated; a silent skip is believed.
 fn pathz_skip(rung: core::fmt::Arguments<'_>, missing: &str) {
     PATHZ_SKIPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    serial_println!("[spawn]   SKIP: {} — prerequisite missing: {}", rung, missing);
+    serial_println!(
+        "[spawn]   SKIP: {} — prerequisite missing: {}",
+        rung,
+        missing
+    );
 }
 
 /// Prerequisite gate for a Path-Z rung.
@@ -130,9 +133,8 @@ pub fn pathz_report_skips() {
 /// fastpy directory name (e.g. `load_test_elf("fastpy-hello")` reads
 /// `/mnt/tests/fastpy-hello.elf`).
 fn load_test_elf(name: &str) -> Option<alloc::vec::Vec<u8>> {
-    let mut path = alloc::string::String::with_capacity(
-        "/mnt/tests/".len() + name.len() + ".elf".len(),
-    );
+    let mut path =
+        alloc::string::String::with_capacity("/mnt/tests/".len() + name.len() + ".elf".len());
     path.push_str("/mnt/tests/");
     path.push_str(name);
     path.push_str(".elf");
@@ -159,8 +161,7 @@ const COMMAND_PATH: &[&str] = &["/mnt/bin"];
 /// how binaries are installed under `/bin`.
 fn resolve_command(name: &str, path_dirs: &[&str]) -> Option<alloc::vec::Vec<u8>> {
     for dir in path_dirs {
-        let mut path =
-            alloc::string::String::with_capacity(dir.len() + 1 + name.len());
+        let mut path = alloc::string::String::with_capacity(dir.len() + 1 + name.len());
         path.push_str(dir);
         path.push('/');
         path.push_str(name);
@@ -572,10 +573,7 @@ pub(crate) struct UserEntryInfo {
 ///
 /// - [`KernelError::InvalidExecutable`] if the ELF binary is invalid.
 /// - [`KernelError::OutOfMemory`] if any allocation fails.
-pub fn spawn_process(
-    elf_data: &[u8],
-    options: &SpawnOptions<'_>,
-) -> KernelResult<SpawnResult> {
+pub fn spawn_process(elf_data: &[u8], options: &SpawnOptions<'_>) -> KernelResult<SpawnResult> {
     spawn_process_inner(elf_data, options, None, &[])
 }
 
@@ -725,7 +723,11 @@ fn spawn_process_inner(
     };
     serial_println!(
         "[spawn] ELF validated: {} segment(s), entry={:#x} (raw {:#x}, bias {:#x}), pie={}",
-        segment_count, entry_point, raw_entry, exec_load_bias, elf_file.is_pie()
+        segment_count,
+        entry_point,
+        raw_entry,
+        exec_load_bias,
+        elf_file.is_pie()
     );
 
     // Detect whether this binary speaks the Linux x86_64 syscall ABI.
@@ -763,7 +765,8 @@ fn spawn_process_inner(
         if let Err(e) = pcb::set_abi_mode(pid, pcb::AbiMode::Linux) {
             serial_println!(
                 "[spawn] WARNING: failed to stamp Linux ABI on process {}: {:?}",
-                pid, e
+                pid,
+                e
             );
             // Continue: the process still runs, just in native ABI mode.
             // detect_linux_abi was a hint; the failure mode (process can't
@@ -772,7 +775,8 @@ fn spawn_process_inner(
         } else if let Err(e) = pcb::linux_fd_install_stdio(pid) {
             serial_println!(
                 "[spawn] WARNING: failed to install Linux stdio fds on process {}: {:?}",
-                pid, e
+                pid,
+                e
             );
             // Non-fatal — the process runs but read/write on stdio
             // will fail until the binary opens something explicitly.
@@ -821,7 +825,9 @@ fn spawn_process_inner(
                     // the handle is always reclaimed exactly once at teardown.
                     serial_println!(
                         "[spawn] WARNING: failed to install fd {} redirect on process {}: {:?}",
-                        fd, pid, e
+                        fd,
+                        pid,
+                        e
                     );
                 }
             }
@@ -848,16 +854,14 @@ fn spawn_process_inner(
     }
 
     // Get the process's PML4 physical address.
-    let pml4_phys = pcb::get_pml4(pid)
-        .filter(|&p| p != 0)
-        .ok_or_else(|| {
-            serial_println!(
-                "[spawn] ERROR: process {} has no PML4 — out of memory?",
-                pid
-            );
-            pcb::destroy(pid);
-            KernelError::OutOfMemory
-        })?;
+    let pml4_phys = pcb::get_pml4(pid).filter(|&p| p != 0).ok_or_else(|| {
+        serial_println!(
+            "[spawn] ERROR: process {} has no PML4 — out of memory?",
+            pid
+        );
+        pcb::destroy(pid);
+        KernelError::OutOfMemory
+    })?;
 
     // Step 3: Load ELF segments into the process address space at the
     // chosen load bias (0 for ET_EXEC, LINUX_PIE_BASE for ET_DYN/PIE).
@@ -944,11 +948,19 @@ fn spawn_process_inner(
         // ld.so receives AT_BASE) and None for a static one.  exec_load_bias
         // shifts AT_ENTRY/AT_PHDR to the executable's runtime addresses
         // (non-zero only for a PIE image).
-        match build_linux_initial_stack(pml4_phys, &elf_file, options.argv, options.envp, interp_base, exec_load_bias) {
+        match build_linux_initial_stack(
+            pml4_phys,
+            &elf_file,
+            options.argv,
+            options.envp,
+            interp_base,
+            exec_load_bias,
+        ) {
             Ok(installed) => {
                 serial_println!(
                     "[spawn] Built Linux SysV stack: rsp={:#x} (was {:#x})",
-                    installed.rsp, user_rsp
+                    installed.rsp,
+                    user_rsp
                 );
                 user_rsp = installed.rsp;
                 // Persist the auxv so PR_GET_AUXV / /proc/<pid>/auxv can
@@ -972,7 +984,8 @@ fn spawn_process_inner(
         if let Err(e) = pcb::grant_capability(pid, resource_type, resource_id, rights) {
             serial_println!(
                 "[spawn] Warning: failed to grant capability to process {}: {:?}",
-                pid, e
+                pid,
+                e
             );
         }
     }
@@ -997,7 +1010,8 @@ fn spawn_process_inner(
         ) {
             serial_println!(
                 "[spawn] Warning: failed to grant Process cap to parent {}: {:?}",
-                options.parent, e
+                options.parent,
+                e
             );
             // Non-fatal — parent can still use implicit parent authority.
         }
@@ -1036,10 +1050,8 @@ fn spawn_process_inner(
                     // write) and returns the same handle.  The child
                     // closes its reference independently when it dies
                     // or when its fd-table layer claims the handle.
-                    crate::ipc::pipe::dup(
-                        crate::ipc::pipe::PipeHandle::from_raw(parent_handle),
-                    )
-                    .map(|h| h.raw())
+                    crate::ipc::pipe::dup(crate::ipc::pipe::PipeHandle::from_raw(parent_handle))
+                        .map(|h| h.raw())
                 }
                 fd_handle_type::STREAM_SOCKET => {
                     // Stream socket endpoints are ref-counted per
@@ -1063,16 +1075,17 @@ fn spawn_process_inner(
                     // (or when SYS_PROCESS_GET_INITIAL_FDS hands the
                     // handle off to the child's fd-table, which then
                     // owns the close).
-                    crate::ipc::eventfd::dup(
-                        crate::ipc::eventfd::EventFdHandle::from_raw(parent_handle),
-                    )
+                    crate::ipc::eventfd::dup(crate::ipc::eventfd::EventFdHandle::from_raw(
+                        parent_handle,
+                    ))
                     .map(|h| h.raw())
                 }
                 _ => {
                     // Unknown handle type.
                     serial_println!(
                         "[spawn] Unknown handle type {} for fd {}",
-                        handle_type, fd_num,
+                        handle_type,
+                        fd_num,
                     );
                     Err(KernelError::InvalidArgument)
                 }
@@ -1082,7 +1095,10 @@ fn spawn_process_inner(
                 Ok(child_handle) => {
                     serial_println!(
                         "[spawn] fd {} → handle {} (type={}, duped from {})",
-                        fd_num, child_handle, handle_type, parent_handle,
+                        fd_num,
+                        child_handle,
+                        handle_type,
+                        parent_handle,
                     );
                     initial_fds.push((fd_num, handle_type, child_handle));
                 }
@@ -1101,9 +1117,7 @@ fn spawn_process_inner(
                                 );
                             }
                             fd_handle_type::PIPE => {
-                                crate::ipc::pipe::close(
-                                    crate::ipc::pipe::PipeHandle::from_raw(h),
-                                );
+                                crate::ipc::pipe::close(crate::ipc::pipe::PipeHandle::from_raw(h));
                             }
                             fd_handle_type::STREAM_SOCKET => {
                                 crate::ipc::stream_socket::close(
@@ -1115,7 +1129,10 @@ fn spawn_process_inner(
                     }
                     serial_println!(
                         "[spawn] Failed to dup handle {} (type={}) for fd {}: {:?}",
-                        parent_handle, handle_type, fd_num, e,
+                        parent_handle,
+                        handle_type,
+                        fd_num,
+                        e,
                     );
                     pcb::destroy(pid);
                     return Err(e);
@@ -1131,24 +1148,23 @@ fn spawn_process_inner(
     // during its init sequence.  The data is stored in kernel heap
     // and freed when the child reads it (or when the process dies).
     if !options.argv.is_empty() || !options.envp.is_empty() {
-        let argv_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> = options.argv
-            .iter()
-            .map(|a| a.to_vec())
-            .collect();
-        let envp_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> = options.envp
-            .iter()
-            .map(|e| e.to_vec())
-            .collect();
+        let argv_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+            options.argv.iter().map(|a| a.to_vec()).collect();
+        let envp_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+            options.envp.iter().map(|e| e.to_vec()).collect();
         if let Err(e) = pcb::set_initial_args(pid, argv_vecs, envp_vecs) {
             serial_println!(
                 "[spawn] Failed to set initial args for process {}: {:?}",
-                pid, e,
+                pid,
+                e,
             );
             // Non-fatal for now — process can still run without args.
         } else {
             serial_println!(
                 "[spawn] Stored {} argv, {} envp entries for process {}",
-                options.argv.len(), options.envp.len(), pid,
+                options.argv.len(),
+                options.envp.len(),
+                pid,
             );
         }
     }
@@ -1160,7 +1176,8 @@ fn spawn_process_inner(
         if let Err(e) = pcb::set_exe_path(pid, path.to_vec()) {
             serial_println!(
                 "[spawn] Failed to record exe path for process {}: {:?}",
-                pid, e,
+                pid,
+                e,
             );
         }
     }
@@ -1174,7 +1191,8 @@ fn spawn_process_inner(
         if let Err(e) = pcb::set_cwd(pid, dir.to_vec()) {
             serial_println!(
                 "[spawn] Ignoring invalid initial cwd for process {}: {:?}",
-                pid, e,
+                pid,
+                e,
             );
         }
     }
@@ -1188,7 +1206,8 @@ fn spawn_process_inner(
         if let Err(e) = pcb::set_credentials(pid, pcb::ProcessCredentials::new(uid, gid)) {
             serial_println!(
                 "[spawn] Ignoring invalid initial uid/gid for process {}: {:?}",
-                pid, e,
+                pid,
+                e,
             );
         }
     }
@@ -1226,7 +1245,10 @@ fn spawn_process_inner(
 
     serial_println!(
         "[spawn] Process {} running (thread {}, entry={:#x}, user_rsp={:#x})",
-        pid, task_id, entry_rip, user_rsp
+        pid,
+        task_id,
+        entry_rip,
+        user_rsp
     );
 
     Ok(SpawnResult {
@@ -1327,8 +1349,7 @@ pub fn exec_process(
     // running its old code.
     let elf_file = elf::ElfFile::parse(elf_data)?;
 
-    let segment_count = elf_file.loadable_segments()?
-        .count();
+    let segment_count = elf_file.loadable_segments()?.count();
     if segment_count == 0 {
         serial_println!("[exec] ELF has no loadable segments");
         return Err(KernelError::InvalidExecutable);
@@ -1347,7 +1368,11 @@ pub fn exec_process(
     })?;
     serial_println!(
         "[exec] ELF validated for exec: {} segment(s), entry={:#x} (raw {:#x}, bias {:#x}), pie={}",
-        segment_count, entry_point, raw_entry, exec_load_bias, elf_file.is_pie()
+        segment_count,
+        entry_point,
+        raw_entry,
+        exec_load_bias,
+        elf_file.is_pie()
     );
 
     // Re-detect ABI mode for the new image.  exec replaces the process
@@ -1363,12 +1388,10 @@ pub fn exec_process(
     }
 
     // Step 2: Get the process's PML4.
-    let pml4_phys = pcb::get_pml4(pid)
-        .filter(|&p| p != 0)
-        .ok_or_else(|| {
-            serial_println!("[exec] ERROR: process {} has no PML4", pid);
-            KernelError::NoSuchProcess
-        })?;
+    let pml4_phys = pcb::get_pml4(pid).filter(|&p| p != 0).ok_or_else(|| {
+        serial_println!("[exec] ERROR: process {} has no PML4", pid);
+        KernelError::NoSuchProcess
+    })?;
 
     // Step 3: Tear down the old user address space.
     //
@@ -1486,7 +1509,9 @@ pub fn exec_process(
     // through %fs early in the new program would read the previous
     // image's (now-unmapped) TLS address.
     // SAFETY: writing 0 to IA32_FS_BASE is canonical and cannot #GP.
-    unsafe { crate::cpu::wrmsr(crate::cpu::IA32_FS_BASE, 0); }
+    unsafe {
+        crate::cpu::wrmsr(crate::cpu::IA32_FS_BASE, 0);
+    }
     crate::sched::set_current_task_fs_base(0);
     // Likewise reset the userspace %gs base to 0.  Like %fs, the userspace
     // %gs base is the active IA32_GS_BASE (the entry stub swaps GS back before
@@ -1496,7 +1521,9 @@ pub fn exec_process(
     // %gs base before its glibc _start optionally re-installs one via
     // arch_prctl(ARCH_SET_GS).
     // SAFETY: writing 0 to IA32_GS_BASE is canonical and cannot #GP.
-    unsafe { crate::cpu::wrmsr(crate::cpu::IA32_GS_BASE, 0); }
+    unsafe {
+        crate::cpu::wrmsr(crate::cpu::IA32_GS_BASE, 0);
+    }
     crate::sched::set_current_task_gs_base(0);
 
     // Step 5: Allocate and map a fresh user stack.
@@ -1520,11 +1547,19 @@ pub fn exec_process(
         // interp_base is Some(base) for a dynamically-linked binary and
         // None for a static one.  exec_load_bias shifts AT_ENTRY/AT_PHDR
         // to the executable's runtime addresses (non-zero only for PIE).
-        match build_linux_initial_stack(pml4_phys, &elf_file, argv, envp, interp_base, exec_load_bias) {
+        match build_linux_initial_stack(
+            pml4_phys,
+            &elf_file,
+            argv,
+            envp,
+            interp_base,
+            exec_load_bias,
+        ) {
             Ok(installed) => {
                 serial_println!(
                     "[exec] Built Linux SysV stack: rsp={:#x} (was {:#x})",
-                    installed.rsp, user_rsp
+                    installed.rsp,
+                    user_rsp
                 );
                 user_rsp = installed.rsp;
                 // Replace any prior saved auxv with the freshly-built one
@@ -1571,7 +1606,8 @@ pub fn exec_process(
     if let Err(e) = pcb::set_abi_mode(pid, new_abi_mode) {
         serial_println!(
             "[exec] WARNING: failed to update ABI mode on process {}: {:?}",
-            pid, e
+            pid,
+            e
         );
         // Non-fatal — the process keeps its previous abi_mode, which
         // will be wrong for the new image but matches the worst-case
@@ -1593,15 +1629,15 @@ pub fn exec_process(
                         serial_println!(
                             "[exec] WARNING: close-on-exec for kind={:?} \
                              raw={:#x} returned {} on process {}",
-                            entry.kind, entry.raw_handle, res.value, pid,
+                            entry.kind,
+                            entry.raw_handle,
+                            res.value,
+                            pid,
                         );
                     }
                 }
                 if count > 0 {
-                    serial_println!(
-                        "[exec] Closed {} cloexec fd(s) on process {}",
-                        count, pid,
-                    );
+                    serial_println!("[exec] Closed {} cloexec fd(s) on process {}", count, pid,);
                 }
             } else {
                 // No old fd table even though abi_mode was Linux —
@@ -1616,7 +1652,8 @@ pub fn exec_process(
                     serial_println!(
                         "[exec] WARNING: failed to install Linux stdio fds \
                          on process {}: {:?}",
-                        pid, e
+                        pid,
+                        e
                     );
                 }
             }
@@ -1624,7 +1661,8 @@ pub fn exec_process(
             // Native → Linux: install fresh stdio-only table.
             serial_println!(
                 "[exec] WARNING: failed to install Linux stdio fds on process {}: {:?}",
-                pid, e
+                pid,
+                e
             );
         }
     } else {
@@ -1639,24 +1677,19 @@ pub fn exec_process(
     // This replaces any previous argv/envp (from the original spawn or
     // a prior exec).  The new binary reads them via SYS_PROCESS_GET_ARGS.
     if !argv.is_empty() || !envp.is_empty() {
-        let argv_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> = argv
-            .iter()
-            .map(|a| a.to_vec())
-            .collect();
-        let envp_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> = envp
-            .iter()
-            .map(|e| e.to_vec())
-            .collect();
+        let argv_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+            argv.iter().map(|a| a.to_vec()).collect();
+        let envp_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+            envp.iter().map(|e| e.to_vec()).collect();
         if let Err(e) = pcb::set_initial_args(pid, argv_vecs, envp_vecs) {
-            serial_println!(
-                "[exec] Failed to set args for process {}: {:?}",
-                pid, e,
-            );
+            serial_println!("[exec] Failed to set args for process {}: {:?}", pid, e,);
             // Non-fatal — process can still run without args.
         } else {
             serial_println!(
                 "[exec] Stored {} argv, {} envp entries for process {}",
-                argv.len(), envp.len(), pid,
+                argv.len(),
+                envp.len(),
+                pid,
             );
         }
     }
@@ -1669,7 +1702,8 @@ pub fn exec_process(
         if let Err(e) = pcb::set_exe_path(pid, path.to_vec()) {
             serial_println!(
                 "[exec] Failed to record exe path for process {}: {:?}",
-                pid, e,
+                pid,
+                e,
             );
         }
     } else {
@@ -1691,16 +1725,15 @@ pub fn exec_process(
     if let Some(src) = comm_src {
         let base = exec_comm_basename(src);
         if !base.is_empty() {
-            let _ = crate::sched::set_task_name(
-                crate::sched::current_task_id(),
-                base,
-            );
+            let _ = crate::sched::set_task_name(crate::sched::current_task_id(), base);
         }
     }
 
     serial_println!(
         "[exec] Process {} exec complete: entry={:#x}, rsp={:#x}",
-        pid, entry_rip, user_rsp
+        pid,
+        entry_rip,
+        user_rsp
     );
 
     Ok(ExecResult {
@@ -1826,7 +1859,10 @@ fn choose_exec_load_bias(is_pie: bool) -> u64 {
         return 0;
     }
     if crate::rng::is_initialized() {
-        apply_aslr_base(LINUX_PIE_BASE, crate::rng::next_bounded(PIE_ASLR_SPAN_PAGES))
+        apply_aslr_base(
+            LINUX_PIE_BASE,
+            crate::rng::next_bounded(PIE_ASLR_SPAN_PAGES),
+        )
     } else {
         LINUX_PIE_BASE
     }
@@ -1940,7 +1976,8 @@ unsafe fn load_interpreter(
             serial_println!(
                 "[spawn] interpreter '{}' unreadable ({:?}); \
                  entering executable directly",
-                interp_path, e
+                interp_path,
+                e
             );
             return Ok(None);
         }
@@ -1953,7 +1990,8 @@ unsafe fn load_interpreter(
             serial_println!(
                 "[spawn] interpreter '{}' is not a valid ELF ({:?}); \
                  entering executable directly",
-                interp_path, e
+                interp_path,
+                e
             );
             return Ok(None);
         }
@@ -1983,7 +2021,8 @@ unsafe fn load_interpreter(
         serial_println!(
             "[spawn] failed to load interpreter '{}' segments ({:?}); \
              entering executable directly",
-            interp_path, e
+            interp_path,
+            e
         );
         return Ok(None);
     }
@@ -1995,7 +2034,9 @@ unsafe fn load_interpreter(
 
     serial_println!(
         "[spawn] loaded interpreter '{}' at base={:#x}, entry={:#x}",
-        interp_path, base, entry_rip
+        interp_path,
+        base,
+        entry_rip
     );
 
     Ok(Some(LoadedInterp { base, entry_rip }))
@@ -2062,8 +2103,7 @@ fn build_linux_initial_stack(
 /// Returns `OutOfMemory` if frame allocation fails, or propagates
 /// page table mapping errors.
 fn setup_user_stack(pml4_phys: u64) -> KernelResult<u64> {
-    let hhdm = page_table::hhdm()
-        .ok_or(KernelError::InternalError)?;
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
 
     let flags = PageFlags::PRESENT
         | PageFlags::WRITABLE
@@ -2154,7 +2194,8 @@ pub(crate) extern "C" fn userspace_entry_trampoline(info_raw: u64) {
 
     serial_println!(
         "[spawn] Ring 3 entry: rip={:#x}, rsp={:#x}",
-        entry_rip, user_rsp
+        entry_rip,
+        user_rsp
     );
 
     // GDT selectors for ring 3.
@@ -2267,14 +2308,16 @@ fn test_brk_aslr_gap() -> KernelResult<()> {
             if floor & FRAME_MASK != 0 {
                 serial_println!(
                     "[spawn]   FAIL: choose_brk_start({:#x}) not 16 KiB-aligned: {:#x}",
-                    image_end, floor
+                    image_end,
+                    floor
                 );
                 return Err(KernelError::InternalError);
             }
             if floor < image_end {
                 serial_println!(
                     "[spawn]   FAIL: choose_brk_start({:#x}) below image end: {:#x}",
-                    image_end, floor
+                    image_end,
+                    floor
                 );
                 return Err(KernelError::InternalError);
             }
@@ -2284,7 +2327,9 @@ fn test_brk_aslr_gap() -> KernelResult<()> {
             if floor >= ceiling {
                 serial_println!(
                     "[spawn]   FAIL: choose_brk_start({:#x}) gap exceeds window: {:#x} >= {:#x}",
-                    image_end, floor, ceiling
+                    image_end,
+                    floor,
+                    ceiling
                 );
                 return Err(KernelError::InternalError);
             }
@@ -2327,7 +2372,8 @@ fn test_pie_aslr_window() -> KernelResult<()> {
         }
         serial_println!(
             "[spawn]   FAIL: PIE ASLR base {:#x} too close to interpreter floor {:#x}",
-            b, LINUX_INTERP_BASE
+            b,
+            LINUX_INTERP_BASE
         );
         return Err(KernelError::InternalError);
     }
@@ -2337,7 +2383,8 @@ fn test_pie_aslr_window() -> KernelResult<()> {
     if LINUX_INTERP_BASE.saturating_sub(max_base) < PIE_MIN_HEADROOM {
         serial_println!(
             "[spawn]   FAIL: PIE ASLR window headroom {:#x} < required {:#x}",
-            LINUX_INTERP_BASE.saturating_sub(max_base), PIE_MIN_HEADROOM
+            LINUX_INTERP_BASE.saturating_sub(max_base),
+            PIE_MIN_HEADROOM
         );
         return Err(KernelError::InternalError);
     }
@@ -2380,7 +2427,8 @@ fn test_apply_aslr_base() -> KernelResult<()> {
         if b >= USER_STACK_GUARD {
             serial_println!(
                 "[spawn]   FAIL: ASLR window reaches the stack guard ({:#x} >= {:#x})",
-                b, USER_STACK_GUARD
+                b,
+                USER_STACK_GUARD
             );
             return Err(KernelError::InternalError);
         }
@@ -2703,7 +2751,8 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: dynamic interp — expected exit {} (interpreter), got {:?} \
              (7 would mean the executable ran instead of ld.so)",
-            INTERP_EXIT, exit_code
+            INTERP_EXIT,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -2761,7 +2810,10 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
     }
     data[READ_OFF] = SENTINEL;
     if let Err(e) = crate::fs::Vfs::write_file(DATA_PATH, &data) {
-        serial_println!("[spawn]   Linux file mmap (ring 3): SKIP (VFS write failed: {:?})", e);
+        serial_println!(
+            "[spawn]   Linux file mmap (ring 3): SKIP (VFS write failed: {:?})",
+            e
+        );
         return Ok(());
     }
 
@@ -2824,7 +2876,8 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: file mmap (ring 3, {label}) — expected exit {} \
                  (mapped sentinel byte), got {:?}",
-                SENTINEL, exit_code
+                SENTINEL,
+                exit_code
             );
             return Err(KernelError::InternalError);
         }
@@ -2839,8 +2892,7 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
     // the mapping's first byte is the file byte at FRAME — the sentinel.  This
     // exercises mmap's `offset` argument end-to-end (ld.so maps PT_LOAD
     // segments at nonzero p_offset, so this path matters for Path X).
-    let elf_offn =
-        elf::build_linux_mmap_test_elf(DATA_PATH_NUL, FRAME as u32, 0, READ_OFF as u32);
+    let elf_offn = elf::build_linux_mmap_test_elf(DATA_PATH_NUL, FRAME as u32, 0, READ_OFF as u32);
 
     let res_a = run_one(&elf_off0, "offset 0, second-frame byte");
     let res_b = if res_a.is_ok() {
@@ -2884,9 +2936,8 @@ pub fn self_test_userspace_netstack() -> KernelResult<()> {
     // The prebuilt daemon ELF, embedded at compile time (same pattern as the
     // `hello` service used by the container tests).  Built by
     // `services/netstack` for x86_64-unknown-none.
-    static NETSTACK_ELF: &[u8] = include_bytes!(
-        "../../../services/netstack/target/x86_64-unknown-none/release/netstack"
-    );
+    static NETSTACK_ELF: &[u8] =
+        include_bytes!("../../../services/netstack/target/x86_64-unknown-none/release/netstack");
 
     // Skip when there's no usable network: the daemon's proof is an ARP
     // round-trip with the gateway, which requires a bound address.
@@ -2894,7 +2945,9 @@ pub fn self_test_userspace_netstack() -> KernelResult<()> {
     if !ifinfo.up || ifinfo.ip.0 == [0, 0, 0, 0] || ifinfo.gateway.0 == [0, 0, 0, 0] {
         serial_println!(
             "[spawn]   netstack daemon (ring 3): SKIP (no network — up={}, ip={}, gw={})",
-            ifinfo.up, ifinfo.ip, ifinfo.gateway
+            ifinfo.up,
+            ifinfo.ip,
+            ifinfo.gateway
         );
         return Ok(());
     }
@@ -2987,16 +3040,17 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
     if !ifinfo.up || ifinfo.ip.0 == [0, 0, 0, 0] || ifinfo.dns.0 == [0, 0, 0, 0] {
         serial_println!(
             "[spawn]   netstack DNS-over-IPC (ring 3): SKIP (no network — up={}, ip={}, dns={})",
-            ifinfo.up, ifinfo.ip, ifinfo.dns
+            ifinfo.up,
+            ifinfo.ip,
+            ifinfo.dns
         );
         return Ok(());
     }
 
     serial_println!("[spawn] Running netstack DNS-over-IPC (ring 3) integration test...");
 
-    static NETSTACK_ELF: &[u8] = include_bytes!(
-        "../../../services/netstack/target/x86_64-unknown-none/release/netstack"
-    );
+    static NETSTACK_ELF: &[u8] =
+        include_bytes!("../../../services/netstack/target/x86_64-unknown-none/release/netstack");
 
     let argv: &[&[u8]] = &[b"netstack", b"serve-dns"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
@@ -3091,7 +3145,10 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   netstack DNS-over-IPC (ring 3: kernel→daemon resolve of \
                  example.com over net.stack): OK — {}.{}.{}.{}",
-                ip[0], ip[1], ip[2], ip[3]
+                ip[0],
+                ip[1],
+                ip[2],
+                ip[3]
             );
             a_ip = Some(ip);
         }
@@ -3105,10 +3162,7 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
             );
         }
         netipc::Ipv4Reply::Malformed => {
-            serial_println!(
-                "[spawn]   FAIL: malformed netstack A reply (len={})",
-                dlen
-            );
+            serial_println!("[spawn]   FAIL: malformed netstack A reply (len={})", dlen);
             let _ = crate::container::wait_process(result.pid);
             return Err(KernelError::InternalError);
         }
@@ -3223,7 +3277,10 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
              response (no upstream?) — path proven"
         ),
         Err(e) => {
-            serial_println!("[spawn]   FAIL: UDP-exchange IPC round-trip error ({:?})", e);
+            serial_println!(
+                "[spawn]   FAIL: UDP-exchange IPC round-trip error ({:?})",
+                e
+            );
             return Err(e);
         }
     }
@@ -3277,7 +3334,10 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
              drained + completions reaped, no/short response (no upstream?) — path proven"
         ),
         Err(e) => {
-            serial_println!("[spawn]   FAIL: ring-TCP-multi IPC round-trip error ({:?})", e);
+            serial_println!(
+                "[spawn]   FAIL: ring-TCP-multi IPC round-trip error ({:?})",
+                e
+            );
             return Err(e);
         }
     }
@@ -3294,7 +3354,10 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
              submissions, no/short response (no upstream?) — path proven"
         ),
         Err(e) => {
-            serial_println!("[spawn]   FAIL: client-persist IPC round-trip error ({:?})", e);
+            serial_println!(
+                "[spawn]   FAIL: client-persist IPC round-trip error ({:?})",
+                e
+            );
             return Err(e);
         }
     }
@@ -3303,7 +3366,11 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
     // Default off: the kernel keeps its resident stack until this is flipped.
     serial_println!(
         "[spawn]   net.userspace cutover switch: {} (default off; resident stack still authoritative)",
-        if crate::net::netstack_client::userspace_enabled() { "ON" } else { "off" }
+        if crate::net::netstack_client::userspace_enabled() {
+            "ON"
+        } else {
+            "off"
+        }
     );
 
     match ring_tcp_demux_result {
@@ -3317,7 +3384,10 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
              + completions reaped, no/short response (no upstream?) — demux path proven"
         ),
         Err(e) => {
-            serial_println!("[spawn]   FAIL: ring-TCP-demux IPC round-trip error ({:?})", e);
+            serial_println!(
+                "[spawn]   FAIL: ring-TCP-demux IPC round-trip error ({:?})",
+                e
+            );
             return Err(e);
         }
     }
@@ -3327,7 +3397,10 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   netstack reverse-DNS-over-IPC (ring 3): OK — PTR name decoded \
                  for {}.{}.{}.{}",
-                ptr_ip[0], ptr_ip[1], ptr_ip[2], ptr_ip[3]
+                ptr_ip[0],
+                ptr_ip[1],
+                ptr_ip[2],
+                ptr_ip[3]
             );
             Ok(())
         }
@@ -3419,13 +3492,10 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         return Ok(());
     }
 
-    serial_println!(
-        "[spawn] Starting persistent userspace netstack daemon (net.userspace on)..."
-    );
+    serial_println!("[spawn] Starting persistent userspace netstack daemon (net.userspace on)...");
 
-    static NETSTACK_ELF: &[u8] = include_bytes!(
-        "../../../services/netstack/target/x86_64-unknown-none/release/netstack"
-    );
+    static NETSTACK_ELF: &[u8] =
+        include_bytes!("../../../services/netstack/target/x86_64-unknown-none/release/netstack");
 
     let argv: &[&[u8]] = &[b"netstack", b"serve-net"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
@@ -3682,9 +3752,9 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             "[spawn]   persistent netstack connect6: IPv6 handshake completed over loopback and \
              echoed data both ways — IPv6-connect parity proven over the daemon"
         ),
-        Ok(None) => serial_println!(
-            "[spawn]   persistent netstack connect6: no NIC MAC — check skipped"
-        ),
+        Ok(None) => {
+            serial_println!("[spawn]   persistent netstack connect6: no NIC MAC — check skipped")
+        }
         Err(e) => serial_println!(
             "[spawn]   WARNING: persistent netstack connect6 error ({:?})",
             e
@@ -3701,9 +3771,9 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             "[spawn]   persistent netstack udp6: IPv6 datagram looped back with an AF_INET6 \
              source header and matching payload — AF_INET6 SOCK_DGRAM parity proven over the daemon"
         ),
-        Ok(None) => serial_println!(
-            "[spawn]   persistent netstack udp6: no NIC MAC — check skipped"
-        ),
+        Ok(None) => {
+            serial_println!("[spawn]   persistent netstack udp6: no NIC MAC — check skipped")
+        }
         Err(e) => serial_println!(
             "[spawn]   WARNING: persistent netstack udp6 error ({:?})",
             e
@@ -3719,9 +3789,9 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             "[spawn]   persistent netstack udp-connect: connected send looped back and the \
              non-peer datagram was dropped — UDP connect() default-peer parity proven"
         ),
-        Ok(None) => serial_println!(
-            "[spawn]   persistent netstack udp-connect: no NIC MAC — check skipped"
-        ),
+        Ok(None) => {
+            serial_println!("[spawn]   persistent netstack udp-connect: no NIC MAC — check skipped")
+        }
         Err(e) => serial_println!(
             "[spawn]   WARNING: persistent netstack udp-connect error ({:?})",
             e
@@ -3793,9 +3863,8 @@ fn run_ring3_http_capstone() {
         }
     };
 
-    static HTTPGET_ELF: &[u8] = include_bytes!(
-        "../../../services/httpget/target/x86_64-unknown-none/release/httpget"
-    );
+    static HTTPGET_ELF: &[u8] =
+        include_bytes!("../../../services/httpget/target/x86_64-unknown-none/release/httpget");
 
     // Format the resolved IP as a dotted-decimal argv string (no NUL — the Linux
     // stack builder terminates argv entries itself, as for the daemon's argv).
@@ -3867,9 +3936,7 @@ fn run_ring3_http_capstone() {
             "[spawn]   WARNING: ring3 HTTP capstone exited {} (see httpget exit-code table)",
             code
         ),
-        None => serial_println!(
-            "[spawn]   WARNING: ring3 HTTP capstone produced no exit code"
-        ),
+        None => serial_println!("[spawn]   WARNING: ring3 HTTP capstone produced no exit code"),
     }
 }
 
@@ -3895,9 +3962,8 @@ fn run_ring3_udp_capstone(dns_ip: &[u8; 4]) {
         return;
     }
 
-    static UDPGET_ELF: &[u8] = include_bytes!(
-        "../../../services/udpget/target/x86_64-unknown-none/release/udpget"
-    );
+    static UDPGET_ELF: &[u8] =
+        include_bytes!("../../../services/udpget/target/x86_64-unknown-none/release/udpget");
 
     // Format the resolver IP as a dotted-decimal argv string; port 53 (DNS).
     let mut ip_buf = [0u8; 16];
@@ -3924,7 +3990,10 @@ fn run_ring3_udp_capstone(dns_ip: &[u8; 4]) {
     let result = match spawn_process_with_abi(UDPGET_ELF, &options, pcb::AbiMode::Linux) {
         Ok(r) => r,
         Err(e) => {
-            serial_println!("[spawn]   WARNING: ring3 UDP capstone spawn returned {:?}", e);
+            serial_println!(
+                "[spawn]   WARNING: ring3 UDP capstone spawn returned {:?}",
+                e
+            );
             return;
         }
     };
@@ -3963,9 +4032,7 @@ fn run_ring3_udp_capstone(dns_ip: &[u8; 4]) {
             "[spawn]   WARNING: ring3 UDP capstone exited {} (see udpget exit-code table)",
             code
         ),
-        None => serial_println!(
-            "[spawn]   WARNING: ring3 UDP capstone produced no exit code"
-        ),
+        None => serial_println!("[spawn]   WARNING: ring3 UDP capstone produced no exit code"),
     }
 }
 
@@ -3989,23 +4056,34 @@ fn run_ring3_udp_capstone(dns_ip: &[u8; 4]) {
 fn run_ring3_udp6_capstone() {
     let mac = crate::net::interface::mac().0;
     if mac == [0u8; 6] {
-        serial_println!(
-            "[spawn]   ring3 UDP6 capstone: no NIC MAC (no me.ip6) — check skipped"
-        );
+        serial_println!("[spawn]   ring3 UDP6 capstone: no NIC MAC (no me.ip6) — check skipped");
         return;
     }
     // EUI-64 link-local (RFC 4291 App. A), matching the daemon's
     // `icmpv6::link_local_from_mac(mac)` used to seed `me.ip6`.
     let ll: [u8; 16] = [
-        0xFE, 0x80, 0, 0, 0, 0, 0, 0, mac[0] ^ 0x02, mac[1], mac[2], 0xFF, 0xFE, mac[3], mac[4],
+        0xFE,
+        0x80,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        mac[0] ^ 0x02,
+        mac[1],
+        mac[2],
+        0xFF,
+        0xFE,
+        mac[3],
+        mac[4],
         mac[5],
     ];
     let mut hex = [0u8; 32];
     fmt_ipv6_hex32(&ll, &mut hex);
 
-    static UDPGET_ELF: &[u8] = include_bytes!(
-        "../../../services/udpget/target/x86_64-unknown-none/release/udpget"
-    );
+    static UDPGET_ELF: &[u8] =
+        include_bytes!("../../../services/udpget/target/x86_64-unknown-none/release/udpget");
 
     // argv = ["udpget", "<32-hex me.ip6>", "<port>", "6"]. A fixed loopback port
     // (distinct from the kernel self-test's 9201 to avoid any cross-talk).
@@ -4028,7 +4106,10 @@ fn run_ring3_udp6_capstone() {
     let result = match spawn_process_with_abi(UDPGET_ELF, &options, pcb::AbiMode::Linux) {
         Ok(r) => r,
         Err(e) => {
-            serial_println!("[spawn]   WARNING: ring3 UDP6 capstone spawn returned {:?}", e);
+            serial_println!(
+                "[spawn]   WARNING: ring3 UDP6 capstone spawn returned {:?}",
+                e
+            );
             return;
         }
     };
@@ -4066,9 +4147,7 @@ fn run_ring3_udp6_capstone() {
             "[spawn]   WARNING: ring3 UDP6 capstone exited {} (see udpget exit-code table)",
             code
         ),
-        None => serial_println!(
-            "[spawn]   WARNING: ring3 UDP6 capstone produced no exit code"
-        ),
+        None => serial_println!("[spawn]   WARNING: ring3 UDP6 capstone produced no exit code"),
     }
 }
 
@@ -4587,14 +4666,18 @@ fn netstack_ring_echo_roundtrip() -> KernelResult<()> {
         if cqe.user_data != want_ud {
             serial_println!(
                 "[spawn]   ring-echo: completion {} user_data mismatch (got {:#x}, want {:#x})",
-                i, cqe.user_data, want_ud
+                i,
+                cqe.user_data,
+                want_ud
             );
             return finish(handle, Err(KernelError::InternalError));
         }
         if cqe.result != want_res {
             serial_println!(
                 "[spawn]   ring-echo: completion {} result mismatch (got {}, want {})",
-                i, cqe.result, want_res
+                i,
+                cqe.result,
+                want_res
             );
             return finish(handle, Err(KernelError::InternalError));
         }
@@ -4788,7 +4871,9 @@ fn netstack_ring_tcp_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Option<(
         if cqe.user_data != want_ud {
             serial_println!(
                 "[spawn]   ring-tcp: completion {} user_data mismatch (got {:#x}, want {:#x})",
-                i, cqe.user_data, want_ud
+                i,
+                cqe.user_data,
+                want_ud
             );
             return finish(handle, Err(KernelError::InternalError));
         }
@@ -4920,7 +5005,8 @@ fn netstack_ring_tcp_multi_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Op
         None => return finish(handle, Err(KernelError::InternalError)),
     };
     // Stage the same HTTP request into both request windows.
-    if !ring.write_data(REQ7_OFF as usize, HTTP_REQ) || !ring.write_data(REQ9_OFF as usize, HTTP_REQ)
+    if !ring.write_data(REQ7_OFF as usize, HTTP_REQ)
+        || !ring.write_data(REQ9_OFF as usize, HTTP_REQ)
     {
         return finish(handle, Err(KernelError::InternalError));
     }
@@ -5057,7 +5143,9 @@ fn netstack_ring_tcp_multi_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Op
         if cqe.user_data != want_ud {
             serial_println!(
                 "[spawn]   ring-tcp-multi: completion {} user_data mismatch (got {:#x}, want {:#x})",
-                i, cqe.user_data, want_ud
+                i,
+                cqe.user_data,
+                want_ud
             );
             return finish(handle, Err(KernelError::InternalError));
         }
@@ -5068,7 +5156,16 @@ fn netstack_ring_tcp_multi_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Op
         return finish(handle, Err(KernelError::InternalError));
     }
 
-    let [connect7, connect9, send7, recv7, _close7, send9, recv9, _close9] = results;
+    let [
+        connect7,
+        connect9,
+        send7,
+        recv7,
+        _close7,
+        send9,
+        recv9,
+        _close9,
+    ] = results;
 
     // Either connect failing (no upstream) leaves the multiplexing path proven.
     if connect7 < 0 || connect9 < 0 {
@@ -5078,7 +5175,8 @@ fn netstack_ring_tcp_multi_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Op
     if send7 < 0 || send9 < 0 {
         serial_println!(
             "[spawn]   ring-tcp-multi: send failed (conn7 {}, conn9 {})",
-            send7, send9
+            send7,
+            send9
         );
         return finish(handle, Err(KernelError::InternalError));
     }
@@ -5200,7 +5298,8 @@ fn netstack_ring_tcp_demux_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Op
         Some(r) => r,
         None => return finish(handle, Err(KernelError::InternalError)),
     };
-    if !ring.write_data(REQ7_OFF as usize, HTTP_REQ) || !ring.write_data(REQ9_OFF as usize, HTTP_REQ)
+    if !ring.write_data(REQ7_OFF as usize, HTTP_REQ)
+        || !ring.write_data(REQ9_OFF as usize, HTTP_REQ)
     {
         return finish(handle, Err(KernelError::InternalError));
     }
@@ -5345,7 +5444,9 @@ fn netstack_ring_tcp_demux_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Op
         if cqe.user_data != want_ud {
             serial_println!(
                 "[spawn]   ring-tcp-demux: completion {} user_data mismatch (got {:#x}, want {:#x})",
-                i, cqe.user_data, want_ud
+                i,
+                cqe.user_data,
+                want_ud
             );
             return finish(handle, Err(KernelError::InternalError));
         }
@@ -5356,7 +5457,16 @@ fn netstack_ring_tcp_demux_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Op
         return finish(handle, Err(KernelError::InternalError));
     }
 
-    let [connect7, connect9, send7, send9, recv7, recv9, _close7, _close9] = results;
+    let [
+        connect7,
+        connect9,
+        send7,
+        send9,
+        recv7,
+        recv9,
+        _close7,
+        _close9,
+    ] = results;
 
     // Either connect failing (no upstream) leaves the demux path proven (it ran).
     if connect7 < 0 || connect9 < 0 {
@@ -5366,7 +5476,8 @@ fn netstack_ring_tcp_demux_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Op
     if send7 < 0 || send9 < 0 {
         serial_println!(
             "[spawn]   ring-tcp-demux: send failed (conn7 {}, conn9 {})",
-            send7, send9
+            send7,
+            send9
         );
         return finish(handle, Err(KernelError::InternalError));
     }
@@ -5486,7 +5597,8 @@ pub fn self_test_linux_brk() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: brk (ring 3) — expected exit {} (heap sentinel byte), \
              got {:?} (0xAA = grow returned the wrong break)",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -5607,7 +5719,8 @@ pub fn self_test_linux_sa_restart() -> KernelResult<()> {
             "[spawn]   FAIL: SA_RESTART (ring 3) — expected exit {} (handler-written byte via \
              transparently-restarted read), got {:?} (a wrong code means the read surfaced \
              EINTR with buf untouched instead of restarting)",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -5639,9 +5752,7 @@ pub fn self_test_linux_signalfd_interrupt() -> KernelResult<()> {
     // Distinct from brk(109)/argv0(0x51)/sa_restart(0x7E)/mmap(91)/interp(42).
     const SENTINEL: u8 = 0x3D; // 61
 
-    serial_println!(
-        "[spawn] Running Linux signalfd-read signal-interruptibility (ring 3) test..."
-    );
+    serial_println!("[spawn] Running Linux signalfd-read signal-interruptibility (ring 3) test...");
 
     let exe_elf = elf::build_linux_signalfd_interrupt_test_elf(SENTINEL);
     let argv: &[&[u8]] = &[b"sfdintr"];
@@ -5721,7 +5832,8 @@ pub fn self_test_linux_signalfd_interrupt() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: signalfd-intr (ring 3) — expected exit {} (read returned -EINTR), \
              got {:?}",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -5756,9 +5868,7 @@ pub fn self_test_linux_eventfd_interrupt() -> KernelResult<()> {
     // interp(42)/signalfd-intr(0x3D).  0x2C = 44.
     const SENTINEL: u8 = 0x2C;
 
-    serial_println!(
-        "[spawn] Running Linux eventfd-read signal-interruptibility (ring 3) test..."
-    );
+    serial_println!("[spawn] Running Linux eventfd-read signal-interruptibility (ring 3) test...");
 
     let exe_elf = elf::build_linux_eventfd_interrupt_test_elf(SENTINEL);
     let argv: &[&[u8]] = &[b"efdintr"];
@@ -5837,7 +5947,8 @@ pub fn self_test_linux_eventfd_interrupt() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: eventfd-intr (ring 3) — expected exit {} (read returned -EINTR), \
              got {:?}",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -5871,9 +5982,7 @@ pub fn self_test_linux_timerfd_interrupt() -> KernelResult<()> {
     // interp(42)/signalfd-intr(0x3D)/eventfd-intr(0x2C).  0x1B = 27.
     const SENTINEL: u8 = 0x1B;
 
-    serial_println!(
-        "[spawn] Running Linux timerfd-read signal-interruptibility (ring 3) test..."
-    );
+    serial_println!("[spawn] Running Linux timerfd-read signal-interruptibility (ring 3) test...");
 
     let exe_elf = elf::build_linux_timerfd_interrupt_test_elf(SENTINEL);
     let argv: &[&[u8]] = &[b"tfdintr"];
@@ -5952,7 +6061,8 @@ pub fn self_test_linux_timerfd_interrupt() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: timerfd-intr (ring 3) — expected exit {} (read returned -EINTR), \
              got {:?}",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -5986,9 +6096,7 @@ pub fn self_test_linux_inotify_interrupt() -> KernelResult<()> {
     // interp(42)/signalfd(0x3D)/eventfd(0x2C)/timerfd(0x1B).  0x66 = 102.
     const SENTINEL: u8 = 0x66;
 
-    serial_println!(
-        "[spawn] Running Linux inotify-read signal-interruptibility (ring 3) test..."
-    );
+    serial_println!("[spawn] Running Linux inotify-read signal-interruptibility (ring 3) test...");
 
     let exe_elf = elf::build_linux_inotify_interrupt_test_elf(SENTINEL);
     let argv: &[&[u8]] = &[b"inintr"];
@@ -6067,7 +6175,8 @@ pub fn self_test_linux_inotify_interrupt() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: inotify-intr (ring 3) — expected exit {} (read returned -EINTR), \
              got {:?}",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -6098,9 +6207,7 @@ pub fn self_test_linux_poll_interrupt() -> KernelResult<()> {
     // 0x4B = 75.
     const SENTINEL: u8 = 0x4B;
 
-    serial_println!(
-        "[spawn] Running Linux poll() signal-interruptibility (ring 3) test..."
-    );
+    serial_println!("[spawn] Running Linux poll() signal-interruptibility (ring 3) test...");
 
     let exe_elf = elf::build_linux_poll_interrupt_test_elf(SENTINEL);
     let argv: &[&[u8]] = &[b"pollintr"];
@@ -6183,7 +6290,8 @@ pub fn self_test_linux_poll_interrupt() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: poll-intr (ring 3) — expected exit {} (poll returned -EINTR), \
              got {:?}",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -6294,7 +6402,8 @@ pub fn self_test_linux_poll_empty_infinite() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: poll-null (ring 3) — expected exit {} (poll returned -EINTR), \
              got {:?}",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -6376,7 +6485,8 @@ pub fn self_test_linux_argv0_deref() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: argv[0] deref (ring 3) — expected exit {} (argv[0][0] sentinel), \
              got {:?}",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -6431,9 +6541,7 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
     let fastpy_hello_elf = match load_test_elf("fastpy-hello") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-hello: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-hello: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -6503,7 +6611,8 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
              exit code was {:?}, expected {} (== argc). A wrong argc means the argv delivery \
              path (SYS_PROCESS_GET_ARGS -> crt -> sys.argv) is broken; exit(0) with no argc \
              would mean the program never read its arguments",
-            exit_code, EXPECTED_ARGC
+            exit_code,
+            EXPECTED_ARGC
         );
         return Err(KernelError::InternalError);
     }
@@ -6636,7 +6745,8 @@ pub fn self_test_ctls_thread() -> KernelResult<()> {
              stick, 40 = the parent's errno block moved across thread creation, 41 = the \
              parent's errno is no longer writable. The 1x/2x codes are the first thread, 3x \
              the second (post-reclaim) one",
-            exit_code, EXPECTED
+            exit_code,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -6772,7 +6882,8 @@ pub fn self_test_clibc_float() -> KernelResult<()> {
              identity (it must be — hexadecimal is exact), 79 = sscanf %lf \
              cannot read hexadecimal. See BUG-SYSROOT-SOFT-FLOAT-ABI and \
              BUG-POSIX-NO-HEX-FLOATS in known-issues.md",
-            exit_code, EXPECTED
+            exit_code,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -6901,7 +7012,8 @@ pub fn self_test_clibm() -> KernelResult<()> {
              classification (72 = lrint must be ties-to-even where lround is \
              ties-away-from-zero). See BUG-SYSROOT-SOFT-FLOAT-ABI in known-issues.md and \
              services/ctest-libm/main.c",
-            exit_code, EXPECTED
+            exit_code,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -7035,7 +7147,8 @@ pub fn self_test_clongdouble() -> KernelResult<()> {
              detectable stale exponent), 50 = format-and-reparse round trip. See \
              BUG-POSIX-LONG-DOUBLE-ABI in known-issues.md and \
              services/ctest-longdouble/main.c",
-            exit_code, EXPECTED
+            exit_code,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -7162,7 +7275,8 @@ pub fn self_test_cfortify() -> KernelResult<()> {
              __vsnprintf_chk called with a compiler-built va_list, so a pass there next to a \
              failure above localises the fault to the assembly. See \
              services/ctest-fortify/main.c",
-            exit_code, EXPECTED
+            exit_code,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -7222,9 +7336,7 @@ pub fn self_test_cpgroup() -> KernelResult<()> {
     let ctest_elf = match load_test_elf("ctest-pgroup") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP ctest-pgroup: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP ctest-pgroup: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -7309,7 +7421,8 @@ pub fn self_test_cpgroup() -> KernelResult<()> {
              after setpgid(child, child), which a userspace static could never report, 70-74 = \
              the group was backed by real membership, so it is ESRCH once the child is reaped. \
              See services/ctest-pgroup/main.c",
-            exit_code, EXPECTED
+            exit_code,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -7374,9 +7487,7 @@ pub fn self_test_jobctl() -> KernelResult<()> {
     let ctest_elf = match load_test_elf("ctest-jobctl") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP ctest-jobctl: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP ctest-jobctl: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -7459,7 +7570,8 @@ pub fn self_test_jobctl() -> KernelResult<()> {
              (WIFCONTINUED) is load-bearing, 70-77 = the resumed child ran to completion and was \
              reaped exactly once (74 specifically means the child's own raise(SIGTSTP) failed \
              rather than stopping it). See services/ctest-jobctl/main.c",
-            exit_code, EXPECTED
+            exit_code,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -7638,7 +7750,8 @@ pub fn self_test_cctty() -> KernelResult<()> {
              110-112 = a pipe answers ENOTTY rather than the console's modes; 113-116 = the \
              fixture puts the console back for every later self-test). See \
              services/ctest-ctty/main.c",
-            exit_code, EXPECTED
+            exit_code,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -7652,7 +7765,8 @@ pub fn self_test_cctty() -> KernelResult<()> {
              console's foreground group as {:?} rather than {} while its session was still alive \
              as a zombie. Exiting must not release the controlling terminal — the session, not \
              the process, owns it",
-            held_at_exit, result.pid
+            held_at_exit,
+            result.pid
         );
         return Err(KernelError::InternalError);
     }
@@ -7775,7 +7889,8 @@ pub fn self_test_cscanf() -> KernelResult<()> {
     if exit_code != Some(EXPECTED) {
         serial_println!(
             "[spawn]   FAIL: ctest-scanf (ring 3) — reached Zombie but exit code was {:?},              expected {}. Code bands: 10-13 = basics inside the register-passed range, 20-23 =              past the eighth conversion, which the old flat [u64; 8] could not represent (21 is              a wrong value, 22 is a canary clobbered by an off-by-one store, 23 is the mixed              %d/%ld/%s form where a miscount corrupts a differently-sized neighbour), 30-32 =              %*d suppression and a %n stored through the eleventh pointer, 40-41 = float              destinations, which are pointers and so must travel the INTEGER path rather than              consult fp_offset, 50-53 = fscanf, a separate trampoline reading a real file (50/51 mean the scratch file could not be opened at all, so the ABI checks above are still valid). See              services/ctest-scanf/main.c",
-            exit_code, EXPECTED
+            exit_code,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -7884,7 +7999,8 @@ pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-fileio (ring 3) — reached Zombie but exit code was {:?}, \
              expected {} (== len('slate\\n')). Exit 0 means read() returned no data (write or \
              reopen failed); a PermissionDenied on open would show up as a non-zombie fault",
-            exit_code, EXPECTED_BYTES
+            exit_code,
+            EXPECTED_BYTES
         );
         return Err(KernelError::InternalError);
     }
@@ -8038,7 +8154,8 @@ pub fn self_test_fastpy_slateos_fileio2() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-fileio2 — could not read back {} ({:?}) — the file writes \
                  never created the file on the VFS",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -8174,7 +8291,8 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-cat (ring 3) — reached Zombie but exit code was {:?}, \
              expected {} (== len of the staged file). A wrong count means argv[1] delivery or \
              the read path is off; exit 1 means an uncaught exception (e.g. the open failed)",
-            exit_code, EXPECTED_BYTES
+            exit_code,
+            EXPECTED_BYTES
         );
         return Err(KernelError::InternalError);
     }
@@ -8183,7 +8301,8 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
         "[spawn]   fastpy-on-SlateOS `cat` (ring 3: promoted /bin command resolved by name via \
          PATH {:?} — read argv[1] file off /tmp and echoed it to stdout via SYS_CONSOLE_WRITE, \
          exited with the {}-byte count): OK",
-        COMMAND_PATH, EXPECTED_BYTES
+        COMMAND_PATH,
+        EXPECTED_BYTES
     );
     Ok(())
 }
@@ -8218,9 +8337,7 @@ pub fn self_test_fastpy_slateos_run() -> KernelResult<()> {
     let fastpy_run_elf = match load_test_elf("fastpy-run") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-run: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-run: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -8342,7 +8459,8 @@ pub fn self_test_fastpy_slateos_run() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-run (ring 3) — reached Zombie but exit code was {:?}, \
              expected {} (== len of the staged file, i.e. the handed-off `cat`'s own exit). \
              A different nonzero value means the exec handed off but `cat` misread the file",
-            exit_code, EXPECTED_BYTES
+            exit_code,
+            EXPECTED_BYTES
         );
         return Err(KernelError::InternalError);
     }
@@ -8352,7 +8470,8 @@ pub fn self_test_fastpy_slateos_run() -> KernelResult<()> {
          os.path.exists, then os.execv → SYS_EXECVE replaced the image in-place; the handed-off \
          `cat` inherited the File cap + console handle, read the file and exited with the \
          {}-byte count): OK",
-        COMMAND_PATH, EXPECTED_BYTES
+        COMMAND_PATH,
+        EXPECTED_BYTES
     );
     Ok(())
 }
@@ -8535,7 +8654,8 @@ pub fn self_test_fastpy_slateos_forkexec() -> KernelResult<()> {
              expected {} (== len of the staged file, i.e. the child `cat`'s own exit propagated by \
              the parent). A different value means fork/exec/wait handed off but the status was \
              mis-read",
-            exit_code, EXPECTED_BYTES
+            exit_code,
+            EXPECTED_BYTES
         );
         return Err(KernelError::InternalError);
     }
@@ -8544,7 +8664,8 @@ pub fn self_test_fastpy_slateos_forkexec() -> KernelResult<()> {
         "[spawn]   fastpy-on-SlateOS `forkexec` (ring 3: os.fork cloned the process, the child \
          os.execv'd `cat` over PATH {:?}, and the parent os.waitpid'd + os.WEXITSTATUS-decoded the \
          child's exit, propagating the {}-byte count as its own): OK",
-        COMMAND_PATH, EXPECTED_BYTES
+        COMMAND_PATH,
+        EXPECTED_BYTES
     );
     Ok(())
 }
@@ -8722,7 +8843,8 @@ pub fn self_test_fastpy_slateos_capture() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-capture (ring 3) — reached Zombie but exit code was {:?}, \
              expected {} (== len of the staged file, i.e. the bytes the parent captured off the \
              pipe). A different value means the capture pipeline mis-counted",
-            exit_code, EXPECTED_BYTES
+            exit_code,
+            EXPECTED_BYTES
         );
         return Err(KernelError::InternalError);
     }
@@ -8959,7 +9081,8 @@ pub fn self_test_fastpy_slateos_pipeline() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-pipeline (ring 3) — reached Zombie but exit code was {:?}, \
              expected {} (== len of the staged file, the bytes carried from cat's stdout through \
              the pipe into countin's stdin). A different value means the pipeline mis-counted",
-            exit_code, EXPECTED_BYTES
+            exit_code,
+            EXPECTED_BYTES
         );
         return Err(KernelError::InternalError);
     }
@@ -9167,7 +9290,8 @@ pub fn self_test_fastpy_slateos_redirect() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-redirect (ring 3) — reached Zombie but exit code was {:?}, \
              expected {} (== len of the staged input, i.e. the bytes cat wrote into the output \
              file). A different value means the redirect mis-counted",
-            exit_code, EXPECTED_BYTES
+            exit_code,
+            EXPECTED_BYTES
         );
         return Err(KernelError::InternalError);
     }
@@ -9376,7 +9500,8 @@ pub fn self_test_fastpy_slateos_inredirect() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-inredirect (ring 3) — reached Zombie but exit code was {:?}, \
              expected {} (== len of the staged input, i.e. the bytes the consumer read from its \
              redirected stdin). A different value means the redirect mis-counted",
-            exit_code, EXPECTED_BYTES
+            exit_code,
+            EXPECTED_BYTES
         );
         return Err(KernelError::InternalError);
     }
@@ -9508,7 +9633,9 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
     fn diag(code: Option<i32>) -> Option<&'static str> {
         match code {
             Some(90) => Some("exited 90: empty command after parsing (tokeniser produced no argv)"),
-            Some(100) => Some("exited 100: argv[0] resolved to nothing (absolute path missing or PATH search matched nothing)"),
+            Some(100) => Some(
+                "exited 100: argv[0] resolved to nothing (absolute path missing or PATH search matched nothing)",
+            ),
             Some(110) => Some("exited 110: os.fork() returned -1"),
             Some(120) => Some("exited 120: child's os.open of the output-redirect file failed"),
             Some(122) => Some("exited 122: child's os.open of the input-redirect file failed"),
@@ -9521,12 +9648,18 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
     }
 
     // ---- Test 1: `cat <in> > <out>` — output redirection with arguments. ----
-    let (st1, ec1) = match run_line(&minishell_elf, b"cat /tmp/minishell-in.txt > /tmp/minishell-out.txt") {
+    let (st1, ec1) = match run_line(
+        &minishell_elf,
+        b"cat /tmp/minishell-in.txt > /tmp/minishell-out.txt",
+    ) {
         Ok(v) => v,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(IN_PATH);
             let _ = crate::fs::Vfs::remove(OUT_PATH);
-            serial_println!("[spawn]   FAIL: fastpy-minishell (test 1) spawn/poll error {:?}", e);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 1) spawn/poll error {:?}",
+                e
+            );
             return Err(e);
         }
     };
@@ -9542,7 +9675,10 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
     if let Some(msg) = diag(ec1) {
         let _ = crate::fs::Vfs::remove(IN_PATH);
         let _ = crate::fs::Vfs::remove(OUT_PATH);
-        serial_println!("[spawn]   FAIL: fastpy-minishell (test 1, `cat > out`) — {}", msg);
+        serial_println!(
+            "[spawn]   FAIL: fastpy-minishell (test 1, `cat > out`) — {}",
+            msg
+        );
         return Err(KernelError::InternalError);
     }
     if ec1 != Some(EXPECTED_BYTES) {
@@ -9551,7 +9687,8 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-minishell (test 1, `cat > out`) — shell exit {:?}, expected {} \
              (cat's byte count, propagated as $?)",
-            ec1, EXPECTED_BYTES
+            ec1,
+            EXPECTED_BYTES
         );
         return Err(KernelError::InternalError);
     }
@@ -9579,7 +9716,8 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-minishell (test 1, `cat > out`) — could not read back the \
                  output file {} ({:?}) — the `>` redirect never created it",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -9595,7 +9733,10 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
             Ok(v) => v,
             Err(e) => {
                 let _ = crate::fs::Vfs::remove(IN_PATH);
-                serial_println!("[spawn]   FAIL: fastpy-minishell (test 2) spawn/poll error {:?}", e);
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-minishell (test 2) spawn/poll error {:?}",
+                    e
+                );
                 return Err(e);
             }
         };
@@ -9609,7 +9750,10 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         }
         if let Some(msg) = diag(ec2) {
             let _ = crate::fs::Vfs::remove(IN_PATH);
-            serial_println!("[spawn]   FAIL: fastpy-minishell (test 2, `countin < in`) — {}", msg);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 2, `countin < in`) — {}",
+                msg
+            );
             return Err(KernelError::InternalError);
         }
         if ec2 != Some(EXPECTED_BYTES) {
@@ -9618,7 +9762,8 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
                 "[spawn]   FAIL: fastpy-minishell (test 2, `countin < in`) — shell exit {:?}, \
                  expected {} (bytes countin read from its redirected stdin). A mismatch means the \
                  `<` redirect did not feed the file to fd 0",
-                ec2, EXPECTED_BYTES
+                ec2,
+                EXPECTED_BYTES
             );
             return Err(KernelError::InternalError);
         }
@@ -9637,7 +9782,10 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
             Ok(v) => v,
             Err(e) => {
                 let _ = crate::fs::Vfs::remove(IN_PATH);
-                serial_println!("[spawn]   FAIL: fastpy-minishell (test 3) spawn/poll error {:?}", e);
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-minishell (test 3) spawn/poll error {:?}",
+                    e
+                );
                 return Err(e);
             }
         };
@@ -9651,7 +9799,10 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         }
         if let Some(msg) = diag(ec3) {
             let _ = crate::fs::Vfs::remove(IN_PATH);
-            serial_println!("[spawn]   FAIL: fastpy-minishell (test 3, `cat | countin`) — {}", msg);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 3, `cat | countin`) — {}",
+                msg
+            );
             return Err(KernelError::InternalError);
         }
         if ec3 != Some(EXPECTED_BYTES) {
@@ -9660,7 +9811,8 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
                 "[spawn]   FAIL: fastpy-minishell (test 3, `cat | countin`) — pipeline exit {:?}, \
                  expected {} (the LAST stage, countin, should have counted every byte cat piped it). \
                  A mismatch means the inter-stage pipe was mis-wired across fork/exec",
-                ec3, EXPECTED_BYTES
+                ec3,
+                EXPECTED_BYTES
             );
             return Err(KernelError::InternalError);
         }
@@ -9699,7 +9851,10 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         }
         if let Some(msg) = diag(ec4) {
             let _ = crate::fs::Vfs::remove(IN_PATH);
-            serial_println!("[spawn]   FAIL: fastpy-minishell (test 4, `cat | catstdin | countin`) — {}", msg);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 4, `cat | catstdin | countin`) — {}",
+                msg
+            );
             return Err(KernelError::InternalError);
         }
         if ec4 != Some(EXPECTED_BYTES) {
@@ -9709,7 +9864,8 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
                  expected {} (the LAST stage, countin, should count every byte the MIDDLE stage forwarded). \
                  A mismatch means the middle stage's simultaneous read-pipe/write-pipe wiring was broken \
                  across fork/exec",
-                ec4, EXPECTED_BYTES
+                ec4,
+                EXPECTED_BYTES
             );
             return Err(KernelError::InternalError);
         }
@@ -9735,7 +9891,10 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
             Err(e) => {
                 let _ = crate::fs::Vfs::remove(IN_PATH);
                 let _ = crate::fs::Vfs::remove(TEE_PATH);
-                serial_println!("[spawn]   FAIL: fastpy-minishell (test 5) spawn/poll error {:?}", e);
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-minishell (test 5) spawn/poll error {:?}",
+                    e
+                );
                 return Err(e);
             }
         };
@@ -9751,7 +9910,10 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         if let Some(msg) = diag(ec5) {
             let _ = crate::fs::Vfs::remove(IN_PATH);
             let _ = crate::fs::Vfs::remove(TEE_PATH);
-            serial_println!("[spawn]   FAIL: fastpy-minishell (test 5, `cat | tee OUT`) — {}", msg);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 5, `cat | tee OUT`) — {}",
+                msg
+            );
             return Err(KernelError::InternalError);
         }
         if ec5 != Some(0) {
@@ -9785,7 +9947,8 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
                 serial_println!(
                     "[spawn]   FAIL: fastpy-minishell (test 5, `cat | tee OUT`) — could not read back \
                      tee'd file {}: {:?}",
-                    TEE_PATH, e
+                    TEE_PATH,
+                    e
                 );
                 return Err(KernelError::InternalError);
             }
@@ -9813,7 +9976,10 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
             Err(e) => {
                 let _ = crate::fs::Vfs::remove(IN_PATH);
                 let _ = crate::fs::Vfs::remove(APP_PATH);
-                serial_println!("[spawn]   FAIL: fastpy-minishell (test 6) spawn/poll error {:?}", e);
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-minishell (test 6) spawn/poll error {:?}",
+                    e
+                );
                 return Err(e);
             }
         };
@@ -9829,7 +9995,10 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         if let Some(msg) = diag(ec6) {
             let _ = crate::fs::Vfs::remove(IN_PATH);
             let _ = crate::fs::Vfs::remove(APP_PATH);
-            serial_println!("[spawn]   FAIL: fastpy-minishell (test 6, `cat IN >> APP`) — {}", msg);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 6, `cat IN >> APP`) — {}",
+                msg
+            );
             return Err(KernelError::InternalError);
         }
         // fastpy-cat exits with the byte count it read (`sys.exit(len(data))`), and a
@@ -9842,7 +10011,8 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-minishell (test 6, `cat IN >> APP`) — pipeline exit {:?}, \
                  expected Some({}) (cat exits with the byte count it read)",
-                ec6, EXPECTED_BYTES
+                ec6,
+                EXPECTED_BYTES
             );
             return Err(KernelError::InternalError);
         }
@@ -9871,7 +10041,8 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
                 let _ = crate::fs::Vfs::remove(APP_PATH);
                 serial_println!(
                     "[spawn]   FAIL: fastpy-minishell (test 6, `cat IN >> APP`) — could not read back {}: {:?}",
-                    APP_PATH, e
+                    APP_PATH,
+                    e
                 );
                 return Err(KernelError::InternalError);
             }
@@ -10102,7 +10273,8 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pathlib — could not read back {} ({:?}) — Path.write_text \
                  never created the file on the VFS",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -10206,9 +10378,21 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
 
     // (argv, expected exit code, description).  grep(1): 0 = matched, 1 = none.
     let steps: &[(&[&[u8]], i32, &str)] = &[
-        (&[b"grep", b"line", GREP_PATH_ARG], 0, "grep 'line' (all 4 lines)"),
-        (&[b"grep", b"gamma", GREP_PATH_ARG], 0, "grep 'gamma' (1 line)"),
-        (&[b"grep", b"zzz", GREP_PATH_ARG], 1, "grep 'zzz' (no match)"),
+        (
+            &[b"grep", b"line", GREP_PATH_ARG],
+            0,
+            "grep 'line' (all 4 lines)",
+        ),
+        (
+            &[b"grep", b"gamma", GREP_PATH_ARG],
+            0,
+            "grep 'gamma' (1 line)",
+        ),
+        (
+            &[b"grep", b"zzz", GREP_PATH_ARG],
+            1,
+            "grep 'zzz' (no match)",
+        ),
     ];
 
     for (argv, want, desc) in steps {
@@ -10218,7 +10402,9 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
                 cleanup();
                 serial_println!(
                     "[spawn]   FAIL: fastpy-grep `{}` exited {} (expected {})",
-                    desc, code, want
+                    desc,
+                    code,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -10805,9 +10991,7 @@ pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
     let fastpy_freq_elf = match load_test_elf("fastpy-freq") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-freq: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-freq: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -11057,7 +11241,8 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP rm: not installed on PATH ({:?}) — lean build", COMMAND_PATH
+                "[spawn] SKIP rm: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -11190,7 +11375,8 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP mv: not installed on PATH ({:?}) — lean build", COMMAND_PATH
+                "[spawn] SKIP mv: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -11223,7 +11409,8 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
     if !crate::fs::Vfs::exists(MV_SRC) || crate::fs::Vfs::exists(MV_DST) {
         serial_println!(
             "[spawn]   FAIL: precondition — expected {} present and {} absent before mv",
-            MV_SRC, MV_DST
+            MV_SRC,
+            MV_DST
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -11311,7 +11498,9 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-mv (ring 3) — {} exists but holds {} bytes, expected the \
                  original {} (content not preserved across rename)",
-                MV_DST, bytes.len(), PAYLOAD.len()
+                MV_DST,
+                bytes.len(),
+                PAYLOAD.len()
             );
             return Err(KernelError::InternalError);
         }
@@ -11319,7 +11508,8 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-mv (ring 3) — exited 0 but {} is not readable: {:?} \
                  (rename did not create the new name)",
-                MV_DST, e
+                MV_DST,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -11345,7 +11535,8 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP mkdir: not installed on PATH ({:?}) — lean build", COMMAND_PATH
+                "[spawn] SKIP mkdir: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -11443,7 +11634,8 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
         Ok(meta) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-mkdir (ring 3) — exited 0 but {} is {:?}, not a directory",
-                MK_DIR, meta.entry_type
+                MK_DIR,
+                meta.entry_type
             );
             return Err(KernelError::InternalError);
         }
@@ -11451,7 +11643,8 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-mkdir (ring 3) — exited 0 but {} does not exist: {:?} \
                  (os.mkdir did not actually create it)",
-                MK_DIR, e
+                MK_DIR,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -11479,7 +11672,8 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP rmdir: not installed on PATH ({:?}) — lean build", COMMAND_PATH
+                "[spawn] SKIP rmdir: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -11606,9 +11800,7 @@ pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
     let fastpy_size_elf = match load_test_elf("fastpy-size") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-size: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-size: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -11643,11 +11835,7 @@ pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
     let argv: &[&[u8]] = &[b"fastpy-size", SIZE_FILE_ARG];
     let envp: &[&[u8]] = &[];
     // os.path.getsize → SYS_FS_STAT, which gates on Rights::METADATA.
-    let caps = [(
-        ResourceType::File,
-        0u64,
-        Rights::READ | Rights::METADATA,
-    )];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::METADATA)];
     let options = SpawnOptions {
         name: "fastpy-size",
         parent: 0,
@@ -11700,7 +11888,9 @@ pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-size (ring 3) — reached Zombie but exit code was {:?}, \
              expected {} (== byte size of {}); mismatch => SYS_FS_STAT returned the wrong size",
-            exit_code, expected, SIZE_FILE
+            exit_code,
+            expected,
+            SIZE_FILE
         );
         return Err(KernelError::InternalError);
     }
@@ -11737,9 +11927,7 @@ pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
     let fastpy_ftype_elf = match load_test_elf("fastpy-ftype") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-ftype: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-ftype: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -11774,11 +11962,7 @@ pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
     }
 
     // os.path.is{file,dir} → SYS_FS_STAT, which gates on Rights::METADATA.
-    let caps = [(
-        ResourceType::File,
-        0u64,
-        Rights::READ | Rights::METADATA,
-    )];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::METADATA)];
 
     // Run `ftype <arg>` once; return the exit code, or None if it failed to
     // spawn or never became a Zombie (the caller distinguishes those from a
@@ -11981,7 +12165,8 @@ pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-symlink (ring 3) — VFS readlink returned {:?}, \
                  expected {:?}",
-                stored, TARGET
+                stored,
+                TARGET
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -12023,9 +12208,7 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
     let fastpy_link_elf = match load_test_elf("fastpy-link") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-link: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-link: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -12059,11 +12242,7 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
     }
 
     // os.link → SYS_FS_LINK (Rights::CREATE); the read-back needs READ.
-    let caps = [(
-        ResourceType::File,
-        0u64,
-        Rights::READ | Rights::CREATE,
-    )];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::CREATE)];
 
     let argv: &[&[u8]] = &[b"fastpy-link", TARGET_ARG, LINK_ARG];
     let envp: &[&[u8]] = &[];
@@ -12138,7 +12317,8 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
                 serial_println!(
                     "[spawn]   FAIL: fastpy-link (ring 3) — inodes differ (target ino={}, \
                      link ino={}); SYS_FS_LINK made a copy, not a hard link",
-                    tm.ino, lm.ino
+                    tm.ino,
+                    lm.ino
                 );
                 cleanup();
                 return Err(KernelError::InternalError);
@@ -12205,7 +12385,8 @@ pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP chmod: not installed on PATH ({:?}) — lean build", COMMAND_PATH
+                "[spawn] SKIP chmod: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -12325,7 +12506,8 @@ pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-chmod (ring 3) — perms are {:o}, expected {:o}; \
                  SYS_FS_SET_PERMS did not persist",
-                m.permissions, NEW_PERMS
+                m.permissions,
+                NEW_PERMS
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -12488,7 +12670,8 @@ pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-truncate (ring 3) — size is {}, expected {}; \
                  SYS_FS_TRUNCATE did not resize",
-                m.size, NEW_SIZE
+                m.size,
+                NEW_SIZE
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -12678,7 +12861,10 @@ pub fn self_test_fastpy_slateos_settimes() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-settimes (ring 3) — stamps are accessed_ns={} \
                  modified_ns={}, expected {} / {}; SYS_FS_SET_TIMES did not stamp correctly",
-                m.accessed_ns, m.modified_ns, ATIME_NS, MTIME_NS
+                m.accessed_ns,
+                m.modified_ns,
+                ATIME_NS,
+                MTIME_NS
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -12841,7 +13027,9 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getmtime (ring 3) — {} held {:?}, expected {:?} \
                  (os.path.getmtime read back the wrong mtime seconds)",
-                OUT_PATH, bytes.as_slice(), EXPECTED_OUT
+                OUT_PATH,
+                bytes.as_slice(),
+                EXPECTED_OUT
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -12849,7 +13037,8 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getmtime (ring 3) — could not read {}: {:?}",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             cleanup();
             return Err(e);
@@ -12864,7 +13053,8 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getmtime (ring 3) — modified_ns={}, expected {} \
                  (os.utime did not stamp the mtime the tool then read back)",
-                m.modified_ns, MTIME_NS
+                m.modified_ns,
+                MTIME_NS
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -12872,7 +13062,8 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getmtime (ring 3) — could not re-stat {}: {:?}",
-                TARGET, e
+                TARGET,
+                e
             );
             cleanup();
             return Err(e);
@@ -13024,7 +13215,9 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getatime (ring 3) — {} held {:?}, expected {:?} \
                  (os.path.getatime read back the wrong atime seconds)",
-                OUT_PATH, bytes.as_slice(), EXPECTED_OUT
+                OUT_PATH,
+                bytes.as_slice(),
+                EXPECTED_OUT
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -13032,7 +13225,8 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getatime (ring 3) — could not read {}: {:?}",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             cleanup();
             return Err(e);
@@ -13048,7 +13242,8 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getatime (ring 3) — accessed_ns={}, expected {} \
                  (os.utime did not stamp the atime the tool then read back)",
-                m.accessed_ns, ATIME_NS
+                m.accessed_ns,
+                ATIME_NS
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -13056,7 +13251,8 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getatime (ring 3) — could not re-stat {}: {:?}",
-                TARGET, e
+                TARGET,
+                e
             );
             cleanup();
             return Err(e);
@@ -13211,7 +13407,8 @@ pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getctime (ring 3) — could not re-stat {}: {:?}",
-                TARGET, e
+                TARGET,
+                e
             );
             cleanup();
             return Err(e);
@@ -13250,7 +13447,10 @@ pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
                 serial_println!(
                     "[spawn]   FAIL: fastpy-getctime (ring 3) — {} held {:?} (parsed {}), expected \
                      {} (os.path.getctime did not read back the VFS changed_ns)",
-                    OUT_PATH, bytes.as_slice(), parsed, expected_secs
+                    OUT_PATH,
+                    bytes.as_slice(),
+                    parsed,
+                    expected_secs
                 );
                 cleanup();
                 return Err(KernelError::InternalError);
@@ -13259,7 +13459,8 @@ pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getctime (ring 3) — could not read {}: {:?}",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             cleanup();
             return Err(e);
@@ -13407,7 +13608,8 @@ pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-access (ring 3) — TARGET {} does not exist in the VFS: {:?} \
              (cannot validate the accessible case)",
-            TARGET, e
+            TARGET,
+            e
         );
         cleanup();
         return Err(e);
@@ -13432,7 +13634,9 @@ pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
                 serial_println!(
                     "[spawn]   FAIL: fastpy-access (ring 3) — {} held {:?}, expected {:?} \
                      (os.access did not report [exists, R|W|X, !invalid-mode, !missing])",
-                    OUT_PATH, bytes.as_slice(), EXPECTED
+                    OUT_PATH,
+                    bytes.as_slice(),
+                    EXPECTED
                 );
                 cleanup();
                 return Err(KernelError::InternalError);
@@ -13441,7 +13645,8 @@ pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-access (ring 3) — could not read {}: {:?}",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             cleanup();
             return Err(e);
@@ -13596,7 +13801,8 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-samefile (ring 3) — could not stat TARGET {}: {:?}",
-                TARGET, e
+                TARGET,
+                e
             );
             cleanup();
             return Err(e);
@@ -13607,7 +13813,8 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-samefile (ring 3) — could not stat LINK {}: {:?}",
-                LINK, e
+                LINK,
+                e
             );
             cleanup();
             return Err(e);
@@ -13618,7 +13825,8 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-samefile (ring 3) — could not stat OTHER {}: {:?}",
-                OTHER, e
+                OTHER,
+                e
             );
             cleanup();
             return Err(e);
@@ -13632,7 +13840,8 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-samefile (ring 3) — VFS ino(LINK)={} != ino(TARGET)={} \
              (symlink did not resolve to the target inode; samefile's True is unverifiable)",
-            ino_link, ino_target
+            ino_link,
+            ino_target
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -13641,7 +13850,8 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-samefile (ring 3) — VFS ino(OTHER)={} == ino(TARGET)={} \
              (distinct files share an inode; samefile's False is unverifiable)",
-            ino_other, ino_target
+            ino_other,
+            ino_target
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -13654,7 +13864,9 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
                 serial_println!(
                     "[spawn]   FAIL: fastpy-samefile (ring 3) — {} held {:?}, expected {:?} \
                      (os.path.samefile did not report [file==symlink, file!=other, file==file])",
-                    OUT_PATH, bytes.as_slice(), EXPECTED
+                    OUT_PATH,
+                    bytes.as_slice(),
+                    EXPECTED
                 );
                 cleanup();
                 return Err(KernelError::InternalError);
@@ -13663,7 +13875,8 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-samefile (ring 3) — could not read {}: {:?}",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             cleanup();
             return Err(e);
@@ -13749,7 +13962,13 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
         Rights::READ | Rights::WRITE | Rights::CREATE | Rights::METADATA,
     )];
 
-    let argv: &[&[u8]] = &[b"fastpy-islink", TARGET_ARG, LINK_ARG, DANGLING_ARG, MISSING_ARG];
+    let argv: &[&[u8]] = &[
+        b"fastpy-islink",
+        TARGET_ARG,
+        LINK_ARG,
+        DANGLING_ARG,
+        MISSING_ARG,
+    ];
     let envp: &[&[u8]] = &[];
     let options = SpawnOptions {
         name: "fastpy-islink",
@@ -13819,7 +14038,8 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-islink (ring 3) — could not lstat LINK {}: {:?}",
-                LINK, e
+                LINK,
+                e
             );
             cleanup();
             return Err(e);
@@ -13840,7 +14060,8 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-islink (ring 3) — could not lstat TARGET {}: {:?}",
-                TARGET, e
+                TARGET,
+                e
             );
             cleanup();
             return Err(e);
@@ -13861,7 +14082,8 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-islink (ring 3) — could not lstat DANGLING {}: {:?} \
                  (a dangling symlink must still be lstat-able)",
-                DANGLING, e
+                DANGLING,
+                e
             );
             cleanup();
             return Err(e);
@@ -13897,7 +14119,9 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
                 serial_println!(
                     "[spawn]   FAIL: fastpy-islink (ring 3) — {} held {:?}, expected {:?} \
                      (os.path.islink did not report [link, not-file, dangling-link, missing])",
-                    OUT_PATH, bytes.as_slice(), EXPECTED
+                    OUT_PATH,
+                    bytes.as_slice(),
+                    EXPECTED
                 );
                 cleanup();
                 return Err(KernelError::InternalError);
@@ -13906,7 +14130,8 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-islink (ring 3) — could not read {}: {:?}",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             cleanup();
             return Err(e);
@@ -13946,9 +14171,7 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
     let fastpy_stat_elf = match load_test_elf("fastpy-stat") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-stat: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-stat: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -14050,7 +14273,8 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-stat (ring 3) — could not stat TARGET {}: {:?}",
-                TARGET, e
+                TARGET,
+                e
             );
             cleanup();
             return Err(e);
@@ -14060,7 +14284,8 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-stat (ring 3) — VFS size = {}, expected {} (os.stat's \
              st_size is unverifiable / the file was not written as expected)",
-            meta.size, EXPECTED_SIZE
+            meta.size,
+            EXPECTED_SIZE
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -14090,7 +14315,9 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
                 serial_println!(
                     "[spawn]   FAIL: fastpy-stat (ring 3) — {} held {:?}, expected {:?} \
                      (os.stat did not report [size==11, S_IFREG, nlink>=1, ino!=0])",
-                    OUT_PATH, bytes.as_slice(), EXPECTED
+                    OUT_PATH,
+                    bytes.as_slice(),
+                    EXPECTED
                 );
                 cleanup();
                 return Err(KernelError::InternalError);
@@ -14099,7 +14326,8 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-stat (ring 3) — could not read {}: {:?}",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             cleanup();
             return Err(e);
@@ -14244,7 +14472,8 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-statvfs (ring 3) — could not statvfs TARGET {}: {:?}",
-                TARGET, e
+                TARGET,
+                e
             );
             cleanup();
             return Err(e);
@@ -14267,7 +14496,8 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-statvfs (ring 3) — could not read {}: {:?}",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             cleanup();
             return Err(e);
@@ -14319,7 +14549,8 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-statvfs (ring 3) — tool reported f_bsize {} but the live \
              filesystem's block size is {} (os.statvfs's f_bsize is unverifiable / a stub)",
-            reported_bsize, expected_bsize
+            reported_bsize,
+            expected_bsize
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -14328,7 +14559,8 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-statvfs (ring 3) — tool reported f_namemax {} but the live \
              filesystem's max name length is {} (os.statvfs's f_namemax is unverifiable / a stub)",
-            reported_namemax, expected_namemax
+            reported_namemax,
+            expected_namemax
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -14341,7 +14573,8 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
          whole filesystem's metrics in one call, returned as a 10-int statvfs_result list; the \
          tool's observed f_bsize={} and f_namemax={} matched the kernel's independent \
          Vfs::statvfs readout exactly): OK",
-        reported_bsize, reported_namemax
+        reported_bsize,
+        reported_namemax
     );
     Ok(())
 }
@@ -14463,7 +14696,9 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getuid (ring 3) — kernel credentials were {:?}, expected \
                  uid={} gid={} (SpawnOptions.uid_gid was not installed)",
-                other.map(|c| (c.uid, c.gid)), EXPECTED_UID, EXPECTED_GID
+                other.map(|c| (c.uid, c.gid)),
+                EXPECTED_UID,
+                EXPECTED_GID
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -14476,7 +14711,8 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getuid (ring 3) — could not read {}: {:?}",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             cleanup();
             return Err(e);
@@ -14524,7 +14760,10 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-getuid (ring 3) — tool reported uid={} gid={}, expected \
              uid={} gid={} (os.getuid/getgid did not read the real process credentials — a stub \
              or a mis-lowered credential syscall)",
-            fields[0], fields[1], EXPECTED_UID, EXPECTED_GID
+            fields[0],
+            fields[1],
+            EXPECTED_UID,
+            EXPECTED_GID
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -14537,7 +14776,8 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
          SYS_PROCESS_GET_CREDENTIALS read the real process identity; the tool reported uid={} \
          gid={}, matching both the spawn-time SpawnOptions.uid_gid and the kernel's stored \
          ProcessCredentials exactly): OK",
-        fields[0], fields[1]
+        fields[0],
+        fields[1]
     );
     Ok(())
 }
@@ -14668,7 +14908,9 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
                 "[spawn]   FAIL: fastpy-setuid (ring 3) — kernel credentials were {:?}, expected \
                  the mutated uid={} gid={} (setuid/setgid did not write through to \
                  ProcessCredentials — a permission-check-only stub)",
-                other.map(|c| (c.uid, c.gid)), NEW_UID, NEW_GID
+                other.map(|c| (c.uid, c.gid)),
+                NEW_UID,
+                NEW_GID
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -14681,7 +14923,8 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-setuid (ring 3) — could not read {}: {:?}",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             cleanup();
             return Err(e);
@@ -14731,7 +14974,8 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-setuid (ring 3) — pre-setuid identity was uid={} gid={}, \
              expected the spawn identity 0,0",
-            fields[0], fields[1]
+            fields[0],
+            fields[1]
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -14741,7 +14985,10 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-setuid (ring 3) — post-setuid identity was uid={} gid={}, \
              expected the mutated uid={} gid={} (os.setuid/setgid returned success but the \
              change was not observable via os.getuid/getgid — a silent no-op stub)",
-            fields[2], fields[3], NEW_UID, NEW_GID
+            fields[2],
+            fields[3],
+            NEW_UID,
+            NEW_GID
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -14754,7 +15001,8 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
          SYS_PROCESS_SET_CREDENTIALS mutated the process identity from 0,0 to uid={} gid={}; the \
          tool observed the change via os.getuid/getgid AND the kernel's stored \
          ProcessCredentials reflected the mutated pair exactly): OK",
-        fields[2], fields[3]
+        fields[2],
+        fields[3]
     );
     Ok(())
 }
@@ -14798,9 +15046,7 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
     let fastpy_nice_elf = match load_test_elf("fastpy-nice") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-nice: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-nice: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -14957,7 +15203,8 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-nice (ring 3) — kernel pcb::get_nice was {:?}, expected \
              Some({}) (os.setpriority/os.nice did not write through to the PCB — a \
              userspace-only stub)",
-            stored_nice, EXPECT_NICE
+            stored_nice,
+            EXPECT_NICE
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -14971,7 +15218,9 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-nice (ring 3) — scheduler base priority was {:?}, expected \
              Some({}) = nice_to_priority({}) (nice was stored but the scheduler was NOT \
              re-prioritised — the effect is not real)",
-            base_prio, expect_prio, EXPECT_NICE
+            base_prio,
+            expect_prio,
+            EXPECT_NICE
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -14984,7 +15233,10 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
          SYS_PROCESS_SET_NICE; kernel pcb::get_nice == {} AND scheduler base priority == {} = \
          nice_to_priority({}), so the priority change is REAL and observable both to the process \
          and to the scheduler): OK",
-        EXPECT_NICE, EXPECT_NICE, expect_prio, EXPECT_NICE
+        EXPECT_NICE,
+        EXPECT_NICE,
+        expect_prio,
+        EXPECT_NICE
     );
     Ok(())
 }
@@ -15018,9 +15270,7 @@ pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
     let fastpy_umask_elf = match load_test_elf("fastpy-umask") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-umask: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-umask: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -15113,7 +15363,9 @@ pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
     for _ in 0..200_000 {
         if let Ok(bytes) = crate::fs::Vfs::read_file(OUT_PATH) {
             if let Some(fields) = parse_two(&bytes) {
-                let perms = crate::fs::Vfs::metadata(DAT_PATH).ok().map(|m| m.permissions);
+                let perms = crate::fs::Vfs::metadata(DAT_PATH)
+                    .ok()
+                    .map(|m| m.permissions);
                 observed = Some((fields, perms));
                 break;
             }
@@ -15148,7 +15400,8 @@ pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-umask (ring 3) — tool wrote {:?}, expected {:?} \
              (os.umask did not return the prior mask — a stub returning its arg or 0)",
-            fields, EXPECT_PREV
+            fields,
+            EXPECT_PREV
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -15220,7 +15473,8 @@ pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP chown: not installed on PATH ({:?}) — lean build", COMMAND_PATH
+                "[spawn] SKIP chown: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -15341,7 +15595,10 @@ pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-chown (ring 3) — owner is uid={} gid={}, expected \
                  {} / {}; SYS_FS_SET_OWNER did not stamp correctly",
-                m.uid, m.gid, UID, GID
+                m.uid,
+                m.gid,
+                UID,
+                GID
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -15386,9 +15643,7 @@ pub fn self_test_fastpy_slateos_clock() -> KernelResult<()> {
     let fastpy_clock_elf = match load_test_elf("fastpy-clock") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-clock: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-clock: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -15471,7 +15726,8 @@ pub fn self_test_fastpy_slateos_clock() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-clock (ring 3) — reached Zombie but exit code was {:?}, \
              expected 0 (3 = time.time_ns() was 0 or < the kernel's {} ns lower bound)",
-            exit_code, t0
+            exit_code,
+            t0
         );
         return Err(KernelError::InternalError);
     }
@@ -15592,9 +15848,7 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
     let fastpy_sleep_elf = match load_test_elf("fastpy-sleep") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-sleep: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-sleep: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -15726,7 +15980,8 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-sleep (ring 3) — reached Zombie but exit code was {:?}, \
              expected 0 (3 = a clock read was 0 or the observed sleep delta was < {} ns)",
-            exit_code, MIN_ELAPSED_NS
+            exit_code,
+            MIN_ELAPSED_NS
         );
         return Err(KernelError::InternalError);
     }
@@ -15739,7 +15994,8 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-sleep (ring 3) — tool exited 0 but the kernel observed only \
              {} ns of wall time across the run (< {} ns); the sleep did not actually block",
-            kernel_elapsed, MIN_ELAPSED_NS
+            kernel_elapsed,
+            MIN_ELAPSED_NS
         );
         return Err(KernelError::InternalError);
     }
@@ -15748,7 +16004,8 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
         "[spawn]   fastpy-on-SlateOS `sleep` (ring 3: time.sleep() → usleep() → SYS_SLEEP \
          scheduler block + timer wakeup; the tool's 50 ms sleep advanced the wall clock >= {} ns \
          both as the tool measured it and as the kernel independently observed {} ns): OK",
-        MIN_ELAPSED_NS, kernel_elapsed
+        MIN_ELAPSED_NS,
+        kernel_elapsed
     );
     Ok(())
 }
@@ -15869,7 +16126,8 @@ pub fn self_test_fastpy_slateos_getpid() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getpid (ring 3) — could not read back output file {} \
                  ({:?}); cannot confirm the reported PID",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -15905,7 +16163,8 @@ pub fn self_test_fastpy_slateos_getpid() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-getpid (ring 3) — tool reported PID {} but the kernel \
              assigned PID {} at spawn; os.getpid() did not return the real identity",
-            reported_pid, result.pid
+            reported_pid,
+            result.pid
         );
         return Err(KernelError::InternalError);
     }
@@ -16032,7 +16291,8 @@ pub fn self_test_fastpy_slateos_getppid() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-getppid (ring 3) — could not read back output file {} \
                  ({:?}); cannot confirm the reported parent PID",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -16068,7 +16328,8 @@ pub fn self_test_fastpy_slateos_getppid() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-getppid (ring 3) — tool reported parent PID {} but a \
              kernel-spawned (parent=0) process must reparent to init (ppid 1); os.getppid() \
              did not reach SYS_PROCESS_PARENT_ID (its own PID was {})",
-            reported_ppid, result.pid
+            reported_ppid,
+            result.pid
         );
         return Err(KernelError::InternalError);
     }
@@ -16195,7 +16456,8 @@ pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-gettid (ring 3) — could not read back output file {} \
                  ({:?}); cannot confirm the reported task ID",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -16231,7 +16493,9 @@ pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-gettid (ring 3) — tool reported task ID {} but the kernel \
              assigned task ID {} at spawn (its PID was {}); os.gettid() did not return the real \
              SYS_TASK_ID identity",
-            reported_tid, result.task_id, result.pid
+            reported_tid,
+            result.task_id,
+            result.pid
         );
         return Err(KernelError::InternalError);
     }
@@ -16240,7 +16504,8 @@ pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
         "[spawn]   fastpy-on-SlateOS `gettid` (ring 3: os.gettid() → gettid() → SYS_TASK_ID; \
          the tool's written task ID {} matches the kernel-assigned task ID exactly, distinct \
          from its PID {}): OK",
-        reported_tid, result.pid
+        reported_tid,
+        result.pid
     );
     Ok(())
 }
@@ -16266,9 +16531,7 @@ pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
     let fastpy_pipe_elf = match load_test_elf("fastpy-pipe") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-pipe: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-pipe: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -16362,7 +16625,8 @@ pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pipe (ring 3) — could not read back output file {} \
                  ({:?}); cannot confirm the round-tripped message",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -16374,7 +16638,8 @@ pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-pipe (ring 3) — round-tripped message was {:?}, expected \
              {:?}; the kernel pipe did not deliver the bytes intact (SYS_PIPE_CREATE / \
              SYS_PIPE_WRITE / SYS_PIPE_READ path)",
-            written, EXPECTED
+            written,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -16411,9 +16676,7 @@ pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
     let fastpy_dup_elf = match load_test_elf("fastpy-dup") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-dup: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-dup: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -16509,7 +16772,8 @@ pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-dup (ring 3) — could not read back output file {} \
                  ({:?}); cannot confirm the round-tripped message",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -16521,7 +16785,8 @@ pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-dup (ring 3) — round-tripped message was {:?}, expected \
              {:?}; the duplicated write-end did not alias the same kernel pipe (os.dup / \
              posix dup() Pipe-handle-sharing path)",
-            written, EXPECTED
+            written,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -16553,9 +16818,7 @@ pub fn self_test_fastpy_slateos_dup2() -> KernelResult<()> {
     let fastpy_dup2_elf = match load_test_elf("fastpy-dup2") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-dup2: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-dup2: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -16647,7 +16910,8 @@ pub fn self_test_fastpy_slateos_dup2() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-dup2 (ring 3) — could not read back output file {} \
                  ({:?}); cannot confirm the round-tripped message",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -16658,7 +16922,8 @@ pub fn self_test_fastpy_slateos_dup2() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-dup2 (ring 3) — round-tripped message was {:?}, expected \
              {:?}; os.dup2 did not alias the pipe write handle at fd 9 (posix dup2() path)",
-            written, EXPECTED
+            written,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -16693,9 +16958,7 @@ pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
     let fastpy_lseek_elf = match load_test_elf("fastpy-lseek") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-lseek: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-lseek: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -16794,7 +17057,8 @@ pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-lseek (ring 3) — could not read back output file {} \
                  ({:?}); cannot confirm the read-after-seek bytes",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -16806,7 +17070,8 @@ pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-lseek (ring 3) — read-after-seek bytes were {:?}, expected \
              {:?}; os.lseek did not reposition the kernel file offset (os.open/SYS_FS_OPEN + \
              os.lseek/SYS_FS_SEEK path)",
-            written, EXPECTED
+            written,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -16934,7 +17199,8 @@ pub fn self_test_fastpy_slateos_ftruncate() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-ftruncate (ring 3) — could not read back output file {} \
                  ({:?}); cannot confirm the post-truncate bytes",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -16945,7 +17211,8 @@ pub fn self_test_fastpy_slateos_ftruncate() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-ftruncate (ring 3) — post-truncate bytes were {:?}, expected \
              {:?}; os.ftruncate did not shrink the file (os.ftruncate/SYS_FS_FTRUNCATE path)",
-            written, EXPECTED
+            written,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -16979,9 +17246,7 @@ pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
     let fastpy_pos_elf = match load_test_elf("fastpy-pos") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-pos: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-pos: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -17075,7 +17340,8 @@ pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pos (ring 3) — could not read back output file {} \
                  ({:?}); cannot confirm the positioned-read bytes",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             return Err(KernelError::InternalError);
         }
@@ -17087,7 +17353,8 @@ pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-pos (ring 3) — positioned-read bytes were {:?}, expected \
              {:?}; os.pwrite/os.pread did not honor the file offsets (posix pwrite()/pread() \
              path)",
-            written, EXPECTED
+            written,
+            EXPECTED
         );
         return Err(KernelError::InternalError);
     }
@@ -17185,7 +17452,8 @@ pub fn self_test_fastpy_slateos_sysinfo() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-sysinfo (ring 3) — reached Zombie but exit code was {:?}, \
              expected {} (exit 1 means an uncaught exception, e.g. a /proc open failed)",
-            exit_code, EXPECTED_EXIT
+            exit_code,
+            EXPECTED_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -17218,9 +17486,7 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
     let fastpy_store_elf = match load_test_elf("fastpy-store") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-store: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-store: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -17303,7 +17569,8 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
             "[spawn]   FAIL: fastpy-store (ring 3) — reached Zombie but exit code was {:?}, \
              expected {} (exit 1 means the stored blob did not read back equal to the input; a \
              wrong digest on serial means the bigint-masked FNV arithmetic is off)",
-            exit_code, EXPECTED_EXIT
+            exit_code,
+            EXPECTED_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -17353,9 +17620,7 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
     let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -17452,14 +17717,48 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
     // Install a chain libc <- coreutils <- grep; verify deps resolve; remove the
     // base libc; verify the now-missing dep is detected.
     let steps: &[(&[&[u8]], i32, &str)] = &[
-        (&[b"fastpy-pkg", b"install", b"libc", LIBC_ARG, b"-"], 0, "install libc (no deps)"),
-        (&[b"fastpy-pkg", b"install", b"coreutils", CORE_ARG, b"libc"], 0, "install coreutils (dep libc)"),
-        (&[b"fastpy-pkg", b"install", b"grep", GREP_ARG, b"libc,coreutils"], 0, "install grep (deps libc,coreutils)"),
-        (&[b"fastpy-pkg", b"check", b"grep"], 0, "check grep (deps satisfied)"),
-        (&[b"fastpy-pkg", b"check", b"coreutils"], 0, "check coreutils (deps satisfied)"),
+        (
+            &[b"fastpy-pkg", b"install", b"libc", LIBC_ARG, b"-"],
+            0,
+            "install libc (no deps)",
+        ),
+        (
+            &[b"fastpy-pkg", b"install", b"coreutils", CORE_ARG, b"libc"],
+            0,
+            "install coreutils (dep libc)",
+        ),
+        (
+            &[
+                b"fastpy-pkg",
+                b"install",
+                b"grep",
+                GREP_ARG,
+                b"libc,coreutils",
+            ],
+            0,
+            "install grep (deps libc,coreutils)",
+        ),
+        (
+            &[b"fastpy-pkg", b"check", b"grep"],
+            0,
+            "check grep (deps satisfied)",
+        ),
+        (
+            &[b"fastpy-pkg", b"check", b"coreutils"],
+            0,
+            "check coreutils (deps satisfied)",
+        ),
         (&[b"fastpy-pkg", b"deps", b"grep"], 0, "deps grep"),
-        (&[b"fastpy-pkg", b"remove", b"libc"], 0, "remove libc (base dep)"),
-        (&[b"fastpy-pkg", b"check", b"grep"], 1, "check grep (dep libc now missing)"),
+        (
+            &[b"fastpy-pkg", b"remove", b"libc"],
+            0,
+            "remove libc (base dep)",
+        ),
+        (
+            &[b"fastpy-pkg", b"check", b"grep"],
+            1,
+            "check grep (dep libc now missing)",
+        ),
     ];
 
     for (argv, want, desc) in steps {
@@ -17469,7 +17768,9 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
                 cleanup();
                 serial_println!(
                     "[spawn]   FAIL: fastpy-pkg `{}` exited {} (expected {})",
-                    desc, code, want
+                    desc,
+                    code,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -17494,9 +17795,7 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
         }
     };
     // Simple substring checks over the small registry text.
-    let contains = |needle: &[u8]| -> bool {
-        db.windows(needle.len()).any(|w| w == needle)
-    };
+    let contains = |needle: &[u8]| -> bool { db.windows(needle.len()).any(|w| w == needle) };
     let grep_record_present = contains(b"grep 0f4143a6 libc,coreutils");
     let libc_record_gone = !contains(b"libc 86732e22");
 
@@ -17506,7 +17805,8 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-pkg final registry wrong (grep_record_present={}, \
              libc_record_gone={}) — install/remove did not persist correctly",
-            grep_record_present, libc_record_gone
+            grep_record_present,
+            libc_record_gone
         );
         return Err(KernelError::InternalError);
     }
@@ -17543,9 +17843,7 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
     let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -17637,12 +17935,24 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
 
     // The generations lifecycle: (argv, expected exit code, description).
     let steps: &[(&[&[u8]], i32, &str)] = &[
-        (&[b"fastpy-pkg", b"install", b"foo", FOO_ARG, b"-"], 0, "install foo"),
+        (
+            &[b"fastpy-pkg", b"install", b"foo", FOO_ARG, b"-"],
+            0,
+            "install foo",
+        ),
         (&[b"fastpy-pkg", b"commit"], 0, "commit (-> generation 1)"),
-        (&[b"fastpy-pkg", b"install", b"bar", BAR_ARG, b"-"], 0, "install bar"),
+        (
+            &[b"fastpy-pkg", b"install", b"bar", BAR_ARG, b"-"],
+            0,
+            "install bar",
+        ),
         (&[b"fastpy-pkg", b"commit"], 0, "commit (-> generation 2)"),
         (&[b"fastpy-pkg", b"current"], 0, "current (generation 2)"),
-        (&[b"fastpy-pkg", b"rollback"], 0, "rollback (-> generation 1)"),
+        (
+            &[b"fastpy-pkg", b"rollback"],
+            0,
+            "rollback (-> generation 1)",
+        ),
         (&[b"fastpy-pkg", b"current"], 0, "current (generation 1)"),
     ];
 
@@ -17653,7 +17963,9 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
                 cleanup();
                 serial_println!(
                     "[spawn]   FAIL: fastpy-pkg `{}` exited {} (expected {})",
-                    desc, code, want
+                    desc,
+                    code,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -17685,7 +17997,8 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-pkg rollback did not restore generation 1 \
              (foo_present={}, bar_reverted={})",
-            foo_present, bar_reverted
+            foo_present,
+            bar_reverted
         );
         return Err(KernelError::InternalError);
     }
@@ -17720,9 +18033,7 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
     let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -17799,8 +18110,16 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
     // Step 1+2: install foo, then verify it — the blob's bytes still hash to the
     // recorded digest, so verify succeeds (exit 0).
     let good_steps: &[(&[&[u8]], i32, &str)] = &[
-        (&[b"fastpy-pkg", b"install", b"foo", FOO_ARG, b"-"], 0, "install foo"),
-        (&[b"fastpy-pkg", b"verify", b"foo"], 0, "verify foo (intact)"),
+        (
+            &[b"fastpy-pkg", b"install", b"foo", FOO_ARG, b"-"],
+            0,
+            "install foo",
+        ),
+        (
+            &[b"fastpy-pkg", b"verify", b"foo"],
+            0,
+            "verify foo (intact)",
+        ),
     ];
     for (argv, want, desc) in good_steps {
         match run_pkg(&fastpy_pkg_elf, argv) {
@@ -17809,7 +18128,9 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
                 cleanup();
                 serial_println!(
                     "[spawn]   FAIL: fastpy-pkg `{}` exited {} (expected {})",
-                    desc, code, want
+                    desc,
+                    code,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -17843,7 +18164,10 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
         }
         Err(e) => {
             cleanup();
-            serial_println!("[spawn]   FAIL: fastpy-pkg `verify foo (tampered)` — {:?}", e);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg `verify foo (tampered)` — {:?}",
+                e
+            );
             return Err(e);
         }
     }
@@ -17880,9 +18204,7 @@ pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
     let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -18029,9 +18351,7 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
     let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -18039,8 +18359,7 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
     const DB_PATH: &str = "/tmp/pkgdb.txt";
     // Three records; search reads only the name (field 0), so the digests/deps
     // are arbitrary placeholders and no store blobs are required.
-    const DB_SEED: &[u8] =
-        b"libc 86732e22 -\nlibcurl aaaaaaaa libc\ngrep 0f4143a6 libc\n";
+    const DB_SEED: &[u8] = b"libc 86732e22 -\nlibcurl aaaaaaaa libc\ngrep 0f4143a6 libc\n";
 
     fn run_pkg(elf: &[u8], argv: &[&[u8]]) -> KernelResult<i32> {
         let envp: &[&[u8]] = &[];
@@ -18098,10 +18417,26 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
     // (argv, expected exit code, description).  grep(1) semantics: 0 = matched,
     // 1 = no match.
     let steps: &[(&[&[u8]], i32, &str)] = &[
-        (&[b"fastpy-pkg", b"search", b"lib"], 0, "search lib (libc + libcurl)"),
-        (&[b"fastpy-pkg", b"search", b"curl"], 0, "search curl (libcurl)"),
-        (&[b"fastpy-pkg", b"search", b"grep"], 0, "search grep (grep)"),
-        (&[b"fastpy-pkg", b"search", b"zzz"], 1, "search zzz (no match)"),
+        (
+            &[b"fastpy-pkg", b"search", b"lib"],
+            0,
+            "search lib (libc + libcurl)",
+        ),
+        (
+            &[b"fastpy-pkg", b"search", b"curl"],
+            0,
+            "search curl (libcurl)",
+        ),
+        (
+            &[b"fastpy-pkg", b"search", b"grep"],
+            0,
+            "search grep (grep)",
+        ),
+        (
+            &[b"fastpy-pkg", b"search", b"zzz"],
+            1,
+            "search zzz (no match)",
+        ),
     ];
 
     for (argv, want, desc) in steps {
@@ -18111,7 +18446,9 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
                 cleanup();
                 serial_println!(
                     "[spawn]   FAIL: fastpy-pkg `{}` exited {} (expected {})",
-                    desc, code, want
+                    desc,
+                    code,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -18150,9 +18487,7 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
     let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -18230,9 +18565,21 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
 
     // (argv, expected exit code, description).
     let steps: &[(&[&[u8]], i32, &str)] = &[
-        (&[b"fastpy-pkg", b"upgrade", b"foo", V2_ARG, b"libc"], 1, "upgrade foo (not installed)"),
-        (&[b"fastpy-pkg", b"install", b"foo", V1_ARG, b"-"], 0, "install foo v1"),
-        (&[b"fastpy-pkg", b"upgrade", b"foo", V2_ARG, b"libc"], 0, "upgrade foo -> v2"),
+        (
+            &[b"fastpy-pkg", b"upgrade", b"foo", V2_ARG, b"libc"],
+            1,
+            "upgrade foo (not installed)",
+        ),
+        (
+            &[b"fastpy-pkg", b"install", b"foo", V1_ARG, b"-"],
+            0,
+            "install foo v1",
+        ),
+        (
+            &[b"fastpy-pkg", b"upgrade", b"foo", V2_ARG, b"libc"],
+            0,
+            "upgrade foo -> v2",
+        ),
     ];
     for (argv, want, desc) in steps {
         match run_pkg(&fastpy_pkg_elf, argv) {
@@ -18241,7 +18588,9 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
                 cleanup();
                 serial_println!(
                     "[spawn]   FAIL: fastpy-pkg `{}` exited {} (expected {})",
-                    desc, code, want
+                    desc,
+                    code,
+                    want
                 );
                 return Err(KernelError::InternalError);
             }
@@ -18278,7 +18627,9 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fastpy-pkg upgrade did not replace the record/blob \
              (new_record={}, old_gone={}, blob_ok={})",
-            new_record, old_gone, blob_ok
+            new_record,
+            old_gone,
+            blob_ok
         );
         return Err(KernelError::InternalError);
     }
@@ -18308,9 +18659,7 @@ pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
     let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
         Some(v) => v,
         None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
-            );
+            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
             return Ok(());
         }
     };
@@ -18416,7 +18765,10 @@ pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
         (Ok(a), Ok(b), Ok(c)) => a && b && c,
         _ => {
             cleanup();
-            serial_println!("[spawn]   FAIL: could not read back {} after good batch", DB_PATH);
+            serial_println!(
+                "[spawn]   FAIL: could not read back {} after good batch",
+                DB_PATH
+            );
             return Err(KernelError::InternalError);
         }
     };
@@ -18455,7 +18807,10 @@ pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
         (Ok(has_editor), Ok(has_grep)) => !has_editor && has_grep,
         _ => {
             cleanup();
-            serial_println!("[spawn]   FAIL: could not read back {} after bad batch", DB_PATH);
+            serial_println!(
+                "[spawn]   FAIL: could not read back {} after bad batch",
+                DB_PATH
+            );
             return Err(KernelError::InternalError);
         }
     };
@@ -18552,7 +18907,8 @@ pub fn self_test_linux_envp0_deref() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: envp[0] deref (ring 3) — expected exit {} (envp[0][0] sentinel), \
              got {:?} (a wrong-but-valid byte means the envp array is at the wrong offset)",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -18644,7 +19000,8 @@ pub fn self_test_linux_fork_wait() -> KernelResult<()> {
             "[spawn]   FAIL: fork()+wait4() (ring 3) — parent not a zombie after {} yields, \
              got {:?} (the parent is still blocked in wait4; the child-exit wakeup never \
              fired, or fork never resumed the child)",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::InternalError);
     }
@@ -18655,7 +19012,8 @@ pub fn self_test_linux_fork_wait() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fork()+wait4() (ring 3) — expected parent exit {} \
              (child WEXITSTATUS), got {:?} (0xA1/161 = parent's wait4 returned an error)",
-            CHILD_EXIT, exit_code
+            CHILD_EXIT,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -18702,9 +19060,7 @@ pub fn self_test_linux_fork_execve_wait() -> KernelResult<()> {
     const SENTINEL: i32 = 0x53; // 83
     const MAX_YIELDS: usize = 256;
 
-    serial_println!(
-        "[spawn] Running Linux fork()+execve()+wait4() (ring 3) integration test..."
-    );
+    serial_println!("[spawn] Running Linux fork()+execve()+wait4() (ring 3) integration test...");
 
     // Stage the exec target: a Linux-ABI ELF that exit()s with SENTINEL.
     let tgt_elf = elf::build_linux_exit_elf(SENTINEL as u8);
@@ -18765,7 +19121,8 @@ pub fn self_test_linux_fork_execve_wait() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: fork()+execve()+wait4() (ring 3) — parent not a zombie after {} \
              yields, got {:?} (parent still blocked in wait4, or the child never execve'd/exited)",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::InternalError);
     }
@@ -18775,7 +19132,8 @@ pub fn self_test_linux_fork_execve_wait() -> KernelResult<()> {
             "[spawn]   FAIL: fork()+execve()+wait4() (ring 3) — expected parent exit {} \
              (exec target's WEXITSTATUS), got {:?} (0xE7/231 = child's execve failed; \
              0xA2/162 = parent's wait4 returned an error)",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -18884,7 +19242,8 @@ pub fn self_test_linux_pipe_fork_dup2_exec() -> KernelResult<()> {
             "[spawn]   FAIL: pipe2()+fork()+dup2()+execve()+read() (ring 3) — parent not a \
              zombie after {} yields, got {:?} (parent still blocked in read, or the child \
              never dup2'd/execve'd/wrote)",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::InternalError);
     }
@@ -18894,7 +19253,8 @@ pub fn self_test_linux_pipe_fork_dup2_exec() -> KernelResult<()> {
             "[spawn]   FAIL: pipe2()+fork()+dup2()+execve()+read() (ring 3) — expected parent \
              exit {} (the byte read back from the pipe), got {:?} (0xA4/164 = pipe2 failed; \
              0xA3/163 = parent read returned <= 0; 0xE7/231 = child execve failed)",
-            SENTINEL, exit_code
+            SENTINEL,
+            exit_code
         );
         return Err(KernelError::InternalError);
     }
@@ -18987,7 +19347,8 @@ pub fn self_test_linux_symlink_readlink() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: symlink()+readlink() (ring 3) — process not a zombie after {} \
              yields, got {:?}",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::InternalError);
     }
@@ -19056,7 +19417,10 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     serial_println!("[spawn] Running Linux link()/linkat() hard-link test (ring 3, ext4 /mnt)...");
 
     // Skip cleanly when /mnt isn't an ext4 mount (diskless boot).
-    if pathz_missing("Linux link()/linkat() hard-link (ring 3, ext4 /mnt)", &["/mnt"]) {
+    if pathz_missing(
+        "Linux link()/linkat() hard-link (ring 3, ext4 /mnt)",
+        &["/mnt"],
+    ) {
         return Ok(());
     }
 
@@ -19133,7 +19497,8 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: link() (ring 3) — process not a zombie after {} yields, got {:?}",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::InternalError);
     }
@@ -19196,7 +19561,10 @@ pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
 
     serial_println!("[spawn] Running link()/linkat no-follow symlink test (kernel, ext4 /mnt)...");
 
-    if pathz_missing("link()/linkat no-follow symlink (kernel, ext4 /mnt)", &["/mnt"]) {
+    if pathz_missing(
+        "link()/linkat no-follow symlink (kernel, ext4 /mnt)",
+        &["/mnt"],
+    ) {
         return Ok(());
     }
 
@@ -19221,12 +19589,18 @@ pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
 
     // Stage the target file and the symlink pointing at it.
     if let Err(e) = Vfs::write_file(TARGET, b"T") {
-        serial_println!("[spawn]   link no-follow (ext4): SKIP (target write failed: {:?})", e);
+        serial_println!(
+            "[spawn]   link no-follow (ext4): SKIP (target write failed: {:?})",
+            e
+        );
         return Ok(());
     }
     if let Err(e) = Vfs::symlink(LINK, TARGET) {
         drain(TARGET);
-        serial_println!("[spawn]   link no-follow (ext4): SKIP (symlink unsupported: {:?})", e);
+        serial_println!(
+            "[spawn]   link no-follow (ext4): SKIP (symlink unsupported: {:?})",
+            e
+        );
         return Ok(());
     }
 
@@ -19412,7 +19786,8 @@ pub fn self_test_linux_utimensat() -> KernelResult<()> {
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: utimensat() (ring 3) — process not a zombie after {} yields, got {:?}",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::InternalError);
     }
@@ -19432,7 +19807,10 @@ pub fn self_test_linux_utimensat() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: utimensat() (ring 3) — process exited 0 but kernel readback \
                  timestamps mismatch: accessed_ns={} (want {}), modified_ns={} (want {})",
-                m.accessed_ns, EXPECT_ATIME_NS, m.modified_ns, EXPECT_MTIME_NS
+                m.accessed_ns,
+                EXPECT_ATIME_NS,
+                m.modified_ns,
+                EXPECT_MTIME_NS
             );
             return Err(KernelError::InternalError);
         }
@@ -19520,7 +19898,8 @@ pub fn self_test_linux_chmod_chown() -> KernelResult<()> {
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: chmod/chown (ring 3) — process not a zombie after {} yields, got {:?}",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::InternalError);
     }
@@ -19540,7 +19919,12 @@ pub fn self_test_linux_chmod_chown() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: chmod/chown (ring 3) — process exited 0 but kernel readback \
                  mismatch: permissions=0o{:o} (want 0o{:o}), uid={} (want {}), gid={} (want {})",
-                m.permissions, MODE, m.uid, UID, m.gid, GID
+                m.permissions,
+                MODE,
+                m.uid,
+                UID,
+                m.gid,
+                GID
             );
             return Err(KernelError::InternalError);
         }
@@ -19640,7 +20024,8 @@ pub fn self_test_linux_truncate() -> KernelResult<()> {
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: truncate (ring 3) — process not a zombie after {} yields, got {:?}",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::InternalError);
     }
@@ -19663,7 +20048,9 @@ pub fn self_test_linux_truncate() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: truncate (ring 3) — process exited 0 but kernel readback \
                  mismatch: len={} (want {}), bytes={:?}",
-                data.len(), GROW_LEN, data
+                data.len(),
+                GROW_LEN,
+                data
             );
             return Err(KernelError::InternalError);
         }
@@ -19755,7 +20142,8 @@ pub fn self_test_linux_fchmodat2() -> KernelResult<()> {
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: fchmodat2 (ring 3) — process not a zombie after {} yields, got {:?}",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::InternalError);
     }
@@ -19775,7 +20163,8 @@ pub fn self_test_linux_fchmodat2() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fchmodat2 (ring 3) — process exited 0 but kernel readback \
                  mismatch: permissions=0o{:o} (want 0o{:o})",
-                m.permissions, MODE
+                m.permissions,
+                MODE
             );
             return Err(KernelError::InternalError);
         }
@@ -19868,7 +20257,8 @@ pub fn self_test_linux_virtgpu_getparam() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: virtgpu-getparam (ring 3) — process not a zombie after {} yields, \
              got {:?}",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::InternalError);
     }
@@ -19961,7 +20351,8 @@ pub fn self_test_linux_fallocate() -> KernelResult<()> {
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: fallocate (ring 3) — process not a zombie after {} yields, got {:?}",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::InternalError);
     }
@@ -19984,7 +20375,9 @@ pub fn self_test_linux_fallocate() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: fallocate (ring 3) — process exited 0 but kernel readback \
                  mismatch: len={} (want {}), bytes={:?}",
-                data.len(), GROW_LEN, data
+                data.len(),
+                GROW_LEN,
+                data
             );
             return Err(KernelError::InternalError);
         }
@@ -20099,7 +20492,9 @@ pub fn self_test_linux_fs_tls_switch() -> KernelResult<()> {
     if a_state != Some(pcb::ProcessState::Zombie) || b_state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: %fs/TLS test — not both zombie after {} yields (A={:?}, B={:?})",
-            MAX_YIELDS, a_state, b_state
+            MAX_YIELDS,
+            a_state,
+            b_state
         );
         return Err(KernelError::InternalError);
     }
@@ -20110,7 +20505,8 @@ pub fn self_test_linux_fs_tls_switch() -> KernelResult<()> {
             "[spawn]   FAIL: %fs/TLS test — a process saw a clobbered FS base (A exit={:?}, \
              B exit={:?}; 0xF1/241 = FS base changed across a context switch — the scheduler \
              is not saving/restoring IA32_FS_BASE per task)",
-            a_exit, b_exit
+            a_exit,
+            b_exit
         );
         return Err(KernelError::InternalError);
     }
@@ -20214,7 +20610,9 @@ pub fn self_test_linux_gs_tls_switch() -> KernelResult<()> {
     if a_state != Some(pcb::ProcessState::Zombie) || b_state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: %gs test — not both zombie after {} yields (A={:?}, B={:?})",
-            MAX_YIELDS, a_state, b_state
+            MAX_YIELDS,
+            a_state,
+            b_state
         );
         return Err(KernelError::InternalError);
     }
@@ -20225,7 +20623,8 @@ pub fn self_test_linux_gs_tls_switch() -> KernelResult<()> {
             "[spawn]   FAIL: %gs test — a process saw a clobbered GS base (A exit={:?}, \
              B exit={:?}; 0xF2/242 = GS base changed across a context switch — the scheduler \
              is not saving/restoring the userspace %gs base per task)",
-            a_exit, b_exit
+            a_exit,
+            b_exit
         );
         return Err(KernelError::InternalError);
     }
@@ -20300,7 +20699,10 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
         let result = match spawn_process(launcher_elf, &options) {
             Ok(r) => r,
             Err(e) => {
-                serial_println!("[spawn]   FAIL: execveat-test ({label}) spawn returned {:?}", e);
+                serial_println!(
+                    "[spawn]   FAIL: execveat-test ({label}) spawn returned {:?}",
+                    e
+                );
                 return Err(e);
             }
         };
@@ -20331,7 +20733,8 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: execveat (ring 3, {label}) — expected exit {} (target ran), \
                  got {:?} (0xEE = execveat returned an error; launcher ran its failure tail)",
-                SENTINEL, exit_code
+                SENTINEL,
+                exit_code
             );
             return Err(KernelError::InternalError);
         }
@@ -20441,7 +20844,9 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: execveat AT_SYMLINK_NOFOLLOW — expected exit {} (ELOOP → \
              launcher failure tail), got {:?} ({} would mean the symlink was followed)",
-            EXEC_FAIL, exit_nf, SENTINEL
+            EXEC_FAIL,
+            exit_nf,
+            SENTINEL
         );
         return Err(KernelError::InternalError);
     }
@@ -20519,7 +20924,8 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: execveat argv propagation — expected exit {} (argc passed to \
              execveat), got {:?} (1 would mean the launcher's original argv leaked through)",
-            ARGC_EXIT, exit_d
+            ARGC_EXIT,
+            exit_d
         );
         return Err(KernelError::InternalError);
     }
@@ -20585,7 +20991,10 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
 
     // No rootfs.ext4 attached → nothing staged at /mnt.  No-op (not a failure):
     // the image is git-ignored, so most environments legitimately lack it.
-    if pathz_missing("REAL glibc dynamic-execution (ring 3, Path Z)", &[SRC_HELLO]) {
+    if pathz_missing(
+        "REAL glibc dynamic-execution (ring 3, Path Z)",
+        &[SRC_HELLO],
+    ) {
         return Ok(());
     }
 
@@ -20608,7 +21017,9 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real glibc: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -20616,7 +21027,8 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real glibc: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -20629,7 +21041,8 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   real glibc: SKIP (re-read {} failed: {:?})",
-                DST_HELLO, e
+                DST_HELLO,
+                e
             );
             return Ok(());
         }
@@ -20689,7 +21102,8 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real glibc — child did not exit within {} yields (state={:?}); \
              ld.so/libc startup faulted or blocked",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -20698,7 +21112,8 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real glibc — ran to exit but code={:?}, expected {} (a wrong \
              code means glibc startup reached _exit on an error path)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -20764,13 +21179,19 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_STDIO, DST_STDIO)] {
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_STDIO, DST_STDIO),
+    ] {
         match crate::fs::Vfs::read_file(src) {
             Ok(bytes) => {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real glibc stdio: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -20778,7 +21199,8 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real glibc stdio: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -20788,7 +21210,11 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_STDIO) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real glibc stdio: SKIP (re-read {} failed: {:?})", DST_STDIO, e);
+            serial_println!(
+                "[spawn]   real glibc stdio: SKIP (re-read {} failed: {:?})",
+                DST_STDIO,
+                e
+            );
             return Ok(());
         }
     };
@@ -20804,7 +21230,10 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     ) {
         Ok(h) => h,
         Err(e) => {
-            serial_println!("[spawn]   real glibc stdio: SKIP (capture-file open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real glibc stdio: SKIP (capture-file open failed: {:?})",
+                e
+            );
             return Ok(());
         }
     };
@@ -20865,7 +21294,8 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: real glibc stdio — child did not exit within {} yields (state={:?})",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -20873,7 +21303,8 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real glibc stdio — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -20890,7 +21321,9 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real glibc stdio — captured {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -20947,7 +21380,10 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     const CAPTURE: &str = "/glibc-full-capture.tmp";
     const MAX_YIELDS: usize = 4096;
 
-    if pathz_missing("REAL glibc argv/env/stdin/heap (ring 3, Path Z)", &[SRC_FULL]) {
+    if pathz_missing(
+        "REAL glibc argv/env/stdin/heap (ring 3, Path Z)",
+        &[SRC_FULL],
+    ) {
         return Ok(());
     }
 
@@ -20963,7 +21399,9 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real glibc full: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -20971,7 +21409,8 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real glibc full: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -20981,7 +21420,11 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_FULL) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real glibc full: SKIP (re-read {} failed: {:?})", DST_FULL, e);
+            serial_println!(
+                "[spawn]   real glibc full: SKIP (re-read {} failed: {:?})",
+                DST_FULL,
+                e
+            );
             return Ok(());
         }
     };
@@ -20991,14 +21434,20 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     // through the handle later both resolve to the same inode.
     let _ = crate::fs::Vfs::remove(INPUT);
     if let Err(e) = crate::fs::Vfs::write_file(INPUT, STDIN_BYTES) {
-        serial_println!("[spawn]   real glibc full: SKIP (writing stdin input failed: {:?})", e);
+        serial_println!(
+            "[spawn]   real glibc full: SKIP (writing stdin input failed: {:?})",
+            e
+        );
         return Ok(());
     }
     let stdin_handle = match handle::open(INPUT, handle::OpenFlags::READ) {
         Ok(h) => h,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(INPUT);
-            serial_println!("[spawn]   real glibc full: SKIP (stdin-file open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real glibc full: SKIP (stdin-file open failed: {:?})",
+                e
+            );
             return Ok(());
         }
     };
@@ -21015,7 +21464,10 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
         Err(e) => {
             let _ = handle::close(stdin_handle);
             let _ = crate::fs::Vfs::remove(INPUT);
-            serial_println!("[spawn]   real glibc full: SKIP (capture-file open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real glibc full: SKIP (capture-file open failed: {:?})",
+                e
+            );
             return Ok(());
         }
     };
@@ -21078,7 +21530,8 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: real glibc full — child did not exit within {} yields (state={:?})",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -21087,7 +21540,8 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real glibc full — exit code={:?}, expected {} (2=malloc null, \
              3=heap loop skipped, other=glibc error path)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -21104,7 +21558,9 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real glibc full — captured {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -21161,11 +21617,16 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
     // the bound quickly (no ready task → each yield returns immediately).
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL glibc pthread (clone+futex+TLS) (ring 3, Path Z)", &[SRC_PT]) {
+    if pathz_missing(
+        "REAL glibc pthread (clone+futex+TLS) (ring 3, Path Z)",
+        &[SRC_PT],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL glibc pthread (clone+futex+TLS) (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL glibc pthread (clone+futex+TLS) (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -21176,7 +21637,9 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real glibc pthread: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -21184,7 +21647,8 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real glibc pthread: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -21194,7 +21658,11 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_PT) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real glibc pthread: SKIP (re-read {} failed: {:?})", DST_PT, e);
+            serial_println!(
+                "[spawn]   real glibc pthread: SKIP (re-read {} failed: {:?})",
+                DST_PT,
+                e
+            );
             return Ok(());
         }
     };
@@ -21208,7 +21676,10 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
     ) {
         Ok(h) => h,
         Err(e) => {
-            serial_println!("[spawn]   real glibc pthread: SKIP (capture-file open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real glibc pthread: SKIP (capture-file open failed: {:?})",
+                e
+            );
             return Ok(());
         }
     };
@@ -21264,7 +21735,8 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real glibc pthread — process did not exit within {} yields \
              (state={:?}); a thread likely deadlocked on a futex or a worker faulted",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         // A hang (never reached Zombie in budget) is the transient spawn/reap/
         // futex flake family (B-PTHREAD-YIELDBUDGET), NOT a wrong-result bug —
@@ -21277,7 +21749,8 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real glibc pthread — exit code={:?}, expected {} (2=pthread_create \
              failed, 3=pthread_join failed)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -21294,7 +21767,9 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real glibc pthread — captured {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -21358,11 +21833,16 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
     // Generous bound still tolerates scheduler jitter.
     const MAX_YIELDS: usize = 65_536;
 
-    if pathz_missing("REAL glibc signal (SA_SIGINFO handler, ring 3, Path Z)", &[SRC_SIG]) {
+    if pathz_missing(
+        "REAL glibc signal (SA_SIGINFO handler, ring 3, Path Z)",
+        &[SRC_SIG],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL glibc signal (SA_SIGINFO handler, ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL glibc signal (SA_SIGINFO handler, ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -21373,7 +21853,9 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real glibc signal: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -21381,7 +21863,8 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real glibc signal: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -21391,7 +21874,11 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_SIG) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real glibc signal: SKIP (re-read {} failed: {:?})", DST_SIG, e);
+            serial_println!(
+                "[spawn]   real glibc signal: SKIP (re-read {} failed: {:?})",
+                DST_SIG,
+                e
+            );
             return Ok(());
         }
     };
@@ -21405,7 +21892,10 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
     ) {
         Ok(h) => h,
         Err(e) => {
-            serial_println!("[spawn]   real glibc signal: SKIP (capture-file open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real glibc signal: SKIP (capture-file open failed: {:?})",
+                e
+            );
             return Ok(());
         }
     };
@@ -21462,7 +21952,8 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
             "[spawn]   FAIL: real glibc signal — process did not exit within {} yields \
              (state={:?}); the handler likely faulted (bad rt_sigframe) or rt_sigreturn \
              corrupted the resume context",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -21471,7 +21962,8 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real glibc signal — exit code={:?}, expected {} (2=sigaction \
              failed, 3=handler never ran, 4=wrong signo)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -21488,7 +21980,9 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real glibc signal — captured {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -21547,22 +22041,33 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
     // Single-threaded, synchronous fault + siglongjmp — completes promptly.
     const MAX_YIELDS: usize = 65_536;
 
-    if pathz_missing("REAL glibc fault-signal (SIGSEGV handler, ring 3, Path Z)", &[SRC_FAULT]) {
+    if pathz_missing(
+        "REAL glibc fault-signal (SIGSEGV handler, ring 3, Path Z)",
+        &[SRC_FAULT],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL glibc fault-signal (SIGSEGV handler, ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL glibc fault-signal (SIGSEGV handler, ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_FAULT, DST_FAULT)] {
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_FAULT, DST_FAULT),
+    ] {
         match crate::fs::Vfs::read_file(src) {
             Ok(bytes) => {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real glibc fault: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -21570,7 +22075,8 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real glibc fault: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -21580,7 +22086,11 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_FAULT) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real glibc fault: SKIP (re-read {} failed: {:?})", DST_FAULT, e);
+            serial_println!(
+                "[spawn]   real glibc fault: SKIP (re-read {} failed: {:?})",
+                DST_FAULT,
+                e
+            );
             return Ok(());
         }
     };
@@ -21594,7 +22104,10 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
     ) {
         Ok(h) => h,
         Err(e) => {
-            serial_println!("[spawn]   real glibc fault: SKIP (capture-file open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real glibc fault: SKIP (capture-file open failed: {:?})",
+                e
+            );
             return Ok(());
         }
     };
@@ -21651,7 +22164,8 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
             "[spawn]   FAIL: real glibc fault — process did not exit within {} yields \
              (state={:?}); the SIGSEGV handler likely faulted (bad rt_sigframe built from \
              the ISR context) or siglongjmp could not unwind",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -21660,7 +22174,8 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real glibc fault — exit code={:?}, expected {} (2=sigaction \
              failed, 3=handler never ran, 4=wrong signo, 5=wrong si_code, 6=wrong si_addr)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -21678,7 +22193,9 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real glibc fault — captured {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -21725,8 +22242,7 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
 
     const EXPECT_EXIT: i32 = 23;
     // SIGUSR1 = 10, SI_QUEUE = -1, sival_int = 0x12345678, self == getpid().
-    const EXPECT_OUT: &[u8] =
-        b"SLATE_GLIBC_SIGQUEUE_OK signo=10 code=-1 value=0x12345678 self=1\n";
+    const EXPECT_OUT: &[u8] = b"SLATE_GLIBC_SIGQUEUE_OK signo=10 code=-1 value=0x12345678 self=1\n";
 
     const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
     const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
@@ -21738,22 +22254,33 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
     // Single-threaded, synchronous self-sigqueue — completes promptly.
     const MAX_YIELDS: usize = 65_536;
 
-    if pathz_missing("REAL glibc SI_QUEUE-payload (SIGUSR1 handler, ring 3, Path Z)", &[SRC_SIGQUEUE]) {
+    if pathz_missing(
+        "REAL glibc SI_QUEUE-payload (SIGUSR1 handler, ring 3, Path Z)",
+        &[SRC_SIGQUEUE],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL glibc SI_QUEUE-payload (SIGUSR1 handler, ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL glibc SI_QUEUE-payload (SIGUSR1 handler, ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_SIGQUEUE, DST_SIGQUEUE)] {
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_SIGQUEUE, DST_SIGQUEUE),
+    ] {
         match crate::fs::Vfs::read_file(src) {
             Ok(bytes) => {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real glibc sigqueue: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -21761,7 +22288,8 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real glibc sigqueue: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -21771,7 +22299,11 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_SIGQUEUE) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real glibc sigqueue: SKIP (re-read {} failed: {:?})", DST_SIGQUEUE, e);
+            serial_println!(
+                "[spawn]   real glibc sigqueue: SKIP (re-read {} failed: {:?})",
+                DST_SIGQUEUE,
+                e
+            );
             return Ok(());
         }
     };
@@ -21785,7 +22317,10 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
     ) {
         Ok(h) => h,
         Err(e) => {
-            serial_println!("[spawn]   real glibc sigqueue: SKIP (capture-file open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real glibc sigqueue: SKIP (capture-file open failed: {:?})",
+                e
+            );
             return Ok(());
         }
     };
@@ -21842,7 +22377,8 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
             "[spawn]   FAIL: real glibc sigqueue — process did not exit within {} yields \
              (state={:?}); the SIGUSR1 handler likely faulted (bad rt_sigframe) or the \
              SI_QUEUE payload corrupted the siginfo",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -21852,7 +22388,8 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
             "[spawn]   FAIL: real glibc sigqueue — exit code={:?}, expected {} (2=sigaction/\
              sigqueue failed, 3=handler never ran, 4=wrong signo, 5=wrong si_code, \
              6=wrong si_value, 7=wrong si_pid)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -21870,7 +22407,9 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real glibc sigqueue — captured {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -21928,7 +22467,10 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
     // single-process tests (the child re-runs ld.so), so allow extra yields.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL glibc fork()+execl()+waitpid() (ring 3, Path Z)", &[SRC_FORKEXEC]) {
+    if pathz_missing(
+        "REAL glibc fork()+execl()+waitpid() (ring 3, Path Z)",
+        &[SRC_FORKEXEC],
+    ) {
         return Ok(());
     }
 
@@ -21948,7 +22490,9 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real glibc forkexec: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -21956,7 +22500,8 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real glibc forkexec: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -21966,7 +22511,11 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_FORKEXEC) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real glibc forkexec: SKIP (re-read {} failed: {:?})", DST_FORKEXEC, e);
+            serial_println!(
+                "[spawn]   real glibc forkexec: SKIP (re-read {} failed: {:?})",
+                DST_FORKEXEC,
+                e
+            );
             return Ok(());
         }
     };
@@ -21980,7 +22529,10 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
     ) {
         Ok(h) => h,
         Err(e) => {
-            serial_println!("[spawn]   real glibc forkexec: SKIP (capture-file open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real glibc forkexec: SKIP (capture-file open failed: {:?})",
+                e
+            );
             return Ok(());
         }
     };
@@ -22039,7 +22591,8 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
             "[spawn]   FAIL: real glibc forkexec — process did not exit within {} yields \
              (state={:?}); the CoW fork, the child's ld.so re-exec, or the parent's \
              wait4 likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -22048,7 +22601,8 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real glibc forkexec — exit code={:?}, expected {} (2=fork \
              failed, 3=waitpid mismatch, 4=child not WIFEXITED)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -22066,7 +22620,9 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real glibc forkexec — captured {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -22119,11 +22675,16 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
     // once the child finishes its (in-budget) startup.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL glibc pipe()+fork()+dup2()+execl()+read()+wait (ring 3, Path Z)", &[SRC_PIPE]) {
+    if pathz_missing(
+        "REAL glibc pipe()+fork()+dup2()+execl()+read()+wait (ring 3, Path Z)",
+        &[SRC_PIPE],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL glibc pipe()+fork()+dup2()+execl()+read()+wait (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL glibc pipe()+fork()+dup2()+execl()+read()+wait (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -22139,7 +22700,9 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real glibc pipe: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -22147,7 +22710,8 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real glibc pipe: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -22157,7 +22721,11 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_PIPE) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real glibc pipe: SKIP (re-read {} failed: {:?})", DST_PIPE, e);
+            serial_println!(
+                "[spawn]   real glibc pipe: SKIP (re-read {} failed: {:?})",
+                DST_PIPE,
+                e
+            );
             return Ok(());
         }
     };
@@ -22171,7 +22739,10 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
     ) {
         Ok(h) => h,
         Err(e) => {
-            serial_println!("[spawn]   real glibc pipe: SKIP (capture-file open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real glibc pipe: SKIP (capture-file open failed: {:?})",
+                e
+            );
             return Ok(());
         }
     };
@@ -22215,7 +22786,10 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
     if let Err(e) = handle::dup_shared(capture_handle) {
         let _ = handle::close(capture_handle);
         let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real glibc pipe — dup_shared(capture) failed: {:?}", e);
+        serial_println!(
+            "[spawn]   FAIL: real glibc pipe — dup_shared(capture) failed: {:?}",
+            e
+        );
         return Err(KernelError::InternalError);
     }
     let redirects = [(1i32, capture_handle, O_WRONLY)];
@@ -22258,7 +22832,8 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
             "[spawn]   FAIL: real glibc pipe — process did not exit within {} yields \
              (state={:?}); pipe inheritance across fork, the child's dup2/exec, the \
              parent's blocking read, or wait4 likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -22267,7 +22842,8 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real glibc pipe — exit code={:?}, expected {} (2=pipe \
              failed, 3=fork failed, 4=waitpid mismatch, 5=child error)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -22285,7 +22861,9 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real glibc pipe — captured {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -22340,11 +22918,16 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
     // budget as the other real-glibc tests.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL glibc `cmd > file` output-redirection (ring 3, Path Z)", &[SRC_REDIR]) {
+    if pathz_missing(
+        "REAL glibc `cmd > file` output-redirection (ring 3, Path Z)",
+        &[SRC_REDIR],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL glibc `cmd > file` output-redirection (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL glibc `cmd > file` output-redirection (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -22359,7 +22942,9 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real glibc redir: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -22367,7 +22952,8 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real glibc redir: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -22377,7 +22963,11 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_REDIR) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real glibc redir: SKIP (re-read {} failed: {:?})", DST_REDIR, e);
+            serial_println!(
+                "[spawn]   real glibc redir: SKIP (re-read {} failed: {:?})",
+                DST_REDIR,
+                e
+            );
             return Ok(());
         }
     };
@@ -22433,7 +23023,8 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
             "[spawn]   FAIL: real glibc redir — process did not exit within {} yields \
              (state={:?}); the program's open()/dup2() redirection or exit-flush \
              write likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -22442,7 +23033,8 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real glibc redir — exit code={:?}, expected {} (2=open \
              failed, 3=dup2 failed)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -22460,7 +23052,9 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real glibc redir — wrote {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -22513,11 +23107,16 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
     // budget as the other real-glibc tests.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL glibc `cmd < file` input-redirection (ring 3, Path Z)", &[SRC_REDIRIN]) {
+    if pathz_missing(
+        "REAL glibc `cmd < file` input-redirection (ring 3, Path Z)",
+        &[SRC_REDIRIN],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL glibc `cmd < file` input-redirection (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL glibc `cmd < file` input-redirection (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -22532,7 +23131,9 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real glibc redirin: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -22540,7 +23141,8 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real glibc redirin: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -22550,7 +23152,11 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_REDIRIN) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real glibc redirin: SKIP (re-read {} failed: {:?})", DST_REDIRIN, e);
+            serial_println!(
+                "[spawn]   real glibc redirin: SKIP (re-read {} failed: {:?})",
+                DST_REDIRIN,
+                e
+            );
             return Ok(());
         }
     };
@@ -22560,7 +23166,8 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
     if let Err(e) = crate::fs::Vfs::write_file(IN_PATH, IN_CONTENT) {
         serial_println!(
             "[spawn]   real glibc redirin: SKIP (staging input {} failed: {:?})",
-            IN_PATH, e
+            IN_PATH,
+            e
         );
         return Ok(());
     }
@@ -22613,7 +23220,8 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
             "[spawn]   FAIL: real glibc redirin — process did not exit within {} yields \
              (state={:?}); the program's open()/dup2() input redirection or stdin \
              read likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -22622,7 +23230,8 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real glibc redirin — exit code={:?}, expected {} (2=open \
              failed, 3=dup2 failed, 4=fgets EOF, 5=content mismatch)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -22631,7 +23240,8 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
         "[spawn]   REAL glibc redirin (ring 3: open(O_RDONLY) + dup2(file -> fd 0) + \
          displaced-console-stdin close + glibc fgets read {} bytes from the program's \
          own file == expected, exit {}): OK",
-        IN_CONTENT.len(), EXPECT_EXIT
+        IN_CONTENT.len(),
+        EXPECT_EXIT
     );
     Ok(())
 }
@@ -22683,30 +23293,41 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
     // it is doing all of it against our libc, so allow 4x dash's budget.
     const MAX_YIELDS: usize = 1_048_576;
 
-    if pathz_missing("GNU bash 5.2 linked against OUR libc.a (ring 3)", &[SRC_BASH]) {
+    if pathz_missing(
+        "GNU bash 5.2 linked against OUR libc.a (ring 3)",
+        &[SRC_BASH],
+    ) {
         return Ok(());
     }
 
-    serial_println!(
-        "[spawn] Running GNU bash 5.2 linked against OUR libc.a (ring 3) test..."
-    );
+    serial_println!("[spawn] Running GNU bash 5.2 linked against OUR libc.a (ring 3) test...");
 
     let _ = crate::fs::Vfs::mkdir_all("/bin");
     // Statically linked, so unlike the dash test there is no ld.so or libc.so
     // to stage alongside it — the binary is self-contained.
     match crate::fs::Vfs::read_file(SRC_BASH) {
         Ok(bytes) => {
-            serial_println!("[spawn]   bash: staging {} bytes -> {}", bytes.len(), DST_BASH);
+            serial_println!(
+                "[spawn]   bash: staging {} bytes -> {}",
+                bytes.len(),
+                DST_BASH
+            );
             if let Err(e) = crate::fs::Vfs::write_file(DST_BASH, &bytes) {
                 serial_println!(
                     "[spawn]   bash: SKIP (staging {} -> {} failed: {:?})",
-                    SRC_BASH, DST_BASH, e
+                    SRC_BASH,
+                    DST_BASH,
+                    e
                 );
                 return Ok(());
             }
         }
         Err(e) => {
-            serial_println!("[spawn]   bash: SKIP (reading {} failed: {:?})", SRC_BASH, e);
+            serial_println!(
+                "[spawn]   bash: SKIP (reading {} failed: {:?})",
+                SRC_BASH,
+                e
+            );
             return Ok(());
         }
     }
@@ -22714,7 +23335,11 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_BASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   bash: SKIP (re-read {} failed: {:?})", DST_BASH, e);
+            serial_println!(
+                "[spawn]   bash: SKIP (re-read {} failed: {:?})",
+                DST_BASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -22783,7 +23408,8 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: bash did not exit within {} yields (state={:?}) — it hung \
              somewhere in our libc during startup or while running the script",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -22791,7 +23417,8 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: bash exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -22803,14 +23430,17 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
                  and no ld.so; arrays, parameter/arithmetic/brace expansion and its own \
                  `>` redirection all ran against posix/src; read back {} bytes == \
                  expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: bash wrote {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -22863,26 +23493,29 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
     // streams, command parsing); keep the same generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell `echo > file` redirection (ring 3, Path Z)", &[SRC_DASH]) {
+    if pathz_missing(
+        "REAL dash shell `echo > file` redirection (ring 3, Path Z)",
+        &[SRC_DASH],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell `echo > file` redirection (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell `echo > file` redirection (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_DASH, DST_DASH),
-    ] {
+    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
         match crate::fs::Vfs::read_file(src) {
             Ok(bytes) => {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash redir: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -22890,7 +23523,8 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash redir: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -22900,7 +23534,11 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash redir: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash redir: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -22962,7 +23600,8 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
             "[spawn]   FAIL: real dash redir — shell did not exit within {} yields \
              (state={:?}); dash startup (ld.so/libc), command parsing, or its \
              open()/dup2() redirection likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -22971,7 +23610,8 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash redir — exit code={:?}, expected {} (non-zero \
              means dash hit an error parsing/running the command or the redirection)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -22982,14 +23622,17 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
                 "[spawn]   REAL dash shell (ring 3: ld.so loaded dash+libc, dash parsed \
                  `echo … > file`, did its own open()/dup2() redirection of the echo \
                  builtin, read back {} bytes == expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real dash redir — wrote {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -23045,11 +23688,16 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
     // keep the generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell fork+exec of external `/bin/emit > file` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
+    if pathz_missing(
+        "REAL dash shell fork+exec of external `/bin/emit > file` (ring 3, Path Z)",
+        &[SRC_DASH, SRC_EMIT],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell fork+exec of external `/bin/emit > file` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell fork+exec of external `/bin/emit > file` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -23065,7 +23713,9 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash exec: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -23073,7 +23723,8 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash exec: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -23083,7 +23734,11 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash exec: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash exec: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -23093,11 +23748,7 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     // dash forks, the child redirects + exec's the external binary.
-    let argv: &[&[u8]] = &[
-        b"/bin/dash",
-        b"-c",
-        b"/bin/emit > /dash-exec-out.txt",
-    ];
+    let argv: &[&[u8]] = &[b"/bin/dash", b"-c", b"/bin/emit > /dash-exec-out.txt"];
     let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
     // dash's child opens + creates the output file, so File READ|WRITE.
     let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
@@ -23144,7 +23795,8 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
             "[spawn]   FAIL: real dash exec — shell did not exit within {} yields \
              (state={:?}); dash's fork/child-redirect/exec of /bin/emit or its \
              wait4 likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -23153,7 +23805,8 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash exec — exit code={:?}, expected {} (non-zero \
              means dash's fork/exec of /bin/emit failed or the child exited non-zero)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -23164,14 +23817,17 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
                 "[spawn]   REAL dash shell fork+exec (ring 3: dash parsed `/bin/emit > file`, \
                  fork()ed, the child redirected fd 1 + execve()d the external glibc /bin/emit, \
                  parent wait4()ed; read back {} bytes == expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real dash exec — wrote {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -23233,11 +23889,16 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
     // generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell pipeline `/bin/emit | /bin/countbytes > file` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT, SRC_COUNT]) {
+    if pathz_missing(
+        "REAL dash shell pipeline `/bin/emit | /bin/countbytes > file` (ring 3, Path Z)",
+        &[SRC_DASH, SRC_EMIT, SRC_COUNT],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell pipeline `/bin/emit | /bin/countbytes > file` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell pipeline `/bin/emit | /bin/countbytes > file` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -23254,7 +23915,9 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash pipe: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -23262,7 +23925,8 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash pipe: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -23272,7 +23936,11 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash pipe: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash pipe: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -23331,7 +23999,8 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
             "[spawn]   FAIL: real dash pipe — shell did not exit within {} yields \
              (state={:?}); dash's pipe()/double-fork/dup2/exec or the downstream's \
              read-to-EOF likely hung (EOF needs every pipe write end closed)",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -23340,7 +24009,8 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash pipe — exit code={:?}, expected {} (non-zero \
              means a pipeline stage failed to spawn or exited non-zero)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -23352,14 +24022,18 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
                  /bin/emit upstream + /bin/countbytes downstream, dup2'd both pipe ends, \
                  redirected the tail to a file, wait4'd both; downstream counted the \
                  piped bytes — read back {} bytes {:?} == expected, exit {}): OK",
-                bytes.len(), bytes.as_slice(), EXPECT_EXIT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_EXIT
             );
             Ok(())
         }
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real dash pipe — wrote {} bytes {:?}, expected {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -23410,11 +24084,16 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
     // Three fork+exec+wait cycles under a shell; keep the generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell loop `for i in a b c; do /bin/emit; done > file` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
+    if pathz_missing(
+        "REAL dash shell loop `for i in a b c; do /bin/emit; done > file` (ring 3, Path Z)",
+        &[SRC_DASH, SRC_EMIT],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell loop `for i in a b c; do /bin/emit; done > file` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell loop `for i in a b c; do /bin/emit; done > file` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -23430,7 +24109,9 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash loop: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -23438,7 +24119,8 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash loop: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -23448,7 +24130,11 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash loop: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash loop: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -23507,7 +24193,8 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
             "[spawn]   FAIL: real dash loop — shell did not exit within {} yields \
              (state={:?}); a fork/exec/wait iteration likely hung or the shell \
              crashed mid-loop (e.g. a stale CoW double-free corrupting its image)",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -23517,7 +24204,8 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
             "[spawn]   FAIL: real dash loop — exit code={:?}, expected {} (non-zero \
              means a loop iteration's child failed to spawn/exec or the shell \
              faulted part-way through the loop)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -23529,7 +24217,8 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
                  then forked + exec'd /bin/emit three times — three CoW fork→exec→reap \
                  cycles in one parent — read back {} bytes == 3x the emit payload, \
                  exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
@@ -23537,7 +24226,10 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash loop — wrote {} bytes {:?}, expected {} bytes {:?} \
                  (short/garbled output points at a fork/exec/wait or CoW-teardown regression)",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -23592,11 +24284,16 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
     // budget used by the other dash tests.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell script-from-stdin (no -c; ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
+    if pathz_missing(
+        "REAL dash shell script-from-stdin (no -c; ring 3, Path Z)",
+        &[SRC_DASH, SRC_EMIT],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell script-from-stdin (no -c; ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell script-from-stdin (no -c; ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -23612,7 +24309,9 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash script: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -23620,7 +24319,8 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash script: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -23630,7 +24330,11 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash script: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash script: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -23638,14 +24342,20 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
     // Write the script file, then open a READ-only handle we'll plant at fd 0.
     let _ = crate::fs::Vfs::remove(SCRIPT);
     if let Err(e) = crate::fs::Vfs::write_file(SCRIPT, SCRIPT_BYTES) {
-        serial_println!("[spawn]   real dash script: SKIP (writing script failed: {:?})", e);
+        serial_println!(
+            "[spawn]   real dash script: SKIP (writing script failed: {:?})",
+            e
+        );
         return Ok(());
     }
     let script_handle = match handle::open(SCRIPT, handle::OpenFlags::READ) {
         Ok(h) => h,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(SCRIPT);
-            serial_println!("[spawn]   real dash script: SKIP (script open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real dash script: SKIP (script open failed: {:?})",
+                e
+            );
             return Ok(());
         }
     };
@@ -23662,7 +24372,10 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
         Err(e) => {
             let _ = handle::close(script_handle);
             let _ = crate::fs::Vfs::remove(SCRIPT);
-            serial_println!("[spawn]   real dash script: SKIP (capture open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real dash script: SKIP (capture open failed: {:?})",
+                e
+            );
             return Ok(());
         }
     };
@@ -23726,7 +24439,8 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
             "[spawn]   FAIL: real dash script — shell did not exit within {} yields \
              (state={:?}); dash's stdin read-eval loop, a script-command fork/exec/wait, \
              or EOF-driven termination likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         // A hang here (B-DASH-STDIN-FLAKE) is the transient spawn/reap/futex
         // flake family — classify as TimedOut, distinct from a genuine dash
@@ -23738,7 +24452,8 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash script — exit code={:?}, expected {} (non-zero \
              means a script command failed or dash hit a parse/read error)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -23750,14 +24465,19 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
                  read-eval loop over a {}-byte script on fd 0 — two sequential /bin/emit \
                  fork→exec→reap cycles + an echo builtin — captured {} bytes == expected, \
                  EOF→exit {}): OK",
-                SCRIPT_BYTES.len(), bytes.len(), EXPECT_EXIT
+                SCRIPT_BYTES.len(),
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real dash script — captured {} bytes {:?}, expected {} bytes {:?}",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -23808,11 +24528,16 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
     const OUT_PATH: &str = "/glob-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell glob `echo /globdir/* > file` (ring 3, Path Z)", &[SRC_DASH]) {
+    if pathz_missing(
+        "REAL dash shell glob `echo /globdir/* > file` (ring 3, Path Z)",
+        &[SRC_DASH],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell glob `echo /globdir/* > file` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell glob `echo /globdir/* > file` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -23823,7 +24548,9 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash glob: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -23831,7 +24558,8 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash glob: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -23841,7 +24569,11 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash glob: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash glob: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -23851,7 +24583,11 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all(GLOB_DIR);
     for f in [GLOB_A, GLOB_B, GLOB_C] {
         if let Err(e) = crate::fs::Vfs::write_file(f, b"x") {
-            serial_println!("[spawn]   real dash glob: SKIP (creating {} failed: {:?})", f, e);
+            serial_println!(
+                "[spawn]   real dash glob: SKIP (creating {} failed: {:?})",
+                f,
+                e
+            );
             return Ok(());
         }
     }
@@ -23860,11 +24596,7 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
 
     // dash opens /globdir, getdents64s it, expands + sorts the matches, then
     // echoes them to the redirect file.
-    let argv: &[&[u8]] = &[
-        b"/bin/dash",
-        b"-c",
-        b"echo /globdir/* > /glob-out.txt",
-    ];
+    let argv: &[&[u8]] = &[b"/bin/dash", b"-c", b"echo /globdir/* > /glob-out.txt"];
     let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
     let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
@@ -23912,7 +24644,8 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash glob — shell did not exit within {} yields \
              (state={:?}); dash's opendir/getdents64 directory read likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -23920,7 +24653,8 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real dash glob — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -23931,7 +24665,8 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
                 "[spawn]   REAL dash shell glob (ring 3: dash opened /globdir, getdents64'd \
                  it, expanded + sorted `*` to three paths, echoed them — read back {} bytes \
                  == expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
@@ -23939,7 +24674,10 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash glob — wrote {} bytes {:?}, expected {} bytes {:?} \
                  (a literal `/globdir/*` means the directory read returned no matches)",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -23994,11 +24732,16 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
     const OUT_PATH: &str = "/cmdsub-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell command substitution `echo [$(/bin/emit)] > file` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
+    if pathz_missing(
+        "REAL dash shell command substitution `echo [$(/bin/emit)] > file` (ring 3, Path Z)",
+        &[SRC_DASH, SRC_EMIT],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell command substitution `echo [$(/bin/emit)] > file` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell command substitution `echo [$(/bin/emit)] > file` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -24014,7 +24757,9 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash cmdsub: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -24022,7 +24767,8 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash cmdsub: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -24032,7 +24778,11 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash cmdsub: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash cmdsub: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -24088,7 +24838,8 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash cmdsub — shell did not exit within {} yields \
              (state={:?}); dash's pipe/fork/exec of /bin/emit or its capture read likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -24096,7 +24847,8 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real dash cmdsub — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -24108,7 +24860,8 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
                  fork/exec'd /bin/emit, read its stdout to EOF, stripped the trailing \
                  newline, substituted it into echo — read back {} bytes == expected, \
                  exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
@@ -24116,7 +24869,10 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash cmdsub — wrote {} bytes {:?}, expected {} bytes {:?} \
                  (`[]` means the command substitution captured nothing)",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -24157,11 +24913,16 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
     const OUT_PATH: &str = "/cond-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell conditional `if [ \"$x\" = hello ]; then ...` (ring 3, Path Z)", &[SRC_DASH]) {
+    if pathz_missing(
+        "REAL dash shell conditional `if [ \"$x\" = hello ]; then ...` (ring 3, Path Z)",
+        &[SRC_DASH],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell conditional `if [ \"$x\" = hello ]; then ...` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell conditional `if [ \"$x\" = hello ]; then ...` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -24172,7 +24933,9 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash cond: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -24180,7 +24943,8 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash cond: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -24190,7 +24954,11 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash cond: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash cond: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -24246,7 +25014,8 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash cond — shell did not exit within {} yields \
              (state={:?}); dash's if/test evaluation likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -24254,7 +25023,8 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real dash cond — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -24265,7 +25035,8 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
                 "[spawn]   REAL dash shell conditional (ring 3: assigned x=hello, expanded \
                  \"$x\", ran the `[` test builtin, took the then-branch, redirected echo — \
                  read back {} bytes == expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
@@ -24273,7 +25044,10 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash cond — wrote {} bytes {:?}, expected {} bytes {:?} \
                  (`NE` means the test builtin or expansion misbehaved)",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -24312,11 +25086,16 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
     const OUT_PATH: &str = "/arith-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell arithmetic `echo $((x * y + 2))` (ring 3, Path Z)", &[SRC_DASH]) {
+    if pathz_missing(
+        "REAL dash shell arithmetic `echo $((x * y + 2))` (ring 3, Path Z)",
+        &[SRC_DASH],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell arithmetic `echo $((x * y + 2))` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell arithmetic `echo $((x * y + 2))` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -24327,7 +25106,9 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash arith: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -24335,7 +25116,8 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash arith: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -24345,7 +25127,11 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash arith: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash arith: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -24401,7 +25187,8 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash arith — shell did not exit within {} yields \
              (state={:?}); dash's arithmetic evaluation likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -24409,7 +25196,8 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real dash arith — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -24420,7 +25208,8 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
                 "[spawn]   REAL dash shell arithmetic (ring 3: assigned x=3 y=4, evaluated \
                  $((x * y + 2)) with `*` before `+`, substituted 14 into echo — read back \
                  {} bytes == expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
@@ -24428,7 +25217,10 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash arith — wrote {} bytes {:?}, expected {} bytes {:?} \
                  (wrong value means precedence or variable lookup in the arithmetic context broke)",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -24468,11 +25260,16 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
     const OUT_PATH: &str = "/hd-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell here-document `read a <<EOF` (ring 3, Path Z)", &[SRC_DASH]) {
+    if pathz_missing(
+        "REAL dash shell here-document `read a <<EOF` (ring 3, Path Z)",
+        &[SRC_DASH],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell here-document `read a <<EOF` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell here-document `read a <<EOF` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -24483,7 +25280,9 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash heredoc: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -24491,7 +25290,8 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash heredoc: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -24501,7 +25301,11 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash heredoc: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash heredoc: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -24559,7 +25363,8 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash heredoc — shell did not exit within {} yields \
              (state={:?}); dash's heredoc pipe write/read likely deadlocked",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -24567,7 +25372,8 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real dash heredoc — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -24578,7 +25384,8 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
                 "[spawn]   REAL dash shell here-document (ring 3: materialised the heredoc \
                  body, plumbed it onto fd 0 via a pipe, `read a` consumed \"HELLO\", echoed \
                  it — read back {} bytes == expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
@@ -24586,7 +25393,10 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash heredoc — wrote {} bytes {:?}, expected {} bytes {:?} \
                  (empty/short means the heredoc pipe or `read` builtin misbehaved)",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -24627,11 +25437,16 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
     const OUT_PATH: &str = "/bg-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell background job `/bin/emit > file & wait` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
+    if pathz_missing(
+        "REAL dash shell background job `/bin/emit > file & wait` (ring 3, Path Z)",
+        &[SRC_DASH, SRC_EMIT],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell background job `/bin/emit > file & wait` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell background job `/bin/emit > file & wait` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -24647,7 +25462,9 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash bgjob: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -24655,7 +25472,8 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash bgjob: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -24665,18 +25483,18 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash bgjob: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash bgjob: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
 
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
-    let argv: &[&[u8]] = &[
-        b"/bin/dash",
-        b"-c",
-        b"/bin/emit > /bg-out.txt & wait",
-    ];
+    let argv: &[&[u8]] = &[b"/bin/dash", b"-c", b"/bin/emit > /bg-out.txt & wait"];
     let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
     let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
@@ -24721,7 +25539,8 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash bgjob — shell did not exit within {} yields \
              (state={:?}); the `wait` builtin likely never reaped the async child",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -24729,7 +25548,8 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real dash bgjob — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -24740,7 +25560,8 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
                 "[spawn]   REAL dash shell background job (ring 3: forked /bin/emit as an \
                  async job with redirected stdout, returned to the prompt, then `wait` reaped \
                  it — read back {} bytes == expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
@@ -24748,7 +25569,10 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash bgjob — wrote {} bytes {:?}, expected {} bytes {:?} \
                  (empty means the backgrounded job never ran or `wait` returned before it finished)",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -24793,11 +25617,16 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
     const OUT_PATH: &str = "/pipe2-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell pipeline `/bin/emit | while read ...` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
+    if pathz_missing(
+        "REAL dash shell pipeline `/bin/emit | while read ...` (ring 3, Path Z)",
+        &[SRC_DASH, SRC_EMIT],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell pipeline `/bin/emit | while read ...` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell pipeline `/bin/emit | while read ...` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -24813,7 +25642,9 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash pipeline: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -24821,7 +25652,8 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[spawn]   real dash pipeline: SKIP (reading {} failed: {:?})",
-                    src, e
+                    src,
+                    e
                 );
                 return Ok(());
             }
@@ -24831,7 +25663,11 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash pipeline: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash pipeline: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -24887,7 +25723,8 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash pipeline — shell did not exit within {} yields \
              (state={:?}); the pipeline likely never completed (a stage blocked on the pipe)",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -24895,7 +25732,8 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real dash pipeline — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -24906,7 +25744,8 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
                 "[spawn]   REAL dash shell pipeline (ring 3: dash piped external /bin/emit into a \
                  `while read` loop via a kernel pipe, wrapped the line, redirected the loop's stdout \
                  — read back {} bytes == expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
@@ -24914,7 +25753,10 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash pipeline — wrote {} bytes {:?}, expected {} bytes {:?} \
                  (empty means a pipeline stage never ran or the pipe never delivered EOF)",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -24961,11 +25803,16 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
     const OUT_PATH: &str = "/cwd-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell cwd `cd /cwdtest && pwd -P` (ring 3, Path Z)", &[SRC_DASH]) {
+    if pathz_missing(
+        "REAL dash shell cwd `cd /cwdtest && pwd -P` (ring 3, Path Z)",
+        &[SRC_DASH],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell cwd `cd /cwdtest && pwd -P` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell cwd `cd /cwdtest && pwd -P` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -24976,13 +25823,19 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash cwd: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
             }
             Err(e) => {
-                serial_println!("[spawn]   real dash cwd: SKIP (reading {} failed: {:?})", src, e);
+                serial_println!(
+                    "[spawn]   real dash cwd: SKIP (reading {} failed: {:?})",
+                    src,
+                    e
+                );
                 return Ok(());
             }
         }
@@ -24993,7 +25846,11 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash cwd: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash cwd: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -25044,7 +25901,8 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: real dash cwd — shell did not exit within {} yields (state={:?})",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -25052,7 +25910,8 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real dash cwd — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -25062,7 +25921,8 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   REAL dash shell cwd (ring 3: dash chdir'd to /cwdtest then `pwd -P` \
                  read the kernel cwd back via getcwd — read back {} bytes == expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
@@ -25070,7 +25930,10 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash cwd — wrote {} bytes {:?}, expected {} bytes {:?} \
                  (mismatch means chdir/getcwd disagree on the working directory)",
-                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -25117,11 +25980,16 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
     const WRONG_PATH: &str = "/relfile.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell relpath `cd /reltest && echo > relfile.txt` (ring 3, Path Z)", &[SRC_DASH]) {
+    if pathz_missing(
+        "REAL dash shell relpath `cd /reltest && echo > relfile.txt` (ring 3, Path Z)",
+        &[SRC_DASH],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell relpath `cd /reltest && echo > relfile.txt` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell relpath `cd /reltest && echo > relfile.txt` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -25132,13 +26000,19 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash relpath: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
             }
             Err(e) => {
-                serial_println!("[spawn]   real dash relpath: SKIP (reading {} failed: {:?})", src, e);
+                serial_println!(
+                    "[spawn]   real dash relpath: SKIP (reading {} failed: {:?})",
+                    src,
+                    e
+                );
                 return Ok(());
             }
         }
@@ -25153,12 +26027,20 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash relpath: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash relpath: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
 
-    let argv: &[&[u8]] = &[b"/bin/dash", b"-c", b"cd /reltest && echo RELOK > relfile.txt"];
+    let argv: &[&[u8]] = &[
+        b"/bin/dash",
+        b"-c",
+        b"cd /reltest && echo RELOK > relfile.txt",
+    ];
     let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
     let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
@@ -25204,7 +26086,8 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: real dash relpath — shell did not exit within {} yields (state={:?})",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -25212,7 +26095,8 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real dash relpath — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -25221,7 +26105,8 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash relpath — file landed at {} (root) instead of the \
              cwd-relative {}; relative open ignored the process cwd",
-            WRONG_PATH, GOOD_PATH
+            WRONG_PATH,
+            GOOD_PATH
         );
         return Err(KernelError::InternalError);
     }
@@ -25232,14 +26117,20 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
                 "[spawn]   REAL dash shell relpath (ring 3: dash chdir'd to /reltest then opened a \
                  relative `relfile.txt` for redirect — file correctly landed at {}, read back {} \
                  bytes == expected, exit {}): OK",
-                GOOD_PATH, bytes.len(), EXPECT_EXIT
+                GOOD_PATH,
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real dash relpath — {} wrote {} bytes {:?}, expected {} bytes {:?}",
-                GOOD_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                GOOD_PATH,
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -25247,7 +26138,8 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash relpath — reading {} back failed: {:?} (the relative \
                  open likely resolved against the wrong directory)",
-                GOOD_PATH, e
+                GOOD_PATH,
+                e
             );
             Err(KernelError::InternalError)
         }
@@ -25277,11 +26169,16 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
     const OUT_PATH: &str = "/stat-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell statpath `[ -f /bin/dash ] && echo` (ring 3, Path Z)", &[SRC_DASH]) {
+    if pathz_missing(
+        "REAL dash shell statpath `[ -f /bin/dash ] && echo` (ring 3, Path Z)",
+        &[SRC_DASH],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell statpath `[ -f /bin/dash ] && echo` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell statpath `[ -f /bin/dash ] && echo` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -25292,13 +26189,19 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash statpath: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
             }
             Err(e) => {
-                serial_println!("[spawn]   real dash statpath: SKIP (reading {} failed: {:?})", src, e);
+                serial_println!(
+                    "[spawn]   real dash statpath: SKIP (reading {} failed: {:?})",
+                    src,
+                    e
+                );
                 return Ok(());
             }
         }
@@ -25309,12 +26212,20 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash statpath: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash statpath: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
 
-    let argv: &[&[u8]] = &[b"/bin/dash", b"-c", b"[ -f /bin/dash ] && echo HASFILE > /stat-out.txt"];
+    let argv: &[&[u8]] = &[
+        b"/bin/dash",
+        b"-c",
+        b"[ -f /bin/dash ] && echo HASFILE > /stat-out.txt",
+    ];
     let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
     let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
@@ -25358,7 +26269,8 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: real dash statpath — shell did not exit within {} yields (state={:?})",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -25367,7 +26279,8 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real dash statpath — exit code={:?}, expected {} (the `[ -f ]` \
              predicate likely saw ENOENT from a path-based stat)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -25377,14 +26290,19 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   REAL dash shell statpath (ring 3: `[ -f /bin/dash ]` stat'd an existing \
                  path, predicate true, redirect wrote {} bytes == expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real dash statpath — {} wrote {} bytes {:?}, expected {} bytes {:?}",
-                OUT_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                OUT_PATH,
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -25392,7 +26310,8 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash statpath — reading {} back failed: {:?} (the `[ -f ]` \
                  predicate was false, so path-based stat is still broken)",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             Err(KernelError::InternalError)
         }
@@ -25421,11 +26340,16 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
     const OUT_PATH: &str = "/dirstat-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell dirstat `[ -d /bin ] && [ ! -f /bin ]` (ring 3, Path Z)", &[SRC_DASH]) {
+    if pathz_missing(
+        "REAL dash shell dirstat `[ -d /bin ] && [ ! -f /bin ]` (ring 3, Path Z)",
+        &[SRC_DASH],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell dirstat `[ -d /bin ] && [ ! -f /bin ]` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell dirstat `[ -d /bin ] && [ ! -f /bin ]` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -25436,13 +26360,19 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash dirstat: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
             }
             Err(e) => {
-                serial_println!("[spawn]   real dash dirstat: SKIP (reading {} failed: {:?})", src, e);
+                serial_println!(
+                    "[spawn]   real dash dirstat: SKIP (reading {} failed: {:?})",
+                    src,
+                    e
+                );
                 return Ok(());
             }
         }
@@ -25453,7 +26383,11 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash dirstat: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash dirstat: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -25506,7 +26440,8 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: real dash dirstat — shell did not exit within {} yields (state={:?})",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -25514,7 +26449,8 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real dash dirstat — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -25525,14 +26461,19 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
                 "[spawn]   REAL dash shell dirstat (ring 3: `[ -d /bin ]` true, `[ ! -f /bin ]` true, \
                  `[ -e /bin ]` true — directory stat reported S_IFDIR correctly, wrote {} bytes == \
                  expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real dash dirstat — {} wrote {} bytes {:?}, expected {} bytes {:?}",
-                OUT_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                OUT_PATH,
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -25540,7 +26481,8 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash dirstat — reading {} back failed: {:?} (one of `-d`/`! -f`/`-e` \
                  was false, so directory stat mode bits are wrong)",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             Err(KernelError::InternalError)
         }
@@ -25569,11 +26511,16 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     const OUT_PATH: &str = "/append-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing("REAL dash shell append `echo > f; echo >> f` (ring 3, Path Z)", &[SRC_DASH]) {
+    if pathz_missing(
+        "REAL dash shell append `echo > f; echo >> f` (ring 3, Path Z)",
+        &[SRC_DASH],
+    ) {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL dash shell append `echo > f; echo >> f` (ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL dash shell append `echo > f; echo >> f` (ring 3, Path Z) test..."
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -25584,13 +26531,19 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real dash append: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
             }
             Err(e) => {
-                serial_println!("[spawn]   real dash append: SKIP (reading {} failed: {:?})", src, e);
+                serial_println!(
+                    "[spawn]   real dash append: SKIP (reading {} failed: {:?})",
+                    src,
+                    e
+                );
                 return Ok(());
             }
         }
@@ -25601,7 +26554,11 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real dash append: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            serial_println!(
+                "[spawn]   real dash append: SKIP (re-read {} failed: {:?})",
+                DST_DASH,
+                e
+            );
             return Ok(());
         }
     };
@@ -25654,7 +26611,8 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: real dash append — shell did not exit within {} yields (state={:?})",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -25662,7 +26620,8 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     if exit_code != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: real dash append — exit code={:?}, expected {}",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -25672,7 +26631,8 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   REAL dash shell append (ring 3: `>` then `>>` — O_APPEND positioned the \
                  second write at EOF, file == `first\\nsecond\\n` ({} bytes), exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
@@ -25680,14 +26640,19 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real dash append — {} holds {} bytes {:?}, expected {} bytes {:?} \
                  (O_APPEND likely dropped — second write clobbered from offset 0)",
-                OUT_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                OUT_PATH,
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: real dash append — reading {} back failed: {:?}",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             Err(KernelError::InternalError)
         }
@@ -25746,7 +26711,10 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
     // bounded poll loop extra headroom over the two-process shell tests.
     const MAX_YIELDS: usize = 524_288;
 
-    if pathz_missing("REAL GNU make (ring 3, Path Z)", &[SRC_MAKE, SRC_SH, SRC_EMIT]) {
+    if pathz_missing(
+        "REAL GNU make (ring 3, Path Z)",
+        &[SRC_MAKE, SRC_SH, SRC_EMIT],
+    ) {
         return Ok(());
     }
 
@@ -25767,13 +26735,19 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real make: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
             }
             Err(e) => {
-                serial_println!("[spawn]   real make: SKIP (reading {} failed: {:?})", src, e);
+                serial_println!(
+                    "[spawn]   real make: SKIP (reading {} failed: {:?})",
+                    src,
+                    e
+                );
                 return Ok(());
             }
         }
@@ -25781,7 +26755,11 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
 
     // Stage the Makefile and clear any stale recipe output.
     if let Err(e) = crate::fs::Vfs::write_file(MAKEFILE_PATH, MAKEFILE) {
-        serial_println!("[spawn]   real make: SKIP (writing {} failed: {:?})", MAKEFILE_PATH, e);
+        serial_println!(
+            "[spawn]   real make: SKIP (writing {} failed: {:?})",
+            MAKEFILE_PATH,
+            e
+        );
         return Ok(());
     }
     let _ = crate::fs::Vfs::remove(OUT_PATH);
@@ -25789,7 +26767,11 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_MAKE) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real make: SKIP (re-read {} failed: {:?})", DST_MAKE, e);
+            serial_println!(
+                "[spawn]   real make: SKIP (re-read {} failed: {:?})",
+                DST_MAKE,
+                e
+            );
             return Ok(());
         }
     };
@@ -25842,7 +26824,8 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real make — make did not exit within {} yields (state={:?}); make \
              startup (ld.so/libc), Makefile parse, or its fork/exec of /bin/sh likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -25851,7 +26834,8 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: real make — exit code={:?}, expected {} (non-zero means make hit an \
              error parsing the Makefile or its recipe child failed)",
-            exit_code, EXPECT_EXIT
+            exit_code,
+            EXPECT_EXIT
         );
         return Err(KernelError::InternalError);
     }
@@ -25862,14 +26846,19 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
                 "[spawn]   REAL GNU make (ring 3: ld.so loaded make+libc, make parsed the \
                  Makefile and dispatched its recipe via /bin/sh, which fork/exec'd /bin/emit with \
                  a `>` redirect; read back {} bytes == expected, exit {}): OK",
-                bytes.len(), EXPECT_EXIT
+                bytes.len(),
+                EXPECT_EXIT
             );
             Ok(())
         }
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: real make — {} holds {} bytes {:?}, expected {} bytes {:?}",
-                OUT_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+                OUT_PATH,
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT
             );
             Err(KernelError::InternalError)
         }
@@ -25877,7 +26866,8 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: real make — reading the recipe output {} back failed: {:?} \
                  (make's recipe child likely never ran or could not write the file)",
-                OUT_PATH, e
+                OUT_PATH,
+                e
             );
             Err(KernelError::InternalError)
         }
@@ -25982,7 +26972,9 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   real cc: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(());
                 }
@@ -25996,7 +26988,11 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
 
     // Stage the C source and clear any stale compiler/program output.
     if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, CC_SRC) {
-        serial_println!("[spawn]   real cc: SKIP (writing {} failed: {:?})", SRC_PATH, e);
+        serial_println!(
+            "[spawn]   real cc: SKIP (writing {} failed: {:?})",
+            SRC_PATH,
+            e
+        );
         return Ok(());
     }
     let _ = crate::fs::Vfs::remove(OBJ_PATH);
@@ -26005,14 +27001,24 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     let tcc_elf = match crate::fs::Vfs::read_file(DST_TCC) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   real cc: SKIP (re-read {} failed: {:?})", DST_TCC, e);
+            serial_println!(
+                "[spawn]   real cc: SKIP (re-read {} failed: {:?})",
+                DST_TCC,
+                e
+            );
             return Ok(());
         }
     };
 
     // --- step 1: run tcc to compile /cc-prog.c -> /cc-prog ------------------
-    let cc_argv: &[&[u8]] =
-        &[b"tcc", b"-nostdlib", b"-static", b"-o", b"/cc-prog", b"/cc-prog.c"];
+    let cc_argv: &[&[u8]] = &[
+        b"tcc",
+        b"-nostdlib",
+        b"-static",
+        b"-o",
+        b"/cc-prog",
+        b"/cc-prog.c",
+    ];
     let cc_envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
     let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
     let cc_options = SpawnOptions {
@@ -26054,7 +27060,8 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
         serial_println!(
             "[spawn]   FAIL: real cc — tcc did not exit within {} yields (state={:?}); tcc \
              startup (ld.so/libc/libm) or its compile loop likely hung",
-            COMPILE_MAX_YIELDS, cc_state
+            COMPILE_MAX_YIELDS,
+            cc_state
         );
         let _ = crate::fs::Vfs::remove(SRC_PATH);
         return Err(KernelError::TimedOut);
@@ -26064,7 +27071,8 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
         serial_println!(
             "[spawn]   FAIL: real cc — tcc exit code={:?}, expected {} (non-zero means tcc hit a \
              compile/link error)",
-            cc_exit, EXPECT_EXIT
+            cc_exit,
+            EXPECT_EXIT
         );
         let _ = crate::fs::Vfs::remove(SRC_PATH);
         return Err(KernelError::InternalError);
@@ -26077,7 +27085,8 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
             serial_println!(
                 "[spawn]   FAIL: real cc — tcc exited 0 but {} is unreadable: {:?} (no output \
                  ELF produced)",
-                OBJ_PATH, e
+                OBJ_PATH,
+                e
             );
             let _ = crate::fs::Vfs::remove(SRC_PATH);
             return Err(KernelError::InternalError);
@@ -26086,14 +27095,18 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     if obj.len() < 4 || &obj[..4] != b"\x7fELF" {
         serial_println!(
             "[spawn]   FAIL: real cc — {} is not an ELF ({} bytes, first 4 = {:?})",
-            OBJ_PATH, obj.len(), obj.get(..4)
+            OBJ_PATH,
+            obj.len(),
+            obj.get(..4)
         );
         let _ = crate::fs::Vfs::remove(SRC_PATH);
         return Err(KernelError::InternalError);
     }
     serial_println!(
         "[spawn]   real cc — tcc compiled {} into a {}-byte ELF at {}",
-        SRC_PATH, obj.len(), OBJ_PATH
+        SRC_PATH,
+        obj.len(),
+        OBJ_PATH
     );
 
     // --- step 2: run the freshly-compiled program directly -----------------
@@ -26130,7 +27143,10 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     ) {
         Ok(h) => h,
         Err(e) => {
-            serial_println!("[spawn]   real cc: SKIP (capture-file open failed: {:?})", e);
+            serial_println!(
+                "[spawn]   real cc: SKIP (capture-file open failed: {:?})",
+                e
+            );
             let _ = crate::fs::Vfs::remove(SRC_PATH);
             let _ = crate::fs::Vfs::remove(OBJ_PATH);
             return Ok(());
@@ -26156,7 +27172,8 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: real cc — spawning the freshly-built {} returned {:?}",
-                OBJ_PATH, e
+                OBJ_PATH,
+                e
             );
             let _ = crate::fs::Vfs::remove(SRC_PATH);
             let _ = crate::fs::Vfs::remove(OBJ_PATH);
@@ -26190,7 +27207,8 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
         serial_println!(
             "[spawn]   FAIL: real cc — the compiled program did not exit within {} yields \
              (state={:?}); tcc may have produced a broken ELF",
-            RUN_MAX_YIELDS, run_state
+            RUN_MAX_YIELDS,
+            run_state
         );
         return Err(KernelError::TimedOut);
     }
@@ -26201,7 +27219,9 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
                 "[spawn]   REAL C compiler (ring 3: ld.so loaded tcc+libc+libm, tcc compiled C \
                  source into a {}-byte ELF, that freshly-built binary ran in ring 3 and wrote {} \
                  bytes == expected, exit={:?}): OK",
-                obj.len(), bytes.len(), run_exit
+                obj.len(),
+                bytes.len(),
+                run_exit
             );
             Ok(())
         }
@@ -26209,7 +27229,12 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
             serial_println!(
                 "[spawn]   FAIL: real cc — {} holds {} bytes {:?}, expected {} bytes {:?} \
                  (compiled program exit={:?})",
-                OUT_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT, run_exit
+                OUT_PATH,
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT.len(),
+                EXPECT_OUT,
+                run_exit
             );
             Err(KernelError::InternalError)
         }
@@ -26217,7 +27242,9 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
             serial_println!(
                 "[spawn]   FAIL: real cc — reading the compiled program's output {} back failed: \
                  {:?} (exit={:?})",
-                OUT_PATH, e, run_exit
+                OUT_PATH,
+                e,
+                run_exit
             );
             Err(KernelError::InternalError)
         }
@@ -26357,7 +27384,9 @@ fn stage_hosted_cc_support() -> KernelResult<Option<&'static str>> {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   hosted cc: staging {} -> {} failed: {:?}",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     return Ok(Some(dst));
                 }
@@ -26406,24 +27435,33 @@ fn log_reap_wait_progress(
             "[spawn]   {} {} reap: {} yields elapsed — child pid={} pstate={:?} \
              sched_state={:?} last_cpu={} sched_count={} ticks={} min_flt={} maj_flt={} \
              last_rip={:#x}",
-            label, phase, yields, pid, pstate,
-            info.state, info.last_cpu, info.schedule_count, info.total_ticks,
-            info.min_flt, info.maj_flt,
+            label,
+            phase,
+            yields,
+            pid,
+            pstate,
+            info.state,
+            info.last_cpu,
+            info.schedule_count,
+            info.total_ticks,
+            info.min_flt,
+            info.maj_flt,
             crate::rip_sample::last_rip(info.last_cpu),
         ),
         None => serial_println!(
             "[spawn]   {} {} reap: {} yields elapsed — child pid={} pstate={:?} \
              (task {} absent from sched table)",
-            label, phase, yields, pid, pstate, task_id,
+            label,
+            phase,
+            yields,
+            pid,
+            pstate,
+            task_id,
         ),
     }
 }
 
-fn spawn_reap_tcc(
-    tcc_elf: &[u8],
-    argv: &[&[u8]],
-    label: &str,
-) -> KernelResult<Option<i32>> {
+fn spawn_reap_tcc(tcc_elf: &[u8], argv: &[&[u8]], label: &str) -> KernelResult<Option<i32>> {
     // tcc's compile/link loop is the heaviest userspace work in these tests, so
     // it gets the largest yield budget; an exhausted budget is treated as a hang.
     const COMPILE_MAX_YIELDS: usize = 4_194_304;
@@ -26446,7 +27484,11 @@ fn spawn_reap_tcc(
     let cc_result = match spawn_process(tcc_elf, &cc_options) {
         Ok(r) => r,
         Err(e) => {
-            serial_println!("[spawn]   FAIL: hosted cc ({}) — tcc spawn returned {:?}", label, e);
+            serial_println!(
+                "[spawn]   FAIL: hosted cc ({}) — tcc spawn returned {:?}",
+                label,
+                e
+            );
             return Err(e);
         }
     };
@@ -26475,7 +27517,9 @@ fn spawn_reap_tcc(
         serial_println!(
             "[spawn]   FAIL: hosted cc ({}) — tcc did not exit within {} yields (state={:?}); tcc \
              startup or its compile/link loop likely hung",
-            label, COMPILE_MAX_YIELDS, state
+            label,
+            COMPILE_MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -26489,7 +27533,10 @@ fn assert_dynamic_elf(obj: &[u8], path: &str, label: &str) -> KernelResult<()> {
     if obj.len() < 4 || obj.get(..4) != Some(b"\x7fELF".as_slice()) {
         serial_println!(
             "[spawn]   FAIL: hosted cc ({}) — {} is not an ELF ({} bytes, first 4 = {:?})",
-            label, path, obj.len(), obj.get(..4)
+            label,
+            path,
+            obj.len(),
+            obj.get(..4)
         );
         return Err(KernelError::InternalError);
     }
@@ -26498,7 +27545,9 @@ fn assert_dynamic_elf(obj: &[u8], path: &str, label: &str) -> KernelResult<()> {
             Some(interp) => {
                 serial_println!(
                     "[spawn]   hosted cc ({}) — {} is a {}-byte dynamic ELF (PT_INTERP={:?})",
-                    label, path, obj.len(),
+                    label,
+                    path,
+                    obj.len(),
                     core::str::from_utf8(interp).unwrap_or("<non-utf8>")
                 );
                 Ok(())
@@ -26507,7 +27556,8 @@ fn assert_dynamic_elf(obj: &[u8], path: &str, label: &str) -> KernelResult<()> {
                 serial_println!(
                     "[spawn]   FAIL: hosted cc ({}) — {} has no PT_INTERP; expected a \
                      dynamically-linked ELF (the hosted compile should link against glibc + ld-linux)",
-                    label, path
+                    label,
+                    path
                 );
                 Err(KernelError::InternalError)
             }
@@ -26515,7 +27565,9 @@ fn assert_dynamic_elf(obj: &[u8], path: &str, label: &str) -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: hosted cc ({}) — output ELF {} failed to parse: {:?}",
-                label, path, e
+                label,
+                path,
+                e
             );
             Err(KernelError::InternalError)
         }
@@ -26552,7 +27604,9 @@ fn run_dynamic_capture(
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: hosted cc ({}) — capture-file {} open failed: {:?}",
-                label, out_path, e
+                label,
+                out_path,
+                e
             );
             return Err(e);
         }
@@ -26594,7 +27648,9 @@ fn run_dynamic_capture(
             let _ = handle::close(capture_handle);
             serial_println!(
                 "[spawn]   FAIL: hosted cc ({}) — spawning the freshly-built {} returned {:?}",
-                label, prog_path, e
+                label,
+                prog_path,
+                e
             );
             return Err(e);
         }
@@ -26630,7 +27686,9 @@ fn run_dynamic_capture(
         serial_println!(
             "[spawn]   FAIL: hosted cc ({}) — the compiled program did not exit within {} yields \
              (state={:?}); ld.so startup or libc init for the freshly-built binary likely hung",
-            label, RUN_MAX_YIELDS, state
+            label,
+            RUN_MAX_YIELDS,
+            state
         );
         return Err(KernelError::TimedOut);
     }
@@ -26641,7 +27699,10 @@ fn run_dynamic_capture(
             serial_println!(
                 "[spawn]   FAIL: hosted cc ({}) — reading the compiled program's output {} back \
                  failed: {:?} (exit={:?})",
-                label, out_path, e, exit
+                label,
+                out_path,
+                e,
+                exit
             );
             Err(KernelError::InternalError)
         }
@@ -26658,9 +27719,7 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
         Ok(None) => {}
         Ok(Some(missing)) => {
             pathz_skip(
-                format_args!(
-                    "REAL C compiler (tcc, HOSTED glibc link, {label}, ring 3, Path Z)"
-                ),
+                format_args!("REAL C compiler (tcc, HOSTED glibc link, {label}, ring 3, Path Z)"),
                 missing,
             );
             return Ok(());
@@ -26674,7 +27733,11 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
     );
 
     if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, hosted_src) {
-        serial_println!("[spawn]   hosted cc: SKIP (writing {} failed: {:?})", SRC_PATH, e);
+        serial_println!(
+            "[spawn]   hosted cc: SKIP (writing {} failed: {:?})",
+            SRC_PATH,
+            e
+        );
         return Ok(());
     }
     let _ = crate::fs::Vfs::remove(OBJ_PATH);
@@ -26683,7 +27746,10 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
     let tcc_elf = match crate::fs::Vfs::read_file("/bin/tcc") {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   hosted cc: SKIP (re-read /bin/tcc failed: {:?})", e);
+            serial_println!(
+                "[spawn]   hosted cc: SKIP (re-read /bin/tcc failed: {:?})",
+                e
+            );
             let _ = crate::fs::Vfs::remove(SRC_PATH);
             return Ok(());
         }
@@ -26703,7 +27769,9 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
             "[spawn]   FAIL: hosted cc ({}) — tcc exit code={:?}, expected {} (non-zero means tcc \
              hit a compile/link error — e.g. a crt object or libc.so script it could not \
              open/parse)",
-            label, cc_exit, EXPECT_EXIT
+            label,
+            cc_exit,
+            EXPECT_EXIT
         );
         let _ = crate::fs::Vfs::remove(SRC_PATH);
         return Err(KernelError::InternalError);
@@ -26714,7 +27782,9 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: hosted cc ({}) — tcc exited 0 but {} is unreadable: {:?}",
-                label, OBJ_PATH, e
+                label,
+                OBJ_PATH,
+                e
             );
             let _ = crate::fs::Vfs::remove(SRC_PATH);
             return Err(KernelError::InternalError);
@@ -26745,14 +27815,24 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
             "[spawn]   REAL C compiler HOSTED ({}) (ring 3: tcc compiled+glibc-linked C into a \
              {}-byte dynamic ELF, ld.so loaded that binary + libc, it ran the {} libc path and \
              the exit-time stdio flush wrote {} bytes == expected, exit={:?}): OK",
-            label, obj.len(), label, out.len(), run_exit
+            label,
+            obj.len(),
+            label,
+            out.len(),
+            run_exit
         );
         Ok(())
     } else {
         serial_println!(
             "[spawn]   FAIL: hosted cc ({}) — {} holds {} bytes {:?}, expected {} bytes {:?} \
              (compiled program exit={:?})",
-            label, OUT_PATH, out.len(), out.as_slice(), expect_out.len(), expect_out, run_exit
+            label,
+            OUT_PATH,
+            out.len(),
+            out.as_slice(),
+            expect_out.len(),
+            expect_out,
+            run_exit
         );
         Err(KernelError::InternalError)
     }
@@ -26888,7 +27968,14 @@ int main(void){\n\
     // Cleanup helper: remove every artifact we may have created.  Used on every
     // exit path so a failed run does not leave stale files for the next test.
     fn cleanup() {
-        for p in ["/sep-a.c", "/sep-b.c", "/sep-a.o", "/sep-b.o", "/sep-prog", "/sep-out.txt"] {
+        for p in [
+            "/sep-a.c",
+            "/sep-b.c",
+            "/sep-a.o",
+            "/sep-b.o",
+            "/sep-prog",
+            "/sep-out.txt",
+        ] {
             let _ = crate::fs::Vfs::remove(p);
         }
     }
@@ -26926,7 +28013,9 @@ int main(void){\n\
     if a_exit != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: sep cc — `tcc -c {}` exit={:?}, expected {}",
-            A_C, a_exit, EXPECT_EXIT
+            A_C,
+            a_exit,
+            EXPECT_EXIT
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -26936,7 +28025,11 @@ int main(void){\n\
     let a_obj = match crate::fs::Vfs::read_file(A_O) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   FAIL: sep cc — {} unreadable after compile: {:?}", A_O, e);
+            serial_println!(
+                "[spawn]   FAIL: sep cc — {} unreadable after compile: {:?}",
+                A_O,
+                e
+            );
             cleanup();
             return Err(KernelError::InternalError);
         }
@@ -26958,7 +28051,9 @@ int main(void){\n\
     if b_exit != Some(EXPECT_EXIT) {
         serial_println!(
             "[spawn]   FAIL: sep cc — `tcc -c {}` exit={:?}, expected {}",
-            B_C, b_exit, EXPECT_EXIT
+            B_C,
+            b_exit,
+            EXPECT_EXIT
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -26966,7 +28061,11 @@ int main(void){\n\
     let b_obj = match crate::fs::Vfs::read_file(B_O) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   FAIL: sep cc — {} unreadable after compile: {:?}", B_O, e);
+            serial_println!(
+                "[spawn]   FAIL: sep cc — {} unreadable after compile: {:?}",
+                B_O,
+                e
+            );
             cleanup();
             return Err(KernelError::InternalError);
         }
@@ -26989,7 +28088,11 @@ int main(void){\n\
         serial_println!(
             "[spawn]   FAIL: sep cc — `tcc -o {} {} {}` exit={:?}, expected {} (link of two \
              relocatables + crt + glibc failed — e.g. an unresolved cross-TU symbol)",
-            PROG, A_O, B_O, link_exit, EXPECT_EXIT
+            PROG,
+            A_O,
+            B_O,
+            link_exit,
+            EXPECT_EXIT
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -26999,7 +28102,8 @@ int main(void){\n\
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: sep cc — link exited 0 but {} is unreadable: {:?}",
-                PROG, e
+                PROG,
+                e
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -27026,14 +28130,21 @@ int main(void){\n\
              objects via -c, linked them + crt + glibc into a {}-byte dynamic ELF resolving the \
              cross-TU slate_add reference, ld.so ran it, exit-time flush wrote {} bytes == \
              expected, exit={:?}): OK",
-            prog.len(), out.len(), run_exit
+            prog.len(),
+            out.len(),
+            run_exit
         );
         Ok(())
     } else {
         serial_println!(
             "[spawn]   FAIL: sep cc — {} holds {} bytes {:?} (exit={:?}), expected \
              {:?} with exit={}",
-            OUT, out.len(), out.as_slice(), run_exit, b"SLATE-SEP-42\n", EXPECT_EXIT
+            OUT,
+            out.len(),
+            out.as_slice(),
+            run_exit,
+            b"SLATE-SEP-42\n",
+            EXPECT_EXIT
         );
         Err(KernelError::InternalError)
     }
@@ -27051,7 +28162,10 @@ fn assert_relocatable_elf(obj: &[u8], path: &str, label: &str) -> KernelResult<(
     if obj.len() < E_TYPE_OFF + 2 || obj.get(..4) != Some(b"\x7fELF".as_slice()) {
         serial_println!(
             "[spawn]   FAIL: sep cc ({}) — {} is not an ELF ({} bytes, first 4 = {:?})",
-            label, path, obj.len(), obj.get(..4)
+            label,
+            path,
+            obj.len(),
+            obj.get(..4)
         );
         return Err(KernelError::InternalError);
     }
@@ -27069,13 +28183,18 @@ fn assert_relocatable_elf(obj: &[u8], path: &str, label: &str) -> KernelResult<(
         serial_println!(
             "[spawn]   FAIL: sep cc ({}) — {} has e_type={} (expected ET_REL={}); `tcc -c` should \
              emit a relocatable object, not an executable/shared object",
-            label, path, e_type, ET_REL
+            label,
+            path,
+            e_type,
+            ET_REL
         );
         return Err(KernelError::InternalError);
     }
     serial_println!(
         "[spawn]   sep cc ({}) — {} is a {}-byte relocatable ELF object (ET_REL)",
-        label, path, obj.len()
+        label,
+        path,
+        obj.len()
     );
     Ok(())
 }
@@ -27157,18 +28276,25 @@ int main(void){\n\
         Err(e) => return Err(e),
     }
     // make + its recipe shell are the additional binaries this rung needs.
-    if pathz_missing("REAL make-drives-tcc build (ring 3, Path Z)", &[SRC_MAKE, SRC_SH]) {
+    if pathz_missing(
+        "REAL make-drives-tcc build (ring 3, Path Z)",
+        &[SRC_MAKE, SRC_SH],
+    ) {
         return Ok(());
     }
 
-    serial_println!(
-        "[spawn] Running REAL make-drives-tcc build (ring 3, Path Z) test..."
-    );
+    serial_println!("[spawn] Running REAL make-drives-tcc build (ring 3, Path Z) test...");
 
     fn cleanup() {
-        for p in
-            ["/cap-a.c", "/cap-b.c", "/cap.mk", "/cap-a.o", "/cap-b.o", "/cap-prog", "/cap-out.txt"]
-        {
+        for p in [
+            "/cap-a.c",
+            "/cap-b.c",
+            "/cap.mk",
+            "/cap-a.o",
+            "/cap-b.o",
+            "/cap-prog",
+            "/cap-out.txt",
+        ] {
             let _ = crate::fs::Vfs::remove(p);
         }
     }
@@ -27181,7 +28307,9 @@ int main(void){\n\
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
                         "[spawn]   make+tcc: SKIP (staging {} -> {} failed: {:?})",
-                        src, dst, e
+                        src,
+                        dst,
+                        e
                     );
                     cleanup();
                     return Ok(());
@@ -27197,7 +28325,11 @@ int main(void){\n\
 
     for (path, data) in [(A_C, A_SRC), (B_C, B_SRC), (MAKEFILE, MAKEFILE_SRC)] {
         if let Err(e) = crate::fs::Vfs::write_file(path, data) {
-            serial_println!("[spawn]   make+tcc: SKIP (writing {} failed: {:?})", path, e);
+            serial_println!(
+                "[spawn]   make+tcc: SKIP (writing {} failed: {:?})",
+                path,
+                e
+            );
             cleanup();
             return Ok(());
         }
@@ -27206,7 +28338,11 @@ int main(void){\n\
     let make_elf = match crate::fs::Vfs::read_file(DST_MAKE) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   make+tcc: SKIP (re-read {} failed: {:?})", DST_MAKE, e);
+            serial_println!(
+                "[spawn]   make+tcc: SKIP (re-read {} failed: {:?})",
+                DST_MAKE,
+                e
+            );
             cleanup();
             return Ok(());
         }
@@ -27270,7 +28406,8 @@ int main(void){\n\
         serial_println!(
             "[spawn]   FAIL: make+tcc — make did not exit within {} yields (state={:?}); make \
              startup, Makefile parse, or one of its tcc compile/link children likely hung",
-            MAX_YIELDS, state
+            MAX_YIELDS,
+            state
         );
         cleanup();
         return Err(KernelError::TimedOut);
@@ -27279,7 +28416,8 @@ int main(void){\n\
         serial_println!(
             "[spawn]   FAIL: make+tcc — make exit code={:?}, expected {} (non-zero means make hit \
              a parse error or one of its tcc recipe children failed)",
-            make_exit, EXPECT_EXIT
+            make_exit,
+            EXPECT_EXIT
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -27292,7 +28430,8 @@ int main(void){\n\
             serial_println!(
                 "[spawn]   FAIL: make+tcc — make exited 0 but {} is unreadable: {:?} (the link \
                  recipe did not run or did not produce the binary)",
-                PROG, e
+                PROG,
+                e
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -27318,14 +28457,21 @@ int main(void){\n\
             "[spawn]   REAL make-drives-tcc build (ring 3: make parsed a 3-target Makefile, \
              fork/exec'd tcc to compile two TUs to objects and link them into a {}-byte dynamic \
              ELF, ld.so ran it, exit-time flush wrote {} bytes == expected, exit={:?}): OK",
-            prog.len(), out.len(), run_exit
+            prog.len(),
+            out.len(),
+            run_exit
         );
         Ok(())
     } else {
         serial_println!(
             "[spawn]   FAIL: make+tcc — {} holds {} bytes {:?} (exit={:?}), expected {:?} with \
              exit={}",
-            OUT, out.len(), out.as_slice(), run_exit, b"SLATE-SEP-42\n", EXPECT_EXIT
+            OUT,
+            out.len(),
+            out.as_slice(),
+            run_exit,
+            b"SLATE-SEP-42\n",
+            EXPECT_EXIT
         );
         Err(KernelError::InternalError)
     }
@@ -27388,9 +28534,7 @@ int main(void){\n\
         Ok(None) => {}
         Ok(Some(missing)) => {
             pathz_skip(
-                format_args!(
-                    "REAL project-header C build (tcc, #include \"...\", ring 3, Path Z)"
-                ),
+                format_args!("REAL project-header C build (tcc, #include \"...\", ring 3, Path Z)"),
                 missing,
             );
             return Ok(());
@@ -27403,9 +28547,13 @@ int main(void){\n\
     );
 
     fn cleanup() {
-        for p in
-            ["/caphdr-hdr.h", "/caphdr-a.c", "/caphdr-b.c", "/caphdr-prog", "/caphdr-out.txt"]
-        {
+        for p in [
+            "/caphdr-hdr.h",
+            "/caphdr-a.c",
+            "/caphdr-b.c",
+            "/caphdr-prog",
+            "/caphdr-out.txt",
+        ] {
             let _ = crate::fs::Vfs::remove(p);
         }
     }
@@ -27413,7 +28561,12 @@ int main(void){\n\
 
     for (path, data) in [(HDR, HDR_SRC), (A_C, A_SRC), (B_C, B_SRC)] {
         if let Err(e) = crate::fs::Vfs::write_file(path, data) {
-            serial_println!("[spawn]   {}: SKIP (writing {} failed: {:?})", LABEL, path, e);
+            serial_println!(
+                "[spawn]   {}: SKIP (writing {} failed: {:?})",
+                LABEL,
+                path,
+                e
+            );
             cleanup();
             return Ok(());
         }
@@ -27422,15 +28575,24 @@ int main(void){\n\
     let tcc_elf = match crate::fs::Vfs::read_file("/bin/tcc") {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   {}: SKIP (re-read /bin/tcc failed: {:?})", LABEL, e);
+            serial_println!(
+                "[spawn]   {}: SKIP (re-read /bin/tcc failed: {:?})",
+                LABEL,
+                e
+            );
             cleanup();
             return Ok(());
         }
     };
 
     // --- compile + link both TUs in one tcc invocation ---------------------
-    let cc_argv: &[&[u8]] =
-        &[b"tcc", b"-o", PROG.as_bytes(), A_C.as_bytes(), B_C.as_bytes()];
+    let cc_argv: &[&[u8]] = &[
+        b"tcc",
+        b"-o",
+        PROG.as_bytes(),
+        A_C.as_bytes(),
+        B_C.as_bytes(),
+    ];
     let cc_exit = match spawn_reap_tcc(&tcc_elf, cc_argv, LABEL) {
         Ok(x) => x,
         Err(e) => {
@@ -27442,7 +28604,9 @@ int main(void){\n\
         serial_println!(
             "[spawn]   FAIL: {} — tcc exit code={:?}, expected {} (non-zero means the preprocessor \
              could not resolve the quote-include, or hit a compile/link error)",
-            LABEL, cc_exit, EXPECT_EXIT
+            LABEL,
+            cc_exit,
+            EXPECT_EXIT
         );
         cleanup();
         return Err(KernelError::InternalError);
@@ -27454,7 +28618,9 @@ int main(void){\n\
             serial_println!(
                 "[spawn]   FAIL: {} — tcc exited 0 but {} is unreadable: {:?} (the build did not \
                  produce the binary)",
-                LABEL, PROG, e
+                LABEL,
+                PROG,
+                e
             );
             cleanup();
             return Err(KernelError::InternalError);
@@ -27479,13 +28645,21 @@ int main(void){\n\
             "[spawn]   REAL project-header build (ring 3: tcc resolved #include \"caphdr-hdr.h\" \
              from two TUs, expanded SLATE_BASE, linked the cross-TU call into a {}-byte dynamic \
              ELF, ld.so ran it, output {} bytes == expected, exit={:?}): OK",
-            prog.len(), out.len(), run_exit
+            prog.len(),
+            out.len(),
+            run_exit
         );
         Ok(())
     } else {
         serial_println!(
             "[spawn]   FAIL: {} — {} holds {} bytes {:?} (exit={:?}), expected {:?} with exit={}",
-            LABEL, OUT, out.len(), out.as_slice(), run_exit, b"SLATE-HDR-42\n", EXPECT_EXIT
+            LABEL,
+            OUT,
+            out.len(),
+            out.as_slice(),
+            run_exit,
+            b"SLATE-HDR-42\n",
+            EXPECT_EXIT
         );
         Err(KernelError::InternalError)
     }
@@ -28309,7 +29483,10 @@ fn test_spawn_from_elf() -> KernelResult<()> {
 
     // Verify the entry point was captured.
     if result.entry_point != 0x0000_0040_0000_0000 {
-        serial_println!("[spawn]   FAIL: wrong entry point: {:#x}", result.entry_point);
+        serial_println!(
+            "[spawn]   FAIL: wrong entry point: {:#x}",
+            result.entry_point
+        );
         pcb::destroy(result.pid);
         return Err(KernelError::InternalError);
     }
@@ -28340,7 +29517,10 @@ fn test_spawn_invalid_elf() -> KernelResult<()> {
     match spawn_process(&bad_data, &options) {
         Err(KernelError::InvalidExecutable) => {} // Expected.
         other => {
-            serial_println!("[spawn]   FAIL: invalid ELF should fail, got {:?}", other.map(|r| r.pid));
+            serial_println!(
+                "[spawn]   FAIL: invalid ELF should fail, got {:?}",
+                other.map(|r| r.pid)
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -28488,10 +29668,7 @@ fn test_exec_process() -> KernelResult<()> {
     //
     // Its code does: mov eax, 503; movabs rdi, data_vaddr; mov esi, target_len; syscall
     #[allow(clippy::cast_possible_truncation)]
-    let caller_elf = elf::build_exec_test_elf(
-        data_vaddr,
-        target_elf.len() as u32,
-    );
+    let caller_elf = elf::build_exec_test_elf(data_vaddr, target_elf.len() as u32);
 
     // -- Step 4: Spawn the process with the caller ELF --
     let options = SpawnOptions::new("spawn-test-exec");
@@ -28505,8 +29682,7 @@ fn test_exec_process() -> KernelResult<()> {
         .filter(|&p| p != 0)
         .ok_or(KernelError::OutOfMemory)?;
 
-    let hhdm = page_table::hhdm()
-        .ok_or(KernelError::InternalError)?;
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
 
     // Calculate how many frames we need for the target ELF data.
     #[allow(clippy::arithmetic_side_effects)]
@@ -28532,19 +29708,13 @@ fn test_exec_process() -> KernelResult<()> {
 
         // SAFETY: frame_virt is valid, chunk fits within FRAME_SIZE.
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                chunk.as_ptr(),
-                frame_virt as *mut u8,
-                chunk.len(),
-            );
+            core::ptr::copy_nonoverlapping(chunk.as_ptr(), frame_virt as *mut u8, chunk.len());
         }
 
         // Map at data_vaddr + i * FRAME_SIZE.
         #[allow(clippy::arithmetic_side_effects)]
         let vaddr = data_vaddr + (i as u64 * FRAME_SIZE as u64);
-        let flags = PageFlags::PRESENT
-            | PageFlags::USER_ACCESSIBLE
-            | PageFlags::NO_EXECUTE;
+        let flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE;
 
         // SAFETY: pml4_phys is valid, phys_frame is freshly allocated.
         unsafe {
@@ -28564,7 +29734,8 @@ fn test_exec_process() -> KernelResult<()> {
 
     serial_println!(
         "[spawn]   Exec test: mapped {} bytes of target ELF at {:#x}",
-        bytes_copied, data_vaddr
+        bytes_copied,
+        data_vaddr
     );
 
     // -- Step 5: Let the process run --
@@ -28705,10 +29876,7 @@ fn test_process_kill() -> KernelResult<()> {
     // Process should be Running (initial thread was spawned).
     let s = pcb::state(result.pid);
     if s != Some(pcb::ProcessState::Running) {
-        serial_println!(
-            "[spawn]   FAIL: kill test — expected Running, got {:?}",
-            s
-        );
+        serial_println!("[spawn]   FAIL: kill test — expected Running, got {:?}", s);
         pcb::destroy(result.pid);
         return Err(KernelError::InternalError);
     }
@@ -28762,8 +29930,7 @@ fn test_process_kill() -> KernelResult<()> {
 /// stack frames, and page table pages), then destroys it and checks
 /// that the free frame count returns to the pre-spawn value.
 fn test_no_frame_leak() -> KernelResult<()> {
-    let before = frame::stats()
-        .ok_or(KernelError::InternalError)?;
+    let before = frame::stats().ok_or(KernelError::InternalError)?;
 
     let elf_data = elf::build_test_elf_public();
     let options = SpawnOptions::new("spawn-test-leak");
@@ -28780,8 +29947,7 @@ fn test_no_frame_leak() -> KernelResult<()> {
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
 
-    let after = frame::stats()
-        .ok_or(KernelError::InternalError)?;
+    let after = frame::stats().ok_or(KernelError::InternalError)?;
 
     // The page table page pool may have grown (16 KiB frames split
     // into 4 KiB pages that aren't returned to the frame allocator).
@@ -28791,14 +29957,18 @@ fn test_no_frame_leak() -> KernelResult<()> {
     if leaked > 2 {
         serial_println!(
             "[spawn]   FAIL: frame leak detected — before={}, after={}, leaked={}",
-            before.free_frames, after.free_frames, leaked
+            before.free_frames,
+            after.free_frames,
+            leaked
         );
         return Err(KernelError::InternalError);
     }
 
     serial_println!(
         "[spawn]   No frame leak (before={}, after={}, delta={}): OK",
-        before.free_frames, after.free_frames, leaked
+        before.free_frames,
+        after.free_frames,
+        leaked
     );
     Ok(())
 }
@@ -28809,10 +29979,7 @@ fn test_fd_map_entry_layout() -> KernelResult<()> {
     let align = core::mem::align_of::<FdMapEntry>();
 
     if size != 16 {
-        serial_println!(
-            "[spawn]   FAIL: FdMapEntry size should be 16, got {}",
-            size
-        );
+        serial_println!("[spawn]   FAIL: FdMapEntry size should be 16, got {}", size);
         return Err(KernelError::InternalError);
     }
     if align < 4 {
@@ -28824,13 +29991,22 @@ fn test_fd_map_entry_layout() -> KernelResult<()> {
     }
 
     // Verify field offsets are correct.
-    let entry = FdMapEntry { fd: 1, handle_type: fd_handle_type::FILE, _pad: [0; 3], handle: 42 };
+    let entry = FdMapEntry {
+        fd: 1,
+        handle_type: fd_handle_type::FILE,
+        _pad: [0; 3],
+        handle: 42,
+    };
     if entry.fd != 1 || entry.handle != 42 {
         serial_println!("[spawn]   FAIL: FdMapEntry field values wrong");
         return Err(KernelError::InternalError);
     }
 
-    serial_println!("[spawn]   FdMapEntry layout (size={}, align={}): OK", size, align);
+    serial_println!(
+        "[spawn]   FdMapEntry layout (size={}, align={}): OK",
+        size,
+        align
+    );
     Ok(())
 }
 
@@ -28846,7 +30022,9 @@ fn test_spawn_with_fd_map() -> KernelResult<()> {
     // This may fail during early boot before VFS is mounted.
     let parent_handle = match handle::open(
         "/test_fd_map_spawn.tmp",
-        handle::OpenFlags::READ.union(handle::OpenFlags::WRITE).union(handle::OpenFlags::CREATE),
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
     ) {
         Ok(h) => h,
         Err(_) => {
@@ -28882,17 +30060,15 @@ fn test_spawn_with_fd_map() -> KernelResult<()> {
 
     let (fd_num, child_ht, child_handle) = child_fds[0];
     if fd_num != 1 {
-        serial_println!(
-            "[spawn]   FAIL: expected fd 1, got {}",
-            fd_num
-        );
+        serial_println!("[spawn]   FAIL: expected fd 1, got {}", fd_num);
     }
 
     // handle_type should be preserved through the spawn.
     if child_ht != fd_handle_type::FILE {
         serial_println!(
             "[spawn]   FAIL: expected handle_type FILE ({}), got {}",
-            fd_handle_type::FILE, child_ht
+            fd_handle_type::FILE,
+            child_ht
         );
     }
 
@@ -28901,7 +30077,8 @@ fn test_spawn_with_fd_map() -> KernelResult<()> {
     if child_handle == parent_handle {
         serial_println!(
             "[spawn]   FAIL: child handle {} should differ from parent handle {}",
-            child_handle, parent_handle
+            child_handle,
+            parent_handle
         );
     }
 
@@ -28943,10 +30120,7 @@ fn test_spawn_with_empty_fd_map() -> KernelResult<()> {
     // No initial fds should be set.
     let fds = pcb::take_initial_fds(result.pid);
     if !fds.is_empty() {
-        serial_println!(
-            "[spawn]   FAIL: expected 0 initial fds, got {}",
-            fds.len()
-        );
+        serial_println!("[spawn]   FAIL: expected 0 initial fds, got {}", fds.len());
         // Clean up leaked handles.
         for &(_fd, ht, h) in &fds {
             if ht == fd_handle_type::FILE {
@@ -28983,9 +30157,7 @@ fn test_spawn_fd_map_invalid_handle() -> KernelResult<()> {
             crate::sched::reap_dead_tasks();
             thread::on_thread_exit(result.task_id);
             pcb::destroy(result.pid);
-            serial_println!(
-                "[spawn]   FAIL: spawn with invalid handle should fail"
-            );
+            serial_println!("[spawn]   FAIL: spawn with invalid handle should fail");
             Err(KernelError::InternalError)
         }
         Err(KernelError::InvalidHandle) => {
@@ -29013,7 +30185,9 @@ fn test_take_initial_fds_one_shot() -> KernelResult<()> {
 
     let parent_handle = match handle::open(
         "/test_fd_oneshot.tmp",
-        handle::OpenFlags::READ.union(handle::OpenFlags::WRITE).union(handle::OpenFlags::CREATE),
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
     ) {
         Ok(h) => h,
         Err(_) => {
@@ -29090,7 +30264,11 @@ fn test_spawn_args_header_layout() -> KernelResult<()> {
         argv_data_len: 100,
         envp_data_len: 50,
     };
-    if header.argc != 3 || header.envc != 2 || header.argv_data_len != 100 || header.envp_data_len != 50 {
+    if header.argc != 3
+        || header.envc != 2
+        || header.argv_data_len != 100
+        || header.envp_data_len != 50
+    {
         serial_println!("[spawn]   FAIL: SpawnArgsHeader field values wrong");
         return Err(KernelError::InternalError);
     }
@@ -29155,24 +30333,21 @@ fn test_spawn_with_argv_envp() -> KernelResult<()> {
 
     let (argv, envp) = pcb::take_initial_args(result.pid);
     if argv.len() != 2 {
-        serial_println!(
-            "[spawn]   FAIL: expected 2 argv, got {}",
-            argv.len()
-        );
+        serial_println!("[spawn]   FAIL: expected 2 argv, got {}", argv.len());
         return Err(KernelError::InternalError);
     }
     if envp.len() != 3 {
-        serial_println!(
-            "[spawn]   FAIL: expected 3 envp, got {}",
-            envp.len()
-        );
+        serial_println!("[spawn]   FAIL: expected 3 envp, got {}", envp.len());
         return Err(KernelError::InternalError);
     }
     if argv[0] != b"/bin/ls" || argv[1] != b"-la" {
         serial_println!("[spawn]   FAIL: argv content mismatch");
         return Err(KernelError::InternalError);
     }
-    if envp[0] != b"PATH=/bin:/usr/bin" || envp[1] != b"HOME=/root" || envp[2] != b"LANG=en_US.UTF-8" {
+    if envp[0] != b"PATH=/bin:/usr/bin"
+        || envp[1] != b"HOME=/root"
+        || envp[2] != b"LANG=en_US.UTF-8"
+    {
         serial_println!("[spawn]   FAIL: envp content mismatch");
         return Err(KernelError::InternalError);
     }
@@ -29327,7 +30502,8 @@ fn test_spawn_args_one_shot() -> KernelResult<()> {
     if !argv2.is_empty() || !envp2.is_empty() {
         serial_println!(
             "[spawn]   FAIL: second take should be empty, got {} argv, {} envp",
-            argv2.len(), envp2.len()
+            argv2.len(),
+            envp2.len()
         );
         return Err(KernelError::InternalError);
     }
@@ -29399,7 +30575,8 @@ fn test_spawn_records_parent() -> KernelResult<()> {
     if recorded != Some(parent.pid) {
         serial_println!(
             "[spawn]   FAIL: child records parent {:?}, expected {}",
-            recorded, parent.pid
+            recorded,
+            parent.pid
         );
         return cleanup(true);
     }
@@ -29415,7 +30592,9 @@ fn test_spawn_records_parent() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: PID 0 was allowed to reap process {} owned by \
                  {} (got {:?}) — the parent field is not being enforced",
-                child.pid, parent.pid, other.map(|o| o.is_some())
+                child.pid,
+                parent.pid,
+                other.map(|o| o.is_some())
             );
             return cleanup(true);
         }
@@ -29430,7 +30609,8 @@ fn test_spawn_records_parent() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   FAIL: parent {} denied reaping its own child {} \
                  — SpawnOptions::parent was not applied",
-                parent.pid, child.pid
+                parent.pid,
+                child.pid
             );
             cleanup(true)
         }
@@ -29438,7 +30618,9 @@ fn test_spawn_records_parent() -> KernelResult<()> {
             serial_println!(
                 "[spawn]   Spawned child records its parent, PID 0 cannot reap \
                  it, its parent can (parent={} child={} reap={:?}): OK",
-                parent.pid, child.pid, other.map(|o| o.is_some())
+                parent.pid,
+                child.pid,
+                other.map(|o| o.is_some())
             );
             cleanup(false)
         }
@@ -29466,6 +30648,10 @@ fn test_spawn_ex_args_layout() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    serial_println!("[spawn]   SpawnExArgs layout (size={}, align={}): OK", size, align);
+    serial_println!(
+        "[spawn]   SpawnExArgs layout (size={}, align={}): OK",
+        size,
+        align
+    );
     Ok(())
 }

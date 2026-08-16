@@ -35,14 +35,14 @@
 //! constraint with `SCHED`.  Frame allocation uses the frame allocator
 //! lock, which is below `SHM_TABLE`.
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::mm::page_table;
 use crate::serial_println;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -237,10 +237,7 @@ pub fn kernel_addr(handle: ShmHandle) -> KernelResult<*mut u8> {
         .get(&handle.region_id())
         .ok_or(KernelError::InvalidHandle)?;
 
-    let first_frame = region
-        .frames
-        .first()
-        .ok_or(KernelError::InternalError)?;
+    let first_frame = region.frames.first().ok_or(KernelError::InternalError)?;
 
     // SAFETY: first_frame.addr() is a valid physical address within
     // managed memory.  The HHDM maps all physical memory.
@@ -279,9 +276,7 @@ pub fn close(handle: ShmHandle) {
         false
     };
 
-    if should_remove
-        && let Some(region) = table.remove(&handle.region_id())
-    {
+    if should_remove && let Some(region) = table.remove(&handle.region_id()) {
         super::stats::shm_destroyed(region.size as u64);
         // Free all physical frames.
         for f in region.frames {
@@ -372,15 +367,10 @@ fn test_create_write_read() -> KernelResult<()> {
 
     // Read back.
     // SAFETY: Same pointer, just allocated.
-    let (a, b, c) = unsafe {
-        (*ptr, *ptr.add(1), *ptr.add(FRAME_SIZE - 1))
-    };
+    let (a, b, c) = unsafe { (*ptr, *ptr.add(1), *ptr.add(FRAME_SIZE - 1)) };
 
     if a != 0xAB || b != 0xCD || c != 0xEF {
-        serial_println!(
-            "[shm]   FAIL: read back {:#x} {:#x} {:#x}",
-            a, b, c
-        );
+        serial_println!("[shm]   FAIL: read back {:#x} {:#x} {:#x}", a, b, c);
         close(handle);
         return Err(KernelError::InternalError);
     }
@@ -426,7 +416,8 @@ fn test_close_frees_frames() -> KernelResult<()> {
     if stats_during.free_frames >= stats_before.free_frames {
         serial_println!(
             "[shm]   FAIL: free frames didn't decrease ({} -> {})",
-            stats_before.free_frames, stats_during.free_frames
+            stats_before.free_frames,
+            stats_during.free_frames
         );
         close(handle);
         return Err(KernelError::InternalError);
@@ -441,7 +432,8 @@ fn test_close_frees_frames() -> KernelResult<()> {
     if stats_after.free_frames < stats_before.free_frames {
         serial_println!(
             "[shm]   FAIL: free frames not restored ({} -> {})",
-            stats_before.free_frames, stats_after.free_frames
+            stats_before.free_frames,
+            stats_after.free_frames
         );
         return Err(KernelError::InternalError);
     }
@@ -466,10 +458,7 @@ fn test_invalid_args() -> KernelResult<()> {
     match create(MAX_SHM_SIZE + 1) {
         Err(KernelError::InvalidArgument) => {}
         other => {
-            serial_println!(
-                "[shm]   FAIL: create(MAX+1) returned {:?}",
-                other
-            );
+            serial_println!("[shm]   FAIL: create(MAX+1) returned {:?}", other);
             return Err(KernelError::InternalError);
         }
     }

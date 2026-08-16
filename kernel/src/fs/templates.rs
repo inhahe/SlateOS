@@ -290,13 +290,12 @@ pub fn unregister_source(source: &str) -> usize {
 /// List all visible templates, sorted by category then priority.
 pub fn list() -> Vec<Template> {
     let templates = TEMPLATES.lock();
-    let mut result: Vec<Template> = templates.iter()
-        .filter(|t| t.visible)
-        .cloned()
-        .collect();
+    let mut result: Vec<Template> = templates.iter().filter(|t| t.visible).cloned().collect();
 
     result.sort_by(|a, b| {
-        a.category.sort_order().cmp(&b.category.sort_order())
+        a.category
+            .sort_order()
+            .cmp(&b.category.sort_order())
             .then(a.priority.cmp(&b.priority))
     });
 
@@ -306,7 +305,8 @@ pub fn list() -> Vec<Template> {
 /// List templates in a specific category.
 pub fn list_category(category: Category) -> Vec<Template> {
     let templates = TEMPLATES.lock();
-    let mut result: Vec<Template> = templates.iter()
+    let mut result: Vec<Template> = templates
+        .iter()
         .filter(|t| t.visible && t.category == category)
         .cloned()
         .collect();
@@ -323,7 +323,9 @@ pub fn get(id: u64) -> Option<Template> {
 /// Get a template by name (case-insensitive).
 pub fn get_by_name(name: &str) -> Option<Template> {
     let lower = name.to_ascii_lowercase();
-    TEMPLATES.lock().iter()
+    TEMPLATES
+        .lock()
+        .iter()
         .find(|t| t.name.to_ascii_lowercase() == lower)
         .cloned()
 }
@@ -347,16 +349,11 @@ pub fn set_visible(id: u64, visible: bool) -> bool {
 /// Returns the full path of the created file.  If a file with the
 /// default name already exists, appends " (2)", " (3)", etc.
 pub fn create(template_id: u64, directory: &str) -> KernelResult<String> {
-    let template = get(template_id)
-        .ok_or(KernelError::NotFound)?;
+    let template = get(template_id).ok_or(KernelError::NotFound)?;
 
     match template.content {
-        TemplateContent::Directory => {
-            create_directory_from_template(&template, directory)
-        }
-        _ => {
-            create_file_from_template(&template, directory)
-        }
+        TemplateContent::Directory => create_directory_from_template(&template, directory),
+        _ => create_file_from_template(&template, directory),
     }
 }
 
@@ -371,9 +368,7 @@ fn create_file_from_template(template: &Template, directory: &str) -> KernelResu
     // Get content.
     let content = match &template.content {
         TemplateContent::Inline(data) => data.clone(),
-        TemplateContent::FileRef(path) => {
-            crate::fs::vfs::Vfs::read_file(path)?
-        }
+        TemplateContent::FileRef(path) => crate::fs::vfs::Vfs::read_file(path)?,
         TemplateContent::Empty => Vec::new(),
         TemplateContent::Directory => {
             // Shouldn't reach here.
@@ -448,16 +443,14 @@ fn find_unique_name(directory: &str, base_name: &str) -> KernelResult<String> {
 /// Create a new empty text file.
 pub fn create_text_file(directory: &str) -> KernelResult<String> {
     init();
-    let template = get_by_name("Text Document")
-        .ok_or(KernelError::NotFound)?;
+    let template = get_by_name("Text Document").ok_or(KernelError::NotFound)?;
     create(template.id, directory)
 }
 
 /// Create a new folder.
 pub fn create_folder(directory: &str) -> KernelResult<String> {
     init();
-    let template = get_by_name("Folder")
-        .ok_or(KernelError::NotFound)?;
+    let template = get_by_name("Folder").ok_or(KernelError::NotFound)?;
     create(template.id, directory)
 }
 
@@ -531,10 +524,14 @@ pub fn self_test() -> KernelResult<()> {
     // Test 5: register custom template.
     {
         let id = register(
-            "Test Template", ".test", "test-file",
+            "Test Template",
+            ".test",
+            "test-file",
             Category::User,
             TemplateContent::Inline(b"test content".to_vec()),
-            "text-plain", "text/plain", "test-app",
+            "text-plain",
+            "text/plain",
+            "test-app",
         )?;
         assert!(id > 0);
         let t = get(id);

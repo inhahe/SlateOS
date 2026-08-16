@@ -147,14 +147,30 @@ pub fn init() {
         ENHANCED_IBRS.store(enhanced_ibrs, Ordering::Release);
 
         serial_println!("[spectre]   ARCH_CAPABILITIES={:#x}", caps);
-        serial_println!("[spectre]   Meltdown-immune (RDCL_NO): {}",
-            if meltdown_immune { "yes" } else { "NO — KPTI needed" });
-        serial_println!("[spectre]   Enhanced IBRS (IBRS_ALL): {}",
-            if enhanced_ibrs { "yes (zero-cost)" } else { "no" });
-        serial_println!("[spectre]   SSB-immune (SSB_NO): {}",
-            if ssb_immune { "yes" } else { "no" });
-        serial_println!("[spectre]   MDS-immune (MDS_NO): {}",
-            if mds_immune { "yes" } else { "no" });
+        serial_println!(
+            "[spectre]   Meltdown-immune (RDCL_NO): {}",
+            if meltdown_immune {
+                "yes"
+            } else {
+                "NO — KPTI needed"
+            }
+        );
+        serial_println!(
+            "[spectre]   Enhanced IBRS (IBRS_ALL): {}",
+            if enhanced_ibrs {
+                "yes (zero-cost)"
+            } else {
+                "no"
+            }
+        );
+        serial_println!(
+            "[spectre]   SSB-immune (SSB_NO): {}",
+            if ssb_immune { "yes" } else { "no" }
+        );
+        serial_println!(
+            "[spectre]   MDS-immune (MDS_NO): {}",
+            if mds_immune { "yes" } else { "no" }
+        );
     } else {
         serial_println!("[spectre]   IA32_ARCH_CAPABILITIES: not available");
         // Assume vulnerable (conservative).
@@ -206,14 +222,18 @@ pub fn init() {
     if spec_ctrl != 0 && (has_ibrs || has_stibp || has_ssbd) {
         // SAFETY: MSR is available (CPUID confirmed IBRS/STIBP/SSBD support).
         // Writing SPEC_CTRL only restricts speculation — it cannot cause faults.
-        unsafe { crate::cpu::wrmsr(IA32_SPEC_CTRL, spec_ctrl); }
+        unsafe {
+            crate::cpu::wrmsr(IA32_SPEC_CTRL, spec_ctrl);
+        }
         serial_println!("[spectre]   IA32_SPEC_CTRL = {:#x}", spec_ctrl);
     }
 
     // Issue an initial IBPB to flush any stale predictions from boot.
     if features.ibrs_ibpb || features.amd_ibpb {
         // SAFETY: Writing IBPB just flushes the branch predictor.
-        unsafe { crate::cpu::wrmsr(IA32_PRED_CMD, 1); }
+        unsafe {
+            crate::cpu::wrmsr(IA32_PRED_CMD, 1);
+        }
         IBPB_COUNT.fetch_add(1, Ordering::Relaxed);
         serial_println!("[spectre]   Initial IBPB barrier issued");
     }
@@ -226,7 +246,9 @@ pub fn init() {
 /// Replicates the BSP's IA32_SPEC_CTRL settings.  Each CPU has its own
 /// MSR instance, so each AP must write independently.
 pub fn init_ap() {
-    let Some(features) = crate::cpu::features() else { return };
+    let Some(features) = crate::cpu::features() else {
+        return;
+    };
 
     let has_ibrs = features.ibrs_ibpb || features.amd_ibrs;
     let has_stibp = features.stibp || features.amd_stibp;
@@ -245,13 +267,17 @@ pub fn init_ap() {
 
     if spec_ctrl != 0 {
         // SAFETY: Same as BSP — MSR is confirmed available.
-        unsafe { crate::cpu::wrmsr(IA32_SPEC_CTRL, spec_ctrl); }
+        unsafe {
+            crate::cpu::wrmsr(IA32_SPEC_CTRL, spec_ctrl);
+        }
     }
 
     // IBPB on AP startup to ensure clean predictor state.
     if features.ibrs_ibpb || features.amd_ibpb {
         // SAFETY: Writing IBPB flushes the branch predictor.
-        unsafe { crate::cpu::wrmsr(IA32_PRED_CMD, 1); }
+        unsafe {
+            crate::cpu::wrmsr(IA32_PRED_CMD, 1);
+        }
         IBPB_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -270,11 +296,15 @@ pub fn init_ap() {
 /// No-op if IBPB is not supported.
 #[inline]
 pub fn ibpb_barrier() {
-    let Some(features) = crate::cpu::features() else { return };
+    let Some(features) = crate::cpu::features() else {
+        return;
+    };
     if features.ibrs_ibpb || features.amd_ibpb {
         // SAFETY: IBPB is a write-only command that flushes predictions.
         // Cannot fault, has no side effects beyond clearing the predictor.
-        unsafe { crate::cpu::wrmsr(IA32_PRED_CMD, 1); }
+        unsafe {
+            crate::cpu::wrmsr(IA32_PRED_CMD, 1);
+        }
         IBPB_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -312,11 +342,13 @@ pub struct SpectreStatus {
 pub fn status() -> SpectreStatus {
     let features = crate::cpu::features();
     let (hw_ibrs, hw_stibp, hw_ssbd) = features
-        .map(|f| (
-            f.ibrs_ibpb || f.amd_ibrs,
-            f.stibp || f.amd_stibp,
-            f.ssbd || f.amd_ssbd,
-        ))
+        .map(|f| {
+            (
+                f.ibrs_ibpb || f.amd_ibrs,
+                f.stibp || f.amd_stibp,
+                f.ssbd || f.amd_ssbd,
+            )
+        })
         .unwrap_or((false, false, false));
 
     SpectreStatus {
@@ -343,9 +375,21 @@ pub fn self_test() {
 
     // Test 1: Status query works.
     let s = status();
-    serial_println!("[spectre]   IBRS: hw={}, active={}", s.hw_ibrs, s.ibrs_active);
-    serial_println!("[spectre]   STIBP: hw={}, active={}", s.hw_stibp, s.stibp_active);
-    serial_println!("[spectre]   SSBD: hw={}, active={}", s.hw_ssbd, s.ssbd_active);
+    serial_println!(
+        "[spectre]   IBRS: hw={}, active={}",
+        s.hw_ibrs,
+        s.ibrs_active
+    );
+    serial_println!(
+        "[spectre]   STIBP: hw={}, active={}",
+        s.hw_stibp,
+        s.stibp_active
+    );
+    serial_println!(
+        "[spectre]   SSBD: hw={}, active={}",
+        s.hw_ssbd,
+        s.ssbd_active
+    );
 
     // Test 2: If IBRS is active, verify IA32_SPEC_CTRL has IBRS bit set.
     if s.ibrs_active {
@@ -371,11 +415,11 @@ pub fn self_test() {
 
     // Test 4: IBPB count is at least 1 (initial barrier).
     if s.hw_ibrs {
-        assert!(
-            s.ibpb_count >= 1,
-            "IBPB supported but no barriers issued"
+        assert!(s.ibpb_count >= 1, "IBPB supported but no barriers issued");
+        serial_println!(
+            "[spectre]   IBPB barriers: {} (initial + APs): OK",
+            s.ibpb_count
         );
-        serial_println!("[spectre]   IBPB barriers: {} (initial + APs): OK", s.ibpb_count);
     }
 
     // Test 5: ibpb_barrier() doesn't fault.

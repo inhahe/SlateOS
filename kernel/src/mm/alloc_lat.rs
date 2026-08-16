@@ -41,8 +41,8 @@
 // commands; many helpers may not have call sites in production paths yet.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -65,17 +65,29 @@ static TSC_MHZ: AtomicU64 = AtomicU64::new(3000);
 
 /// Allocation latency histogram buckets.
 static ALLOC_HIST: [AtomicU64; NUM_BUCKETS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
 ];
 
 /// Free latency histogram buckets.
 static FREE_HIST: [AtomicU64; NUM_BUCKETS] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
 ];
 
@@ -126,7 +138,13 @@ pub fn end_alloc(start: u64) {
     }
     let end = rdtsc();
     let elapsed = end.saturating_sub(start);
-    record_latency(&ALLOC_HIST, &ALLOC_TOTAL_CYCLES, &ALLOC_COUNT, &ALLOC_MAX, elapsed);
+    record_latency(
+        &ALLOC_HIST,
+        &ALLOC_TOTAL_CYCLES,
+        &ALLOC_COUNT,
+        &ALLOC_MAX,
+        elapsed,
+    );
 }
 
 /// End a free latency measurement.
@@ -137,7 +155,13 @@ pub fn end_free(start: u64) {
     }
     let end = rdtsc();
     let elapsed = end.saturating_sub(start);
-    record_latency(&FREE_HIST, &FREE_TOTAL_CYCLES, &FREE_COUNT, &FREE_MAX, elapsed);
+    record_latency(
+        &FREE_HIST,
+        &FREE_TOTAL_CYCLES,
+        &FREE_COUNT,
+        &FREE_MAX,
+        elapsed,
+    );
 }
 
 /// Record a raw latency value into the histogram.
@@ -157,9 +181,7 @@ fn record_latency(
     // Update max (relaxed CAS loop — benign races are acceptable).
     let mut current_max = max.load(Ordering::Relaxed);
     while cycles > current_max {
-        match max.compare_exchange_weak(
-            current_max, cycles, Ordering::Relaxed, Ordering::Relaxed
-        ) {
+        match max.compare_exchange_weak(current_max, cycles, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => break,
             Err(actual) => current_max = actual,
         }
@@ -262,7 +284,10 @@ impl LatencyHist {
         }
         // cycles / (tsc_mhz * 1000) * 1_000_000_000
         // = cycles * 1000 / tsc_mhz
-        cycles.saturating_mul(1000).checked_div(self.tsc_mhz).unwrap_or(0)
+        cycles
+            .saturating_mul(1000)
+            .checked_div(self.tsc_mhz)
+            .unwrap_or(0)
     }
 
     /// Get the bucket lower bound in cycles.
@@ -319,7 +344,14 @@ pub fn alloc_histogram() -> LatencyHist {
     let avg = if count > 0 { total / count } else { 0 };
     let tsc_mhz = TSC_MHZ.load(Ordering::Relaxed);
 
-    LatencyHist { buckets, count, total_cycles: total, max_cycles: max, avg_cycles: avg, tsc_mhz }
+    LatencyHist {
+        buckets,
+        count,
+        total_cycles: total,
+        max_cycles: max,
+        avg_cycles: avg,
+        tsc_mhz,
+    }
 }
 
 /// Get the free latency histogram.
@@ -335,7 +367,14 @@ pub fn free_histogram() -> LatencyHist {
     let avg = if count > 0 { total / count } else { 0 };
     let tsc_mhz = TSC_MHZ.load(Ordering::Relaxed);
 
-    LatencyHist { buckets, count, total_cycles: total, max_cycles: max, avg_cycles: avg, tsc_mhz }
+    LatencyHist {
+        buckets,
+        count,
+        total_cycles: total,
+        max_cycles: max,
+        avg_cycles: avg,
+        tsc_mhz,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -394,8 +433,10 @@ pub fn self_test() {
     // Check that exactly one bucket was incremented.
     let total_bucketed: u64 = h.buckets.iter().sum();
     assert_eq!(total_bucketed, 1);
-    serial_println!("[alloc_lat]   Single measurement: OK ({}ns)",
-        h.cycles_to_ns(h.avg_cycles));
+    serial_println!(
+        "[alloc_lat]   Single measurement: OK ({}ns)",
+        h.cycles_to_ns(h.avg_cycles)
+    );
 
     // Test 3: Multiple measurements distribute across buckets.
     reset();
@@ -406,8 +447,11 @@ pub fn self_test() {
     }
     let h = alloc_histogram();
     assert_eq!(h.count, 50);
-    serial_println!("[alloc_lat]   50 fast allocs: avg={}ns, max={}ns",
-        h.cycles_to_ns(h.avg_cycles), h.cycles_to_ns(h.max_cycles));
+    serial_println!(
+        "[alloc_lat]   50 fast allocs: avg={}ns, max={}ns",
+        h.cycles_to_ns(h.avg_cycles),
+        h.cycles_to_ns(h.max_cycles)
+    );
 
     // Test 4: Free histogram is separate.
     let start = begin();
@@ -421,10 +465,10 @@ pub fn self_test() {
 
     // Test 5: Bucket classification.
     assert_eq!(cycles_to_bucket(0), 0);
-    assert_eq!(cycles_to_bucket(32), 0);   // < 64 → bucket 0
-    assert_eq!(cycles_to_bucket(63), 0);   // < 64 → bucket 0
-    assert_eq!(cycles_to_bucket(64), 1);   // 64-127 → bucket 1
-    assert_eq!(cycles_to_bucket(128), 2);  // 128-255 → bucket 2
+    assert_eq!(cycles_to_bucket(32), 0); // < 64 → bucket 0
+    assert_eq!(cycles_to_bucket(63), 0); // < 64 → bucket 0
+    assert_eq!(cycles_to_bucket(64), 1); // 64-127 → bucket 1
+    assert_eq!(cycles_to_bucket(128), 2); // 128-255 → bucket 2
     assert_eq!(cycles_to_bucket(1000), 4); // 512-1023 → bucket 4
     assert_eq!(cycles_to_bucket(100_000), 9); // overflow → last bucket
     serial_println!("[alloc_lat]   Bucket classification: OK");
@@ -449,7 +493,11 @@ pub fn self_test() {
     assert!(p50 <= 64, "p50 should be in bucket 0: got {}", p50);
     // p99 should be in bucket 5 (1024-2047 cycles).
     assert!(p99 > 64, "p99 should be above bucket 0: got {}", p99);
-    serial_println!("[alloc_lat]   Percentiles: p50={}cyc, p99={}cyc: OK", p50, p99);
+    serial_println!(
+        "[alloc_lat]   Percentiles: p50={}cyc, p99={}cyc: OK",
+        p50,
+        p99
+    );
 
     // Test 7: Disable suppresses measurement.
     reset();

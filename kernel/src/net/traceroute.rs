@@ -33,18 +33,18 @@
 //! - Single traceroute at a time per address family (global probe state).
 //! - Polling-based (calls net::poll() in a loop).
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
+use super::icmp;
+use super::icmpv6;
 use super::interface::Ipv4Addr;
 use super::ipv4;
-use super::icmp;
 use super::ipv6::{self, Ipv6Addr, NH_ICMPV6};
-use super::icmpv6;
+use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -296,12 +296,16 @@ pub fn format_trace(result: &TraceResult) -> String {
     if result.reached {
         out.push_str(&format!(
             "\nDestination reached in {} hops ({} probes, {} timeouts)\n",
-            result.hops.len(), result.probes_sent, result.probes_timeout
+            result.hops.len(),
+            result.probes_sent,
+            result.probes_timeout
         ));
     } else {
         out.push_str(&format!(
             "\nDestination NOT reached after {} hops ({} probes, {} timeouts)\n",
-            result.hops.len(), result.probes_sent, result.probes_timeout
+            result.hops.len(),
+            result.probes_sent,
+            result.probes_timeout
         ));
     }
 
@@ -534,12 +538,16 @@ pub fn format_trace6(result: &TraceResult6) -> String {
     if result.reached {
         out.push_str(&format!(
             "\nDestination reached in {} hops ({} probes, {} timeouts)\n",
-            result.hops.len(), result.probes_sent, result.probes_timeout
+            result.hops.len(),
+            result.probes_sent,
+            result.probes_timeout
         ));
     } else {
         out.push_str(&format!(
             "\nDestination NOT reached after {} hops ({} probes, {} timeouts)\n",
-            result.hops.len(), result.probes_sent, result.probes_timeout
+            result.hops.len(),
+            result.probes_sent,
+            result.probes_timeout
         ));
     }
 
@@ -578,7 +586,10 @@ pub fn procfs_content6() -> String {
     let mut out = String::with_capacity(256);
     out.push_str("Traceroute6\n");
     out.push_str("===========\n\n");
-    out.push_str(&format!("Active:          {}\n", if s.active { "yes" } else { "no" }));
+    out.push_str(&format!(
+        "Active:          {}\n",
+        if s.active { "yes" } else { "no" }
+    ));
     out.push_str(&format!("Total traces:    {}\n", s.total_traces));
     out.push_str(&format!("Probes sent:     {}\n", s.total_probes_sent));
     out.push_str(&format!("Probes timeout:  {}\n", s.total_probes_timeout));
@@ -618,7 +629,10 @@ pub fn procfs_content() -> String {
     let mut out = String::with_capacity(256);
     out.push_str("Traceroute\n");
     out.push_str("==========\n\n");
-    out.push_str(&format!("Active:          {}\n", if s.active { "yes" } else { "no" }));
+    out.push_str(&format!(
+        "Active:          {}\n",
+        if s.active { "yes" } else { "no" }
+    ));
     out.push_str(&format!("Total traces:    {}\n", s.total_traces));
     out.push_str(&format!("Probes sent:     {}\n", s.total_probes_sent));
     out.push_str(&format!("Probes timeout:  {}\n", s.total_probes_timeout));
@@ -640,10 +654,10 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 1: RTT formatting ---
     {
-        let s1 = format_rtt(500);        // 500 ns
+        let s1 = format_rtt(500); // 500 ns
         assert!(s1.contains("ns"), "sub-microsecond");
 
-        let s2 = format_rtt(5_000);      // 5 us
+        let s2 = format_rtt(5_000); // 5 us
         assert!(s2.contains("us"), "microsecond");
 
         let s3 = format_rtt(15_000_000); // 15 ms
@@ -772,16 +786,10 @@ pub fn self_test() -> KernelResult<()> {
         // Code = 0.
         assert!(*pkt.get(1).unwrap_or(&0xFF) == 0, "code");
         // ID = TRACEROUTE_ID (0x5678).
-        let id = u16::from_be_bytes([
-            *pkt.get(4).unwrap_or(&0),
-            *pkt.get(5).unwrap_or(&0),
-        ]);
+        let id = u16::from_be_bytes([*pkt.get(4).unwrap_or(&0), *pkt.get(5).unwrap_or(&0)]);
         assert!(id == icmp::trace_id(), "traceroute ID");
         // Seq.
-        let s = u16::from_be_bytes([
-            *pkt.get(6).unwrap_or(&0),
-            *pkt.get(7).unwrap_or(&0),
-        ]);
+        let s = u16::from_be_bytes([*pkt.get(6).unwrap_or(&0), *pkt.get(7).unwrap_or(&0)]);
         assert!(s == seq, "sequence number");
 
         passed = passed.saturating_add(1);
@@ -975,16 +983,10 @@ pub fn self_test() -> KernelResult<()> {
         // Type = 128 (Echo Request).
         assert!(*pkt.first().unwrap_or(&0) == 128, "v6 type");
         // ID = TRACEROUTE6_ID.
-        let id = u16::from_be_bytes([
-            *pkt.get(4).unwrap_or(&0),
-            *pkt.get(5).unwrap_or(&0),
-        ]);
+        let id = u16::from_be_bytes([*pkt.get(4).unwrap_or(&0), *pkt.get(5).unwrap_or(&0)]);
         assert!(id == icmpv6::trace6_id(), "v6 traceroute ID");
         // Seq.
-        let s = u16::from_be_bytes([
-            *pkt.get(6).unwrap_or(&0),
-            *pkt.get(7).unwrap_or(&0),
-        ]);
+        let s = u16::from_be_bytes([*pkt.get(6).unwrap_or(&0), *pkt.get(7).unwrap_or(&0)]);
         assert!(s == seq, "v6 sequence number");
 
         passed = passed.saturating_add(1);

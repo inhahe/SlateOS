@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -137,35 +137,107 @@ where
 
 fn light_colors() -> Vec<ColorEntry> {
     alloc::vec![
-        ColorEntry { role: ColorRole::Background, hex: String::from("#ffffff") },
-        ColorEntry { role: ColorRole::Surface, hex: String::from("#f5f5f5") },
-        ColorEntry { role: ColorRole::Primary, hex: String::from("#1976d2") },
-        ColorEntry { role: ColorRole::Secondary, hex: String::from("#424242") },
-        ColorEntry { role: ColorRole::Accent, hex: String::from("#ff4081") },
-        ColorEntry { role: ColorRole::TextPrimary, hex: String::from("#212121") },
-        ColorEntry { role: ColorRole::TextSecondary, hex: String::from("#757575") },
-        ColorEntry { role: ColorRole::Border, hex: String::from("#e0e0e0") },
-        ColorEntry { role: ColorRole::Error, hex: String::from("#d32f2f") },
-        ColorEntry { role: ColorRole::Warning, hex: String::from("#f57c00") },
-        ColorEntry { role: ColorRole::Success, hex: String::from("#388e3c") },
-        ColorEntry { role: ColorRole::Link, hex: String::from("#1565c0") },
+        ColorEntry {
+            role: ColorRole::Background,
+            hex: String::from("#ffffff")
+        },
+        ColorEntry {
+            role: ColorRole::Surface,
+            hex: String::from("#f5f5f5")
+        },
+        ColorEntry {
+            role: ColorRole::Primary,
+            hex: String::from("#1976d2")
+        },
+        ColorEntry {
+            role: ColorRole::Secondary,
+            hex: String::from("#424242")
+        },
+        ColorEntry {
+            role: ColorRole::Accent,
+            hex: String::from("#ff4081")
+        },
+        ColorEntry {
+            role: ColorRole::TextPrimary,
+            hex: String::from("#212121")
+        },
+        ColorEntry {
+            role: ColorRole::TextSecondary,
+            hex: String::from("#757575")
+        },
+        ColorEntry {
+            role: ColorRole::Border,
+            hex: String::from("#e0e0e0")
+        },
+        ColorEntry {
+            role: ColorRole::Error,
+            hex: String::from("#d32f2f")
+        },
+        ColorEntry {
+            role: ColorRole::Warning,
+            hex: String::from("#f57c00")
+        },
+        ColorEntry {
+            role: ColorRole::Success,
+            hex: String::from("#388e3c")
+        },
+        ColorEntry {
+            role: ColorRole::Link,
+            hex: String::from("#1565c0")
+        },
     ]
 }
 
 fn dark_colors() -> Vec<ColorEntry> {
     alloc::vec![
-        ColorEntry { role: ColorRole::Background, hex: String::from("#121212") },
-        ColorEntry { role: ColorRole::Surface, hex: String::from("#1e1e1e") },
-        ColorEntry { role: ColorRole::Primary, hex: String::from("#90caf9") },
-        ColorEntry { role: ColorRole::Secondary, hex: String::from("#b0bec5") },
-        ColorEntry { role: ColorRole::Accent, hex: String::from("#ff80ab") },
-        ColorEntry { role: ColorRole::TextPrimary, hex: String::from("#e0e0e0") },
-        ColorEntry { role: ColorRole::TextSecondary, hex: String::from("#9e9e9e") },
-        ColorEntry { role: ColorRole::Border, hex: String::from("#333333") },
-        ColorEntry { role: ColorRole::Error, hex: String::from("#ef5350") },
-        ColorEntry { role: ColorRole::Warning, hex: String::from("#ffa726") },
-        ColorEntry { role: ColorRole::Success, hex: String::from("#66bb6a") },
-        ColorEntry { role: ColorRole::Link, hex: String::from("#42a5f5") },
+        ColorEntry {
+            role: ColorRole::Background,
+            hex: String::from("#121212")
+        },
+        ColorEntry {
+            role: ColorRole::Surface,
+            hex: String::from("#1e1e1e")
+        },
+        ColorEntry {
+            role: ColorRole::Primary,
+            hex: String::from("#90caf9")
+        },
+        ColorEntry {
+            role: ColorRole::Secondary,
+            hex: String::from("#b0bec5")
+        },
+        ColorEntry {
+            role: ColorRole::Accent,
+            hex: String::from("#ff80ab")
+        },
+        ColorEntry {
+            role: ColorRole::TextPrimary,
+            hex: String::from("#e0e0e0")
+        },
+        ColorEntry {
+            role: ColorRole::TextSecondary,
+            hex: String::from("#9e9e9e")
+        },
+        ColorEntry {
+            role: ColorRole::Border,
+            hex: String::from("#333333")
+        },
+        ColorEntry {
+            role: ColorRole::Error,
+            hex: String::from("#ef5350")
+        },
+        ColorEntry {
+            role: ColorRole::Warning,
+            hex: String::from("#ffa726")
+        },
+        ColorEntry {
+            role: ColorRole::Success,
+            hex: String::from("#66bb6a")
+        },
+        ColorEntry {
+            role: ColorRole::Link,
+            hex: String::from("#42a5f5")
+        },
     ]
 }
 
@@ -175,11 +247,25 @@ fn dark_colors() -> Vec<ColorEntry> {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         schemes: alloc::vec![
-            Scheme { id: 1, name: String::from("Light"), mode: ColorMode::Light, colors: light_colors(), accent: String::from("#1976d2") },
-            Scheme { id: 2, name: String::from("Dark"), mode: ColorMode::Dark, colors: dark_colors(), accent: String::from("#90caf9") },
+            Scheme {
+                id: 1,
+                name: String::from("Light"),
+                mode: ColorMode::Light,
+                colors: light_colors(),
+                accent: String::from("#1976d2")
+            },
+            Scheme {
+                id: 2,
+                name: String::from("Dark"),
+                mode: ColorMode::Dark,
+                colors: dark_colors(),
+                accent: String::from("#90caf9")
+            },
         ],
         active_scheme_id: 1,
         next_id: 3,
@@ -216,10 +302,17 @@ pub fn set_mode(mode: ColorMode) -> KernelResult<()> {
 /// Set accent color for active scheme.
 pub fn set_accent(hex: &str) -> KernelResult<()> {
     with_state(|state| {
-        let scheme = state.schemes.iter_mut().find(|s| s.id == state.active_scheme_id)
+        let scheme = state
+            .schemes
+            .iter_mut()
+            .find(|s| s.id == state.active_scheme_id)
             .ok_or(KernelError::NotFound)?;
         scheme.accent = String::from(hex);
-        if let Some(c) = scheme.colors.iter_mut().find(|c| c.role == ColorRole::Accent) {
+        if let Some(c) = scheme
+            .colors
+            .iter_mut()
+            .find(|c| c.role == ColorRole::Accent)
+        {
             c.hex = String::from(hex);
         }
         state.total_changes += 1;
@@ -230,7 +323,10 @@ pub fn set_accent(hex: &str) -> KernelResult<()> {
 /// Set a specific color in the active scheme.
 pub fn set_color(role: ColorRole, hex: &str) -> KernelResult<()> {
     with_state(|state| {
-        let scheme = state.schemes.iter_mut().find(|s| s.id == state.active_scheme_id)
+        let scheme = state
+            .schemes
+            .iter_mut()
+            .find(|s| s.id == state.active_scheme_id)
             .ok_or(KernelError::NotFound)?;
         if let Some(c) = scheme.colors.iter_mut().find(|c| c.role == role) {
             c.hex = String::from(hex);
@@ -243,7 +339,9 @@ pub fn set_color(role: ColorRole, hex: &str) -> KernelResult<()> {
 /// Get a color value for a role.
 pub fn get_color(role: ColorRole) -> Option<String> {
     STATE.lock().as_ref().and_then(|s| {
-        s.schemes.iter().find(|sc| sc.id == s.active_scheme_id)
+        s.schemes
+            .iter()
+            .find(|sc| sc.id == s.active_scheme_id)
             .and_then(|sc| sc.colors.iter().find(|c| c.role == role))
             .map(|c| c.hex.clone())
     })
@@ -252,13 +350,19 @@ pub fn get_color(role: ColorRole) -> Option<String> {
 /// Get active scheme.
 pub fn get_active() -> Option<Scheme> {
     STATE.lock().as_ref().and_then(|s| {
-        s.schemes.iter().find(|sc| sc.id == s.active_scheme_id).cloned()
+        s.schemes
+            .iter()
+            .find(|sc| sc.id == s.active_scheme_id)
+            .cloned()
     })
 }
 
 /// List all schemes.
 pub fn list_schemes() -> Vec<Scheme> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.schemes.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.schemes.clone())
 }
 
 /// Statistics: (scheme_count, total_changes, ops).

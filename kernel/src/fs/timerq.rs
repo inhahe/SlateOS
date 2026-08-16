@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -38,8 +38,8 @@ use crate::error::{KernelError, KernelResult};
 pub enum TimerType {
     OneShot,
     Periodic,
-    Deadline,    // Fires at exact time.
-    Deferrable,  // Can be delayed to reduce wakeups.
+    Deadline,   // Fires at exact time.
+    Deferrable, // Can be delayed to reduce wakeups.
 }
 
 impl TimerType {
@@ -57,10 +57,10 @@ impl TimerType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerState {
     Pending,
-    Active,     // Currently executing callback.
+    Active, // Currently executing callback.
     Fired,
     Cancelled,
-    Expired,    // Missed deadline.
+    Expired, // Missed deadline.
 }
 
 impl TimerState {
@@ -83,9 +83,9 @@ pub struct Timer {
     pub timer_type: TimerType,
     pub state: TimerState,
     pub deadline_ns: u64,
-    pub interval_ns: u64,    // For periodic.
+    pub interval_ns: u64, // For periodic.
     pub fire_count: u64,
-    pub overruns: u64,       // Missed fires for periodic.
+    pub overruns: u64, // Missed fires for periodic.
     pub cpu: u32,
     pub created_ns: u64,
 }
@@ -140,7 +140,9 @@ where
 /// (deferrable 50ms) — and a total_created of 3.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         timers: Vec::new(),
         next_id: 1,
@@ -153,15 +155,30 @@ pub fn init_defaults() {
 }
 
 /// Add a timer.
-pub fn add(name: &str, timer_type: TimerType, deadline_ns: u64, interval_ns: u64, cpu: u32) -> KernelResult<u32> {
+pub fn add(
+    name: &str,
+    timer_type: TimerType,
+    deadline_ns: u64,
+    interval_ns: u64,
+    cpu: u32,
+) -> KernelResult<u32> {
     with_state(|state| {
-        if state.timers.len() >= MAX_TIMERS { return Err(KernelError::ResourceExhausted); }
+        if state.timers.len() >= MAX_TIMERS {
+            return Err(KernelError::ResourceExhausted);
+        }
         let now = crate::hpet::elapsed_ns();
         let id = state.next_id;
         state.next_id += 1;
         state.timers.push(Timer {
-            id, name: String::from(name), timer_type, state: TimerState::Pending,
-            deadline_ns, interval_ns, fire_count: 0, overruns: 0, cpu,
+            id,
+            name: String::from(name),
+            timer_type,
+            state: TimerState::Pending,
+            deadline_ns,
+            interval_ns,
+            fire_count: 0,
+            overruns: 0,
+            cpu,
             created_ns: now,
         });
         state.total_created += 1;
@@ -172,8 +189,14 @@ pub fn add(name: &str, timer_type: TimerType, deadline_ns: u64, interval_ns: u64
 /// Cancel a timer.
 pub fn cancel(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.timers.iter_mut().find(|t| t.id == id).ok_or(KernelError::NotFound)?;
-        if t.state == TimerState::Cancelled { return Err(KernelError::AlreadyExists); }
+        let t = state
+            .timers
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or(KernelError::NotFound)?;
+        if t.state == TimerState::Cancelled {
+            return Err(KernelError::AlreadyExists);
+        }
         t.state = TimerState::Cancelled;
         state.total_cancelled += 1;
         Ok(())
@@ -183,8 +206,14 @@ pub fn cancel(id: u32) -> KernelResult<()> {
 /// Fire a timer (simulate).
 pub fn fire(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let t = state.timers.iter_mut().find(|t| t.id == id).ok_or(KernelError::NotFound)?;
-        if t.state != TimerState::Pending { return Err(KernelError::InvalidArgument); }
+        let t = state
+            .timers
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or(KernelError::NotFound)?;
+        if t.state != TimerState::Pending {
+            return Err(KernelError::InvalidArgument);
+        }
         t.fire_count += 1;
         state.total_fired += 1;
         match t.timer_type {
@@ -206,7 +235,9 @@ pub fn fire_expired() -> KernelResult<u32> {
         let now = crate::hpet::elapsed_ns();
         let mut fired = 0u32;
         for t in &mut state.timers {
-            if t.state != TimerState::Pending { continue; }
+            if t.state != TimerState::Pending {
+                continue;
+            }
             if now >= t.deadline_ns {
                 t.fire_count += 1;
                 state.total_fired += 1;
@@ -234,20 +265,29 @@ pub fn fire_expired() -> KernelResult<u32> {
 /// List pending timers.
 pub fn list_pending() -> Vec<Timer> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.timers.iter().filter(|t| t.state == TimerState::Pending).cloned().collect()
+        s.timers
+            .iter()
+            .filter(|t| t.state == TimerState::Pending)
+            .cloned()
+            .collect()
     })
 }
 
 /// List all timers.
 pub fn list_all() -> Vec<Timer> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.timers.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.timers.clone())
 }
 
 /// Cleanup fired/cancelled timers.
 pub fn cleanup() -> KernelResult<u32> {
     with_state(|state| {
         let before = state.timers.len();
-        state.timers.retain(|t| t.state == TimerState::Pending || t.state == TimerState::Active);
+        state
+            .timers
+            .retain(|t| t.state == TimerState::Pending || t.state == TimerState::Active);
         Ok((before - state.timers.len()) as u32)
     })
 }
@@ -257,8 +297,20 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let pending = s.timers.iter().filter(|t| t.state == TimerState::Pending).count();
-            (s.timers.len(), pending, s.total_created, s.total_fired, s.total_cancelled, s.total_overruns, s.ops)
+            let pending = s
+                .timers
+                .iter()
+                .filter(|t| t.state == TimerState::Pending)
+                .count();
+            (
+                s.timers.len(),
+                pending,
+                s.total_created,
+                s.total_fired,
+                s.total_cancelled,
+                s.total_overruns,
+                s.ops,
+            )
         }
         None => (0, 0, 0, 0, 0, 0, 0),
     }
@@ -279,7 +331,10 @@ pub fn self_test() {
     assert_eq!(list_all().len(), 0);
     assert_eq!(list_pending().len(), 0);
     let (total0, pending0, created0, fired0, cancelled0, overruns0, _) = stats();
-    assert_eq!((total0, pending0, created0, fired0, cancelled0, overruns0), (0, 0, 0, 0, 0, 0));
+    assert_eq!(
+        (total0, pending0, created0, fired0, cancelled0, overruns0),
+        (0, 0, 0, 0, 0, 0)
+    );
     crate::serial_println!("  [1/8] empty defaults: OK");
 
     // 2: Add + fire a one-shot — ids monotonic from 1; one-shot ends Fired.
@@ -294,7 +349,14 @@ pub fn self_test() {
     // 3: Cancel — state becomes Cancelled; double-cancel errors.
     let id2 = add("cancel_me", TimerType::OneShot, 999_999, 0, 0).expect("add2");
     cancel(id2).expect("cancel");
-    assert_eq!(list_all().into_iter().find(|t| t.id == id2).expect("f2").state, TimerState::Cancelled);
+    assert_eq!(
+        list_all()
+            .into_iter()
+            .find(|t| t.id == id2)
+            .expect("f2")
+            .state,
+        TimerState::Cancelled
+    );
     assert!(cancel(id2).is_err()); // already cancelled
     crate::serial_println!("  [3/8] cancel: OK");
 
@@ -327,7 +389,14 @@ pub fn self_test() {
     let id4 = add("expired", TimerType::OneShot, 0, 0, 0).expect("add4");
     let fired = fire_expired().expect("expired");
     assert_eq!(fired, 1); // only id4 (periodic pid is far-future)
-    assert_eq!(list_all().into_iter().find(|t| t.id == id4).expect("f4").state, TimerState::Fired);
+    assert_eq!(
+        list_all()
+            .into_iter()
+            .find(|t| t.id == id4)
+            .expect("f4")
+            .state,
+        TimerState::Fired
+    );
     crate::serial_println!("  [6/8] fire expired: OK");
 
     // 7: Cleanup retains only Pending/Active timers (removes id1+id2+id4).

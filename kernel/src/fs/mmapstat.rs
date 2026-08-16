@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -136,7 +136,9 @@ fn type_index(t: MapType) -> usize {
 /// the record functions as it maps, unmaps, and reprotects regions.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         processes: Vec::new(),
         type_counts: [0; 6],
@@ -151,7 +153,10 @@ pub fn init_defaults() {
 /// Record an mmap.
 pub fn record_map(pid: u32, size: u64, map_type: MapType) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.processes.iter_mut().find(|p| p.pid == pid)
+        let p = state
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
         p.maps += 1;
         p.regions += 1;
@@ -166,7 +171,10 @@ pub fn record_map(pid: u32, size: u64, map_type: MapType) -> KernelResult<()> {
 /// Record an munmap.
 pub fn record_unmap(pid: u32, size: u64) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.processes.iter_mut().find(|p| p.pid == pid)
+        let p = state
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
         p.unmaps += 1;
         p.regions = p.regions.saturating_sub(1);
@@ -179,7 +187,10 @@ pub fn record_unmap(pid: u32, size: u64) -> KernelResult<()> {
 /// Record an mprotect.
 pub fn record_protect(pid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.processes.iter_mut().find(|p| p.pid == pid)
+        let p = state
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
         p.protects += 1;
         state.total_protects += 1;
@@ -190,11 +201,20 @@ pub fn record_protect(pid: u32) -> KernelResult<()> {
 /// Register a process.
 pub fn register_process(pid: u32, name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.processes.iter().any(|p| p.pid == pid) { return Err(KernelError::AlreadyExists); }
-        if state.processes.len() >= MAX_PROCESSES { return Err(KernelError::ResourceExhausted); }
+        if state.processes.iter().any(|p| p.pid == pid) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.processes.len() >= MAX_PROCESSES {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.processes.push(ProcessMapStats {
-            pid, name: String::from(name), regions: 0, total_bytes: 0,
-            maps: 0, unmaps: 0, protects: 0,
+            pid,
+            name: String::from(name),
+            regions: 0,
+            total_bytes: 0,
+            maps: 0,
+            unmaps: 0,
+            protects: 0,
         });
         Ok(())
     })
@@ -202,7 +222,10 @@ pub fn register_process(pid: u32, name: &str) -> KernelResult<()> {
 
 /// Per-process stats.
 pub fn per_process() -> Vec<ProcessMapStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.processes.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.processes.clone())
 }
 
 /// Type breakdown.
@@ -223,7 +246,14 @@ pub fn type_breakdown() -> [(MapType, u64); 6] {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.processes.len(), s.total_maps, s.total_unmaps, s.total_protects, s.total_bytes_mapped, s.ops),
+        Some(s) => (
+            s.processes.len(),
+            s.total_maps,
+            s.total_unmaps,
+            s.total_protects,
+            s.total_bytes_mapped,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -259,7 +289,11 @@ pub fn self_test() {
     // 3: Map — maps/regions/total_bytes increment exactly from zero.
     record_map(200, 4096, MapType::Anonymous).expect("map");
     record_map(200, 8192, MapType::File).expect("map2");
-    let p = per_process().iter().find(|p| p.pid == 200).cloned().expect("p200");
+    let p = per_process()
+        .iter()
+        .find(|p| p.pid == 200)
+        .cloned()
+        .expect("p200");
     assert_eq!(p.maps, 2);
     assert_eq!(p.regions, 2);
     assert_eq!(p.total_bytes, 4096 + 8192);
@@ -267,7 +301,11 @@ pub fn self_test() {
 
     // 4: Unmap — unmaps increments, regions/total_bytes decrement.
     record_unmap(200, 4096).expect("unmap");
-    let p = per_process().iter().find(|p| p.pid == 200).cloned().expect("p200");
+    let p = per_process()
+        .iter()
+        .find(|p| p.pid == 200)
+        .cloned()
+        .expect("p200");
     assert_eq!(p.unmaps, 1);
     assert_eq!(p.regions, 1);
     assert_eq!(p.total_bytes, 8192);
@@ -275,7 +313,11 @@ pub fn self_test() {
 
     // 5: Protect increments exactly from zero.
     record_protect(200).expect("protect");
-    let p = per_process().iter().find(|p| p.pid == 200).cloned().expect("p200");
+    let p = per_process()
+        .iter()
+        .find(|p| p.pid == 200)
+        .cloned()
+        .expect("p200");
     assert_eq!(p.protects, 1);
     crate::serial_println!("  [5/8] protect: OK");
 

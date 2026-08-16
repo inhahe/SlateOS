@@ -23,10 +23,10 @@
 //! roadmap.md line 750: "File extensions: .nx (executable), .dso (shared
 //! library), .slib (static library)"
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::Path;
@@ -162,7 +162,10 @@ pub fn default_app_for_file(path: impl AsRef<Path>) -> Option<Association> {
     if let Some(ext) = path.extension().and_then(Path::to_str) {
         let inner = ASSOC.lock();
         if let Some(mime) = inner.ext_override.get(ext) {
-            let result = inner.by_mime.get(mime.as_str()).and_then(|l| l.first().cloned());
+            let result = inner
+                .by_mime
+                .get(mime.as_str())
+                .and_then(|l| l.first().cloned());
             if result.is_some() {
                 return result;
             }
@@ -357,13 +360,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 1: register and lookup ---
     {
-        register(
-            "test/selftest",
-            "/usr/bin/test_app",
-            "Test App",
-            50,
-            false,
-        );
+        register("test/selftest", "/usr/bin/test_app", "Test App", 50, false);
 
         let app = default_app("test/selftest");
         if app.is_none() {
@@ -404,10 +401,7 @@ pub fn self_test() -> KernelResult<()> {
 
         let all = apps_for("test/selftest");
         if all.len() != 3 {
-            serial_println!(
-                "[assoc]   ERROR: expected 3 apps, got {}",
-                all.len()
-            );
+            serial_println!("[assoc]   ERROR: expected 3 apps, got {}", all.len());
             return Err(KernelError::InternalError);
         }
 
@@ -442,11 +436,18 @@ pub fn self_test() -> KernelResult<()> {
     {
         let st = stats();
         if st.total_entries < 2 {
-            serial_println!("[assoc]   ERROR: expected >= 2 entries, got {}", st.total_entries);
+            serial_println!(
+                "[assoc]   ERROR: expected >= 2 entries, got {}",
+                st.total_entries
+            );
             return Err(KernelError::InternalError);
         }
 
-        serial_println!("[assoc]   stats OK (types: {}, entries: {})", st.mime_types, st.total_entries);
+        serial_println!(
+            "[assoc]   stats OK (types: {}, entries: {})",
+            st.mime_types,
+            st.total_entries
+        );
     }
 
     // --- Test 5: list_types ---

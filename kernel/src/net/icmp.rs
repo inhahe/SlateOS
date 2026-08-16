@@ -146,7 +146,12 @@ fn record_outstanding(seq: u16, dst: Ipv4Addr) {
     // Find an empty slot (or reuse the oldest if full).
     for slot in table.iter_mut() {
         if !slot.active {
-            *slot = PingSlot { active: true, seq, sent_ns: now, dst };
+            *slot = PingSlot {
+                active: true,
+                seq,
+                sent_ns: now,
+                dst,
+            };
             return;
         }
     }
@@ -161,7 +166,12 @@ fn record_outstanding(seq: u16, dst: Ipv4Addr) {
         }
     }
     if let Some(slot) = table.get_mut(oldest_idx) {
-        *slot = PingSlot { active: true, seq, sent_ns: now, dst };
+        *slot = PingSlot {
+            active: true,
+            seq,
+            sent_ns: now,
+            dst,
+        };
     }
 }
 
@@ -484,21 +494,23 @@ fn notify_transport_error(icmp_data: &[u8], icmp_type: u8, icmp_code: u8) {
     // PMTUD (RFC 1191): for "Fragmentation Needed" (type 3, code 4),
     // extract the next-hop MTU from ICMP header bytes 6-7.  This
     // tells the sender the maximum packet size the path supports.
-    let next_hop_mtu = if icmp_type == ICMP_DEST_UNREACHABLE
-        && icmp_code == 4
-        && icmp_data.len() >= 8
-    {
-        let mtu = u16::from_be_bytes([icmp_data[6], icmp_data[7]]);
-        if mtu > 0 { Some(mtu) } else { None }
-    } else {
-        None
-    };
+    let next_hop_mtu =
+        if icmp_type == ICMP_DEST_UNREACHABLE && icmp_code == 4 && icmp_data.len() >= 8 {
+            let mtu = u16::from_be_bytes([icmp_data[6], icmp_data[7]]);
+            if mtu > 0 { Some(mtu) } else { None }
+        } else {
+            None
+        };
 
     match protocol {
         PROTO_TCP => {
             super::tcp::icmp_error(
-                src_ip, dst_ip, transport_hdr,
-                icmp_type, icmp_code, next_hop_mtu,
+                src_ip,
+                dst_ip,
+                transport_hdr,
+                icmp_type,
+                icmp_code,
+                next_hop_mtu,
             );
         }
         _ => {
@@ -559,10 +571,7 @@ fn time_exceeded_reason(code: u8) -> &'static str {
 /// `ns_id` is the namespace the packet arrived in.  Echo replies are sent
 /// from that namespace's interface address (so a ping to a container's IP
 /// is answered from the container's namespace, not the root namespace).
-pub fn process_icmp(
-    ip_packet: &Ipv4Packet<'_>,
-    ns_id: crate::netns::NetNsId,
-) -> KernelResult<()> {
+pub fn process_icmp(ip_packet: &Ipv4Packet<'_>, ns_id: crate::netns::NetNsId) -> KernelResult<()> {
     let data = ip_packet.payload;
     if data.len() < ICMP_HEADER_SIZE {
         return Ok(());
@@ -611,7 +620,10 @@ pub fn process_icmp(
                 let gw = Ipv4Addr::new(data[4], data[5], data[6], data[7]);
                 crate::serial_println!(
                     "[icmp] Redirect from {}: use gateway {} (code {}={})",
-                    ip_packet.src, gw, code, redirect_reason(code)
+                    ip_packet.src,
+                    gw,
+                    code,
+                    redirect_reason(code)
                 );
                 // Note: we don't update routing tables because we only
                 // have a single default gateway.  Log for diagnostics.
@@ -638,7 +650,9 @@ pub fn process_icmp(
             let pointer = if data.len() >= 5 { data[4] } else { 0 };
             crate::serial_println!(
                 "[icmp] Parameter problem from {}: pointer={} (code {})",
-                ip_packet.src, pointer, code
+                ip_packet.src,
+                pointer,
+                code
             );
             notify_transport_error(data, icmp_type, code);
         }
@@ -684,19 +698,20 @@ fn handle_echo_reply(ip_packet: &Ipv4Packet<'_>, data: &[u8]) {
             let rtt_ms = rtt_us / 1000;
             crate::serial_println!(
                 "[icmp] Echo reply from {} seq={} rtt={} ms",
-                ip_packet.src, seq, rtt_ms
+                ip_packet.src,
+                seq,
+                rtt_ms
             );
         } else {
             crate::serial_println!(
                 "[icmp] Echo reply from {} seq={} rtt={} us",
-                ip_packet.src, seq, rtt_us
+                ip_packet.src,
+                seq,
+                rtt_us
             );
         }
     } else {
-        crate::serial_println!(
-            "[icmp] Echo reply from {} seq={}",
-            ip_packet.src, seq
-        );
+        crate::serial_println!("[icmp] Echo reply from {} seq={}", ip_packet.src, seq);
     }
 
     // Store seq last — this is the signal that the reply arrived.
@@ -707,10 +722,7 @@ fn handle_echo_reply(ip_packet: &Ipv4Packet<'_>, data: &[u8]) {
 
 /// Send an ICMP echo reply in response to a request.
 #[allow(clippy::arithmetic_side_effects)]
-fn send_echo_reply(
-    request_ip: &Ipv4Packet<'_>,
-    ns_id: crate::netns::NetNsId,
-) -> KernelResult<()> {
+fn send_echo_reply(request_ip: &Ipv4Packet<'_>, ns_id: crate::netns::NetNsId) -> KernelResult<()> {
     let data = request_ip.payload;
     if data.len() < ICMP_HEADER_SIZE {
         return Ok(());
@@ -830,7 +842,11 @@ fn test_build_echo_request_checksum() -> KernelResult<()> {
 
     // Type must be Echo Request (8).
     if pkt[0] != ICMP_ECHO_REQUEST {
-        crate::serial_println!("[icmp]   FAIL: type = {}, expected {}", pkt[0], ICMP_ECHO_REQUEST);
+        crate::serial_println!(
+            "[icmp]   FAIL: type = {}, expected {}",
+            pkt[0],
+            ICMP_ECHO_REQUEST
+        );
         return Err(crate::error::KernelError::InternalError);
     }
 

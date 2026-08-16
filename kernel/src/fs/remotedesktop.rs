@@ -25,10 +25,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -203,7 +203,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         config: RdConfig::default(),
         sessions: Vec::new(),
@@ -214,7 +216,10 @@ pub fn init_defaults() {
 }
 
 pub fn set_enabled(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.enabled = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.enabled = enabled;
+        Ok(())
+    })
 }
 
 pub fn is_enabled() -> bool {
@@ -222,19 +227,31 @@ pub fn is_enabled() -> bool {
 }
 
 pub fn set_port(port: u16) -> KernelResult<()> {
-    with_state(|state| { state.config.port = port; Ok(()) })
+    with_state(|state| {
+        state.config.port = port;
+        Ok(())
+    })
 }
 
 pub fn set_require_auth(required: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.require_auth = required; Ok(()) })
+    with_state(|state| {
+        state.config.require_auth = required;
+        Ok(())
+    })
 }
 
 pub fn set_quality(quality: QualityPreset) -> KernelResult<()> {
-    with_state(|state| { state.config.quality = quality; Ok(()) })
+    with_state(|state| {
+        state.config.quality = quality;
+        Ok(())
+    })
 }
 
 pub fn set_clipboard_sharing(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.clipboard_sharing = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.clipboard_sharing = enabled;
+        Ok(())
+    })
 }
 
 pub fn get_config() -> KernelResult<RdConfig> {
@@ -242,12 +259,20 @@ pub fn get_config() -> KernelResult<RdConfig> {
 }
 
 /// Accept an incoming connection.
-pub fn accept_session(remote_host: &str, protocol: RdProtocol, username: &str) -> KernelResult<u32> {
+pub fn accept_session(
+    remote_host: &str,
+    protocol: RdProtocol,
+    username: &str,
+) -> KernelResult<u32> {
     with_state(|state| {
         if !state.config.enabled {
             return Err(KernelError::NotSupported);
         }
-        let active = state.sessions.iter().filter(|s| s.state == RdSessionState::Active).count();
+        let active = state
+            .sessions
+            .iter()
+            .filter(|s| s.state == RdSessionState::Active)
+            .count();
         if active >= state.config.max_sessions as usize {
             return Err(KernelError::ResourceExhausted);
         }
@@ -308,7 +333,10 @@ pub fn connect(host: &str, port: u16, protocol: RdProtocol) -> KernelResult<u32>
 /// Disconnect a session.
 pub fn disconnect(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.state = RdSessionState::Disconnected;
         Ok(())
@@ -319,18 +347,28 @@ pub fn disconnect(id: u32) -> KernelResult<()> {
 pub fn cleanup() -> KernelResult<usize> {
     with_state(|state| {
         let before = state.sessions.len();
-        state.sessions.retain(|s| s.state != RdSessionState::Disconnected);
+        state
+            .sessions
+            .retain(|s| s.state != RdSessionState::Disconnected);
         Ok(before - state.sessions.len())
     })
 }
 
 pub fn list_sessions() -> Vec<RdSession> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.sessions.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sessions.clone())
 }
 
 pub fn get_session(id: u32) -> KernelResult<RdSession> {
     with_state(|state| {
-        state.sessions.iter().find(|s| s.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
@@ -339,8 +377,18 @@ pub fn stats() -> (usize, u64, bool, u16, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let active = s.sessions.iter().filter(|sess| sess.state == RdSessionState::Active).count();
-            (active, s.total_connections, s.config.enabled, s.config.port, s.ops)
+            let active = s
+                .sessions
+                .iter()
+                .filter(|sess| sess.state == RdSessionState::Active)
+                .count();
+            (
+                active,
+                s.total_connections,
+                s.config.enabled,
+                s.config.port,
+                s.ops,
+            )
         }
         None => (0, 0, false, 0, 0),
     }

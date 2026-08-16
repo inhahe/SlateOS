@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -207,7 +207,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         config: DictationConfig::default(),
         state: DictationState::Idle,
@@ -276,11 +278,19 @@ pub fn resume() -> KernelResult<()> {
 
 /// Get current state.
 pub fn current_state() -> DictationState {
-    STATE.lock().as_ref().map_or(DictationState::Idle, |s| s.state)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(DictationState::Idle, |s| s.state)
 }
 
 /// Submit a transcription result (from speech engine).
-pub fn submit_transcription(text: &str, confidence: u8, duration_ms: u32, target_app: &str) -> KernelResult<u64> {
+pub fn submit_transcription(
+    text: &str,
+    confidence: u8,
+    duration_ms: u32,
+    target_app: &str,
+) -> KernelResult<u64> {
     with_state(|state| {
         let id = state.next_id;
         state.next_id += 1;
@@ -314,7 +324,11 @@ pub fn recent_transcriptions(count: usize) -> Vec<Transcription> {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let start = if s.history.len() > count { s.history.len() - count } else { 0 };
+            let start = if s.history.len() > count {
+                s.history.len() - count
+            } else {
+                0
+            };
             s.history[start..].iter().rev().cloned().collect()
         }
         None => Vec::new(),
@@ -322,19 +336,31 @@ pub fn recent_transcriptions(count: usize) -> Vec<Transcription> {
 }
 
 pub fn set_language(language: DictationLanguage) -> KernelResult<()> {
-    with_state(|state| { state.config.language = language; Ok(()) })
+    with_state(|state| {
+        state.config.language = language;
+        Ok(())
+    })
 }
 
 pub fn set_auto_punctuation(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.auto_punctuation = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.auto_punctuation = enabled;
+        Ok(())
+    })
 }
 
 pub fn set_profanity_filter(enabled: bool) -> KernelResult<()> {
-    with_state(|state| { state.config.profanity_filter = enabled; Ok(()) })
+    with_state(|state| {
+        state.config.profanity_filter = enabled;
+        Ok(())
+    })
 }
 
 pub fn set_hotkey(hotkey: &str) -> KernelResult<()> {
-    with_state(|state| { state.config.hotkey = String::from(hotkey); Ok(()) })
+    with_state(|state| {
+        state.config.hotkey = String::from(hotkey);
+        Ok(())
+    })
 }
 
 pub fn get_config() -> KernelResult<DictationConfig> {
@@ -361,7 +387,10 @@ pub fn add_vocab(phrase: &str, phonetic: &str) -> KernelResult<()> {
 /// Remove a custom vocabulary word.
 pub fn remove_vocab(phrase: &str) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.custom_vocab.iter().position(|v| v.phrase == phrase)
+        let pos = state
+            .custom_vocab
+            .iter()
+            .position(|v| v.phrase == phrase)
             .ok_or(KernelError::NotFound)?;
         state.custom_vocab.remove(pos);
         Ok(())
@@ -370,7 +399,10 @@ pub fn remove_vocab(phrase: &str) -> KernelResult<()> {
 
 /// List custom vocabulary.
 pub fn list_vocab() -> Vec<VocabEntry> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.custom_vocab.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.custom_vocab.clone())
 }
 
 /// Clear transcription history.
@@ -429,7 +461,8 @@ pub fn self_test() {
     crate::serial_println!("  [4/11] pause/resume: OK");
 
     // 5: Submit transcription.
-    let id = submit_transcription("Hello world this is a test", 95, 3000, "editor").expect("submit");
+    let id =
+        submit_transcription("Hello world this is a test", 95, 3000, "editor").expect("submit");
     assert!(id > 0);
     crate::serial_println!("  [5/11] submit transcription: OK");
 

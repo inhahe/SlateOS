@@ -25,10 +25,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -212,7 +212,15 @@ static QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 
 /// Register a column definition.
-pub fn register_column(id: &str, name: &str, col_type: ColumnType, category: ColumnCategory, width: u16, sortable: bool, app: &str) -> KernelResult<()> {
+pub fn register_column(
+    id: &str,
+    name: &str,
+    col_type: ColumnType,
+    category: ColumnCategory,
+    width: u16,
+    sortable: bool,
+    app: &str,
+) -> KernelResult<()> {
     let mut state = STATE.lock();
     if state.columns.len() >= MAX_COLUMNS {
         return Err(KernelError::ResourceExhausted);
@@ -235,7 +243,10 @@ pub fn register_column(id: &str, name: &str, col_type: ColumnType, category: Col
 /// Unregister a column (only app-defined columns can be removed).
 pub fn unregister_column(id: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
-    let col = state.columns.iter().find(|c| c.id == id)
+    let col = state
+        .columns
+        .iter()
+        .find(|c| c.id == id)
         .ok_or(KernelError::NotFound)?;
     if col.source_app.is_empty() {
         return Err(KernelError::PermissionDenied); // Built-in columns can't be removed.
@@ -250,13 +261,21 @@ pub fn unregister_column(id: &str) -> KernelResult<()> {
 
 /// Get a column definition.
 pub fn get_column(id: &str) -> KernelResult<ColumnDef> {
-    STATE.lock().columns.iter().find(|c| c.id == id).cloned().ok_or(KernelError::NotFound)
+    STATE
+        .lock()
+        .columns
+        .iter()
+        .find(|c| c.id == id)
+        .cloned()
+        .ok_or(KernelError::NotFound)
 }
 
 /// List all columns, optionally filtered by category.
 pub fn list_columns(category: Option<ColumnCategory>) -> Vec<ColumnDef> {
     let state = STATE.lock();
-    state.columns.iter()
+    state
+        .columns
+        .iter()
         .filter(|c| category.is_none_or(|cat| c.category == cat))
         .cloned()
         .collect()
@@ -293,7 +312,9 @@ pub fn unbind(mime_pattern: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
     let len = state.bindings.len();
     state.bindings.retain(|b| b.mime_pattern != mime_pattern);
-    if state.bindings.len() == len { return Err(KernelError::NotFound); }
+    if state.bindings.len() == len {
+        return Err(KernelError::NotFound);
+    }
     Ok(())
 }
 
@@ -308,8 +329,12 @@ pub fn list_bindings() -> Vec<TypeBinding> {
 
 /// Check if a MIME pattern matches a MIME type.
 fn pattern_matches(pattern: &str, mime: &str) -> bool {
-    if pattern == "*" { return true; }
-    if pattern == mime { return true; }
+    if pattern == "*" {
+        return true;
+    }
+    if pattern == mime {
+        return true;
+    }
     // Wildcard suffix: "audio/*" matches "audio/mpeg"
     if let Some(prefix) = pattern.strip_suffix("/*") {
         if let Some(type_prefix) = mime.split('/').next() {
@@ -333,7 +358,11 @@ pub fn columns_for_types(mime_types: &[&str]) -> Vec<ColumnDef> {
 
     for mime in mime_types {
         // Check user selections first.
-        if let Some(sel) = state.user_selections.iter().find(|s| pattern_matches(&s.mime_pattern, mime)) {
+        if let Some(sel) = state
+            .user_selections
+            .iter()
+            .find(|s| pattern_matches(&s.mime_pattern, mime))
+        {
             for cid in &sel.visible_columns {
                 if !seen_ids.iter().any(|s| s == cid) {
                     seen_ids.push(cid.clone());
@@ -381,7 +410,9 @@ pub fn columns_for_types(mime_types: &[&str]) -> Vec<ColumnDef> {
 /// Set user-visible columns for a MIME pattern.
 pub fn set_user_columns(mime_pattern: &str, column_ids: &[&str]) -> KernelResult<()> {
     let mut state = STATE.lock();
-    state.user_selections.retain(|s| s.mime_pattern != mime_pattern);
+    state
+        .user_selections
+        .retain(|s| s.mime_pattern != mime_pattern);
     if state.user_selections.len() >= MAX_USER_SELECTIONS {
         return Err(KernelError::ResourceExhausted);
     }
@@ -397,8 +428,12 @@ pub fn set_user_columns(mime_pattern: &str, column_ids: &[&str]) -> KernelResult
 pub fn clear_user_columns(mime_pattern: &str) -> KernelResult<()> {
     let mut state = STATE.lock();
     let len = state.user_selections.len();
-    state.user_selections.retain(|s| s.mime_pattern != mime_pattern);
-    if state.user_selections.len() == len { return Err(KernelError::NotFound); }
+    state
+        .user_selections
+        .retain(|s| s.mime_pattern != mime_pattern);
+    if state.user_selections.len() == len {
+        return Err(KernelError::NotFound);
+    }
     Ok(())
 }
 
@@ -414,7 +449,9 @@ pub fn list_user_selections() -> Vec<UserSelection> {
 /// Initialize built-in columns and default bindings.
 pub fn init_defaults() {
     let mut state = STATE.lock();
-    if !state.columns.is_empty() { return; }
+    if !state.columns.is_empty() {
+        return;
+    }
 
     // --- Standard columns (always available) ---
     let std_cols = [
@@ -429,9 +466,13 @@ pub fn init_defaults() {
     ];
     for &(id, name, ct, w) in &std_cols {
         state.columns.push(ColumnDef {
-            id: String::from(id), display_name: String::from(name),
-            col_type: ct, category: ColumnCategory::Standard,
-            default_width: w, sortable: true, source_app: String::new(),
+            id: String::from(id),
+            display_name: String::from(name),
+            col_type: ct,
+            category: ColumnCategory::Standard,
+            default_width: w,
+            sortable: true,
+            source_app: String::new(),
         });
     }
 
@@ -451,9 +492,13 @@ pub fn init_defaults() {
     ];
     for &(id, name, ct, w) in &audio_cols {
         state.columns.push(ColumnDef {
-            id: String::from(id), display_name: String::from(name),
-            col_type: ct, category: ColumnCategory::Audio,
-            default_width: w, sortable: true, source_app: String::new(),
+            id: String::from(id),
+            display_name: String::from(name),
+            col_type: ct,
+            category: ColumnCategory::Audio,
+            default_width: w,
+            sortable: true,
+            source_app: String::new(),
         });
     }
 
@@ -471,9 +516,13 @@ pub fn init_defaults() {
     ];
     for &(id, name, ct, w) in &image_cols {
         state.columns.push(ColumnDef {
-            id: String::from(id), display_name: String::from(name),
-            col_type: ct, category: ColumnCategory::Image,
-            default_width: w, sortable: true, source_app: String::new(),
+            id: String::from(id),
+            display_name: String::from(name),
+            col_type: ct,
+            category: ColumnCategory::Image,
+            default_width: w,
+            sortable: true,
+            source_app: String::new(),
         });
     }
 
@@ -488,9 +537,13 @@ pub fn init_defaults() {
     ];
     for &(id, name, ct, w) in &video_cols {
         state.columns.push(ColumnDef {
-            id: String::from(id), display_name: String::from(name),
-            col_type: ct, category: ColumnCategory::Video,
-            default_width: w, sortable: true, source_app: String::new(),
+            id: String::from(id),
+            display_name: String::from(name),
+            col_type: ct,
+            category: ColumnCategory::Video,
+            default_width: w,
+            sortable: true,
+            source_app: String::new(),
         });
     }
 
@@ -503,23 +556,36 @@ pub fn init_defaults() {
     ];
     for &(id, name, ct, w) in &doc_cols {
         state.columns.push(ColumnDef {
-            id: String::from(id), display_name: String::from(name),
-            col_type: ct, category: ColumnCategory::Document,
-            default_width: w, sortable: true, source_app: String::new(),
+            id: String::from(id),
+            display_name: String::from(name),
+            col_type: ct,
+            category: ColumnCategory::Document,
+            default_width: w,
+            sortable: true,
+            source_app: String::new(),
         });
     }
 
     // --- Archive columns ---
     let arch_cols = [
         ("archive.files", "File Count", ColumnType::Integer, 8),
-        ("archive.compressed", "Compressed Size", ColumnType::Size, 12),
+        (
+            "archive.compressed",
+            "Compressed Size",
+            ColumnType::Size,
+            12,
+        ),
         ("archive.ratio", "Ratio", ColumnType::Float, 6),
     ];
     for &(id, name, ct, w) in &arch_cols {
         state.columns.push(ColumnDef {
-            id: String::from(id), display_name: String::from(name),
-            col_type: ct, category: ColumnCategory::Archive,
-            default_width: w, sortable: true, source_app: String::new(),
+            id: String::from(id),
+            display_name: String::from(name),
+            col_type: ct,
+            category: ColumnCategory::Archive,
+            default_width: w,
+            sortable: true,
+            source_app: String::new(),
         });
     }
 
@@ -576,10 +642,17 @@ pub fn init_defaults() {
 /// Returns (column_count, binding_count, user_selection_count, queries).
 pub fn stats() -> (usize, usize, usize, u64) {
     let state = STATE.lock();
-    (state.columns.len(), state.bindings.len(), state.user_selections.len(), QUERY_COUNT.load(Ordering::Relaxed))
+    (
+        state.columns.len(),
+        state.bindings.len(),
+        state.user_selections.len(),
+        QUERY_COUNT.load(Ordering::Relaxed),
+    )
 }
 
-pub fn reset_stats() { QUERY_COUNT.store(0, Ordering::Relaxed); }
+pub fn reset_stats() {
+    QUERY_COUNT.store(0, Ordering::Relaxed);
+}
 
 pub fn clear_all() {
     let mut state = STATE.lock();
@@ -626,7 +699,15 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 5: Custom column registration.
     serial_println!("  detailcols::self_test 5: custom column");
-    register_column("app.myfield", "My Field", ColumnType::Text, ColumnCategory::AppDefined, 15, true, "myapp")?;
+    register_column(
+        "app.myfield",
+        "My Field",
+        ColumnType::Text,
+        ColumnCategory::AppDefined,
+        15,
+        true,
+        "myapp",
+    )?;
     let col = get_column("app.myfield")?;
     assert_eq!(col.display_name, "My Field");
     bind_columns("text/plain", &["app.myfield"])?;

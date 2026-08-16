@@ -20,11 +20,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -35,10 +35,10 @@ use crate::error::{KernelError, KernelResult};
 /// DNS protocol type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsProtocol {
-    Plain,       // Standard DNS (port 53).
-    Doh,         // DNS-over-HTTPS.
-    Dot,         // DNS-over-TLS.
-    Dnscrypt,    // DNSCrypt.
+    Plain,    // Standard DNS (port 53).
+    Doh,      // DNS-over-HTTPS.
+    Dot,      // DNS-over-TLS.
+    Dnscrypt, // DNSCrypt.
 }
 
 impl DnsProtocol {
@@ -110,12 +110,35 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         servers: alloc::vec![
-            DnsServer { address: String::from("1.1.1.1"), protocol: DnsProtocol::Plain, priority: 1, is_active: true, queries_sent: 0, failures: 0 },
-            DnsServer { address: String::from("8.8.8.8"), protocol: DnsProtocol::Plain, priority: 2, is_active: true, queries_sent: 0, failures: 0 },
-            DnsServer { address: String::from("https://dns.cloudflare.com/dns-query"), protocol: DnsProtocol::Doh, priority: 3, is_active: false, queries_sent: 0, failures: 0 },
+            DnsServer {
+                address: String::from("1.1.1.1"),
+                protocol: DnsProtocol::Plain,
+                priority: 1,
+                is_active: true,
+                queries_sent: 0,
+                failures: 0
+            },
+            DnsServer {
+                address: String::from("8.8.8.8"),
+                protocol: DnsProtocol::Plain,
+                priority: 2,
+                is_active: true,
+                queries_sent: 0,
+                failures: 0
+            },
+            DnsServer {
+                address: String::from("https://dns.cloudflare.com/dns-query"),
+                protocol: DnsProtocol::Doh,
+                priority: 3,
+                is_active: false,
+                queries_sent: 0,
+                failures: 0
+            },
         ],
         search_domains: alloc::vec![String::from("local")],
         cache: Vec::new(),
@@ -136,8 +159,12 @@ pub fn add_server(address: &str, protocol: DnsProtocol, priority: u32) -> Kernel
             return Err(KernelError::AlreadyExists);
         }
         state.servers.push(DnsServer {
-            address: String::from(address), protocol, priority,
-            is_active: true, queries_sent: 0, failures: 0,
+            address: String::from(address),
+            protocol,
+            priority,
+            is_active: true,
+            queries_sent: 0,
+            failures: 0,
         });
         state.servers.sort_by_key(|s| s.priority);
         Ok(())
@@ -149,7 +176,9 @@ pub fn remove_server(address: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.servers.len();
         state.servers.retain(|s| s.address != address);
-        if state.servers.len() == before { return Err(KernelError::NotFound); }
+        if state.servers.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -157,7 +186,10 @@ pub fn remove_server(address: &str) -> KernelResult<()> {
 /// Set server active/inactive.
 pub fn set_server_active(address: &str, active: bool) -> KernelResult<()> {
     with_state(|state| {
-        let srv = state.servers.iter_mut().find(|s| s.address == address)
+        let srv = state
+            .servers
+            .iter_mut()
+            .find(|s| s.address == address)
             .ok_or(KernelError::NotFound)?;
         srv.is_active = active;
         Ok(())
@@ -180,7 +212,9 @@ pub fn remove_search_domain(domain: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.search_domains.len();
         state.search_domains.retain(|d| d != domain);
-        if state.search_domains.len() == before { return Err(KernelError::NotFound); }
+        if state.search_domains.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -195,16 +229,32 @@ pub fn resolve(name: &str) -> KernelResult<String> {
             return Ok(entry.address.clone());
         }
         // Find active server.
-        let server = state.servers.iter_mut().find(|s| s.is_active)
+        let server = state
+            .servers
+            .iter_mut()
+            .find(|s| s.is_active)
             .ok_or(KernelError::NotFound)?;
         server.queries_sent += 1;
         // Simulate resolution: generate a fake IP based on name hash.
-        let hash: u32 = name.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-        let ip = format!("{}.{}.{}.{}", (hash >> 24) & 0xFF, (hash >> 16) & 0xFF, (hash >> 8) & 0xFF, hash & 0xFF);
+        let hash: u32 = name
+            .bytes()
+            .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+        let ip = format!(
+            "{}.{}.{}.{}",
+            (hash >> 24) & 0xFF,
+            (hash >> 16) & 0xFF,
+            (hash >> 8) & 0xFF,
+            hash & 0xFF
+        );
         let now = crate::hpet::elapsed_ns();
-        if state.cache.len() >= MAX_CACHE { state.cache.remove(0); }
+        if state.cache.len() >= MAX_CACHE {
+            state.cache.remove(0);
+        }
         state.cache.push(DnsRecord {
-            name: String::from(name), address: ip.clone(), ttl_sec: 300, cached_ns: now,
+            name: String::from(name),
+            address: ip.clone(),
+            ttl_sec: 300,
+            cached_ns: now,
         });
         Ok(ip)
     })
@@ -221,12 +271,18 @@ pub fn flush_cache() -> KernelResult<usize> {
 
 /// List DNS servers.
 pub fn list_servers() -> Vec<DnsServer> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.servers.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.servers.clone())
 }
 
 /// List search domains.
 pub fn list_search_domains() -> Vec<String> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.search_domains.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.search_domains.clone())
 }
 
 /// Cache size.
@@ -238,7 +294,14 @@ pub fn cache_size() -> usize {
 pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.servers.len(), s.cache.len(), s.total_queries, s.total_cache_hits, s.total_failures, s.ops),
+        Some(s) => (
+            s.servers.len(),
+            s.cache.len(),
+            s.total_queries,
+            s.total_cache_hits,
+            s.total_failures,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }

@@ -104,9 +104,8 @@ pub fn process_frame(data: &[u8], ns_id: crate::netns::NetNsId) -> KernelResult<
     // the prefix 01:00:5e (IEEE 802.3 §7.8).  The low bit of the first
     // octet being set indicates a multicast MAC (group address).
     let our_mac = super::interface::ns_mac(ns_id);
-    let is_for_us = frame.dst.0 == our_mac.0
-        || frame.dst.0 == BROADCAST_MAC.0
-        || (frame.dst.0[0] & 0x01) != 0; // Multicast bit set.
+    let is_for_us =
+        frame.dst.0 == our_mac.0 || frame.dst.0 == BROADCAST_MAC.0 || (frame.dst.0[0] & 0x01) != 0; // Multicast bit set.
 
     if !is_for_us {
         return Ok(()); // Not for us, silently drop.
@@ -168,9 +167,7 @@ fn test_parse_valid_frame() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if frame.ethertype != ETHERTYPE_IPV4 {
-        crate::serial_println!(
-            "[ethernet]   FAIL: ethertype = {:#06x}", frame.ethertype
-        );
+        crate::serial_println!("[ethernet]   FAIL: ethertype = {:#06x}", frame.ethertype);
         return Err(KernelError::InternalError);
     }
     if frame.payload != [1, 2, 3, 4] {
@@ -218,9 +215,7 @@ fn test_build_frame_roundtrip() -> KernelResult<()> {
 
     // Should be 14 + 4 = 18 bytes.
     if frame_bytes.len() != 18 {
-        crate::serial_println!(
-            "[ethernet]   FAIL: frame length = {}", frame_bytes.len()
-        );
+        crate::serial_println!("[ethernet]   FAIL: frame length = {}", frame_bytes.len());
         return Err(KernelError::InternalError);
     }
 

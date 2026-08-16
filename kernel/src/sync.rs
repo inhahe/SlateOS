@@ -139,7 +139,8 @@ impl ContentionStats {
     fn record_contended(&self, wait_cycles: u64) {
         self.acquisitions.fetch_add(1, Ordering::Relaxed);
         self.contentions.fetch_add(1, Ordering::Relaxed);
-        self.total_wait_cycles.fetch_add(wait_cycles, Ordering::Relaxed);
+        self.total_wait_cycles
+            .fetch_add(wait_cycles, Ordering::Relaxed);
         // Update max via CAS loop.
         let mut cur = self.max_wait_cycles.load(Ordering::Relaxed);
         while wait_cycles > cur {
@@ -158,7 +159,8 @@ impl ContentionStats {
     /// Record lock hold duration when the guard is dropped.
     #[inline]
     fn record_hold(&self, hold_cycles: u64) {
-        self.total_hold_cycles.fetch_add(hold_cycles, Ordering::Relaxed);
+        self.total_hold_cycles
+            .fetch_add(hold_cycles, Ordering::Relaxed);
         // Update max hold via CAS loop.
         let mut cur = self.max_hold_cycles.load(Ordering::Relaxed);
         while hold_cycles > cur {
@@ -256,7 +258,9 @@ fn register_lock(stats: &ContentionStats, name: &'static [u8]) {
         return;
     }
     let entry = &LOCK_REGISTRY[idx];
-    entry.stats.store(stats as *const ContentionStats as u64, Ordering::Release);
+    entry
+        .stats
+        .store(stats as *const ContentionStats as u64, Ordering::Release);
     entry.name.store(name.as_ptr() as u64, Ordering::Release);
     entry.name_len.store(name.len() as u64, Ordering::Release);
 }
@@ -287,8 +291,7 @@ pub struct LockStatSnapshot {
 #[must_use]
 pub fn lock_stats() -> [Option<LockStatSnapshot>; MAX_TRACKED_LOCKS] {
     let count = REGISTRY_COUNT.load(Ordering::Acquire) as usize;
-    let mut result: [Option<LockStatSnapshot>; MAX_TRACKED_LOCKS] =
-        [None; MAX_TRACKED_LOCKS];
+    let mut result: [Option<LockStatSnapshot>; MAX_TRACKED_LOCKS] = [None; MAX_TRACKED_LOCKS];
 
     for i in 0..count.min(MAX_TRACKED_LOCKS) {
         let entry = &LOCK_REGISTRY[i];
@@ -305,9 +308,7 @@ pub fn lock_stats() -> [Option<LockStatSnapshot>; MAX_TRACKED_LOCKS] {
         // the lifetime of the kernel.
         let stats = unsafe { &*(stats_ptr as *const ContentionStats) };
         // SAFETY: Same — name is a &'static [u8] from a string literal.
-        let name = unsafe {
-            core::slice::from_raw_parts(name_ptr as *const u8, name_len)
-        };
+        let name = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, name_len) };
 
         result[i] = Some(LockStatSnapshot {
             name,
@@ -410,9 +411,11 @@ impl<T> Mutex<T> {
             return;
         }
         // Slow path: register (CAS to avoid double-registration).
-        if self.registered.compare_exchange(
-            0, 1, Ordering::AcqRel, Ordering::Relaxed
-        ).is_ok() {
+        if self
+            .registered
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
             register_lock(&self.stats, self.name);
         }
     }
@@ -781,7 +784,11 @@ fn report_spin_stall(name: &'static [u8], owner: &AtomicU64, iters: u64) {
          spinning (cpu {}, task {}, {} iters). Likely self-deadlock or lock convoy; \
          the timer-driven liveness watchdog is blind to this if interrupts are \
          disabled.",
-        name, STALL_SECONDS, cpu, tid, iters
+        name,
+        STALL_SECONDS,
+        cpu,
+        tid,
+        iters
     );
     // Name the holder: if `owner == tid`, this is a recursive self-deadlock
     // (the spinning task already holds the lock); if `owner` is some other
@@ -792,19 +799,24 @@ fn report_spin_stall(name: &'static [u8], owner: &AtomicU64, iters: u64) {
         serial_println!(
             "[sync]   lock '{}' holder: NONE recorded (owner=unheld) — \
              lost-unlock or flag desync; spinner is task {} on cpu {}",
-            name, tid, cpu
+            name,
+            tid,
+            cpu
         );
     } else if owner == tid {
         serial_println!(
             "[sync]   lock '{}' holder: task {} == spinner — RECURSIVE \
              self-deadlock (same task re-entered the lock)",
-            name, owner
+            name,
+            owner
         );
     } else {
         serial_println!(
             "[sync]   lock '{}' holder: task {} (spinner is task {}) — guard \
              held by another task; check whether it is still alive",
-            name, owner, tid
+            name,
+            owner,
+            tid
         );
     }
     // The single most useful clue: what else this CPU already holds.

@@ -41,9 +41,9 @@
 // commands; many helpers may not have call sites in production paths yet.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use crate::serial_println;
 use crate::mm::frame::{self, FRAME_SIZE};
+use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -151,8 +151,11 @@ pub fn init() {
         let end = (fstats.total_frames as u64).saturating_mul(FRAME_SIZE as u64);
         SCRUB_END.store(end, Ordering::Release);
         CURSOR.store(0, Ordering::Release);
-        serial_println!("[scrub] Initialized: range 0..{:#x} ({} MiB)",
-            end, end / (1024 * 1024));
+        serial_println!(
+            "[scrub] Initialized: range 0..{:#x} ({} MiB)",
+            end,
+            end / (1024 * 1024)
+        );
     } else {
         serial_println!("[scrub] Warning: frame allocator not ready, scrub range = 0");
     }
@@ -275,8 +278,11 @@ pub fn self_test() {
     init();
     let s = stats();
     assert!(s.range_end > 0, "scrub range should be non-zero after init");
-    serial_println!("[scrub]   Init: range_end={:#x} ({} MiB)",
-        s.range_end, s.range_end / (1024 * 1024));
+    serial_println!(
+        "[scrub]   Init: range_end={:#x} ({} MiB)",
+        s.range_end,
+        s.range_end / (1024 * 1024)
+    );
 
     // Test 2: Disabled by default.
     assert!(!s.enabled);
@@ -312,7 +318,10 @@ pub fn self_test() {
     let s = stats();
     assert_eq!(s.steps, 3);
     assert!(s.total_bytes >= SCRUB_STEP_BYTES as u64 * 3);
-    serial_println!("[scrub]   Multiple steps: OK (total={} bytes)", s.total_bytes);
+    serial_println!(
+        "[scrub]   Multiple steps: OK (total={} bytes)",
+        s.total_bytes
+    );
 
     // Test 8: Error count starts at 0.
     assert_eq!(error_count(), 0);

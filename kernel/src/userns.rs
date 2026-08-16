@@ -39,10 +39,10 @@
 //! - `man 7 user_namespaces`
 //! - Design spec: container primitives for Docker support
 
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -92,7 +92,8 @@ impl IdMapping {
     #[inline]
     fn contains_inner(&self, inner_id: u32) -> bool {
         inner_id >= self.inner_start
-            && inner_id.checked_sub(self.inner_start)
+            && inner_id
+                .checked_sub(self.inner_start)
                 .is_some_and(|offset| offset < self.count)
     }
 
@@ -100,7 +101,8 @@ impl IdMapping {
     #[inline]
     fn contains_outer(&self, outer_id: u32) -> bool {
         outer_id >= self.outer_start
-            && outer_id.checked_sub(self.outer_start)
+            && outer_id
+                .checked_sub(self.outer_start)
                 .is_some_and(|offset| offset < self.count)
     }
 
@@ -110,7 +112,8 @@ impl IdMapping {
         if !self.contains_inner(inner_id) {
             return None;
         }
-        inner_id.checked_sub(self.inner_start)
+        inner_id
+            .checked_sub(self.inner_start)
             .and_then(|offset| self.outer_start.checked_add(offset))
     }
 
@@ -120,7 +123,8 @@ impl IdMapping {
         if !self.contains_outer(outer_id) {
             return None;
         }
-        outer_id.checked_sub(self.outer_start)
+        outer_id
+            .checked_sub(self.outer_start)
             .and_then(|offset| self.inner_start.checked_add(offset))
     }
 }
@@ -277,7 +281,9 @@ pub fn create(parent: UserNsId, owner_uid: u32) -> KernelResult<UserNsId> {
         for offset in 0..MAX_NAMESPACES {
             #[allow(clippy::arithmetic_side_effects)]
             let idx = (start + offset) % MAX_NAMESPACES;
-            if idx == 0 { continue; }
+            if idx == 0 {
+                continue;
+            }
             if !table.namespaces[idx].active {
                 found = Some(idx);
                 break;
@@ -574,8 +580,7 @@ pub fn attach_process(ns_id: UserNsId) -> KernelResult<()> {
         if idx >= MAX_NAMESPACES || !table.namespaces[idx].active {
             return Err(KernelError::InvalidArgument);
         }
-        table.namespaces[idx].nr_procs =
-            table.namespaces[idx].nr_procs.saturating_add(1);
+        table.namespaces[idx].nr_procs = table.namespaces[idx].nr_procs.saturating_add(1);
         Ok(())
     })
 }
@@ -587,8 +592,7 @@ pub fn detach_process(ns_id: UserNsId) -> KernelResult<()> {
         if idx >= MAX_NAMESPACES || !table.namespaces[idx].active {
             return Err(KernelError::InvalidArgument);
         }
-        table.namespaces[idx].nr_procs =
-            table.namespaces[idx].nr_procs.saturating_sub(1);
+        table.namespaces[idx].nr_procs = table.namespaces[idx].nr_procs.saturating_sub(1);
         Ok(())
     })
 }
@@ -631,9 +635,7 @@ pub fn exists(id: UserNsId) -> bool {
 /// Count active namespaces.
 #[must_use]
 pub fn active_count() -> usize {
-    with_table_ref(|table| {
-        table.namespaces.iter().filter(|ns| ns.active).count()
-    })
+    with_table_ref(|table| table.namespaces.iter().filter(|ns| ns.active).count())
 }
 
 /// Get the UID mappings for a namespace.
@@ -702,7 +704,7 @@ pub fn self_test() {
 
     // Test 4: Add UID mapping — inner 0-999 → outer 100000-100999.
     add_uid_mapping(ns1, 0, 100_000, 1000).expect("add uid mapping");
-    assert_eq!(uid_to_outer(ns1, 0), 100_000);  // root inside → 100000 outside
+    assert_eq!(uid_to_outer(ns1, 0), 100_000); // root inside → 100000 outside
     assert_eq!(uid_to_outer(ns1, 999), 100_999);
     assert_eq!(uid_to_outer(ns1, 1000), OVERFLOW_ID); // Unmapped.
     serial_println!("[userns]   UID inner→outer: OK");

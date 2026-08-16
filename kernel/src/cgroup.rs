@@ -62,10 +62,10 @@
 //! - Design spec: "set resource limits at process launch, let the
 //!   kernel enforce them" (line 594)
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use crate::sync::Mutex;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Global flag: `true` when any non-root cgroup has a memory limit set.
 ///
@@ -346,38 +346,30 @@ impl CgroupTable {
                 // AtomicU64 doesn't impl Copy.  Macro alternative:
                 const EMPTY: CgroupNode = CgroupNode::empty();
                 [
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
-                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                    EMPTY, EMPTY, EMPTY,
                 ]
             },
             next_id: 1, // 0 is the root, start allocating at 1.
@@ -433,7 +425,9 @@ pub fn create(parent: CgroupId) -> KernelResult<CgroupId> {
     let idx = found.ok_or(KernelError::ResourceExhausted)?;
 
     table.nodes[idx].init(parent);
-    table.nodes[parent_idx].nr_children.fetch_add(1, Ordering::Relaxed);
+    table.nodes[parent_idx]
+        .nr_children
+        .fetch_add(1, Ordering::Relaxed);
 
     // Advance next_id hint.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
@@ -475,7 +469,9 @@ pub fn delete(id: CgroupId) -> KernelResult<()> {
     // Decrement parent's child count.
     let parent = table.nodes[idx].parent as usize;
     if parent < MAX_CGROUPS && table.nodes[parent].active {
-        table.nodes[parent].nr_children.fetch_sub(1, Ordering::Relaxed);
+        table.nodes[parent]
+            .nr_children
+            .fetch_sub(1, Ordering::Relaxed);
     }
 
     // Mark slot as free.
@@ -597,7 +593,9 @@ pub fn cpu_charge(cgroup_id: CgroupId) -> bool {
         return false;
     }
 
-    let used = node.cpu_used.fetch_add(1, Ordering::Relaxed)
+    let used = node
+        .cpu_used
+        .fetch_add(1, Ordering::Relaxed)
         .saturating_add(1);
 
     if used >= node.cpu_quota {
@@ -701,7 +699,9 @@ pub fn mem_charge(cgroup_id: CgroupId, count: u64) -> KernelResult<()> {
 
     // Unlimited memory — always allow.
     if node.mem_limit == 0 {
-        let new_val = node.mem_usage.fetch_add(count, Ordering::Relaxed)
+        let new_val = node
+            .mem_usage
+            .fetch_add(count, Ordering::Relaxed)
             .saturating_add(count);
         update_mem_peak(node, new_val);
         return Ok(());
@@ -718,9 +718,11 @@ pub fn mem_charge(cgroup_id: CgroupId, count: u64) -> KernelResult<()> {
         if new_val > node.mem_limit {
             return Err(KernelError::OutOfMemory);
         }
-        if node.mem_usage.compare_exchange_weak(
-            current, new_val, Ordering::Relaxed, Ordering::Relaxed,
-        ).is_ok() {
+        if node
+            .mem_usage
+            .compare_exchange_weak(current, new_val, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
             update_mem_peak(node, new_val);
             return Ok(());
         }
@@ -746,7 +748,9 @@ pub fn mem_uncharge(cgroup_id: CgroupId, count: u64) {
         return;
     }
 
-    let old = table.nodes[idx].mem_usage.fetch_sub(count, Ordering::Relaxed);
+    let old = table.nodes[idx]
+        .mem_usage
+        .fetch_sub(count, Ordering::Relaxed);
     if old < count {
         // Underflow — fix up.
         table.nodes[idx].mem_usage.store(0, Ordering::Relaxed);
@@ -761,9 +765,11 @@ fn update_mem_peak(node: &CgroupNode, new_val: u64) {
         if new_val <= peak {
             break;
         }
-        if node.mem_peak.compare_exchange_weak(
-            peak, new_val, Ordering::Relaxed, Ordering::Relaxed,
-        ).is_ok() {
+        if node
+            .mem_peak
+            .compare_exchange_weak(peak, new_val, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
             break;
         }
     }
@@ -793,7 +799,10 @@ impl IoLimit {
     /// No I/O limit (unlimited ops and bytes).
     #[must_use]
     pub const fn unlimited() -> Self {
-        Self { ops_max: 0, bytes_max: 0 }
+        Self {
+            ops_max: 0,
+            bytes_max: 0,
+        }
     }
 
     /// I/O limit with specified ops and bytes per period.
@@ -858,7 +867,9 @@ pub fn io_charge(cgroup_id: CgroupId, frames: u64) -> bool {
 
     // Check ops limit.
     let ops_exceeded = if node.io_ops_limit > 0 {
-        let used = node.io_ops_used.fetch_add(1, Ordering::Relaxed)
+        let used = node
+            .io_ops_used
+            .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         used > node.io_ops_limit
     } else {
@@ -868,7 +879,9 @@ pub fn io_charge(cgroup_id: CgroupId, frames: u64) -> bool {
 
     // Check bytes limit.
     let bytes_exceeded = if node.io_bytes_limit > 0 {
-        let used = node.io_bytes_used.fetch_add(frames, Ordering::Relaxed)
+        let used = node
+            .io_bytes_used
+            .fetch_add(frames, Ordering::Relaxed)
             .saturating_add(frames);
         used > node.io_bytes_limit
     } else {
@@ -907,7 +920,11 @@ pub fn io_would_throttle(cgroup_id: CgroupId, frames: u64) -> bool {
         && node.io_ops_used.load(Ordering::Relaxed).saturating_add(1) > node.io_ops_limit;
 
     let bytes_over = node.io_bytes_limit > 0
-        && node.io_bytes_used.load(Ordering::Relaxed).saturating_add(frames) > node.io_bytes_limit;
+        && node
+            .io_bytes_used
+            .load(Ordering::Relaxed)
+            .saturating_add(frames)
+            > node.io_bytes_limit;
 
     ops_over || bytes_over
 }
@@ -948,7 +965,11 @@ pub fn effective_io_ops_limit(id: CgroupId) -> u64 {
         }
         let limit = table.nodes[current].io_ops_limit;
         if limit > 0 {
-            min_limit = if min_limit == 0 { limit } else { min_limit.min(limit) };
+            min_limit = if min_limit == 0 {
+                limit
+            } else {
+                min_limit.min(limit)
+            };
         }
         let parent = table.nodes[current].parent;
         if parent == NO_PARENT || parent as usize == current {
@@ -977,7 +998,11 @@ pub fn effective_io_bytes_limit(id: CgroupId) -> u64 {
         }
         let limit = table.nodes[current].io_bytes_limit;
         if limit > 0 {
-            min_limit = if min_limit == 0 { limit } else { min_limit.min(limit) };
+            min_limit = if min_limit == 0 {
+                limit
+            } else {
+                min_limit.min(limit)
+            };
         }
         let parent = table.nodes[current].parent;
         if parent == NO_PARENT || parent as usize == current {
@@ -1123,7 +1148,11 @@ pub fn effective_cpu_quota(id: CgroupId) -> u64 {
         }
         let quota = table.nodes[current].cpu_quota;
         if quota > 0 {
-            min_quota = if min_quota == 0 { quota } else { min_quota.min(quota) };
+            min_quota = if min_quota == 0 {
+                quota
+            } else {
+                min_quota.min(quota)
+            };
         }
         let parent = table.nodes[current].parent;
         if parent == NO_PARENT || parent as usize == current {
@@ -1151,7 +1180,11 @@ pub fn effective_mem_limit(id: CgroupId) -> u64 {
         }
         let limit = table.nodes[current].mem_limit;
         if limit > 0 {
-            min_limit = if min_limit == 0 { limit } else { min_limit.min(limit) };
+            min_limit = if min_limit == 0 {
+                limit
+            } else {
+                min_limit.min(limit)
+            };
         }
         let parent = table.nodes[current].parent;
         if parent == NO_PARENT || parent as usize == current {
@@ -1267,8 +1300,7 @@ fn self_test_inner() {
     serial_println!("[cgroup]   Delete with tasks rejected: OK");
 
     // Test 10: CPU controller — set limit and charge.
-    set_cpu_limit(child2, CpuLimit::from_percent(10))
-        .expect("set cpu limit");
+    set_cpu_limit(child2, CpuLimit::from_percent(10)).expect("set cpu limit");
 
     // Charge 9 ticks — should be fine (limit is 10).
     for _ in 0..9 {
@@ -1367,7 +1399,10 @@ fn self_test_inner() {
     serial_println!("[cgroup]   Effective memory limits: OK");
 
     // Test 18: Stats query for non-existent cgroup.
-    assert!(stats(250).is_none(), "stats for non-existent should be None");
+    assert!(
+        stats(250).is_none(),
+        "stats for non-existent should be None"
+    );
     serial_println!("[cgroup]   Stats non-existent: OK");
 
     // Test 19: I/O controller — set limit and charge ops.
@@ -1437,11 +1472,17 @@ fn self_test_inner() {
     // Test 24: io_would_throttle pre-check.
     io_period_reset();
     set_io_limit(child2, IoLimit::new(5, 0)).expect("small ops limit");
-    assert!(!io_would_throttle(child2, 1), "should not throttle initially");
+    assert!(
+        !io_would_throttle(child2, 1),
+        "should not throttle initially"
+    );
     for _ in 0..5 {
         io_charge(child2, 1);
     }
-    assert!(io_would_throttle(child2, 1), "should throttle after limit reached");
+    assert!(
+        io_would_throttle(child2, 1),
+        "should throttle after limit reached"
+    );
     io_period_reset();
     serial_println!("[cgroup]   I/O would_throttle pre-check: OK");
 

@@ -20,11 +20,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -53,7 +53,13 @@ impl PrefValue {
         match self {
             Self::Str(s) => s.clone(),
             Self::Int(v) => format!("{}", v),
-            Self::Bool(v) => if *v { String::from("true") } else { String::from("false") },
+            Self::Bool(v) => {
+                if *v {
+                    String::from("true")
+                } else {
+                    String::from("false")
+                }
+            }
         }
     }
 }
@@ -111,20 +117,34 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        apps: alloc::vec![
-            AppPrefs {
-                app_name: String::from("system"),
-                entries: alloc::vec![
-                    PrefEntry { key: String::from("theme"), value: PrefValue::Str(String::from("dark")), modified_ns: now },
-                    PrefEntry { key: String::from("font_size"), value: PrefValue::Int(14), modified_ns: now },
-                    PrefEntry { key: String::from("animations"), value: PrefValue::Bool(true), modified_ns: now },
-                ],
-                total_reads: 0, total_writes: 0, created_ns: now,
-            },
-        ],
+        apps: alloc::vec![AppPrefs {
+            app_name: String::from("system"),
+            entries: alloc::vec![
+                PrefEntry {
+                    key: String::from("theme"),
+                    value: PrefValue::Str(String::from("dark")),
+                    modified_ns: now
+                },
+                PrefEntry {
+                    key: String::from("font_size"),
+                    value: PrefValue::Int(14),
+                    modified_ns: now
+                },
+                PrefEntry {
+                    key: String::from("animations"),
+                    value: PrefValue::Bool(true),
+                    modified_ns: now
+                },
+            ],
+            total_reads: 0,
+            total_writes: 0,
+            created_ns: now,
+        },],
         total_reads: 0,
         total_writes: 0,
         total_resets: 0,
@@ -138,7 +158,10 @@ pub fn get(app: &str, key: &str) -> KernelResult<Option<PrefValue>> {
         state.total_reads += 1;
         if let Some(a) = state.apps.iter_mut().find(|a| a.app_name == app) {
             a.total_reads += 1;
-            Ok(a.entries.iter().find(|e| e.key == key).map(|e| e.value.clone()))
+            Ok(a.entries
+                .iter()
+                .find(|e| e.key == key)
+                .map(|e| e.value.clone()))
         } else {
             Ok(None)
         }
@@ -159,7 +182,9 @@ pub fn set(app: &str, key: &str, value: PrefValue) -> KernelResult<()> {
             state.apps.push(AppPrefs {
                 app_name: String::from(app),
                 entries: Vec::new(),
-                total_reads: 0, total_writes: 0, created_ns: now,
+                total_reads: 0,
+                total_writes: 0,
+                created_ns: now,
             });
             state.apps.last_mut().ok_or(KernelError::InternalError)?
         };
@@ -172,7 +197,9 @@ pub fn set(app: &str, key: &str, value: PrefValue) -> KernelResult<()> {
                 return Err(KernelError::ResourceExhausted);
             }
             app_entry.entries.push(PrefEntry {
-                key: String::from(key), value, modified_ns: now,
+                key: String::from(key),
+                value,
+                modified_ns: now,
             });
         }
         Ok(())
@@ -182,11 +209,16 @@ pub fn set(app: &str, key: &str, value: PrefValue) -> KernelResult<()> {
 /// Delete a specific preference.
 pub fn delete(app: &str, key: &str) -> KernelResult<()> {
     with_state(|state| {
-        let a = state.apps.iter_mut().find(|a| a.app_name == app)
+        let a = state
+            .apps
+            .iter_mut()
+            .find(|a| a.app_name == app)
             .ok_or(KernelError::NotFound)?;
         let before = a.entries.len();
         a.entries.retain(|e| e.key != key);
-        if a.entries.len() == before { return Err(KernelError::NotFound); }
+        if a.entries.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -194,7 +226,10 @@ pub fn delete(app: &str, key: &str) -> KernelResult<()> {
 /// Reset all preferences for an app.
 pub fn reset(app: &str) -> KernelResult<()> {
     with_state(|state| {
-        let a = state.apps.iter_mut().find(|a| a.app_name == app)
+        let a = state
+            .apps
+            .iter_mut()
+            .find(|a| a.app_name == app)
             .ok_or(KernelError::NotFound)?;
         a.entries.clear();
         state.total_resets += 1;
@@ -207,7 +242,9 @@ pub fn remove_app(app: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.apps.len();
         state.apps.retain(|a| a.app_name != app);
-        if state.apps.len() == before { return Err(KernelError::NotFound); }
+        if state.apps.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -221,16 +258,21 @@ pub fn list_apps() -> Vec<String> {
 
 /// Get all preferences for an app.
 pub fn get_app_prefs(app: &str) -> Option<AppPrefs> {
-    STATE.lock().as_ref().and_then(|s| {
-        s.apps.iter().find(|a| a.app_name == app).cloned()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.apps.iter().find(|a| a.app_name == app).cloned())
 }
 
 /// List all keys for an app.
 pub fn list_keys(app: &str) -> Vec<String> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.apps.iter().find(|a| a.app_name == app)
-            .map_or(Vec::new(), |a| a.entries.iter().map(|e| e.key.clone()).collect())
+        s.apps
+            .iter()
+            .find(|a| a.app_name == app)
+            .map_or(Vec::new(), |a| {
+                a.entries.iter().map(|e| e.key.clone()).collect()
+            })
     })
 }
 
@@ -238,7 +280,13 @@ pub fn list_keys(app: &str) -> Vec<String> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.apps.len(), s.total_reads, s.total_writes, s.total_resets, s.ops),
+        Some(s) => (
+            s.apps.len(),
+            s.total_reads,
+            s.total_writes,
+            s.total_resets,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -262,13 +310,26 @@ pub fn self_test() {
     crate::serial_println!("  [2/8] read: OK");
 
     // 3: Set preference (new app).
-    set("browser", "homepage", PrefValue::Str(String::from("https://example.com"))).expect("set");
+    set(
+        "browser",
+        "homepage",
+        PrefValue::Str(String::from("https://example.com")),
+    )
+    .expect("set");
     let val = get("browser", "homepage").expect("get2");
-    assert_eq!(val, Some(PrefValue::Str(String::from("https://example.com"))));
+    assert_eq!(
+        val,
+        Some(PrefValue::Str(String::from("https://example.com")))
+    );
     crate::serial_println!("  [3/8] write new: OK");
 
     // 4: Update existing preference.
-    set("browser", "homepage", PrefValue::Str(String::from("https://other.com"))).expect("update");
+    set(
+        "browser",
+        "homepage",
+        PrefValue::Str(String::from("https://other.com")),
+    )
+    .expect("update");
     let val = get("browser", "homepage").expect("get3");
     assert_eq!(val, Some(PrefValue::Str(String::from("https://other.com"))));
     crate::serial_println!("  [4/8] update: OK");

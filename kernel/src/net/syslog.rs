@@ -45,16 +45,16 @@
 //! `set_remote_server_v6()`.  The receiver also accepts incoming IPv6
 //! syslog messages when the receiver is running (same UDP port).
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU16, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
-use crate::error::KernelResult;
 use super::interface::Ipv4Addr;
 use super::ipv6::Ipv6Addr;
+use crate::error::KernelResult;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -355,19 +355,27 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
     let z = days.saturating_add(719468);
     let era = z / 146097;
     let doe = z.saturating_sub(era.saturating_mul(146097)); // day of era
-    let yoe = (doe.saturating_sub(doe / 1460).saturating_add(doe / 36524)
-        .saturating_sub(doe / 146096)) / 365;
+    let yoe = (doe
+        .saturating_sub(doe / 1460)
+        .saturating_add(doe / 36524)
+        .saturating_sub(doe / 146096))
+        / 365;
     let y = yoe.saturating_add(era.saturating_mul(400));
     let doy = doe.saturating_sub(
-        365u64.saturating_mul(yoe)
+        365u64
+            .saturating_mul(yoe)
             .saturating_add(yoe / 4)
-            .saturating_sub(yoe / 100)
+            .saturating_sub(yoe / 100),
     );
     let mp = (5u64.saturating_mul(doy).saturating_add(2)) / 153;
-    let d = doy.saturating_sub(
-        (153u64.saturating_mul(mp).saturating_add(2)) / 5
-    ).saturating_add(1);
-    let m = if mp < 10 { mp.saturating_add(3) } else { mp.saturating_sub(9) };
+    let d = doy
+        .saturating_sub((153u64.saturating_mul(mp).saturating_add(2)) / 5)
+        .saturating_add(1);
+    let m = if mp < 10 {
+        mp.saturating_add(3)
+    } else {
+        mp.saturating_sub(9)
+    };
     let y = if m <= 2 { y.saturating_add(1) } else { y };
 
     (y, m, d)
@@ -416,7 +424,11 @@ fn parse_message(data: &[u8], source_ip: Ipv4Addr) -> Option<SyslogMessage> {
         let hostname = parts.get(2).copied().unwrap_or("-");
         let app_name = parts.get(3).copied().unwrap_or("-");
         let msg = parts.get(4).copied().unwrap_or("");
-        (String::from(hostname), String::from(app_name), String::from(msg))
+        (
+            String::from(hostname),
+            String::from(app_name),
+            String::from(msg),
+        )
     } else if parts.len() >= 2 {
         // Minimal format.
         let hostname = parts.first().copied().unwrap_or("-");
@@ -466,7 +478,11 @@ fn parse_message_v6(data: &[u8], source_ip: Ipv6Addr) -> Option<SyslogMessage> {
         let hostname = parts.get(2).copied().unwrap_or("-");
         let app_name = parts.get(3).copied().unwrap_or("-");
         let msg = parts.get(4).copied().unwrap_or("");
-        (String::from(hostname), String::from(app_name), String::from(msg))
+        (
+            String::from(hostname),
+            String::from(app_name),
+            String::from(msg),
+        )
     } else if parts.len() >= 2 {
         let hostname = parts.first().copied().unwrap_or("-");
         let msg = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
@@ -633,7 +649,10 @@ pub fn recent_messages(count: usize) -> Vec<SyslogMessage> {
         let idx = if state.ring_write >= i.saturating_add(1) {
             state.ring_write.saturating_sub(i.saturating_add(1))
         } else {
-            state.ring.len().saturating_sub(i.saturating_add(1).saturating_sub(state.ring_write))
+            state
+                .ring
+                .len()
+                .saturating_sub(i.saturating_add(1).saturating_sub(state.ring_write))
         };
         if let Some(msg) = state.ring.get(idx) {
             result.push(msg.clone());
@@ -684,9 +703,13 @@ pub fn tick() {
 
                 crate::serial_println!(
                     "[syslog] {}:{} <{}.{}> {} {} {}",
-                    dgram.src_ip, dgram.src_port,
-                    m.facility.label(), m.severity.label(),
-                    m.hostname, m.app_name, m.message
+                    dgram.src_ip,
+                    dgram.src_port,
+                    m.facility.label(),
+                    m.severity.label(),
+                    m.hostname,
+                    m.app_name,
+                    m.message
                 );
 
                 // Store in ring buffer.
@@ -718,9 +741,13 @@ pub fn tick() {
 
                 crate::serial_println!(
                     "[syslog] [{}]:{} <{}.{}> {} {} {}",
-                    dgram.src_ip, dgram.src_port,
-                    m.facility.label(), m.severity.label(),
-                    m.hostname, m.app_name, m.message
+                    dgram.src_ip,
+                    dgram.src_port,
+                    m.facility.label(),
+                    m.severity.label(),
+                    m.hostname,
+                    m.app_name,
+                    m.message
                 );
 
                 // Store in ring buffer.
@@ -798,10 +825,17 @@ pub fn procfs_content() -> String {
     out.push_str("Network Syslog\n");
     out.push_str("==============\n\n");
 
-    out.push_str(&format!("Receiver:      {}\n",
-        if s.receiver_enabled { "running" } else { "stopped" }));
+    out.push_str(&format!(
+        "Receiver:      {}\n",
+        if s.receiver_enabled {
+            "running"
+        } else {
+            "stopped"
+        }
+    ));
     out.push_str(&format!("Listen port:   {}\n", s.listen_port));
-    out.push_str(&format!("Forwarder:     {}\n",
+    out.push_str(&format!(
+        "Forwarder:     {}\n",
         if s.forwarder_enabled {
             if let Some((ip6, port)) = s.remote_server_v6 {
                 format!("[{}]:{}", ip6, port)
@@ -810,21 +844,31 @@ pub fn procfs_content() -> String {
             } else {
                 String::from("configured but no server")
             }
-        } else { String::from("disabled") }));
+        } else {
+            String::from("disabled")
+        }
+    ));
     out.push_str(&format!("Hostname:      {}\n", s.hostname));
     out.push_str(&format!("Received:      {}\n", s.messages_received));
     out.push_str(&format!("Forwarded:     {}\n", s.messages_forwarded));
     out.push_str(&format!("Parse errors:  {}\n", s.parse_errors));
     out.push_str(&format!("Forward errs:  {}\n", s.forward_errors));
-    out.push_str(&format!("Buffer:        {}/{}\n", s.ring_count, RING_BUFFER_SIZE));
+    out.push_str(&format!(
+        "Buffer:        {}/{}\n",
+        s.ring_count, RING_BUFFER_SIZE
+    ));
 
     if !recent.is_empty() {
         out.push_str("\nRecent Messages:\n");
         for msg in &recent {
             out.push_str(&format!(
                 "  <{}.{}> {} [{}] {}: {}\n",
-                msg.facility.label(), msg.severity.label(),
-                msg.source_addr, msg.hostname, msg.app_name, msg.message,
+                msg.facility.label(),
+                msg.severity.label(),
+                msg.source_addr,
+                msg.hostname,
+                msg.app_name,
+                msg.message,
             ));
         }
     }
@@ -878,7 +922,9 @@ pub fn self_test() -> KernelResult<()> {
     {
         for fac_num in [0u8, 1, 3, 4, 5, 9, 16, 23] {
             for sev_num in 0..8u8 {
-                if let (Some(fac), Some(sev)) = (Facility::from_u8(fac_num), Severity::from_u8(sev_num)) {
+                if let (Some(fac), Some(sev)) =
+                    (Facility::from_u8(fac_num), Severity::from_u8(sev_num))
+                {
                     let pri = compute_pri(fac, sev);
                     let (decoded_fac, decoded_sev) = decode_pri(pri);
                     assert!(decoded_fac == Some(fac), "round-trip facility");
@@ -894,8 +940,11 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 4: Message building ---
     {
         let msg = build_message(
-            Facility::Kern, Severity::Info,
-            "testhost", "kernel", "Boot complete",
+            Facility::Kern,
+            Severity::Info,
+            "testhost",
+            "kernel",
+            "Boot complete",
         );
         assert!(msg.starts_with("<6>1"), "starts with PRI VERSION");
         assert!(msg.contains("testhost"), "contains hostname");
@@ -989,12 +1038,18 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 11: Invalid message parsing ---
     {
-        assert!(parse_message(b"not a syslog message", Ipv4Addr([0,0,0,0])).is_none(),
-            "no PRI");
-        assert!(parse_message(b"<>", Ipv4Addr([0,0,0,0])).is_none(),
-            "empty PRI");
-        assert!(parse_message(b"<abc>", Ipv4Addr([0,0,0,0])).is_none(),
-            "non-numeric PRI");
+        assert!(
+            parse_message(b"not a syslog message", Ipv4Addr([0, 0, 0, 0])).is_none(),
+            "no PRI"
+        );
+        assert!(
+            parse_message(b"<>", Ipv4Addr([0, 0, 0, 0])).is_none(),
+            "empty PRI"
+        );
+        assert!(
+            parse_message(b"<abc>", Ipv4Addr([0, 0, 0, 0])).is_none(),
+            "non-numeric PRI"
+        );
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[syslog]   test 11 (invalid message parsing) PASSED");

@@ -26,11 +26,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -151,7 +151,9 @@ fn generate_code(counter: u32) -> String {
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         sessions: Vec::new(),
         next_id: 1,
@@ -163,7 +165,11 @@ pub fn init_defaults() {
 }
 
 /// Generate an invitation code and create a waiting session.
-pub fn create_invitation(host_name: &str, mode: AssistMode, duration_limit_secs: u64) -> KernelResult<(u32, String)> {
+pub fn create_invitation(
+    host_name: &str,
+    mode: AssistMode,
+    duration_limit_secs: u64,
+) -> KernelResult<(u32, String)> {
     with_state(|state| {
         if state.sessions.len() >= MAX_SESSIONS {
             return Err(KernelError::ResourceExhausted);
@@ -175,9 +181,11 @@ pub fn create_invitation(host_name: &str, mode: AssistMode, duration_limit_secs:
         state.next_id += 1;
 
         state.sessions.push(AssistSession {
-            id, code: code.clone(),
+            id,
+            code: code.clone(),
             state: AssistState::WaitingForHelper,
-            mode, helper_name: String::new(),
+            mode,
+            helper_name: String::new(),
             host_name: String::from(host_name),
             created_ns: crate::hpet::elapsed_ns(),
             connected_ns: 0,
@@ -195,7 +203,9 @@ pub fn create_invitation(host_name: &str, mode: AssistMode, duration_limit_secs:
 /// Helper connects using an invitation code.
 pub fn connect(code: &str, helper_name: &str) -> KernelResult<u32> {
     with_state(|state| {
-        let session = state.sessions.iter_mut()
+        let session = state
+            .sessions
+            .iter_mut()
             .find(|s| s.code == code && s.state == AssistState::WaitingForHelper)
             .ok_or(KernelError::NotFound)?;
 
@@ -210,7 +220,10 @@ pub fn connect(code: &str, helper_name: &str) -> KernelResult<u32> {
 /// Grant control to helper.
 pub fn grant_control(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         if session.state != AssistState::Connected {
             return Err(KernelError::InvalidArgument);
@@ -223,7 +236,10 @@ pub fn grant_control(id: u32) -> KernelResult<()> {
 /// Revoke control from helper.
 pub fn revoke_control(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.mode = AssistMode::ViewOnly;
         Ok(())
@@ -233,7 +249,10 @@ pub fn revoke_control(id: u32) -> KernelResult<()> {
 /// Pause session.
 pub fn pause_session(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.state = AssistState::Paused;
         Ok(())
@@ -243,7 +262,10 @@ pub fn pause_session(id: u32) -> KernelResult<()> {
 /// Resume session.
 pub fn resume_session(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.state = AssistState::Connected;
         Ok(())
@@ -253,7 +275,10 @@ pub fn resume_session(id: u32) -> KernelResult<()> {
 /// End session.
 pub fn end_session(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.state = AssistState::Ended;
         Ok(())
@@ -263,7 +288,10 @@ pub fn end_session(id: u32) -> KernelResult<()> {
 /// Record a file transfer.
 pub fn record_file_transfer(id: u32, size_bytes: u64) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.files_transferred += 1;
         session.bytes_transferred += size_bytes;
@@ -275,7 +303,10 @@ pub fn record_file_transfer(id: u32, size_bytes: u64) -> KernelResult<()> {
 /// Toggle clipboard sharing.
 pub fn set_clipboard_sharing(id: u32, shared: bool) -> KernelResult<()> {
     with_state(|state| {
-        let session = state.sessions.iter_mut().find(|s| s.id == id)
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
         session.clipboard_shared = shared;
         Ok(())
@@ -285,13 +316,21 @@ pub fn set_clipboard_sharing(id: u32, shared: bool) -> KernelResult<()> {
 /// Get session by ID.
 pub fn get_session(id: u32) -> KernelResult<AssistSession> {
     with_state(|state| {
-        state.sessions.iter().find(|s| s.id == id).cloned().ok_or(KernelError::NotFound)
+        state
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+            .ok_or(KernelError::NotFound)
     })
 }
 
 /// List sessions.
 pub fn list_sessions() -> Vec<AssistSession> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.sessions.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.sessions.clone())
 }
 
 /// Statistics: (active_sessions, total_sessions, total_files, ops).
@@ -299,8 +338,15 @@ pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let active = s.sessions.iter()
-                .filter(|ss| matches!(ss.state, AssistState::Connected | AssistState::WaitingForHelper))
+            let active = s
+                .sessions
+                .iter()
+                .filter(|ss| {
+                    matches!(
+                        ss.state,
+                        AssistState::Connected | AssistState::WaitingForHelper
+                    )
+                })
                 .count();
             (active, s.total_sessions, s.total_files, s.ops)
         }

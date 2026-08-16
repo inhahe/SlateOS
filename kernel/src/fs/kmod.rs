@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -141,7 +141,9 @@ pub fn init_defaults() {
     // command as if real modules had been loaded. Modules appear only when
     // registered through load_module().
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         modules: Vec::new(),
         params: Vec::new(),
@@ -154,12 +156,18 @@ pub fn init_defaults() {
 
 /// List all loaded modules.
 pub fn list_modules() -> Vec<KernelModule> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.modules.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.modules.clone())
 }
 
 /// Get module info by name.
 pub fn get_module(name: &str) -> Option<KernelModule> {
-    STATE.lock().as_ref().and_then(|s| s.modules.iter().find(|m| m.name == name).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.modules.iter().find(|m| m.name == name).cloned())
 }
 
 /// Load a module.
@@ -168,14 +176,23 @@ pub fn load_module(name: &str, mod_type: ModuleType, size: u64, desc: &str) -> K
         if state.modules.len() >= MAX_MODULES {
             return Err(KernelError::ResourceExhausted);
         }
-        if state.modules.iter().any(|m| m.name == name && m.state == ModuleState::Live) {
+        if state
+            .modules
+            .iter()
+            .any(|m| m.name == name && m.state == ModuleState::Live)
+        {
             return Err(KernelError::AlreadyExists);
         }
         let now = crate::hpet::elapsed_ns();
         state.modules.push(KernelModule {
-            name: String::from(name), mod_type, state: ModuleState::Live,
-            version: String::from("1.0"), size_bytes: size, ref_count: 0,
-            depends_on: Vec::new(), loaded_at_ns: now,
+            name: String::from(name),
+            mod_type,
+            state: ModuleState::Live,
+            version: String::from("1.0"),
+            size_bytes: size,
+            ref_count: 0,
+            depends_on: Vec::new(),
+            loaded_at_ns: now,
             description: String::from(desc),
         });
         state.total_loads += 1;
@@ -186,13 +203,18 @@ pub fn load_module(name: &str, mod_type: ModuleType, size: u64, desc: &str) -> K
 /// Unload a module.
 pub fn unload_module(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.modules.iter().position(|m| m.name == name && m.state == ModuleState::Live)
+        let idx = state
+            .modules
+            .iter()
+            .position(|m| m.name == name && m.state == ModuleState::Live)
             .ok_or(KernelError::NotFound)?;
         if state.modules[idx].ref_count > 0 {
             return Err(KernelError::WouldBlock);
         }
         // Check if other modules depend on this one.
-        let depended = state.modules.iter()
+        let depended = state
+            .modules
+            .iter()
             .any(|m| m.state == ModuleState::Live && m.depends_on.iter().any(|d| d == name));
         if depended {
             return Err(KernelError::WouldBlock);
@@ -207,7 +229,9 @@ pub fn unload_module(name: &str) -> KernelResult<()> {
 /// with a non-zero reference count cannot be unloaded.
 pub fn add_ref(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let module = state.modules.iter_mut()
+        let module = state
+            .modules
+            .iter_mut()
             .find(|m| m.name == name && m.state == ModuleState::Live)
             .ok_or(KernelError::NotFound)?;
         module.ref_count = module.ref_count.saturating_add(1);
@@ -218,7 +242,9 @@ pub fn add_ref(name: &str) -> KernelResult<()> {
 /// Release a previously-taken reference on a live module.
 pub fn drop_ref(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        let module = state.modules.iter_mut()
+        let module = state
+            .modules
+            .iter_mut()
             .find(|m| m.name == name && m.state == ModuleState::Live)
             .ok_or(KernelError::NotFound)?;
         if module.ref_count == 0 {
@@ -233,10 +259,16 @@ pub fn drop_ref(name: &str) -> KernelResult<()> {
 pub fn add_dependency(module_name: &str, depends_on: &str) -> KernelResult<()> {
     with_state(|state| {
         // Verify dependency target exists.
-        if !state.modules.iter().any(|m| m.name == depends_on && m.state == ModuleState::Live) {
+        if !state
+            .modules
+            .iter()
+            .any(|m| m.name == depends_on && m.state == ModuleState::Live)
+        {
             return Err(KernelError::NotFound);
         }
-        let module = state.modules.iter_mut()
+        let module = state
+            .modules
+            .iter_mut()
             .find(|m| m.name == module_name && m.state == ModuleState::Live)
             .ok_or(KernelError::NotFound)?;
         if module.depends_on.iter().any(|d| d == depends_on) {
@@ -253,8 +285,11 @@ pub fn set_param(module_name: &str, param_name: &str, value: &str, desc: &str) -
         if !state.modules.iter().any(|m| m.name == module_name) {
             return Err(KernelError::NotFound);
         }
-        if let Some(p) = state.params.iter_mut()
-            .find(|p| p.module_name == module_name && p.param_name == param_name) {
+        if let Some(p) = state
+            .params
+            .iter_mut()
+            .find(|p| p.module_name == module_name && p.param_name == param_name)
+        {
             p.value = String::from(value);
         } else {
             state.params.push(ModuleParam {
@@ -271,14 +306,21 @@ pub fn set_param(module_name: &str, param_name: &str, value: &str, desc: &str) -
 /// Get module parameters.
 pub fn get_params(module_name: &str) -> Vec<ModuleParam> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.params.iter().filter(|p| p.module_name == module_name).cloned().collect()
+        s.params
+            .iter()
+            .filter(|p| p.module_name == module_name)
+            .cloned()
+            .collect()
     })
 }
 
 /// Count of live modules.
 pub fn live_count() -> usize {
     STATE.lock().as_ref().map_or(0, |s| {
-        s.modules.iter().filter(|m| m.state == ModuleState::Live).count()
+        s.modules
+            .iter()
+            .filter(|m| m.state == ModuleState::Live)
+            .count()
     })
 }
 
@@ -287,7 +329,11 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            let live = s.modules.iter().filter(|m| m.state == ModuleState::Live).count();
+            let live = s
+                .modules
+                .iter()
+                .filter(|m| m.state == ModuleState::Live)
+                .count();
             (live, s.total_loads, s.total_unloads, s.total_errors, s.ops)
         }
         None => (0, 0, 0, 0, 0),
@@ -310,8 +356,20 @@ pub fn self_test() {
     assert_eq!(list_modules().len(), 0);
     assert_eq!(live_count(), 0);
     // Build the test fixture through the real load_module() API.
-    load_module("virtio_blk", ModuleType::Driver, 32768, "VirtIO block driver").expect("load blk");
-    load_module("virtio_net", ModuleType::Network, 45056, "VirtIO network driver").expect("load net");
+    load_module(
+        "virtio_blk",
+        ModuleType::Driver,
+        32768,
+        "VirtIO block driver",
+    )
+    .expect("load blk");
+    load_module(
+        "virtio_net",
+        ModuleType::Network,
+        45056,
+        "VirtIO network driver",
+    )
+    .expect("load net");
     load_module("fat", ModuleType::Filesystem, 65536, "FAT filesystem").expect("load fat");
     assert_eq!(live_count(), 3);
     crate::serial_println!("  [1/8] defaults+fixture: OK");

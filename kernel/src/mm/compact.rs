@@ -36,10 +36,10 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::mm::frame::{self, FRAME_SIZE};
-use crate::mm::{rmap, page_table};
+use crate::mm::{page_table, rmap};
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -112,9 +112,8 @@ pub fn analyze() -> Option<FragmentationReport> {
     #[allow(clippy::arithmetic_side_effects)]
     for (order, &count) in stats.order_counts.iter().enumerate().skip(1) {
         let frames_per_block = 1usize << order;
-        higher_order_free = higher_order_free.saturating_add(
-            count.saturating_mul(frames_per_block)
-        );
+        higher_order_free =
+            higher_order_free.saturating_add(count.saturating_mul(frames_per_block));
         if count > 0 {
             largest_block_frames = frames_per_block;
         }
@@ -166,14 +165,17 @@ pub fn compact() -> Option<FragmentationReport> {
         if r.compaction_recommended {
             serial_println!(
                 "[compact] Fragmentation: {}% (order-0: {} frames, higher: {} frames)",
-                r.fragmentation_pct, r.order0_free, r.higher_order_free
+                r.fragmentation_pct,
+                r.order0_free,
+                r.higher_order_free
             );
             serial_println!(
                 "[compact] Compaction recommended but page migration not yet implemented"
             );
             serial_println!(
                 "[compact] Estimated {} movable pages, largest free block: {} frames ({} KiB)",
-                r.estimated_movable, r.largest_free_block,
+                r.estimated_movable,
+                r.largest_free_block,
                 r.largest_free_block.saturating_mul(FRAME_SIZE) / 1024
             );
         } else {
@@ -491,7 +493,9 @@ pub fn try_compact() -> usize {
     if migrated > 0 || failures > 0 {
         serial_println!(
             "[compact] try_compact: {} rmap entries, {} migrated, {} failed",
-            rmap_st.entries_used, migrated, failures
+            rmap_st.entries_used,
+            migrated,
+            failures
         );
     }
 
@@ -556,12 +560,20 @@ pub fn self_test() {
     let report = analyze();
     // analyze() may return None if frame allocator stats aren't available.
     if let Some(r) = report {
-        assert!(r.fragmentation_pct <= 100,
-            "fragmentation percentage must be 0-100");
-        assert!(r.free_frames <= r.free_frames + r.order0_free,
-            "free_frames should be consistent");
-        serial_println!("[compact]   analyze: OK (frag={}%, free={}, largest_block={})",
-            r.fragmentation_pct, r.free_frames, r.largest_free_block);
+        assert!(
+            r.fragmentation_pct <= 100,
+            "fragmentation percentage must be 0-100"
+        );
+        assert!(
+            r.free_frames <= r.free_frames + r.order0_free,
+            "free_frames should be consistent"
+        );
+        serial_println!(
+            "[compact]   analyze: OK (frag={}%, free={}, largest_block={})",
+            r.fragmentation_pct,
+            r.free_frames,
+            r.largest_free_block
+        );
     } else {
         serial_println!("[compact]   analyze: skipped (frame stats unavailable)");
     }
@@ -574,8 +586,12 @@ pub fn self_test() {
     let st = stats();
     // After our try_compact calls, these should be populated.
     assert!(!st.is_running, "should not be running right now");
-    serial_println!("[compact]   stats: OK (requests={}, migrated={}, failures={})",
-        st.total_requests, st.pages_migrated, st.migration_failures);
+    serial_println!(
+        "[compact]   stats: OK (requests={}, migrated={}, failures={})",
+        st.total_requests,
+        st.pages_migrated,
+        st.migration_failures
+    );
 
     // Test 4: try_compact with no rmap entries returns 0.
     // (The rmap table may have entries from other subsystems, but
@@ -619,7 +635,10 @@ pub fn self_test() {
         }
         scan_idx = next;
     }
-    assert!(saw_fake, "collect_private_frames should find our fake entry");
+    assert!(
+        saw_fake,
+        "collect_private_frames should find our fake entry"
+    );
     serial_println!("[compact]   collect_private_frames: OK (saw_fake=true)");
 
     // Clean up fake entry.

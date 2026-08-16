@@ -169,7 +169,9 @@ unsafe fn mmio_read32(addr: usize) -> u32 {
 #[inline]
 unsafe fn mmio_write32(addr: usize, value: u32) {
     // SAFETY: Caller guarantees addr is a valid MMIO register address.
-    unsafe { core::ptr::write_volatile(addr as *mut u32, value); }
+    unsafe {
+        core::ptr::write_volatile(addr as *mut u32, value);
+    }
 }
 
 #[inline]
@@ -225,9 +227,19 @@ struct NvmeSqe {
 impl NvmeSqe {
     const fn zeroed() -> Self {
         Self {
-            cdw0: 0, nsid: 0, cdw2: 0, cdw3: 0,
-            mptr: 0, prp1: 0, prp2: 0,
-            cdw10: 0, cdw11: 0, cdw12: 0, cdw13: 0, cdw14: 0, cdw15: 0,
+            cdw0: 0,
+            nsid: 0,
+            cdw2: 0,
+            cdw3: 0,
+            mptr: 0,
+            prp1: 0,
+            prp2: 0,
+            cdw10: 0,
+            cdw11: 0,
+            cdw12: 0,
+            cdw13: 0,
+            cdw14: 0,
+            cdw15: 0,
         }
     }
 }
@@ -249,7 +261,12 @@ struct NvmeCqe {
 impl NvmeCqe {
     #[allow(dead_code)]
     const fn zeroed() -> Self {
-        Self { dw0: 0, dw1: 0, sq_head_sqid: 0, cid_status: 0 }
+        Self {
+            dw0: 0,
+            dw1: 0,
+            sq_head_sqid: 0,
+            cid_status: 0,
+        }
     }
 
     /// Extract status code (bits 31:17 of DW3, shifted right by 17 = 15 bits).
@@ -316,14 +333,18 @@ impl NvmeQueuePair {
         let slot_offset = (self.sq_tail as usize) * 64; // sizeof(NvmeSqe) = 64
         let slot_ptr = (self.sq_virt + slot_offset) as *mut NvmeSqe;
         // SAFETY: slot_ptr is within our allocated SQ memory.
-        unsafe { slot_ptr.write(sqe); }
+        unsafe {
+            slot_ptr.write(sqe);
+        }
 
         // Advance tail.
         self.sq_tail = (self.sq_tail + 1) % self.depth;
 
         // Ring the SQ doorbell.
         // SAFETY: sq_doorbell is a valid MMIO register address.
-        unsafe { mmio_write32(self.sq_doorbell, u32::from(self.sq_tail)); }
+        unsafe {
+            mmio_write32(self.sq_doorbell, u32::from(self.sq_tail));
+        }
 
         cid
     }
@@ -347,7 +368,9 @@ impl NvmeQueuePair {
 
                 // Ring the CQ doorbell (tells controller we consumed the entry).
                 // SAFETY: cq_doorbell is a valid MMIO register address.
-                unsafe { mmio_write32(self.cq_doorbell, u32::from(self.cq_head)); }
+                unsafe {
+                    mmio_write32(self.cq_doorbell, u32::from(self.cq_head));
+                }
 
                 return Ok(cqe);
             }
@@ -410,7 +433,9 @@ impl NvmeController {
 
         // Disable the controller (clear CC.EN).
         // SAFETY: Valid MMIO write.
-        unsafe { mmio_write32(regs_virt + REG_CC, 0); }
+        unsafe {
+            mmio_write32(regs_virt + REG_CC, 0);
+        }
 
         // Wait for CSTS.RDY to clear.
         // SAFETY: regs_virt + REG_CSTS is a valid MMIO status register.
@@ -427,7 +452,9 @@ impl NvmeController {
         let asq_phys = asq_frame.addr();
         let asq_virt = (asq_phys + hhdm) as usize;
         // SAFETY: Freshly allocated frame.
-        unsafe { core::ptr::write_bytes(asq_virt as *mut u8, 0, frame::FRAME_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(asq_virt as *mut u8, 0, frame::FRAME_SIZE);
+        }
 
         // Allocate Admin CQ (16 entries × 16 bytes = 256 bytes).
         // We can put it in the same frame at offset 4096 (page-aligned).
@@ -435,11 +462,12 @@ impl NvmeController {
         let acq_phys = acq_frame.addr();
         let acq_virt = (acq_phys + hhdm) as usize;
         // SAFETY: Freshly allocated frame.
-        unsafe { core::ptr::write_bytes(acq_virt as *mut u8, 0, frame::FRAME_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(acq_virt as *mut u8, 0, frame::FRAME_SIZE);
+        }
 
         // Configure Admin Queue Attributes: SQ size (bits 27:16), CQ size (bits 11:0).
-        let aqa = (u32::from(ADMIN_QUEUE_DEPTH - 1) << 16)
-                | u32::from(ADMIN_QUEUE_DEPTH - 1);
+        let aqa = (u32::from(ADMIN_QUEUE_DEPTH - 1) << 16) | u32::from(ADMIN_QUEUE_DEPTH - 1);
         // SAFETY: Valid MMIO writes.
         unsafe {
             mmio_write32(regs_virt + REG_AQA, aqa);
@@ -450,9 +478,11 @@ impl NvmeController {
         // Configure CC: enable, IOSQES=6 (64B), IOCQES=4 (16B), NVM command set.
         let cc = CC_EN
             | (6u32 << CC_IOSQES_SHIFT)   // SQE size = 2^6 = 64 bytes.
-            | (4u32 << CC_IOCQES_SHIFT);   // CQE size = 2^4 = 16 bytes.
+            | (4u32 << CC_IOCQES_SHIFT); // CQE size = 2^4 = 16 bytes.
         // SAFETY: Valid MMIO write.
-        unsafe { mmio_write32(regs_virt + REG_CC, cc); }
+        unsafe {
+            mmio_write32(regs_virt + REG_CC, cc);
+        }
 
         // Wait for CSTS.RDY.
         // SAFETY: regs_virt + REG_CSTS is a valid MMIO status register
@@ -512,7 +542,9 @@ impl NvmeController {
         let data_phys = data_frame.addr();
         let data_virt = (data_phys + hhdm) as *mut u8;
         // SAFETY: Freshly allocated frame.
-        unsafe { core::ptr::write_bytes(data_virt, 0, 4096); }
+        unsafe {
+            core::ptr::write_bytes(data_virt, 0, 4096);
+        }
 
         // Build IDENTIFY command: CNS=1 (controller).
         let mut sqe = NvmeSqe::zeroed();
@@ -541,7 +573,9 @@ impl NvmeController {
 
         // Free the frame.
         // SAFETY: Done with the temporary buffer.
-        unsafe { let _ = frame::free_frame(data_frame); }
+        unsafe {
+            let _ = frame::free_frame(data_frame);
+        }
 
         Ok(())
     }
@@ -553,7 +587,9 @@ impl NvmeController {
         let data_phys = data_frame.addr();
         let data_virt = (data_phys + hhdm) as *mut u8;
         // SAFETY: Freshly allocated frame.
-        unsafe { core::ptr::write_bytes(data_virt, 0, 4096); }
+        unsafe {
+            core::ptr::write_bytes(data_virt, 0, 4096);
+        }
 
         // IDENTIFY namespace (CNS=0).
         let mut sqe = NvmeSqe::zeroed();
@@ -570,8 +606,7 @@ impl NvmeController {
 
         // Bytes 0-7: NSZE (Namespace Size in logical blocks, 64-bit LE).
         let nsze = u64::from_le_bytes([
-            data[0], data[1], data[2], data[3],
-            data[4], data[5], data[6], data[7],
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);
         self.sector_count = nsze;
 
@@ -591,11 +626,15 @@ impl NvmeController {
 
         // Free frame.
         // SAFETY: Done with temporary buffer.
-        unsafe { let _ = frame::free_frame(data_frame); }
+        unsafe {
+            let _ = frame::free_frame(data_frame);
+        }
 
         serial_println!(
             "[nvme]   NS{}: {} blocks, block_size={}",
-            nsid, self.sector_count, self.block_size
+            nsid,
+            self.sector_count,
+            self.block_size
         );
 
         Ok(())
@@ -611,7 +650,9 @@ impl NvmeController {
         let cq_phys = cq_frame.addr();
         let cq_virt = (cq_phys + hhdm) as usize;
         // SAFETY: Freshly allocated frame.
-        unsafe { core::ptr::write_bytes(cq_virt as *mut u8, 0, frame::FRAME_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(cq_virt as *mut u8, 0, frame::FRAME_SIZE);
+        }
 
         // CREATE I/O COMPLETION QUEUE (admin command).
         let mut sqe = NvmeSqe::zeroed();
@@ -630,7 +671,9 @@ impl NvmeController {
         let sq_phys = sq_frame.addr();
         let sq_virt = (sq_phys + hhdm) as usize;
         // SAFETY: Freshly allocated frame.
-        unsafe { core::ptr::write_bytes(sq_virt as *mut u8, 0, frame::FRAME_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(sq_virt as *mut u8, 0, frame::FRAME_SIZE);
+        }
 
         // CREATE I/O SUBMISSION QUEUE.
         let mut sqe = NvmeSqe::zeroed();
@@ -668,7 +711,13 @@ impl NvmeController {
 
     /// Read sectors using the I/O queue.
     #[allow(clippy::arithmetic_side_effects)]
-    fn read_sectors_impl(&mut self, lba: u64, count: u16, buf: &mut [u8], hhdm: u64) -> KernelResult<()> {
+    fn read_sectors_impl(
+        &mut self,
+        lba: u64,
+        count: u16,
+        buf: &mut [u8],
+        hhdm: u64,
+    ) -> KernelResult<()> {
         let io_queue = self.io_queue.as_mut().ok_or(KernelError::InternalError)?;
 
         // Allocate a DMA frame for the transfer.
@@ -679,7 +728,9 @@ impl NvmeController {
         let byte_count = (count as usize) * (self.block_size as usize);
         if byte_count > frame::FRAME_SIZE || buf.len() < byte_count {
             // SAFETY: Free unused frame.
-            unsafe { let _ = frame::free_frame(data_frame); }
+            unsafe {
+                let _ = frame::free_frame(data_frame);
+            }
             return Err(KernelError::InvalidArgument);
         }
 
@@ -711,14 +762,22 @@ impl NvmeController {
         }
 
         // SAFETY: Done with frame.
-        unsafe { let _ = frame::free_frame(data_frame); }
+        unsafe {
+            let _ = frame::free_frame(data_frame);
+        }
 
         result.map(|_| ())
     }
 
     /// Write sectors using the I/O queue.
     #[allow(clippy::arithmetic_side_effects)]
-    fn write_sectors_impl(&mut self, lba: u64, count: u16, buf: &[u8], hhdm: u64) -> KernelResult<()> {
+    fn write_sectors_impl(
+        &mut self,
+        lba: u64,
+        count: u16,
+        buf: &[u8],
+        hhdm: u64,
+    ) -> KernelResult<()> {
         let io_queue = self.io_queue.as_mut().ok_or(KernelError::InternalError)?;
 
         let data_frame = frame::alloc_frame()?;
@@ -728,7 +787,9 @@ impl NvmeController {
         let byte_count = (count as usize) * (self.block_size as usize);
         if byte_count > frame::FRAME_SIZE || buf.len() < byte_count {
             // SAFETY: Free unused frame.
-            unsafe { let _ = frame::free_frame(data_frame); }
+            unsafe {
+                let _ = frame::free_frame(data_frame);
+            }
             return Err(KernelError::InvalidArgument);
         }
 
@@ -753,7 +814,9 @@ impl NvmeController {
         let result = io_queue.submit_and_wait(sqe);
 
         // SAFETY: Done with frame.
-        unsafe { let _ = frame::free_frame(data_frame); }
+        unsafe {
+            let _ = frame::free_frame(data_frame);
+        }
 
         result.map(|_| ())
     }
@@ -813,7 +876,8 @@ impl BlockDevice for NvmeDevice {
                 return Err(KernelError::InvalidArgument);
             }
 
-            lba = lba.checked_add(u64::from(batch))
+            lba = lba
+                .checked_add(u64::from(batch))
                 .ok_or(KernelError::InvalidArgument)?;
             offset += byte_count;
             remaining -= u32::from(batch);
@@ -843,7 +907,8 @@ impl BlockDevice for NvmeDevice {
                 return Err(KernelError::InvalidArgument);
             }
 
-            lba = lba.checked_add(u64::from(batch))
+            lba = lba
+                .checked_add(u64::from(batch))
                 .ok_or(KernelError::InvalidArgument)?;
             offset += byte_count;
             remaining -= u32::from(batch);
@@ -877,8 +942,11 @@ pub fn init(hhdm_offset: u64) {
     for ctrl_pci in &controllers {
         serial_println!(
             "[nvme] Found controller: {:04x}:{:04x} at {:02x}:{:02x}.{}",
-            ctrl_pci.vendor_id, ctrl_pci.device_id,
-            ctrl_pci.address.bus, ctrl_pci.address.device, ctrl_pci.address.function,
+            ctrl_pci.vendor_id,
+            ctrl_pci.device_id,
+            ctrl_pci.address.bus,
+            ctrl_pci.address.device,
+            ctrl_pci.address.function,
         );
 
         // BAR0 contains the controller registers (64-bit MMIO).
@@ -906,7 +974,11 @@ pub fn init(hhdm_offset: u64) {
 
         let regs_virt = (base_phys + hhdm_offset) as usize;
 
-        serial_println!("[nvme]   MMIO base: phys={:#010x}, virt={:#x}", base_phys, regs_virt);
+        serial_println!(
+            "[nvme]   MMIO base: phys={:#010x}, virt={:#x}",
+            base_phys,
+            regs_virt
+        );
 
         // Map NVMe MMIO region into kernel page tables.
         // BAR addresses may be above physical RAM (not covered by HHDM).
@@ -925,7 +997,9 @@ pub fn init(hhdm_offset: u64) {
         }
         // TLB flush.
         for i in 0..4u64 {
-            let addr = base_phys.wrapping_add(hhdm_offset).wrapping_add(i.wrapping_mul(16384));
+            let addr = base_phys
+                .wrapping_add(hhdm_offset)
+                .wrapping_add(i.wrapping_mul(16384));
             // SAFETY: Standard invlpg.
             unsafe {
                 core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags));
@@ -940,7 +1014,9 @@ pub fn init(hhdm_offset: u64) {
         let vs = unsafe { mmio_read32(regs_virt + REG_VS) };
         serial_println!(
             "[nvme]   Version: {}.{}.{}",
-            (vs >> 16) & 0xFFFF, (vs >> 8) & 0xFF, vs & 0xFF,
+            (vs >> 16) & 0xFFFF,
+            (vs >> 8) & 0xFF,
+            vs & 0xFF,
         );
 
         // Initialize the controller.
@@ -979,11 +1055,14 @@ pub fn init(hhdm_offset: u64) {
 
         // Register as block device.
         let dev_name = format!("nvme{}n1", total_devices);
-        let capacity_mb = (controller.sector_count * u64::from(controller.block_size))
-            / (1024 * 1024);
+        let capacity_mb =
+            (controller.sector_count * u64::from(controller.block_size)) / (1024 * 1024);
         serial_println!(
             "[nvme]   Registering {} ({} MB, {} blocks, bs={})",
-            dev_name, capacity_mb, controller.sector_count, controller.block_size,
+            dev_name,
+            capacity_mb,
+            controller.sector_count,
+            controller.block_size,
         );
 
         let info = BlockDeviceInfo {
@@ -1005,7 +1084,10 @@ pub fn init(hhdm_offset: u64) {
     DEVICE_COUNT.store(total_devices, Ordering::Release);
     INITIALIZED.store(true, Ordering::Release);
 
-    serial_println!("[nvme] Initialization complete: {} device(s)", total_devices);
+    serial_println!(
+        "[nvme] Initialization complete: {} device(s)",
+        total_devices
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,10 +1126,16 @@ pub fn self_test() {
     serial_println!("[nvme] Running self-test...");
 
     let s = stats();
-    serial_println!("[nvme]   Initialized: {}, devices: {}", s.initialized, s.device_count);
+    serial_println!(
+        "[nvme]   Initialized: {}, devices: {}",
+        s.initialized,
+        s.device_count
+    );
 
     if !s.initialized {
-        serial_println!("[nvme]   No controller found — self-test SKIPPED (OK for non-NVMe systems)");
+        serial_println!(
+            "[nvme]   No controller found — self-test SKIPPED (OK for non-NVMe systems)"
+        );
         serial_println!("[nvme] Self-test PASSED (no hardware)");
         return;
     }
@@ -1063,9 +1151,13 @@ pub fn self_test() {
         let info = dev.info();
         serial_println!(
             "[nvme]   nvme0n1: {} blocks, block_size={}",
-            info.sector_count, info.sector_size
+            info.sector_count,
+            info.sector_size
         );
-        assert!(info.sector_count > 0, "NVMe device should have non-zero capacity");
+        assert!(
+            info.sector_count > 0,
+            "NVMe device should have non-zero capacity"
+        );
 
         // Read block 0.
         let mut buf = [0u8; SECTOR_SIZE];

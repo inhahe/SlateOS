@@ -21,11 +21,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -110,7 +110,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         dumps: Vec::new(),
         next_id: 1,
@@ -125,7 +127,13 @@ pub fn init_defaults() {
 }
 
 /// Record a core dump.
-pub fn record_dump(pid: u32, process_name: &str, reason: DumpReason, size_bytes: u64, signal_code: u32) -> KernelResult<u32> {
+pub fn record_dump(
+    pid: u32,
+    process_name: &str,
+    reason: DumpReason,
+    size_bytes: u64,
+    signal_code: u32,
+) -> KernelResult<u32> {
     with_state(|state| {
         if !state.dumps_enabled {
             return Err(KernelError::PermissionDenied);
@@ -143,8 +151,14 @@ pub fn record_dump(pid: u32, process_name: &str, reason: DumpReason, size_bytes:
         state.next_id += 1;
         let path = format!("/var/crash/core.{}.{}", pid, id);
         state.dumps.push(CoreDumpRecord {
-            id, pid, process_name: String::from(process_name), reason,
-            timestamp_ns: now, size_bytes, path, signal_code,
+            id,
+            pid,
+            process_name: String::from(process_name),
+            reason,
+            timestamp_ns: now,
+            size_bytes,
+            path,
+            signal_code,
         });
         state.total_dumps += 1;
         state.total_bytes += size_bytes;
@@ -154,7 +168,10 @@ pub fn record_dump(pid: u32, process_name: &str, reason: DumpReason, size_bytes:
 
 /// Get dump record by ID.
 pub fn get_dump(id: u32) -> Option<CoreDumpRecord> {
-    STATE.lock().as_ref().and_then(|s| s.dumps.iter().find(|d| d.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.dumps.iter().find(|d| d.id == id).cloned())
 }
 
 /// List all dumps, newest first.
@@ -171,7 +188,9 @@ pub fn delete_dump(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.dumps.len();
         state.dumps.retain(|d| d.id != id);
-        if state.dumps.len() == before { return Err(KernelError::NotFound); }
+        if state.dumps.len() == before {
+            return Err(KernelError::NotFound);
+        }
         state.total_cleaned += 1;
         Ok(())
     })
@@ -180,7 +199,9 @@ pub fn delete_dump(id: u32) -> KernelResult<()> {
 /// Cleanup old dumps, keep only the newest N.
 pub fn cleanup(keep: usize) -> KernelResult<u32> {
     with_state(|state| {
-        if state.dumps.len() <= keep { return Ok(0); }
+        if state.dumps.len() <= keep {
+            return Ok(0);
+        }
         let remove_count = state.dumps.len() - keep;
         state.dumps.drain(0..remove_count);
         state.total_cleaned += remove_count as u64;
@@ -211,14 +232,23 @@ pub fn is_enabled() -> bool {
 
 /// Get total bytes used by dumps.
 pub fn total_size() -> u64 {
-    STATE.lock().as_ref().map_or(0, |s| s.dumps.iter().map(|d| d.size_bytes).sum())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(0, |s| s.dumps.iter().map(|d| d.size_bytes).sum())
 }
 
 /// Statistics: (dump_count, total_dumps, total_bytes, total_cleaned, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.dumps.len(), s.total_dumps, s.total_bytes, s.total_cleaned, s.ops),
+        Some(s) => (
+            s.dumps.len(),
+            s.total_dumps,
+            s.total_bytes,
+            s.total_cleaned,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

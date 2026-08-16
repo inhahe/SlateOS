@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -35,9 +35,9 @@ use crate::error::{KernelError, KernelResult};
 /// Fault type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultType {
-    Missing,     // Page not present
+    Missing,      // Page not present
     WriteProtect, // Write to read-only
-    Minor,       // Minor fault (page present but needs update)
+    Minor,        // Minor fault (page present but needs update)
 }
 
 impl FaultType {
@@ -118,7 +118,9 @@ where
 /// zeros.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         handlers: Vec::new(),
         total_faults: 0,
@@ -132,12 +134,23 @@ pub fn init_defaults() {
 /// Register a uffd handler for a process.
 pub fn register(pid: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.handlers.iter().any(|h| h.pid == pid) { return Err(KernelError::AlreadyExists); }
-        if state.handlers.len() >= MAX_HANDLERS { return Err(KernelError::ResourceExhausted); }
+        if state.handlers.iter().any(|h| h.pid == pid) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.handlers.len() >= MAX_HANDLERS {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.handlers.push(UffdStats {
-            pid, registered_ranges: 0, faults_missing: 0, faults_wp: 0,
-            faults_minor: 0, resolves: 0, total_resolve_ns: 0, max_resolve_ns: 0,
-            copy_pages: 0, zero_pages: 0,
+            pid,
+            registered_ranges: 0,
+            faults_missing: 0,
+            faults_wp: 0,
+            faults_minor: 0,
+            resolves: 0,
+            total_resolve_ns: 0,
+            max_resolve_ns: 0,
+            copy_pages: 0,
+            zero_pages: 0,
         });
         Ok(())
     })
@@ -146,7 +159,10 @@ pub fn register(pid: u32) -> KernelResult<()> {
 /// Unregister.
 pub fn unregister(pid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.handlers.iter().position(|h| h.pid == pid)
+        let idx = state
+            .handlers
+            .iter()
+            .position(|h| h.pid == pid)
             .ok_or(KernelError::NotFound)?;
         state.handlers.remove(idx);
         Ok(())
@@ -156,7 +172,10 @@ pub fn unregister(pid: u32) -> KernelResult<()> {
 /// Record a fault.
 pub fn record_fault(pid: u32, fault_type: FaultType) -> KernelResult<()> {
     with_state(|state| {
-        let h = state.handlers.iter_mut().find(|h| h.pid == pid)
+        let h = state
+            .handlers
+            .iter_mut()
+            .find(|h| h.pid == pid)
             .ok_or(KernelError::NotFound)?;
         match fault_type {
             FaultType::Missing => h.faults_missing += 1,
@@ -171,13 +190,23 @@ pub fn record_fault(pid: u32, fault_type: FaultType) -> KernelResult<()> {
 /// Record a fault resolution.
 pub fn record_resolve(pid: u32, ns: u64, is_copy: bool) -> KernelResult<()> {
     with_state(|state| {
-        let h = state.handlers.iter_mut().find(|h| h.pid == pid)
+        let h = state
+            .handlers
+            .iter_mut()
+            .find(|h| h.pid == pid)
             .ok_or(KernelError::NotFound)?;
         h.resolves += 1;
         h.total_resolve_ns += ns;
-        if ns > h.max_resolve_ns { h.max_resolve_ns = ns; }
-        if is_copy { h.copy_pages += 1; state.total_copies += 1; }
-        else { h.zero_pages += 1; state.total_zeros += 1; }
+        if ns > h.max_resolve_ns {
+            h.max_resolve_ns = ns;
+        }
+        if is_copy {
+            h.copy_pages += 1;
+            state.total_copies += 1;
+        } else {
+            h.zero_pages += 1;
+            state.total_zeros += 1;
+        }
         state.total_resolves += 1;
         Ok(())
     })
@@ -185,14 +214,24 @@ pub fn record_resolve(pid: u32, ns: u64, is_copy: bool) -> KernelResult<()> {
 
 /// Per-process stats.
 pub fn per_process() -> Vec<UffdStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.handlers.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.handlers.clone())
 }
 
 /// Statistics: (handler_count, total_faults, total_resolves, total_copies, total_zeros, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.handlers.len(), s.total_faults, s.total_resolves, s.total_copies, s.total_zeros, s.ops),
+        Some(s) => (
+            s.handlers.len(),
+            s.total_faults,
+            s.total_resolves,
+            s.total_copies,
+            s.total_zeros,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -216,8 +255,19 @@ pub fn self_test() {
 
     // 2: Register — handler appears zeroed; duplicate is AlreadyExists.
     register(200).expect("register");
-    let h = per_process().into_iter().find(|h| h.pid == 200).expect("find");
-    assert_eq!((h.registered_ranges, h.faults_missing, h.faults_wp, h.faults_minor), (0, 0, 0, 0));
+    let h = per_process()
+        .into_iter()
+        .find(|h| h.pid == 200)
+        .expect("find");
+    assert_eq!(
+        (
+            h.registered_ranges,
+            h.faults_missing,
+            h.faults_wp,
+            h.faults_minor
+        ),
+        (0, 0, 0, 0)
+    );
     assert_eq!((h.resolves, h.copy_pages, h.zero_pages), (0, 0, 0));
     assert_eq!(per_process().len(), 1);
     assert!(register(200).is_err());
@@ -227,14 +277,20 @@ pub fn self_test() {
     record_fault(200, FaultType::Missing).expect("missing");
     record_fault(200, FaultType::WriteProtect).expect("wp");
     record_fault(200, FaultType::Minor).expect("minor");
-    let h = per_process().into_iter().find(|h| h.pid == 200).expect("p3");
+    let h = per_process()
+        .into_iter()
+        .find(|h| h.pid == 200)
+        .expect("p3");
     assert_eq!((h.faults_missing, h.faults_wp, h.faults_minor), (1, 1, 1));
     assert_eq!(stats().1, 3); // total_faults
     crate::serial_println!("  [3/8] fault: OK");
 
     // 4: Resolve copy — resolves + copy_pages advance; global copy/resolve too.
     record_resolve(200, 5000, true).expect("resolve_copy");
-    let h = per_process().into_iter().find(|h| h.pid == 200).expect("p4");
+    let h = per_process()
+        .into_iter()
+        .find(|h| h.pid == 200)
+        .expect("p4");
     assert_eq!((h.resolves, h.copy_pages, h.total_resolve_ns), (1, 1, 5000));
     let (_, _, resolves, copies, _, _) = stats();
     assert_eq!((resolves, copies), (1, 1));
@@ -242,14 +298,20 @@ pub fn self_test() {
 
     // 5: Resolve zero — zero_pages advance; global zero/resolve too.
     record_resolve(200, 2000, false).expect("resolve_zero");
-    let h = per_process().into_iter().find(|h| h.pid == 200).expect("p5");
+    let h = per_process()
+        .into_iter()
+        .find(|h| h.pid == 200)
+        .expect("p5");
     assert_eq!((h.zero_pages, h.resolves), (1, 2));
     let (_, _, resolves, _, zeros, _) = stats();
     assert_eq!((resolves, zeros), (2, 1));
     crate::serial_println!("  [5/8] resolve zero: OK");
 
     // 6: Max latency holds the larger of the two resolve durations (5000 > 2000).
-    let h = per_process().into_iter().find(|h| h.pid == 200).expect("p6");
+    let h = per_process()
+        .into_iter()
+        .find(|h| h.pid == 200)
+        .expect("p6");
     assert_eq!(h.max_resolve_ns, 5000);
     crate::serial_println!("  [6/8] max latency: OK");
 

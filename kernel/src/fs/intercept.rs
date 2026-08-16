@@ -54,9 +54,9 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 
 use crate::fs::path::{Path, PathBuf};
+use crate::sync::Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -270,20 +270,26 @@ pub fn register(
 
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
-    inner.interceptors.insert(id, Interceptor {
+    inner.interceptors.insert(
         id,
-        name: String::from(name),
-        path_prefix: path_prefix.to_path_buf(),
-        mask,
-        handler,
-        active: true,
-        invocations: 0,
-        denials: 0,
-    });
+        Interceptor {
+            id,
+            name: String::from(name),
+            path_prefix: path_prefix.to_path_buf(),
+            mask,
+            handler,
+            active: true,
+            invocations: 0,
+            denials: 0,
+        },
+    );
 
     serial_println!(
         "[intercept] Registered interceptor {} '{}' (path='{}', mask={:#x})",
-        id, name, path_prefix.display(), mask.0
+        id,
+        name,
+        path_prefix.display(),
+        mask.0
     );
 
     Ok(id)
@@ -302,7 +308,9 @@ pub fn unregister(id: u64) -> bool {
 /// Enable or disable an interceptor.
 pub fn set_active(id: u64, active: bool) -> KernelResult<()> {
     let mut inner = INTERCEPTS.lock();
-    let interceptor = inner.interceptors.get_mut(&id)
+    let interceptor = inner
+        .interceptors
+        .get_mut(&id)
         .ok_or(KernelError::InvalidHandle)?;
     interceptor.active = active;
     Ok(())
@@ -311,15 +319,19 @@ pub fn set_active(id: u64, active: bool) -> KernelResult<()> {
 /// List all registered interceptors.
 pub fn list() -> Vec<InterceptorInfo> {
     let inner = INTERCEPTS.lock();
-    inner.interceptors.values().map(|i| InterceptorInfo {
-        id: i.id,
-        name: i.name.clone(),
-        path_prefix: i.path_prefix.clone(),
-        mask: i.mask,
-        active: i.active,
-        invocations: i.invocations,
-        denials: i.denials,
-    }).collect()
+    inner
+        .interceptors
+        .values()
+        .map(|i| InterceptorInfo {
+            id: i.id,
+            name: i.name.clone(),
+            path_prefix: i.path_prefix.clone(),
+            mask: i.mask,
+            active: i.active,
+            invocations: i.invocations,
+            denials: i.denials,
+        })
+        .collect()
 }
 
 /// Get statistics.
@@ -441,7 +453,10 @@ pub fn pre_check(
                 inner.total_denials = inner.total_denials.saturating_add(1);
                 serial_println!(
                     "[intercept] DENIED: {} on '{}' by interceptor {}: {}",
-                    op.name(), path.display(), id, reason
+                    op.name(),
+                    path.display(),
+                    id,
+                    reason
                 );
                 return Err(KernelError::PermissionDenied);
             }
@@ -671,7 +686,12 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 7: built-in readonly handler ---
     {
-        let id = register("ro-zone", "/readonly/", FsOpMask::ALL_WRITES, readonly_handler)?;
+        let id = register(
+            "ro-zone",
+            "/readonly/",
+            FsOpMask::ALL_WRITES,
+            readonly_handler,
+        )?;
 
         // Write to protected path → denied.
         let result = pre_check(FsOp::Write, "/readonly/data", None);
@@ -706,7 +726,9 @@ pub fn self_test() -> KernelResult<()> {
         }
         serial_println!(
             "[intercept]   stats OK (checks={}, denials={}, allows={})",
-            st.total_checks, st.total_denials, st.total_allows
+            st.total_checks,
+            st.total_denials,
+            st.total_allows
         );
     }
 

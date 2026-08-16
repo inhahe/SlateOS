@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -115,7 +115,9 @@ where
 /// and a 510k total-transitions count.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         next_id: 1,
@@ -127,12 +129,19 @@ pub fn init_defaults() {
 /// Register a device.
 pub fn register(name: &str, min_khz: u64, max_khz: u64) -> KernelResult<u32> {
     with_state(|state| {
-        if state.devices.len() >= MAX_DEVICES { return Err(KernelError::ResourceExhausted); }
+        if state.devices.len() >= MAX_DEVICES {
+            return Err(KernelError::ResourceExhausted);
+        }
         let id = state.next_id;
         state.next_id += 1;
         state.devices.push(DevFreqInfo {
-            id, name: String::from(name), min_freq_khz: min_khz, max_freq_khz: max_khz,
-            cur_freq_khz: min_khz, governor: Governor::OnDemand, transitions: 0,
+            id,
+            name: String::from(name),
+            min_freq_khz: min_khz,
+            max_freq_khz: max_khz,
+            cur_freq_khz: min_khz,
+            governor: Governor::OnDemand,
+            transitions: 0,
             time_in_state_ms: [0; 5],
         });
         Ok(id)
@@ -142,7 +151,10 @@ pub fn register(name: &str, min_khz: u64, max_khz: u64) -> KernelResult<u32> {
 /// Record a frequency transition.
 pub fn record_transition(id: u32, new_freq_khz: u64) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.id == id)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         d.cur_freq_khz = new_freq_khz.clamp(d.min_freq_khz, d.max_freq_khz);
         d.transitions += 1;
@@ -154,7 +166,10 @@ pub fn record_transition(id: u32, new_freq_khz: u64) -> KernelResult<()> {
 /// Set governor.
 pub fn set_governor(id: u32, gov: Governor) -> KernelResult<()> {
     with_state(|state| {
-        let d = state.devices.iter_mut().find(|d| d.id == id)
+        let d = state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         d.governor = gov;
         Ok(())
@@ -164,7 +179,10 @@ pub fn set_governor(id: u32, gov: Governor) -> KernelResult<()> {
 /// Unregister a device.
 pub fn unregister(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let idx = state.devices.iter().position(|d| d.id == id)
+        let idx = state
+            .devices
+            .iter()
+            .position(|d| d.id == id)
             .ok_or(KernelError::NotFound)?;
         state.devices.remove(idx);
         Ok(())
@@ -173,7 +191,10 @@ pub fn unregister(id: u32) -> KernelResult<()> {
 
 /// List devices.
 pub fn list() -> Vec<DevFreqInfo> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Statistics: (device_count, total_transitions, ops).
@@ -220,14 +241,35 @@ pub fn self_test() {
 
     // 4: Out-of-range targets clamp to [min, max].
     record_transition(id, 9_999_999).expect("clamp_high");
-    assert_eq!(list().into_iter().find(|d| d.id == id).expect("dev").cur_freq_khz, 1_000_000);
+    assert_eq!(
+        list()
+            .into_iter()
+            .find(|d| d.id == id)
+            .expect("dev")
+            .cur_freq_khz,
+        1_000_000
+    );
     record_transition(id, 1).expect("clamp_low");
-    assert_eq!(list().into_iter().find(|d| d.id == id).expect("dev").cur_freq_khz, 100_000);
+    assert_eq!(
+        list()
+            .into_iter()
+            .find(|d| d.id == id)
+            .expect("dev")
+            .cur_freq_khz,
+        100_000
+    );
     crate::serial_println!("  [4/8] clamp: OK");
 
     // 5: Governor change is recorded.
     set_governor(id, Governor::Performance).expect("governor");
-    assert_eq!(list().into_iter().find(|d| d.id == id).expect("dev").governor, Governor::Performance);
+    assert_eq!(
+        list()
+            .into_iter()
+            .find(|d| d.id == id)
+            .expect("dev")
+            .governor,
+        Governor::Performance
+    );
     crate::serial_println!("  [5/8] governor: OK");
 
     // 6: Total transitions accumulated exactly (3 record_transition calls).

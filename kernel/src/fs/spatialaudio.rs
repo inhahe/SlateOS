@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -154,7 +154,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         config: SpatialConfig {
             global_enabled: false,
@@ -238,7 +240,11 @@ pub fn set_doppler(enabled: bool) -> KernelResult<()> {
 /// Set per-app spatial audio config.
 pub fn set_app_enabled(app_name: &str, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        if let Some(cfg) = state.app_configs.iter_mut().find(|c| c.app_name == app_name) {
+        if let Some(cfg) = state
+            .app_configs
+            .iter_mut()
+            .find(|c| c.app_name == app_name)
+        {
             cfg.enabled = enabled;
         } else {
             if state.app_configs.len() >= MAX_APP_CONFIGS {
@@ -258,7 +264,10 @@ pub fn set_app_enabled(app_name: &str, enabled: bool) -> KernelResult<()> {
 /// Set per-app layout override.
 pub fn set_app_layout(app_name: &str, layout: SpeakerLayout) -> KernelResult<()> {
     with_state(|state| {
-        let cfg = state.app_configs.iter_mut().find(|c| c.app_name == app_name)
+        let cfg = state
+            .app_configs
+            .iter_mut()
+            .find(|c| c.app_name == app_name)
             .ok_or(KernelError::NotFound)?;
         cfg.layout_override = Some(layout);
         Ok(())
@@ -299,14 +308,22 @@ pub fn get_app_config(app_name: &str) -> Option<SpatialConfig> {
 
 /// List per-app configs.
 pub fn list_app_configs() -> Vec<AppSpatialConfig> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.app_configs.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.app_configs.clone())
 }
 
 /// Statistics: (app_config_count, streams_processed, config_changes, ops).
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.app_configs.len(), s.total_streams_processed, s.total_config_changes, s.ops),
+        Some(s) => (
+            s.app_configs.len(),
+            s.total_streams_processed,
+            s.total_config_changes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

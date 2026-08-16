@@ -124,9 +124,8 @@ impl Barrier {
             BarrierWaitResult { is_leader: true }
         } else {
             // Not the last — block until the generation advances.
-            self.wq.wait_until(|| {
-                self.generation.load(Ordering::Acquire) != my_gen
-            });
+            self.wq
+                .wait_until(|| self.generation.load(Ordering::Acquire) != my_gen);
 
             BarrierWaitResult { is_leader: false }
         }

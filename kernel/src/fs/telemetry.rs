@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -36,10 +36,10 @@ use crate::error::{KernelError, KernelResult};
 /// Metric type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricType {
-    Counter,     // Monotonically increasing.
-    Gauge,       // Current value (can go up/down).
-    Histogram,   // Distribution of values.
-    Rate,        // Events per second.
+    Counter,   // Monotonically increasing.
+    Gauge,     // Current value (can go up/down).
+    Histogram, // Distribution of values.
+    Rate,      // Events per second.
 }
 
 impl MetricType {
@@ -147,7 +147,9 @@ where
 /// API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         metrics: Vec::new(),
         collection_enabled: true,
@@ -159,7 +161,12 @@ pub fn init_defaults() {
 }
 
 /// Register a new metric.
-pub fn register_metric(name: &str, mtype: MetricType, category: MetricCategory, unit: &str) -> KernelResult<()> {
+pub fn register_metric(
+    name: &str,
+    mtype: MetricType,
+    category: MetricCategory,
+    unit: &str,
+) -> KernelResult<()> {
     with_state(|state| {
         if state.metrics.len() >= MAX_METRICS {
             return Err(KernelError::ResourceExhausted);
@@ -168,10 +175,17 @@ pub fn register_metric(name: &str, mtype: MetricType, category: MetricCategory, 
             return Err(KernelError::AlreadyExists);
         }
         state.metrics.push(Metric {
-            name: String::from(name), metric_type: mtype, category,
-            value: 0, min_value: u64::MAX, max_value: 0,
-            sample_count: 0, total_sum: 0,
-            last_updated_ns: 0, unit: String::from(unit), enabled: true,
+            name: String::from(name),
+            metric_type: mtype,
+            category,
+            value: 0,
+            min_value: u64::MAX,
+            max_value: 0,
+            sample_count: 0,
+            total_sum: 0,
+            last_updated_ns: 0,
+            unit: String::from(unit),
+            enabled: true,
         });
         Ok(())
     })
@@ -184,7 +198,10 @@ pub fn record(name: &str, value: u64) -> KernelResult<()> {
             return Err(KernelError::PermissionDenied);
         }
         let now = crate::hpet::elapsed_ns();
-        let metric = state.metrics.iter_mut().find(|m| m.name == name)
+        let metric = state
+            .metrics
+            .iter_mut()
+            .find(|m| m.name == name)
             .ok_or(KernelError::NotFound)?;
         if !metric.enabled {
             return Err(KernelError::PermissionDenied);
@@ -193,8 +210,12 @@ pub fn record(name: &str, value: u64) -> KernelResult<()> {
             MetricType::Counter => metric.value += value,
             _ => metric.value = value,
         }
-        if value < metric.min_value { metric.min_value = value; }
-        if value > metric.max_value { metric.max_value = value; }
+        if value < metric.min_value {
+            metric.min_value = value;
+        }
+        if value > metric.max_value {
+            metric.max_value = value;
+        }
         metric.sample_count += 1;
         metric.total_sum += value;
         metric.last_updated_ns = now;
@@ -205,18 +226,28 @@ pub fn record(name: &str, value: u64) -> KernelResult<()> {
 
 /// Query a metric by name.
 pub fn query(name: &str) -> Option<Metric> {
-    STATE.lock().as_ref().and_then(|s| s.metrics.iter().find(|m| m.name == name).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.metrics.iter().find(|m| m.name == name).cloned())
 }
 
 /// List all metrics.
 pub fn list_metrics() -> Vec<Metric> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.metrics.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.metrics.clone())
 }
 
 /// List by category.
 pub fn by_category(category: MetricCategory) -> Vec<Metric> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.metrics.iter().filter(|m| m.category == category).cloned().collect()
+        s.metrics
+            .iter()
+            .filter(|m| m.category == category)
+            .cloned()
+            .collect()
     })
 }
 
@@ -225,7 +256,9 @@ pub fn remove_metric(name: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.metrics.len();
         state.metrics.retain(|m| m.name != name);
-        if state.metrics.len() == before { return Err(KernelError::NotFound); }
+        if state.metrics.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -241,7 +274,9 @@ pub fn set_collection_enabled(enabled: bool) -> KernelResult<()> {
 /// Set collection interval.
 pub fn set_interval(ms: u64) -> KernelResult<()> {
     with_state(|state| {
-        if ms == 0 { return Err(KernelError::InvalidArgument); }
+        if ms == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
         state.collection_interval_ms = ms;
         Ok(())
     })
@@ -259,7 +294,13 @@ pub fn export() -> KernelResult<Vec<Metric>> {
 pub fn stats() -> (usize, u64, u64, bool, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.metrics.len(), s.total_samples, s.total_exports, s.collection_enabled, s.ops),
+        Some(s) => (
+            s.metrics.len(),
+            s.total_samples,
+            s.total_exports,
+            s.collection_enabled,
+            s.ops,
+        ),
         None => (0, 0, 0, false, 0),
     }
 }
@@ -283,7 +324,13 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty defaults: OK");
 
     // 2: Register a gauge metric — starts at zero with no samples.
-    register_metric("cpu.usage_pct", MetricType::Gauge, MetricCategory::System, "%").expect("reg");
+    register_metric(
+        "cpu.usage_pct",
+        MetricType::Gauge,
+        MetricCategory::System,
+        "%",
+    )
+    .expect("reg");
     let m = query("cpu.usage_pct").expect("query");
     assert_eq!(m.metric_type, MetricType::Gauge);
     assert_eq!(m.value, 0);
@@ -298,7 +345,13 @@ pub fn self_test() {
     crate::serial_println!("  [3/8] record gauge: OK");
 
     // 4: Counter accumulates across data points.
-    register_metric("net.rx_bytes", MetricType::Counter, MetricCategory::Network, "bytes").expect("reg2");
+    register_metric(
+        "net.rx_bytes",
+        MetricType::Counter,
+        MetricCategory::Network,
+        "bytes",
+    )
+    .expect("reg2");
     record("net.rx_bytes", 4096).expect("counter1");
     record("net.rx_bytes", 1024).expect("counter2");
     let m = query("net.rx_bytes").expect("query3");
@@ -306,7 +359,13 @@ pub fn self_test() {
     crate::serial_println!("  [4/8] counter: OK");
 
     // 5: Register custom — duplicate registration is rejected.
-    register_metric("custom.test", MetricType::Gauge, MetricCategory::Custom, "units").expect("reg3");
+    register_metric(
+        "custom.test",
+        MetricType::Gauge,
+        MetricCategory::Custom,
+        "units",
+    )
+    .expect("reg3");
     assert_eq!(list_metrics().len(), 3);
     assert!(register_metric("custom.test", MetricType::Gauge, MetricCategory::Custom, "").is_err());
     crate::serial_println!("  [5/8] register: OK");

@@ -37,10 +37,10 @@
 //! - `man 7 network_namespaces`
 //! - Design spec: container primitives for Docker support
 
-use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -284,7 +284,9 @@ pub fn create() -> KernelResult<NetNsId> {
         for offset in 0..MAX_NAMESPACES {
             #[allow(clippy::arithmetic_side_effects)]
             let idx = (start + offset) % MAX_NAMESPACES;
-            if idx == 0 { continue; } // Skip root.
+            if idx == 0 {
+                continue;
+            } // Skip root.
             if !table.namespaces[idx].active {
                 found = Some(idx);
                 break;
@@ -443,11 +445,7 @@ pub fn add_route(
 ///
 /// - [`KernelError::InvalidArgument`] if namespace doesn't exist.
 /// - [`KernelError::NotFound`] if no matching route.
-pub fn remove_route(
-    ns_id: NetNsId,
-    destination: Ipv4Addr,
-    mask: Ipv4Addr,
-) -> KernelResult<()> {
+pub fn remove_route(ns_id: NetNsId, destination: Ipv4Addr, mask: Ipv4Addr) -> KernelResult<()> {
     with_table(|table| {
         let idx = ns_id as usize;
         if idx >= MAX_NAMESPACES || !table.namespaces[idx].active {
@@ -455,9 +453,9 @@ pub fn remove_route(
         }
 
         let routes = &mut table.namespaces[idx].routes;
-        let pos = routes.iter().position(|r| {
-            r.destination == destination && r.mask == mask
-        });
+        let pos = routes
+            .iter()
+            .position(|r| r.destination == destination && r.mask == mask);
 
         match pos {
             Some(i) => {
@@ -539,8 +537,7 @@ pub fn attach_process(ns_id: NetNsId) -> KernelResult<()> {
         if idx >= MAX_NAMESPACES || !table.namespaces[idx].active {
             return Err(KernelError::InvalidArgument);
         }
-        table.namespaces[idx].nr_procs =
-            table.namespaces[idx].nr_procs.saturating_add(1);
+        table.namespaces[idx].nr_procs = table.namespaces[idx].nr_procs.saturating_add(1);
         Ok(())
     })
 }
@@ -552,8 +549,7 @@ pub fn detach_process(ns_id: NetNsId) -> KernelResult<()> {
         if idx >= MAX_NAMESPACES || !table.namespaces[idx].active {
             return Err(KernelError::InvalidArgument);
         }
-        table.namespaces[idx].nr_procs =
-            table.namespaces[idx].nr_procs.saturating_sub(1);
+        table.namespaces[idx].nr_procs = table.namespaces[idx].nr_procs.saturating_sub(1);
         Ok(())
     })
 }
@@ -597,9 +593,7 @@ pub fn exists(id: NetNsId) -> bool {
 /// Count active namespaces.
 #[must_use]
 pub fn active_count() -> usize {
-    with_table_ref(|table| {
-        table.namespaces.iter().filter(|ns| ns.active).count()
-    })
+    with_table_ref(|table| table.namespaces.iter().filter(|ns| ns.active).count())
 }
 
 // ---------------------------------------------------------------------------
@@ -651,11 +645,23 @@ pub fn self_test() {
 
     // Test 6: Add routes.
     // Default route: 0.0.0.0/0 → 10.0.0.1, metric 100
-    add_route(ns1, Ipv4Addr::new(0, 0, 0, 0), Ipv4Addr::new(0, 0, 0, 0),
-              Ipv4Addr::new(10, 0, 0, 1), 100).expect("default route");
+    add_route(
+        ns1,
+        Ipv4Addr::new(0, 0, 0, 0),
+        Ipv4Addr::new(0, 0, 0, 0),
+        Ipv4Addr::new(10, 0, 0, 1),
+        100,
+    )
+    .expect("default route");
     // LAN route: 10.0.0.0/24 → 0.0.0.0 (direct), metric 0
-    add_route(ns1, Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(255, 255, 255, 0),
-              Ipv4Addr::UNSPECIFIED, 0).expect("lan route");
+    add_route(
+        ns1,
+        Ipv4Addr::new(10, 0, 0, 0),
+        Ipv4Addr::new(255, 255, 255, 0),
+        Ipv4Addr::UNSPECIFIED,
+        0,
+    )
+    .expect("lan route");
     assert_eq!(routes(ns1).len(), 2);
     serial_println!("[netns]   Add routes: OK");
 
@@ -670,8 +676,12 @@ pub fn self_test() {
     serial_println!("[netns]   Route lookup (longest prefix): OK");
 
     // Test 8: Remove route.
-    remove_route(ns1, Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(255, 255, 255, 0))
-        .expect("remove lan route");
+    remove_route(
+        ns1,
+        Ipv4Addr::new(10, 0, 0, 0),
+        Ipv4Addr::new(255, 255, 255, 0),
+    )
+    .expect("remove lan route");
     assert_eq!(routes(ns1).len(), 1);
     // Now 10.0.0.5 falls through to default route.
     let next = route_lookup(ns1, Ipv4Addr::new(10, 0, 0, 5));
@@ -687,10 +697,22 @@ pub fn self_test() {
 
     // Test 10: Metric tie-breaking.
     // Two default routes with different metrics.
-    add_route(ns1, Ipv4Addr::new(0, 0, 0, 0), Ipv4Addr::new(0, 0, 0, 0),
-              Ipv4Addr::new(10, 0, 0, 99), 200).expect("high metric");
-    add_route(ns1, Ipv4Addr::new(0, 0, 0, 0), Ipv4Addr::new(0, 0, 0, 0),
-              Ipv4Addr::new(10, 0, 0, 1), 50).expect("low metric");
+    add_route(
+        ns1,
+        Ipv4Addr::new(0, 0, 0, 0),
+        Ipv4Addr::new(0, 0, 0, 0),
+        Ipv4Addr::new(10, 0, 0, 99),
+        200,
+    )
+    .expect("high metric");
+    add_route(
+        ns1,
+        Ipv4Addr::new(0, 0, 0, 0),
+        Ipv4Addr::new(0, 0, 0, 0),
+        Ipv4Addr::new(10, 0, 0, 1),
+        50,
+    )
+    .expect("low metric");
     let next = route_lookup(ns1, Ipv4Addr::new(1, 1, 1, 1));
     assert_eq!(next, Some(Ipv4Addr::new(10, 0, 0, 1))); // Lower metric wins.
     serial_println!("[netns]   Metric tie-breaking: OK");
@@ -724,10 +746,14 @@ pub fn self_test() {
     // Test 15: Namespace isolation — different namespaces have
     // independent interface configs.
     let ns2 = create().expect("create ns2");
-    configure_interface(ns2, Ipv4Addr::new(192, 168, 1, 100),
-                        Ipv4Addr::new(255, 255, 255, 0),
-                        Ipv4Addr::new(192, 168, 1, 1),
-                        Ipv4Addr::new(1, 1, 1, 1)).expect("configure ns2");
+    configure_interface(
+        ns2,
+        Ipv4Addr::new(192, 168, 1, 100),
+        Ipv4Addr::new(255, 255, 255, 0),
+        Ipv4Addr::new(192, 168, 1, 1),
+        Ipv4Addr::new(1, 1, 1, 1),
+    )
+    .expect("configure ns2");
     // ns1 and ns2 have different IPs.
     let cfg1 = interface_config(ns1).unwrap();
     let cfg2 = interface_config(ns2).unwrap();
@@ -740,26 +766,60 @@ pub fn self_test() {
     for i in 0..MAX_ROUTES {
         #[allow(clippy::cast_possible_truncation)]
         let octet = (i & 0xFF) as u8;
-        add_route(ns3, Ipv4Addr::new(octet, 0, 0, 0),
-                  Ipv4Addr::new(255, 0, 0, 0),
-                  Ipv4Addr::new(10, 0, 0, 1), 100).expect("fill routes");
+        add_route(
+            ns3,
+            Ipv4Addr::new(octet, 0, 0, 0),
+            Ipv4Addr::new(255, 0, 0, 0),
+            Ipv4Addr::new(10, 0, 0, 1),
+            100,
+        )
+        .expect("fill routes");
     }
-    assert!(add_route(ns3, Ipv4Addr::new(250, 0, 0, 0),
-                      Ipv4Addr::new(255, 0, 0, 0),
-                      Ipv4Addr::new(10, 0, 0, 1), 100).is_err());
+    assert!(
+        add_route(
+            ns3,
+            Ipv4Addr::new(250, 0, 0, 0),
+            Ipv4Addr::new(255, 0, 0, 0),
+            Ipv4Addr::new(10, 0, 0, 1),
+            100
+        )
+        .is_err()
+    );
     serial_println!("[netns]   Route table full: OK");
 
     // Test 17: Invalid namespace operations.
-    assert!(configure_interface(99, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED,
-                                Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED).is_err());
-    assert!(add_route(99, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED,
-                      Ipv4Addr::UNSPECIFIED, 0).is_err());
+    assert!(
+        configure_interface(
+            99,
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::UNSPECIFIED
+        )
+        .is_err()
+    );
+    assert!(
+        add_route(
+            99,
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::UNSPECIFIED,
+            0
+        )
+        .is_err()
+    );
     assert!(!exists(99));
     serial_println!("[netns]   Invalid namespace rejected: OK");
 
     // Test 18: Remove non-existent route.
-    assert!(remove_route(ns1, Ipv4Addr::new(172, 16, 0, 0),
-                         Ipv4Addr::new(255, 255, 0, 0)).is_err());
+    assert!(
+        remove_route(
+            ns1,
+            Ipv4Addr::new(172, 16, 0, 0),
+            Ipv4Addr::new(255, 255, 0, 0)
+        )
+        .is_err()
+    );
     serial_println!("[netns]   Remove non-existent route: OK");
 
     // Cleanup.

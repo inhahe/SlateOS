@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -128,7 +128,9 @@ where
 /// a backing device is tracked and the record functions on every cache event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         devices: Vec::new(),
         total_hits: 0,
@@ -147,12 +149,22 @@ pub fn init_defaults() {
 /// [`KernelError::ResourceExhausted`].
 pub fn register_device(device: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.devices.len() >= MAX_DEVICES { return Err(KernelError::ResourceExhausted); }
-        if state.devices.iter().any(|d| d.device == device) { return Err(KernelError::AlreadyExists); }
+        if state.devices.len() >= MAX_DEVICES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.devices.iter().any(|d| d.device == device) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.devices.push(DeviceCacheStats {
-            device: String::from(device), cached_pages: 0, hits: 0, misses: 0,
-            evictions: 0, dirty_pages: 0, writeback_pages: 0,
-            readahead_pages: 0, readahead_useful: 0,
+            device: String::from(device),
+            cached_pages: 0,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            dirty_pages: 0,
+            writeback_pages: 0,
+            readahead_pages: 0,
+            readahead_useful: 0,
         });
         Ok(())
     })
@@ -161,7 +173,10 @@ pub fn register_device(device: &str) -> KernelResult<()> {
 /// Record a cache hit.
 pub fn record_hit(device: &str) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         dev.hits += 1;
         state.total_hits += 1;
@@ -172,7 +187,10 @@ pub fn record_hit(device: &str) -> KernelResult<()> {
 /// Record a cache miss.
 pub fn record_miss(device: &str) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         dev.misses += 1;
         dev.cached_pages += 1; // Page now cached.
@@ -184,7 +202,10 @@ pub fn record_miss(device: &str) -> KernelResult<()> {
 /// Record page eviction.
 pub fn record_eviction(device: &str, pages: u64) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         dev.evictions += pages;
         dev.cached_pages = dev.cached_pages.saturating_sub(pages);
@@ -196,7 +217,10 @@ pub fn record_eviction(device: &str, pages: u64) -> KernelResult<()> {
 /// Record readahead pages.
 pub fn record_readahead(device: &str, pages: u64, useful: u64) -> KernelResult<()> {
     with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.device == device)
+        let dev = state
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
             .ok_or(KernelError::NotFound)?;
         dev.readahead_pages += pages;
         dev.readahead_useful += useful;
@@ -209,7 +233,10 @@ pub fn record_readahead(device: &str, pages: u64, useful: u64) -> KernelResult<(
 
 /// Get per-device cache stats.
 pub fn per_device() -> Vec<DeviceCacheStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.devices.clone())
 }
 
 /// Cache hit rate as percentage * 100 (integer math).
@@ -218,7 +245,9 @@ pub fn hit_rate() -> u64 {
     match guard.as_ref() {
         Some(s) => {
             let total = s.total_hits + s.total_misses;
-            if total == 0 { return 0; }
+            if total == 0 {
+                return 0;
+            }
             s.total_hits * 10000 / total
         }
         None => 0,
@@ -230,7 +259,9 @@ pub fn readahead_rate() -> u64 {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => {
-            if s.total_readahead == 0 { return 0; }
+            if s.total_readahead == 0 {
+                return 0;
+            }
             s.total_readahead_useful * 10000 / s.total_readahead
         }
         None => 0,
@@ -241,7 +272,14 @@ pub fn readahead_rate() -> u64 {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.total_hits, s.total_misses, s.total_evictions, s.total_readahead, s.ops),
+        Some(s) => (
+            s.devices.len(),
+            s.total_hits,
+            s.total_misses,
+            s.total_evictions,
+            s.total_readahead,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -272,8 +310,14 @@ pub fn self_test() {
 
     // 2: Register — zeroed counters; dup fails.
     register_device("sda").expect("register");
-    let d = per_device().into_iter().find(|d| d.device == "sda").expect("find");
-    assert_eq!((d.hits, d.misses, d.evictions, d.cached_pages), (0, 0, 0, 0));
+    let d = per_device()
+        .into_iter()
+        .find(|d| d.device == "sda")
+        .expect("find");
+    assert_eq!(
+        (d.hits, d.misses, d.evictions, d.cached_pages),
+        (0, 0, 0, 0)
+    );
     assert!(register_device("sda").is_err());
     crate::serial_println!("  [2/8] register: OK");
 
@@ -303,7 +347,7 @@ pub fn self_test() {
     assert_eq!(d.readahead_pages, 100);
     assert_eq!(d.readahead_useful, 80);
     assert_eq!(readahead_rate(), 8000); // 80 * 10000 / 100
-    assert_eq!(hit_rate(), 5000);       // 1 * 10000 / (1 + 1)
+    assert_eq!(hit_rate(), 5000); // 1 * 10000 / (1 + 1)
     crate::serial_println!("  [6/8] readahead + rates: OK");
 
     // 7: Unknown device → NotFound on every record path.

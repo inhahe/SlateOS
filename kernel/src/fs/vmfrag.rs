@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -102,7 +102,9 @@ where
 /// via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         zones: Vec::new(),
         total_compactions: 0,
@@ -115,12 +117,18 @@ pub fn init_defaults() {
 /// Register a zone.
 pub fn register_zone(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.zones.len() >= MAX_ZONES { return Err(KernelError::ResourceExhausted); }
-        if state.zones.iter().any(|z| z.zone_name == name) { return Err(KernelError::AlreadyExists); }
+        if state.zones.len() >= MAX_ZONES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.zones.iter().any(|z| z.zone_name == name) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.zones.push(ZoneFragInfo {
             zone_name: String::from(name),
             frag_index: [0; MAX_ORDER],
-            compactions: 0, compact_success: 0, compact_fail: 0,
+            compactions: 0,
+            compact_success: 0,
+            compact_fail: 0,
             last_index_update: 0,
         });
         Ok(())
@@ -130,9 +138,16 @@ pub fn register_zone(name: &str) -> KernelResult<()> {
 /// Update fragmentation index for a zone/order.
 pub fn update_index(name: &str, order: usize, index: u32) -> KernelResult<()> {
     with_state(|state| {
-        if order >= MAX_ORDER { return Err(KernelError::InvalidArgument); }
-        if index > 1000 { return Err(KernelError::InvalidArgument); }
-        let z = state.zones.iter_mut().find(|z| z.zone_name == name)
+        if order >= MAX_ORDER {
+            return Err(KernelError::InvalidArgument);
+        }
+        if index > 1000 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let z = state
+            .zones
+            .iter_mut()
+            .find(|z| z.zone_name == name)
             .ok_or(KernelError::NotFound)?;
         z.frag_index[order] = index;
         z.last_index_update = crate::hpet::elapsed_ns();
@@ -143,11 +158,19 @@ pub fn update_index(name: &str, order: usize, index: u32) -> KernelResult<()> {
 /// Record a compaction attempt.
 pub fn record_compaction(name: &str, success: bool) -> KernelResult<()> {
     with_state(|state| {
-        let z = state.zones.iter_mut().find(|z| z.zone_name == name)
+        let z = state
+            .zones
+            .iter_mut()
+            .find(|z| z.zone_name == name)
             .ok_or(KernelError::NotFound)?;
         z.compactions += 1;
-        if success { z.compact_success += 1; state.total_success += 1; }
-        else { z.compact_fail += 1; state.total_fail += 1; }
+        if success {
+            z.compact_success += 1;
+            state.total_success += 1;
+        } else {
+            z.compact_fail += 1;
+            state.total_fail += 1;
+        }
         state.total_compactions += 1;
         Ok(())
     })
@@ -155,14 +178,23 @@ pub fn record_compaction(name: &str, success: bool) -> KernelResult<()> {
 
 /// Per-zone fragmentation info.
 pub fn per_zone() -> Vec<ZoneFragInfo> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.zones.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.zones.clone())
 }
 
 /// Statistics: (zone_count, total_compactions, total_success, total_fail, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.zones.len(), s.total_compactions, s.total_success, s.total_fail, s.ops),
+        Some(s) => (
+            s.zones.len(),
+            s.total_compactions,
+            s.total_success,
+            s.total_fail,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -191,7 +223,10 @@ pub fn self_test() {
 
     // 3: Update index.
     update_index("TestZone", 0, 100).expect("update");
-    let z = per_zone().into_iter().find(|z| z.zone_name == "TestZone").expect("find");
+    let z = per_zone()
+        .into_iter()
+        .find(|z| z.zone_name == "TestZone")
+        .expect("find");
     assert_eq!(z.frag_index[0], 100);
     crate::serial_println!("  [3/8] update index: OK");
 
@@ -202,13 +237,19 @@ pub fn self_test() {
 
     // 5: Compaction success.
     record_compaction("TestZone", true).expect("compact_ok");
-    let z = per_zone().into_iter().find(|z| z.zone_name == "TestZone").expect("find2");
+    let z = per_zone()
+        .into_iter()
+        .find(|z| z.zone_name == "TestZone")
+        .expect("find2");
     assert_eq!(z.compact_success, 1);
     crate::serial_println!("  [5/8] compact success: OK");
 
     // 6: Compaction fail.
     record_compaction("TestZone", false).expect("compact_fail");
-    let z = per_zone().into_iter().find(|z| z.zone_name == "TestZone").expect("find3");
+    let z = per_zone()
+        .into_iter()
+        .find(|z| z.zone_name == "TestZone")
+        .expect("find3");
     assert_eq!(z.compact_fail, 1);
     assert_eq!(z.compactions, 2);
     crate::serial_println!("  [6/8] compact fail: OK");

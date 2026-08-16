@@ -50,11 +50,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
@@ -215,17 +215,20 @@ pub fn create(
     let id = inner.next_id;
     inner.next_id = inner.next_id.wrapping_add(1);
 
-    inner.mounts.insert(id, OverlayMount {
-        name: name.into(),
-        lower_path: lower_path.to_path_buf(),
-        upper_path: upper_path.to_path_buf(),
-        whiteouts: BTreeSet::new(),
-        opaque_dirs: BTreeSet::new(),
-        reads: 0,
-        writes: 0,
-        copyups: 0,
-        whiteout_count: 0,
-    });
+    inner.mounts.insert(
+        id,
+        OverlayMount {
+            name: name.into(),
+            lower_path: lower_path.to_path_buf(),
+            upper_path: upper_path.to_path_buf(),
+            whiteouts: BTreeSet::new(),
+            opaque_dirs: BTreeSet::new(),
+            reads: 0,
+            writes: 0,
+            copyups: 0,
+            whiteout_count: 0,
+        },
+    );
 
     Ok(id)
 }
@@ -254,18 +257,25 @@ pub fn find_by_name(name: &str) -> Option<OverlayId> {
 /// List all active overlays.
 pub fn list() -> Vec<(OverlayId, OverlayStats)> {
     let inner = OVERLAYS.lock();
-    inner.mounts.iter().map(|(&id, m)| {
-        (id, OverlayStats {
-            name: m.name.clone(),
-            lower_path: m.lower_path.clone(),
-            upper_path: m.upper_path.clone(),
-            whiteout_count: m.whiteouts.len(),
-            opaque_dir_count: m.opaque_dirs.len(),
-            reads: m.reads,
-            writes: m.writes,
-            copyups: m.copyups,
+    inner
+        .mounts
+        .iter()
+        .map(|(&id, m)| {
+            (
+                id,
+                OverlayStats {
+                    name: m.name.clone(),
+                    lower_path: m.lower_path.clone(),
+                    upper_path: m.upper_path.clone(),
+                    whiteout_count: m.whiteouts.len(),
+                    opaque_dir_count: m.opaque_dirs.len(),
+                    reads: m.reads,
+                    writes: m.writes,
+                    copyups: m.copyups,
+                },
+            )
         })
-    }).collect()
+        .collect()
 }
 
 /// Get stats for a single overlay.
@@ -518,7 +528,11 @@ pub fn remove(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<()> {
     };
 
     let in_upper = Vfs::exists(&upper_full);
-    let in_lower = if lower_hidden { false } else { Vfs::exists(&lower_full) };
+    let in_lower = if lower_hidden {
+        false
+    } else {
+        Vfs::exists(&lower_full)
+    };
 
     if !in_upper && !in_lower {
         return Err(KernelError::NotFound);
@@ -638,15 +652,16 @@ pub fn readdir(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<Vec<Di
         // reduced to the bare child name so they can be matched against the
         // names `Vfs::readdir` returns for the lower layer.  Component-aligned
         // stripping is what keeps `d2/x` out of the listing of `d`.
-        let wo: BTreeSet<PathBuf> = m.whiteouts.iter()
+        let wo: BTreeSet<PathBuf> = m
+            .whiteouts
+            .iter()
             .filter_map(|w| w.strip_prefix(&rel))
             .filter(|child| child.components().count() == 1)
             .collect();
 
         m.reads = m.reads.saturating_add(1);
 
-        let hidden = is_opaque_ancestor(&m.opaque_dirs, &rel)
-            || m.opaque_dirs.contains(&rel);
+        let hidden = is_opaque_ancestor(&m.opaque_dirs, &rel) || m.opaque_dirs.contains(&rel);
 
         (
             layer_join(&m.upper_path, &rel),
@@ -851,9 +866,7 @@ pub fn commit(id: OverlayId) -> KernelResult<u64> {
     }
 
     // Copy upper-layer files to lower.
-    applied = applied.saturating_add(
-        merge_dir_to_lower(&upper_path, &lower_path, Path::new(""))?
-    );
+    applied = applied.saturating_add(merge_dir_to_lower(&upper_path, &lower_path, Path::new(""))?);
 
     // Reset the overlay.
     reset(id)?;
@@ -1235,7 +1248,11 @@ pub fn self_test() -> KernelResult<()> {
     {
         let s = stats(id)?;
         if s.reads == 0 || s.writes == 0 {
-            serial_println!("[overlay]   ERROR: stats not tracked (r={} w={})", s.reads, s.writes);
+            serial_println!(
+                "[overlay]   ERROR: stats not tracked (r={} w={})",
+                s.reads,
+                s.writes
+            );
             let _ = Vfs::remove_recursive(test_base);
             destroy(id).ok();
             return Err(KernelError::InternalError);
@@ -1246,8 +1263,13 @@ pub fn self_test() -> KernelResult<()> {
             destroy(id).ok();
             return Err(KernelError::InternalError);
         }
-        serial_println!("[overlay]   stats: OK (reads={} writes={} copyups={} whiteouts={})",
-            s.reads, s.writes, s.copyups, s.whiteout_count);
+        serial_println!(
+            "[overlay]   stats: OK (reads={} writes={} copyups={} whiteouts={})",
+            s.reads,
+            s.writes,
+            s.copyups,
+            s.whiteout_count
+        );
     }
 
     // --- Test 11: Reset discards upper changes ---

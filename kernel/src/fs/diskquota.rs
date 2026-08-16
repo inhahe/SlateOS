@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -140,7 +140,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         entries: Vec::new(),
         next_id: 1,
@@ -161,9 +163,18 @@ pub fn set_enabled(enabled: bool) -> KernelResult<()> {
 }
 
 /// Set quota for a user or group.
-pub fn set_quota(name: &str, target: QuotaTarget, soft_bytes: u64, hard_bytes: u64) -> KernelResult<u32> {
+pub fn set_quota(
+    name: &str,
+    target: QuotaTarget,
+    soft_bytes: u64,
+    hard_bytes: u64,
+) -> KernelResult<u32> {
     with_state(|state| {
-        if let Some(e) = state.entries.iter_mut().find(|e| e.name == name && e.target_type == target) {
+        if let Some(e) = state
+            .entries
+            .iter_mut()
+            .find(|e| e.name == name && e.target_type == target)
+        {
             e.soft_limit_bytes = soft_bytes;
             e.hard_limit_bytes = hard_bytes;
             Ok(e.id)
@@ -174,11 +185,17 @@ pub fn set_quota(name: &str, target: QuotaTarget, soft_bytes: u64, hard_bytes: u
             let id = state.next_id;
             state.next_id += 1;
             state.entries.push(QuotaEntry {
-                id, name: String::from(name), target_type: target,
-                bytes_used: 0, file_count: 0,
-                soft_limit_bytes: soft_bytes, hard_limit_bytes: hard_bytes,
-                soft_limit_files: u64::MAX, hard_limit_files: u64::MAX,
-                grace_start_ns: None, grace_period_ns: DEFAULT_GRACE_NS,
+                id,
+                name: String::from(name),
+                target_type: target,
+                bytes_used: 0,
+                file_count: 0,
+                soft_limit_bytes: soft_bytes,
+                hard_limit_bytes: hard_bytes,
+                soft_limit_files: u64::MAX,
+                hard_limit_files: u64::MAX,
+                grace_start_ns: None,
+                grace_period_ns: DEFAULT_GRACE_NS,
             });
             Ok(id)
         }
@@ -186,9 +203,16 @@ pub fn set_quota(name: &str, target: QuotaTarget, soft_bytes: u64, hard_bytes: u
 }
 
 /// Set file count limits.
-pub fn set_file_limits(name: &str, target: QuotaTarget, soft_files: u64, hard_files: u64) -> KernelResult<()> {
+pub fn set_file_limits(
+    name: &str,
+    target: QuotaTarget,
+    soft_files: u64,
+    hard_files: u64,
+) -> KernelResult<()> {
     with_state(|state| {
-        let entry = state.entries.iter_mut()
+        let entry = state
+            .entries
+            .iter_mut()
             .find(|e| e.name == name && e.target_type == target)
             .ok_or(KernelError::NotFound)?;
         entry.soft_limit_files = soft_files;
@@ -204,7 +228,11 @@ pub fn check_quota(name: &str, target: QuotaTarget, bytes: u64) -> KernelResult<
         if !state.enabled {
             return Ok(true);
         }
-        let entry = match state.entries.iter().find(|e| e.name == name && e.target_type == target) {
+        let entry = match state
+            .entries
+            .iter()
+            .find(|e| e.name == name && e.target_type == target)
+        {
             Some(e) => e,
             None => return Ok(true), // No quota set → allow.
         };
@@ -222,10 +250,17 @@ pub fn check_quota(name: &str, target: QuotaTarget, bytes: u64) -> KernelResult<
 }
 
 /// Update usage after a write/delete.
-pub fn update_usage(name: &str, target: QuotaTarget, bytes_delta: i64, file_delta: i64) -> KernelResult<()> {
+pub fn update_usage(
+    name: &str,
+    target: QuotaTarget,
+    bytes_delta: i64,
+    file_delta: i64,
+) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let entry = state.entries.iter_mut()
+        let entry = state
+            .entries
+            .iter_mut()
             .find(|e| e.name == name && e.target_type == target)
             .ok_or(KernelError::NotFound)?;
         if bytes_delta >= 0 {
@@ -252,21 +287,31 @@ pub fn update_usage(name: &str, target: QuotaTarget, bytes_delta: i64, file_delt
 pub fn remove_quota(name: &str, target: QuotaTarget) -> KernelResult<()> {
     with_state(|state| {
         let before = state.entries.len();
-        state.entries.retain(|e| !(e.name == name && e.target_type == target));
-        if state.entries.len() == before { return Err(KernelError::NotFound); }
+        state
+            .entries
+            .retain(|e| !(e.name == name && e.target_type == target));
+        if state.entries.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
 
 /// List all quota entries.
 pub fn list_quotas() -> Vec<QuotaEntry> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.entries.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.entries.clone())
 }
 
 /// Get quota for a specific user/group.
 pub fn get_quota(name: &str, target: QuotaTarget) -> Option<QuotaEntry> {
     STATE.lock().as_ref().and_then(|s| {
-        s.entries.iter().find(|e| e.name == name && e.target_type == target).cloned()
+        s.entries
+            .iter()
+            .find(|e| e.name == name && e.target_type == target)
+            .cloned()
     })
 }
 
@@ -274,7 +319,13 @@ pub fn get_quota(name: &str, target: QuotaTarget) -> Option<QuotaEntry> {
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.entries.len(), s.total_checks, s.total_denials, s.total_warnings, s.ops),
+        Some(s) => (
+            s.entries.len(),
+            s.total_checks,
+            s.total_denials,
+            s.total_warnings,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

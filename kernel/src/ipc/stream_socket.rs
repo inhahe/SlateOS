@@ -41,15 +41,15 @@
 //! `PAIRS` → `SCHED` (send/recv may call `sched::wake()`), identical to
 //! the pipe subsystem.
 
-use alloc::collections::BTreeMap;
-use alloc::vec;
-use alloc::vec::Vec;
+use super::waiters::{WaiterSet, wake_all};
 use crate::error::{KernelError, KernelResult};
 use crate::sched;
 use crate::serial_println;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
-use super::waiters::{wake_all, WaiterSet};
+use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -306,8 +306,7 @@ fn current_user_pid() -> u64 {
 /// `true` if a deliverable (unblocked) signal is pending for `pid`.
 /// Always `false` for `pid == 0` (kernel task — no signal context).
 fn deliverable_signal_pending(pid: u64) -> bool {
-    pid != 0
-        && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
+    pid != 0 && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
 }
 
 /// Park the current task for a stream-socket wait, interruptibly for user
@@ -1223,7 +1222,10 @@ fn test_dup_refcount() -> KernelResult<()> {
     match try_recv(b, &mut buf) {
         Err(KernelError::WouldBlock) => {}
         other => {
-            serial_println!("[stream_socket]   FAIL: try_recv partial close: {:?}", other);
+            serial_println!(
+                "[stream_socket]   FAIL: try_recv partial close: {:?}",
+                other
+            );
             close(a2);
             close(b);
             return Err(KernelError::InternalError);
@@ -1245,12 +1247,10 @@ fn test_dup_refcount() -> KernelResult<()> {
 }
 
 /// Number of multi-waiter receivers that got one byte.
-static SS_MULTI_DATA_OK: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static SS_MULTI_DATA_OK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Number of multi-waiter receivers that observed EOF.
-static SS_MULTI_EOF_OK: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static SS_MULTI_EOF_OK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Multi-waiter task: park on an endpoint until exactly one byte arrives.
 extern "C" fn ss_multi_data_task(handle_raw: u64) {

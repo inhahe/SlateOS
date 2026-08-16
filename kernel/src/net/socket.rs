@@ -40,10 +40,10 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::net::netstack_client::NetstackConn;
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 /// Unique per-socket id (also the value stored in `FdEntry::raw_handle`).
 type SocketId = u64;
@@ -565,12 +565,7 @@ pub fn send(handle: SocketHandle, buf: &[u8], nonblock: bool) -> KernelResult<i3
 /// - `NotConnected` — the socket is not connected.
 /// - `WouldBlock` — `nonblock` was set and no data was ready.
 /// - protocol faults propagated from [`NetstackConn::recv`].
-pub fn recv(
-    handle: SocketHandle,
-    buf: &mut [u8],
-    nonblock: bool,
-    peek: bool,
-) -> KernelResult<i32> {
+pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool, peek: bool) -> KernelResult<i32> {
     let inner = inner_of(handle)?;
     let mut guard = inner.lock();
     if guard.state != SockState::Connected {
@@ -1398,17 +1393,26 @@ pub fn self_test_server() -> KernelResult<Option<()>> {
         Err(KernelError::WouldBlock) => {}
         Ok((accepted, _peer)) => {
             close(accepted);
-            return cleanup(listener, "accept() dequeued a connection from an empty backlog");
+            return cleanup(
+                listener,
+                "accept() dequeued a connection from an empty backlog",
+            );
         }
         Err(_) => {
-            return cleanup(listener, "accept() on an empty backlog returned a non-WouldBlock error");
+            return cleanup(
+                listener,
+                "accept() on an empty backlog returned a non-WouldBlock error",
+            );
         }
     }
 
     // connect on a listening socket must be rejected (it is not Created).
     // (connect() routes through owned_conn_mut, which errors on a Shared session.)
     if connect(listener, &[127, 0, 0, 1], PORT, true).is_ok() {
-        return cleanup(listener, "connect() on a listening socket unexpectedly succeeded");
+        return cleanup(
+            listener,
+            "connect() on a listening socket unexpectedly succeeded",
+        );
     }
 
     close(listener);
@@ -1420,7 +1424,9 @@ pub fn self_test_server() -> KernelResult<Option<()>> {
     };
     if bind_stream(dgram, PORT).is_ok() {
         close(dgram);
-        crate::serial_println!("[net::socket] FAIL(server): bind_stream on a dgram socket succeeded");
+        crate::serial_println!(
+            "[net::socket] FAIL(server): bind_stream on a dgram socket succeeded"
+        );
         return Err(KernelError::InternalError);
     }
     if listen(dgram, 8).is_ok() {

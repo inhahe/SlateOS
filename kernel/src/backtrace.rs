@@ -58,7 +58,10 @@ pub fn capture() -> BacktraceResult {
 /// Used by exception handlers which have access to the faulting task's
 /// saved RBP (from the interrupt stack frame or saved context).
 pub fn walk_from(start_rbp: u64) -> BacktraceResult {
-    let mut frames = [Frame { return_addr: 0, frame_ptr: 0 }; MAX_FRAMES];
+    let mut frames = [Frame {
+        return_addr: 0,
+        frame_ptr: 0,
+    }; MAX_FRAMES];
     let mut count = 0;
     let mut rbp = start_rbp;
 
@@ -288,7 +291,10 @@ pub fn self_test() {
         "first return address {:#x} not in kernel text",
         first
     );
-    serial_println!("[backtrace]   First return addr: {:#x} (kernel text: OK)", first);
+    serial_println!(
+        "[backtrace]   First return addr: {:#x} (kernel text: OK)",
+        first
+    );
 
     // Test 3: walk_from(0) should return nothing.
     let empty = walk_from(0);

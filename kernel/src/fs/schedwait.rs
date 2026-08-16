@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -35,12 +35,12 @@ use crate::error::{KernelError, KernelResult};
 /// Wait reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitReason {
-    Runqueue,   // Waiting in runqueue for CPU
-    IoWait,     // Waiting for I/O completion
-    LockWait,   // Waiting for a lock
-    SleepWait,  // Voluntary sleep
-    IpcWait,    // Waiting for IPC message
-    PageFault,  // Waiting for page fault resolution
+    Runqueue,  // Waiting in runqueue for CPU
+    IoWait,    // Waiting for I/O completion
+    LockWait,  // Waiting for a lock
+    SleepWait, // Voluntary sleep
+    IpcWait,   // Waiting for IPC message
+    PageFault, // Waiting for page fault resolution
 }
 
 impl WaitReason {
@@ -104,7 +104,9 @@ where
 fn bucket_index(ns: u64) -> usize {
     let us = ns / 1000;
     for (i, &bound) in BUCKET_BOUNDS_US.iter().enumerate() {
-        if us < bound { return i; }
+        if us < bound {
+            return i;
+        }
     }
     BUCKET_COUNT - 1
 }
@@ -130,7 +132,9 @@ fn bucket_index(ns: u64) -> usize {
 /// totals of 90M waits over 920s of wait time.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         counts: [0; REASON_COUNT],
         total_ns: [0; REASON_COUNT],
@@ -148,7 +152,9 @@ pub fn record_wait(reason: WaitReason, ns: u64) -> KernelResult<()> {
         let idx = reason_index(reason);
         state.counts[idx] += 1;
         state.total_ns[idx] += ns;
-        if ns > state.max_ns[idx] { state.max_ns[idx] = ns; }
+        if ns > state.max_ns[idx] {
+            state.max_ns[idx] = ns;
+        }
         state.histogram[bucket_index(ns)] += 1;
         state.total_waits += 1;
         state.total_wait_ns += ns;
@@ -162,10 +168,18 @@ pub fn per_reason() -> Vec<(WaitReason, u64, u64, u64)> {
     match guard.as_ref() {
         Some(s) => {
             let reasons = [
-                WaitReason::Runqueue, WaitReason::IoWait, WaitReason::LockWait,
-                WaitReason::SleepWait, WaitReason::IpcWait, WaitReason::PageFault,
+                WaitReason::Runqueue,
+                WaitReason::IoWait,
+                WaitReason::LockWait,
+                WaitReason::SleepWait,
+                WaitReason::IpcWait,
+                WaitReason::PageFault,
             ];
-            reasons.iter().enumerate().map(|(i, &r)| (r, s.counts[i], s.total_ns[i], s.max_ns[i])).collect()
+            reasons
+                .iter()
+                .enumerate()
+                .map(|(i, &r)| (r, s.counts[i], s.total_ns[i], s.max_ns[i]))
+                .collect()
         }
         None => Vec::new(),
     }
@@ -230,10 +244,10 @@ pub fn self_test() {
     // 4: Max tracking — a larger runqueue wait raises the max (200us → <1ms).
     record_wait(WaitReason::Runqueue, 200_000).expect("rq2");
     let r = per_reason();
-    assert_eq!(r[0].1, 2);             // two runqueue waits
-    assert_eq!(r[0].2, 200_500);       // 500 + 200_000
-    assert_eq!(r[0].3, 200_000);       // max raised
-    assert_eq!(histogram().1[3], 1);   // <1ms
+    assert_eq!(r[0].1, 2); // two runqueue waits
+    assert_eq!(r[0].2, 200_500); // 500 + 200_000
+    assert_eq!(r[0].3, 200_000); // max raised
+    assert_eq!(histogram().1[3], 1); // <1ms
     crate::serial_println!("  [4/8] max tracking: OK");
 
     // 5: Histogram structure — six buckets, exact placements so far.

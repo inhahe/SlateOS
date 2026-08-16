@@ -63,8 +63,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 use crate::fs::path::{Path, PathBuf};
+use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 
 use crate::sync::PreemptSpinMutex as Mutex;
 
@@ -453,9 +453,7 @@ fn gen_cpu_file(name: &str) -> KernelResult<Vec<u8>> {
         // CPUs present (populated) — enabled entries in the ACPI MADT.
         // We don't model hot-plug slots beyond the MADT, so possible ==
         // present (correct for non-hotplug hardware; never over-reported).
-        "present" | "possible" => {
-            Ok(cpu_range(crate::acpi::processor_count()).into_bytes())
-        }
+        "present" | "possible" => Ok(cpu_range(crate::acpi::processor_count()).into_bytes()),
         // Highest CPU index the kernel can address (NR_CPUS - 1 in Linux).
         "kernel_max" => {
             let max = crate::sched::priority_rr::MAX_CPUS.saturating_sub(1);
@@ -639,12 +637,8 @@ fn gen_cpu_cache_file(cpu_idx: usize, cache_idx: usize, name: &str) -> KernelRes
         "coherency_line_size" => format!("{}\n", c.line_size).into_bytes(),
         "ways_of_associativity" => format!("{}\n", c.ways).into_bytes(),
         "number_of_sets" => format!("{}\n", c.sets).into_bytes(),
-        "shared_cpu_map" => {
-            fmt_cpu_mask(&cache_shared_cpus(cpu_idx, c.max_sharing)).into_bytes()
-        }
-        "shared_cpu_list" => {
-            fmt_cpu_list(&cache_shared_cpus(cpu_idx, c.max_sharing)).into_bytes()
-        }
+        "shared_cpu_map" => fmt_cpu_mask(&cache_shared_cpus(cpu_idx, c.max_sharing)).into_bytes(),
+        "shared_cpu_list" => fmt_cpu_list(&cache_shared_cpus(cpu_idx, c.max_sharing)).into_bytes(),
         _ => return Err(KernelError::NotFound),
     };
     Ok(bytes)
@@ -862,8 +856,7 @@ impl FileSystem for SysFs {
                 let entries = CPU_CACHE_FILES
                     .iter()
                     .map(|name| {
-                        let size =
-                            gen_cpu_cache_file(idx, ci, name).map_or(0, |d| d.len() as u64);
+                        let size = gen_cpu_cache_file(idx, ci, name).map_or(0, |d| d.len() as u64);
                         DirEntry {
                             name: PathBuf::from(*name),
                             entry_type: EntryType::File,
@@ -877,8 +870,7 @@ impl FileSystem for SysFs {
                 let entries = CPU_TOPOLOGY_FILES
                     .iter()
                     .map(|name| {
-                        let size =
-                            gen_cpu_topo_file(idx, name).map_or(0, |d| d.len() as u64);
+                        let size = gen_cpu_topo_file(idx, name).map_or(0, |d| d.len() as u64);
                         DirEntry {
                             name: PathBuf::from(*name),
                             entry_type: EntryType::File,
@@ -1062,18 +1054,14 @@ impl FileSystem for SysFs {
 
         match classify_path(rel) {
             SysPath::KernelFile("hostname") => {
-                let text = core::str::from_utf8(data)
-                    .map_err(|_| KernelError::InvalidArgument)?;
+                let text = core::str::from_utf8(data).map_err(|_| KernelError::InvalidArgument)?;
                 set_hostname(text)
             }
             SysPath::ParamFile(name) => {
                 // Parse value as decimal u64.
-                let text = core::str::from_utf8(data)
-                    .map_err(|_| KernelError::InvalidArgument)?;
+                let text = core::str::from_utf8(data).map_err(|_| KernelError::InvalidArgument)?;
                 let trimmed = text.trim();
-                let value: u64 = trimmed
-                    .parse()
-                    .map_err(|_| KernelError::InvalidArgument)?;
+                let value: u64 = trimmed.parse().map_err(|_| KernelError::InvalidArgument)?;
                 match crate::sysctl::set_by_name(name, value) {
                     Some(_old) => Ok(()),
                     None => Err(KernelError::InvalidArgument),
@@ -1196,12 +1184,17 @@ pub fn self_test() -> KernelResult<()> {
     );
     for dir_name in TOP_DIRS {
         assert!(
-            root_entries.iter().any(|e| e.name.as_path() == Path::new(*dir_name)),
+            root_entries
+                .iter()
+                .any(|e| e.name.as_path() == Path::new(*dir_name)),
             "sysfs root missing '{}'",
             dir_name
         );
     }
-    serial_println!("[sysfs]   root directory: OK ({} entries)", root_entries.len());
+    serial_println!(
+        "[sysfs]   root directory: OK ({} entries)",
+        root_entries.len()
+    );
 
     // 2. Read kernel files.
     let version = fs.read_file(Path::new("/kernel/version"))?;
@@ -1237,7 +1230,10 @@ pub fn self_test() -> KernelResult<()> {
         !params_dir.is_empty(),
         "params dir should have sysctl entries"
     );
-    serial_println!("[sysfs]   params directory: OK ({} params)", params_dir.len());
+    serial_println!(
+        "[sysfs]   params directory: OK ({} params)",
+        params_dir.len()
+    );
 
     // Read one known parameter.
     let swappiness = fs.read_file(Path::new("/params/mm.swappiness"));
@@ -1270,7 +1266,9 @@ pub fn self_test() -> KernelResult<()> {
         "devices dir should contain 'pci'"
     );
     assert!(
-        dev_dir.iter().any(|e| e.name.as_path() == Path::new("system")),
+        dev_dir
+            .iter()
+            .any(|e| e.name.as_path() == Path::new("system")),
         "devices dir should contain 'system'"
     );
     serial_println!("[sysfs]   devices directory: OK");
@@ -1291,9 +1289,15 @@ pub fn self_test() -> KernelResult<()> {
 
     // 10. Metadata with permissions.
     let hostname_meta = fs.metadata(Path::new("/kernel/hostname"))?;
-    assert!(hostname_meta.permissions == 0o644, "hostname should be rw-r--r--");
+    assert!(
+        hostname_meta.permissions == 0o644,
+        "hostname should be rw-r--r--"
+    );
     let version_meta = fs.metadata(Path::new("/kernel/version"))?;
-    assert!(version_meta.permissions == 0o444, "version should be r--r--r--");
+    assert!(
+        version_meta.permissions == 0o444,
+        "version should be r--r--r--"
+    );
     serial_println!("[sysfs]   metadata/permissions: OK");
 
     // 11. CPU topology tree (/sys/devices/system/cpu).  This is the
@@ -1304,7 +1308,10 @@ pub fn self_test() -> KernelResult<()> {
         // system/ lists cpu/.
         let sys_dir = fs.readdir(Path::new("/devices/system"))?;
         assert!(
-            sys_dir.iter().any(|e| e.name.as_path() == Path::new("cpu") && e.entry_type == EntryType::Directory),
+            sys_dir
+                .iter()
+                .any(|e| e.name.as_path() == Path::new("cpu")
+                    && e.entry_type == EntryType::Directory),
             "devices/system should contain 'cpu' directory"
         );
 
@@ -1312,7 +1319,9 @@ pub fn self_test() -> KernelResult<()> {
         let cpu_dir = fs.readdir(Path::new("/devices/system/cpu"))?;
         for name in CPU_FILES {
             assert!(
-                cpu_dir.iter().any(|e| e.name.as_path() == Path::new(*name) && e.entry_type == EntryType::File),
+                cpu_dir.iter().any(
+                    |e| e.name.as_path() == Path::new(*name) && e.entry_type == EntryType::File
+                ),
                 "devices/system/cpu missing '{}'",
                 name
             );
@@ -1320,31 +1329,32 @@ pub fn self_test() -> KernelResult<()> {
 
         // online must equal the SMP online count, formatted Linux-style.
         let online = fs.read_file(Path::new("/devices/system/cpu/online"))?;
-        let online_txt = core::str::from_utf8(&online)
-            .map_err(|_| KernelError::InternalError)?;
+        let online_txt = core::str::from_utf8(&online).map_err(|_| KernelError::InternalError)?;
         let want_online = cpu_range(crate::smp::cpu_count());
         assert!(
             online_txt == want_online,
             "cpu/online = {:?}, want {:?}",
-            online_txt, want_online
+            online_txt,
+            want_online
         );
 
         // present/possible must equal the ACPI present count.
         let present = fs.read_file(Path::new("/devices/system/cpu/present"))?;
-        let present_txt = core::str::from_utf8(&present)
-            .map_err(|_| KernelError::InternalError)?;
+        let present_txt = core::str::from_utf8(&present).map_err(|_| KernelError::InternalError)?;
         let want_present = cpu_range(crate::acpi::processor_count());
         assert!(
             present_txt == want_present,
             "cpu/present = {:?}, want {:?}",
-            present_txt, want_present
+            present_txt,
+            want_present
         );
 
         // kernel_max parses as a number and is >= any online index.
         let kmax = fs.read_file(Path::new("/devices/system/cpu/kernel_max"))?;
-        let kmax_txt = core::str::from_utf8(&kmax)
-            .map_err(|_| KernelError::InternalError)?;
-        let kmax_val: usize = kmax_txt.trim().parse()
+        let kmax_txt = core::str::from_utf8(&kmax).map_err(|_| KernelError::InternalError)?;
+        let kmax_val: usize = kmax_txt
+            .trim()
+            .parse()
             .map_err(|_| KernelError::InternalError)?;
         assert!(
             kmax_val >= crate::smp::cpu_count().saturating_sub(1),
@@ -1354,7 +1364,8 @@ pub fn self_test() -> KernelResult<()> {
 
         // The range files are read-only.
         assert!(
-            fs.write_file(Path::new("/devices/system/cpu/online"), b"0-1").is_err(),
+            fs.write_file(Path::new("/devices/system/cpu/online"), b"0-1")
+                .is_err(),
             "cpu/online should reject writes"
         );
 
@@ -1366,7 +1377,8 @@ pub fn self_test() -> KernelResult<()> {
 
         serial_println!(
             "[sysfs]   devices/system/cpu: OK (online={}, present={})",
-            online_txt.trim(), present_txt.trim()
+            online_txt.trim(),
+            present_txt.trim()
         );
     }
 
@@ -1389,8 +1401,9 @@ pub fn self_test() -> KernelResult<()> {
         // cpu0 always exists; it exposes a topology/ subdir.
         let cpu0 = fs.readdir(Path::new("/devices/system/cpu/cpu0"))?;
         assert!(
-            cpu0.iter().any(|e| e.name.as_path() == Path::new("topology")
-                && e.entry_type == EntryType::Directory),
+            cpu0.iter()
+                .any(|e| e.name.as_path() == Path::new("topology")
+                    && e.entry_type == EntryType::Directory),
             "cpu0 should contain 'topology'"
         );
 
@@ -1398,26 +1411,37 @@ pub fn self_test() -> KernelResult<()> {
         let topo = fs.readdir(Path::new("/devices/system/cpu/cpu0/topology"))?;
         for name in CPU_TOPOLOGY_FILES {
             assert!(
-                topo.iter().any(|e| e.name.as_path() == Path::new(*name) && e.entry_type == EntryType::File),
+                topo.iter().any(
+                    |e| e.name.as_path() == Path::new(*name) && e.entry_type == EntryType::File
+                ),
                 "cpu0/topology missing '{}'",
                 name
             );
         }
 
         // physical_package_id and core_id parse as numbers.
-        let pkg = fs.read_file(Path::new("/devices/system/cpu/cpu0/topology/physical_package_id"))?;
+        let pkg = fs.read_file(Path::new(
+            "/devices/system/cpu/cpu0/topology/physical_package_id",
+        ))?;
         let pkg_txt = core::str::from_utf8(&pkg).map_err(|_| KernelError::InternalError)?;
-        let _pkg_val: u32 = pkg_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
+        let _pkg_val: u32 = pkg_txt
+            .trim()
+            .parse()
+            .map_err(|_| KernelError::InternalError)?;
         let core = fs.read_file(Path::new("/devices/system/cpu/cpu0/topology/core_id"))?;
         let core_txt = core::str::from_utf8(&core).map_err(|_| KernelError::InternalError)?;
-        let _core_val: u32 = core_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
+        let _core_val: u32 = core_txt
+            .trim()
+            .parse()
+            .map_err(|_| KernelError::InternalError)?;
 
         // thread_siblings_list always includes self (cpu0).
-        let tsl = fs.read_file(Path::new("/devices/system/cpu/cpu0/topology/thread_siblings_list"))?;
+        let tsl = fs.read_file(Path::new(
+            "/devices/system/cpu/cpu0/topology/thread_siblings_list",
+        ))?;
         let tsl_txt = core::str::from_utf8(&tsl).map_err(|_| KernelError::InternalError)?;
         assert!(
-            tsl_txt.split([',', '-'])
-                .any(|tok| tok.trim() == "0"),
+            tsl_txt.split([',', '-']).any(|tok| tok.trim() == "0"),
             "thread_siblings_list {:?} should include cpu 0",
             tsl_txt
         );
@@ -1425,21 +1449,31 @@ pub fn self_test() -> KernelResult<()> {
         // core_siblings (hex mask) has bit 0 set (self is in its own socket).
         let csm = fs.read_file(Path::new("/devices/system/cpu/cpu0/topology/core_siblings"))?;
         let csm_txt = core::str::from_utf8(&csm).map_err(|_| KernelError::InternalError)?;
-        let csm_val = u32::from_str_radix(csm_txt.trim(), 16)
-            .map_err(|_| KernelError::InternalError)?;
-        assert!(csm_val & 1 == 1, "core_siblings {:?} should set bit 0", csm_txt);
+        let csm_val =
+            u32::from_str_radix(csm_txt.trim(), 16).map_err(|_| KernelError::InternalError)?;
+        assert!(
+            csm_val & 1 == 1,
+            "core_siblings {:?} should set bit 0",
+            csm_txt
+        );
 
         // Topology files are read-only.
         assert!(
-            fs.write_file(Path::new("/devices/system/cpu/cpu0/topology/core_id"), b"7").is_err(),
+            fs.write_file(Path::new("/devices/system/cpu/cpu0/topology/core_id"), b"7")
+                .is_err(),
             "topology/core_id should reject writes"
         );
 
         // Out-of-range CPU and unknown topology file are NotFound.
         let bogus_cpu = format!("/devices/system/cpu/cpu{ncpu}");
-        assert!(fs.stat(Path::new(&bogus_cpu)).is_err(), "cpu{} should not exist", ncpu);
         assert!(
-            fs.stat(Path::new("/devices/system/cpu/cpu0/topology/bogus")).is_err(),
+            fs.stat(Path::new(&bogus_cpu)).is_err(),
+            "cpu{} should not exist",
+            ncpu
+        );
+        assert!(
+            fs.stat(Path::new("/devices/system/cpu/cpu0/topology/bogus"))
+                .is_err(),
             "unknown topology file should be NotFound"
         );
         // cpuN with a leading zero is not a valid Linux name.
@@ -1448,7 +1482,8 @@ pub fn self_test() -> KernelResult<()> {
         // Per-CPU online toggle: cpu0 never has one (boot CPU can't be
         // offlined); cpu1.. expose a read-only "1"/"0".
         assert!(
-            fs.stat(Path::new("/devices/system/cpu/cpu0/online")).is_err(),
+            fs.stat(Path::new("/devices/system/cpu/cpu0/online"))
+                .is_err(),
             "cpu0 must not expose an online file"
         );
         assert!(
@@ -1464,7 +1499,8 @@ pub fn self_test() -> KernelResult<()> {
                 on_txt
             );
             assert!(
-                fs.write_file(Path::new("/devices/system/cpu/cpu1/online"), b"0").is_err(),
+                fs.write_file(Path::new("/devices/system/cpu/cpu1/online"), b"0")
+                    .is_err(),
                 "cpu1/online should reject writes (no hot-plug model)"
             );
         }
@@ -1488,7 +1524,10 @@ pub fn self_test() -> KernelResult<()> {
                 !cpu0.iter().any(|e| e.name.as_path() == Path::new("cache")),
                 "cpu0 must not list 'cache' when no geometry detected"
             );
-            assert!(fs.stat(Path::new("/devices/system/cpu/cpu0/cache")).is_err());
+            assert!(
+                fs.stat(Path::new("/devices/system/cpu/cpu0/cache"))
+                    .is_err()
+            );
             serial_println!("[sysfs]   devices/system/cpu/cpuN/cache: absent (no geometry)");
         } else {
             assert!(
@@ -1501,13 +1540,16 @@ pub fn self_test() -> KernelResult<()> {
             assert!(
                 cache_dir.len() == ncache,
                 "cache/ has {} entries, want {}",
-                cache_dir.len(), ncache
+                cache_dir.len(),
+                ncache
             );
             for i in 0..ncache {
                 let want = format!("index{i}");
                 assert!(
-                    cache_dir.iter().any(|e| e.name.as_path() == Path::new(&want)
-                        && e.entry_type == EntryType::Directory),
+                    cache_dir
+                        .iter()
+                        .any(|e| e.name.as_path() == Path::new(&want)
+                            && e.entry_type == EntryType::Directory),
                     "cache/ missing '{}'",
                     want
                 );
@@ -1515,24 +1557,46 @@ pub fn self_test() -> KernelResult<()> {
 
             // index0 exposes the full file set; geometry parses and matches the
             // kernel's own cache_topology() values (no fabrication, no drift).
-            let topo0 = crate::cpu::cache_topology().first().copied()
+            let topo0 = crate::cpu::cache_topology()
+                .first()
+                .copied()
                 .ok_or(KernelError::InternalError)?;
             let lvl = fs.read_file(Path::new("/devices/system/cpu/cpu0/cache/index0/level"))?;
             let lvl_txt = core::str::from_utf8(&lvl).map_err(|_| KernelError::InternalError)?;
-            let lvl_val: u8 = lvl_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
-            assert!(lvl_val == topo0.level, "index0 level {} != {}", lvl_val, topo0.level);
+            let lvl_val: u8 = lvl_txt
+                .trim()
+                .parse()
+                .map_err(|_| KernelError::InternalError)?;
+            assert!(
+                lvl_val == topo0.level,
+                "index0 level {} != {}",
+                lvl_val,
+                topo0.level
+            );
 
             let ty = fs.read_file(Path::new("/devices/system/cpu/cpu0/cache/index0/type"))?;
             let ty_txt = core::str::from_utf8(&ty).map_err(|_| KernelError::InternalError)?;
             assert!(ty_txt.trim() == topo0.type_name(), "index0 type mismatch");
 
-            let ways = fs.read_file(Path::new("/devices/system/cpu/cpu0/cache/index0/ways_of_associativity"))?;
+            let ways = fs.read_file(Path::new(
+                "/devices/system/cpu/cpu0/cache/index0/ways_of_associativity",
+            ))?;
             let ways_txt = core::str::from_utf8(&ways).map_err(|_| KernelError::InternalError)?;
-            let ways_val: u16 = ways_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
-            assert!(ways_val == topo0.ways, "index0 ways {} != {}", ways_val, topo0.ways);
+            let ways_val: u16 = ways_txt
+                .trim()
+                .parse()
+                .map_err(|_| KernelError::InternalError)?;
+            assert!(
+                ways_val == topo0.ways,
+                "index0 ways {} != {}",
+                ways_val,
+                topo0.ways
+            );
 
             // shared_cpu_list always contains cpu0 itself.
-            let scl = fs.read_file(Path::new("/devices/system/cpu/cpu0/cache/index0/shared_cpu_list"))?;
+            let scl = fs.read_file(Path::new(
+                "/devices/system/cpu/cpu0/cache/index0/shared_cpu_list",
+            ))?;
             let scl_txt = core::str::from_utf8(&scl).map_err(|_| KernelError::InternalError)?;
             assert!(
                 scl_txt.split([',', '-']).any(|t| t.trim() == "0"),
@@ -1542,13 +1606,22 @@ pub fn self_test() -> KernelResult<()> {
 
             // Cache files are read-only; out-of-range index is NotFound.
             assert!(
-                fs.write_file(Path::new("/devices/system/cpu/cpu0/cache/index0/size"), b"0").is_err(),
+                fs.write_file(
+                    Path::new("/devices/system/cpu/cpu0/cache/index0/size"),
+                    b"0"
+                )
+                .is_err(),
                 "cache size should reject writes"
             );
             let bogus = format!("/devices/system/cpu/cpu0/cache/index{ncache}");
-            assert!(fs.stat(Path::new(&bogus)).is_err(), "index{} should not exist", ncache);
             assert!(
-                fs.stat(Path::new("/devices/system/cpu/cpu0/cache/index0/bogus")).is_err(),
+                fs.stat(Path::new(&bogus)).is_err(),
+                "index{} should not exist",
+                ncache
+            );
+            assert!(
+                fs.stat(Path::new("/devices/system/cpu/cpu0/cache/index0/bogus"))
+                    .is_err(),
                 "unknown cache file should be NotFound"
             );
 

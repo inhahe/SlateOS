@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -187,7 +187,14 @@ where
     f(state)
 }
 
-fn log_event(state: &mut State, pen_id: u32, event_type: PenEventType, x: u16, y: u16, pressure: u16) {
+fn log_event(
+    state: &mut State,
+    pen_id: u32,
+    event_type: PenEventType,
+    x: u16,
+    y: u16,
+    pressure: u16,
+) {
     if state.events.len() >= MAX_EVENTS {
         state.events.remove(0);
     }
@@ -195,7 +202,12 @@ fn log_event(state: &mut State, pen_id: u32, event_type: PenEventType, x: u16, y
     state.next_event_id += 1;
     state.total_events += 1;
     state.events.push(PenEvent {
-        id, pen_id, event_type, x, y, pressure,
+        id,
+        pen_id,
+        event_type,
+        x,
+        y,
+        pressure,
         timestamp_ns: crate::hpet::elapsed_ns(),
     });
 }
@@ -206,7 +218,9 @@ fn log_event(state: &mut State, pen_id: u32, event_type: PenEventType, x: u16, y
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         pens: Vec::new(),
         events: Vec::new(),
@@ -220,7 +234,11 @@ pub fn init_defaults() {
 }
 
 /// Register a pen device.
-pub fn register_pen(name: &str, pen_type: PenType, capabilities: PenCapabilities) -> KernelResult<u32> {
+pub fn register_pen(
+    name: &str,
+    pen_type: PenType,
+    capabilities: PenCapabilities,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.pens.len() >= MAX_PENS {
             return Err(KernelError::ResourceExhausted);
@@ -228,10 +246,17 @@ pub fn register_pen(name: &str, pen_type: PenType, capabilities: PenCapabilities
         let id = state.next_pen_id;
         state.next_pen_id += 1;
         state.pens.push(PenDevice {
-            id, name: String::from(name), pen_type, capabilities,
+            id,
+            name: String::from(name),
+            pen_type,
+            capabilities,
             state: PenState::OutOfRange,
-            x: 0, y: 0, pressure: 0,
-            tilt_x: 0, tilt_y: 0, rotation: 0,
+            x: 0,
+            y: 0,
+            pressure: 0,
+            tilt_x: 0,
+            tilt_y: 0,
+            rotation: 0,
             buttons: 0,
             registered_ns: crate::hpet::elapsed_ns(),
         });
@@ -242,7 +267,10 @@ pub fn register_pen(name: &str, pen_type: PenType, capabilities: PenCapabilities
 /// Unregister a pen device.
 pub fn unregister_pen(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.pens.iter().position(|p| p.id == id)
+        let pos = state
+            .pens
+            .iter()
+            .position(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
         state.pens.remove(pos);
         state.mappings.retain(|m| m.pen_id != id);
@@ -253,7 +281,10 @@ pub fn unregister_pen(id: u32) -> KernelResult<()> {
 /// Report pen proximity in.
 pub fn proximity_in(pen_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pen = state.pens.iter_mut().find(|p| p.id == pen_id)
+        let pen = state
+            .pens
+            .iter_mut()
+            .find(|p| p.id == pen_id)
             .ok_or(KernelError::NotFound)?;
         pen.state = PenState::Hovering;
         log_event(state, pen_id, PenEventType::ProximityIn, 0, 0, 0);
@@ -264,7 +295,10 @@ pub fn proximity_in(pen_id: u32) -> KernelResult<()> {
 /// Report pen proximity out.
 pub fn proximity_out(pen_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pen = state.pens.iter_mut().find(|p| p.id == pen_id)
+        let pen = state
+            .pens
+            .iter_mut()
+            .find(|p| p.id == pen_id)
             .ok_or(KernelError::NotFound)?;
         pen.state = PenState::OutOfRange;
         pen.pressure = 0;
@@ -277,7 +311,10 @@ pub fn proximity_out(pen_id: u32) -> KernelResult<()> {
 /// Report pen contact (tip down).
 pub fn contact(pen_id: u32, x: u16, y: u16, pressure: u16) -> KernelResult<()> {
     with_state(|state| {
-        let pen = state.pens.iter_mut().find(|p| p.id == pen_id)
+        let pen = state
+            .pens
+            .iter_mut()
+            .find(|p| p.id == pen_id)
             .ok_or(KernelError::NotFound)?;
         pen.state = PenState::Contact;
         pen.x = x;
@@ -292,7 +329,10 @@ pub fn contact(pen_id: u32, x: u16, y: u16, pressure: u16) -> KernelResult<()> {
 /// Report pen release (tip up).
 pub fn release(pen_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pen = state.pens.iter_mut().find(|p| p.id == pen_id)
+        let pen = state
+            .pens
+            .iter_mut()
+            .find(|p| p.id == pen_id)
             .ok_or(KernelError::NotFound)?;
         pen.state = PenState::Hovering;
         pen.pressure = 0;
@@ -303,9 +343,19 @@ pub fn release(pen_id: u32) -> KernelResult<()> {
 }
 
 /// Report pen movement.
-pub fn report_move(pen_id: u32, x: u16, y: u16, pressure: u16, tilt_x: i16, tilt_y: i16) -> KernelResult<()> {
+pub fn report_move(
+    pen_id: u32,
+    x: u16,
+    y: u16,
+    pressure: u16,
+    tilt_x: i16,
+    tilt_y: i16,
+) -> KernelResult<()> {
     with_state(|state| {
-        let pen = state.pens.iter_mut().find(|p| p.id == pen_id)
+        let pen = state
+            .pens
+            .iter_mut()
+            .find(|p| p.id == pen_id)
             .ok_or(KernelError::NotFound)?;
         pen.x = x;
         pen.y = y;
@@ -324,14 +374,20 @@ pub fn set_button_mapping(pen_id: u32, button_index: u8, action: &str) -> Kernel
             return Err(KernelError::NotFound);
         }
         // Update existing or add new.
-        if let Some(m) = state.mappings.iter_mut().find(|m| m.pen_id == pen_id && m.button_index == button_index) {
+        if let Some(m) = state
+            .mappings
+            .iter_mut()
+            .find(|m| m.pen_id == pen_id && m.button_index == button_index)
+        {
             m.action = String::from(action);
         } else {
             if state.mappings.len() >= MAX_MAPPINGS {
                 return Err(KernelError::ResourceExhausted);
             }
             state.mappings.push(ButtonMapping {
-                pen_id, button_index, action: String::from(action),
+                pen_id,
+                button_index,
+                action: String::from(action),
             });
         }
         Ok(())
@@ -341,7 +397,8 @@ pub fn set_button_mapping(pen_id: u32, button_index: u8, action: &str) -> Kernel
 /// Get button mapping.
 pub fn get_button_mapping(pen_id: u32, button_index: u8) -> Option<String> {
     STATE.lock().as_ref().and_then(|s| {
-        s.mappings.iter()
+        s.mappings
+            .iter()
             .find(|m| m.pen_id == pen_id && m.button_index == button_index)
             .map(|m| m.action.clone())
     })
@@ -382,7 +439,13 @@ pub fn self_test() {
     crate::serial_println!("  [1/10] empty initial: OK");
 
     // 2: Register pen.
-    let caps = PenCapabilities { pressure: true, tilt: true, rotation: false, eraser_tip: true, buttons: 2 };
+    let caps = PenCapabilities {
+        pressure: true,
+        tilt: true,
+        rotation: false,
+        eraser_tip: true,
+        buttons: 2,
+    };
     let pen_id = register_pen("Wacom Intuos", PenType::Stylus, caps).expect("register");
     assert!(pen_id > 0);
     crate::serial_println!("  [2/10] register: OK");

@@ -103,7 +103,6 @@ global_asm!(
     //   offset 0x38: rflags
     ".global switch_context",
     "switch_context:",
-
     // --- Save old task's FPU/SSE/AVX state ---
     //
     // Dispatch based on FPU_STRATEGY global:
@@ -118,9 +117,9 @@ global_asm!(
     "jmp 3f",
     "1:",
     // Strategy 1: XSAVE64
-    "push rdx",       // save old_fpu pointer
-    "push rcx",       // save new_fpu pointer
-    "mov r8, rdx",    // save fpu pointer in r8
+    "push rdx",    // save old_fpu pointer
+    "push rcx",    // save new_fpu pointer
+    "mov r8, rdx", // save fpu pointer in r8
     "mov eax, dword ptr [rip + XSAVE_MASK_LO]",
     "mov edx, dword ptr [rip + XSAVE_MASK_HI]",
     "xsave64 [r8]",
@@ -138,7 +137,6 @@ global_asm!(
     "pop rcx",
     "pop rdx",
     "3:",
-
     // --- Save callee-saved GPRs to old context ---
     "mov [rdi + 0x00], rbx",
     "mov [rdi + 0x08], rbp",
@@ -151,7 +149,6 @@ global_asm!(
     "pushfq",
     "pop rax",
     "mov [rdi + 0x38], rax",
-
     // --- Restore callee-saved GPRs from new context ---
     //
     // After this sequence, we're on the NEW task's stack (rsp loaded
@@ -164,7 +161,6 @@ global_asm!(
     "mov r14, [rsi + 0x20]",
     "mov r15, [rsi + 0x28]",
     "mov rsp, [rsi + 0x30]",
-
     // --- Restore new task's FPU/SSE/AVX state ---
     //
     // Dispatch based on strategy (same as save, but always use XRSTOR
@@ -173,7 +169,7 @@ global_asm!(
     "cmp al, 0",
     "je 4f",
     // Strategy 1 or 2: XRSTOR64
-    "mov r8, rcx",    // save new_fpu in r8 (rcx clobbered by mask load)
+    "mov r8, rcx", // save new_fpu in r8 (rcx clobbered by mask load)
     "mov eax, dword ptr [rip + XSAVE_MASK_LO]",
     "mov edx, dword ptr [rip + XSAVE_MASK_HI]",
     "xrstor64 [r8]",
@@ -182,12 +178,10 @@ global_asm!(
     // Strategy 0: FXRSTOR64
     "fxrstor64 [rcx]",
     "5:",
-
     // Restore RFLAGS from the target task's saved state.
     "mov rax, [rsi + 0x38]",
     "push rax",
     "popfq",
-
     // Return.  For an existing task, this returns to where it last
     // called switch_context.  For a new task, this pops the
     // trampoline address from the stack and jumps there.

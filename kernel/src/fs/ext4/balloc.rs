@@ -55,7 +55,8 @@ pub fn read_block_bitmap(
         if stored != computed {
             crate::serial_println!(
                 "[ext4] block bitmap checksum mismatch: stored={:#010x} computed={:#010x}",
-                stored, computed,
+                stored,
+                computed,
             );
             return Err(KernelError::CorruptedData);
         }
@@ -106,7 +107,8 @@ pub fn read_inode_bitmap(
         if stored != computed {
             crate::serial_println!(
                 "[ext4] inode bitmap checksum mismatch: stored={:#010x} computed={:#010x}",
-                stored, computed,
+                stored,
+                computed,
             );
             return Err(KernelError::CorruptedData);
         }
@@ -147,7 +149,8 @@ pub fn write_inode_bitmap(
 fn bitmap_test(bitmap: &[u8], bit: u32) -> bool {
     let byte_idx = (bit / 8) as usize;
     let bit_idx = bit % 8;
-    bitmap.get(byte_idx)
+    bitmap
+        .get(byte_idx)
         .is_some_and(|b| (b >> bit_idx) & 1 != 0)
 }
 
@@ -188,12 +191,7 @@ fn bitmap_find_free(bitmap: &[u8], start: u32, max_bits: u32) -> Option<u32> {
 /// Find a contiguous run of `count` free bits starting from `start`.
 ///
 /// Returns the first bit of the run, or `None` if not found.
-fn bitmap_find_free_run(
-    bitmap: &[u8],
-    start: u32,
-    max_bits: u32,
-    count: u32,
-) -> Option<u32> {
+fn bitmap_find_free_run(bitmap: &[u8], start: u32, max_bits: u32, count: u32) -> Option<u32> {
     if count == 0 {
         return Some(start);
     }
@@ -280,9 +278,7 @@ pub fn alloc_block(
         let max_bits = if group_idx == group_count.saturating_sub(1) {
             // Last group may have fewer blocks.
             let total = sb.block_count.saturating_sub(
-                first_data.saturating_add(
-                    (group_idx as u64).saturating_mul(blocks_per_group)
-                )
+                first_data.saturating_add((group_idx as u64).saturating_mul(blocks_per_group)),
             );
             (total as u32).min(sb.raw.s_blocks_per_group)
         } else {
@@ -359,9 +355,7 @@ pub fn alloc_blocks(
         let mut bitmap = read_block_bitmap(reader, sb, gd)?;
         let max_bits = if group_idx == group_count.saturating_sub(1) {
             let total = sb.block_count.saturating_sub(
-                first_data.saturating_add(
-                    (group_idx as u64).saturating_mul(blocks_per_group)
-                )
+                first_data.saturating_add((group_idx as u64).saturating_mul(blocks_per_group)),
             );
             (total as u32).min(sb.raw.s_blocks_per_group)
         } else {
@@ -418,7 +412,9 @@ pub fn free_block(
     let group_idx = (relative / blocks_per_group) as usize;
     let bit = (relative % blocks_per_group) as u32;
 
-    let gd = group_descs.get_mut(group_idx).ok_or(KernelError::InvalidArgument)?;
+    let gd = group_descs
+        .get_mut(group_idx)
+        .ok_or(KernelError::InvalidArgument)?;
     let mut bitmap = read_block_bitmap(reader, sb, gd)?;
 
     if !bitmap_test(&bitmap, bit) {
@@ -550,7 +546,9 @@ pub fn free_inode(
         return Err(KernelError::InvalidArgument);
     }
 
-    let gd = group_descs.get_mut(group_idx).ok_or(KernelError::InvalidArgument)?;
+    let gd = group_descs
+        .get_mut(group_idx)
+        .ok_or(KernelError::InvalidArgument)?;
     let mut bitmap = read_inode_bitmap(reader, sb, gd)?;
 
     if !bitmap_test(&bitmap, bit) {
@@ -912,7 +910,8 @@ fn test_gd_free_blocks_64bit() -> KernelResult<()> {
     if count != expected {
         crate::serial_println!(
             "[ext4-balloc]   FAIL: 64-bit free blocks = {:#x}, expected {:#x}",
-            count, expected
+            count,
+            expected
         );
         return Err(KernelError::InternalError);
     }
@@ -926,7 +925,8 @@ fn test_gd_free_blocks_64bit() -> KernelResult<()> {
     if max_count != expected_max {
         crate::serial_println!(
             "[ext4-balloc]   FAIL: max free blocks = {:#x}, expected {:#x}",
-            max_count, expected_max
+            max_count,
+            expected_max
         );
         return Err(KernelError::InternalError);
     }
@@ -947,7 +947,8 @@ fn test_gd_free_inodes_64bit() -> KernelResult<()> {
     if count != expected {
         crate::serial_println!(
             "[ext4-balloc]   FAIL: 64-bit free inodes = {:#x}, expected {:#x}",
-            count, expected
+            count,
+            expected
         );
         return Err(KernelError::InternalError);
     }
@@ -981,7 +982,8 @@ fn test_gd_increment_decrement() -> KernelResult<()> {
     if gd.bg_free_blocks_count_lo != 0xFFFF || gd.bg_free_blocks_count_hi != 0 {
         crate::serial_println!(
             "[ext4-balloc]   FAIL: lo={:#x} hi={:#x} after dec",
-            gd.bg_free_blocks_count_lo, gd.bg_free_blocks_count_hi
+            gd.bg_free_blocks_count_lo,
+            gd.bg_free_blocks_count_hi
         );
         return Err(KernelError::InternalError);
     }
@@ -1000,7 +1002,8 @@ fn test_gd_increment_decrement() -> KernelResult<()> {
     if gd.bg_free_blocks_count_lo != 0 || gd.bg_free_blocks_count_hi != 1 {
         crate::serial_println!(
             "[ext4-balloc]   FAIL: lo={:#x} hi={:#x} after inc",
-            gd.bg_free_blocks_count_lo, gd.bg_free_blocks_count_hi
+            gd.bg_free_blocks_count_lo,
+            gd.bg_free_blocks_count_hi
         );
         return Err(KernelError::InternalError);
     }

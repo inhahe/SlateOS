@@ -47,7 +47,7 @@
 // that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
 #![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 
-use super::page_table::{self, PageFlags, VirtAddr, USER_SPACE_END};
+use super::page_table::{self, PageFlags, USER_SPACE_END, VirtAddr};
 use crate::error::{KernelError, KernelResult};
 use crate::proc::thread;
 use crate::sched;
@@ -162,7 +162,8 @@ fn validate_user_range(ptr: u64, len: usize, need_writable: bool) -> KernelResul
     let len_u64 = len as u64;
 
     // Check for overflow: ptr + len must not wrap around.
-    let end = ptr.checked_add(len_u64)
+    let end = ptr
+        .checked_add(len_u64)
         .ok_or(KernelError::InvalidAddress)?;
 
     // The entire range must be in user space.
@@ -343,11 +344,7 @@ fn page_flags(pml4_phys: u64, virt: VirtAddr) -> Option<PageFlags> {
 /// `kernel_dst` must point to a valid, writable kernel buffer of at
 /// least `len` bytes.
 #[allow(dead_code)]
-pub unsafe fn copy_from_user(
-    user_src: u64,
-    kernel_dst: *mut u8,
-    len: usize,
-) -> KernelResult<()> {
+pub unsafe fn copy_from_user(user_src: u64, kernel_dst: *mut u8, len: usize) -> KernelResult<()> {
     if len == 0 {
         return Ok(());
     }
@@ -386,11 +383,7 @@ pub unsafe fn copy_from_user(
 /// `kernel_src` must point to a valid, readable kernel buffer of at
 /// least `len` bytes.
 #[allow(dead_code)]
-pub unsafe fn copy_to_user(
-    kernel_src: *const u8,
-    user_dst: u64,
-    len: usize,
-) -> KernelResult<()> {
+pub unsafe fn copy_to_user(kernel_src: *const u8, user_dst: u64, len: usize) -> KernelResult<()> {
     if len == 0 {
         return Ok(());
     }
@@ -485,7 +478,9 @@ pub fn copy_from_user_as(pml4: u64, user_src: u64, dst: &mut [u8]) -> KernelResu
             .ok_or(KernelError::InvalidAddress)?
             .copy_from_slice(src);
         copied = next;
-        va = va.checked_add(n as u64).ok_or(KernelError::InvalidAddress)?;
+        va = va
+            .checked_add(n as u64)
+            .ok_or(KernelError::InvalidAddress)?;
     }
     Ok(())
 }
@@ -529,9 +524,7 @@ pub fn copy_to_user_as(pml4: u64, user_dst: u64, src: &[u8]) -> KernelResult<()>
         let phys = user_page_phys(pml4, va, true)?;
         let kva = hhdm.checked_add(phys).ok_or(KernelError::InvalidAddress)?;
         let next = copied.checked_add(n).ok_or(KernelError::InvalidAddress)?;
-        let chunk = src
-            .get(copied..next)
-            .ok_or(KernelError::InvalidAddress)?;
+        let chunk = src.get(copied..next).ok_or(KernelError::InvalidAddress)?;
         // SAFETY: `phys` is a mapped, writable physical address (checked via
         // translate_flags); the HHDM maps all physical memory, so `kva` is a
         // valid writable kernel pointer to `n` bytes within a single 4 KiB
@@ -539,7 +532,9 @@ pub fn copy_to_user_as(pml4: u64, user_dst: u64, src: &[u8]) -> KernelResult<()>
         let out = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, n) };
         out.copy_from_slice(chunk);
         copied = next;
-        va = va.checked_add(n as u64).ok_or(KernelError::InvalidAddress)?;
+        va = va
+            .checked_add(n as u64)
+            .ok_or(KernelError::InvalidAddress)?;
     }
     Ok(())
 }
@@ -669,11 +664,7 @@ pub fn user_atomic_store_u32(addr: u64, value: u32) -> KernelResult<()> {
 /// # Errors
 ///
 /// As [`user_atomic_load_u32`].
-pub fn user_atomic_cas_u32(
-    addr: u64,
-    current: u32,
-    new: u32,
-) -> KernelResult<Result<u32, u32>> {
+pub fn user_atomic_cas_u32(addr: u64, current: u32, new: u32) -> KernelResult<Result<u32, u32>> {
     // SAFETY: one non-blocking atomic RMW inside the window; see above.
     unsafe {
         let atomic = user_atomic_u32(addr)?;
@@ -1073,7 +1064,10 @@ pub fn self_test() -> KernelResult<()> {
     match validate_user_range(0xFFFF_8000_0000_0000, 1, false) {
         Err(KernelError::InvalidAddress) => {} // Expected.
         other => {
-            crate::serial_println!("[user]   FAIL: kernel addr should be invalid, got {:?}", other);
+            crate::serial_println!(
+                "[user]   FAIL: kernel addr should be invalid, got {:?}",
+                other
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -1083,7 +1077,8 @@ pub fn self_test() -> KernelResult<()> {
         Err(KernelError::InvalidAddress) => {} // Expected.
         other => {
             crate::serial_println!(
-                "[user]   FAIL: wrapping range should be invalid, got {:?}", other
+                "[user]   FAIL: wrapping range should be invalid, got {:?}",
+                other
             );
             return Err(KernelError::InternalError);
         }
@@ -1094,7 +1089,8 @@ pub fn self_test() -> KernelResult<()> {
         Err(KernelError::InvalidAddress) => {} // Expected.
         other => {
             crate::serial_println!(
-                "[user]   FAIL: cross-boundary range should be invalid, got {:?}", other
+                "[user]   FAIL: cross-boundary range should be invalid, got {:?}",
+                other
             );
             return Err(KernelError::InternalError);
         }
@@ -1107,7 +1103,8 @@ pub fn self_test() -> KernelResult<()> {
         Err(KernelError::InvalidAddress) => {} // Expected.
         other => {
             crate::serial_println!(
-                "[user]   FAIL: unmapped user addr should be invalid, got {:?}", other
+                "[user]   FAIL: unmapped user addr should be invalid, got {:?}",
+                other
             );
             return Err(KernelError::InternalError);
         }

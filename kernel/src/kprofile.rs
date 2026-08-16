@@ -137,15 +137,17 @@ pub fn end(slot: Slot, start_tsc: u64) {
         data.total.fetch_add(delta, Ordering::Relaxed);
 
         // Update min (CAS loop — typically 1 iteration).
-        let _ = data.min.fetch_update(
-            Ordering::Relaxed, Ordering::Relaxed,
-            |cur| if delta < cur { Some(delta) } else { None },
-        );
+        let _ = data
+            .min
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                if delta < cur { Some(delta) } else { None }
+            });
         // Update max.
-        let _ = data.max.fetch_update(
-            Ordering::Relaxed, Ordering::Relaxed,
-            |cur| if delta > cur { Some(delta) } else { None },
-        );
+        let _ = data
+            .max
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                if delta > cur { Some(delta) } else { None }
+            });
     }
 }
 

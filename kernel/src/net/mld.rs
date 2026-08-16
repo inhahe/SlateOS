@@ -27,15 +27,15 @@
 //!   schedules and sends reports for all active groups.
 //! - Periodic unsolicited reports are sent for active groups.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::KernelResult;
 use super::ipv6::{self, Ipv6Addr, Ipv6Packet, NH_ICMPV6};
+use crate::error::KernelResult;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -71,18 +71,14 @@ const MLD_V1_MSG_SIZE: usize = 24;
 
 /// All-routers link-local multicast (ff02::2).
 /// Done messages are sent here.
-const ALL_ROUTERS_V6: Ipv6Addr = Ipv6Addr([
-    0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0x02,
-]);
+const ALL_ROUTERS_V6: Ipv6Addr =
+    Ipv6Addr([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);
 
 /// MLDv2 all-capable-routers (ff02::16).
 /// MLDv2 reports are sent here (we note it but send v1 reports).
 #[allow(dead_code)] // Protocol constant for future MLDv2 sending.
-const MLDV2_ALL_ROUTERS: Ipv6Addr = Ipv6Addr([
-    0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0x16,
-]);
+const MLDV2_ALL_ROUTERS: Ipv6Addr =
+    Ipv6Addr([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16]);
 
 /// Maximum multicast groups we track for MLD.
 const MAX_GROUPS: usize = 32;
@@ -134,8 +130,7 @@ impl GroupEntry {
 }
 
 /// Global group membership table.
-static GROUPS: Mutex<[GroupEntry; MAX_GROUPS]> =
-    Mutex::new([GroupEntry::empty(); MAX_GROUPS]);
+static GROUPS: Mutex<[GroupEntry; MAX_GROUPS]> = Mutex::new([GroupEntry::empty(); MAX_GROUPS]);
 
 /// Last tick timestamp (for rate-limiting periodic work).
 static LAST_TICK_NS: AtomicU64 = AtomicU64::new(0);
@@ -163,7 +158,7 @@ fn build_report(group: Ipv6Addr) -> Vec<u8> {
     let mut pkt = Vec::with_capacity(MLD_V1_MSG_SIZE);
 
     pkt.push(MLD_V1_REPORT); // Type.
-    pkt.push(0);              // Code.
+    pkt.push(0); // Code.
     pkt.extend_from_slice(&[0, 0]); // Checksum placeholder.
     pkt.extend_from_slice(&[0, 0]); // Maximum Response Delay (0 for report).
     pkt.extend_from_slice(&[0, 0]); // Reserved.
@@ -176,8 +171,8 @@ fn build_report(group: Ipv6Addr) -> Vec<u8> {
 fn build_done(group: Ipv6Addr) -> Vec<u8> {
     let mut pkt = Vec::with_capacity(MLD_V1_MSG_SIZE);
 
-    pkt.push(MLD_V1_DONE);   // Type.
-    pkt.push(0);              // Code.
+    pkt.push(MLD_V1_DONE); // Type.
+    pkt.push(0); // Code.
     pkt.extend_from_slice(&[0, 0]); // Checksum placeholder.
     pkt.extend_from_slice(&[0, 0]); // Maximum Response Delay (0 for done).
     pkt.extend_from_slice(&[0, 0]); // Reserved.
@@ -338,10 +333,8 @@ pub fn process(ip_packet: &Ipv6Packet<'_>, data: &[u8]) -> KernelResult<()> {
             QUERIES_RECEIVED.fetch_add(1, Ordering::Relaxed);
 
             // Extract Maximum Response Delay (bytes 4-5, in milliseconds).
-            let max_resp_ms = u16::from_be_bytes([
-                *data.get(4).unwrap_or(&0),
-                *data.get(5).unwrap_or(&0),
-            ]);
+            let max_resp_ms =
+                u16::from_be_bytes([*data.get(4).unwrap_or(&0), *data.get(5).unwrap_or(&0)]);
 
             // Extract multicast address (bytes 8-23).
             let mut group_bytes = [0u8; 16];
@@ -425,7 +418,8 @@ fn handle_specific_query(group: Ipv6Addr, max_resp_ms: u16) {
 
     crate::serial_println!(
         "[mld] Specific query for {} (max_resp={}ms)",
-        group, max_resp_ms
+        group,
+        max_resp_ms
     );
 }
 
@@ -519,7 +513,10 @@ pub struct MldStats {
 /// Get MLD statistics.
 pub fn stats() -> MldStats {
     let groups = GROUPS.lock();
-    let active = groups.iter().filter(|e| e.state != GroupState::Idle).count();
+    let active = groups
+        .iter()
+        .filter(|e| e.state != GroupState::Idle)
+        .count();
     MldStats {
         active_groups: active,
         reports_sent: REPORTS_SENT.load(Ordering::Relaxed),
@@ -594,10 +591,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 1: Report construction ---
     {
-        let group = Ipv6Addr([
-            0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0xFB,
-        ]); // ff02::fb (mDNS)
+        let group = Ipv6Addr([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB]); // ff02::fb (mDNS)
         let pkt = build_report(group);
         assert!(pkt.len() == MLD_V1_MSG_SIZE, "report size");
         assert!(pkt[0] == MLD_V1_REPORT, "report type");
@@ -616,10 +610,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 2: Done construction ---
     {
-        let group = Ipv6Addr([
-            0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0xFB,
-        ]);
+        let group = Ipv6Addr([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB]);
         let pkt = build_done(group);
         assert!(pkt.len() == MLD_V1_MSG_SIZE, "done size");
         assert!(pkt[0] == MLD_V1_DONE, "done type");
@@ -666,13 +657,9 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 5: Checksum computation ---
     {
         let src = Ipv6Addr([
-            0xFE, 0x80, 0, 0, 0, 0, 0, 0,
-            0x02, 0x01, 0x02, 0xFF, 0xFE, 0x03, 0x04, 0x05,
+            0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x02, 0x01, 0x02, 0xFF, 0xFE, 0x03, 0x04, 0x05,
         ]);
-        let group = Ipv6Addr([
-            0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0xFB,
-        ]);
+        let group = Ipv6Addr([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB]);
         let pkt = build_report(group);
         let pkt = finalize_mld_checksum(&src, &group, pkt);
         // Verify the checksum field is non-zero (was computed).
@@ -691,10 +678,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 6: Report vs Done have different type bytes ---
     {
-        let group = Ipv6Addr([
-            0xFF, 0x02, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0x01,
-        ]);
+        let group = Ipv6Addr([0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01]);
         let report = build_report(group);
         let done = build_done(group);
         assert!(report[0] != done[0], "different type bytes");
@@ -742,10 +726,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 10: Message format lengths ---
     {
-        let group = Ipv6Addr([
-            0xFF, 0x05, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0x01, 0x00,
-        ]);
+        let group = Ipv6Addr([0xFF, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00]);
         let r = build_report(group);
         let d = build_done(group);
         assert!(r.len() == 24, "report 24 bytes");

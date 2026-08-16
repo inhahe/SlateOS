@@ -93,9 +93,7 @@ struct CpuTimerState {
 
 impl CpuTimerState {
     const fn new() -> Self {
-        Self {
-            timers: Vec::new(),
-        }
+        Self { timers: Vec::new() }
     }
 }
 
@@ -133,8 +131,10 @@ pub fn init() {
     INITIALIZED.store(true, Ordering::Release);
     serial_println!("[hrtimer] High-resolution timer subsystem initialized");
     if crate::hpet::is_available() {
-        serial_println!("[hrtimer]   Clock source: HPET ({} MHz)",
-            crate::hpet::frequency_hz() / 1_000_000);
+        serial_println!(
+            "[hrtimer]   Clock source: HPET ({} MHz)",
+            crate::hpet::frequency_hz() / 1_000_000
+        );
     } else {
         serial_println!("[hrtimer]   Clock source: TSC (fallback)");
     }
@@ -345,7 +345,8 @@ pub fn process_expired() -> u32 {
                 serial_println!(
                     "[hrtimer] CRITICAL: refusing to dispatch corrupt timer callback \
                      addr={:#x} arg={:#x} — entry corruption; skipping (see B-KNULLJUMP-SIGNAL)",
-                    cb_addr, arg
+                    cb_addr,
+                    arg
                 );
                 continue;
             }
@@ -375,7 +376,9 @@ pub fn process_expired() -> u32 {
 
 /// Insert a timer into the sorted list (by expiry_ns, earliest first).
 fn insert_sorted(timers: &mut Vec<TimerEntry>, entry: TimerEntry) {
-    let pos = timers.iter().position(|t| t.expiry_ns > entry.expiry_ns)
+    let pos = timers
+        .iter()
+        .position(|t| t.expiry_ns > entry.expiry_ns)
         .unwrap_or(timers.len());
     timers.insert(pos, entry);
 }
@@ -411,7 +414,9 @@ fn schedule_absolute(
 
         // Enforce per-CPU limit.
         if state.timers.len() >= MAX_TIMERS_PER_CPU {
-            serial_println!("[hrtimer] WARNING: per-CPU timer limit reached — oldest timer evicted");
+            serial_println!(
+                "[hrtimer] WARNING: per-CPU timer limit reached — oldest timer evicted"
+            );
             state.timers.pop(); // Remove the last (furthest) timer.
         }
 
@@ -489,7 +494,10 @@ pub fn self_test() {
     }
     let t2 = now_ns();
     assert!(t2 >= t1, "now_ns() is not monotonic: {} < {}", t2, t1);
-    serial_println!("[hrtimer]   now_ns() monotonic: OK (delta={}ns)", t2.saturating_sub(t1));
+    serial_println!(
+        "[hrtimer]   now_ns() monotonic: OK (delta={}ns)",
+        t2.saturating_sub(t1)
+    );
 
     // Test 2: Schedule a timer and verify it fires.
     static TEST_FIRED: AtomicU64 = AtomicU64::new(0);
@@ -521,14 +529,20 @@ pub fn self_test() {
         // fires on this process_expired() call.
         process_expired()
     });
-    assert!(n >= 1, "Timer with 0 delay didn't fire on process_expired()");
+    assert!(
+        n >= 1,
+        "Timer with 0 delay didn't fire on process_expired()"
+    );
     assert_eq!(
         TEST_FIRED.load(Ordering::Acquire),
         0xDEAD,
         "Timer callback didn't execute with correct arg"
     );
     assert!(fired_count() > fired_before, "fired_count didn't increment");
-    assert!(scheduled_count() > before_scheduled, "scheduled_count didn't increment");
+    assert!(
+        scheduled_count() > before_scheduled,
+        "scheduled_count didn't increment"
+    );
     serial_println!("[hrtimer]   Immediate timer: OK (fired with arg=0xDEAD)");
 
     // Test 3: Cancel a pending timer.
@@ -557,7 +571,11 @@ pub fn self_test() {
     assert!(cancelled, "cancel() returned false for valid handle");
     // Verify it doesn't fire.
     process_expired();
-    assert_eq!(CANCEL_FIRED.load(Ordering::Acquire), 0, "Cancelled timer still fired");
+    assert_eq!(
+        CANCEL_FIRED.load(Ordering::Acquire),
+        0,
+        "Cancelled timer still fired"
+    );
     serial_println!("[hrtimer]   Cancel: OK");
 
     // Test 4: Multiple timers fire in order.
@@ -596,8 +614,16 @@ pub fn self_test() {
         let base = pending_count();
         let rh = schedule_repeating(0, 1_000_000, repeat_cb, 0); // 1ms interval, fire immediately
         process_expired(); // First fire (re-schedules our repeating timer).
-        assert_eq!(REPEAT_COUNT.load(Ordering::Relaxed), 1, "Repeating timer didn't fire");
-        assert_eq!(pending_count(), base + 1, "Repeating timer not re-scheduled");
+        assert_eq!(
+            REPEAT_COUNT.load(Ordering::Relaxed),
+            1,
+            "Repeating timer didn't fire"
+        );
+        assert_eq!(
+            pending_count(),
+            base + 1,
+            "Repeating timer not re-scheduled"
+        );
         cancel(rh);
         assert_eq!(pending_count(), base, "Repeating timer not cancelled");
     });
@@ -607,8 +633,12 @@ pub fn self_test() {
     let sched = scheduled_count();
     let cancelled_n = TOTAL_CANCELLED.load(Ordering::Relaxed);
     let fired_n = fired_count();
-    serial_println!("[hrtimer]   Stats: scheduled={}, fired={}, cancelled={}",
-        sched, fired_n, cancelled_n);
+    serial_println!(
+        "[hrtimer]   Stats: scheduled={}, fired={}, cancelled={}",
+        sched,
+        fired_n,
+        cancelled_n
+    );
 
     serial_println!("[hrtimer] Self-test PASSED");
 }

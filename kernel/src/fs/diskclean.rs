@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -116,7 +116,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         items: Vec::new(),
         total_scans: 0,
@@ -129,27 +131,36 @@ pub fn init_defaults() {
 
 /// All cleanup categories, in display order.
 const ALL_CATEGORIES: [CleanCategory; 10] = [
-    CleanCategory::TempFiles, CleanCategory::SystemCache, CleanCategory::AppCache,
-    CleanCategory::OldLogs, CleanCategory::PackageCache, CleanCategory::ThumbnailCache,
-    CleanCategory::TrashBin, CleanCategory::DownloadedUpdates, CleanCategory::BrowserData,
+    CleanCategory::TempFiles,
+    CleanCategory::SystemCache,
+    CleanCategory::AppCache,
+    CleanCategory::OldLogs,
+    CleanCategory::PackageCache,
+    CleanCategory::ThumbnailCache,
+    CleanCategory::TrashBin,
+    CleanCategory::DownloadedUpdates,
+    CleanCategory::BrowserData,
     CleanCategory::CrashDumps,
 ];
 
 /// Build per-category summaries from a set of items (categories with no items
 /// are omitted).
 fn build_summaries(items: &[CleanItem]) -> Vec<CategorySummary> {
-    ALL_CATEGORIES.iter().filter_map(|&cat| {
-        let matching: Vec<&CleanItem> = items.iter().filter(|i| i.category == cat).collect();
-        if matching.is_empty() {
-            None
-        } else {
-            Some(CategorySummary {
-                category: cat,
-                item_count: matching.len() as u64,
-                total_bytes: matching.iter().map(|i| i.size_bytes).sum(),
-            })
-        }
-    }).collect()
+    ALL_CATEGORIES
+        .iter()
+        .filter_map(|&cat| {
+            let matching: Vec<&CleanItem> = items.iter().filter(|i| i.category == cat).collect();
+            if matching.is_empty() {
+                None
+            } else {
+                Some(CategorySummary {
+                    category: cat,
+                    item_count: matching.len() as u64,
+                    total_bytes: matching.iter().map(|i| i.size_bytes).sum(),
+                })
+            }
+        })
+        .collect()
 }
 
 /// Scan for reclaimable items.
@@ -189,13 +200,21 @@ pub fn scan() -> KernelResult<Vec<CategorySummary>> {
 /// reclaimable file it finds (and is also how tests populate a known set of
 /// items without a real backend). Returns [`KernelError::ResourceExhausted`] if
 /// the item table is full.
-pub fn add_item(category: CleanCategory, path: &str, size_bytes: u64, safe_to_remove: bool) -> KernelResult<()> {
+pub fn add_item(
+    category: CleanCategory,
+    path: &str,
+    size_bytes: u64,
+    safe_to_remove: bool,
+) -> KernelResult<()> {
     with_state(|state| {
         if state.items.len() >= MAX_ITEMS {
             return Err(KernelError::ResourceExhausted);
         }
         state.items.push(CleanItem {
-            category, path: String::from(path), size_bytes, safe_to_remove,
+            category,
+            path: String::from(path),
+            size_bytes,
+            safe_to_remove,
         });
         Ok(())
     })
@@ -203,7 +222,10 @@ pub fn add_item(category: CleanCategory, path: &str, size_bytes: u64, safe_to_re
 
 /// Per-category summaries of the currently-recorded reclaimable items.
 pub fn summarize() -> Vec<CategorySummary> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| build_summaries(&s.items))
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| build_summaries(&s.items))
 }
 
 /// Clean items in specified categories.
@@ -230,20 +252,33 @@ pub fn clean(categories: &[CleanCategory]) -> KernelResult<(u64, u64)> {
 /// Estimate total reclaimable space.
 pub fn estimate() -> u64 {
     STATE.lock().as_ref().map_or(0, |s| {
-        s.items.iter().filter(|i| i.safe_to_remove).map(|i| i.size_bytes).sum()
+        s.items
+            .iter()
+            .filter(|i| i.safe_to_remove)
+            .map(|i| i.size_bytes)
+            .sum()
     })
 }
 
 /// Get current scan items.
 pub fn list_items() -> Vec<CleanItem> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.items.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.items.clone())
 }
 
 /// Statistics: (item_count, total_scans, total_cleaned_bytes, total_cleaned_items, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.items.len(), s.total_scans, s.total_cleaned_bytes, s.total_cleaned_items, s.ops),
+        Some(s) => (
+            s.items.len(),
+            s.total_scans,
+            s.total_cleaned_bytes,
+            s.total_cleaned_items,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -286,7 +321,10 @@ pub fn self_test() {
 
     // 4: Category summaries — TempFiles has 2 items totalling 3000 bytes.
     let sums = summarize();
-    let temp_sum = sums.iter().find(|s| s.category == CleanCategory::TempFiles).expect("temp");
+    let temp_sum = sums
+        .iter()
+        .find(|s| s.category == CleanCategory::TempFiles)
+        .expect("temp");
     assert_eq!(temp_sum.item_count, 2);
     assert_eq!(temp_sum.total_bytes, 3000);
     crate::serial_println!("  [4/8] summaries: OK");
@@ -300,12 +338,19 @@ pub fn self_test() {
     let (items, bytes) = clean(&[CleanCategory::TempFiles]).expect("clean");
     assert_eq!((items, bytes), (2, 3000));
     let after = list_items();
-    assert_eq!(after.iter().filter(|i| i.category == CleanCategory::TempFiles).count(), 0);
+    assert_eq!(
+        after
+            .iter()
+            .filter(|i| i.category == CleanCategory::TempFiles)
+            .count(),
+        0
+    );
     crate::serial_println!("  [6/8] clean temp: OK");
 
     // 7: Clean SystemCache + CrashDumps — only the cache item is safe_to_remove
     //    (1 item, 5000 bytes); the crash dump is retained because it is unsafe.
-    let (items2, bytes2) = clean(&[CleanCategory::SystemCache, CleanCategory::CrashDumps]).expect("clean2");
+    let (items2, bytes2) =
+        clean(&[CleanCategory::SystemCache, CleanCategory::CrashDumps]).expect("clean2");
     assert_eq!((items2, bytes2), (1, 5000));
     assert_eq!(list_items().len(), 1); // the unsafe crash dump remains
     crate::serial_println!("  [7/8] clean cache (unsafe retained): OK");
@@ -313,7 +358,10 @@ pub fn self_test() {
     // 8: Final stats — 1 item left (crash dump), 1 scan, 8000 cleaned bytes
     //    across 3 cleaned items.
     let (count, scans, cleaned_bytes, cleaned_items, ops) = stats();
-    assert_eq!((count, scans, cleaned_bytes, cleaned_items), (1, 1, 8000, 3));
+    assert_eq!(
+        (count, scans, cleaned_bytes, cleaned_items),
+        (1, 1, 8000, 3)
+    );
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

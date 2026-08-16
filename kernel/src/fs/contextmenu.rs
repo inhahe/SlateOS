@@ -263,7 +263,8 @@ pub fn build(target: ContextTarget, path: &str) -> ContextMenu {
 
     // Add separator before extensions.
     let exts = EXTENSIONS.lock();
-    let matching: Vec<&MenuExtension> = exts.iter()
+    let matching: Vec<&MenuExtension> = exts
+        .iter()
         .filter(|e| e.enabled && e.targets.contains(&target))
         .filter(|e| {
             if e.file_patterns.is_empty() {
@@ -310,7 +311,9 @@ pub fn build(target: ContextTarget, path: &str) -> ContextMenu {
 pub fn execute_action(menu: &ContextMenu, item_id: u64) -> KernelResult<String> {
     EXECUTE_COUNT.fetch_add(1, Ordering::Relaxed);
 
-    let item = menu.items.iter()
+    let item = menu
+        .items
+        .iter()
         .find(|i| i.id == item_id)
         .ok_or(KernelError::NotFound)?;
 
@@ -614,7 +617,11 @@ pub fn self_test() -> KernelResult<()> {
     // Test 3: build desktop background menu.
     {
         let menu = build(ContextTarget::DesktopBackground, "");
-        assert!(menu.items.iter().any(|i| i.label == "New" && !i.submenu.is_empty()));
+        assert!(
+            menu.items
+                .iter()
+                .any(|i| i.label == "New" && !i.submenu.is_empty())
+        );
         assert!(menu.items.iter().any(|i| i.label == "Refresh"));
         serial_println!("[contextmenu] test 3 passed: desktop menu build");
     }
@@ -627,22 +634,26 @@ pub fn self_test() -> KernelResult<()> {
             action: String::from("compress"),
             priority: 0,
         }];
-        let ext_id = register_extension(
-            "TestApp",
-            &[ContextTarget::File],
-            &["*"],
-            &ext_items,
-        )?;
+        let ext_id = register_extension("TestApp", &[ContextTarget::File], &["*"], &ext_items)?;
         assert!(ext_id > 0);
 
         // Build menu — should include extension item.
         let menu = build(ContextTarget::File, "/test.txt");
-        assert!(menu.items.iter().any(|i| i.label == "Compress with TestApp"));
+        assert!(
+            menu.items
+                .iter()
+                .any(|i| i.label == "Compress with TestApp")
+        );
 
         // Disable extension.
         set_extension_enabled(ext_id, false)?;
         let menu2 = build(ContextTarget::File, "/test.txt");
-        assert!(!menu2.items.iter().any(|i| i.label == "Compress with TestApp"));
+        assert!(
+            !menu2
+                .items
+                .iter()
+                .any(|i| i.label == "Compress with TestApp")
+        );
 
         // Clean up.
         unregister_extension(ext_id)?;

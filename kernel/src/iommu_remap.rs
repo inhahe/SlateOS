@@ -391,7 +391,9 @@ pub fn init() -> KernelResult<()> {
         if let Err(e) = init_unit(unit.register_base) {
             serial_println!(
                 "[iommu_remap] WARNING: failed to init unit {} at {:#x}: {:?}",
-                i, unit.register_base, e
+                i,
+                unit.register_base,
+                e
             );
             // Continue with other units — partial protection is better
             // than none.
@@ -414,7 +416,12 @@ fn init_unit(register_base: u64) -> KernelResult<()> {
     let version = read_reg32(mmio, reg::VER);
     let major = (version >> 4) & 0xF;
     let minor = version & 0xF;
-    serial_println!("[iommu_remap]   Unit at {:#x}: VT-d version {}.{}", register_base, major, minor);
+    serial_println!(
+        "[iommu_remap]   Unit at {:#x}: VT-d version {}.{}",
+        register_base,
+        major,
+        minor
+    );
 
     // Read capabilities.
     let cap_val = read_reg64(mmio, reg::CAP);
@@ -423,7 +430,12 @@ fn init_unit(register_base: u64) -> KernelResult<()> {
     let sagaw = (cap_val & cap::SAGAW_MASK) >> cap::SAGAW_SHIFT;
     let need_wbf = (cap_val & cap::RWBF) != 0;
 
-    serial_println!("[iommu_remap]   CAP: ndoms={}, sagaw={:#x}, need_wbf={}", ndoms, sagaw, need_wbf);
+    serial_println!(
+        "[iommu_remap]   CAP: ndoms={}, sagaw={:#x}, need_wbf={}",
+        ndoms,
+        sagaw,
+        need_wbf
+    );
 
     // Verify 4-level (48-bit) page table support (SAGAW bit 2).
     if sagaw & 0x04 == 0 {
@@ -530,7 +542,9 @@ pub fn destroy_domain(domain_id: DomainId) -> KernelResult<()> {
             // hardware walk and no concurrent map_dma can race this teardown.
             // SAFETY: pml4_phys was returned by alloc_pt_page in
             // create_domain and is now detached from the domain table.
-            unsafe { free_slpt(pml4_phys, hhdm); }
+            unsafe {
+                free_slpt(pml4_phys, hhdm);
+            }
         } else {
             serial_println!(
                 "[iommu_remap] WARNING: HHDM unavailable; leaking SLPT pages for domain {}",
@@ -603,11 +617,7 @@ pub fn map_dma(
 ///
 /// After this call, devices in this domain can no longer DMA to
 /// `bus_addr..bus_addr+size`.  An IOTLB flush is issued.
-pub fn unmap_dma(
-    domain_id: DomainId,
-    bus_addr: u64,
-    size: usize,
-) -> KernelResult<()> {
+pub fn unmap_dma(domain_id: DomainId, bus_addr: u64, size: usize) -> KernelResult<()> {
     if size == 0 {
         return Err(KernelError::InvalidArgument);
     }
@@ -652,12 +662,7 @@ pub fn unmap_dma(
 /// Programs the IOMMU context table so that DMA from this device
 /// (identified by Bus:Device:Function) goes through the domain's
 /// page table.
-pub fn attach_device(
-    domain_id: DomainId,
-    bus: u8,
-    device: u8,
-    function: u8,
-) -> KernelResult<()> {
+pub fn attach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> KernelResult<()> {
     if device >= 32 || function >= 8 {
         return Err(KernelError::InvalidArgument);
     }
@@ -712,7 +717,10 @@ pub fn attach_device(
 
     serial_println!(
         "[iommu_remap] Attached {:02x}:{:02x}.{} to domain {}",
-        bus, device, function, domain_id
+        bus,
+        device,
+        function,
+        domain_id
     );
     Ok(())
 }
@@ -721,12 +729,7 @@ pub fn attach_device(
 ///
 /// Clears the context table entry, preventing any further DMA from
 /// this device.
-pub fn detach_device(
-    domain_id: DomainId,
-    bus: u8,
-    device: u8,
-    function: u8,
-) -> KernelResult<()> {
+pub fn detach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> KernelResult<()> {
     if device >= 32 || function >= 8 {
         return Err(KernelError::InvalidArgument);
     }
@@ -782,7 +785,10 @@ pub fn detach_device(
 
     serial_println!(
         "[iommu_remap] Detached {:02x}:{:02x}.{} from domain {}",
-        bus, device, function, domain_id
+        bus,
+        device,
+        function,
+        domain_id
     );
     Ok(())
 }
@@ -972,18 +978,26 @@ unsafe fn free_slpt(pml4_phys: u64, hhdm: u64) {
                 // SAFETY: `pt` is a structure page we allocated via
                 // walk_or_create and is no longer referenced once the PD
                 // entry above is dropped with the PD page below.
-                unsafe { page_table::free_pt_page(pt); }
+                unsafe {
+                    page_table::free_pt_page(pt);
+                }
             }
             // SAFETY: `pd` is a domain-owned structure page; all its PT
             // children were just freed and nothing else references it.
-            unsafe { page_table::free_pt_page(pd); }
+            unsafe {
+                page_table::free_pt_page(pd);
+            }
         }
         // SAFETY: `pdpt` is a domain-owned structure page; all its PD
         // children were just freed.
-        unsafe { page_table::free_pt_page(pdpt); }
+        unsafe {
+            page_table::free_pt_page(pdpt);
+        }
     }
     // SAFETY: the PML4 root is domain-owned; all lower levels are freed.
-    unsafe { page_table::free_pt_page(pml4_phys); }
+    unsafe {
+        page_table::free_pt_page(pml4_phys);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,7 +1093,8 @@ fn wait_for_status(mmio_base: u64, bit: u32, expected_set: bool) -> KernelResult
 
     serial_println!(
         "[iommu_remap] Timeout waiting for GSTS bit {:#x} = {}",
-        bit, expected_set
+        bit,
+        expected_set
     );
     Err(KernelError::TimedOut)
 }
@@ -1174,7 +1189,8 @@ pub struct RemapStats {
 pub fn stats() -> RemapStats {
     let domains = DOMAINS.lock();
     let active_domains = domains.iter().filter(|d| d.active).count() as u16;
-    let total_mapped = domains.iter()
+    let total_mapped = domains
+        .iter()
         .filter(|d| d.active)
         .map(|d| d.mapped_pages)
         .sum();
@@ -1230,7 +1246,9 @@ pub fn handle_fault(unit_index: u8) {
 
         serial_println!(
             "[iommu_remap] DMA FAULT: addr={:#x} src={:04x} reason={}",
-            fault_addr, source_id, reason
+            fault_addr,
+            source_id,
+            reason
         );
 
         // Clear the fault by writing 1 to PFO (bit 0 of FSTS).
@@ -1257,7 +1275,13 @@ pub fn self_test() -> KernelResult<()> {
     // Test 2: Map a DMA page.
     let bus_addr: u64 = 0x1000; // Page-aligned bus address.
     let phys_addr: u64 = 0x200000; // Some physical address (2 MiB).
-    map_dma(domain, bus_addr, phys_addr, IOMMU_PAGE_SIZE, DmaPerms::READ_WRITE)?;
+    map_dma(
+        domain,
+        bus_addr,
+        phys_addr,
+        IOMMU_PAGE_SIZE,
+        DmaPerms::READ_WRITE,
+    )?;
     serial_println!("[iommu_remap]   Map DMA page: OK");
 
     // Test 3: Verify the mapping by walking the page table.
@@ -1269,14 +1293,11 @@ pub fn self_test() -> KernelResult<()> {
 
         // Walk PML4 → PDPT → PD → PT → leaf.
         let pml4_idx = ((bus_addr >> 39) & 0x1FF) as usize;
-        let pdpt_phys = walk_existing(pml4, pml4_idx, hhdm)
-            .expect("PML4 entry should exist");
+        let pdpt_phys = walk_existing(pml4, pml4_idx, hhdm).expect("PML4 entry should exist");
         let pdpt_idx = ((bus_addr >> 30) & 0x1FF) as usize;
-        let pd_phys = walk_existing(pdpt_phys, pdpt_idx, hhdm)
-            .expect("PDPT entry should exist");
+        let pd_phys = walk_existing(pdpt_phys, pdpt_idx, hhdm).expect("PDPT entry should exist");
         let pd_idx = ((bus_addr >> 21) & 0x1FF) as usize;
-        let pt_phys = walk_existing(pd_phys, pd_idx, hhdm)
-            .expect("PD entry should exist");
+        let pt_phys = walk_existing(pd_phys, pd_idx, hhdm).expect("PD entry should exist");
         let pt_idx = ((bus_addr >> 12) & 0x1FF) as usize;
 
         // Read the leaf entry.
@@ -1294,7 +1315,13 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Test 4: Map multiple pages.
-    map_dma(domain, 0x10000, 0x300000, IOMMU_PAGE_SIZE * 4, DmaPerms::READ)?;
+    map_dma(
+        domain,
+        0x10000,
+        0x300000,
+        IOMMU_PAGE_SIZE * 4,
+        DmaPerms::READ,
+    )?;
     {
         let domains = DOMAINS.lock();
         assert_eq!(domains[domain as usize].mapped_pages, 5, "5 pages mapped");
@@ -1305,7 +1332,10 @@ pub fn self_test() -> KernelResult<()> {
     unmap_dma(domain, bus_addr, IOMMU_PAGE_SIZE)?;
     {
         let domains = DOMAINS.lock();
-        assert_eq!(domains[domain as usize].mapped_pages, 4, "4 pages after unmap");
+        assert_eq!(
+            domains[domain as usize].mapped_pages, 4,
+            "4 pages after unmap"
+        );
     }
     // Verify the leaf is now zero.
     {
@@ -1332,8 +1362,11 @@ pub fn self_test() -> KernelResult<()> {
     // Test 6: Stats.
     let s = stats();
     assert!(s.active_domains >= 1, "at least 1 active domain");
-    serial_println!("[iommu_remap]   Stats: {} active domains, {} mapped pages",
-        s.active_domains, s.total_mapped_pages);
+    serial_println!(
+        "[iommu_remap]   Stats: {} active domains, {} mapped pages",
+        s.active_domains,
+        s.total_mapped_pages
+    );
 
     // Test 7: Domain destruction.
     // First unmap remaining pages.
@@ -1344,7 +1377,10 @@ pub fn self_test() -> KernelResult<()> {
     // Test 8: DmaPerms.
     assert_eq!(DmaPerms::READ.to_pte_flags(), slpte::READ);
     assert_eq!(DmaPerms::WRITE.to_pte_flags(), slpte::WRITE);
-    assert_eq!(DmaPerms::READ_WRITE.to_pte_flags(), slpte::READ | slpte::WRITE);
+    assert_eq!(
+        DmaPerms::READ_WRITE.to_pte_flags(),
+        slpte::READ | slpte::WRITE
+    );
     serial_println!("[iommu_remap]   Permissions: OK");
 
     // Test 9: SLPT structure pages are reclaimed on domain destroy.
@@ -1362,7 +1398,13 @@ pub fn self_test() -> KernelResult<()> {
         // distinct from the bus addresses used by earlier tests on other
         // (now-destroyed) domains, so this mapping creates a full fresh
         // 3-level structure under the domain's PML4.
-        map_dma(d, 0x4000_0000, 0x500000, IOMMU_PAGE_SIZE, DmaPerms::READ_WRITE)?;
+        map_dma(
+            d,
+            0x4000_0000,
+            0x500000,
+            IOMMU_PAGE_SIZE,
+            DmaPerms::READ_WRITE,
+        )?;
         let before = page_table::pt_pool_free_count();
         destroy_domain(d)?;
         let after = page_table::pt_pool_free_count();

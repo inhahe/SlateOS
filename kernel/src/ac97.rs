@@ -36,7 +36,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::pci::{self, PciDevice};
 use crate::port;
 use crate::serial_println;
@@ -228,7 +228,11 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     }
     let nabm_base = (bar1 & !0x3) as u16;
 
-    serial_println!("[ac97] NAM base: {:#x}, NABM base: {:#x}", nam_base, nabm_base);
+    serial_println!(
+        "[ac97] NAM base: {:#x}, NABM base: {:#x}",
+        nam_base,
+        nabm_base
+    );
 
     // Enable bus mastering for DMA.
     pci::enable_bus_master(dev.address);
@@ -250,7 +254,10 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
 
     // Check primary codec ready (bit 8).
     if glob_stat & (1 << 8) == 0 {
-        serial_println!("[ac97] Warning: primary codec not ready (status {:#x})", glob_stat);
+        serial_println!(
+            "[ac97] Warning: primary codec not ready (status {:#x})",
+            glob_stat
+        );
         // Continue anyway — some emulators don't set this correctly.
     }
 
@@ -259,7 +266,9 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     // Reset the codec.
     // SAFETY: nam_base is the AC97 NAM I/O base from PCI BAR.  All port
     // reads/writes below target valid AC97 mixer register offsets.
-    unsafe { port::outw(nam_base.wrapping_add(NAM_RESET), 0); }
+    unsafe {
+        port::outw(nam_base.wrapping_add(NAM_RESET), 0);
+    }
     busy_wait_us(10_000);
 
     // Read codec vendor ID.
@@ -411,7 +420,7 @@ pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
     // Use the full frame for audio data (minus a small reservation).
     let pcm_buf_size = FRAME_SIZE; // 16384 bytes
     let chunk_size = pcm_buf_size / BDL_SIZE; // 512 bytes per chunk
-    let samples_per_chunk = chunk_size / 4;    // 128 stereo samples (4 bytes each)
+    let samples_per_chunk = chunk_size / 4; // 128 stereo samples (4 bytes each)
 
     // Generate the waveform into the PCM buffer.
     generate_tone_buffer(pcm_virt, pcm_buf_size, dev.sample_rate);
@@ -429,7 +438,11 @@ pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
 
     // Determine how many BDL entries we need for the desired duration.
     let total_chunks_needed = total_bytes.saturating_div(chunk_size).min(BDL_SIZE);
-    let lvi = if total_chunks_needed == 0 { 0 } else { (total_chunks_needed - 1) as u8 };
+    let lvi = if total_chunks_needed == 0 {
+        0
+    } else {
+        (total_chunks_needed - 1) as u8
+    };
 
     // SAFETY: dev.nabm_base is validated AC97 NABM I/O base.  The following
     // writes set the last valid index, clear status, and start DMA playback.
@@ -609,7 +622,11 @@ pub fn self_test() {
         if bdbar == expected {
             serial_println!("[ac97]   BDBAR: OK ({:#010x})", bdbar);
         } else {
-            serial_println!("[ac97]   BDBAR: MISMATCH (got {:#010x}, expected {:#010x})", bdbar, expected);
+            serial_println!(
+                "[ac97]   BDBAR: MISMATCH (got {:#010x}, expected {:#010x})",
+                bdbar,
+                expected
+            );
         }
     }
     drop(guard);

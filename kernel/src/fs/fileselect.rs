@@ -326,11 +326,7 @@ pub fn select_toggle(set_id: u64, path: impl AsRef<Path>, index: usize) -> Kerne
 ///
 /// Selects all items from the anchor to the given index.
 /// `listing` provides the full ordered listing of the directory.
-pub fn select_range(
-    set_id: u64,
-    listing: &[&Path],
-    target_index: usize,
-) -> KernelResult<()> {
+pub fn select_range(set_id: u64, listing: &[&Path], target_index: usize) -> KernelResult<()> {
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
 
@@ -407,7 +403,9 @@ pub fn select_pattern(set_id: u64, listing: &[&Path], pattern: &str) -> KernelRe
     for path in listing {
         // A path with no final component (the root, or all separators) has no
         // name to match, so no pattern can select it.
-        let Some(name) = path.file_name() else { continue };
+        let Some(name) = path.file_name() else {
+            continue;
+        };
         if simple_glob(pattern, name) && !set.contains(path) {
             if let Ok(item) = make_item(path) {
                 set.add(item);
@@ -425,7 +423,9 @@ pub fn deselect_pattern(set_id: u64, pattern: &str) -> KernelResult<()> {
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
 
-    let to_remove: Vec<PathBuf> = set.items.iter()
+    let to_remove: Vec<PathBuf> = set
+        .items
+        .iter()
         .filter(|i| simple_glob(pattern, &i.name))
         .map(|i| i.path.clone())
         .collect();
@@ -475,7 +475,9 @@ pub fn count(set_id: u64) -> KernelResult<usize> {
 /// List all active selection sets.
 pub fn list_sets() -> Vec<(u64, PathBuf, usize)> {
     let sets = SETS.lock();
-    sets.iter().map(|s| (s.id, s.directory.clone(), s.count())).collect()
+    sets.iter()
+        .map(|s| (s.id, s.directory.clone(), s.count()))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -547,7 +549,10 @@ pub fn recompute_parent_state(node: &mut CheckTreeNode) {
         return;
     }
     let all_checked = node.children.iter().all(|c| c.state == CheckState::Checked);
-    let all_unchecked = node.children.iter().all(|c| c.state == CheckState::Unchecked);
+    let all_unchecked = node
+        .children
+        .iter()
+        .all(|c| c.state == CheckState::Unchecked);
 
     node.state = if all_checked {
         CheckState::Checked
@@ -790,14 +795,20 @@ pub fn self_test() -> KernelResult<()> {
         };
         let checked = collect_checked(&tree);
         assert_eq!(checked.len(), 1);
-        assert_eq!(checked.first().map(PathBuf::as_path), Some(Path::new("/test/a")));
+        assert_eq!(
+            checked.first().map(PathBuf::as_path),
+            Some(Path::new("/test/a"))
+        );
 
         // After toggling parent, all should be checked.
         toggle_check_node(&mut tree);
         let checked = collect_checked(&tree);
         // Parent is checked → just the parent path.
         assert_eq!(checked.len(), 1);
-        assert_eq!(checked.first().map(PathBuf::as_path), Some(Path::new("/test")));
+        assert_eq!(
+            checked.first().map(PathBuf::as_path),
+            Some(Path::new("/test"))
+        );
         serial_println!("[fileselect] test 7 passed: collect_checked");
     }
 

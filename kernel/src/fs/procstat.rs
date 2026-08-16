@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -124,7 +124,9 @@ where
 /// [`unregister`] when it exits.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         processes: Vec::new(),
         total_updates: 0,
@@ -134,26 +136,45 @@ pub fn init_defaults() {
 
 /// Get stats for a process.
 pub fn get_process(pid: u32) -> Option<ProcessStats> {
-    STATE.lock().as_ref().and_then(|s| s.processes.iter().find(|p| p.pid == pid).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.processes.iter().find(|p| p.pid == pid).cloned())
 }
 
 /// List all processes.
 pub fn list_processes() -> Vec<ProcessStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.processes.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.processes.clone())
 }
 
 /// Register a new process.
 pub fn register(pid: u32, name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if state.processes.len() >= MAX_PROCESSES { return Err(KernelError::ResourceExhausted); }
-        if state.processes.iter().any(|p| p.pid == pid) { return Err(KernelError::AlreadyExists); }
+        if state.processes.len() >= MAX_PROCESSES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.processes.iter().any(|p| p.pid == pid) {
+            return Err(KernelError::AlreadyExists);
+        }
         let now = crate::hpet::elapsed_ns();
         state.processes.push(ProcessStats {
-            pid, name: String::from(name), state: ProcState::Running,
-            cpu_time_us: 0, user_time_us: 0, sys_time_us: 0,
-            memory_bytes: 0, rss_pages: 0, io_read_bytes: 0,
-            io_write_bytes: 0, page_faults: 0, ctx_switches: 0,
-            threads: 1, started_ns: now,
+            pid,
+            name: String::from(name),
+            state: ProcState::Running,
+            cpu_time_us: 0,
+            user_time_us: 0,
+            sys_time_us: 0,
+            memory_bytes: 0,
+            rss_pages: 0,
+            io_read_bytes: 0,
+            io_write_bytes: 0,
+            page_faults: 0,
+            ctx_switches: 0,
+            threads: 1,
+            started_ns: now,
         });
         Ok(())
     })
@@ -164,7 +185,9 @@ pub fn unregister(pid: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.processes.len();
         state.processes.retain(|p| p.pid != pid);
-        if state.processes.len() == before { return Err(KernelError::NotFound); }
+        if state.processes.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -172,7 +195,11 @@ pub fn unregister(pid: u32) -> KernelResult<()> {
 /// Update CPU time.
 pub fn update_cpu(pid: u32, user_us: u64, sys_us: u64) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.processes.iter_mut().find(|p| p.pid == pid).ok_or(KernelError::NotFound)?;
+        let p = state
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid)
+            .ok_or(KernelError::NotFound)?;
         p.user_time_us += user_us;
         p.sys_time_us += sys_us;
         p.cpu_time_us = p.user_time_us + p.sys_time_us;
@@ -184,7 +211,11 @@ pub fn update_cpu(pid: u32, user_us: u64, sys_us: u64) -> KernelResult<()> {
 /// Update memory.
 pub fn update_memory(pid: u32, bytes: u64, rss_pages: u64) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.processes.iter_mut().find(|p| p.pid == pid).ok_or(KernelError::NotFound)?;
+        let p = state
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid)
+            .ok_or(KernelError::NotFound)?;
         p.memory_bytes = bytes;
         p.rss_pages = rss_pages;
         state.total_updates += 1;
@@ -270,7 +301,7 @@ pub fn self_test() {
     crate::serial_println!("  [4/8] memory: OK");
 
     // 5: Give beta more CPU + memory so ordering is deterministic.
-    update_cpu(200, 9000, 1000).expect("cpu beta");   // cpu_time 10000 > 1800
+    update_cpu(200, 9000, 1000).expect("cpu beta"); // cpu_time 10000 > 1800
     update_memory(200, 1_000_000, 256).expect("mem beta");
     crate::serial_println!("  [5/8] second process: OK");
 

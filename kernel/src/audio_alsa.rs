@@ -578,27 +578,51 @@ pub const SNDRV_PCM_IOCTL_SW_PARAMS: u32 = ioc(
     struct_size::<SndPcmSwParams>(),
 );
 /// `WRITEI_FRAMES` — write interleaved frames (`_IOW`).
-pub const SNDRV_PCM_IOCTL_WRITEI_FRAMES: u32 =
-    ioc(IOC_WRITE, SNDRV_PCM_IOCTL_MAGIC, 0x50, struct_size::<SndXferi>());
+pub const SNDRV_PCM_IOCTL_WRITEI_FRAMES: u32 = ioc(
+    IOC_WRITE,
+    SNDRV_PCM_IOCTL_MAGIC,
+    0x50,
+    struct_size::<SndXferi>(),
+);
 /// `READI_FRAMES` — read interleaved frames (`_IOR`).
-pub const SNDRV_PCM_IOCTL_READI_FRAMES: u32 =
-    ioc(IOC_READ, SNDRV_PCM_IOCTL_MAGIC, 0x51, struct_size::<SndXferi>());
+pub const SNDRV_PCM_IOCTL_READI_FRAMES: u32 = ioc(
+    IOC_READ,
+    SNDRV_PCM_IOCTL_MAGIC,
+    0x51,
+    struct_size::<SndXferi>(),
+);
 /// `INFO` — query device identification (`_IOR`).
-pub const SNDRV_PCM_IOCTL_INFO: u32 =
-    ioc(IOC_READ, SNDRV_PCM_IOCTL_MAGIC, 0x01, struct_size::<SndPcmInfo>());
+pub const SNDRV_PCM_IOCTL_INFO: u32 = ioc(
+    IOC_READ,
+    SNDRV_PCM_IOCTL_MAGIC,
+    0x01,
+    struct_size::<SndPcmInfo>(),
+);
 /// `SYNC_PTR` — exchange the application/hardware pointers (`_IOWR`).
-pub const SNDRV_PCM_IOCTL_SYNC_PTR: u32 =
-    ioc(IOC_READ | IOC_WRITE, SNDRV_PCM_IOCTL_MAGIC, 0x23, struct_size::<SndPcmSyncPtr>());
+pub const SNDRV_PCM_IOCTL_SYNC_PTR: u32 = ioc(
+    IOC_READ | IOC_WRITE,
+    SNDRV_PCM_IOCTL_MAGIC,
+    0x23,
+    struct_size::<SndPcmSyncPtr>(),
+);
 /// `STATUS` — read the full stream status snapshot (`_IOR`).
 ///
 /// Time64 layout → `sizeof(snd_pcm_status)` = 152, so this encodes to
 /// `0x8098_4120` (asserted in [`self_test`]).
-pub const SNDRV_PCM_IOCTL_STATUS: u32 =
-    ioc(IOC_READ, SNDRV_PCM_IOCTL_MAGIC, 0x20, struct_size::<SndPcmStatus>());
+pub const SNDRV_PCM_IOCTL_STATUS: u32 = ioc(
+    IOC_READ,
+    SNDRV_PCM_IOCTL_MAGIC,
+    0x20,
+    struct_size::<SndPcmStatus>(),
+);
 /// `STATUS_EXT` — like `STATUS` but read-write (the client selects an
 /// audio-timestamp type in `audio_tstamp_data`); `_IOWR`, `0xC098_4124`.
-pub const SNDRV_PCM_IOCTL_STATUS_EXT: u32 =
-    ioc(IOC_READ | IOC_WRITE, SNDRV_PCM_IOCTL_MAGIC, 0x24, struct_size::<SndPcmStatus>());
+pub const SNDRV_PCM_IOCTL_STATUS_EXT: u32 = ioc(
+    IOC_READ | IOC_WRITE,
+    SNDRV_PCM_IOCTL_MAGIC,
+    0x24,
+    struct_size::<SndPcmStatus>(),
+);
 
 // ---------------------------------------------------------------------------
 // Format / configuration translation onto the mixer pipeline
@@ -620,9 +644,7 @@ pub fn format_bytes_per_sample(format: u32) -> Option<u32> {
         | SNDRV_PCM_FORMAT_U16_LE
         | SNDRV_PCM_FORMAT_U16_BE => Some(2),
         SNDRV_PCM_FORMAT_S24_LE => Some(4), // padded to 32-bit container
-        SNDRV_PCM_FORMAT_S32_LE
-        | SNDRV_PCM_FORMAT_S32_BE
-        | SNDRV_PCM_FORMAT_FLOAT_LE => Some(4),
+        SNDRV_PCM_FORMAT_S32_LE | SNDRV_PCM_FORMAT_S32_BE | SNDRV_PCM_FORMAT_FLOAT_LE => Some(4),
         _ => None,
     }
 }
@@ -772,29 +794,69 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         "TTSTAMP enc {:#x}",
         SNDRV_PCM_IOCTL_TTSTAMP
     );
-    check!(SNDRV_PCM_IOCTL_HWSYNC == 0x4122, "HWSYNC enc {:#x}", SNDRV_PCM_IOCTL_HWSYNC);
-    check!(SNDRV_PCM_IOCTL_PREPARE == 0x4140, "PREPARE enc {:#x}", SNDRV_PCM_IOCTL_PREPARE);
-    check!(SNDRV_PCM_IOCTL_RESET == 0x4141, "RESET enc {:#x}", SNDRV_PCM_IOCTL_RESET);
-    check!(SNDRV_PCM_IOCTL_START == 0x4142, "START enc {:#x}", SNDRV_PCM_IOCTL_START);
-    check!(SNDRV_PCM_IOCTL_DROP == 0x4143, "DROP enc {:#x}", SNDRV_PCM_IOCTL_DROP);
-    check!(SNDRV_PCM_IOCTL_DRAIN == 0x4144, "DRAIN enc {:#x}", SNDRV_PCM_IOCTL_DRAIN);
+    check!(
+        SNDRV_PCM_IOCTL_HWSYNC == 0x4122,
+        "HWSYNC enc {:#x}",
+        SNDRV_PCM_IOCTL_HWSYNC
+    );
+    check!(
+        SNDRV_PCM_IOCTL_PREPARE == 0x4140,
+        "PREPARE enc {:#x}",
+        SNDRV_PCM_IOCTL_PREPARE
+    );
+    check!(
+        SNDRV_PCM_IOCTL_RESET == 0x4141,
+        "RESET enc {:#x}",
+        SNDRV_PCM_IOCTL_RESET
+    );
+    check!(
+        SNDRV_PCM_IOCTL_START == 0x4142,
+        "START enc {:#x}",
+        SNDRV_PCM_IOCTL_START
+    );
+    check!(
+        SNDRV_PCM_IOCTL_DROP == 0x4143,
+        "DROP enc {:#x}",
+        SNDRV_PCM_IOCTL_DROP
+    );
+    check!(
+        SNDRV_PCM_IOCTL_DRAIN == 0x4144,
+        "DRAIN enc {:#x}",
+        SNDRV_PCM_IOCTL_DRAIN
+    );
     check!(
         SNDRV_PCM_IOCTL_PAUSE == 0x4004_4145,
         "PAUSE enc {:#x}",
         SNDRV_PCM_IOCTL_PAUSE
     );
-    check!(SNDRV_PCM_IOCTL_RESUME == 0x4147, "RESUME enc {:#x}", SNDRV_PCM_IOCTL_RESUME);
-    check!(SNDRV_PCM_IOCTL_XRUN == 0x4148, "XRUN enc {:#x}", SNDRV_PCM_IOCTL_XRUN);
+    check!(
+        SNDRV_PCM_IOCTL_RESUME == 0x4147,
+        "RESUME enc {:#x}",
+        SNDRV_PCM_IOCTL_RESUME
+    );
+    check!(
+        SNDRV_PCM_IOCTL_XRUN == 0x4148,
+        "XRUN enc {:#x}",
+        SNDRV_PCM_IOCTL_XRUN
+    );
     check!(
         SNDRV_PCM_IOCTL_LINK == 0x4004_4160,
         "LINK enc {:#x}",
         SNDRV_PCM_IOCTL_LINK
     );
-    check!(SNDRV_PCM_IOCTL_UNLINK == 0x4161, "UNLINK enc {:#x}", SNDRV_PCM_IOCTL_UNLINK);
+    check!(
+        SNDRV_PCM_IOCTL_UNLINK == 0x4161,
+        "UNLINK enc {:#x}",
+        SNDRV_PCM_IOCTL_UNLINK
+    );
 
     // --- byte-exact struct layouts vs Linux asound.h --------------------
     use core::mem::size_of;
-    check!(size_of::<SndMask>() == 32, "snd_mask size {}", size_of::<SndMask>());
+    check!(
+        size_of::<SndMask>() == 32,
+        "snd_mask size {}",
+        size_of::<SndMask>()
+    );
     check!(
         size_of::<SndInterval>() == 12,
         "snd_interval size {}",
@@ -810,7 +872,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         "snd_pcm_sw_params size {}",
         size_of::<SndPcmSwParams>()
     );
-    check!(size_of::<SndXferi>() == 24, "snd_xferi size {}", size_of::<SndXferi>());
+    check!(
+        size_of::<SndXferi>() == 24,
+        "snd_xferi size {}",
+        size_of::<SndXferi>()
+    );
     check!(
         size_of::<SndPcmInfo>() == 288,
         "snd_pcm_info size {}",
@@ -893,7 +959,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         ((pv >> IOC_SIZESHIFT) & ((1 << IOC_SIZEBITS) - 1)) == 4,
         "PVERSION size wrong"
     );
-    check!(((pv >> IOC_TYPESHIFT) & 0xff) == SNDRV_PCM_IOCTL_MAGIC, "PVERSION type wrong");
+    check!(
+        ((pv >> IOC_TYPESHIFT) & 0xff) == SNDRV_PCM_IOCTL_MAGIC,
+        "PVERSION type wrong"
+    );
     check!((pv & 0xff) == 0, "PVERSION nr wrong");
 
     // --- protocol version literal ---------------------------------------
@@ -901,14 +970,38 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     check!(SNDRV_PCM_VERSION == 0x0002_000f, "version literal wrong");
 
     // --- format → bytes-per-sample --------------------------------------
-    check!(format_bytes_per_sample(SNDRV_PCM_FORMAT_S8) == Some(1), "S8 bps");
-    check!(format_bytes_per_sample(SNDRV_PCM_FORMAT_U8) == Some(1), "U8 bps");
-    check!(format_bytes_per_sample(SNDRV_PCM_FORMAT_S16_LE) == Some(2), "S16_LE bps");
-    check!(format_bytes_per_sample(SNDRV_PCM_FORMAT_S16_BE) == Some(2), "S16_BE bps");
-    check!(format_bytes_per_sample(SNDRV_PCM_FORMAT_S24_LE) == Some(4), "S24_LE bps");
-    check!(format_bytes_per_sample(SNDRV_PCM_FORMAT_S32_LE) == Some(4), "S32_LE bps");
-    check!(format_bytes_per_sample(SNDRV_PCM_FORMAT_FLOAT_LE) == Some(4), "FLOAT_LE bps");
-    check!(format_bytes_per_sample(0xdead).is_none(), "unknown format must be None");
+    check!(
+        format_bytes_per_sample(SNDRV_PCM_FORMAT_S8) == Some(1),
+        "S8 bps"
+    );
+    check!(
+        format_bytes_per_sample(SNDRV_PCM_FORMAT_U8) == Some(1),
+        "U8 bps"
+    );
+    check!(
+        format_bytes_per_sample(SNDRV_PCM_FORMAT_S16_LE) == Some(2),
+        "S16_LE bps"
+    );
+    check!(
+        format_bytes_per_sample(SNDRV_PCM_FORMAT_S16_BE) == Some(2),
+        "S16_BE bps"
+    );
+    check!(
+        format_bytes_per_sample(SNDRV_PCM_FORMAT_S24_LE) == Some(4),
+        "S24_LE bps"
+    );
+    check!(
+        format_bytes_per_sample(SNDRV_PCM_FORMAT_S32_LE) == Some(4),
+        "S32_LE bps"
+    );
+    check!(
+        format_bytes_per_sample(SNDRV_PCM_FORMAT_FLOAT_LE) == Some(4),
+        "FLOAT_LE bps"
+    );
+    check!(
+        format_bytes_per_sample(0xdead).is_none(),
+        "unknown format must be None"
+    );
 
     // --- direct-mixer acceptance ----------------------------------------
     check!(
@@ -927,12 +1020,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         !mixer_accepts_directly(SNDRV_PCM_FORMAT_S16_LE, 48000, 1),
         "mono must require conversion"
     );
-    check!(MIXER_RATE == 48000 && MIXER_CHANNELS == 2, "mixer config constants");
+    check!(
+        MIXER_RATE == 48000 && MIXER_CHANNELS == 2,
+        "mixer config constants"
+    );
 
     // --- frame → byte sizing (native 4-byte frame) ----------------------
     check!(mixer_frames_to_bytes(0) == Some(0), "0 frames");
     check!(mixer_frames_to_bytes(1) == Some(4), "1 frame == 4 bytes");
-    check!(mixer_frames_to_bytes(1024) == Some(4096), "1024 frames == 4096 bytes");
+    check!(
+        mixer_frames_to_bytes(1024) == Some(4096),
+        "1024 frames == 4096 bytes"
+    );
 
     // --- HW_REFINE collapse onto native config --------------------------
     // Start from a fully-open params (all-ones masks, wide intervals) as
@@ -953,26 +1052,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     refine_to_native(&mut hwp);
     // Helper: a refined interval pinned to [v, v] and marked integer.
     let interval_pinned = |slot: usize, v: u32| -> bool {
-        hwp.intervals.get(slot).is_some_and(|iv| {
-            iv.min == v && iv.max == v && iv.flags & SNDRV_INTERVAL_INTEGER != 0
-        })
+        hwp.intervals
+            .get(slot)
+            .is_some_and(|iv| iv.min == v && iv.max == v && iv.flags & SNDRV_INTERVAL_INTEGER != 0)
     };
     let mask_is = |slot: usize, bit: u32| -> bool {
-        hwp.masks.get(slot).is_some_and(|m| m.bits == mask_bit(bit).bits)
+        hwp.masks
+            .get(slot)
+            .is_some_and(|m| m.bits == mask_bit(bit).bits)
     };
     check!(
         mask_is(0, SNDRV_PCM_ACCESS_RW_INTERLEAVED),
         "ACCESS collapsed to RW_INTERLEAVED"
     );
-    check!(mask_is(1, SNDRV_PCM_FORMAT_S16_LE), "FORMAT collapsed to S16_LE");
-    check!(mask_is(2, SNDRV_PCM_SUBFORMAT_STD), "SUBFORMAT collapsed to STD");
-    check!(interval_pinned(IV_RATE, 48000), "RATE pinned to 48000 (integer)");
+    check!(
+        mask_is(1, SNDRV_PCM_FORMAT_S16_LE),
+        "FORMAT collapsed to S16_LE"
+    );
+    check!(
+        mask_is(2, SNDRV_PCM_SUBFORMAT_STD),
+        "SUBFORMAT collapsed to STD"
+    );
+    check!(
+        interval_pinned(IV_RATE, 48000),
+        "RATE pinned to 48000 (integer)"
+    );
     check!(interval_pinned(IV_CHANNELS, 2), "CHANNELS pinned to 2");
-    check!(interval_pinned(IV_SAMPLE_BITS, 16), "SAMPLE_BITS pinned to 16");
-    check!(interval_pinned(IV_FRAME_BITS, 32), "FRAME_BITS pinned to 32");
+    check!(
+        interval_pinned(IV_SAMPLE_BITS, 16),
+        "SAMPLE_BITS pinned to 16"
+    );
+    check!(
+        interval_pinned(IV_FRAME_BITS, 32),
+        "FRAME_BITS pinned to 32"
+    );
     check!(hwp.cmask == 0xffff_ffff, "cmask echoes rmask");
     check!(hwp.msbits == 16, "msbits = 16");
-    check!(hwp.rate_num == 48000 && hwp.rate_den == 1, "exact rate 48000/1");
+    check!(
+        hwp.rate_num == 48000 && hwp.rate_den == 1,
+        "exact rate 48000/1"
+    );
 
     serial_println!("[alsa] ALSA PCM ABI self-test PASSED");
     Ok(())

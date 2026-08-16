@@ -28,10 +28,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -401,7 +401,12 @@ pub fn get_active_entry() -> Option<BootEntry> {
 // ---------------------------------------------------------------------------
 
 /// Record a boot event.
-pub fn record_boot(entry_id: u64, success: bool, duration_ms: u64, reason: &str) -> KernelResult<u64> {
+pub fn record_boot(
+    entry_id: u64,
+    success: bool,
+    duration_ms: u64,
+    reason: &str,
+) -> KernelResult<u64> {
     let mut state = STATE.lock();
     if state.boot_log.len() >= 1024 {
         // Trim oldest entries.
@@ -553,8 +558,22 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: add entries.
     serial_println!("bootcfg::self_test 1: add entries");
-    let e1 = add_entry("TestOS", EntryKind::SlateOs, "/boot/kernel", "/boot/initrd", "root=/dev/sda1 quiet", false)?;
-    let e2 = add_entry("Linux", EntryKind::Linux, "/boot/vmlinuz", "/boot/initramfs", "root=/dev/sda2", true)?;
+    let e1 = add_entry(
+        "TestOS",
+        EntryKind::SlateOs,
+        "/boot/kernel",
+        "/boot/initrd",
+        "root=/dev/sda1 quiet",
+        false,
+    )?;
+    let e2 = add_entry(
+        "Linux",
+        EntryKind::Linux,
+        "/boot/vmlinuz",
+        "/boot/initramfs",
+        "root=/dev/sda2",
+        true,
+    )?;
     assert_eq!(list_entries().len(), 2);
     // First entry is automatically default.
     let entry = get_entry(e1)?;

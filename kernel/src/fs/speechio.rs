@@ -26,10 +26,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -175,12 +175,32 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
 
     let voices = alloc::vec![
-        Voice { id: 1, name: String::from("Default"), language: String::from("en-US"), gender: VoiceGender::Neutral, is_default: true },
-        Voice { id: 2, name: String::from("Alex"), language: String::from("en-US"), gender: VoiceGender::Male, is_default: false },
-        Voice { id: 3, name: String::from("Samantha"), language: String::from("en-US"), gender: VoiceGender::Female, is_default: false },
+        Voice {
+            id: 1,
+            name: String::from("Default"),
+            language: String::from("en-US"),
+            gender: VoiceGender::Neutral,
+            is_default: true
+        },
+        Voice {
+            id: 2,
+            name: String::from("Alex"),
+            language: String::from("en-US"),
+            gender: VoiceGender::Male,
+            is_default: false
+        },
+        Voice {
+            id: 3,
+            name: String::from("Samantha"),
+            language: String::from("en-US"),
+            gender: VoiceGender::Female,
+            is_default: false
+        },
     ];
 
     *guard = Some(State {
@@ -216,7 +236,9 @@ pub fn add_voice(name: &str, language: &str, gender: VoiceGender) -> KernelResul
             gender,
             is_default: is_first,
         });
-        if is_first { state.default_voice_id = id; }
+        if is_first {
+            state.default_voice_id = id;
+        }
         Ok(id)
     })
 }
@@ -224,7 +246,10 @@ pub fn add_voice(name: &str, language: &str, gender: VoiceGender) -> KernelResul
 /// Remove a voice.
 pub fn remove_voice(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pos = state.voices.iter().position(|v| v.id == id)
+        let pos = state
+            .voices
+            .iter()
+            .position(|v| v.id == id)
             .ok_or(KernelError::NotFound)?;
         state.voices.remove(pos);
         if state.default_voice_id == id {
@@ -252,14 +277,22 @@ pub fn set_default_voice(id: u32) -> KernelResult<()> {
 }
 
 /// Queue a TTS utterance.
-pub fn speak(text: &str, voice_id: Option<u32>, rate_percent: u32, pitch_percent: u32, volume_percent: u32) -> KernelResult<u32> {
+pub fn speak(
+    text: &str,
+    voice_id: Option<u32>,
+    rate_percent: u32,
+    pitch_percent: u32,
+    volume_percent: u32,
+) -> KernelResult<u32> {
     with_state(|state| {
         if !state.tts_enabled {
             return Err(KernelError::NotSupported);
         }
         if state.utterances.len() >= MAX_UTTERANCES {
             // Auto-evict completed utterances.
-            state.utterances.retain(|u| u.state != UtteranceState::Completed && u.state != UtteranceState::Cancelled);
+            state.utterances.retain(|u| {
+                u.state != UtteranceState::Completed && u.state != UtteranceState::Cancelled
+            });
             if state.utterances.len() >= MAX_UTTERANCES {
                 return Err(KernelError::ResourceExhausted);
             }
@@ -289,7 +322,10 @@ pub fn speak(text: &str, voice_id: Option<u32>, rate_percent: u32, pitch_percent
 /// Cancel an utterance.
 pub fn cancel_utterance(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let utt = state.utterances.iter_mut().find(|u| u.id == id)
+        let utt = state
+            .utterances
+            .iter_mut()
+            .find(|u| u.id == id)
             .ok_or(KernelError::NotFound)?;
         utt.state = UtteranceState::Cancelled;
         Ok(())
@@ -311,7 +347,10 @@ pub fn stop_speaking() -> KernelResult<()> {
 /// Mark an utterance as speaking (for synthesis engine).
 pub fn mark_speaking(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let utt = state.utterances.iter_mut().find(|u| u.id == id)
+        let utt = state
+            .utterances
+            .iter_mut()
+            .find(|u| u.id == id)
             .ok_or(KernelError::NotFound)?;
         utt.state = UtteranceState::Speaking;
         Ok(())
@@ -321,7 +360,10 @@ pub fn mark_speaking(id: u32) -> KernelResult<()> {
 /// Mark an utterance as completed.
 pub fn mark_completed(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let utt = state.utterances.iter_mut().find(|u| u.id == id)
+        let utt = state
+            .utterances
+            .iter_mut()
+            .find(|u| u.id == id)
             .ok_or(KernelError::NotFound)?;
         utt.state = UtteranceState::Completed;
         Ok(())
@@ -395,29 +437,47 @@ pub fn submit_result(text: &str, confidence: u32) -> KernelResult<u32> {
 
 /// List voices.
 pub fn list_voices() -> Vec<Voice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.voices.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.voices.clone())
 }
 
 /// List queued/active utterances.
 pub fn list_utterances() -> Vec<Utterance> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.utterances.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.utterances.clone())
 }
 
 /// List recent recognition results.
 pub fn list_results() -> Vec<RecognitionResult> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.results.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.results.clone())
 }
 
 /// Get recognition state.
 pub fn recognition_state() -> RecognitionState {
-    STATE.lock().as_ref().map_or(RecognitionState::Idle, |s| s.recognition_state)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(RecognitionState::Idle, |s| s.recognition_state)
 }
 
 /// Statistics: (voice_count, total_spoken, total_recognized, tts_enabled, ops).
 pub fn stats() -> (usize, u64, u64, bool, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.voices.len(), s.total_spoken, s.total_recognized, s.tts_enabled, s.ops),
+        Some(s) => (
+            s.voices.len(),
+            s.total_spoken,
+            s.total_recognized,
+            s.tts_enabled,
+            s.ops,
+        ),
         None => (0, 0, 0, false, 0),
     }
 }
@@ -461,7 +521,10 @@ pub fn self_test() {
     // 5: Cancel utterance.
     let uid2 = speak("Test cancel", Some(vid), 150, 100, 100).expect("speak2");
     cancel_utterance(uid2).expect("cancel");
-    let u = list_utterances().into_iter().find(|u| u.id == uid2).expect("find");
+    let u = list_utterances()
+        .into_iter()
+        .find(|u| u.id == uid2)
+        .expect("find");
     assert_eq!(u.state, UtteranceState::Cancelled);
     crate::serial_println!("  [5/10] cancel: OK");
 

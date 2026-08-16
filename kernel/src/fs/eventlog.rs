@@ -21,10 +21,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -155,7 +155,9 @@ fn severity_index(s: Severity) -> usize {
 /// builds its own fixtures via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         events: Vec::new(),
         next_id: 1,
@@ -168,7 +170,12 @@ pub fn init_defaults() {
 }
 
 /// Log an event.
-pub fn log_event(severity: Severity, category: EventCategory, source: &str, message: &str) -> KernelResult<u64> {
+pub fn log_event(
+    severity: Severity,
+    category: EventCategory,
+    source: &str,
+    message: &str,
+) -> KernelResult<u64> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         if state.events.len() >= MAX_EVENTS {
@@ -177,8 +184,12 @@ pub fn log_event(severity: Severity, category: EventCategory, source: &str, mess
         let id = state.next_id;
         state.next_id += 1;
         state.events.push(EventEntry {
-            id, severity, category, source: String::from(source),
-            message: String::from(message), timestamp_ns: now,
+            id,
+            severity,
+            category,
+            source: String::from(source),
+            message: String::from(message),
+            timestamp_ns: now,
         });
         state.total_logged += 1;
         state.counts_by_severity[severity_index(severity)] += 1;
@@ -192,7 +203,9 @@ pub fn query_by_severity(min_severity: Severity, max_results: usize) -> Vec<Even
     if let Some(state) = guard.as_mut() {
         state.ops += 1;
         state.total_queries += 1;
-        let mut results: Vec<EventEntry> = state.events.iter()
+        let mut results: Vec<EventEntry> = state
+            .events
+            .iter()
             .filter(|e| e.severity >= min_severity)
             .cloned()
             .collect();
@@ -211,7 +224,9 @@ pub fn query_by_source(source: &str, max_results: usize) -> Vec<EventEntry> {
         state.ops += 1;
         state.total_queries += 1;
         let src_lower = source.to_lowercase();
-        let mut results: Vec<EventEntry> = state.events.iter()
+        let mut results: Vec<EventEntry> = state
+            .events
+            .iter()
             .filter(|e| e.source.to_lowercase().contains(&src_lower))
             .cloned()
             .collect();
@@ -229,7 +244,9 @@ pub fn query_by_category(category: EventCategory, max_results: usize) -> Vec<Eve
     if let Some(state) = guard.as_mut() {
         state.ops += 1;
         state.total_queries += 1;
-        let mut results: Vec<EventEntry> = state.events.iter()
+        let mut results: Vec<EventEntry> = state
+            .events
+            .iter()
             .filter(|e| e.category == category)
             .cloned()
             .collect();
@@ -284,14 +301,23 @@ pub fn count() -> usize {
 
 /// Get severity counts: [debug, info, warn, error, critical].
 pub fn severity_counts() -> [u64; 5] {
-    STATE.lock().as_ref().map_or([0; 5], |s| s.counts_by_severity)
+    STATE
+        .lock()
+        .as_ref()
+        .map_or([0; 5], |s| s.counts_by_severity)
 }
 
 /// Statistics: (event_count, total_logged, total_cleared, total_queries, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.events.len(), s.total_logged, s.total_cleared, s.total_queries, s.ops),
+        Some(s) => (
+            s.events.len(),
+            s.total_logged,
+            s.total_cleared,
+            s.total_queries,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }
@@ -316,9 +342,21 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty defaults: OK");
 
     // 2: Log events — counters rise from zero.
-    log_event(Severity::Warning, EventCategory::Hardware, "disk", "Disk temperature high").expect("log1");
+    log_event(
+        Severity::Warning,
+        EventCategory::Hardware,
+        "disk",
+        "Disk temperature high",
+    )
+    .expect("log1");
     log_event(Severity::Error, EventCategory::Network, "eth0", "Link down").expect("log2");
-    log_event(Severity::Debug, EventCategory::Application, "app1", "Debug trace").expect("log3");
+    log_event(
+        Severity::Debug,
+        EventCategory::Application,
+        "app1",
+        "Debug trace",
+    )
+    .expect("log3");
     assert_eq!(count(), 3);
     assert_eq!(severity_counts(), [1, 0, 1, 1, 0]); // debug, info, warn, error, crit.
     crate::serial_println!("  [2/8] log: OK");

@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -37,11 +37,11 @@ use crate::error::{KernelError, KernelResult};
 pub struct CpuThrottleStats {
     pub cpu_id: u32,
     pub package_id: u32,
-    pub temp_mc: u32,          // millicelsius
+    pub temp_mc: u32, // millicelsius
     pub throttle_count: u64,
     pub total_throttle_ms: u64,
     pub max_throttle_ms: u64,
-    pub freq_cap_mhz: u32,    // 0 = no cap
+    pub freq_cap_mhz: u32, // 0 = no cap
     pub cap_count: u64,
     pub is_throttled: bool,
 }
@@ -80,13 +80,55 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         cpus: alloc::vec![
-            CpuThrottleStats { cpu_id: 0, package_id: 0, temp_mc: 65_000, throttle_count: 100, total_throttle_ms: 50_000, max_throttle_ms: 2000, freq_cap_mhz: 0, cap_count: 50, is_throttled: false },
-            CpuThrottleStats { cpu_id: 1, package_id: 0, temp_mc: 67_000, throttle_count: 120, total_throttle_ms: 60_000, max_throttle_ms: 2500, freq_cap_mhz: 0, cap_count: 60, is_throttled: false },
-            CpuThrottleStats { cpu_id: 2, package_id: 0, temp_mc: 63_000, throttle_count: 80, total_throttle_ms: 40_000, max_throttle_ms: 1500, freq_cap_mhz: 0, cap_count: 40, is_throttled: false },
-            CpuThrottleStats { cpu_id: 3, package_id: 0, temp_mc: 64_000, throttle_count: 90, total_throttle_ms: 45_000, max_throttle_ms: 1800, freq_cap_mhz: 0, cap_count: 45, is_throttled: false },
+            CpuThrottleStats {
+                cpu_id: 0,
+                package_id: 0,
+                temp_mc: 65_000,
+                throttle_count: 100,
+                total_throttle_ms: 50_000,
+                max_throttle_ms: 2000,
+                freq_cap_mhz: 0,
+                cap_count: 50,
+                is_throttled: false
+            },
+            CpuThrottleStats {
+                cpu_id: 1,
+                package_id: 0,
+                temp_mc: 67_000,
+                throttle_count: 120,
+                total_throttle_ms: 60_000,
+                max_throttle_ms: 2500,
+                freq_cap_mhz: 0,
+                cap_count: 60,
+                is_throttled: false
+            },
+            CpuThrottleStats {
+                cpu_id: 2,
+                package_id: 0,
+                temp_mc: 63_000,
+                throttle_count: 80,
+                total_throttle_ms: 40_000,
+                max_throttle_ms: 1500,
+                freq_cap_mhz: 0,
+                cap_count: 40,
+                is_throttled: false
+            },
+            CpuThrottleStats {
+                cpu_id: 3,
+                package_id: 0,
+                temp_mc: 64_000,
+                throttle_count: 90,
+                total_throttle_ms: 45_000,
+                max_throttle_ms: 1800,
+                freq_cap_mhz: 0,
+                cap_count: 45,
+                is_throttled: false
+            },
         ],
         total_throttle_events: 390,
         total_throttle_ms: 195_000,
@@ -98,11 +140,16 @@ pub fn init_defaults() {
 /// Record a throttle event.
 pub fn record_throttle(cpu_id: u32, duration_ms: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.throttle_count += 1;
         cpu.total_throttle_ms += duration_ms;
-        if duration_ms > cpu.max_throttle_ms { cpu.max_throttle_ms = duration_ms; }
+        if duration_ms > cpu.max_throttle_ms {
+            cpu.max_throttle_ms = duration_ms;
+        }
         cpu.is_throttled = true;
         state.total_throttle_events += 1;
         state.total_throttle_ms += duration_ms;
@@ -113,7 +160,10 @@ pub fn record_throttle(cpu_id: u32, duration_ms: u64) -> KernelResult<()> {
 /// Clear throttle state.
 pub fn clear_throttle(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.is_throttled = false;
         cpu.freq_cap_mhz = 0;
@@ -124,7 +174,10 @@ pub fn clear_throttle(cpu_id: u32) -> KernelResult<()> {
 /// Record a frequency cap.
 pub fn record_cap(cpu_id: u32, max_mhz: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.freq_cap_mhz = max_mhz;
         cpu.cap_count += 1;
@@ -136,7 +189,10 @@ pub fn record_cap(cpu_id: u32, max_mhz: u32) -> KernelResult<()> {
 /// Update temperature.
 pub fn set_temp(cpu_id: u32, millicelsius: u32) -> KernelResult<()> {
     with_state(|state| {
-        let cpu = state.cpus.iter_mut().find(|c| c.cpu_id == cpu_id)
+        let cpu = state
+            .cpus
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu_id)
             .ok_or(KernelError::NotFound)?;
         cpu.temp_mc = millicelsius;
         Ok(())
@@ -150,16 +206,23 @@ pub fn per_cpu() -> Vec<CpuThrottleStats> {
 
 /// Count of currently throttled CPUs.
 pub fn throttled_count() -> usize {
-    STATE.lock().as_ref().map_or(0, |s| {
-        s.cpus.iter().filter(|c| c.is_throttled).count()
-    })
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(0, |s| s.cpus.iter().filter(|c| c.is_throttled).count())
 }
 
 /// Statistics: (cpu_count, total_events, total_ms, total_caps, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.cpus.len(), s.total_throttle_events, s.total_throttle_ms, s.total_cap_events, s.ops),
+        Some(s) => (
+            s.cpus.len(),
+            s.total_throttle_events,
+            s.total_throttle_ms,
+            s.total_cap_events,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

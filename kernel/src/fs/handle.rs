@@ -18,9 +18,9 @@
 //! early development but should move to per-handle locks or lock-free
 //! structures on the hot path.
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
@@ -229,12 +229,7 @@ fn check_file_tags_for_handle(path: &Path) -> KernelResult<()> {
         None => return Ok(()),
     };
 
-    crate::cap::file_tags::check_access(
-        creds.uid,
-        creds.gid,
-        &creds.groups,
-        path,
-    )
+    crate::cap::file_tags::check_access(creds.uid, creds.gid, &creds.groups, path)
 }
 
 // ---------------------------------------------------------------------------
@@ -825,22 +820,30 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
             if delta >= 0 {
                 #[allow(clippy::cast_sign_loss)]
                 let d = delta as u64;
-                file.offset.checked_add(d).ok_or(KernelError::InvalidArgument)?
+                file.offset
+                    .checked_add(d)
+                    .ok_or(KernelError::InvalidArgument)?
             } else {
                 #[allow(clippy::cast_sign_loss)]
                 let d = delta.unsigned_abs();
-                file.offset.checked_sub(d).ok_or(KernelError::InvalidArgument)?
+                file.offset
+                    .checked_sub(d)
+                    .ok_or(KernelError::InvalidArgument)?
             }
         }
         SeekFrom::End(delta) => {
             if delta >= 0 {
                 #[allow(clippy::cast_sign_loss)]
                 let d = delta as u64;
-                file.size.checked_add(d).ok_or(KernelError::InvalidArgument)?
+                file.size
+                    .checked_add(d)
+                    .ok_or(KernelError::InvalidArgument)?
             } else {
                 #[allow(clippy::cast_sign_loss)]
                 let d = delta.unsigned_abs();
-                file.size.checked_sub(d).ok_or(KernelError::InvalidArgument)?
+                file.size
+                    .checked_sub(d)
+                    .ok_or(KernelError::InvalidArgument)?
             }
         }
         SeekFrom::Data(pos) => {
@@ -978,7 +981,10 @@ pub fn dup(handle: u64) -> KernelResult<u64> {
 pub fn dup_shared(handle: u64) -> KernelResult<u64> {
     let mut table = OPEN_FILES.lock();
     let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
-    file.refcount = file.refcount.checked_add(1).ok_or(KernelError::InvalidHandle)?;
+    file.refcount = file
+        .refcount
+        .checked_add(1)
+        .ok_or(KernelError::InvalidHandle)?;
     Ok(handle)
 }
 
@@ -1053,12 +1059,7 @@ pub fn list_handles() -> alloc::vec::Vec<HandleInfo> {
 // ---------------------------------------------------------------------------
 
 /// Allocate a handle in the global table.
-fn allocate_handle(
-    path: PathBuf,
-    offset: u64,
-    size: u64,
-    flags: OpenFlags,
-) -> KernelResult<u64> {
+fn allocate_handle(path: PathBuf, offset: u64, size: u64, flags: OpenFlags) -> KernelResult<u64> {
     let mut table = OPEN_FILES.lock();
 
     if table.len() >= MAX_OPEN_FILES {
@@ -1087,10 +1088,7 @@ fn allocate_handle(
 /// Directory handles use `offset` as an entry cursor and `size = 0`
 /// (the underlying VFS doesn't track a stable entry count cheaply, so
 /// we don't cache one — `read_dir_at` queries the VFS each time).
-fn allocate_dir_handle(
-    path: PathBuf,
-    flags: OpenFlags,
-) -> KernelResult<u64> {
+fn allocate_dir_handle(path: PathBuf, flags: OpenFlags) -> KernelResult<u64> {
     let mut table = OPEN_FILES.lock();
 
     if table.len() >= MAX_OPEN_FILES {
@@ -1199,7 +1197,9 @@ pub fn self_test() -> KernelResult<()> {
     // 8. Verify closed handle is rejected.
     let result = read(h, &mut buf);
     if result != Err(KernelError::InvalidHandle) {
-        crate::serial_println!("[fs::handle]   FAIL: read on closed handle should return InvalidHandle");
+        crate::serial_println!(
+            "[fs::handle]   FAIL: read on closed handle should return InvalidHandle"
+        );
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[fs::handle]   read after close: InvalidHandle (correct)");
@@ -1207,7 +1207,9 @@ pub fn self_test() -> KernelResult<()> {
     // 9. Test write via handle.
     let hw = open(
         "/handle_write_test.txt",
-        OpenFlags::WRITE.union(OpenFlags::CREATE).union(OpenFlags::READ),
+        OpenFlags::WRITE
+            .union(OpenFlags::CREATE)
+            .union(OpenFlags::READ),
     )?;
     let write_data = b"Written via handle!";
     let nw = write(hw, write_data)?;
@@ -1243,7 +1245,8 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!(
         "[fs::handle]   fstat: OK (size={}, type=file, nlinks={})",
-        stat_result.size, stat_result.nlinks
+        stat_result.size,
+        stat_result.nlinks
     );
 
     // 11. ftruncate.
@@ -1253,7 +1256,8 @@ pub fn self_test() -> KernelResult<()> {
     if trunc_stat.size != trunc_size {
         crate::serial_println!(
             "[fs::handle]   FAIL: ftruncate to {} but fstat shows {}",
-            trunc_size, trunc_stat.size
+            trunc_size,
+            trunc_stat.size
         );
         close(hw).ok();
         return Err(KernelError::InternalError);
@@ -1262,7 +1266,10 @@ pub fn self_test() -> KernelResult<()> {
     seek(hw, SeekFrom::Start(0))?;
     let nt = read(hw, &mut buf)?;
     if nt != trunc_size as usize {
-        crate::serial_println!("[fs::handle]   FAIL: read after truncate returned {} bytes", nt);
+        crate::serial_println!(
+            "[fs::handle]   FAIL: read after truncate returned {} bytes",
+            nt
+        );
         close(hw).ok();
         return Err(KernelError::InternalError);
     }
@@ -1300,10 +1307,7 @@ pub fn self_test() -> KernelResult<()> {
         close(hw).ok();
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!(
-        "[fs::handle]   handle_path: '{}' OK",
-        path_check.display()
-    );
+    crate::serial_println!("[fs::handle]   handle_path: '{}' OK", path_check.display());
 
     close(hdup)?;
     close(hw)?;
@@ -1320,7 +1324,8 @@ pub fn self_test() -> KernelResult<()> {
     if hs2 != hs {
         crate::serial_println!(
             "[fs::handle]   FAIL: dup_shared returned new id {} (expected same {})",
-            hs2, hs
+            hs2,
+            hs
         );
         close(hs).ok();
         return Err(KernelError::InternalError);
@@ -1334,7 +1339,8 @@ pub fn self_test() -> KernelResult<()> {
     if s_a != 3 || off_after != 3 {
         crate::serial_println!(
             "[fs::handle]   FAIL: shared cursor: read {} bytes, offset now {} (expected 3/3)",
-            s_a, off_after
+            s_a,
+            off_after
         );
         close(hs).ok();
         return Err(KernelError::InternalError);
@@ -1371,7 +1377,10 @@ pub fn self_test() -> KernelResult<()> {
     match crate::fs::Vfs::lock_query(lock_path) {
         Ok(Some(_)) => {} // Lock is held — expected.
         other => {
-            crate::serial_println!("[fs::handle]   FAIL: lock not held after flock: {:?}", other);
+            crate::serial_println!(
+                "[fs::handle]   FAIL: lock not held after flock: {:?}",
+                other
+            );
             close(hlock).ok();
             return Err(KernelError::InternalError);
         }
@@ -1385,7 +1394,10 @@ pub fn self_test() -> KernelResult<()> {
     match crate::fs::Vfs::lock_query(lock_path) {
         Ok(None) => {} // Lock released — expected.
         other => {
-            crate::serial_println!("[fs::handle]   FAIL: lock still held after close: {:?}", other);
+            crate::serial_println!(
+                "[fs::handle]   FAIL: lock still held after close: {:?}",
+                other
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -1418,7 +1430,8 @@ pub fn self_test() -> KernelResult<()> {
             Err(KernelError::IsADirectory) => {}
             other => {
                 crate::serial_println!(
-                    "[fs::handle]   FAIL: open(dir, READ) not IsADirectory: {:?}", other
+                    "[fs::handle]   FAIL: open(dir, READ) not IsADirectory: {:?}",
+                    other
                 );
                 return Err(KernelError::InternalError);
             }
@@ -1429,7 +1442,8 @@ pub fn self_test() -> KernelResult<()> {
             Err(KernelError::NotADirectory) => {}
             other => {
                 crate::serial_println!(
-                    "[fs::handle]   FAIL: open(file, DIRECTORY) not NotADirectory: {:?}", other
+                    "[fs::handle]   FAIL: open(file, DIRECTORY) not NotADirectory: {:?}",
+                    other
                 );
                 return Err(KernelError::InternalError);
             }
@@ -1471,13 +1485,18 @@ pub fn self_test() -> KernelResult<()> {
         let mut saw_a = false;
         let mut saw_b = false;
         for e in &entries {
-            if e.name.as_path() == Path::new("a.txt") { saw_a = true; }
-            if e.name.as_path() == Path::new("b.txt") { saw_b = true; }
+            if e.name.as_path() == Path::new("a.txt") {
+                saw_a = true;
+            }
+            if e.name.as_path() == Path::new("b.txt") {
+                saw_b = true;
+            }
         }
         if !(saw_a && saw_b) {
             crate::serial_println!(
                 "[fs::handle]   FAIL: dir listing missing entries (saw_a={}, saw_b={})",
-                saw_a, saw_b
+                saw_a,
+                saw_b
             );
             close(hd).ok();
             return Err(KernelError::InternalError);
@@ -1501,7 +1520,8 @@ pub fn self_test() -> KernelResult<()> {
         if page3.len() != entries.len() {
             crate::serial_println!(
                 "[fs::handle]   FAIL: rewind+read mismatch ({} vs {})",
-                page3.len(), entries.len()
+                page3.len(),
+                entries.len()
             );
             close(hd).ok();
             return Err(KernelError::InternalError);
@@ -1512,7 +1532,8 @@ pub fn self_test() -> KernelResult<()> {
         if let Err(e) = read_dir_at(hf, 16) {
             if e != KernelError::NotADirectory {
                 crate::serial_println!(
-                    "[fs::handle]   FAIL: read_dir_at(file-handle) wrong err: {:?}", e
+                    "[fs::handle]   FAIL: read_dir_at(file-handle) wrong err: {:?}",
+                    e
                 );
                 close(hf).ok();
                 close(hd).ok();
@@ -1577,7 +1598,9 @@ pub fn self_test() -> KernelResult<()> {
     let hf_excl = open(excl_fresh, excl_flags)?;
     close(hf_excl)?;
     if crate::fs::Vfs::stat(excl_fresh).is_err() {
-        crate::serial_println!("[fs::handle]   FAIL: O_CREAT|O_EXCL fresh path did not create file");
+        crate::serial_println!(
+            "[fs::handle]   FAIL: O_CREAT|O_EXCL fresh path did not create file"
+        );
         crate::fs::Vfs::remove(excl_existing).ok();
         crate::fs::Vfs::remove(excl_fresh).ok();
         return Err(KernelError::InternalError);
@@ -1696,7 +1719,10 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // (b) with NO_SYMLINKS a PARENT-component symlink is refused (ELOOP).
-        match open(ns_via_dirlink, OpenFlags::READ.union(OpenFlags::NO_SYMLINKS)) {
+        match open(
+            ns_via_dirlink,
+            OpenFlags::READ.union(OpenFlags::NO_SYMLINKS),
+        ) {
             Err(KernelError::TooManyLinks) => {}
             other => {
                 crate::serial_println!(

@@ -557,7 +557,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     }
 
     // --- byte-exact struct layouts vs Linux virtgpu_drm.h (64-bit) -------
-    check!(size_of::<DrmVirtgpuMap>() == 16, "drm_virtgpu_map size {}", size_of::<DrmVirtgpuMap>());
+    check!(
+        size_of::<DrmVirtgpuMap>() == 16,
+        "drm_virtgpu_map size {}",
+        size_of::<DrmVirtgpuMap>()
+    );
     check!(
         size_of::<DrmVirtgpuExecbuffer>() == 64,
         "drm_virtgpu_execbuffer size {}",
@@ -683,7 +687,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     );
 
     // The ioctl "magic" must be `'d'` and the nr must be in the driver range.
-    check!(ioc_type(DRM_IOCTL_VIRTGPU_EXECBUFFER) == DRM_IOCTL_BASE, "execbuffer magic not 'd'");
+    check!(
+        ioc_type(DRM_IOCTL_VIRTGPU_EXECBUFFER) == DRM_IOCTL_BASE,
+        "execbuffer magic not 'd'"
+    );
     check!(
         ioc_nr(DRM_IOCTL_VIRTGPU_EXECBUFFER) == DRM_COMMAND_BASE + DRM_VIRTGPU_EXECBUFFER,
         "execbuffer nr {:#x}",
@@ -691,16 +698,37 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     );
 
     // --- GETPARAM policy (honest no-3D reporting, §59) -------------------
-    check!(param_value(VIRTGPU_PARAM_3D_FEATURES) == Some(0), "3D_FEATURES must be 0 (no virgl)");
-    check!(param_value(VIRTGPU_PARAM_CAPSET_QUERY_FIX) == Some(1), "CAPSET_QUERY_FIX param");
-    check!(param_value(VIRTGPU_PARAM_RESOURCE_BLOB) == Some(0), "RESOURCE_BLOB param");
-    check!(param_value(VIRTGPU_PARAM_CONTEXT_INIT) == Some(0), "CONTEXT_INIT param");
-    check!(param_value(0xDEAD_BEEF).is_none(), "unknown param should be None");
+    check!(
+        param_value(VIRTGPU_PARAM_3D_FEATURES) == Some(0),
+        "3D_FEATURES must be 0 (no virgl)"
+    );
+    check!(
+        param_value(VIRTGPU_PARAM_CAPSET_QUERY_FIX) == Some(1),
+        "CAPSET_QUERY_FIX param"
+    );
+    check!(
+        param_value(VIRTGPU_PARAM_RESOURCE_BLOB) == Some(0),
+        "RESOURCE_BLOB param"
+    );
+    check!(
+        param_value(VIRTGPU_PARAM_CONTEXT_INIT) == Some(0),
+        "CONTEXT_INIT param"
+    );
+    check!(
+        param_value(0xDEAD_BEEF).is_none(),
+        "unknown param should be None"
+    );
 
     // --- GET_CAPS policy: no capsets advertised until a virgl backend ---
     check!(NUM_CAPSETS == 0, "NUM_CAPSETS must be 0 until virgl lands");
-    check!(!capset_supported(VIRTGPU_DRM_CAPSET_VIRGL), "virgl capset must be unsupported");
-    check!(!capset_supported(VIRTGPU_DRM_CAPSET_VENUS), "venus capset must be unsupported");
+    check!(
+        !capset_supported(VIRTGPU_DRM_CAPSET_VIRGL),
+        "virgl capset must be unsupported"
+    );
+    check!(
+        !capset_supported(VIRTGPU_DRM_CAPSET_VENUS),
+        "venus capset must be unsupported"
+    );
 
     serial_println!("[virtgpu-uapi] virtio-gpu DRM uAPI ABI self-test PASSED");
     Ok(())

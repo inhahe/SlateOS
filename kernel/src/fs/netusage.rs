@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -148,7 +148,9 @@ where
 /// builds its own fixtures explicitly via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         apps: Vec::new(),
         interfaces: Vec::new(),
@@ -161,7 +163,12 @@ pub fn init_defaults() {
 }
 
 /// Record traffic for an application.
-pub fn record_traffic(app: &str, iface: &str, direction: Direction, bytes: u64) -> KernelResult<()> {
+pub fn record_traffic(
+    app: &str,
+    iface: &str,
+    direction: Direction,
+    bytes: u64,
+) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         // Update app stats.
@@ -173,8 +180,12 @@ pub fn record_traffic(app: &str, iface: &str, direction: Direction, bytes: u64) 
             }
             state.apps.push(AppUsage {
                 app_name: String::from(app),
-                bytes_sent: 0, bytes_received: 0, connections: 0,
-                last_activity_ns: 0, cap_bytes: None, cap_warned: false,
+                bytes_sent: 0,
+                bytes_received: 0,
+                connections: 0,
+                last_activity_ns: 0,
+                cap_bytes: None,
+                cap_warned: false,
             });
             state.apps.last_mut().ok_or(KernelError::InternalError)?
         };
@@ -229,8 +240,12 @@ pub fn record_connection(app: &str) -> KernelResult<()> {
             }
             state.apps.push(AppUsage {
                 app_name: String::from(app),
-                bytes_sent: 0, bytes_received: 0, connections: 1,
-                last_activity_ns: now, cap_bytes: None, cap_warned: false,
+                bytes_sent: 0,
+                bytes_received: 0,
+                connections: 1,
+                last_activity_ns: now,
+                cap_bytes: None,
+                cap_warned: false,
             });
         }
         state.total_connections += 1;
@@ -256,7 +271,8 @@ pub fn is_over_cap(app: &str) -> bool {
     let guard = STATE.lock();
     guard.as_ref().is_some_and(|s| {
         s.apps.iter().find(|a| a.app_name == app).is_some_and(|a| {
-            a.cap_bytes.is_some_and(|cap| a.bytes_sent + a.bytes_received >= cap)
+            a.cap_bytes
+                .is_some_and(|cap| a.bytes_sent + a.bytes_received >= cap)
         })
     })
 }
@@ -271,8 +287,12 @@ pub fn add_interface(name: &str, iface_type: InterfaceType) -> KernelResult<()> 
             return Err(KernelError::AlreadyExists);
         }
         state.interfaces.push(InterfaceStats {
-            name: String::from(name), iface_type,
-            bytes_sent: 0, bytes_received: 0, packets_sent: 0, packets_received: 0,
+            name: String::from(name),
+            iface_type,
+            bytes_sent: 0,
+            bytes_received: 0,
+            packets_sent: 0,
+            packets_received: 0,
         });
         Ok(())
     })
@@ -280,7 +300,10 @@ pub fn add_interface(name: &str, iface_type: InterfaceType) -> KernelResult<()> 
 
 /// Get usage for a specific app.
 pub fn get_app_usage(app: &str) -> Option<AppUsage> {
-    STATE.lock().as_ref().and_then(|s| s.apps.iter().find(|a| a.app_name == app).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.apps.iter().find(|a| a.app_name == app).cloned())
 }
 
 /// Get top apps by total bytes (sent + received).
@@ -295,7 +318,10 @@ pub fn top_apps(max: usize) -> Vec<AppUsage> {
 
 /// List all interfaces.
 pub fn list_interfaces() -> Vec<InterfaceStats> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.interfaces.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.interfaces.clone())
 }
 
 /// Reset all usage stats.
@@ -324,7 +350,15 @@ pub fn reset_all() -> KernelResult<()> {
 pub fn stats() -> (usize, usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.apps.len(), s.interfaces.len(), s.total_bytes_sent, s.total_bytes_received, s.total_connections, s.cap_warnings, s.ops),
+        Some(s) => (
+            s.apps.len(),
+            s.interfaces.len(),
+            s.total_bytes_sent,
+            s.total_bytes_received,
+            s.total_connections,
+            s.cap_warnings,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0, 0),
     }
 }

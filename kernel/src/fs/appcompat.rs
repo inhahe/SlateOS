@@ -23,10 +23,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -139,7 +139,9 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         profiles: Vec::new(),
         global_enabled: true,
@@ -174,7 +176,10 @@ pub fn set_compat(app_name: &str, level: CompatLevel) -> KernelResult<()> {
 /// Add a shim to an app's profile.
 pub fn add_shim(app_name: &str, shim: Shim) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.app_name == app_name)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.app_name == app_name)
             .ok_or(KernelError::NotFound)?;
         if !profile.shims.contains(&shim) {
             profile.shims.push(shim);
@@ -186,7 +191,10 @@ pub fn add_shim(app_name: &str, shim: Shim) -> KernelResult<()> {
 /// Remove a shim.
 pub fn remove_shim(app_name: &str, shim: Shim) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.app_name == app_name)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.app_name == app_name)
             .ok_or(KernelError::NotFound)?;
         profile.shims.retain(|s| *s != shim);
         Ok(())
@@ -196,7 +204,10 @@ pub fn remove_shim(app_name: &str, shim: Shim) -> KernelResult<()> {
 /// Get compatibility profile for an app (apply on launch).
 pub fn get_profile(app_name: &str) -> Option<CompatProfile> {
     STATE.lock().as_ref().and_then(|s| {
-        s.profiles.iter().find(|p| p.app_name == app_name && p.enabled).cloned()
+        s.profiles
+            .iter()
+            .find(|p| p.app_name == app_name && p.enabled)
+            .cloned()
     })
 }
 
@@ -204,7 +215,10 @@ pub fn get_profile(app_name: &str) -> Option<CompatProfile> {
 pub fn record_launch(app_name: &str) -> KernelResult<usize> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
-        let profile = state.profiles.iter_mut().find(|p| p.app_name == app_name)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.app_name == app_name)
             .ok_or(KernelError::NotFound)?;
         profile.launch_count += 1;
         profile.last_launch_ns = now;
@@ -218,7 +232,10 @@ pub fn record_launch(app_name: &str) -> KernelResult<usize> {
 /// Enable/disable a profile.
 pub fn set_profile_enabled(app_name: &str, enabled: bool) -> KernelResult<()> {
     with_state(|state| {
-        let profile = state.profiles.iter_mut().find(|p| p.app_name == app_name)
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.app_name == app_name)
             .ok_or(KernelError::NotFound)?;
         profile.enabled = enabled;
         Ok(())
@@ -230,7 +247,9 @@ pub fn remove_profile(app_name: &str) -> KernelResult<()> {
     with_state(|state| {
         let before = state.profiles.len();
         state.profiles.retain(|p| p.app_name != app_name);
-        if state.profiles.len() == before { return Err(KernelError::NotFound); }
+        if state.profiles.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -245,14 +264,22 @@ pub fn set_global_enabled(enabled: bool) -> KernelResult<()> {
 
 /// List all profiles.
 pub fn list_profiles() -> Vec<CompatProfile> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.profiles.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.profiles.clone())
 }
 
 /// Statistics: (profile_count, total_launches, total_shim_activations, ops).
 pub fn stats() -> (usize, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.profiles.len(), s.total_launches, s.total_shim_activations, s.ops),
+        Some(s) => (
+            s.profiles.len(),
+            s.total_launches,
+            s.total_shim_activations,
+            s.ops,
+        ),
         None => (0, 0, 0, 0),
     }
 }

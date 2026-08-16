@@ -199,7 +199,9 @@ fn parse_octal(field: &[u8]) -> u64 {
             break;
         }
         if b >= b'0' && b <= b'7' {
-            val = val.wrapping_mul(8).wrapping_add(u64::from(b.wrapping_sub(b'0')));
+            val = val
+                .wrapping_mul(8)
+                .wrapping_add(u64::from(b.wrapping_sub(b'0')));
         }
     }
     val
@@ -299,8 +301,12 @@ pub fn parse(data: &[u8]) -> KernelResult<Vec<TarEntry>> {
         let name = if prefix_part.is_empty() {
             PathBuf::from(name_part)
         } else {
-            let mut n =
-                PathBuf::with_capacity(prefix_part.len().saturating_add(name_part.len()).saturating_add(1));
+            let mut n = PathBuf::with_capacity(
+                prefix_part
+                    .len()
+                    .saturating_add(name_part.len())
+                    .saturating_add(1),
+            );
             n.extend_bytes(prefix_part);
             n.extend_bytes(b"/");
             n.extend_bytes(name_part);
@@ -335,10 +341,15 @@ pub fn parse(data: &[u8]) -> KernelResult<Vec<TarEntry>> {
                 return Err(KernelError::CorruptedData);
             }
             let end = data_offset.wrapping_add(size as usize);
-            let payload = data.get(data_offset..end).ok_or(KernelError::CorruptedData)?;
+            let payload = data
+                .get(data_offset..end)
+                .ok_or(KernelError::CorruptedData)?;
             // The payload is NUL-terminated; keep only what precedes the NUL
             // (a truncated writer may omit it, hence the `unwrap_or`).
-            let stop = payload.iter().position(|&b| b == 0).unwrap_or(payload.len());
+            let stop = payload
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(payload.len());
             let value = PathBuf::from(payload.get(..stop).unwrap_or(payload));
             if typeflag == LONGNAME_FLAG {
                 long_name = Some(value);
@@ -736,7 +747,11 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::CorruptedData);
         }
         if parsed[0].uid != 1234 || parsed[0].gid != 5678 {
-            serial_println!("[tar]   uid/gid mismatch: {}/{}", parsed[0].uid, parsed[0].gid);
+            serial_println!(
+                "[tar]   uid/gid mismatch: {}/{}",
+                parsed[0].uid,
+                parsed[0].gid
+            );
             return Err(KernelError::CorruptedData);
         }
         if parsed[0].mtime != 1609459200 {
@@ -877,7 +892,10 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::CorruptedData);
         }
         if first.name != huge {
-            serial_println!("[tar]   long-name record mismatch: {}", first.name.display());
+            serial_println!(
+                "[tar]   long-name record mismatch: {}",
+                first.name.display()
+            );
             return Err(KernelError::CorruptedData);
         }
         // The metadata belongs to the real header, not the record.
@@ -918,7 +936,10 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::CorruptedData);
         };
         if parsed.len() != 1 || first.link_target != target {
-            serial_println!("[tar]   long-link mismatch: {}", first.link_target.display());
+            serial_println!(
+                "[tar]   long-link mismatch: {}",
+                first.link_target.display()
+            );
             return Err(KernelError::CorruptedData);
         }
         if first.name.as_path() != Path::new("link") || first.kind != EntryKind::Symlink {

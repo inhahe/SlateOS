@@ -35,12 +35,12 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
@@ -206,7 +206,9 @@ pub fn record(command: impl AsRef<[u8]>, resolved_path: Option<&Path>) {
                 entry.resolved_path = Some(p.to_path_buf());
             }
             // Move to front by sorting (newest first).
-            state.recent.sort_by_key(|e| core::cmp::Reverse(e.timestamp_ns));
+            state
+                .recent
+                .sort_by_key(|e| core::cmp::Reverse(e.timestamp_ns));
             return;
         }
     }
@@ -215,18 +217,23 @@ pub fn record(command: impl AsRef<[u8]>, resolved_path: Option<&Path>) {
     if state.recent.len() >= MAX_RECENT {
         state.recent.pop(); // Remove oldest.
     }
-    state.recent.insert(0, RecentCommand {
-        command: command.to_vec(),
-        resolved_path: resolved_path.map(Path::to_path_buf),
-        timestamp_ns: now,
-        run_count: 1,
-    });
+    state.recent.insert(
+        0,
+        RecentCommand {
+            command: command.to_vec(),
+            resolved_path: resolved_path.map(Path::to_path_buf),
+            timestamp_ns: now,
+            run_count: 1,
+        },
+    );
 }
 
 /// Get recent commands (newest first).
 pub fn recent(limit: usize) -> Vec<RecentCommand> {
     let state = STATE.lock();
-    state.recent.iter()
+    state
+        .recent
+        .iter()
         .take(if limit == 0 { MAX_RECENT } else { limit })
         .cloned()
         .collect()
@@ -272,14 +279,21 @@ pub fn register_alias(name: impl AsRef<[u8]>, path: impl AsRef<Path>) -> KernelR
 /// Remove an alias.
 pub fn remove_alias(name: impl AsRef<[u8]>) -> KernelResult<()> {
     let mut state = STATE.lock();
-    state.aliases.remove(name.as_ref()).ok_or(KernelError::NotFound)?;
+    state
+        .aliases
+        .remove(name.as_ref())
+        .ok_or(KernelError::NotFound)?;
     Ok(())
 }
 
 /// List all aliases.
 pub fn list_aliases() -> Vec<(Vec<u8>, PathBuf)> {
     let state = STATE.lock();
-    state.aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    state
+        .aliases
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +326,9 @@ pub fn register_executable(
         return Err(KernelError::InvalidArgument);
     }
     let mut state = STATE.lock();
-    state.path_cache.insert(name.to_path_buf(), full_path.to_path_buf());
+    state
+        .path_cache
+        .insert(name.to_path_buf(), full_path.to_path_buf());
     Ok(())
 }
 
@@ -410,7 +426,9 @@ pub fn completions(prefix: impl AsRef<[u8]>) -> Vec<Completion> {
     if prefix.is_empty() {
         // Return recent commands as suggestions.
         let state = STATE.lock();
-        return state.recent.iter()
+        return state
+            .recent
+            .iter()
             .take(MAX_COMPLETIONS)
             .map(|e| Completion {
                 text: e.command.clone(),
@@ -715,7 +733,10 @@ pub fn self_test() -> KernelResult<()> {
         register_executable(odd, Path::new(b"/bin/we\xffird-app".as_slice()))?;
 
         let resolved = resolve(b"we\xffird-app --go".as_slice())?;
-        assert_eq!(resolved.path.as_path(), Path::new(b"/bin/we\xffird-app".as_slice()));
+        assert_eq!(
+            resolved.path.as_path(),
+            Path::new(b"/bin/we\xffird-app".as_slice())
+        );
         assert_eq!(resolved.args, alloc::vec![b"--go".to_vec()]);
 
         let comps = completions(b"we\xff".as_slice());

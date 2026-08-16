@@ -32,10 +32,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -349,11 +349,7 @@ pub fn init_defaults() {
 // ---------------------------------------------------------------------------
 
 /// Create a new scheduled task. Returns task ID.
-pub fn create_task(
-    name: &str,
-    command: &str,
-    schedule_type: ScheduleType,
-) -> KernelResult<u64> {
+pub fn create_task(name: &str, command: &str, schedule_type: ScheduleType) -> KernelResult<u64> {
     if name.is_empty() || command.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -416,7 +412,9 @@ pub fn remove_task(id: u64) -> KernelResult<()> {
 pub fn get_task(id: u64) -> KernelResult<SchedTask> {
     let guard = STATE.lock();
     let state = guard.as_ref().ok_or(KernelError::NotSupported)?;
-    state.tasks.iter()
+    state
+        .tasks
+        .iter()
         .find(|t| t.id == id)
         .cloned()
         .ok_or(KernelError::NotFound)
@@ -438,7 +436,10 @@ pub fn set_time(id: u64, hour: u8, minute: u8) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.hour = hour;
         task.minute = minute;
@@ -452,7 +453,10 @@ pub fn set_weekday(id: u64, day: usize, enabled: bool) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.weekdays[day] = enabled;
         Ok(())
@@ -465,7 +469,10 @@ pub fn set_interval(id: u64, minutes: u32) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.interval_minutes = minutes;
         Ok(())
@@ -475,7 +482,10 @@ pub fn set_interval(id: u64, minutes: u32) -> KernelResult<()> {
 /// Set task arguments.
 pub fn set_arguments(id: u64, args: &str) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.arguments = String::from(args);
         Ok(())
@@ -485,7 +495,10 @@ pub fn set_arguments(id: u64, args: &str) -> KernelResult<()> {
 /// Set task description.
 pub fn set_description(id: u64, desc: &str) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.description = String::from(desc);
         Ok(())
@@ -495,7 +508,10 @@ pub fn set_description(id: u64, desc: &str) -> KernelResult<()> {
 /// Set task priority.
 pub fn set_priority(id: u64, prio: TaskPriority) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.priority = prio;
         Ok(())
@@ -505,7 +521,10 @@ pub fn set_priority(id: u64, prio: TaskPriority) -> KernelResult<()> {
 /// Enable a task.
 pub fn enable_task(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.status = TaskStatus::Ready;
         Ok(())
@@ -515,7 +534,10 @@ pub fn enable_task(id: u64) -> KernelResult<()> {
 /// Disable a task.
 pub fn disable_task(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.status = TaskStatus::Disabled;
         Ok(())
@@ -525,7 +547,10 @@ pub fn disable_task(id: u64) -> KernelResult<()> {
 /// Set whether to skip on battery.
 pub fn set_skip_on_battery(id: u64, skip: bool) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.skip_on_battery = skip;
         Ok(())
@@ -535,7 +560,10 @@ pub fn set_skip_on_battery(id: u64, skip: bool) -> KernelResult<()> {
 /// Set whether to wake system from sleep to run.
 pub fn set_wake_to_run(id: u64, wake: bool) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.wake_to_run = wake;
         Ok(())
@@ -545,7 +573,10 @@ pub fn set_wake_to_run(id: u64, wake: bool) -> KernelResult<()> {
 /// Set the timeout in seconds.
 pub fn set_timeout(id: u64, seconds: u32) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.timeout_seconds = seconds;
         Ok(())
@@ -555,7 +586,10 @@ pub fn set_timeout(id: u64, seconds: u32) -> KernelResult<()> {
 /// Set max retries on failure.
 pub fn set_max_retries(id: u64, retries: u32) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.max_retries = retries;
         Ok(())
@@ -622,9 +656,9 @@ pub fn check_due(hour: u8, minute: u8, weekday: u8) -> Vec<u64> {
 pub fn boot_tasks() -> Vec<u64> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.tasks.iter()
-            .filter(|t| t.schedule_type == ScheduleType::Boot
-                && t.status != TaskStatus::Disabled)
+        s.tasks
+            .iter()
+            .filter(|t| t.schedule_type == ScheduleType::Boot && t.status != TaskStatus::Disabled)
             .map(|t| t.id)
             .collect()
     })
@@ -634,10 +668,13 @@ pub fn boot_tasks() -> Vec<u64> {
 pub fn login_tasks(uid: u32) -> Vec<u64> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.tasks.iter()
-            .filter(|t| t.schedule_type == ScheduleType::Login
-                && t.status != TaskStatus::Disabled
-                && (t.uid == uid || t.uid == 0))
+        s.tasks
+            .iter()
+            .filter(|t| {
+                t.schedule_type == ScheduleType::Login
+                    && t.status != TaskStatus::Disabled
+                    && (t.uid == uid || t.uid == 0)
+            })
             .map(|t| t.id)
             .collect()
     })
@@ -646,7 +683,10 @@ pub fn login_tasks(uid: u32) -> Vec<u64> {
 /// Record that a task has started running.
 pub fn record_start(id: u64) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.status = TaskStatus::Running;
         task.last_run_ns = crate::hpet::elapsed_ns();
@@ -657,7 +697,10 @@ pub fn record_start(id: u64) -> KernelResult<()> {
 /// Record that a task has completed.
 pub fn record_complete(id: u64, success: bool, exit_code: i32) -> KernelResult<()> {
     with_state(|state| {
-        let task = state.tasks.iter_mut().find(|t| t.id == id)
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
 
         let now = crate::hpet::elapsed_ns();
@@ -710,7 +753,8 @@ pub fn record_complete(id: u64, success: bool, exit_code: i32) -> KernelResult<(
 pub fn task_history(id: u64) -> Vec<TaskRun> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.history.iter()
+        s.history
+            .iter()
             .filter(|h| h.task_id == id)
             .cloned()
             .collect()
@@ -727,7 +771,8 @@ pub fn all_history() -> Vec<TaskRun> {
 pub fn tasks_by_status(status: TaskStatus) -> Vec<SchedTask> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
-        s.tasks.iter()
+        s.tasks
+            .iter()
             .filter(|t| t.status == status)
             .cloned()
             .collect()
@@ -738,9 +783,16 @@ pub fn tasks_by_status(status: TaskStatus) -> Vec<SchedTask> {
 pub fn next_due() -> Option<(u64, String, u8, u8)> {
     let guard = STATE.lock();
     let state = guard.as_ref()?;
-    state.tasks.iter()
-        .filter(|t| t.status == TaskStatus::Ready
-            && matches!(t.schedule_type, ScheduleType::Daily | ScheduleType::Weekly | ScheduleType::Once))
+    state
+        .tasks
+        .iter()
+        .filter(|t| {
+            t.status == TaskStatus::Ready
+                && matches!(
+                    t.schedule_type,
+                    ScheduleType::Daily | ScheduleType::Weekly | ScheduleType::Once
+                )
+        })
         .min_by_key(|t| t.hour as u32 * 60 + t.minute as u32)
         .map(|t| (t.id, t.name.clone(), t.hour, t.minute))
 }
@@ -753,7 +805,13 @@ pub fn next_due() -> Option<(u64, String, u8, u8)> {
 pub fn stats() -> (usize, u64, u64, usize, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.tasks.len(), s.total_runs, s.total_failures, s.history.len(), s.ops),
+        Some(s) => (
+            s.tasks.len(),
+            s.total_runs,
+            s.total_failures,
+            s.history.len(),
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0),
     }
 }

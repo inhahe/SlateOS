@@ -22,10 +22,10 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -147,7 +147,9 @@ where
 /// per online CPU, and the record_* functions on the interrupt path.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         irq_lines: Vec::new(),
         cpu_states: Vec::new(),
@@ -181,9 +183,14 @@ pub fn record(cpu: u32, irq_num: u32) -> KernelResult<()> {
 /// Record ISR latency.
 pub fn record_latency(cpu: u32, latency_ns: u64) -> KernelResult<()> {
     with_state(|state| {
-        let cs = state.cpu_states.iter_mut().find(|c| c.cpu_id == cpu)
+        let cs = state
+            .cpu_states
+            .iter_mut()
+            .find(|c| c.cpu_id == cpu)
             .ok_or(KernelError::NotFound)?;
-        if latency_ns > cs.max_latency_ns { cs.max_latency_ns = latency_ns; }
+        if latency_ns > cs.max_latency_ns {
+            cs.max_latency_ns = latency_ns;
+        }
         // Running average (EWMA, weight 1/8).  Seed exactly on the first sample
         // rather than blending against a zero initial value, which would
         // underweight the first measurement and bias the average low at cold
@@ -215,13 +222,26 @@ pub fn mark_spurious(cpu: u32, irq_num: u32) -> KernelResult<()> {
 }
 
 /// Register an IRQ line.
-pub fn register_irq(irq_num: u32, irq_type: IrqType, name: &str, affinity: u64) -> KernelResult<()> {
+pub fn register_irq(
+    irq_num: u32,
+    irq_type: IrqType,
+    name: &str,
+    affinity: u64,
+) -> KernelResult<()> {
     with_state(|state| {
-        if state.irq_lines.len() >= MAX_IRQ_LINES { return Err(KernelError::ResourceExhausted); }
-        if state.irq_lines.iter().any(|l| l.irq_num == irq_num) { return Err(KernelError::AlreadyExists); }
+        if state.irq_lines.len() >= MAX_IRQ_LINES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.irq_lines.iter().any(|l| l.irq_num == irq_num) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.irq_lines.push(IrqLine {
-            irq_num, irq_type, name: String::from(name),
-            count: 0, spurious: 0, affinity_mask: affinity,
+            irq_num,
+            irq_type,
+            name: String::from(name),
+            count: 0,
+            spurious: 0,
+            affinity_mask: affinity,
         });
         Ok(())
     })
@@ -235,11 +255,20 @@ pub fn register_irq(irq_num: u32, irq_type: IrqType, name: &str, affinity: u64) 
 /// CPU id.
 pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
     with_state(|state| {
-        if state.cpu_states.len() >= MAX_CPU { return Err(KernelError::ResourceExhausted); }
-        if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
+        if state.cpu_states.len() >= MAX_CPU {
+            return Err(KernelError::ResourceExhausted);
+        }
+        if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) {
+            return Err(KernelError::AlreadyExists);
+        }
         state.cpu_states.push(CpuIrqState {
-            cpu_id, total_irqs: 0, total_ipi: 0, total_timer: 0,
-            total_spurious: 0, avg_latency_ns: 0, max_latency_ns: 0,
+            cpu_id,
+            total_irqs: 0,
+            total_ipi: 0,
+            total_timer: 0,
+            total_spurious: 0,
+            avg_latency_ns: 0,
+            max_latency_ns: 0,
         });
         Ok(())
     })
@@ -247,19 +276,32 @@ pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
 
 /// Get all IRQ line stats.
 pub fn irq_lines() -> Vec<IrqLine> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.irq_lines.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.irq_lines.clone())
 }
 
 /// Get per-CPU state.
 pub fn per_cpu() -> Vec<CpuIrqState> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.cpu_states.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.cpu_states.clone())
 }
 
 /// Statistics: (irq_count, cpu_count, total_irqs, total_spurious, total_samples, ops).
 pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.irq_lines.len(), s.cpu_states.len(), s.total_irqs, s.total_spurious, s.total_latency_samples, s.ops),
+        Some(s) => (
+            s.irq_lines.len(),
+            s.cpu_states.len(),
+            s.total_irqs,
+            s.total_spurious,
+            s.total_latency_samples,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -293,7 +335,11 @@ pub fn self_test() {
     assert!(register_cpu(0).is_err());
     assert_eq!(irq_lines().len(), 1);
     assert_eq!(per_cpu().len(), 2);
-    let line = irq_lines().iter().find(|l| l.irq_num == 1).cloned().expect("irq1");
+    let line = irq_lines()
+        .iter()
+        .find(|l| l.irq_num == 1)
+        .cloned()
+        .expect("irq1");
     assert_eq!(line.count, 0);
     assert_eq!(line.spurious, 0);
     crate::serial_println!("  [2/8] register: OK");
@@ -301,37 +347,65 @@ pub fn self_test() {
     // 3: Record increments the IRQ line count and the CPU's total exactly from
     //    zero.
     record(0, 1).expect("record");
-    let line = irq_lines().iter().find(|l| l.irq_num == 1).cloned().expect("irq1");
+    let line = irq_lines()
+        .iter()
+        .find(|l| l.irq_num == 1)
+        .cloned()
+        .expect("irq1");
     assert_eq!(line.count, 1);
-    let cs0 = per_cpu().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let cs0 = per_cpu()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(cs0.total_irqs, 1);
     crate::serial_println!("  [3/8] record: OK");
 
     // 4: Latency — first sample seeds the average exactly (no cold-start bias),
     //    and sets the max.
     record_latency(0, 800).expect("lat1");
-    let cs0 = per_cpu().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let cs0 = per_cpu()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(cs0.avg_latency_ns, 800); // seeded, not blended against 0
     assert_eq!(cs0.max_latency_ns, 800);
     // Second sample blends: (800*7 + 1600)/8 = (5600+1600)/8 = 900.
     record_latency(0, 1600).expect("lat2");
-    let cs0 = per_cpu().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let cs0 = per_cpu()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(cs0.avg_latency_ns, 900);
     assert_eq!(cs0.max_latency_ns, 1600);
     crate::serial_println!("  [4/8] latency: OK");
 
     // 5: Spurious — increments the line, the CPU, and the aggregate exactly.
     mark_spurious(0, 1).expect("spurious");
-    let line = irq_lines().iter().find(|l| l.irq_num == 1).cloned().expect("irq1");
+    let line = irq_lines()
+        .iter()
+        .find(|l| l.irq_num == 1)
+        .cloned()
+        .expect("irq1");
     assert_eq!(line.spurious, 1);
-    let cs0 = per_cpu().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let cs0 = per_cpu()
+        .iter()
+        .find(|c| c.cpu_id == 0)
+        .cloned()
+        .expect("cpu0");
     assert_eq!(cs0.total_spurious, 1);
     crate::serial_println!("  [5/8] spurious: OK");
 
     // 6: Recording on an unregistered CPU fails with NotFound; the IRQ line
     //    count is NOT bumped when the CPU lookup fails (record returns early).
     assert!(record(99, 1).is_err());
-    let line = irq_lines().iter().find(|l| l.irq_num == 1).cloned().expect("irq1");
+    let line = irq_lines()
+        .iter()
+        .find(|l| l.irq_num == 1)
+        .cloned()
+        .expect("irq1");
     assert_eq!(line.count, 1); // unchanged — still just the one valid record
     crate::serial_println!("  [6/8] not found: OK");
 
@@ -343,9 +417,9 @@ pub fn self_test() {
     let (irqs, cpus, total, spurious, samples, ops) = stats();
     assert_eq!(irqs, 1);
     assert_eq!(cpus, 2);
-    assert_eq!(total, 1);     // one successful record
-    assert_eq!(spurious, 1);  // one mark_spurious
-    assert_eq!(samples, 2);   // two record_latency calls
+    assert_eq!(total, 1); // one successful record
+    assert_eq!(spurious, 1); // one mark_spurious
+    assert_eq!(samples, 2); // two record_latency calls
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

@@ -22,9 +22,9 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -75,12 +75,23 @@ where
 
 fn find_or_create(state: &mut State, pid: u32) -> KernelResult<&mut PidfdStats> {
     if !state.pids.iter().any(|p| p.pid == pid) {
-        if state.pids.len() >= MAX_TRACKED { return Err(KernelError::ResourceExhausted); }
+        if state.pids.len() >= MAX_TRACKED {
+            return Err(KernelError::ResourceExhausted);
+        }
         state.pids.push(PidfdStats {
-            pid, creates: 0, polls: 0, signals: 0, waits: 0, close_count: 0,
+            pid,
+            creates: 0,
+            polls: 0,
+            signals: 0,
+            waits: 0,
+            close_count: 0,
         });
     }
-    state.pids.iter_mut().find(|p| p.pid == pid).ok_or(KernelError::InternalError)
+    state
+        .pids
+        .iter_mut()
+        .find(|p| p.pid == pid)
+        .ok_or(KernelError::InternalError)
 }
 
 // ---------------------------------------------------------------------------
@@ -89,11 +100,27 @@ fn find_or_create(state: &mut State, pid: u32) -> KernelResult<&mut PidfdStats> 
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     *guard = Some(State {
         pids: alloc::vec![
-            PidfdStats { pid: 1, creates: 100, polls: 50_000, signals: 200, waits: 10_000, close_count: 50 },
-            PidfdStats { pid: 100, creates: 50, polls: 20_000, signals: 100, waits: 5_000, close_count: 30 },
+            PidfdStats {
+                pid: 1,
+                creates: 100,
+                polls: 50_000,
+                signals: 200,
+                waits: 10_000,
+                close_count: 50
+            },
+            PidfdStats {
+                pid: 100,
+                creates: 50,
+                polls: 20_000,
+                signals: 100,
+                waits: 5_000,
+                close_count: 30
+            },
         ],
         total_creates: 150,
         total_polls: 70_000,
@@ -147,7 +174,10 @@ pub fn record_wait(pid: u32) -> KernelResult<()> {
 /// Record pidfd close.
 pub fn record_close(pid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let p = state.pids.iter_mut().find(|p| p.pid == pid)
+        let p = state
+            .pids
+            .iter_mut()
+            .find(|p| p.pid == pid)
             .ok_or(KernelError::NotFound)?;
         p.close_count += 1;
         state.total_closes += 1;
@@ -164,7 +194,15 @@ pub fn per_pid() -> Vec<PidfdStats> {
 pub fn stats() -> (usize, u64, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.pids.len(), s.total_creates, s.total_polls, s.total_signals, s.total_waits, s.total_closes, s.ops),
+        Some(s) => (
+            s.pids.len(),
+            s.total_creates,
+            s.total_polls,
+            s.total_signals,
+            s.total_waits,
+            s.total_closes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0, 0),
     }
 }

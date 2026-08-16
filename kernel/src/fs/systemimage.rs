@@ -20,11 +20,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
@@ -35,11 +35,11 @@ use crate::error::{KernelError, KernelResult};
 /// Image type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageType {
-    Full,           // Complete system image.
-    Incremental,    // Changes since last full.
-    Differential,   // Changes since specific base.
-    BootPartition,  // Boot partition only.
-    UserData,       // User data only.
+    Full,          // Complete system image.
+    Incremental,   // Changes since last full.
+    Differential,  // Changes since specific base.
+    BootPartition, // Boot partition only.
+    UserData,      // User data only.
 }
 
 impl ImageType {
@@ -128,18 +128,22 @@ where
 
 pub fn init_defaults() {
     let mut guard = STATE.lock();
-    if guard.is_some() { return; }
+    if guard.is_some() {
+        return;
+    }
     let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        images: alloc::vec![
-            SystemImage {
-                id: 1, name: String::from("Initial Install"),
-                image_type: ImageType::Full, status: ImageStatus::Ready,
-                size_bytes: 8_589_934_592, created_ns: now, base_image_id: None,
-                description: String::from("Factory image after OS installation"),
-                checksum: String::from("SHA256:aabb1122"),
-            },
-        ],
+        images: alloc::vec![SystemImage {
+            id: 1,
+            name: String::from("Initial Install"),
+            image_type: ImageType::Full,
+            status: ImageStatus::Ready,
+            size_bytes: 8_589_934_592,
+            created_ns: now,
+            base_image_id: None,
+            description: String::from("Factory image after OS installation"),
+            checksum: String::from("SHA256:aabb1122"),
+        },],
         next_id: 2,
         total_created: 1,
         total_restored: 0,
@@ -150,7 +154,13 @@ pub fn init_defaults() {
 }
 
 /// Create a new system image.
-pub fn create_image(name: &str, image_type: ImageType, description: &str, size_bytes: u64, base_id: Option<u32>) -> KernelResult<u32> {
+pub fn create_image(
+    name: &str,
+    image_type: ImageType,
+    description: &str,
+    size_bytes: u64,
+    base_id: Option<u32>,
+) -> KernelResult<u32> {
     with_state(|state| {
         if state.images.len() >= MAX_IMAGES {
             return Err(KernelError::ResourceExhausted);
@@ -166,9 +176,15 @@ pub fn create_image(name: &str, image_type: ImageType, description: &str, size_b
         state.next_id += 1;
         let checksum = format!("SHA256:{:08x}", now & 0xFFFF_FFFF);
         state.images.push(SystemImage {
-            id, name: String::from(name), image_type, status: ImageStatus::Ready,
-            size_bytes, created_ns: now, base_image_id: base_id,
-            description: String::from(description), checksum,
+            id,
+            name: String::from(name),
+            image_type,
+            status: ImageStatus::Ready,
+            size_bytes,
+            created_ns: now,
+            base_image_id: base_id,
+            description: String::from(description),
+            checksum,
         });
         state.total_created += 1;
         state.total_bytes += size_bytes;
@@ -181,7 +197,9 @@ pub fn delete_image(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.images.len();
         state.images.retain(|i| i.id != id);
-        if state.images.len() == before { return Err(KernelError::NotFound); }
+        if state.images.len() == before {
+            return Err(KernelError::NotFound);
+        }
         Ok(())
     })
 }
@@ -189,7 +207,10 @@ pub fn delete_image(id: u32) -> KernelResult<()> {
 /// Simulate restoring from an image.
 pub fn restore_image(id: u32) -> KernelResult<()> {
     with_state(|state| {
-        let img = state.images.iter().find(|i| i.id == id)
+        let img = state
+            .images
+            .iter()
+            .find(|i| i.id == id)
             .ok_or(KernelError::NotFound)?;
         if img.status == ImageStatus::Corrupted {
             return Err(KernelError::CorruptedData);
@@ -202,7 +223,10 @@ pub fn restore_image(id: u32) -> KernelResult<()> {
 /// Verify an image's integrity.
 pub fn verify_image(id: u32) -> KernelResult<bool> {
     with_state(|state| {
-        let img = state.images.iter_mut().find(|i| i.id == id)
+        let img = state
+            .images
+            .iter_mut()
+            .find(|i| i.id == id)
             .ok_or(KernelError::NotFound)?;
         // Simulate: images are valid unless marked corrupted.
         let valid = img.status != ImageStatus::Corrupted;
@@ -217,7 +241,10 @@ pub fn verify_image(id: u32) -> KernelResult<bool> {
 /// Set image status (e.g., mark as expired or corrupted).
 pub fn set_status(id: u32, status: ImageStatus) -> KernelResult<()> {
     with_state(|state| {
-        let img = state.images.iter_mut().find(|i| i.id == id)
+        let img = state
+            .images
+            .iter_mut()
+            .find(|i| i.id == id)
             .ok_or(KernelError::NotFound)?;
         img.status = status;
         Ok(())
@@ -226,19 +253,32 @@ pub fn set_status(id: u32, status: ImageStatus) -> KernelResult<()> {
 
 /// List all images.
 pub fn list_images() -> Vec<SystemImage> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.images.clone())
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| s.images.clone())
 }
 
 /// Get a specific image.
 pub fn get_image(id: u32) -> Option<SystemImage> {
-    STATE.lock().as_ref().and_then(|s| s.images.iter().find(|i| i.id == id).cloned())
+    STATE
+        .lock()
+        .as_ref()
+        .and_then(|s| s.images.iter().find(|i| i.id == id).cloned())
 }
 
 /// Statistics: (image_count, total_created, total_restored, total_verified, total_bytes, ops).
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
-        Some(s) => (s.images.len(), s.total_created, s.total_restored, s.total_verified, s.total_bytes, s.ops),
+        Some(s) => (
+            s.images.len(),
+            s.total_created,
+            s.total_restored,
+            s.total_verified,
+            s.total_bytes,
+            s.ops,
+        ),
         None => (0, 0, 0, 0, 0, 0),
     }
 }
@@ -256,12 +296,26 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] defaults: OK");
 
     // 2: Create full image.
-    let id = create_image("Pre-Update", ImageType::Full, "Before big update", 4_000_000_000, None).expect("create");
+    let id = create_image(
+        "Pre-Update",
+        ImageType::Full,
+        "Before big update",
+        4_000_000_000,
+        None,
+    )
+    .expect("create");
     assert_eq!(list_images().len(), 2);
     crate::serial_println!("  [2/8] create: OK");
 
     // 3: Create incremental based on previous.
-    let inc_id = create_image("Post-Update Delta", ImageType::Incremental, "Incremental after update", 500_000_000, Some(id)).expect("inc");
+    let inc_id = create_image(
+        "Post-Update Delta",
+        ImageType::Incremental,
+        "Incremental after update",
+        500_000_000,
+        Some(id),
+    )
+    .expect("inc");
     assert_eq!(list_images().len(), 3);
     crate::serial_println!("  [3/8] incremental: OK");
 

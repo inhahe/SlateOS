@@ -46,11 +46,11 @@
 
 #![allow(dead_code)]
 
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use crate::blkdev::{self, SECTOR_SIZE};
 use crate::error::{KernelError, KernelResult};
@@ -284,7 +284,6 @@ struct BufferCacheInner {
     // OPT: Replaces O(n) linear scan in find_index() with BTreeMap
     // lookup.  Sector lookup is the hottest path (every read/write).
     // Benchmark: find_index dropped from O(512) to O(log 512) ≈ 9.
-
     /// Maps (device_id, lba) → entry index for O(log n) sector lookup.
     index: BTreeMap<(u8, u64), usize>,
 
@@ -443,9 +442,7 @@ impl BufferCacheInner {
         let mut data = [0u8; SECTOR_SIZE];
         data.copy_from_slice(&self.entries[idx].data);
 
-        let result = blkdev::with_device(dev_name, |dev| {
-            dev.write_sector(lba, &data)
-        });
+        let result = blkdev::with_device(dev_name, |dev| dev.write_sector(lba, &data));
 
         match result {
             Some(Ok(())) => {
@@ -497,8 +494,7 @@ impl BufferCacheInner {
         }
 
         // 3. All entries dirty — writeback LRU, then evict it.
-        let idx = self.find_lru()
-            .ok_or(KernelError::InternalError)?;
+        let idx = self.find_lru().ok_or(KernelError::InternalError)?;
         self.writeback_entry(idx)?;
         self.evict_entry(idx);
         Ok(idx)
@@ -536,11 +532,7 @@ static CACHE: Mutex<BufferCacheInner> = Mutex::new(BufferCacheInner::new());
 ///
 /// Returns `true` if read-ahead should be triggered (sequential pattern
 /// detected above the threshold).
-fn update_readahead_tracker(
-    cache: &mut BufferCacheInner,
-    dev_id: u8,
-    lba: u64,
-) -> bool {
+fn update_readahead_tracker(cache: &mut BufferCacheInner, dev_id: u8, lba: u64) -> bool {
     let tracker = &mut cache.readahead[dev_id as usize];
 
     if lba == tracker.last_lba.wrapping_add(1) {
@@ -551,9 +543,7 @@ fn update_readahead_tracker(
         // exhaust the current prefetch range.  This means small
         // sequential runs use a small window (low cache pressure)
         // while large file reads ramp up to full throughput.
-        if tracker.seq_count > 0
-            && tracker.seq_count.is_multiple_of(tracker.window)
-        {
+        if tracker.seq_count > 0 && tracker.seq_count.is_multiple_of(tracker.window) {
             tracker.window = tracker.window.saturating_mul(2).min(get_readahead_max());
         }
     } else {
@@ -572,16 +562,13 @@ fn update_readahead_tracker(
 /// On a cache hit, the data is served directly from memory.
 /// On a miss, the sector is read from the block device and cached.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn read_sector(
-    device: &str,
-    lba: u64,
-    buf: &mut [u8; SECTOR_SIZE],
-) -> KernelResult<()> {
+pub fn read_sector(device: &str, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
     let mut cache = CACHE.lock();
     cache.ensure_init();
     cache.reads = cache.reads.wrapping_add(1);
 
-    let dev_id = cache.device_id(device)
+    let dev_id = cache
+        .device_id(device)
         .ok_or(KernelError::InvalidArgument)?;
 
     // Check cache hit.
@@ -597,9 +584,7 @@ pub fn read_sector(
     // Cache miss — read from device.
     cache.misses = cache.misses.wrapping_add(1);
 
-    let result = blkdev::with_device(device, |dev| {
-        dev.read_sector(lba, buf)
-    });
+    let result = blkdev::with_device(device, |dev| dev.read_sector(lba, buf));
     match result {
         Some(Ok(())) => {
             blkdev::record_io(false); // Track read for disk-idle heuristic.
@@ -629,7 +614,9 @@ pub fn read_sector(
         let ra_start = lba.wrapping_add(1);
         let window = u64::from(cache.readahead[dev_id as usize].window);
         let ra_end = ra_start.saturating_add(window);
-        let prefetch_from = cache.readahead[dev_id as usize].prefetched_up_to.max(ra_start);
+        let prefetch_from = cache.readahead[dev_id as usize]
+            .prefetched_up_to
+            .max(ra_start);
         if prefetch_from < ra_end {
             cache.readaheads = cache.readaheads.wrapping_add(1);
             // Prefetch sectors that aren't already cached.
@@ -639,9 +626,8 @@ pub fn read_sector(
                 }
                 // Read from device into a temporary buffer.
                 let mut ahead_buf = [0u8; SECTOR_SIZE];
-                let ahead_result = blkdev::with_device(device, |dev| {
-                    dev.read_sector(ahead_lba, &mut ahead_buf)
-                });
+                let ahead_result =
+                    blkdev::with_device(device, |dev| dev.read_sector(ahead_lba, &mut ahead_buf));
                 if let Some(Ok(())) = ahead_result {
                     if let Ok(slot) = cache.make_room() {
                         cache.entries[slot].device_id = dev_id;
@@ -672,16 +658,13 @@ pub fn read_sector(
 /// - [`flush`] or [`flush_all`] is called
 /// - The filesystem is unmounted
 #[allow(clippy::arithmetic_side_effects)]
-pub fn write_sector(
-    device: &str,
-    lba: u64,
-    buf: &[u8; SECTOR_SIZE],
-) -> KernelResult<()> {
+pub fn write_sector(device: &str, lba: u64, buf: &[u8; SECTOR_SIZE]) -> KernelResult<()> {
     let mut cache = CACHE.lock();
     cache.ensure_init();
     cache.writes = cache.writes.wrapping_add(1);
 
-    let dev_id = cache.device_id(device)
+    let dev_id = cache
+        .device_id(device)
         .ok_or(KernelError::InvalidArgument)?;
 
     let now_ns = crate::hpet::elapsed_ns();
@@ -786,11 +769,7 @@ pub fn read_sector_uncached(
 ///
 /// [`KernelError::NoSuchDevice`] if the device is unknown, or an I/O error from
 /// the device write.
-pub fn write_sector_uncached(
-    device: &str,
-    lba: u64,
-    buf: &[u8; SECTOR_SIZE],
-) -> KernelResult<()> {
+pub fn write_sector_uncached(device: &str, lba: u64, buf: &[u8; SECTOR_SIZE]) -> KernelResult<()> {
     let result = blkdev::with_device(device, |dev| dev.write_sector(lba, buf));
     match result {
         Some(Ok(())) => blkdev::record_io(true),
@@ -819,9 +798,7 @@ pub fn flush(device: &str) -> KernelResult<()> {
     // We iterate by index to avoid borrow conflicts.
     let mut errors: Option<KernelError> = None;
     for i in 0..cache.entries.len() {
-        if cache.entries[i].valid
-            && cache.entries[i].dirty
-            && cache.entries[i].device_id == dev_id
+        if cache.entries[i].valid && cache.entries[i].dirty && cache.entries[i].device_id == dev_id
         {
             if let Err(e) = cache.writeback_entry(i) {
                 // Track the worst error but keep flushing.
@@ -875,10 +852,7 @@ pub fn flush_expired() -> usize {
     let mut flushed: usize = 0;
 
     for i in 0..cache.entries.len() {
-        if cache.entries[i].valid
-            && cache.entries[i].dirty
-            && cache.entries[i].dirty_since_ns > 0
-        {
+        if cache.entries[i].valid && cache.entries[i].dirty && cache.entries[i].dirty_since_ns > 0 {
             let age = now_ns.saturating_sub(cache.entries[i].dirty_since_ns);
             if age >= get_dirty_expire_ns() {
                 if cache.writeback_entry(i).is_ok() {
@@ -888,8 +862,7 @@ pub fn flush_expired() -> usize {
         }
     }
 
-    cache.expired_flushes = cache.expired_flushes
-        .wrapping_add(flushed as u64);
+    cache.expired_flushes = cache.expired_flushes.wrapping_add(flushed as u64);
 
     flushed
 }
@@ -911,10 +884,7 @@ pub fn try_flush_expired() -> Option<usize> {
     let mut flushed: usize = 0;
 
     for i in 0..cache.entries.len() {
-        if cache.entries[i].valid
-            && cache.entries[i].dirty
-            && cache.entries[i].dirty_since_ns > 0
-        {
+        if cache.entries[i].valid && cache.entries[i].dirty && cache.entries[i].dirty_since_ns > 0 {
             let age = now_ns.saturating_sub(cache.entries[i].dirty_since_ns);
             if age >= get_dirty_expire_ns() {
                 if cache.writeback_entry(i).is_ok() {
@@ -924,8 +894,7 @@ pub fn try_flush_expired() -> Option<usize> {
         }
     }
 
-    cache.expired_flushes = cache.expired_flushes
-        .wrapping_add(flushed as u64);
+    cache.expired_flushes = cache.expired_flushes.wrapping_add(flushed as u64);
 
     Some(flushed)
 }
@@ -1134,7 +1103,11 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("[bcache]   FAIL: flush did not trigger writeback");
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[bcache]   Flush verified (writebacks: {} → {})", wb_before, wb_after);
+    crate::serial_println!(
+        "[bcache]   Flush verified (writebacks: {} → {})",
+        wb_before,
+        wb_after
+    );
 
     // Restore the original sector content.
     write_sector(device, test_lba, &original)?;
@@ -1158,7 +1131,9 @@ pub fn self_test() -> KernelResult<()> {
     if ra_after > ra_before {
         crate::serial_println!(
             "[bcache]   Read-ahead triggered: {} → {} ({} new prefetches)",
-            ra_before, ra_after, ra_after.wrapping_sub(ra_before),
+            ra_before,
+            ra_after,
+            ra_after.wrapping_sub(ra_before),
         );
 
         // Verify that sectors ahead are now cached (should be cache hits).
@@ -1182,7 +1157,9 @@ pub fn self_test() -> KernelResult<()> {
             );
         }
     } else {
-        crate::serial_println!("[bcache]   Read-ahead: no triggers (sectors may already be cached)");
+        crate::serial_println!(
+            "[bcache]   Read-ahead: no triggers (sectors may already be cached)"
+        );
     }
 
     // Print final statistics.

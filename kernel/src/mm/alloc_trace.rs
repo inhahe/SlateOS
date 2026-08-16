@@ -47,9 +47,9 @@
 // commands; many helpers may not have call sites in production paths yet.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::mm::frame_owner::Owner;
 use crate::serial_println;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -156,7 +156,6 @@ impl TraceEntry {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Ring buffer storage
 // ---------------------------------------------------------------------------
@@ -170,7 +169,7 @@ struct TraceRing(core::cell::UnsafeCell<[TraceEntry; RING_SIZE]>);
 unsafe impl Sync for TraceRing {}
 
 static RING: TraceRing = TraceRing(core::cell::UnsafeCell::new(
-    [TraceEntry::empty(); RING_SIZE]
+    [TraceEntry::empty(); RING_SIZE],
 ));
 
 /// Write position (monotonically increasing, masked to get slot index).
@@ -427,7 +426,11 @@ pub fn recent(buf: &mut [TraceEntry]) -> usize {
 pub fn alloc_free_balance() -> (u64, u64) {
     let write_pos = WRITE_POS.load(Ordering::Acquire) as usize;
     let count = write_pos.min(RING_SIZE);
-    let start = if write_pos <= RING_SIZE { 0 } else { write_pos & RING_MASK };
+    let start = if write_pos <= RING_SIZE {
+        0
+    } else {
+        write_pos & RING_MASK
+    };
 
     let mut allocs: u64 = 0;
     let mut frees: u64 = 0;
@@ -479,7 +482,9 @@ fn current_cpu_fast() -> u8 {
     // Use the SMP module's tiered detection (RDPID → rdtscp → APIC MMIO).
     // Never call rdtscp unconditionally — it may not be available.
     #[allow(clippy::cast_possible_truncation)]
-    { crate::smp::current_cpu_index() as u8 }
+    {
+        crate::smp::current_cpu_index() as u8
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -532,7 +537,11 @@ pub fn self_test() {
     let (allocs, frees) = alloc_free_balance();
     assert_eq!(allocs, 2);
     assert_eq!(frees, 1);
-    serial_println!("[alloc_trace]   Alloc/free balance: allocs={}, frees={}", allocs, frees);
+    serial_println!(
+        "[alloc_trace]   Alloc/free balance: allocs={}, frees={}",
+        allocs,
+        frees
+    );
 
     // Test 6: Disable suppresses recording.
     disable();
@@ -566,8 +575,10 @@ pub fn self_test() {
     let mut prev_ts = 0u64;
     for i in 0..snap.count {
         if snap.entries[i].is_valid() {
-            assert!(snap.entries[i].timestamp >= prev_ts,
-                "timestamps should be monotonic");
+            assert!(
+                snap.entries[i].timestamp >= prev_ts,
+                "timestamps should be monotonic"
+            );
             prev_ts = snap.entries[i].timestamp;
         }
     }

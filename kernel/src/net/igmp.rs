@@ -36,16 +36,16 @@
 //!   schedules and sends Membership Reports for all active groups.
 //! - Periodic unsolicited reports are sent for active groups.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::KernelResult;
 use super::interface::Ipv4Addr;
 use super::ipv4;
+use crate::error::KernelResult;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -129,8 +129,7 @@ impl GroupEntry {
 }
 
 /// Global group membership table.
-static GROUPS: Mutex<[GroupEntry; MAX_GROUPS]> =
-    Mutex::new([GroupEntry::empty(); MAX_GROUPS]);
+static GROUPS: Mutex<[GroupEntry; MAX_GROUPS]> = Mutex::new([GroupEntry::empty(); MAX_GROUPS]);
 
 /// Last tick timestamp (for rate-limiting periodic work).
 static LAST_TICK_NS: AtomicU64 = AtomicU64::new(0);
@@ -376,7 +375,8 @@ fn handle_group_query(group: Ipv4Addr, max_resp_time: u8) {
 
     crate::serial_println!(
         "[igmp] Group-specific query for {} (max_resp={}ds)",
-        group, max_resp_time
+        group,
+        max_resp_time
     );
 }
 
@@ -470,7 +470,10 @@ pub struct IgmpStats {
 /// Get IGMP statistics.
 pub fn stats() -> IgmpStats {
     let groups = GROUPS.lock();
-    let active = groups.iter().filter(|e| e.state != GroupState::Idle).count();
+    let active = groups
+        .iter()
+        .filter(|e| e.state != GroupState::Idle)
+        .count();
     IgmpStats {
         active_groups: active,
         reports_sent: REPORTS_SENT.load(Ordering::Relaxed),

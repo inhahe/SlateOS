@@ -861,6 +861,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_wait_status_wpgid_and_wnowait()?;
     test_dispatch_wait_info_layout()?;
     test_dispatch_rusage_info_layout()?;
+    test_dispatch_set_credentials_gate()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
     Ok(())
@@ -2182,6 +2183,125 @@ fn test_dispatch_rusage_info_layout() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   RusageInfo (1064) byte layout + who gate: OK");
+    Ok(())
+}
+
+/// Pin which `SYS_PROCESS_SET_CREDENTIALS` (530) requests count as an
+/// *identity change*, because that is the whole of its capability gate.
+///
+/// The gate itself cannot be driven from here — the handler reads
+/// `current_task_id()`, so exercising the deny path through `dispatch()` would
+/// need a synthetic caller with a synthetic capability table. What it *can* be
+/// driven from is `resolve_credential_request`, which is the entire decision
+/// with the lookup removed. Both failure directions are bad in ways that would
+/// not show up as a crash:
+///
+/// - a no-op wrongly judged a change denies `setuid(getuid())` to processes
+///   that hold no capability and need none, breaking privilege-shedding code
+///   that never actually held privilege;
+/// - a change wrongly judged a no-op is the escalation this gate exists to
+///   stop, and it would pass every other test in the tree, because the identity
+///   really does end up where the caller asked.
+fn test_dispatch_set_credentials_gate() -> KernelResult<()> {
+    use crate::syscall::handlers::{CREDENTIALS_KEEP, resolve_credential_request};
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: set_credentials gate: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    // (current, arg0, arg1) -> (resolved, is_change, what)
+    let cases: [((u32, u32), u64, u64, (u32, u32), bool, &str); 9] = [
+        (
+            (0, 0),
+            CREDENTIALS_KEEP,
+            CREDENTIALS_KEEP,
+            (0, 0),
+            false,
+            "KEEP/KEEP touches nothing",
+        ),
+        (
+            (1000, 1000),
+            1000,
+            1000,
+            (1000, 1000),
+            false,
+            "setuid(getuid()) is a no-op, not an exercise of authority",
+        ),
+        (
+            (1000, 1000),
+            1000,
+            CREDENTIALS_KEEP,
+            (1000, 1000),
+            false,
+            "redundant uid + KEEP gid",
+        ),
+        (
+            (1000, 1000),
+            0,
+            CREDENTIALS_KEEP,
+            (0, 1000),
+            true,
+            "1000 -> root is a change",
+        ),
+        (
+            (0, 0),
+            1000,
+            CREDENTIALS_KEEP,
+            (1000, 0),
+            true,
+            "dropping privilege is a change too",
+        ),
+        (
+            (1000, 1000),
+            CREDENTIALS_KEEP,
+            0,
+            (1000, 0),
+            true,
+            "a gid-only change must be gated, not just uid",
+        ),
+        (
+            (0, 0),
+            3131,
+            4242,
+            (3131, 4242),
+            true,
+            "both fields at once (the fastpy-setuid fixture's move)",
+        ),
+        // The sentinel is u32::MAX widened, not u64::MAX: the value that means
+        // "keep" is exactly the one no process can adopt.
+        (
+            (7, 7),
+            u64::MAX,
+            CREDENTIALS_KEEP,
+            (0xFFFF_FFFF, 7),
+            true,
+            "u64::MAX is NOT the KEEP sentinel; it truncates to a real uid",
+        ),
+        // Truncation happens before the comparison as well as before the write,
+        // so high garbage over a matching low half is judged on what would
+        // actually be stored.
+        (
+            (5, 5),
+            0x1_0000_0005,
+            CREDENTIALS_KEEP,
+            (5, 5),
+            false,
+            "high bits above a matching low half resolve to no change",
+        ),
+    ];
+
+    for (current, arg0, arg1, want, want_change, what) in cases {
+        let (got, got_change) = resolve_credential_request(current, arg0, arg1);
+        if got != want {
+            return fail(what);
+        }
+        if got_change != want_change {
+            return fail(what);
+        }
+    }
+
+    serial_println!("[syscall]   set_credentials (530) identity-change gate: OK");
     Ok(())
 }
 

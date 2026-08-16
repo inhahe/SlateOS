@@ -5233,24 +5233,56 @@ pub fn sys_process_get_credentials(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_PROCESS_SET_CREDENTIALS` — mutate the caller's own real uid/gid.
 ///
-/// A thin mutation primitive backing POSIX `setuid()`/`setgid()` (and the
+/// The mutation primitive backing POSIX `setuid()`/`setgid()` (and the
 /// `sete/re/res` family, all collapsed onto the single real uid/gid in our
-/// flat credential model). See the syscall-number doc for the full policy
-/// discussion: **the cap/identity permission check is performed by the
-/// userspace posix wrappers** (POSIX caps are userspace-only, so the kernel
-/// cannot re-check them — exactly as with every other cap-gated op). The
-/// only invariant enforced here is structural: the call always targets the
-/// *caller's own* process.
+/// flat credential model).
 ///
 /// `arg0`/`arg1` carry the new uid/gid as `u32` widened to `u64`; the
 /// sentinel `0xFFFF_FFFF` means "leave that field unchanged". Both fields
-/// are applied atomically (computed, then written once). Fails only if the
-/// caller has no owning process.
+/// are applied atomically (computed, then written once).
+///
+/// # The capability gate, and why it exists here as well as in userspace
+///
+/// A call that would **change** the identity requires the caller to hold
+/// [`Rights::SET_CREDENTIALS`](crate::cap::Rights::SET_CREDENTIALS) on
+/// [`ResourceType::Process`](crate::cap::ResourceType::Process); one that
+/// leaves both fields at their current values does not.
+///
+/// This used to be enforced *only* by the userspace posix wrappers, on the
+/// reasoning (design-decisions.md §83) that POSIX capabilities are a userspace
+/// concept the kernel has no way to check. That reasoning was correct when it
+/// was written and is not any more: §207 introduced `Rights::SET_CREDENTIALS`
+/// as a **kernel-side, handle-backed** right, and §312 made posix's
+/// `CAP_SETUID`/`CAP_SETGID` *project from it*. The authority the kernel was
+/// said not to have is now the authority the userspace answer is derived from,
+/// so declining to check it here left the only gate on `setuid()` outside the
+/// kernel — and a userspace-enforced capability is not a capability, it is a
+/// convention. Any ring-3 process could reach uid 0 by issuing syscall 530
+/// directly, and posix's cold-boot cap set is *all capabilities held*, so the
+/// userspace gate is open by default until a projection refresh narrows it.
+///
+/// The same predicate is used on both sides — `(Process, SET_CREDENTIALS)`,
+/// **id-agnostic** — deliberately. If the kernel gate and the projection asked
+/// different questions, the projection would stop being a projection: userspace
+/// would authorise calls the kernel refuses, or worse, the reverse.
+///
+/// # Why an unchanged identity is free
+///
+/// `setuid(getuid())` is permitted to every process in POSIX, and a great deal
+/// of code calls it unconditionally when dropping privilege it may not have had.
+/// Gating a no-op would break those callers while protecting nothing: the state
+/// after a refused no-op and after an allowed one is identical. Only a genuine
+/// identity change is an exercise of authority, so only that is gated.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] — the caller is a kernel task with no
+///   owning process, or has no recorded credentials.
+/// - [`KernelError::PermissionDenied`] — the call would change uid or gid and
+///   the caller holds no `(Process, SET_CREDENTIALS)` capability.
 pub fn sys_process_set_credentials(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::{ResourceType, Rights};
     use crate::proc::{pcb, thread};
-
-    /// `u32` "leave unchanged" sentinel (matches POSIX `(uid_t)-1`).
-    const KEEP: u64 = 0xFFFF_FFFF;
 
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
@@ -5261,25 +5293,75 @@ pub fn sys_process_set_credentials(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
 
-    // Apply each requested field (KEEP leaves it untouched), then write the
-    // credentials back in a single update so uid/gid change together.
-    if args.arg0 != KEEP {
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            creds.uid = args.arg0 as u32;
-        }
+    // Resolve what was asked for BEFORE deciding whether it is allowed: the
+    // gate turns on whether the identity would actually move, which KEEP and a
+    // redundant self-assignment both make false for different reasons.
+    let ((want_uid, want_gid), is_change) =
+        resolve_credential_request((creds.uid, creds.gid), args.arg0, args.arg1);
+
+    if is_change && !pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_CREDENTIALS)
+    {
+        return SyscallResult::err(KernelError::PermissionDenied);
     }
-    if args.arg1 != KEEP {
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            creds.gid = args.arg1 as u32;
-        }
-    }
+
+    // Write both fields back in a single update so uid and gid change together;
+    // a half-applied identity would otherwise be observable.
+    creds.uid = want_uid;
+    creds.gid = want_gid;
 
     match pcb::set_credentials(pid, creds) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// `u32` "leave this field unchanged" sentinel for
+/// [`sys_process_set_credentials`], matching POSIX's `(uid_t)-1`.
+///
+/// Note it is `u32::MAX` widened, not `u64::MAX`: `setuid(0xFFFF_FFFF)` means
+/// *keep*, and there is consequently no way to become uid 4294967295. That is
+/// POSIX's own corner and is reproduced deliberately.
+pub(crate) const CREDENTIALS_KEEP: u64 = 0xFFFF_FFFF;
+
+/// Resolve a `SYS_PROCESS_SET_CREDENTIALS` request against the identity the
+/// caller currently has: the identity it is asking for, and whether reaching it
+/// is a *change*.
+///
+/// Split out of the handler because the capability gate hangs entirely off the
+/// second half of that answer, and the handler cannot be called for a synthetic
+/// caller — it reads `current_task_id()`. Testing the gate through the syscall
+/// would mean spawning a process per case; testing this function costs a table.
+///
+/// The two ways an identity does not move are distinct and both matter:
+/// `CREDENTIALS_KEEP` says "do not touch this field", while passing the value
+/// the field already holds says "set it to what it is". POSIX permits the
+/// second to every process — `setuid(getuid())` is a no-op that a lot of code
+/// issues unconditionally when shedding privilege it may never have had — so
+/// collapsing it into "an identity change" would deny callers a capability they
+/// have no need of, to protect a transition that does not occur.
+pub(crate) fn resolve_credential_request(
+    current: (u32, u32),
+    arg0: u64,
+    arg1: u64,
+) -> ((u32, u32), bool) {
+    let (cur_uid, cur_gid) = current;
+    // Truncation is intentional and, importantly, happens *before* the
+    // comparison as well as before the write — so a caller that sets high bits
+    // above a matching low half is judged on the same value that would be
+    // stored, and cannot be told it changed something it did not.
+    #[allow(clippy::cast_possible_truncation)]
+    let uid = if arg0 == CREDENTIALS_KEEP {
+        cur_uid
+    } else {
+        arg0 as u32
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let gid = if arg1 == CREDENTIALS_KEEP {
+        cur_gid
+    } else {
+        arg1 as u32
+    };
+    ((uid, gid), uid != cur_uid || gid != cur_gid)
 }
 
 /// `SYS_PROCESS_GET_NICE` — read the caller's scheduling nice value.

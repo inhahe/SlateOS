@@ -357,6 +357,15 @@ pub const SYS_EVENTFD_READ_TIMEOUT: u64 = 245;
 pub const SYS_EVENTFD_WRITE_TIMEOUT: u64 = 246;
 pub const SYS_EVENTFD_HAS_VALUE: u64 = 247;
 
+// Capabilities (400-409)
+//
+// Counts or enumerates the calling process's kernel capabilities.  `arg0` is
+// a `CapEntryInfo` array (0 to only count), `arg1` its capacity **in entries**;
+// truncation is `BufferTooSmall`/`ERANGE` with nothing written, never a short
+// answer.  See `sys_capability::kernel_view` for the consumer and
+// `requests/a-b-cap-query-enumeration-landed.md` for the ABI.
+pub const SYS_CAP_QUERY: u64 = 400;
+
 // Networking (800-999)
 pub const SYS_TCP_CONNECT: u64 = 800;
 pub const SYS_TCP_SEND: u64 = 801;

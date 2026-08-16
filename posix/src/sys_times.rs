@@ -17,7 +17,13 @@
 //! divided by 10_000_000 for the 100 Hz `CLK_TCK`).
 //!
 //! On host targets, the fields are zeroed and the return value is a
-//! monotonic call counter (for unit-test determinism).
+//! **process-wide, strictly increasing call counter**.  Note the two
+//! words that matter: *process-wide* (every `times()` caller in the test
+//! binary shares it, including ones on other threads) and *strictly
+//! increasing* (no promise about the size of the step).  A test may
+//! assert `t2 > t1`; it may **not** assert `t2 == t1 + 1`, because a
+//! concurrently running test can bump the counter in between.  See
+//! `test_times_is_strictly_monotonic` for the history of that mistake.
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,11 +84,24 @@ fn ns_to_ticks(ns: u64) -> i64 {
 /// Simple monotonic tick counter (host-test fallback only).
 ///
 /// On host builds (`not(target_os = "none")`), each call to `times()`
-/// increments this counter so unit tests can verify monotonic behavior
-/// deterministically.  On the kernel target the return value comes from
-/// `SYS_CLOCK_MONOTONIC` and this counter is unused.
+/// increments this counter so unit tests can verify monotonic behavior.
+/// On the kernel target the return value comes from `SYS_CLOCK_MONOTONIC`
+/// and this counter is unused.
+///
+/// **Atomic, not `static mut`.**  It was a `static mut` bumped by a plain
+/// read-modify-write under a `// SAFETY: single-threaded access` comment,
+/// and that comment was simply false: `cargo test -p posix --lib` runs
+/// >20 000 tests across a thread pool in one process, so any two of them
+/// calling `times()` at once raced on this word.  That is undefined
+/// behaviour, and its benign-looking symptom is the worst part — two
+/// callers can read the same pre-increment value and return the same
+/// "tick", destroying the single property the counter exists to provide.
+/// `fetch_add` makes every caller's value distinct and totally ordered.
+/// `Relaxed` suffices: coherence on a single location already guarantees
+/// that a thread's own successive calls see increasing values, and no
+/// other memory is published through this counter.
 #[cfg(not(target_os = "none"))]
-static mut TICK_COUNTER: i64 = 0;
+static TICK_COUNTER: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
 
 // ---------------------------------------------------------------------------
 // times
@@ -193,11 +212,13 @@ pub extern "C" fn times(buffer: *mut Tms) -> i64 {
         }
 
         // Return a monotonically increasing tick value (host test stub).
-        // SAFETY: single-threaded access.
-        unsafe {
-            TICK_COUNTER = TICK_COUNTER.wrapping_add(1);
-            TICK_COUNTER
-        }
+        // `fetch_add` yields the *previous* value, so add one to report the
+        // post-increment tick — the first call still returns 1, as it did
+        // when this was a `static mut`.  `wrapping_add` keeps the old
+        // overflow behaviour rather than panicking in a debug build.
+        TICK_COUNTER
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1)
     }
 }
 
@@ -579,19 +600,114 @@ mod tests {
     // times — multiple calls accumulate
     // -----------------------------------------------------------------------
 
+    /// Successive `times()` calls must strictly increase.
+    ///
+    /// This deliberately does **not** assert `t == base + i`.  It used to,
+    /// under the name `test_times_increments_each_call`, and that made it a
+    /// flake rather than an assertion: the host counter is process-wide, and
+    /// `cargo test -p posix --lib` runs >20 000 tests on a thread pool in a
+    /// single process, so any other test calling `times()` lands between two
+    /// of ours and shifts the delta.  It passed when run filtered and failed
+    /// in the full-workspace run — i.e. precisely in the run every lane must
+    /// make green before merging, where it reads as the merging lane's own
+    /// regression (reported by lane C, 2026-08-15).
+    ///
+    /// Strict monotonicity is the counter's actual contract, so it is what
+    /// this checks.  Determinism per *call* never implied determinism per
+    /// *delta* once the counter is shared.
     #[test]
-    fn test_times_increments_each_call() {
+    fn test_times_is_strictly_monotonic() {
         let mut tms = Tms {
             tms_utime: 0,
             tms_stime: 0,
             tms_cutime: 0,
             tms_cstime: 0,
         };
-        let base = times(&mut tms);
+        let mut prev = times(&mut tms);
         for i in 1..=5 {
             let t = times(&mut tms);
-            assert_eq!(t, base + i, "each call should increment by 1");
+            assert!(
+                t > prev,
+                "call {i}: times() must be strictly monotonic ({t} <= {prev})"
+            );
+            prev = t;
         }
+    }
+
+    /// The counter must hand out a distinct value to every caller, even when
+    /// callers run concurrently.
+    ///
+    /// This is the regression test for the `static mut` it replaced: a plain
+    /// read-modify-write let two threads observe the same pre-increment value
+    /// and return the same tick, which no single-threaded test can catch.
+    /// Collecting every returned value and checking they are all distinct
+    /// fails loudly if the atomic is ever downgraded again.
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn test_times_hands_out_distinct_ticks_across_threads() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use std::collections::BTreeSet;
+        use std::sync::Arc;
+
+        const THREADS: usize = 8;
+        const CALLS: usize = 200;
+
+        // Release the threads together. Without this the first spawned thread
+        // usually finishes its 200 calls before the last one is even created,
+        // so the racy implementation this guards against would have no window
+        // to lose a value in and the test would pass vacuously.
+        let ready = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let ready = Arc::clone(&ready);
+                std::thread::spawn(move || {
+                    ready.fetch_add(1, Ordering::AcqRel);
+                    // Bounded: the barrier only sharpens the race window, it is
+                    // not a correctness requirement, so a thread that never
+                    // arrives (spawn failure) must not hang the suite forever.
+                    let spin_until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    while ready.load(Ordering::Acquire) < THREADS
+                        && std::time::Instant::now() < spin_until
+                    {
+                        core::hint::spin_loop();
+                    }
+                    let mut tms = Tms {
+                        tms_utime: 0,
+                        tms_stime: 0,
+                        tms_cutime: 0,
+                        tms_cstime: 0,
+                    };
+                    let mut mine = Vec::with_capacity(CALLS);
+                    let mut prev = i64::MIN;
+                    for _ in 0..CALLS {
+                        let t = times(&mut tms);
+                        // Each thread's own calls must also increase.
+                        assert!(t > prev, "not monotonic within a thread: {t} <= {prev}");
+                        prev = t;
+                        mine.push(t);
+                    }
+                    mine
+                })
+            })
+            .collect();
+
+        let mut seen = BTreeSet::new();
+        let mut total = 0usize;
+        for h in handles {
+            let ticks = h.join().expect("times() worker thread panicked");
+            total += ticks.len();
+            for t in ticks {
+                seen.insert(t);
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            total,
+            "times() returned a duplicate tick to concurrent callers \
+             ({} distinct out of {total}) — the counter is racing",
+            seen.len()
+        );
     }
 
     // -----------------------------------------------------------------------

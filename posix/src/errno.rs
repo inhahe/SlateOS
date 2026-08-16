@@ -218,6 +218,21 @@ pub(crate) mod native {
     /// `EINTR` is 4, and `-4` here is `WOULD_BLOCK`, so the two ABIs must
     /// never share an encoding path.
     pub const INTERRUPTED: i64 = -8;
+    /// A caller-supplied output buffer was too small to hold the whole answer.
+    ///
+    /// Deliberately distinct from `INVALID_ARGUMENT`: the request was
+    /// well-formed and the kernel *could* have answered it, so the caller's
+    /// correct response is to allocate more and retry rather than give up. A
+    /// handler returning this writes **nothing** — which is the point of the
+    /// variant, because for an enumeration like `SYS_CAP_QUERY` a silently
+    /// truncated prefix would read as "this process holds less authority than
+    /// it does": the same class of bug as over-reporting, in the direction that
+    /// is harder to notice.
+    ///
+    /// Added by lane A alongside `SYS_CAP_QUERY`'s enumerate mode
+    /// (`requests/a-b-cap-query-enumeration-landed.md`). Until it was mapped
+    /// here it fell through to the catch-all `EIO`, which no caller retries on.
+    pub const BUFFER_TOO_SMALL: i64 = -9;
 
     // --- Memory (100 range: -100 to -103) ---
     pub const OUT_OF_MEMORY: i64 = -100;
@@ -286,6 +301,8 @@ pub fn translate(ret: i64) -> i64 {
         native::TIMED_OUT => ETIMEDOUT,
         native::DEADLOCK => EDEADLK,
         native::INTERRUPTED => EINTR,
+        // ERANGE, not EINVAL: the caller should retry with a bigger buffer.
+        native::BUFFER_TOO_SMALL => ERANGE,
 
         // Memory errors
         native::OUT_OF_MEMORY | native::RESOURCE_EXHAUSTED => ENOMEM,
@@ -443,6 +460,30 @@ mod tests {
     fn test_translate_deadlock() {
         assert_eq!(translate(native::DEADLOCK), -1);
         assert_eq!(get_errno(), EDEADLK);
+    }
+
+    #[test]
+    fn test_translate_buffer_too_small_is_erange_not_einval() {
+        // ERANGE is the retryable answer: the request was well-formed and the
+        // caller should allocate more and ask again.  EINVAL would say the
+        // request itself was wrong, and EIO — where this landed before it was
+        // mapped, via the catch-all arm — says nothing a caller can act on.
+        assert_eq!(translate(native::BUFFER_TOO_SMALL), -1);
+        assert_eq!(get_errno(), ERANGE);
+        assert_ne!(ERANGE, EINVAL);
+        assert_ne!(ERANGE, EIO);
+    }
+
+    #[test]
+    fn test_native_buffer_too_small_matches_kernel_error_rs() {
+        // This module is a hand-maintained mirror of kernel/src/error.rs and
+        // nothing but a test enforces that.  -9 is `KernelError::BufferTooSmall`
+        // and is what SYS_CAP_QUERY's enumerate mode returns when the caller's
+        // array cannot hold every entry; it must not collide with the general
+        // errors either side of it.
+        assert_eq!(native::BUFFER_TOO_SMALL, -9);
+        assert_ne!(native::BUFFER_TOO_SMALL, native::INTERRUPTED);
+        assert_ne!(native::BUFFER_TOO_SMALL, native::INVALID_ARGUMENT);
     }
 
     #[test]

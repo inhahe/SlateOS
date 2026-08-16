@@ -112,7 +112,7 @@ mod tests {
         assert_eq!(MMC_RSP_R1B, MMC_RSP_R1 | MMC_RSP_BUSY);
         // R2 carries CID/CSD (136-bit response, no opcode echo).
         assert!((MMC_RSP_R2 & MMC_RSP_136) != 0);
-        assert!((MMC_RSP_R2 & MMC_RSP_OPCODE) == 0);
+        assert_eq!(MMC_RSP_R2 & MMC_RSP_OPCODE, 0);
     }
 
     #[test]

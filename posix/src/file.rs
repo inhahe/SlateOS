@@ -2822,10 +2822,11 @@ pub extern "C" fn fchownat(
 // ---------------------------------------------------------------------------
 //
 // The permission-changing family.  Each entry point validates its
-// arguments (NULL path → EFAULT, bad/closed fd → EBADF, CAP_CHOWN gate for
-// the chown variants) and then, on bare metal, issues the corresponding
-// kernel syscall: SYS_FS_SET_PERMS for chmod/fchmod and SYS_FS_SET_OWNER
-// for chown/fchown/lchown.  On the host build (no kernel) the syscall is
+// arguments (NULL path → EFAULT, bad/closed fd → EBADF) and then, on bare
+// metal, issues the corresponding kernel syscall: SYS_FS_SET_PERMS for
+// chmod/fchmod and SYS_FS_SET_OWNER for chown/fchown/lchown.  Authority is
+// the kernel's — both handlers require a File capability with WRITE before
+// touching anything, and libc does not pre-empt that (§314).  On the host build (no kernel) the syscall is
 // skipped and the call returns 0 after validation, which keeps the
 // argument-domain tests stable.
 
@@ -2895,31 +2896,47 @@ pub extern "C" fn fchmod(fd: Fd, mode: ModeT) -> i32 {
 
 /// Change file owner and group.
 ///
-/// Validates `path != NULL`, enforces the `CAP_CHOWN` gate, then issues
-/// `SYS_FS_SET_OWNER`.  A field of `(uid_t)-1` / `(gid_t)-1` (i.e.
-/// `u32::MAX`) leaves that field unchanged; a call that changes neither
-/// field is a pure no-op and skips the syscall.
+/// Validates `path != NULL`, then issues `SYS_FS_SET_OWNER`.  A field of
+/// `(uid_t)-1` / `(gid_t)-1` (i.e. `u32::MAX`) leaves that field unchanged;
+/// a call that changes neither field is a pure no-op and skips the syscall.
+///
+/// # Authority — the kernel's, not libc's (§314; was a Phase-206 `CAP_CHOWN` gate)
+///
+/// Linux's rule is not a flat `CAP_CHOWN` test.  Changing the **owner** needs
+/// the capability, but changing only the **group** is permitted to the file's
+/// own owner when the target group is one they belong to — so a plain
+/// `chgrp` by the owner needs no privilege at all.  Testing the capability
+/// alone denies that case.
+///
+/// It is worse than a missing clause here, because `CAP_CHOWN` has **no rule
+/// in §312's projection table** — nothing in the kernel's `(ResourceType,
+/// Rights)` model maps to it, so it falls to the deny-by-default arm and
+/// reads *false* for every process.  Under §312 step 3 a libc-side gate would
+/// therefore refuse **every** `chown`, while the kernel went on permitting it.
+///
+/// The kernel is not thereby left ungated: `sys_fs_set_owner` requires a
+/// `File` capability with `WRITE` rights before it resolves the path, and
+/// returns its own error when that fails.  The evaluable-alternative route
+/// (rule 3 of §314 — teach the gate Linux's whole predicate) was considered
+/// and rejected *here*: it would need libc to `stat` the file for its current
+/// owner and consult the supplementary group list, i.e. reimplement the
+/// kernel's check one syscall earlier and out of date by construction.
 ///
 /// Errors:
 ///   * `EFAULT` — `path` is NULL.
-///   * `EPERM` — changing ownership without `CAP_CHOWN`.
-///   * any error the kernel returns from `SYS_FS_SET_OWNER`.
+///   * any error the kernel returns from `SYS_FS_SET_OWNER`, including the
+///     capability failure above.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn chown(path: *const u8, owner: UidT, group: GidT) -> i32 {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // Phase 206: CAP_CHOWN gate.  Linux requires CAP_CHOWN when the
-    // caller actually changes file ownership.  owner/group == (uid_t)-1
-    // means "don't change that field", so a double-no-op call bypasses.
+    // owner/group == (uid_t)-1 means "don't change that field", so a
+    // double-no-op call has nothing to authorise and nothing to do.
     if owner == u32::MAX && group == u32::MAX {
         // Nothing to change — succeed without touching ctime.
         return 0;
-    }
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN) {
-        errno::set_errno(errno::EPERM);
-        return -1;
     }
     #[cfg(target_os = "none")]
     {
@@ -2933,14 +2950,15 @@ pub extern "C" fn chown(path: *const u8, owner: UidT, group: GidT) -> i32 {
 
 /// Change file owner and group (by fd).
 ///
-/// Validates `fd >= 0` and that `fd` refers to an open file description,
-/// enforces the `CAP_CHOWN` gate, then resolves the fd to its stored path
-/// and issues `SYS_FS_SET_OWNER`.  Path-less descriptors (pipes, sockets, …)
-/// succeed as a no-op.
+/// Validates `fd >= 0` and that `fd` refers to an open file description, then
+/// resolves the fd to its stored path and issues `SYS_FS_SET_OWNER`.
+/// Path-less descriptors (pipes, sockets, …) succeed as a no-op.
+///
+/// Authority is the kernel's — see [`chown`] for why libc does not pre-empt it
+/// (§314).
 ///
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.
-///   * `EPERM` — changing ownership without `CAP_CHOWN`.
 ///   * any error the kernel returns from `SYS_FS_SET_OWNER`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fchown(fd: Fd, owner: UidT, group: GidT) -> i32 {
@@ -2952,14 +2970,9 @@ pub extern "C" fn fchown(fd: Fd, owner: UidT, group: GidT) -> i32 {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    // Phase 206: CAP_CHOWN gate — same semantics as chown(), after EBADF
-    // validation.
+    // Same no-op shortcut as chown(), after EBADF validation.
     if owner == u32::MAX && group == u32::MAX {
         return 0;
-    }
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN) {
-        errno::set_errno(errno::EPERM);
-        return -1;
     }
     #[cfg(target_os = "none")]
     {
@@ -2979,13 +2992,15 @@ pub extern "C" fn fchown(fd: Fd, owner: UidT, group: GidT) -> i32 {
 /// Change file owner and group (don't follow symlinks).
 ///
 /// Like `chown`, but is meant to change ownership of a symlink itself
-/// rather than its target.  Validates `path != NULL` and enforces the
-/// `CAP_CHOWN` gate, then issues `SYS_FS_SET_OWNER` with the NO_FOLLOW flag
-/// so the *link inode itself* is chowned, not its target.
+/// rather than its target.  Validates `path != NULL`, then issues
+/// `SYS_FS_SET_OWNER` with the NO_FOLLOW flag so the *link inode itself* is
+/// chowned, not its target.
+///
+/// Authority is the kernel's — see [`chown`] for why libc does not pre-empt it
+/// (§314).
 ///
 /// Errors:
 ///   * `EFAULT` — `path` is NULL.
-///   * `EPERM` — changing ownership without `CAP_CHOWN`.
 ///   * any error the kernel returns from `SYS_FS_SET_OWNER`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lchown(path: *const u8, owner: UidT, group: GidT) -> i32 {
@@ -2993,13 +3008,9 @@ pub extern "C" fn lchown(path: *const u8, owner: UidT, group: GidT) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // Phase 206: CAP_CHOWN gate — same semantics as chown().
+    // Same no-op shortcut as chown().
     if owner == u32::MAX && group == u32::MAX {
         return 0;
-    }
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN) {
-        errno::set_errno(errno::EPERM);
-        return -1;
     }
     #[cfg(target_os = "none")]
     {
@@ -12381,15 +12392,23 @@ mod tests {
     }
 
     // =======================================================================
-    // Phase 206 — CAP_CHOWN gate on chown / fchown / lchown / fchownat
+    // §314 — chown / fchown / lchown / fchownat have NO libc CAP_CHOWN gate
     // =======================================================================
     //
-    // Linux requires CAP_CHOWN when actually changing a file's owner or
-    // group.  owner/group == (uid_t)-1 (u32::MAX) means "don't change";
-    // a double-no-op call bypasses the gate.  Error priority:
-    //   EFAULT (null path) / EBADF (bad fd) / EINVAL (bad flags)  >  EPERM
+    // These were the Phase-206 gate tests.  The gate is gone: Linux permits a
+    // file's owner to chgrp to a group they belong to with no capability at
+    // all, and — decisively — `CAP_CHOWN` has no rule in §312's projection
+    // table, so under step 3 it would read false for *every* process and deny
+    // every chown while the kernel went on allowing them.
     //
-    // fchownat delegates to chown(), so it inherits the gate automatically.
+    // What remains testable on the host is that the capability is not an
+    // input: the answer must be identical with it held and with it dropped.
+    // Argument validation is unaffected and keeps its priority, because
+    // EFAULT/EBADF/EINVAL are questions about libc's own arguments rather
+    // than about authority — the distinction §314 turns on.
+    //
+    // owner/group == (uid_t)-1 (u32::MAX) still means "don't change", and a
+    // double-no-op still returns early without a syscall.
     mod phase206_cap_chown {
         use super::*;
 
@@ -12462,49 +12481,62 @@ mod tests {
             assert_eq!(chown(b"/tmp\0".as_ptr(), 1000, 1000), 0);
         }
 
-        /// chown without CAP_CHOWN returns EPERM when ownership changes.
+        /// Dropping `CAP_CHOWN` must not change `chown`'s answer (§314).
         #[test]
-        fn test_chown_no_cap_eperm() {
+        fn test_chown_without_cap_is_not_libc_denied() {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
-            assert_eq!(chown(b"/tmp\0".as_ptr(), 1000, 1000), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(
+                chown(b"/tmp\0".as_ptr(), 1000, 1000),
+                0,
+                "§314: libc must not refuse a chown the kernel has not been \
+                 asked about — and CAP_CHOWN, having no rule in §312's table, \
+                 reads false for every process once the words are truthful"
+            );
+            assert_ne!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
-        /// chown with owner-only change denied.
+        /// Owner-only change: same, and worth its own case because this is
+        /// the one half of Linux's rule that *is* capability-only. Even here
+        /// libc does not pre-empt — `sys_fs_set_owner` requires a `File`
+        /// capability with `WRITE`, so the check is made where the file is.
         #[test]
-        fn test_chown_no_cap_owner_only() {
+        fn test_chown_owner_only_without_cap_is_not_libc_denied() {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
-            assert_eq!(chown(b"/a\0".as_ptr(), 500, u32::MAX), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(chown(b"/a\0".as_ptr(), 500, u32::MAX), 0);
         }
 
-        /// chown with group-only change denied.
+        /// Group-only change: the case Linux permits outright to a file's
+        /// owner, and therefore the clearest false denial the old gate caused.
         #[test]
-        fn test_chown_no_cap_group_only() {
+        fn test_chown_group_only_without_cap_is_not_libc_denied() {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
-            assert_eq!(chown(b"/a\0".as_ptr(), u32::MAX, 100), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(
+                chown(b"/a\0".as_ptr(), u32::MAX, 100),
+                0,
+                "a chgrp by the file's owner needs no privilege in Linux"
+            );
         }
 
-        /// chown with both owner and group == u32::MAX is a no-op;
-        /// bypasses the cap gate even without CAP_CHOWN.
+        /// Both fields `(uid_t)-1` is a no-op and returns before anything
+        /// else — unchanged by §314, since it never needed authorising.
         #[test]
-        fn test_chown_noop_bypasses_gate() {
+        fn test_chown_noop_returns_early() {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
             assert_eq!(chown(b"/tmp\0".as_ptr(), u32::MAX, u32::MAX), 0);
         }
 
-        /// EFAULT takes priority over EPERM — NULL path checked first.
+        /// A NULL path is still rejected first: argument validation is a
+        /// question libc can answer completely, unlike an authority question.
         #[test]
-        fn test_chown_efault_before_eperm() {
+        fn test_chown_efault_still_precedes_everything() {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
@@ -12525,22 +12557,22 @@ mod tests {
             let _ = crate::fdtable::close_fd(fd);
         }
 
-        /// fchown without CAP_CHOWN returns EPERM.
+        /// Dropping `CAP_CHOWN` must not change `fchown`'s answer (§314).
         #[test]
-        fn test_fchown_no_cap_eperm() {
+        fn test_fchown_without_cap_is_not_libc_denied() {
             let _g = CapGuard::snapshot();
             let fd =
                 crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 998).expect("alloc fd");
             drop_cap_chown();
             crate::errno::set_errno(0);
-            assert_eq!(fchown(fd, 1000, 1000), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(fchown(fd, 1000, 1000), 0);
+            assert_ne!(crate::errno::get_errno(), crate::errno::EPERM);
             let _ = crate::fdtable::close_fd(fd);
         }
 
-        /// fchown no-op (both -1) bypasses cap gate.
+        /// `fchown` no-op (both `-1`) returns early, unchanged by §314.
         #[test]
-        fn test_fchown_noop_bypasses_gate() {
+        fn test_fchown_noop_returns_early() {
             let _g = CapGuard::snapshot();
             let fd =
                 crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 997).expect("alloc fd");
@@ -12550,9 +12582,10 @@ mod tests {
             let _ = crate::fdtable::close_fd(fd);
         }
 
-        /// EBADF takes priority over EPERM for negative fd.
+        /// A bad fd is still rejected first — argument validation, not
+        /// authority.
         #[test]
-        fn test_fchown_ebadf_before_eperm() {
+        fn test_fchown_ebadf_still_precedes_everything() {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
@@ -12562,28 +12595,28 @@ mod tests {
 
         // ---- lchown ------------------------------------------------------
 
-        /// lchown without CAP_CHOWN returns EPERM.
+        /// Dropping `CAP_CHOWN` must not change `lchown`'s answer (§314).
         #[test]
-        fn test_lchown_no_cap_eperm() {
+        fn test_lchown_without_cap_is_not_libc_denied() {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
-            assert_eq!(lchown(b"/tmp\0".as_ptr(), 1000, 1000), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(lchown(b"/tmp\0".as_ptr(), 1000, 1000), 0);
+            assert_ne!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
-        /// lchown no-op bypasses cap gate.
+        /// `lchown` no-op returns early, unchanged by §314.
         #[test]
-        fn test_lchown_noop_bypasses_gate() {
+        fn test_lchown_noop_returns_early() {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
             assert_eq!(lchown(b"/a\0".as_ptr(), u32::MAX, u32::MAX), 0);
         }
 
-        /// lchown EFAULT before EPERM.
+        /// `lchown` still rejects a NULL path first.
         #[test]
-        fn test_lchown_efault_before_eperm() {
+        fn test_lchown_efault_still_precedes_everything() {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
@@ -12591,21 +12624,22 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
         }
 
-        // ---- fchownat (inherits gate from chown) -------------------------
+        // ---- fchownat (delegates to chown) -------------------------------
 
-        /// fchownat delegates to chown — cap gate fires through delegation.
+        /// `fchownat` delegates to `chown`, so it inherits the *absence* of
+        /// the gate just as it previously inherited its presence.
         #[test]
-        fn test_fchownat_no_cap_eperm() {
+        fn test_fchownat_without_cap_is_not_libc_denied() {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
-            assert_eq!(fchownat(AT_FDCWD, b"/x\0".as_ptr(), 0, 0, 0), -1,);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(fchownat(AT_FDCWD, b"/x\0".as_ptr(), 0, 0, 0), 0);
+            assert_ne!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
-        /// fchownat EINVAL (bad flags) takes priority over EPERM.
+        /// `fchownat` still validates its flags before delegating.
         #[test]
-        fn test_fchownat_einval_before_eperm() {
+        fn test_fchownat_einval_still_precedes_everything() {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);

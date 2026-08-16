@@ -119,7 +119,7 @@ mod tests {
         // All carry the unicast-class bit.
         for &v in &u {
             assert_eq!(v & BATADV_UNICAST_CLASS_BIT, BATADV_UNICAST_CLASS_BIT);
-            assert!(v & BATADV_PACKET_TYPE_MASK == v); // bit 7 unused
+            assert_eq!(v & BATADV_PACKET_TYPE_MASK, v); // bit 7 unused
         }
     }
 

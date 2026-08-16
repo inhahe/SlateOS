@@ -125,7 +125,7 @@ mod tests {
         // Label occupies the top 20 bits.
         assert_eq!(MPLS_LS_LABEL_SHIFT, 12);
         // The 20-bit label field fits within 32 bits when shifted.
-        assert!(MPLS_LS_LABEL_SHIFT + 20 == 32);
+        assert_eq!(MPLS_LS_LABEL_SHIFT + 20, 32);
         // 4-byte on-wire size.
         assert_eq!(MPLS_HLEN, 4);
     }

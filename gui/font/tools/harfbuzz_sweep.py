@@ -109,6 +109,28 @@ CORPUS = [
     # a vowel under it must be lifted clear of it, and Thai faces write that
     # lift as a contextual rule too.
     "\\u0e17\\u0e35\\u0e48\\u0e19\\u0e35\\u0e48",
+    # --- Thai and Lao SARA AM, which is what the Thai shaper is *for* ---
+    #
+    # SARA AM (U+0E33) is one character that draws as two marks: a nikhahit
+    # ring above the consonant and a sara aa stroke after it. A shaper splits
+    # it, and -- the part that needs an oracle -- moves the ring in front of
+    # any tone mark already sitting above, because the ring belongs closest to
+    # the letter and the tone rides on top of it. Stored order is consonant,
+    # tone, sara am; drawn order is consonant, nikhahit, tone, sara aa.
+    #
+    # Plain, with no tone: the split happens but nothing moves, so a shaper
+    # that only splits agrees here and disagrees on the entry below it.
+    "\\u0e01\\u0e33",
+    # KO KAI, MAI EK, SARA AM -- the reordering case.
+    "\\u0e01\\u0e48\\u0e33",
+    # The same pair in Lao, which shares the shaper and the rule: LO LING,
+    # MAI EK, SARA AM.
+    "\\u0ea5\\u0eb3",
+    "\\u0ea5\\u0ec8\\u0eb3",
+    # A whole Thai word with a pre-base vowel. Thai stores pre-base vowels
+    # before their consonant already, so nothing reorders and this is the
+    # control: a difference here is not the shaper.
+    "\\u0e40\\u0e01\\u0e34\\u0e14",
     # Devanagari, the reason script tags have two spellings.
     "\\u0939\\u093f\\u0928\\u094d\\u0926\\u0940",
     # Scriptless text, which selects the font's default features.

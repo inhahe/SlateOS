@@ -21512,3 +21512,43 @@ than a solution to it.
 `gui/toolkit/src/textview.rs` — `x_of_col`, `col_at_x`;
 `gui/toolkit/src/text.rs` — `char_index_at`; `gui/font/src/shape.rs` —
 `x_of`/`offset_at`/`Affinity`, which is everything the fix needs from the font.
+
+## TD-OILS-TESTS-CANNOT-SEE-A-FAILED-SPAWN (lane B's tree; filed by lane C, 2026-08-16)
+
+**Status: OPEN.** Filed for lane B as
+`requests/c-b-oils-tests-cannot-see-a-failed-spawn.md`. Logged here so the next
+lane to hit it does not re-triage it from scratch.
+
+**What.** Eight `oils` `interp::tests` go red under machine load and green on a
+clean re-run, and when they go red the failure message cannot say why. All
+eight pipe through an external host utility (`grep`, `sed`, `cat`); the flake is
+a transient failure to spawn one. `oils` handles that correctly — it reports the
+error via `spawn_error_message` and exits 126/127 — but it reports it on the
+command's **fd 2**, and the `run()` test helper captures **stdout only**. The
+assertion therefore shows `left: ""` against a builtin's expected output, which
+reads as that builtin having stopped producing output. It is not.
+
+**How it was seen.** Lane C's pre-merge `cargo test --workspace` run,
+2026-08-16: 1804 test binaries `ok`, `oils` `1488 passed; 8 failed`. Clean
+re-run of `-p oils --lib`: `1496 passed; 0 failed`. The trigger was lane C
+having two workspace runs live at once; the *legibility* problem is
+independent of that and will recur on any loaded machine.
+
+**The two conclusive data points**, for anyone who doubts the diagnosis:
+`builtin_diagnostics_honor_stderr_redirect` ran `cd /nodir 2>&1 | sed 's/^/E:/'`
+and got the shell's own diagnostic back complete and correct with the `E:`
+prefix simply absent — `sed` never ran. `local_dash_binds_a_variable_no_listing_reports`
+wrote five `grep -c` pipelines and got **four** lines; `grep -c` prints `0\n`
+when it matches nothing, so a missing line means no process, not no match.
+
+**Proper fix** (lane B's to make): have `run()` capture fd 2 and surface it in
+the panic message — no test in the file expects a spawn error it did not ask
+for, so it could even be asserted empty. One edit, covers all ~88 external-spawn
+sites. Optionally also convert the six self-filtering `grep`/`sed` pipelines to
+`case`/`while read`, which needs no spawn at all and makes those tests hermetic
+rather than merely legible.
+
+**Also learned:** never run two `cargo test --workspace` invocations against one
+`target/`. The earlier of lane C's two died with `os error 32` — "could not
+execute process colorpicker-….exe … being used by another process" — with
+nothing actually under test at the point of failure.

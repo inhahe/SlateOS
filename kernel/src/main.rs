@@ -660,6 +660,18 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("FATAL: Ada/SPARK FFI self-test failed: {}", e);
         cpu::halt_loop();
     }
+    // Say so on success too. Every other self-test in this tree ends `: OK`, and
+    // a silent one is indistinguishable from one that was never called — an
+    // `ada::selftest()` accidentally dropped from this sequence would look
+    // exactly like a passing boot. Printing the two bounds makes the line carry
+    // information rather than just presence: they are read back out of the Ada
+    // object, so the numbers are evidence the linkage resolved.
+    serial_println!(
+        "[ada]   FFI boundary self-test (linkage, calling convention, status enum, \
+         Max_Descriptors={}, Max_Queues={}): OK",
+        ada::MAX_DESCRIPTORS,
+        ada::MAX_QUEUES
+    );
 
     cputime::init();
     timekeeping::init();

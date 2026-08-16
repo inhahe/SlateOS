@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Terminal Emulator — graphical VT100/xterm terminal"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

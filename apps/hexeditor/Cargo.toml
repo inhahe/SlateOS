@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Hex Editor — binary file hex editor with data inspector, search, bookmarks"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Image Viewer — photo and image viewing with zoom and slideshow"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

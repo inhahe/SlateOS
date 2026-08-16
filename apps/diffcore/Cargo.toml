@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS shared diff/merge engine — Myers line diff, character-level inline diff, and diff3 three-way merge. Used by the File Diff tool and the text editors."
 
 [dependencies]
+
+[lints]
+workspace = true

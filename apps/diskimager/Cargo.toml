@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Disk Imager / ISO Tool — create, write, browse, and verify disk images"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

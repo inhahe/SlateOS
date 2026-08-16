@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Lock Screen — secure graphical lock screen with clock, password entry, and multi-user support"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

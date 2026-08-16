@@ -6,3 +6,6 @@ description = "SlateOS File Diff/Compare Tool — side-by-side, unified, and inl
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
 diffcore = { path = "../diffcore" }
+
+[lints]
+workspace = true

@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Network Scanner — IP/port scanning, host discovery, service detection, topology visualization"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

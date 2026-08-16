@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Task Scheduler — cron-like task scheduling with GUI"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

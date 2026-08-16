@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Process Explorer — graphical system monitor and task manager"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

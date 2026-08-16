@@ -9,3 +9,6 @@ guitk = { path = "../../gui/toolkit" }
 # from, so they share one model and one file rather than each keeping a copy.
 # See known-issues.md TD-THREE-INDEPENDENT-APPEARANCE-MODELS.
 appearance = { path = "../../gui/appearance" }
+
+[lints]
+workspace = true

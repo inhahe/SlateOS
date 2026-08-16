@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS App Launcher — quick launch dialog with search"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

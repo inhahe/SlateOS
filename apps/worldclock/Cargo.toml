@@ -12,3 +12,6 @@ guitk = { path = "../../gui/toolkit" }
 # place that may carry its own table of offsets. See tzrules/src/lib.rs's "Why
 # this is a crate and not a module".
 tzrules = { path = "../../tzrules" }
+
+[lints]
+workspace = true

@@ -23457,6 +23457,28 @@ size: a tree unpacked by an earlier run from an unverified tarball satisfies
 tarball would have changed nothing at all. It costs a second and is not even a
 rebuild, since `configure` and `make` below run unconditionally regardless.
 
+Both paths were exercised, not assumed — a pin whose *rejection* path has never
+run is one you are trusting on the strength of its happy case:
+
+| case | result |
+|---|---|
+| both copies good | resolves the scratch copy, `tar xf` from the verified path, link exit 0, 0 missing symbols |
+| scratch copy corrupted | ignored *loudly*, naming both hashes; falls through to the cache copy; builds |
+| both copies corrupted | `refusing to extract`, script exits **non-zero**, nothing is built |
+
+`pkgconf-slateos.elf` came out byte-identical (`9f0a7647f11a71c0…`) on all four
+rebuilds, including across the two different source paths, so this port is
+reproducible and a change in that hash is evidence rather than noise.
+
+One methodology note for whoever tests this next, because it cost a wrong
+conclusion here first: **`$`-expressions inside `wsl -d Ubuntu -- bash -c '…'`
+are eaten before WSL sees them**, single quotes notwithstanding. `…; echo
+"RC=$?"` reported `RC=` and a control `bash -c "exit 7"` reported `0` — which
+reads exactly like "the script refuses but exits 0", a serious bug and a
+phantom. Use `&& echo ZERO || echo NONZERO`, which contains no `$`, and it
+gives the true answer. The same artifact makes `echo "$SLATE_ROOT"` after
+sourcing `scripts/lib/worktree.sh` look like the file sets nothing.
+
 ## B-POSIX-CAP-KILL-IS-PROJECTED-FROM-A-PER-CHILD-GRANT, SO EVERY PROCESS THAT HAS FORKED REPORTS IT (lane B, 2026-08-16)
 
 **Status: open, deliberately.** The fix depends on a convention only lane A can

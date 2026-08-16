@@ -498,6 +498,24 @@ at once.
 | **C — Keep separate, and add a free-space floor to the tooling** | `boot-test.sh` and the test runner refuse to start below (say) 20 GB free and say why | Does not free anything; converts a corrupting failure into an honest refusal |
 | **D — Move the build output off `D:` entirely** | Compiler output goes to another volume; `D:` holds only source and the operator's data | Needs a volume with tens of GB free — operator knows whether one exists; also slower if that volume is slower |
 
+**Measured 2026-08-15, a few hours after the incident** (so you can size the
+options rather than guess at them):
+
+| Where | Build output |
+|---|---|
+| `os` (the integration checkout) | 59.1 GB |
+| `os-lane-b` | 40.4 GB |
+| `os-lane-c` | 35.0 GB |
+| `os-lane-a` | 3.5 GB — small only because it was deleted today to recover |
+| **total** | **138 GB** |
+| free on `D:` right now | **41 GB (2% of a 1.9 TB drive)** |
+
+Two things this makes concrete. First, the footprint is dominated by the
+**integration checkout**, which nobody actively builds in — it is the largest
+single consumer at 59 GB and the cheapest to reclaim, which makes B better than
+it looks on paper. Second, 41 GB free is *less* than a single full rebuild of
+all four trees would need, so the current margin is one careless afternoon wide.
+
 **Claude's recommendation: C now (it is Lane A's to do unilaterally and is
 strictly protective), plus A if you are willing to trade build parallelism.**
 A's serialisation is arguably a *bonus* rather than a cost here: concurrent lane

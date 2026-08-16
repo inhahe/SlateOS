@@ -71253,3 +71253,39 @@ twenty lines, not about the check. It was re-run as
 that can be saturated by benign output is not a check; recording the *reassurance*
 ("the repo stayed responsive") instead of the *result* would have been worse
 still, since it is evidence of nothing at all.
+
+### [A] TOOLING-A-EDITING-A-SHELL-SCRIPT-WHILE-IT-IS-RUNNING-CAN-DERAIL-THE-RUNNING-COPY — ⚠️ HAZARD, avoided 2026-08-15
+
+**Status:** not a bug in the repo; a standing hazard in how we work. Recorded
+because it was very nearly hit today and the failure would have been baffling.
+
+**The hazard.** `bash` does not read a script into memory and then run it. It
+reads it *incrementally*, remembering a byte offset into the file. If the file
+changes underneath a running shell, the shell resumes at its saved offset in
+the **new** bytes — which no longer mean what they did. The result is not a
+clean error: the shell executes whatever fragment now lives at that offset,
+producing syntax errors from lines that are perfectly valid, or, much worse,
+silently running a *different* command than the one on that line.
+
+**How it nearly happened.** `./scripts/boot-test.sh --bench` was running in the
+background (a ~17 min job). The next queued task was to add a free-space floor
+to `scripts/boot-test.sh` — i.e. to rewrite, in place, the exact file a live
+bash was mid-way through interpreting. Whether it corrupts depends on an
+implementation detail nobody should have to reason about: an editor that writes
+to a temp file and `rename()`s over the target is safe (the running shell keeps
+the old inode), while one that truncates and rewrites in place is not. Our
+editing tool's behaviour on Windows is not guaranteed to be the former.
+
+**What makes it nasty.** The damage lands in the *long-running background job*,
+not in the edit, so the two are separated by minutes and look unrelated. A
+boot test that dies with a syntax error at line 900 of a script that `bash -n`
+declares perfectly valid is a genuinely hard thing to diagnose, and the natural
+first hypothesis — "the script is broken" — is wrong.
+
+**Prescription.** Before editing any script, check whether a background task is
+currently executing it, and wait. This is cheap: the queued edit loses a few
+minutes; the alternative costs a confusing debugging session and a wasted run.
+The same applies to `scripts/run-timeout.py` and any other harness file, and it
+is *most* dangerous for exactly the files worth improving — the long-running
+harnesses, which are running precisely when you have the idle window that
+tempts you to improve them.

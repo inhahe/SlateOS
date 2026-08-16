@@ -58,6 +58,7 @@ use alloc::vec::Vec;
 use crate::norm_tables::{
     COMBINES_BACKWARD, CCC, MARKS, NO_COMPOSE, PAIRS, PAIRS_BY_PARTS, SINGLETONS,
 };
+use crate::khmer;
 use crate::thai;
 
 /// The first Hangul syllable, and the counts that make its composition
@@ -563,7 +564,11 @@ pub(crate) fn pieces(text: &str, has_glyph: impl Fn(char) -> bool) -> Vec<Piece>
     // separately and not folded into `needs_work`, because it is neither a
     // mark nor decomposable and so `needs_work` is right to say no to it —
     // it is a second reason to do the work, not a wider version of the first.
-    let work = needs_work(text) || thai::present(text);
+    // Khmer's five split vowel signs are asked about the same way and for the
+    // same reason: they are neither marks nor decomposable, so `needs_work` is
+    // right to say no to them, and taking them apart is a third separate
+    // reason to do the work. See [`khmer::split_matras`](crate::khmer).
+    let work = needs_work(text) || thai::present(text) || khmer::present(text);
     let mut out = if work {
         // Everything but Hangul. Which spelling of a Korean syllable to draw
         // depends on what the face covers, so it is `hangul::preprocess` that
@@ -575,6 +580,12 @@ pub(crate) fn pieces(text: &str, has_glyph: impl Fn(char) -> bool) -> Vec<Piece>
         // there is nothing to reorder or join.
         text.char_indices().map(|(at, ch)| (ch, at)).collect()
     };
+    // Before `fit_to_face` rather than after, because the halves it produces
+    // are ordinary characters the face may or may not have and the fitting
+    // pass is entitled to look at them — and because a split vowel the face
+    // *cannot* split has to reach `fit_to_face` whole, which is what happens
+    // when this declines.
+    khmer::split_matras(&mut out, &has_glyph);
     fit_to_face(&mut out, has_glyph);
     if work {
         // After `fit_to_face` and not before: splitting a character the face

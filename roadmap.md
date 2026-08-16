@@ -704,9 +704,37 @@ Roadmap:
   and takes the first the *font* registers. Sweep after the fix: 556 faces ×
   35 strings, `agree` **18235**, `reordered` 0, `misplaced` 0, `differ` 1176
   — every one of them the same composed-diacritics question as C-Q1.
-  Next unblocked step is the rest of shaping: no Khmer/Myanmar/Thai/USE
-  shapers (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`) and no device tables
-  in `ValueRecord`. Vello itself waits on `[A]`'s GPU driver.
+  Thai/Lao is now done as well — the first of the four missing shapers, and
+  two separate pieces (§431, §432). SARA AM, the Thai letter drawn as two
+  marks in two places that Unicode gives no decomposition, is split between
+  decomposition and the mark sort, an ordering that turns out to be
+  load-bearing rather than incidental: sorting first puts the nikhahit on
+  the wrong side of a tone mark. Sweep after it: 556 faces × 40 strings,
+  `agree` 18806 → **21015**, `reordered` 3 → **0**, `differ` 3382 → **1176**
+  — every Thai and Lao string agreeing on every face, and the residual the
+  same composed-diacritics bucket as before. The second piece, the
+  private-use fallback for Thai fonts predating OpenType, could not be
+  measured against the host at all: **zero** of the 556 faces carry a single
+  Thai private-use glyph, so a sweep over them would have reported agreement
+  it never tested. Three faces with no layout tables at all were synthesized
+  with fontTools to give it an oracle (Windows forms, Mac forms, and a
+  no-forms control the pass must leave untouched) — 78 of 78 agree, and the
+  oracle immediately caught that the pass was gated on the wrong predicate
+  and never fired at all. Khmer is done too (step 2 of 3) — the Indic model
+  plus two moves, a COENG+RO pair jumping to the head of its syllable and a
+  pre-base vowel jumping ahead of it, with the reordering running *before* the
+  first lookup rather than after `locl`/`ccmp`. Sweep: `agree` 27421 →
+  **27687**, `differ` back to the same **1176** baseline, `reordered` 0. And
+  §431 paid for itself twice: no installed face has a `cfar` lookup — nor
+  `pres`, nor `psts` — so the host could not falsify the masks at all, and the
+  probe font built to disagree found `locl`/`ccmp`/`blwf`/`abvf`/`pstf` being
+  applied **twice** in *both* the Khmer and the long-shipping Indic shaper.
+  1 of 45 probe strings agreed before the fix, 43 after (§433); the two
+  remaining are a crate-wide default-ignorable bug, filed as
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`. Next unblocked step is Myanmar,
+  then USE (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`, step 2 of 3 done), the
+  ignorable fix, and no device tables in `ValueRecord`. Vello itself waits on
+  `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

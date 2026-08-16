@@ -636,8 +636,13 @@ impl ScaledFont {
         // deriving. Neither is free — one is a binary search of the Indic
         // table, the other of the bidi table — and neither is read anywhere
         // else, so a line of Latin pays for neither.
-        let mut indic =
-            !simple && runs.first().is_some_and(|&(_, t)| Script::shaping(t).is_some());
+        // Khmer counts here too, and not through `Script::shaping`: it reads the
+        // same [`Char`] out of the same table — the two shapers share one
+        // category enum — but has a shaper and a script tag of its own. See
+        // [`indic`](crate::indic).
+        let categorised =
+            |t: Option<ScriptTags>| Script::shaping(t).is_some() || crate::khmer::shapes(t);
+        let mut indic = !simple && runs.first().is_some_and(|&(_, t)| categorised(t));
         for (i, &(ch, cluster)) in pieces.iter().enumerate() {
             while runs.get(run).is_some_and(|&(end, _)| end <= i) {
                 run = run.saturating_add(1);
@@ -651,8 +656,7 @@ impl ScaledFont {
                 zeroed = runs
                     .get(run)
                     .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t, simple));
-                indic = !simple
-                    && runs.get(run).is_some_and(|&(_, t)| Script::shaping(t).is_some());
+                indic = !simple && runs.get(run).is_some_and(|&(_, t)| categorised(t));
             }
             // A tab has no glyph. Drawn through `cmap` it comes out as the
             // missing-glyph box, one space wide; the width every caller wants

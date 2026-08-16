@@ -1228,6 +1228,18 @@ impl Face {
     ) {
         let subs = self.substitutions.as_ref();
         let chosen = self.gsub_chosen_script(script);
+        // Khmer is asked about first and without the `shaped_as_default`
+        // filter, because `khmr` is in
+        // [`fallback::ALWAYS_COMPLEX`](crate::fallback) — a face that files its
+        // features under `latn` does not get to call Khmer's reordering off,
+        // since text with an unmoved pre-base vowel is not plainer but wrong.
+        // The two arms are exclusive: no script tag is both.
+        if crate::khmer::shapes(script) {
+            crate::khmer::shape(&self.data, subs, script, lang, glyphs, |ch| {
+                self.glyph_index(ch)
+            });
+            return;
+        }
         match Script::shaping(script)
             .filter(|_| !crate::fallback::shaped_as_default(script, chosen))
         {

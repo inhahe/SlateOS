@@ -133,6 +133,48 @@ CORPUS = [
     "\\u0e40\\u0e01\\u0e34\\u0e14",
     # Devanagari, the reason script tags have two spellings.
     "\\u0939\\u093f\\u0928\\u094d\\u0926\\u0940",
+    # --- Khmer, which the Khmer shaper is for ---
+    #
+    # Khmer stacks a consonant under another by writing COENG (U+17D2) between
+    # them, and the shaper has two moves: a left vowel goes to the front of its
+    # syllable, and a COENG+RO pair goes to the front *ahead of it*. Neither is
+    # in the stored order, so a face's own rules cannot do either.
+    #
+    # `khmae` -- "Khmer". KHA, COENG, MO, AE, RO: one subscript and one left
+    # vowel, which is the ordinary case and the one that breaks most visibly.
+    "\\u1781\\u17d2\\u1798\\u17c2\\u179a",
+    # The whole word, `phiesaa khmae` -- "the Khmer language". A systematic
+    # breakage shows here as more than an edge case.
+    "\\u1797\\u17b6\\u179f\\u17b6\\u1781\\u17d2\\u1798\\u17c2\\u179a",
+    # NGO, COENG, RO, COENG, KO and NGO, COENG, KO, COENG, RO -- HarfBuzz's own
+    # pair, from the comment in `reorder_consonant_syllable`. The two differ
+    # only in which subscript is RO, and telling them apart is the entire point
+    # of the `cfar` feature: the first moves COENG+RO to the front and marks
+    # what follows, the second leaves it where it is.
+    "\\u1784\\u17d2\\u179a\\u17d2\\u1782",
+    "\\u1784\\u17d2\\u1782\\u17d2\\u179a",
+    # NYO with a below vowel, NYO with a subscript NYO, and both at once --
+    # HarfBuzz's three-sequence Uniscribe test (issue #974), which is what
+    # settled that the basic features are applied together rather than one
+    # stage each. NYO loses its tail when something is subscripted under it.
+    "\\u1789\\u17bc",
+    "\\u1789\\u17d2\\u1789",
+    "\\u1789\\u17d2\\u1789\\u17bc",
+    # The five split vowels, which Unicode gives no decomposition and the
+    # shaper's own `decompose` hook has to split: each is drawn as a left part
+    # plus a second part, so a shaper that leaves them whole asks the face for
+    # one glyph where it wants two.
+    "\\u1780\\u17be\\u0020\\u1780\\u17bf\\u0020\\u1780\\u17c0",
+    "\\u1780\\u17c4\\u0020\\u1780\\u17c5",
+    # ROBAT (U+17CC) over a consonant -- its own category in the grammar, and
+    # the only mark allowed before the first COENG.
+    "\\u1780\\u17cc",
+    # A bare COENG with nothing to subscript: a broken cluster, which gets a
+    # dotted circle to hang from.
+    "\\u17d2\\u1780",
+    # Khmer digits and a lek attak, which reach no syllable rule at all and are
+    # the control: a difference here is not the shaper.
+    "\\u17e1\\u17e2\\u17e3",
     # Scriptless text, which selects the font's default features.
     "123 456",
     # --- language ---

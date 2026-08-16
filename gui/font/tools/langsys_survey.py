@@ -68,6 +68,7 @@ WANTED = frozenset(
     nukt akhn rphf rkrf pref blwf abvf half pstf vatu cjct pres abvs blws
     psts haln
     ljmo vjmo tjmo
+    cfar
     """.split()
 )
 

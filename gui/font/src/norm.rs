@@ -55,10 +55,10 @@
 
 use alloc::vec::Vec;
 
-use crate::norm_tables::{
-    COMBINES_BACKWARD, CCC, MARKS, NO_COMPOSE, PAIRS, PAIRS_BY_PARTS, SINGLETONS,
-};
 use crate::khmer;
+use crate::norm_tables::{
+    CCC, COMBINES_BACKWARD, MARKS, NO_COMPOSE, PAIRS, PAIRS_BY_PARTS, SINGLETONS,
+};
 use crate::thai;
 
 /// The first Hangul syllable, and the counts that make its composition
@@ -236,19 +236,86 @@ const IGNORABLE: &[(u32, u32)] = &[
     (0x000E_0000, 0x000E_0FFF), // language tags, variation selectors supplement
 ];
 
-/// Whether `ch` is one of the characters shaping consumes and never draws:
-/// a joiner, a soft hyphen, a bidi control, a variation selector.
+/// What kind of never-drawn character a glyph came from, if any.
+///
+/// All five are erased at the end of shaping — that part is one question with
+/// one answer, [`Ignorable::erased`]. The distinction exists for the *other*
+/// question: whether a lookup walking the run is allowed to step over the
+/// glyph on its way to the next one. Three of the characters are exempt from
+/// that stepping in some contexts and not others, and which three is not a
+/// matter of taste:
+///
+/// * **`Zwnj`** is what a writer types to say "do *not* join these". A lookup
+///   that stepped over it in `GSUB` would form exactly the ligature the
+///   character was inserted to prevent.
+/// * **`Zwj`** says the opposite, and is stepped over in `GSUB` precisely so
+///   that `f ZWJ i` still reaches the `fi` ligature. The Indic-family shapers
+///   turn that off for their own features, where a joiner selects between
+///   conjunct forms and is not decoration.
+/// * **`Hidden`** — the Mongolian variation selectors, the tag characters and
+///   `CGJ` — must be visible to `GSUB` because a face's rules name them, and
+///   invisible to `GPOS` because nothing attaches to them.
+///
+/// Everything else is `Plain`: stepped over by any lookup that is looking
+/// past something.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Ignorable {
+    /// Not one of these characters at all — an ordinary, drawable glyph.
+    #[default]
+    No,
+    /// A never-drawn character with no special standing in lookup matching.
+    Plain,
+    /// U+200C ZERO WIDTH NON-JOINER.
+    Zwnj,
+    /// U+200D ZERO WIDTH JOINER.
+    Zwj,
+    /// A never-drawn character that `GSUB` must still see: the Mongolian free
+    /// variation selectors (U+180B..U+180D, U+180F), the language tag
+    /// characters (U+E0020..U+E007F), and U+034F COMBINING GRAPHEME JOINER.
+    Hidden,
+}
+
+impl Ignorable {
+    /// Whether this glyph is erased once shaping is over.
+    ///
+    /// True for every variant but [`Ignorable::No`]: the exemptions above are
+    /// about *matching*, not about drawing, and nothing here is ever drawn.
+    #[must_use]
+    pub(crate) fn erased(self) -> bool {
+        self != Self::No
+    }
+}
+
+/// Which of the characters shaping consumes and never draws `ch` is: a joiner,
+/// a soft hyphen, a bidi control, a variation selector.
 ///
 /// The caller's obligation is *not* to skip them — they take part in shaping,
 /// and a joiner dropped early would stop making the ligature it exists to
 /// request — but to erase them once shaping is over, which is what
 /// [`SubGlyph::ignorable`](crate::gsub::SubGlyph) tracks and
 /// [`ScaledFont::shape`](crate::ScaledFont::shape) acts on.
+///
+/// The `Hidden` set is HarfBuzz's `UPROPS_MASK_HIDDEN`, assigned in
+/// `_hb_glyph_info_set_unicode_props`. Note that U+180E, alone among the
+/// Mongolian block's ignorables, is *not* hidden: it is a vowel separator
+/// rather than a variation selector, and no rule names it. U+180F, which reads
+/// like a fourth free variation selector and which HarfBuzz's props code does
+/// name, never reaches that code at all — the ignorable range above stops at
+/// U+180E — so it is an ordinary drawn character here, as measured against
+/// HarfBuzz 14.3.0.
 #[must_use]
-pub(crate) fn is_default_ignorable(ch: char) -> bool {
+pub(crate) fn ignorable(ch: char) -> Ignorable {
     let cp = ch as u32;
     let i = IGNORABLE.partition_point(|&(_, hi)| hi < cp);
-    IGNORABLE.get(i).is_some_and(|&(lo, _)| cp >= lo)
+    if IGNORABLE.get(i).is_none_or(|&(lo, _)| cp < lo) {
+        return Ignorable::No;
+    }
+    match cp {
+        0x0000_200C => Ignorable::Zwnj,
+        0x0000_200D => Ignorable::Zwj,
+        0x0000_034F | 0x0000_180B..=0x0000_180D | 0x000E_0020..=0x000E_007F => Ignorable::Hidden,
+        _ => Ignorable::Plain,
+    }
 }
 
 /// Whether `text` can possibly change under [`nfc`].
@@ -373,7 +440,9 @@ fn compose_pair(a: char, b: char, hangul: Hangul) -> Option<char> {
     let key = (a as u32, b as u32);
     let i = PAIRS_BY_PARTS
         .binary_search_by_key(&key, |&j| {
-            PAIRS.get(usize::from(j)).map_or((0, 0), |&(_, x, y)| (x, y))
+            PAIRS
+                .get(usize::from(j))
+                .map_or((0, 0), |&(_, x, y)| (x, y))
         })
         .ok()?;
     let row = usize::from(*PAIRS_BY_PARTS.get(i)?);
@@ -475,8 +544,14 @@ fn sort_marks(pieces: &mut [Piece], class: impl Fn(char) -> u8) {
 /// is kept, and kept exact, because "what is this text in NFC" is a different
 /// question from "how should this face draw it" and the distinction is the
 /// point of the split; the tests below hold it to real NFC either way.
-#[cfg_attr(not(test), allow(dead_code, reason = "the text-question half of the \
-    normalize split; only the drawing half has callers today"))]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the text-question half of the \
+    normalize split; only the drawing half has callers today"
+    )
+)]
 #[must_use]
 pub(crate) fn nfc(text: &str) -> Vec<Piece> {
     // NFC is NFC: a question about *text* gets the Unicode answer, Hangul
@@ -769,37 +844,36 @@ mod tests {
     #[test]
     fn the_ignorables_are_the_characters_that_instruct_the_shaper() {
         for ch in [
-            '\u{ad}',     // SOFT HYPHEN, the one that draws a visible hyphen
-            '\u{34f}',    // COMBINING GRAPHEME JOINER
-            '\u{61c}',    // ARABIC LETTER MARK
-            '\u{17b4}',   // KHMER VOWEL INHERENT AQ
-            '\u{17b5}',   // ...and AA, the other end of that range
-            '\u{180b}',   // MONGOLIAN FREE VARIATION SELECTOR ONE
-            '\u{200b}',   // ZERO WIDTH SPACE
-            '\u{200c}',   // ZWNJ
-            '\u{200d}',   // ZWJ
-            '\u{200f}',   // RIGHT-TO-LEFT MARK
-            '\u{202b}',   // RIGHT-TO-LEFT EMBEDDING
-            '\u{2060}',   // WORD JOINER
-            '\u{fe0f}',   // VARIATION SELECTOR-16
-            '\u{feff}',   // ZERO WIDTH NO-BREAK SPACE
-            '\u{1d173}',  // MUSICAL SYMBOL BEGIN BEAM
-            '\u{e0020}',  // TAG SPACE
-            '\u{e0100}',  // VARIATION SELECTOR-17
+            '\u{ad}',    // SOFT HYPHEN, the one that draws a visible hyphen
+            '\u{34f}',   // COMBINING GRAPHEME JOINER
+            '\u{61c}',   // ARABIC LETTER MARK
+            '\u{17b4}',  // KHMER VOWEL INHERENT AQ
+            '\u{17b5}',  // ...and AA, the other end of that range
+            '\u{180b}',  // MONGOLIAN FREE VARIATION SELECTOR ONE
+            '\u{200b}',  // ZERO WIDTH SPACE
+            '\u{200c}',  // ZWNJ
+            '\u{200d}',  // ZWJ
+            '\u{200f}',  // RIGHT-TO-LEFT MARK
+            '\u{202b}',  // RIGHT-TO-LEFT EMBEDDING
+            '\u{2060}',  // WORD JOINER
+            '\u{fe0f}',  // VARIATION SELECTOR-16
+            '\u{feff}',  // ZERO WIDTH NO-BREAK SPACE
+            '\u{1d173}', // MUSICAL SYMBOL BEGIN BEAM
+            '\u{e0020}', // TAG SPACE
+            '\u{e0100}', // VARIATION SELECTOR-17
         ] {
-            assert!(is_default_ignorable(ch), "{ch:?}");
+            assert!(ignorable(ch).erased(), "{ch:?}");
         }
         for ch in [
-            'a', ' ', '-',
-            '\u{ac}',    // one below SOFT HYPHEN
-            '\u{ae}',    // one above
-            '\u{17b3}',  // one below the Khmer pair
-            '\u{17b6}',  // one above it — a real vowel sign, drawn
-            '\u{200a}',  // HAIR SPACE, which is a space and *is* drawn
-            '\u{2010}',  // HYPHEN, the visible one U+00AD is confused with
+            'a', ' ', '-', '\u{ac}',   // one below SOFT HYPHEN
+            '\u{ae}',   // one above
+            '\u{17b3}', // one below the Khmer pair
+            '\u{17b6}', // one above it — a real vowel sign, drawn
+            '\u{200a}', // HAIR SPACE, which is a space and *is* drawn
+            '\u{2010}', // HYPHEN, the visible one U+00AD is confused with
             '\u{fdff}', '\u{ff00}',
         ] {
-            assert!(!is_default_ignorable(ch), "{ch:?}");
+            assert!(!ignorable(ch).erased(), "{ch:?}");
         }
     }
 
@@ -810,15 +884,47 @@ mod tests {
     #[test]
     fn the_ignorable_set_is_harfbuzzs_and_not_unicodes() {
         // In HarfBuzz's list, removed from Unicode's property in 6.3.
-        assert!(is_default_ignorable('\u{180e}'));
+        assert!(ignorable('\u{180e}').erased());
         // In Unicode's property, absent from HarfBuzz's list: the shorthand
         // format controls and the Hangul fillers.
-        assert!(!is_default_ignorable('\u{1bca0}'));
-        assert!(!is_default_ignorable('\u{115f}'));
-        assert!(!is_default_ignorable('\u{3164}'));
+        assert!(!ignorable('\u{1bca0}').erased());
+        assert!(!ignorable('\u{115f}').erased());
+        assert!(!ignorable('\u{3164}').erased());
         // ...and one that *is* in both, so the test cannot pass by the
         // predicate having become uniformly false.
-        assert!(is_default_ignorable('\u{2065}'));
+        assert!(ignorable('\u{2065}').erased());
+    }
+
+    /// Which *kind* of ignorable each one is, which is what decides whether a
+    /// lookup may step over it. Getting `Hidden` wrong is invisible in the
+    /// output for a face that never names a variation selector — and wrong on
+    /// every Mongolian face that does.
+    #[test]
+    fn the_joiners_and_the_hidden_ones_are_told_apart_from_the_rest() {
+        assert_eq!(ignorable('\u{200c}'), Ignorable::Zwnj);
+        assert_eq!(ignorable('\u{200d}'), Ignorable::Zwj);
+        // CGJ, the Mongolian free variation selectors, and the tag characters:
+        // never drawn, but a `GSUB` rule may name them.
+        assert_eq!(ignorable('\u{34f}'), Ignorable::Hidden);
+        assert_eq!(ignorable('\u{180b}'), Ignorable::Hidden);
+        assert_eq!(ignorable('\u{180d}'), Ignorable::Hidden);
+        assert_eq!(ignorable('\u{e0020}'), Ignorable::Hidden);
+        assert_eq!(ignorable('\u{e007f}'), Ignorable::Hidden);
+        // U+180E sits inside the same table range as the selectors around it
+        // and is *not* hidden: it is a vowel separator, and no rule names it.
+        assert_eq!(ignorable('\u{180e}'), Ignorable::Plain);
+        // Either side of the tag range, which is a sub-range of E0000..E0FFF:
+        // both are ignorable, neither is hidden.
+        assert_eq!(ignorable('\u{e0001}'), Ignorable::Plain);
+        assert_eq!(ignorable('\u{e0100}'), Ignorable::Plain);
+        assert_eq!(ignorable('\u{200b}'), Ignorable::Plain);
+        assert_eq!(ignorable('a'), Ignorable::No);
+        // U+180F FVS FOUR reads like a fourth member of the hidden set and is
+        // not one: HarfBuzz's ignorable range stops at U+180E, so U+180F is an
+        // ordinary character that its font draws. Measured against HarfBuzz
+        // 14.3.0, which leaves `a\u{180f}b` as .notdef rather than replacing it
+        // with the space glyph the way it does for every character above.
+        assert_eq!(ignorable('\u{180f}'), Ignorable::No);
     }
 
     /// The table has to be sorted and disjoint, because the lookup is a binary
@@ -849,7 +955,10 @@ mod tests {
             let mut got: Vec<u8> = (lo..=hi).map(permute).collect();
             got.sort_unstable();
             let want: Vec<u8> = (lo..=hi).collect();
-            assert_eq!(got, want, "classes {lo}..={hi} are not permuted onto themselves");
+            assert_eq!(
+                got, want,
+                "classes {lo}..={hi} are not permuted onto themselves"
+            );
         }
         // Tibetan is stated over the classes Unicode *assigns* rather than
         // over the range: 131 is unassigned, so 132 is free to take it and
@@ -925,7 +1034,14 @@ mod tests {
         // One from each of a few blocks, so a table regenerated with the ranges
         // mis-sorted cannot pass: a binary search over a broken table finds
         // whatever it happens to land on.
-        for ch in ['\u{301}', '\u{5b8}', '\u{64e}', '\u{94d}', '\u{fe00}', '\u{e0100}'] {
+        for ch in [
+            '\u{301}',
+            '\u{5b8}',
+            '\u{64e}',
+            '\u{94d}',
+            '\u{fe00}',
+            '\u{e0100}',
+        ] {
             assert!(is_mark(ch), "{ch:?}");
         }
     }
@@ -1063,7 +1179,14 @@ mod tests {
     #[test]
     fn the_fast_path_only_skips_text_that_would_not_change() {
         for text in [
-            "hello", "1/2", "x\u{2013}y", "\u{e9}", "e\u{301}", "\u{ac00}", "\u{212b}", "",
+            "hello",
+            "1/2",
+            "x\u{2013}y",
+            "\u{e9}",
+            "e\u{301}",
+            "\u{ac00}",
+            "\u{212b}",
+            "",
         ] {
             if !needs_work(text) {
                 assert_eq!(
@@ -1091,7 +1214,9 @@ mod tests {
         assert_eq!(chars(&nfc("\u{cbf}\u{cd5}")), "\u{cc0}");
         // The filler at the bottom of the trailing-consonant range is not a
         // jamo and must not drag a plain run onto the slow path.
-        assert!(!needs_work(&String::from(char::from_u32(T_BASE).unwrap_or('a'))));
+        assert!(!needs_work(&String::from(
+            char::from_u32(T_BASE).unwrap_or('a')
+        )));
     }
 
     /// A face that cannot draw the composed form gets the pieces back.

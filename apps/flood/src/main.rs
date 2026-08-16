@@ -223,23 +223,22 @@ impl FloodIt {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, modifiers, .. })
-                if *modifiers == Modifiers::NONE => {
-                    match key {
-                        Key::Num1 => self.choose_color(0),
-                        Key::Num2 => self.choose_color(1),
-                        Key::Num3 => self.choose_color(2),
-                        Key::Num4 => self.choose_color(3),
-                        Key::Num5 => self.choose_color(4),
-                        Key::Num6 => self.choose_color(5),
-                        Key::N => self.new_game(),
-                        Key::H => self.show_help = !self.show_help,
-                        Key::S => self.set_size(8),
-                        Key::M => self.set_size(14),
-                        Key::L => self.set_size(18),
-                        _ => {}
-                    }
+            Event::Key(KeyEvent { key, modifiers, .. }) if *modifiers == Modifiers::NONE => {
+                match key {
+                    Key::Num1 => self.choose_color(0),
+                    Key::Num2 => self.choose_color(1),
+                    Key::Num3 => self.choose_color(2),
+                    Key::Num4 => self.choose_color(3),
+                    Key::Num5 => self.choose_color(4),
+                    Key::Num6 => self.choose_color(5),
+                    Key::N => self.new_game(),
+                    Key::H => self.show_help = !self.show_help,
+                    Key::S => self.set_size(8),
+                    Key::M => self.set_size(14),
+                    Key::L => self.set_size(18),
+                    _ => {}
                 }
+            }
             Event::Mouse(MouseEvent { x, y, kind }) => {
                 if matches!(kind, MouseEventKind::Press(MouseButton::Left)) {
                     self.handle_mouse(*x, *y);

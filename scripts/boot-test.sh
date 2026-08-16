@@ -443,6 +443,31 @@ WAIT_MARKER="BOOT_OK"
 # own twin be written up as the cleanest run the instruments could describe.
 # See known-issues.md B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING.
 HOST_LOAD="unknown"
+# Refuse to start a build below this many GiB free on the build volume
+# (0 disables).  Q47 option C in open-questions.md, which is Lane A's to take
+# unilaterally because it is purely protective: it frees nothing and changes no
+# build, it only converts a corrupting failure into an honest refusal.
+#
+# WHY, concretely: on 2026-08-15 `D:` reached *zero* bytes free.  An edit that
+# was half-written when the space ran out left a kernel source file **empty** —
+# 18 KB of code replaced by nothing.  That one was already committed and came
+# back from git in under a minute; five other files being edited at that moment
+# were not committed and would have been lost outright.
+#
+# A disk-full build does not fail cleanly, which is the real argument for a
+# floor rather than a post-hoc check.  A link step that dies part-way can leave
+# a stale kernel image staged in the ESP, and a later --no-build run then boots
+# that image *as if it were current* — so the harness reports on code that was
+# never compiled.  Failing before the build starts is the only point at which
+# that is cheap.
+#
+# 20 GiB is the figure proposed in Q47 and is a floor, not an estimate of what a
+# build needs: measured the same day, the four worktrees held 138 GB of build
+# output between them (59.1 / 40.4 / 35.0 / 3.5), so 20 GiB is well under one
+# full rebuild of all four.  It is meant to leave enough room that the *editor*
+# and git keep working while a build is refused — recovering costs a
+# `cargo clean`, and losing an uncommitted file costs the work.
+MIN_FREE_GB="${BOOT_TEST_MIN_FREE_GB:-20}"
 
 # Parse args
 for arg in "$@"; do
@@ -460,8 +485,60 @@ for arg in "$@"; do
         --stall-secs=*) STALL_SECS="${arg#*=}" ;;
         --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
         --host-load=*) HOST_LOAD="${arg#*=}" ;;
+        --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
     esac
 done
+
+# Free-space floor (Q47 option C).  See MIN_FREE_GB above for why.
+#
+# Reports one of three outcomes and never conflates them, because "the check
+# could not run" reads exactly like "the check passed" if you let it:
+#   ok      — measured, and above the floor
+#   refuse  — measured, and below it (exit 1 before anything is built)
+#   unknown — df did not produce a number; warn loudly and continue
+#
+# Continuing on `unknown` is deliberate: this guard is protective, not
+# load-bearing, and a df that cannot parse must not be able to block every boot
+# test on every machine.  But it says so, rather than printing nothing and
+# letting a silent skip pass for a clean bill of health.
+check_free_space() {
+    local phase="$1"
+    [ "$MIN_FREE_GB" = "0" ] && return 0
+
+    # -P forces POSIX single-line output: without it a long filesystem name
+    # wraps onto its own line and $4 is then the wrong column.
+    local avail_kib
+    avail_kib="$(df -Pk "$PROJECT_ROOT" 2>/dev/null | awk 'NR==2 {print $4}')"
+
+    case "$avail_kib" in
+        ''|*[!0-9]*)
+            echo "WARNING: could not measure free space on $PROJECT_ROOT " \
+                 "(df gave '${avail_kib:-no output}'); the ${MIN_FREE_GB} GiB " \
+                 "floor is NOT being enforced for this run." >&2
+            return 0
+            ;;
+    esac
+
+    local avail_gb=$((avail_kib / 1024 / 1024))
+    if [ "$avail_gb" -lt "$MIN_FREE_GB" ]; then
+        echo "" >&2
+        echo "ERROR: only ${avail_gb} GiB free on the build volume; the floor is ${MIN_FREE_GB} GiB (${phase})." >&2
+        echo "" >&2
+        echo "Refusing to continue rather than risk a disk-full build.  On 2026-08-15 this" >&2
+        echo "volume hit zero bytes free and a half-written edit truncated a kernel source" >&2
+        echo "file to zero bytes; a part-way link can also leave a stale kernel staged in the" >&2
+        echo "ESP, which a later --no-build run boots as if it were current." >&2
+        echo "" >&2
+        echo "To free space, prune build output from a worktree nobody is building in:" >&2
+        echo "    cargo clean --manifest-path '<other-worktree>/Cargo.toml'" >&2
+        echo "The integration checkout (…/os) is usually the largest and the safest --" >&2
+        echo "target/ is entirely regenerable, so this costs a rebuild and never source." >&2
+        echo "" >&2
+        echo "To override for one run:  --min-free-gb=N   (or BOOT_TEST_MIN_FREE_GB=N, 0 disables)" >&2
+        exit 1
+    fi
+    echo "Free space OK: ${avail_gb} GiB on the build volume (floor ${MIN_FREE_GB} GiB, ${phase})."
+}
 
 # Validated here rather than passed through, so a typo ("--host-load=quiet")
 # fails the run outright instead of being silently recorded as an unknown value
@@ -859,6 +936,7 @@ fi
 
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
+    check_free_space "before building"
     echo "=== Building kernel ==="
     CARGO="${CARGO:-cargo}"
     # Try full path on Windows if cargo not in PATH
@@ -875,6 +953,14 @@ if [ "$NO_STAGE" -eq 0 ] && [ ! -f "$KERNEL_BIN" ]; then
 fi
 
 # Step 2: Stage boot files
+#
+# Checked a second time, and not redundantly: staging copies a ~200 MiB kernel
+# image into build/esp, and the failure this whole floor exists to prevent is a
+# *partial* write leaving a stale-or-truncated image that a later --no-build run
+# boots as if it were current.  The pre-build check cannot cover this, because
+# the build itself is what consumes the margin.  This also covers --no-build and
+# --no-stage callers, which skip the first check entirely.
+check_free_space "before staging"
 echo "=== Staging boot files ==="
 mkdir -p "$ESP_DIR/EFI/BOOT" "$ESP_DIR/boot"
 cp "$PROJECT_ROOT/limine/BOOTX64.EFI" "$ESP_DIR/EFI/BOOT/BOOTX64.EFI"

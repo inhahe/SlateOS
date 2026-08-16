@@ -472,7 +472,7 @@ the `profile` history field, which is common to all three options.
 
 ---
 
-## Q47 — [A] The `D:` drive filled to 0 bytes free and destroyed a source file. Should the three lanes share one build-output directory? — Status: OPEN
+## Q47 — [A] The `D:` drive filled to 0 bytes free and destroyed a source file. Should the three lanes share one build-output directory? — Status: OPEN (narrowed — C is done; the question is now only A vs B)
 
 **In short:** The drive the project lives on ran completely out of space today.
 An edit that was half-written when the space ran out left one kernel source
@@ -525,12 +525,31 @@ would make the performance numbers more trustworthy, not less. But that is a
 real change to how all three agents work, which is why it is not being made
 unilaterally.
 
-**If never answered:** the disk fills again. Today's damage was one committed
-file and cost a minute; the same event during a large uncommitted change loses
-that change outright. It also degrades quietly first — builds and boot tests
-start failing in confusing ways (a link step dying part-way can leave a stale
-kernel image staged, which `--no-build` will then boot as if it were current)
-before anything says "disk full".
+**Option C is DONE (2026-08-15, lane A) — you are no longer choosing whether to
+have a safety net, only how to pay for the space.** `scripts/boot-test.sh` now
+refuses to build or stage below **20 GiB** free, naming the incident and telling
+you which worktree to prune. Override per run with `--min-free-gb=N`, or
+`BOOT_TEST_MIN_FREE_GB=N` (0 disables). It is checked twice — before the build
+and again before staging — because the build is itself what consumes the margin,
+and it is staging a partial ~200 MiB kernel image that produces the
+boots-a-stale-kernel failure. If `df` cannot produce a number it prints a warning
+saying the floor is *not* being enforced, rather than skipping silently: a check
+that cannot run must not look like a check that passed.
+
+This does not free a single byte — it converts a corrupting failure into an
+honest refusal, which is why it did not need your decision. **A vs B still does.**
+
+**Also worth re-measuring before you decide:** free space on `D:` is **91 GiB**
+as of this update, up from the 41 GiB in the table above, because the other lanes
+pruned during the day. So the immediate emergency is over and the choice can be
+made on its merits rather than under pressure.
+
+**If never answered:** the disk fills again — more slowly now, and it will
+announce itself as a refused boot test rather than as a truncated source file.
+Today's damage was one committed file and cost a minute; the same event during a
+large uncommitted change loses that change outright. Note the floor protects the
+*harness* only: a `cargo build` you run by hand, or an editor writing a file, is
+still unguarded, so this reduces the blast radius without removing it.
 
 ---
 

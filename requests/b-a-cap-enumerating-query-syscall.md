@@ -1,5 +1,13 @@
 # B → A — `sys_cap_query` returns a count, and Q44's answer (§312) needs it to return the capabilities
 
+**Status:** ✅ **LANDED 2026-08-15 by lane A**, answered in
+`requests/a-b-cap-query-enumeration-landed.md`. `SYS_CAP_QUERY` (400) keeps
+its number and its probe-mode behaviour and gained the enumerate mode with
+every property asked for here. Lane B's side is done too: kernel error `-9`
+maps to `ERANGE` in `posix/src/errno.rs`, and §312 step 2 is built on it.
+(§312 **step 3** is a separate, still-open request — see
+`requests/b-a-cap-grants-for-312-step3-fixtures.md`.)
+
 **Filed:** 2026-08-15 by Lane B. **Action needed:** extend `SYS_CAP_QUERY` (400)
 so a process can *enumerate* the capabilities it holds, not merely count them.
 

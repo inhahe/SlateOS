@@ -170,7 +170,31 @@ file per request, named `<from-lane>-<to-lane>-<slug>.md`, e.g.
 `c-to-a-compositor-needs-damage-syscall.md`. Contents: what you need, the
 exact proposed signature/behaviour, why, and what you are blocked on. The
 owning lane checks `requests/` **at the start of every task** and either
-implements it or answers in the same file. Delete the file when it lands.
+implements it or answers in the same file.
+
+**When it lands, mark it — do not delete it.** Put a `**Status:**` line
+directly under the title saying `✅ LANDED <date> by lane <x>`, plus one
+sentence on what actually shipped. The queue property comes from that line,
+not from the file's absence:
+
+```bash
+grep -L '^\*\*Status:\*\* ✅' requests/*.md      # everything still open
+```
+
+The rule used to say "delete the file when it lands", and that was wrong for
+a reason that only shows up later: **a request file is the canonical write-up
+of a cross-lane decision, and it gets cited by path** — from source comments
+(`posix/src/errno.rs`, `posix/src/sys_capability.rs`, `kernel/src/sched/mod.rs`
+all do), from `design-decisions.md`, from `known-issues.md`, from `todo.txt`,
+and from `CLAUDE.md`. Deleting one turns every citation into a dead path.
+That is not hypothetical: three files were deleted under the old rule
+(`2f3dba13e`, `c875f768a`) and left live citations in `design-decisions.md`
+§306/§307 and `todo.txt` pointing at nothing. All three have been restored.
+See `design-decisions.md` §315.
+
+A landed request is cheap to keep — the whole dropbox is under 30 small files
+— and expensive to lose, because what it holds is the *why*, which is exactly
+what the citing comment is reaching for.
 
 ### 3. Shared documents are append-only, with per-lane sections
 

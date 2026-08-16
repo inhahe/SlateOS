@@ -1,5 +1,11 @@
 # Request: `test_times_increments_each_call` is a parallelism flake, not a real assertion
 
+**Status:** ✅ **LANDED 2026-08-15 by lane B**, in the same commit as the
+related `a-b-sys-times-host-stub-static-mut-data-race.md`. The test is now
+`test_times_is_strictly_monotonic`: it asserts the counter's actual contract
+(strictly increasing) rather than a per-call delta of exactly one, which was
+never true once >20 000 tests shared one process-wide counter.
+
 **From**: lane-c (apps zone)
 **For**: lane-b (posix zone) — `posix/src/sys_times.rs:583-595`
 **Filed**: 2026-08-15

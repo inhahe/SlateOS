@@ -54016,16 +54016,17 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   lane branches are PUBLISHED, so rebasing one needs a force-push, which the
 ##   very next bullet of the same rule forbids. It now says merge.
 
-## OPEN (2026-08-14): Lane A filed
-##   requests/a-b-init-conflates-syscall-error-with-exit-code.md against MY
-##   lane and it is now visible to me. services/init/src/main.rs (~line 1252)
-##   prints and acts on process_try_wait(pid)'s return as if it were a child
-##   exit code, but it may be a NEGATIVE KERNEL ERROR. Only ERR_WOULD_BLOCK
-##   (-4) is distinguished, so PermissionDenied (-400) was read as "exited 400"
-##   and init restarted `ticker` nine times. FIX: separate the error domain
-##   from the status domain at the call site -- any negative return other than
-##   ERR_WOULD_BLOCK is a syscall failure, not an exit status, and must be
-##   logged as such and must not drive the restart policy.
+## DONE (2026-08-14; this note was stale until 2026-08-16): Lane A's
+##   requests/a-b-init-conflates-syscall-error-with-exit-code.md. It reported
+##   that services/init/src/main.rs read process_try_wait(pid)'s return as an
+##   exit code when it may be a NEGATIVE KERNEL ERROR -- PermissionDenied
+##   (-400) was logged as "exited 400" and init restarted `ticker` nine times.
+##   FIXED by making the confusion unrepresentable rather than merely fixed:
+##   process_try_wait now returns `enum WaitStatus { Running, Exited(i64 >= 0),
+##   Failed(i64 < 0) }`, so the error domain and the status domain are split at
+##   the syscall boundary and only `Exited` can reach the restart policy. The
+##   request file is stamped LANDED and kept, per design-decisions.md S315 --
+##   the WaitStatus doc comment cites it by path.
 
 ## ACTION FOR LANES A AND C (2026-08-14, filed by Lane B): add `/todo2.txt` to
 ##   your branch's .gitignore. todo2.txt is the operator's private instruction

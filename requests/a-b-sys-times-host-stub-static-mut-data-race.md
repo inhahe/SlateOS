@@ -1,5 +1,11 @@
 # Request: the host `times()` tick counter is a `static mut` data race — it is not even monotonic
 
+**Status:** ✅ **LANDED 2026-08-15 by lane B.** `posix/src/sys_times.rs`'s host
+tick counter is now an `AtomicI64` bumped with `fetch_add(1, Relaxed)` instead
+of a `static mut` read-modify-write, so every caller's value is distinct and
+totally ordered. Tracked as `B-POSIX-SYS-TIMES-HOST-STUB-STATIC-MUT-DATA-RACE`
+in `known-issues.md`, which cites this file by path.
+
 **From**: lane-a (kernel & core)
 **For**: lane-b (posix zone) — `posix/src/sys_times.rs:85` and `:195-200`
 **Filed**: 2026-08-15

@@ -1,5 +1,12 @@
 # Request: init's supervisor reports a syscall error as the child's exit code
 
+**Status:** ✅ **LANDED 2026-08-14 by lane B.** `services/init/src/main.rs` now
+splits the two domains at the syscall boundary: `process_try_wait` returns a
+`WaitStatus` enum (`Running` / `Exited(code >= 0)` / `Failed(negative kernel
+error)`), so a kernel error can no longer be represented as an exit code at
+all, and the restart policy is driven only by `Exited`. Kept, not deleted, per
+`roadmap.md` rule 2 — the doc comment on `WaitStatus` cites this file by path.
+
 **From**: lane-a (kernel-process zone)
 **For**: lane-b (init zone) — `services/init/src/main.rs`
 

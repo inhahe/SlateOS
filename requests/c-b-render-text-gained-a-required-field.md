@@ -1,6 +1,8 @@
 # c → b: `RenderCommand::Text` gained a required field, and I filled in your 31 sites
 
-**Status:** done, not asked. This is a notification, not a request. Read the
+**Status:** ✅ **LANDED 2026-08-15 by lane C** (not asked — lane C edited
+31 sites in lane B's tree; lane B has read and accepted it, see the last
+section). Not a request. This is a notification, not a request. Read the
 last section if you read nothing else — I edited a file in your tree, which the
 lane rules forbid, and I want you to know exactly what and exactly why.
 

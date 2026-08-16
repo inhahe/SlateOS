@@ -12446,6 +12446,32 @@ shell the pattern came from a script or a variable. `grep -f patterns.txt` and
 `sed -f script.sed` read the pattern from a **file** — it is now as much
 untrusted input as the subject is, in four more programs.
 
+### The correction: the engine was leftmost-*first* too
+
+Option C above was rejected partly because `regex` alternates leftmost-first
+where POSIX requires leftmost-**longest** — and then the extraction found that
+the engine being extracted did the same thing. A priority-ordered Pike VM stops
+at the first thread to reach `Match`, so `a|ab` against `ab` answered `a`. That
+is right for Perl and wrong for `grep`, and it was invisible: the shell's
+`[[ =~ ]]` only asks *whether* a pattern matched, so nothing in osh's suite
+could see which of two possible matches it had chosen. The four utilities do
+ask — `grep -o` prints it, `sed` replaces it — so the extraction would have
+shipped the defect into the programs where it is observable.
+
+The search is now two passes over one program: an unanchored priority-ordered
+pass to find the leftmost *start* (a thread that entered the pattern earlier
+outranks one that skipped further first, so the first `Match` is leftmost), then
+an anchored pass from that start which does not stop at `Match` and keeps the
+last one — the longest end. The second pass is seeded at a single position, so
+it ends as soon as its threads die; on the patterns anyone writes that is a few
+characters.
+
+*What it still does not do:* full POSIX **submatch** rules, which require
+longest-first at every level of nesting rather than only for the whole match.
+Group captures stay greedy-by-priority. GNU's engines do not implement the full
+rules either, and none of the five callers asks; recorded here so the gap is a
+known one rather than a surprise.
+
 ## §400 — Every GUI process finds its own UI font, lazily, from a compiled-in fallback list
 
 **Date:** 2026-08-14

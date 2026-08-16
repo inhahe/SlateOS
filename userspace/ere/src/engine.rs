@@ -794,6 +794,12 @@ fn char_fold_eq(a: Ch, b: Ch) -> bool {
 pub struct Regex {
     prog: Vec<Inst>,
     ngroups: usize,
+    /// The first instruction of the pattern proper — past the unanchored search
+    /// prefix. Entering here matches only at the position the search is seeded
+    /// at, which is what the longest-match pass in [`Regex::run`] needs. Stored
+    /// rather than assumed to be a constant so that changing the prefix cannot
+    /// silently leave the second pass entering the wrong instruction.
+    entry: usize,
     /// Case-insensitive matching (`shopt -s nocasematch`). When set, `Char`
     /// and `Class` instructions match without regard to letter case.
     ci: bool,
@@ -880,6 +886,7 @@ impl Regex {
         Ok(Regex {
             prog: c.prog,
             ngroups,
+            entry: real,
             ci,
         })
     }
@@ -1036,21 +1043,69 @@ impl Regex {
         out
     }
 
-    /// Run the Pike VM over `input` starting at character index `start`,
-    /// returning the winning thread's capture slots (`2 × (ngroups + 1)`
-    /// positions) or `None` if no match.
+    /// The leftmost-longest match at or after character index `start`.
+    ///
+    /// POSIX requires the **longest** match among those that start leftmost,
+    /// and that is not what a priority-ordered Pike VM gives you: thread
+    /// priority answers `a|ab` against `ab` with `a`, because the first
+    /// alternative is tried first and wins as soon as it reaches `Match`. Perl
+    /// and the `regex` crate are defined that way; `grep`, `sed` and `awk` are
+    /// not, and a `grep -o 'a\|ab'` that printed `a` would be quietly wrong in
+    /// a way no test of ours had ever asked about.
+    ///
+    /// So the search is two passes over one program:
+    ///
+    /// 1. an unanchored, priority-ordered pass, stopped at the first `Match` —
+    ///    which is the *leftmost* start, since a thread that entered the
+    ///    pattern earlier outranks one that skipped further first;
+    /// 2. an anchored pass from that start which does *not* stop at `Match`,
+    ///    keeping the last one reached — the longest end.
+    ///
+    /// The second pass usually costs almost nothing: its threads are seeded at
+    /// one position, so it stops the moment they all die, which for most
+    /// patterns is a few characters in.
+    ///
+    /// Group captures within the chosen match stay priority-ordered (greedy),
+    /// which is where this stops short of full POSIX submatch rules — those
+    /// require longest-first at every level of nesting. GNU's engines do not
+    /// implement them either, and the utilities in this tree do not ask.
     fn run(&self, input: &[Ch], start: usize) -> Option<Vec<Option<usize>>> {
+        let first = self.scan(input, start, 0, false)?;
+        let at = first.first().copied().flatten()?;
+        // `or(first)` is unreachable — the anchored pass repeats a match that
+        // was just found at exactly that position — and is written out rather
+        // than unwrapped so a future change to the prefix cannot turn a shorter
+        // answer into no answer at all.
+        self.scan(input, at, self.entry, true).or(Some(first))
+    }
+
+    /// One pass of the Pike VM: threads seeded at `seed_pc` and character index
+    /// `start`, returning the winning thread's capture slots (`2 × (ngroups +
+    /// 1)` positions). With `longest`, a thread reaching `Match` records its
+    /// slots and the pass continues, so a later — longer — match supersedes it;
+    /// without it the pass stops at the first, highest-priority `Match`.
+    fn scan(
+        &self,
+        input: &[Ch],
+        start: usize,
+        seed_pc: usize,
+        longest: bool,
+    ) -> Option<Vec<Option<usize>>> {
         // Two slots — open and close — for every group plus the whole match.
         let nslots = self.ngroups.saturating_add(1).saturating_mul(2);
         let mut clist = ThreadList::new(self.prog.len());
         let mut nlist = ThreadList::new(self.prog.len());
         let mut matched: Option<Vec<Option<usize>>> = None;
+        // Where the recorded match ends, so that among the threads reaching
+        // `Match` at one position the first — the highest-priority one — is the
+        // one kept, while a `Match` at a later position still supersedes it.
+        let mut matched_at: Option<usize> = None;
 
         let mut caps = vec![None; nslots];
         // `start` past the end is not an error — it is a scan that has run off
         // the subject, which `find_iter` does on its last step.
         let start = start.min(input.len());
-        self.add_thread(&mut clist, 0, start, &mut caps, input);
+        self.add_thread(&mut clist, seed_pc, start, &mut caps, input);
 
         for sp in start..=input.len() {
             if clist.threads.is_empty() {
@@ -1091,10 +1146,18 @@ impl Regex {
                         self.add_thread(&mut nlist, next.0, next.1, &mut caps, input);
                     }
                     Inst::Match => {
-                        // Highest-priority thread to reach Match wins; cut the
-                        // remaining (lower-priority) threads at this step.
-                        matched = Some(th.caps.clone());
-                        break;
+                        if matched_at.is_none_or(|at| sp > at) {
+                            matched = Some(th.caps.clone());
+                            matched_at = Some(sp);
+                        }
+                        if !longest {
+                            // Highest-priority thread to reach Match wins; cut
+                            // the remaining (lower-priority) threads here.
+                            break;
+                        }
+                        // Under `longest` the pass runs on: a lower-priority
+                        // thread at this step may still be consuming, and the
+                        // match it reaches later is the longer one.
                     }
                     // Epsilon instructions are expanded by `add_thread`.
                     _ => {}
@@ -1591,6 +1654,43 @@ mod tests {
         let re = Regex::new(b"(a{100}){10}").expect("10 * 100 copies is 1000 instructions");
         assert!(re.is_match(&b"a".repeat(1000)));
         assert!(!re.is_match(&b"a".repeat(999)));
+    }
+
+    #[test]
+    fn the_longest_match_wins_not_the_first_alternative() {
+        // POSIX is leftmost-*longest*; Perl and the `regex` crate are
+        // leftmost-first. Priority ordering alone answers these with the short
+        // arm, which is what `grep -o` and `sed` would then have printed.
+        let cap = |pat: &str, s: &str| {
+            compile(pat).unwrap().captures(s.as_bytes()).unwrap()[0].clone().unwrap()
+        };
+        assert_eq!(cap("a|ab", "ab"), b"ab");
+        assert_eq!(cap("ab|a", "ab"), b"ab");
+        assert_eq!(cap("a|ab|abc", "abcd"), b"abc");
+        assert_eq!(cap("(a|ab)(c|bcd)", "abcd"), b"abcd");
+        // Leftmost still beats longer: the match at 1 is not preferred to the
+        // one at 0 for being longer.
+        assert_eq!(compile("a|bb").unwrap().find(b"abb"), Some((0, 1)));
+        // And the rule reaches the scanning API, which is what actually feeds
+        // `grep -o`.
+        let spans: Vec<_> = compile("a|ab").unwrap().find_iter(b"abab").collect();
+        assert_eq!(spans, vec![(0, 2), (2, 4)]);
+    }
+
+    #[test]
+    fn a_longest_match_still_reports_its_groups() {
+        // The second pass re-runs the pattern, so the capture slots it hands
+        // back have to be the winning thread's, not the first pass's.
+        let re = compile("(a+)(b*)").unwrap();
+        let caps = re.captures(b"xaaabb").unwrap();
+        assert_eq!(caps[0].as_deref(), Some(&b"aaabb"[..]));
+        assert_eq!(caps[1].as_deref(), Some(&b"aaa"[..]));
+        assert_eq!(caps[2].as_deref(), Some(&b"bb"[..]));
+        assert_eq!(re.capture_spans(b"xaaabb").unwrap(), vec![
+            Some((1, 6)),
+            Some((1, 4)),
+            Some((4, 6)),
+        ]);
     }
 
     // ---- byte offsets ----------------------------------------------------

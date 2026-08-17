@@ -30089,6 +30089,67 @@ cost of a mismatch is small.
   it to `oswindow`, not to `guiremote::Client` directly — an app should not
   name the wire format any more than a Unix program names the socket layer —
   and do (c½) and (d½) first so the editor is not rewired twice.
+  — **DONE 2026-08-17** (commit `7f8c7b514`).
+
+  **What landed.** `apps/editor/src/input.rs`, ~800 lines and 31 tests: the
+  editor previously had *no* input handling at all, so this is the whole layer
+  rather than a rewiring of one. Its organising rule is that nothing in it
+  moves the caret directly — every motion goes through `EditorState::moving`,
+  which settles the selection anchor and then calls **both**
+  `ensure_cursor_visible` and `ensure_caret_visible_horizontally`. That is what
+  this step asked for, and routing it through one function rather than
+  appending two calls to each binding is what stops the thirty-second binding
+  from forgetting them. Both functions now have callers for the first time
+  since they were written, which closes the specific symptom that opened this
+  entry.
+
+  Three input modes are checked in order — external-change prompt, find bar,
+  document — and the find bar returns an `Option` rather than a bool, so a
+  chord it does not claim (`Ctrl+S`) falls through to the document's bindings
+  instead of being swallowed by the bar that happens to have focus.
+
+  `main` became `run(&mut EventLoop<T>, window, &mut EditorState)`, generic
+  over `oswindow::ConnectionTransport` and therefore testable end to end
+  against `oswindow::testing` — which is the point of the step, since a model
+  test can assert a scroll function *works* but not that anything ever calls
+  it. `mod loop_tests` drives the editor through the real protocol and asserts
+  the one thing `run` adds over `handle_event`: *when* a frame is sent. A
+  no-op mouse move, a keystroke and a close produce **two** frames — the
+  initial paint and the keystroke's — not one per event.
+
+  The demo `main()` is preserved as `mod api_tour` with its prints turned into
+  assertions, as this step required.
+
+  **`connect()` returns `None`.** There is still no transport, so the binary
+  prints a four-line diagnostic naming this entry and exits 1. It is a
+  function rather than an `unimplemented!` main precisely so everything above
+  it is real, compiled code: the day it returns a socket, the editor works
+  with no other change in `apps/editor`.
+
+  **One piece this step forced.** `oswindow`'s compositor stand-in was
+  `#[cfg(test)]`-private, so no other crate could test an event loop at all —
+  an app cannot obtain a window id without a compositor answering
+  `CreateWindow`, and (d½) deliberately removed the locally-minted ids that
+  used to make that possible. It is now a public `oswindow::testing`, compiled
+  unconditionally, for the same reason `guiremote::loopback` is: a per-app copy
+  of the fake is a fresh chance to get the wire format wrong in a way that
+  makes the *test* pass. Promoting it also exposed a defect in it — `serve()`
+  consumed submissions while decoding, so `drawn()` only ever reported frames
+  sent since the last turn, which is useless for an event-loop test where
+  taking turns is how the loop makes progress. Submissions now accumulate in
+  `absorb()`.
+
+  **What (e) does not close.** The editor cannot yet run: `connect()` has
+  nothing to return. Both halves of the protocol are complete and there is no
+  channel between them — the compositor's `main()` has no listener and no
+  client has an address to dial. That is the next step and is now the only
+  thing between this tree and a window on a screen. Two smaller gaps found on
+  the way: `guitk::event::MouseEvent` carries no modifiers, so shift-click is
+  recognised from state recorded on the last `KeyEvent` (correct, but it means
+  a mouse event that arrives before any key event cannot know the shift
+  state); and Save As needs a file dialog, which does not exist, so an unnamed
+  buffer reports "No file name — Save As needs a file dialog" and cannot be
+  saved.
 
 **Severity.** High as a *blocker* — it is the single gap between "142 app
 crates" and "an OS with any usable application at all". Low as a *defect*:

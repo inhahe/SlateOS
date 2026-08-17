@@ -36,6 +36,7 @@ pub use osfont::shape::Affinity;
 use osfont::shape::Hit;
 use osfont::system::{Family, FontCache, Weight};
 
+use crate::canvas::Canvas;
 use crate::color::Color;
 use crate::fontdb::FontDb;
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
@@ -408,6 +409,185 @@ pub fn draw_into_family(
     })
 }
 
+/// Rounds a pixel *extent* up to a whole count, rejecting anything that is not
+/// a finite, positive, addressable number of pixels.
+///
+/// `NaN` fails every comparison, so the range check rejects it without a
+/// special case — which is the point: a `NaN` width reaching an allocation is
+/// how a layout bug becomes a panic.
+fn px_count(extent: f32) -> Option<u32> {
+    let whole = extent.ceil();
+    if whole >= 1.0 && whole <= f64::from(u32::MAX) as f32 {
+        // Proved in range and non-negative on the line above.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Some(whole as u32)
+    } else {
+        None
+    }
+}
+
+/// Floors a pixel coordinate to a whole one, clamping instead of wrapping.
+///
+/// A coordinate far outside `i64` is off-canvas by any measure, and saturating
+/// keeps it off-canvas; the `as` cast alone would wrap it back into view.
+fn whole(coord: f32) -> i64 {
+    let floored = coord.floor();
+    if floored.is_nan() {
+        return 0;
+    }
+    let clamped = floored.clamp(-(2.0_f32.powi(62)), 2.0_f32.powi(62));
+    // Clamped into a range `i64` represents exactly at this magnitude.
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        clamped as i64
+    }
+}
+
+/// Draws `text` onto a [`Canvas`] with its **baseline** at `baseline_y`,
+/// starting at pen position `x`, and returns the pen position after the last
+/// glyph.
+///
+/// # Why this is not just [`draw_into`] with a converted buffer
+///
+/// [`Surface`] is an *opaque* target: the rasterizer forces every pixel it
+/// touches to `alpha = 255`, because a screenshot or an exported chart has no
+/// transparency to preserve and blending against a transparent destination
+/// would only produce fringing. A `Canvas` is the opposite — a paint layer is
+/// routinely transparent, and text dropped onto one must leave the untouched
+/// parts of every anti-aliased pixel *still* transparent, or the glyphs arrive
+/// wearing a black halo wherever they were smoothed against nothing.
+///
+/// So this renders the string once into a scratch buffer as white-on-black,
+/// which makes each pixel's value its **coverage** (`blend_channel(255, 0, a)`
+/// is `a`), and then blends `color` onto the canvas at that coverage. The
+/// canvas's own alpha compositing ([`Canvas::blend`]) does the rest, so drawing
+/// onto a transparent layer yields a glyph with a soft transparent edge rather
+/// than a soft black one.
+///
+/// The scratch buffer is bounded by the measured extent of the text, not by the
+/// canvas, so drawing a short word onto a large image costs the word.
+pub fn draw_onto_canvas(
+    canvas: &mut Canvas,
+    text: &str,
+    x: f32,
+    baseline_y: f32,
+    size: f32,
+    weight: FontWeightHint,
+    color: Color,
+) -> f32 {
+    draw_onto_canvas_in(
+        canvas,
+        text,
+        x,
+        baseline_y,
+        size,
+        weight,
+        FontFamily::Ui,
+        color,
+    )
+}
+
+/// The family-aware form of [`draw_onto_canvas`].
+// Eight arguments, for the same reason `draw_into_family` takes eight.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_onto_canvas_in(
+    canvas: &mut Canvas,
+    text: &str,
+    x: f32,
+    baseline_y: f32,
+    size: f32,
+    weight: FontWeightHint,
+    family: FontFamily,
+    color: Color,
+) -> f32 {
+    if text.is_empty() || color.a == 0 {
+        return x;
+    }
+    let advance = measure_in(text, size, weight, family);
+
+    // The mask has to cover more than the advance box. A glyph may start left
+    // of the pen (an italic `f`, a negative left bearing), may overshoot the
+    // ascent (an accent stack), and the rasterizer anti-aliases a fraction of a
+    // pixel past both. Padding by the font size is coarse and is *meant* to be:
+    // an under-sized mask silently clips glyph edges, which is a bug that looks
+    // like a font problem, while an over-sized one costs a few zero pixels.
+    let pad = size.max(1.0).ceil();
+    let ascent = ascent_in(size, weight, family);
+    let line = line_height_in(size, weight, family);
+    let origin_x = (x - pad).floor();
+    let origin_y = (baseline_y - ascent - pad).floor();
+    // A width or height that is not a finite, positive, representable count of
+    // pixels is not a text box, it is a broken layout; drawing nothing is the
+    // honest response.
+    let (Some(mask_w), Some(mask_h)) = (px_count(advance + pad * 2.0), px_count(line + pad * 2.0))
+    else {
+        return x;
+    };
+    let Some(cells) = (mask_w as usize).checked_mul(mask_h as usize) else {
+        return x;
+    };
+
+    let mut mask = vec![0u32; cells];
+    let pen = {
+        let mut surface = Surface {
+            pixels: &mut mask,
+            width: mask_w,
+            height: mask_h,
+        };
+        draw_into_family(
+            &mut surface,
+            text,
+            x - origin_x,
+            baseline_y - origin_y,
+            size,
+            weight,
+            family,
+            // Opaque white on the zeroed (black) buffer, so the value that
+            // lands in each pixel *is* the coverage.
+            Color::rgba(255, 255, 255, 255),
+        )
+    };
+
+    // The origin can sit left of or above the canvas — text anchored near the
+    // edge routinely does — so the destination coordinate is computed in `i64`
+    // and pixels that land outside are dropped rather than wrapped onto the
+    // opposite edge.
+    let (origin_col, origin_row) = (whole(origin_x), whole(origin_y));
+
+    for row in 0..mask_h {
+        let Ok(dest_y) = u32::try_from(origin_row.saturating_add(i64::from(row))) else {
+            continue;
+        };
+        for col in 0..mask_w {
+            let idx = (row as usize)
+                .saturating_mul(mask_w as usize)
+                .saturating_add(col as usize);
+            let coverage = mask.get(idx).map_or(0, |px| px & 0xFF);
+            if coverage == 0 {
+                continue;
+            }
+            let Ok(dest_x) = u32::try_from(origin_col.saturating_add(i64::from(col))) else {
+                continue;
+            };
+            // Coverage scales the requested alpha: a half-covered pixel of a
+            // half-transparent colour is a quarter-strength blend.
+            let Ok(alpha) = u8::try_from(coverage.saturating_mul(u32::from(color.a)) / 255) else {
+                continue;
+            };
+            if alpha == 0 {
+                continue;
+            }
+            canvas.blend(
+                dest_x,
+                dest_y,
+                Color::rgba(color.r, color.g, color.b, alpha),
+            );
+        }
+    }
+
+    origin_x + pen
+}
+
 /// The advance of one fixed-pitch cell: the width every glyph occupies in
 /// [`FontFamily::Mono`].
 ///
@@ -618,6 +798,42 @@ pub fn wrap(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> Ve
     }
     with_font(size, weight, FontFamily::Ui, |font| {
         font.wrap(text, max_width)
+    })
+}
+
+/// [`wrap`], except that a word wider than `max_width` is broken by measured
+/// fit rather than left on an over-long line.
+///
+/// # Which of the two to call
+///
+/// [`wrap`] is right when the box can grow, or when an over-long line is
+/// merely ugly: a paragraph in a detail pane, a tooltip, a description in a
+/// list. It never breaks inside a word, because where to break one is a
+/// per-script decision that belongs to a real line breaker.
+///
+/// This is right when the box **cannot** grow — a desktop icon's 72 px cell
+/// with another icon beside it, a fixed-width column, an article body in a
+/// pane the user sized. There, a line wider than the box is not a blemish; it
+/// is text drawn over something else, or text the renderer silently drops the
+/// end of.
+///
+/// It is also the only workable answer for a script that does not use spaces.
+/// A Japanese file name contains no space, so `wrap` returns the whole of it
+/// as one line however narrow the box is — meaning *every* such label
+/// overflows. Han and Kana break almost anywhere, so a measured break is close
+/// to what a real line breaker would do for them, and merely inelegant for a
+/// long Latin word.
+///
+/// The cost of this over [`wrap`] is one extra shaping pass per over-long
+/// line, and none at all for text that already fits.
+pub fn wrap_hard(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> Vec<String> {
+    if max_width <= 0.0 {
+        // Nothing fits. Breaking by measured fit would answer that with one
+        // cluster per line — an unbounded list for a box that cannot show it.
+        return text.split('\n').map(str::to_string).collect();
+    }
+    with_font(size, weight, FontFamily::Ui, |font| {
+        font.wrap_hard(text, max_width)
     })
 }
 
@@ -2210,6 +2426,215 @@ mod tests {
         // proportional to its word count.
         let lines = wrap("a b c d e f g", 0.0, 11.0, FontWeightHint::Regular);
         assert_eq!(lines, vec!["a b c d e f g"]);
+    }
+
+    /// The case `wrap` is documented not to handle: a run with no space in it.
+    /// `wrap` returns it as one over-long line; `wrap_hard` breaks it, and
+    /// every piece fits.
+    #[test]
+    fn hard_wrapping_breaks_a_run_that_has_no_spaces() {
+        let cjk = "日本語のファイル名がとても長い場合の折り返しです";
+        let soft = wrap(cjk, 72.0, 11.0, FontWeightHint::Regular);
+        assert_eq!(soft.len(), 1, "wrap has no break opportunity to use");
+        assert!(
+            measure(cjk, 11.0, FontWeightHint::Regular) > 72.0,
+            "the sample must actually overflow or this test asserts nothing"
+        );
+
+        let hard = wrap_hard(cjk, 72.0, 11.0, FontWeightHint::Regular);
+        assert!(hard.len() > 1, "{hard:?}");
+        assert_eq!(hard.concat(), cjk, "breaking must not lose or add text");
+        for line in &hard {
+            let w = measure(line, 11.0, FontWeightHint::Regular);
+            assert!(w <= 72.0, "line {line:?} measures {w} in a 72 px box");
+        }
+    }
+
+    /// Text that already fits comes back untouched, so `wrap_hard` is a safe
+    /// substitution for `wrap` rather than a different layout.
+    #[test]
+    fn hard_wrapping_leaves_fitting_text_alone() {
+        let prose = "one two three four five six seven eight";
+        assert_eq!(
+            wrap_hard(prose, 200.0, 11.0, FontWeightHint::Regular),
+            wrap(prose, 200.0, 11.0, FontWeightHint::Regular)
+        );
+    }
+
+    /// A word longer than the box is broken, and — the property that makes
+    /// this usable on remote text — broken from a single shaping pass, so a
+    /// pathological input is a long list rather than a hang. Fifty thousand
+    /// characters is what an article body from an unfriendly feed looks like.
+    #[test]
+    fn hard_wrapping_a_pathological_word_is_linear() {
+        let word = "λ".repeat(50_000);
+        let lines = wrap_hard(&word, 200.0, 11.0, FontWeightHint::Regular);
+        assert!(lines.len() > 100, "{} lines", lines.len());
+        assert_eq!(lines.concat(), word);
+        for line in &lines {
+            assert!(measure(line, 11.0, FontWeightHint::Regular) <= 200.0);
+        }
+    }
+
+    /// A single glyph wider than the box has nowhere to go, so it takes a line
+    /// and overflows it. The alternative — refusing to emit it — would be an
+    /// unbounded loop in whatever called this.
+    #[test]
+    fn hard_wrapping_a_box_narrower_than_one_glyph_terminates() {
+        let lines = wrap_hard("mmmm", 1.0, 11.0, FontWeightHint::Regular);
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert_eq!(lines.concat(), "mmmm");
+    }
+
+    /// Counts pixels the canvas actually changed.
+    fn touched(canvas: &Canvas) -> usize {
+        canvas.pixels().iter().filter(|c| c.a != 0).count()
+    }
+
+    #[test]
+    fn text_drawn_onto_a_canvas_marks_pixels_where_the_glyphs_are() {
+        let mut canvas = Canvas::transparent(120, 40);
+        let pen = draw_onto_canvas(
+            &mut canvas,
+            "Hello",
+            10.0,
+            28.0,
+            16.0,
+            FontWeightHint::Regular,
+            Color::rgba(255, 0, 0, 255),
+        );
+        assert!(touched(&canvas) > 0, "the text left no mark at all");
+        let expected = 10.0 + measure("Hello", 16.0, FontWeightHint::Regular);
+        assert!(
+            (pen - expected).abs() < 1.0,
+            "the pen ended at {pen}, but the text measures to {expected}"
+        );
+    }
+
+    #[test]
+    fn a_glyph_edge_on_a_transparent_layer_stays_transparent() {
+        // The whole reason this does not reuse `draw_into`: that target forces
+        // every pixel it touches opaque, so anti-aliased edges on a transparent
+        // paint layer would arrive as a black halo.
+        let mut canvas = Canvas::transparent(120, 40);
+        draw_onto_canvas(
+            &mut canvas,
+            "Hello",
+            10.0,
+            28.0,
+            16.0,
+            FontWeightHint::Regular,
+            Color::rgba(255, 0, 0, 255),
+        );
+        let mut partial = 0;
+        for pixel in canvas.pixels() {
+            if pixel.a == 0 {
+                continue;
+            }
+            // Every touched pixel is the colour asked for; only its alpha
+            // varies with coverage. A halo would show up as a pixel that is
+            // partly opaque *and* not red.
+            assert_eq!(
+                (pixel.r, pixel.g, pixel.b),
+                (255, 0, 0),
+                "a blended-against-nothing pixel crept in: {pixel:?}"
+            );
+            if pixel.a < 255 {
+                partial += 1;
+            }
+        }
+        assert!(
+            partial > 0,
+            "no partially-covered pixels at all — the text is not anti-aliased, \
+             so this test would not catch a halo"
+        );
+    }
+
+    #[test]
+    fn drawing_off_the_canvas_edge_clips_rather_than_wraps() {
+        // A negative anchor must lose the glyphs to the left of the canvas, not
+        // wrap them onto the right-hand edge.
+        let mut canvas = Canvas::transparent(60, 30);
+        draw_onto_canvas(
+            &mut canvas,
+            "Wide text here",
+            -40.0,
+            20.0,
+            16.0,
+            FontWeightHint::Regular,
+            Color::rgba(0, 0, 255, 255),
+        );
+        let right_edge_touched = (0..canvas.height())
+            .filter_map(|y| canvas.get(canvas.width() - 1, y))
+            .any(|c| c.a != 0);
+        assert!(
+            !right_edge_touched || touched(&canvas) > 0,
+            "clipping is not wrapping"
+        );
+
+        // And an anchor entirely off-canvas leaves it untouched.
+        let mut far = Canvas::transparent(60, 30);
+        draw_onto_canvas(
+            &mut far,
+            "Hello",
+            -10_000.0,
+            20.0,
+            16.0,
+            FontWeightHint::Regular,
+            Color::rgba(0, 0, 255, 255),
+        );
+        assert_eq!(touched(&far), 0, "text far off-canvas still painted");
+    }
+
+    #[test]
+    fn a_transparent_colour_draws_nothing_and_costs_nothing() {
+        let mut canvas = Canvas::transparent(60, 30);
+        let pen = draw_onto_canvas(
+            &mut canvas,
+            "Hello",
+            5.0,
+            20.0,
+            16.0,
+            FontWeightHint::Regular,
+            Color::rgba(255, 0, 0, 0),
+        );
+        assert_eq!(touched(&canvas), 0);
+        assert!((pen - 5.0).abs() < f32::EPSILON, "the pen should not move");
+    }
+
+    #[test]
+    fn a_non_finite_anchor_does_not_panic() {
+        // `NaN` reaching an allocation is how a layout bug becomes a crash.
+        let mut canvas = Canvas::transparent(40, 20);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let _ = draw_onto_canvas(
+                &mut canvas,
+                "x",
+                bad,
+                10.0,
+                16.0,
+                FontWeightHint::Regular,
+                Color::rgba(0, 0, 0, 255),
+            );
+            let _ = draw_onto_canvas(
+                &mut canvas,
+                "x",
+                5.0,
+                bad,
+                16.0,
+                FontWeightHint::Regular,
+                Color::rgba(0, 0, 0, 255),
+            );
+            let _ = draw_onto_canvas(
+                &mut canvas,
+                "x",
+                5.0,
+                10.0,
+                bad,
+                FontWeightHint::Regular,
+                Color::rgba(0, 0, 0, 255),
+            );
+        }
     }
 
     #[test]

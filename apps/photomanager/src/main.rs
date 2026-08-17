@@ -2829,7 +2829,7 @@ impl PhotoApp {
                 cmds.push(RenderCommand::Text {
                     x: cx + 4.0,
                     y: cy + thumb - 16.0,
-                    text: truncate_str(&photo.file_name, (thumb / 7.0) as usize),
+                    text: photo.file_name.clone(),
                     color: SUBTEXT0,
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
@@ -3126,16 +3126,16 @@ impl PhotoApp {
     }
 }
 
-/// Truncate a string to max_len characters with ellipsis.
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_owned()
-    } else {
-        let mut result = s.get(..max_len.saturating_sub(3)).unwrap_or(s).to_owned();
-        result.push_str("...");
-        result
-    }
-}
+// `truncate_str` was removed here. Its one caller cut a thumbnail's file name
+// to `(thumb / 7.0)` characters — a guess of 7 px per character for a label
+// drawn at 9 px, where the average is nearer 4.5 — and then handed the result
+// to a `Text` command that already carried `max_width: Some(thumb - 8.0)` and
+// `TextOverflow::Ellipsis`. The renderer measures with the real font; the
+// guess did not, so it cut a third of the name off a thumbnail that had room
+// for it. Worse, `s.get(..n)` on a name like "Sommerferien_Österreich.jpg"
+// straddles a character and silently returns the *whole* string, so the one
+// case the truncation existed for was the one it did not handle. The name is
+// now passed whole and cut by the renderer, which knows how wide it is.
 
 /// Library-wide statistics.
 pub struct LibraryStats<'a> {
@@ -3823,11 +3823,31 @@ mod tests {
         assert_eq!(face.x, 100.0);
     }
 
+    /// A thumbnail's file name reaches the renderer whole, with the thumbnail
+    /// width alongside it, so the cut is made by something that measured the
+    /// text. The removed `truncate_str` cut it to `(thumb / 7.0)` characters
+    /// first — a guess about a 9 px font that was wrong by roughly half — and
+    /// its byte-offset slice silently declined to cut a name with an umlaut
+    /// in it at all.
     #[test]
-    fn test_truncate_str() {
-        assert_eq!(truncate_str("hello", 10), "hello");
-        assert_eq!(truncate_str("hello world", 8), "hello...");
-        assert_eq!(truncate_str("hi", 2), "hi");
+    fn a_thumbnail_name_is_bounded_by_width_not_pre_truncated() {
+        let name = "Sommerferien_Österreich_2026_Abend_am_See.jpg";
+        let mut app = PhotoApp::new();
+        app.import_photo(&format!("/photos/{name}"), name, ImageFormat::Jpeg, 1000);
+        let cmds = app.render(1400.0, 900.0);
+        let label = cmds
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    text, max_width, ..
+                } if text == name => Some(*max_width),
+                _ => None,
+            })
+            .expect("the thumbnail is labelled with the whole file name");
+        assert!(
+            label.is_some(),
+            "and the renderer is told how wide the thumbnail is"
+        );
     }
 
     #[test]

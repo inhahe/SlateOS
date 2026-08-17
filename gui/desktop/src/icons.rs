@@ -1054,74 +1054,49 @@ pub enum DesktopKey {
 /// then cut a second time, by the renderer, in the middle of a word the wrapper
 /// had decided was fine. Two disagreeing answers to one question.
 ///
-/// Now there is one answer, and it is measured: every break is placed by
-/// [`text::fit`], so what this function thinks fits is what the renderer draws.
+/// Now there is one answer, and it is measured: the breaks come from
+/// [`text::wrap_hard`], which places them with the same font cache the
+/// compositor draws with, so what this function thinks fits is what is drawn.
 ///
-/// # Breaking inside a word
+/// # Why `wrap_hard` and not `wrap`
 ///
 /// [`text::wrap`] deliberately does *not* break inside a word — where to do
-/// that is a per-script decision belonging to a real line breaker — so it is
-/// not used here. A desktop icon cannot take that answer: its cell is a fixed
-/// 72 px, an over-long line runs under the next icon, and "日本語のファイル名です"
-/// contains no space at all, so *every* CJK label would be one over-long line.
-/// This breaks by measured fit when a run has no break opportunity in it, which
-/// is right for the Han and Kana that make up most such labels (both break
-/// almost anywhere) and merely inelegant for a long Latin word, which is what
-/// the renderer would have done to it anyway.
+/// that is a per-script decision belonging to a real line breaker. A desktop
+/// icon cannot take that answer: its cell is a fixed 72 px, an over-long line
+/// runs under the next icon, and a Japanese file name contains no space at all,
+/// so *every* CJK label would come back as one over-long line.
+/// [`text::wrap_hard`] breaks by measured fit when a run has no break
+/// opportunity in it, which is right for the Han and Kana that make up most
+/// such labels and merely inelegant for a long Latin word — which is what the
+/// renderer would have done to it anyway.
 ///
-/// The last line absorbs everything left over and is elided, so the mark lands
-/// on real text rather than wherever a count happened to stop.
+/// The last line kept is marked when anything was dropped, so a truncated file
+/// name is distinguishable from a short one.
 fn wrap_label(text: &str, max_width: f32, max_lines: usize) -> Vec<String> {
-    if text.is_empty() || max_lines == 0 {
+    /// The mark that says text was dropped.
+    const ELLIPSIS: &str = "\u{2026}";
+
+    if text.is_empty() || max_lines == 0 || max_width <= 0.0 {
         return vec![String::new()];
     }
 
     let weight = FontWeightHint::Regular;
-    let mut lines: Vec<String> = Vec::new();
-    let mut rest = text;
-
-    while !rest.is_empty() && lines.len() < max_lines {
-        // On the last line we may draw, everything that is left goes on it and
-        // is elided. Stopping at a word boundary instead would end the label
-        // with no sign that anything followed it.
-        if lines.len().saturating_add(1) == max_lines {
-            lines.push(text::elide(
-                rest,
-                max_width,
-                "\u{2026}",
-                LABEL_FONT_SIZE,
-                weight,
-            ));
-            return lines;
-        }
-
-        let fits = text::fit(rest, max_width, LABEL_FONT_SIZE, weight);
-        if fits >= rest.len() {
-            lines.push(rest.to_string());
-            return lines;
-        }
-        if fits == 0 {
-            // Not even one character fits the cell. Anything drawn overflows,
-            // so draw the mark and stop rather than looping forever.
-            lines.push("\u{2026}".to_string());
-            return lines;
-        }
-
-        // Prefer the last break opportunity at or before the measured cut;
-        // fall back to the cut itself for a run that has none.
-        let head = rest.get(..fits).unwrap_or(rest);
-        let cut = head
-            .rfind([' ', '-', '_', '.'])
-            .map_or(fits, |i| i.saturating_add(1));
-        let cut = if cut == 0 { fits } else { cut };
-
-        let (line, tail) = rest.split_at(cut);
-        lines.push(line.trim_end().to_string());
-        rest = tail.trim_start_matches(' ');
+    let mut lines = text::wrap_hard(text, max_width, LABEL_FONT_SIZE, weight);
+    if lines.len() <= max_lines {
+        return lines;
     }
 
-    if lines.is_empty() {
-        lines.push(String::new());
+    lines.truncate(max_lines);
+    if let Some(last) = lines.last_mut() {
+        // The mark has to fit *with* the text it marks, so the room for the
+        // text is the cell less the mark. Appending it to a line that already
+        // filled the cell is how a label ends up one glyph wider than the cell
+        // it was carefully wrapped into.
+        let room = (max_width - text::measure(ELLIPSIS, LABEL_FONT_SIZE, weight)).max(0.0);
+        let cut = text::fit(last, room, LABEL_FONT_SIZE, weight);
+        let mut marked = last.get(..cut).unwrap_or("").trim_end().to_string();
+        marked.push_str(ELLIPSIS);
+        *last = marked;
     }
     lines
 }

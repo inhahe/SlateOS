@@ -944,7 +944,8 @@ Roadmap:
   horizontally by *slicing the line at a byte offset* — and the visible part of
   a bidirectional line is not the shaping of a substring of it, so that is a
   model change rather than a substitution (`TD-EDITOR-IS-NOT-BIDIRECTIONAL`).
-  **One of that entry's four items is now done** (§455): syntax highlighting no
+  **Two of that entry's four items are now done.** First (§455): syntax
+  highlighting no
   longer draws a command per token. Cutting a line at each colour change and
   laying the pieces out end to end *is* the screen-order-is-byte-order
   assumption, applied once per token; colour is now an attribute of a glyph,
@@ -954,8 +955,19 @@ Roadmap:
   the family from its own font stack, so the app cannot know which glyphs it is
   colouring. It is also 2.3x *faster* on an ordinary 80-character line of 40
   tokens, since each shaping pays a fixed cost that the decomposition paid once
-  per piece. Still outstanding there: the byte-offset scroll (the model change
-  above), the caret, and hit testing. The same end-to-end layout was then found
+  per piece. Second, the byte-offset scroll is gone: `Document::scroll_col`
+  becomes `scroll_px`, and the line is shaped once, whole, and *translated*
+  under a clip rectangle instead of being sliced and its tail re-shaped — a
+  window onto the correctly-ordered line rather than a differently-ordered
+  shaping of part of it. That also deletes the "scrolled into the middle of a
+  character" bug class outright (nothing is sliced, so there is nothing to land
+  inside), and lets the caret keep the kerning it used to lose at the scroll
+  boundary. Still outstanding there: the caret and hit testing, both of which
+  want the per-line shaped cache first so there is somewhere to ask for cluster
+  positions. Wiring any of it to a user needs `TD-EDITOR-HAS-NO-INPUT-LOOP`
+  closed — the editor has no event loop at all, which is how two auto-scroll
+  functions came to be written, tested and never called.
+  The same end-to-end layout was then found
   in three more places — `RichTextView`, `SimpleTextView` and
   `apps/markdowneditor` — and cannot take the same fix, because their spans
   carry weight and size rather than colour alone

@@ -17,3 +17,12 @@
 
 # rustfmt: reformat the kernel crate (Lane A) -- 733 files
 c33bfa34ffea15c6be689a0757470947a95e4e25
+
+# rustfmt: reformat the oils crate (Lane B) -- 17 files, 2016 hunks
+497181ec2578dd67f0f165cd201a91db5268953c
+
+# rustfmt: reformat the ere crate (Lane B) -- 2 files
+551b50eabb8adc73c303108f4bbc6566a0ebe095
+
+# rustfmt: coreutils head.rs and tail.rs (Lane B) -- 32 hunks
+d37bd563cad8661bc7bc42084fcfe461cbeae954

@@ -271,10 +271,9 @@ fn apply_obsolete(body: &[u8], options: &mut Options) -> Result<(), getopt::Erro
             // `invalid option -- 'x'`, and it *does* carry the referral because
             // upstream reaches it through `usage (EXIT_FAILURE)`.
             _ => {
-                return Err(HEAD.usage_referring(format!(
-                    "invalid trailing option -- {}",
-                    char::from(c)
-                )));
+                return Err(
+                    HEAD.usage_referring(format!("invalid trailing option -- {}", char::from(c)))
+                );
             }
         }
     }
@@ -331,10 +330,9 @@ fn short_options(
             // which is precisely the case upstream refuses. The `-NUM` form is
             // handled before this loop ever runs.
             b'0'..=b'9' => {
-                return Err(HEAD.usage_referring(format!(
-                    "invalid trailing option -- {}",
-                    char::from(c)
-                )));
+                return Err(
+                    HEAD.usage_referring(format!("invalid trailing option -- {}", char::from(c)))
+                );
             }
             _ => return Err(HEAD.invalid_option(c)),
         }
@@ -642,7 +640,11 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
     if out.flush().is_err() {
         return ExitCode::from(1);
     }
-    if ok { ExitCode::SUCCESS } else { ExitCode::from(1) }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
 
 fn write_all(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
@@ -691,7 +693,12 @@ fn head_bytes(source: &mut impl Read, out: &mut impl Write, n: u64) -> io::Resul
 /// never adds one. Ending at the terminator rather than at the start of the
 /// next line is what makes `printf 'a\nb' | head -n1` print `a\n` and not
 /// `a\nb`.
-fn head_lines(source: &mut impl Read, out: &mut impl Write, n: u64, line_end: u8) -> io::Result<()> {
+fn head_lines(
+    source: &mut impl Read,
+    out: &mut impl Write,
+    n: u64,
+    line_end: u8,
+) -> io::Result<()> {
     if n == 0 {
         return Ok(());
     }
@@ -704,7 +711,10 @@ fn head_lines(source: &mut impl Read, out: &mut impl Write, n: u64, line_end: u8
         }
         let chunk = buf.get(..got).unwrap_or_default();
         let mut at = 0usize;
-        while let Some(rel) = chunk.get(at..).and_then(|t| t.iter().position(|&b| b == line_end)) {
+        while let Some(rel) = chunk
+            .get(at..)
+            .and_then(|t| t.iter().position(|&b| b == line_end))
+        {
             at = at.saturating_add(rel).saturating_add(1);
             left = left.saturating_sub(1);
             if left == 0 {
@@ -799,7 +809,10 @@ fn elide_tail_lines(
     let mut emit_lines = total.saturating_sub(n);
     let mut at = 0usize;
     while emit_lines > 0 {
-        let Some(rel) = held.get(at..).and_then(|t| t.iter().position(|&b| b == line_end)) else {
+        let Some(rel) = held
+            .get(at..)
+            .and_then(|t| t.iter().position(|&b| b == line_end))
+        else {
             break;
         };
         at = at.saturating_add(rel).saturating_add(1);
@@ -953,17 +966,17 @@ mod tests {
     fn a_short_cluster_takes_its_value_from_the_rest_or_the_next_argument() {
         assert_eq!(parse(&["-qn2"]).n_units, 2);
         assert_eq!(parse(&["-qn", "2"]).n_units, 2);
-        assert_eq!(parse(&["-vz"]), Options {
-            headers: Headers::Always,
-            line_end: 0,
-            ..Options::default()
-        });
+        assert_eq!(
+            parse(&["-vz"]),
+            Options {
+                headers: Headers::Always,
+                line_end: 0,
+                ..Options::default()
+            }
+        );
         // `-c2n`: the whole rest of the cluster is `c`'s argument, so the `n`
         // is part of the number and the number is bad.
-        assert_eq!(
-            fail(&["-c2n"]).message,
-            "invalid number of bytes: '2n'"
-        );
+        assert_eq!(fail(&["-c2n"]).message, "invalid number of bytes: '2n'");
     }
 
     // ---------------------------------------------------- the obsolete form ---
@@ -998,17 +1011,23 @@ mod tests {
         assert_eq!(parse(&["-2kc"]).n_units, 2);
         // … but `l` selects lines and does not, which is upstream's asymmetry
         // and not a slip here.
-        assert_eq!(parse(&["-2kl"]), Options {
-            unit: Unit::Lines,
-            n_units: 2048,
-            ..Options::default()
-        });
-        assert_eq!(parse(&["-3qz"]), Options {
-            n_units: 3,
-            headers: Headers::Never,
-            line_end: 0,
-            ..Options::default()
-        });
+        assert_eq!(
+            parse(&["-2kl"]),
+            Options {
+                unit: Unit::Lines,
+                n_units: 2048,
+                ..Options::default()
+            }
+        );
+        assert_eq!(
+            parse(&["-3qz"]),
+            Options {
+                n_units: 3,
+                headers: Headers::Never,
+                line_end: 0,
+                ..Options::default()
+            }
+        );
         // An unknown letter is the trailing-option sentence, with the letter
         // unquoted — unlike getopt's `invalid option -- 'x'`.
         assert_eq!(body(&fail(&["-3x"])), "invalid trailing option -- x");
@@ -1033,7 +1052,10 @@ mod tests {
         assert_eq!(fail(&["-n", "-"]).message, "invalid number of lines: ''");
         // Two dashes leave one, which an unsigned parse refuses — and the
         // message shows the stripped string, not what was typed.
-        assert_eq!(fail(&["-n", "--5"]).message, "invalid number of lines: '-5'");
+        assert_eq!(
+            fail(&["-n", "--5"]).message,
+            "invalid number of lines: '-5'"
+        );
     }
 
     #[test]
@@ -1063,12 +1085,18 @@ mod tests {
             );
         }
         // A lone `i` is not `iB`, so it is a trailing byte.
-        assert_eq!(fail(&["-n", "1Ki"]).message, "invalid number of lines: '1Ki'");
+        assert_eq!(
+            fail(&["-n", "1Ki"]).message,
+            "invalid number of lines: '1Ki'"
+        );
         assert_eq!(
             fail(&["-n", "1KiBB"]).message,
             "invalid number of lines: '1KiBB'"
         );
-        assert_eq!(fail(&["-n", "5K5"]).message, "invalid number of lines: '5K5'");
+        assert_eq!(
+            fail(&["-n", "5K5"]).message,
+            "invalid number of lines: '5K5'"
+        );
     }
 
     #[test]
@@ -1099,7 +1127,10 @@ mod tests {
              Value too large for defined data type"
         );
         // 2^64 / 1024 rounds to this; one more overflows.
-        assert_eq!(parse(&["-n", "18014398509481983K"]).n_units, 18_014_398_509_481_983 * 1024);
+        assert_eq!(
+            parse(&["-n", "18014398509481983K"]).n_units,
+            18_014_398_509_481_983 * 1024
+        );
         assert_eq!(
             fail(&["-n", "18014398509481984K"]).message,
             "invalid number of lines: '18014398509481984K': \
@@ -1109,7 +1140,9 @@ mod tests {
         assert_eq!(parse(&["-n", "1E"]).n_units, 1024u64.pow(6));
         for big in ["1Z", "1Y", "1R", "1Q"] {
             assert!(
-                fail(&["-n", big]).message.ends_with("Value too large for defined data type"),
+                fail(&["-n", big])
+                    .message
+                    .ends_with("Value too large for defined data type"),
                 "{big}"
             );
         }
@@ -1247,7 +1280,10 @@ mod tests {
         assert_eq!(parse_args(&args(&["--help"])), Ok(Request::Help));
         assert_eq!(parse_args(&args(&["--vers"])), Ok(Request::Version));
         // Even behind other options, and even with a bad operand after.
-        assert_eq!(parse_args(&args(&["-v", "--help", "-x"])), Ok(Request::Help));
+        assert_eq!(
+            parse_args(&args(&["-v", "--help", "-x"])),
+            Ok(Request::Help)
+        );
         assert!(help_text().starts_with("Usage: head [OPTION]... [FILE]...\n"));
     }
 }

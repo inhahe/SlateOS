@@ -115,19 +115,16 @@ use std::sync::{Arc, Mutex, RwLock, mpsc};
 
 use crate::arith::{self, VarLookup};
 use crate::assoc::{AssocArray, TableShape};
+use crate::ast::{
+    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseTerm,
+    CmdSubBody, Command, CondBinOp, CondBinary, CondExpr, CondUnary, DeclArray, ForArithClause,
+    ForClause, FunctionDef, IfClause, LineMap, LoopClause, ParamOp, Pipeline, ProcSubBody, Program,
+    Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, SubshellClause, Word,
+    WordPart,
+};
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str, StrBuf};
 use crate::escape::sh_single_quote;
-use crate::ast::{
-    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseTerm,
-    CmdSubBody, Command,
-    CondBinOp, CondBinary, CondUnary,
-    CondExpr, DeclArray,
-    ForArithClause, ForClause, FunctionDef, IfClause, LineMap, LoopClause, ParamOp, Pipeline,
-    ProcSubBody, Program, Redirect,
-    RedirectOp,
-    ReplaceAnchor, SelectClause, SimpleCommand, SubshellClause, Word, WordPart,
-};
 use crate::histexpand::{Expansion, HistCtx};
 use crate::lexer;
 use crate::lexer::ReaderWarning;
@@ -136,9 +133,9 @@ use crate::parser::{
 };
 use crate::unparse::Nested;
 use crate::unparse::elem_src;
-use crate::wordscan::WordFault;
 #[cfg(windows)]
 use crate::wincmd;
+use crate::wordscan::WordFault;
 
 /// The bash release level this shell emulates, exposed via `$BASH_VERSION`
 /// (and parsed into `$BASH_VERSINFO`). Scripts branch on this to gate features;
@@ -490,8 +487,7 @@ fn path_is_executable(p: &std::path::Path) -> bool {
     #[cfg(not(windows))]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(p)
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     }
     #[cfg(windows)]
     {
@@ -771,7 +767,9 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    std::thread::Builder::new().stack_size(SHELL_STACK_SIZE).spawn(f)
+    std::thread::Builder::new()
+        .stack_size(SHELL_STACK_SIZE)
+        .spawn(f)
 }
 
 /// The current working directory as a shell-facing path (see [`shell_path`]),
@@ -781,7 +779,10 @@ where
 /// Only used to *seed* [`Shell::cwd`] at construction. Everything after that
 /// reads the shell's own directory, which is per-`Shell` (see the field docs).
 fn shell_cwd() -> Str {
-    std::env::current_dir().as_deref().map(shell_path).unwrap_or_default()
+    std::env::current_dir()
+        .as_deref()
+        .map(shell_path)
+        .unwrap_or_default()
 }
 
 /// True when `p` names a location without needing a working directory: a
@@ -868,7 +869,9 @@ fn drive_colon_at(path: BStr<'_>, start: usize, i: usize) -> bool {
     cfg!(windows)
         && i == start.saturating_add(1)
         && path.get(start).is_some_and(|b| b.is_ascii_alphabetic())
-        && path.get(i.saturating_add(1)).is_some_and(|&b| b == b'/' || b == b'\\')
+        && path
+            .get(i.saturating_add(1))
+            .is_some_and(|&b| b == b'/' || b == b'\\')
 }
 
 /// Join `rel` under the directory `cwd` unconditionally: `cwd`'s trailing
@@ -1017,7 +1020,9 @@ const STANDARD_SET_O_OPTIONS: &[&str] = &[
 /// coverage for the interposition is therefore the corpus case, which runs the
 /// real binary.
 fn own_binary() -> Option<Str> {
-    std::env::current_exe().ok().map(|p| bytes::path_to_bytes(&p))
+    std::env::current_exe()
+        .ok()
+        .map(|p| bytes::path_to_bytes(&p))
 }
 
 /// bash's `check_binary_file`, applied to the first bytes of a file: is this
@@ -1083,7 +1088,10 @@ fn shebang(head: BStr<'_>) -> Option<(Str, Option<Str>)> {
     };
     let arg = line.get(split..)?;
     let arg_start = arg.iter().position(|&c| !blank(c))?;
-    Some((line.get(..split)?.to_vec(), Some(arg.get(arg_start..)?.to_vec())))
+    Some((
+        line.get(..split)?.to_vec(),
+        Some(arg.get(arg_start..)?.to_vec()),
+    ))
 }
 
 /// What has to run in a command file's place, because the OS will not run the
@@ -1273,7 +1281,11 @@ fn spawn_target(cwd: BStr<'_>, word: BStr<'_>, resolved: Option<&std::path::Path
         None => return SpawnTarget::Other,
     };
     if let Ok(m) = std::fs::metadata(bytes::bytes_to_path(&path)) {
-        return if m.is_dir() { SpawnTarget::Dir } else { SpawnTarget::Other };
+        return if m.is_dir() {
+            SpawnTarget::Dir
+        } else {
+            SpawnTarget::Other
+        };
     }
     // The host would not even look at it. Where that is the trailing separator
     // talking, the name in front of it is what POSIX resolves and what decides
@@ -1471,7 +1483,11 @@ struct ClosedStd {
 
 impl ClosedStd {
     /// No fd 0 (`cmd <&-`), the only shape the read side needs.
-    const STDIN: Self = Self { stdin: true, stdout: false, stderr: false };
+    const STDIN: Self = Self {
+        stdin: true,
+        stdout: false,
+        stderr: false,
+    };
 
     /// Whether anything at all is to be closed — the fast path is every other
     /// spawn in the shell.
@@ -1673,7 +1689,11 @@ impl ExecOpts {
     /// the word that named it.
     fn arg0_for(&self, word: BStr<'_>) -> Str {
         let base = self.arg0.as_deref().unwrap_or(word);
-        if self.login { bfmt![b"-", base] } else { base.to_vec() }
+        if self.login {
+            bfmt![b"-", base]
+        } else {
+            base.to_vec()
+        }
     }
 }
 
@@ -3680,7 +3700,10 @@ impl DirStackSpec {
         if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
             return None;
         }
-        bytes::as_str(digits)?.parse().ok().map(|n| Self { plus, n })
+        bytes::as_str(digits)?
+            .parse()
+            .ok()
+            .map(|n| Self { plus, n })
     }
 }
 
@@ -4083,8 +4106,16 @@ struct CompSpec {
 }
 
 /// Canonical print order of `complete -o` option names (bash `pcomplete.c`).
-const COMP_O_ORDER: &[&str] =
-    &["bashdefault", "default", "dirnames", "filenames", "noquote", "nosort", "nospace", "plusdirs"];
+const COMP_O_ORDER: &[&str] = &[
+    "bashdefault",
+    "default",
+    "dirnames",
+    "filenames",
+    "noquote",
+    "nosort",
+    "nospace",
+    "plusdirs",
+];
 
 /// Completion actions and their single-letter shortcut (`'\0'` = `-A name` only).
 /// Order matches bash's `compacts[]`; `complete -p` prints shortcut actions
@@ -6829,7 +6860,11 @@ impl Shell {
     pub fn format_shopt_list(&self, enable: bool) -> String {
         let mut listing = String::new();
         for &(opt, _) in SHOPT_TABLE {
-            let on = self.shopt.get(opt).copied().unwrap_or_else(|| self.shopt_default(opt));
+            let on = self
+                .shopt
+                .get(opt)
+                .copied()
+                .unwrap_or_else(|| self.shopt_default(opt));
             listing.push_str(&shopt_line(opt, on, !enable));
         }
         listing
@@ -6945,7 +6980,11 @@ impl Shell {
                 }
                 // bash chains these with `&&` on "did not run", so the first one
                 // that exists is the only one read.
-                for path in [b"~/.bash_profile".as_slice(), b"~/.bash_login", b"~/.profile"] {
+                for path in [
+                    b"~/.bash_profile".as_slice(),
+                    b"~/.bash_login",
+                    b"~/.profile",
+                ] {
                     match self.run_startup_file(path) {
                         Err(code) => return Some(code),
                         Ok(true) => break,
@@ -7094,7 +7133,9 @@ impl Shell {
             quoted.push(b);
         }
         quoted.push(b'"');
-        let Ok(word) = crate::parser::word_verbatim_from_source(&quoted, self.parse_opts(), Quoting::Bare) else {
+        let Ok(word) =
+            crate::parser::word_verbatim_from_source(&quoted, self.parse_opts(), Quoting::Bare)
+        else {
             return Ok(false);
         };
         let path = self.expand_to_string(&word);
@@ -7228,7 +7269,9 @@ impl Shell {
                 let line = bfmt![
                     self.err_prefix(),
                     b"BASH_XTRACEFD: ",
-                    self.vars.get("BASH_XTRACEFD").map_or(&[][..], Vec::as_slice),
+                    self.vars
+                        .get("BASH_XTRACEFD")
+                        .map_or(&[][..], Vec::as_slice),
                     b": invalid value for trace file descriptor"
                 ];
                 self.berrln(&line);
@@ -7380,7 +7423,9 @@ impl Shell {
     /// exported — so nothing is checked beyond the two fixtures being present
     /// with at least one byte between them.
     fn env_function_name(key: BStr<'_>) -> Option<BStr<'_>> {
-        key.strip_prefix(b"BASH_FUNC_")?.strip_suffix(b"%%").filter(|n| !n.is_empty())
+        key.strip_prefix(b"BASH_FUNC_")?
+            .strip_suffix(b"%%")
+            .filter(|n| !n.is_empty())
     }
 
     /// Bind a function that arrived in the environment (see
@@ -7422,7 +7467,9 @@ impl Shell {
                     }
                     msg.push_str(&wrap_parse_message(one, &prefix));
                 }
-                if e.msgs.iter().any(|m| bytes::contains(m, b"syntax error near "))
+                if e.msgs
+                    .iter()
+                    .any(|m| bytes::contains(m, b"syntax error near "))
                     && let Some(text) = nth_source_line(&src, e.line.unwrap_or(1))
                 {
                     msg.push_str(&bfmt![b"\n", &prefix, b"`", text, b"'"]);
@@ -7439,7 +7486,8 @@ impl Shell {
         };
         let Some(f) = def else { return };
         self.funcs.insert(name.to_vec(), f.body);
-        self.func_sources.insert(name.to_vec(), b"environment".to_vec());
+        self.func_sources
+            .insert(name.to_vec(), b"environment".to_vec());
         self.func_lines.insert(name.to_vec(), 0);
         self.func_body_lines.insert(name.to_vec(), f.body_line);
         if f.redirects.is_empty() {
@@ -7601,7 +7649,11 @@ impl Shell {
             // Read-only (see `shopt_is_read_only`), so nothing can ever shadow
             // it in `self.shopt` and this "default" is always the answer.
             "login_shell" => self.login_shell,
-            _ => SHOPT_TABLE.iter().find(|(n, _)| *n == name).map(|(_, d)| *d).unwrap_or(false),
+            _ => SHOPT_TABLE
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, d)| *d)
+                .unwrap_or(false),
         }
     }
 
@@ -7831,7 +7883,10 @@ impl Shell {
         // loop, so an input the loop never entered is a success — whatever `$?`
         // was before it. `$?` itself is left alone, which is what keeps a
         // comment-only *line* at the top level from clearing the status.
-        SourceRun { flow, status: if ran { self.last_status } else { 0 } }
+        SourceRun {
+            flow,
+            status: if ran { self.last_status } else { 0 },
+        }
     }
 
     /// The read-parse-execute loop itself; see [`Shell::run_source_flow_out`].
@@ -7869,7 +7924,11 @@ impl Shell {
             if hist == HistRead::Reader && self.hist_on() && self.histexpand() {
                 self.expand_history_lines(&mut ip, opts);
             }
-            let aliases = if self.aliases_enabled() { Some(&self.aliases) } else { None };
+            let aliases = if self.aliases_enabled() {
+                Some(&self.aliases)
+            } else {
+                None
+            };
             let Some(unit) = ip.next_unit(aliases, opts) else {
                 return Flow::Next;
             };
@@ -8046,7 +8105,9 @@ impl Shell {
     fn expand_history_lines(&mut self, ip: &mut IncrementalParser, opts: crate::lexer::ParseOpts) {
         let mut accum = Str::new();
         loop {
-            let Some(raw) = ip.peek_raw_line() else { return };
+            let Some(raw) = ip.peek_raw_line() else {
+                return;
+            };
             // Lifted out and put back so the expander can hold `&mut` on the
             // cross-line expansion state while `HistCtx` borrows the history list.
             let mut state = std::mem::take(&mut self.hist_state);
@@ -8731,14 +8792,20 @@ impl Shell {
         // down would have got the chance to pick the higher status. Hence
         // `set -eo posix; readonly r=1; r=x` exits 1 rather than 127.
         if self.errexit && when != FatalWhen::PosixOnly {
-            self.unbound_error = Some(FatalAbort { status: 1, demote: true });
+            self.unbound_error = Some(FatalAbort {
+                status: 1,
+                demote: true,
+            });
             // This half of the promotion is `report_error`'s own exit, taken at
             // the diagnostic rather than carried back as a return value, so a
             // prompt expansion cannot intercept it — see
             // [`Shell::shell_error_exit`].
             self.shell_error_exit = true;
         } else if when != FatalWhen::ErrexitOnly && self.shell_option_enabled("posix") {
-            self.unbound_error = Some(FatalAbort { status: 127, demote: true });
+            self.unbound_error = Some(FatalAbort {
+                status: 127,
+                demote: true,
+            });
         } else {
             return;
         }
@@ -9239,7 +9306,11 @@ impl Shell {
             let flow = self.exec_command(&pipe.commands[0], out, stdin);
             self.debug_announced = false;
             (vec![self.last_status], flow)
-        } else if pipe.commands.iter().all(|c| self.stage_is_plain_external(c)) {
+        } else if pipe
+            .commands
+            .iter()
+            .all(|c| self.stage_is_plain_external(c))
+        {
             // All-external pipeline → real OS pipes (concurrent, SIGPIPE-aware).
             self.exec_concurrent_pipeline(&pipe.commands, &skipped, out, stdin)
         } else {
@@ -9254,7 +9325,10 @@ impl Shell {
         // ([`Shell::publishes_pipestatus`]). `$?` needs no folding in that last
         // case: a single command's status is the pipeline's already.
         let writes_array = pipe.commands.len() != 1
-            || pipe.commands.first().is_some_and(Self::publishes_pipestatus);
+            || pipe
+                .commands
+                .first()
+                .is_some_and(Self::publishes_pipestatus);
         if abandoned {
             self.last_status = 0;
         } else if !std::mem::take(&mut self.debug_skipped) && writes_array {
@@ -9460,7 +9534,12 @@ impl Shell {
                     i += 2;
                 }
                 Some(b'P') => {
-                    out.extend_from_slice(&Self::mkfmt(2, false, cpu / 100, (cpu % 100) as u32 * 10));
+                    out.extend_from_slice(&Self::mkfmt(
+                        2,
+                        false,
+                        cpu / 100,
+                        (cpu % 100) as u32 * 10,
+                    ));
                     i += 2;
                 }
                 _ => {
@@ -9516,7 +9595,12 @@ impl Shell {
                 .collect(),
         );
         self.last_status = if self.pipefail {
-            statuses.iter().rev().copied().find(|&s| s != 0).unwrap_or(0)
+            statuses
+                .iter()
+                .rev()
+                .copied()
+                .find(|&s| s != 0)
+                .unwrap_or(0)
         } else {
             statuses.last().copied().unwrap_or(0)
         };
@@ -9991,7 +10075,9 @@ impl Shell {
         // The head stage reads the pipeline's own input, which is the shell's
         // real stdin only when the pipeline is not itself nested inside another
         // (`cmd | f`, where `f`'s body is `a | b`).
-        let mut head_stdio = self.pipeline_head_stdin(stdin).map(HeadIn::into_child_stdin);
+        let mut head_stdio = self
+            .pipeline_head_stdin(stdin)
+            .map(HeadIn::into_child_stdin);
         // Where the *last* stage's stdout goes. `Capture` is spawned as a pipe
         // and drained below; `Pipe` hands the child a duplicate of the write
         // end, so the bytes reach the enclosing pipeline directly (no relay
@@ -10067,7 +10153,10 @@ impl Shell {
             self.apply_child_env(
                 &mut pc,
                 &assigns,
-                Some(ChildProgram { word: program, resolved: resolved.as_deref() }),
+                Some(ChildProgram {
+                    word: program,
+                    resolved: resolved.as_deref(),
+                }),
             );
 
             // stdin: the first stage takes the pipeline's own input; later
@@ -10120,9 +10209,7 @@ impl Shell {
 
         // Read the final stage's output into the capture buffer before waiting,
         // so the producer isn't blocked on a full pipe (avoids deadlock).
-        if capturing
-            && let Some(mut so) = children.last_mut().and_then(|c| c.stdout.take())
-        {
+        if capturing && let Some(mut so) = children.last_mut().and_then(|c| c.stdout.take()) {
             let mut buf = Vec::new();
             let _ = so.read_to_end(&mut buf);
             if let Out::Capture(b) = out {
@@ -10334,7 +10421,8 @@ impl Shell {
             // current line, because the latter is the reader's — the *end* of
             // the parse unit — and a multi-line definition would report its
             // closing brace. See [`crate::ast::FunctionDef::line`].
-            self.func_lines.insert(f.name.clone(), f.line.saturating_sub(self.line_bias));
+            self.func_lines
+                .insert(f.name.clone(), f.line.saturating_sub(self.line_bias));
             // …and where its *body* opens, which is a different number and a
             // different job: a call stands on it. See
             // [`crate::ast::FunctionDef::body_line`].
@@ -10345,7 +10433,8 @@ impl Shell {
             if f.redirects.is_empty() {
                 self.func_redirects.remove(&f.name);
             } else {
-                self.func_redirects.insert(f.name.clone(), f.redirects.clone());
+                self.func_redirects
+                    .insert(f.name.clone(), f.redirects.clone());
             }
             self.last_status = 0;
         }
@@ -10727,7 +10816,10 @@ impl Shell {
         let header: Str = {
             let words = match &c.words {
                 Some(words) => bytes::join(
-                    &words.iter().map(crate::unparse::word_src).collect::<Vec<_>>(),
+                    &words
+                        .iter()
+                        .map(crate::unparse::word_src)
+                        .collect::<Vec<_>>(),
                     b" ",
                 ),
                 None => b"\"$@\"".to_vec(),
@@ -10877,7 +10969,10 @@ impl Shell {
         // takes an optional sign and stops at the first non-digit — so `40x` is
         // 40 while `abc` is 0. A leading `-` leaves no digits here, which lands
         // on the same "not positive, use the default" branch bash takes.
-        let raw: BStr<'_> = self.vars.get("COLUMNS").map_or(b"".as_slice(), Vec::as_slice);
+        let raw: BStr<'_> = self
+            .vars
+            .get("COLUMNS")
+            .map_or(b"".as_slice(), Vec::as_slice);
         let t = bytes::trim_start(raw);
         let t = t.strip_prefix(b"+".as_slice()).unwrap_or(t);
         // `atoi` reads *bytes*: the digit run is ASCII by construction, so a
@@ -10939,7 +11034,10 @@ impl Shell {
         let header: Str = {
             let words = match &c.words {
                 Some(words) => bytes::join(
-                    &words.iter().map(crate::unparse::word_src).collect::<Vec<_>>(),
+                    &words
+                        .iter()
+                        .map(crate::unparse::word_src)
+                        .collect::<Vec<_>>(),
                     b" ",
                 ),
                 None => b"\"$@\"".to_vec(),
@@ -10995,7 +11093,11 @@ impl Shell {
             self.last_status = 0;
             return Flow::Next;
         }
-        let ps3 = self.vars.get("PS3").cloned().unwrap_or_else(|| b"#? ".to_vec());
+        let ps3 = self
+            .vars
+            .get("PS3")
+            .cloned()
+            .unwrap_or_else(|| b"#? ".to_vec());
         let redir = RedirPlan::default();
         let mut show_menu = true;
         loop {
@@ -11420,7 +11522,8 @@ impl Shell {
         // with it (execute_cmd.c:3139-3141, 3171-3174) rather than holding it
         // over the loop, which is why the *body* runs on its own lines. See
         // [`ForArithClause::line`].
-        if let Err(flow) = self.on_control_line(c.line, |s| s.run_arith_section(&c.init, out, stdin))
+        if let Err(flow) =
+            self.on_control_line(c.line, |s| s.run_arith_section(&c.init, out, stdin))
         {
             return flow;
         }
@@ -11645,8 +11748,8 @@ impl Shell {
         // pipe is not what the list clears. Restored after the body, unlike
         // bash's never-restored global — see the field doc.
         let saved_stdin_redirected = self.stdin_redirected;
-        self.stdin_redirected = redirects_rebind_stdin(redirects)
-            || std::mem::take(&mut self.pipe_stage_redirect_root);
+        self.stdin_redirected =
+            redirects_rebind_stdin(redirects) || std::mem::take(&mut self.pipe_stage_redirect_root);
         // `( … ) {v}>f` is the one shape bash applies the list *after* forking,
         // so the assignment it makes belongs to the body and not to us — see
         // [`VarfdScope::Subshell`].
@@ -11772,8 +11875,8 @@ impl Shell {
             // *independent* `>f 2>f` (same path, but `stderr_shares_stdout` false)
             // opens a fresh handle — each redirect truncates to offset 0, so the
             // writes clobber, matching bash.
-            let share_stdout = plan.stderr_shares_stdout
-                && plan.stdout.as_ref().is_some_and(|(sp, _)| sp == path);
+            let share_stdout =
+                plan.stderr_shares_stdout && plan.stdout.as_ref().is_some_and(|(sp, _)| sp == path);
             let opened: io::Result<File> = match (share_stdout, &stdout_file) {
                 (true, Some(f)) => f.try_clone(),
                 _ => open_std_sink(&self.cwd, plan.stderr_write.as_ref(), path, *append),
@@ -12000,7 +12103,8 @@ impl Shell {
         let saved_exec_stdin = input_fd.as_ref().map(|c| {
             // fd 0's write half travels with its read half: `{ …; } <> f` makes
             // the body's `>&0` writable, `{ …; } < f` makes it `EBADF`.
-            let prev_write = std::mem::replace(&mut self.exec_stdin_write, plan.stdin_write.clone());
+            let prev_write =
+                std::mem::replace(&mut self.exec_stdin_write, plan.stdin_write.clone());
             (self.exec_stdin.replace(Arc::clone(c)), prev_write)
         });
 
@@ -12022,7 +12126,11 @@ impl Shell {
             // work this way — their group sinks are `exec_stdout`/`exec_stderr`
             // overrides that an inner `exec` simply replaces.
             let inherit_stdin = StdinSrc::Inherit;
-            let sin: &StdinSrc = if input_fd.is_some() { &inherit_stdin } else { stdin };
+            let sin: &StdinSrc = if input_fd.is_some() {
+                &inherit_stdin
+            } else {
+                stdin
+            };
             if stdout_file.is_some() || plan.stdout_closed || stdout_read_only.is_some() {
                 // fd 1 flows to the file — or to nothing at all, for `>&-` — via
                 // `exec_stdout`; run with an ambient `Out::Inherit` (the group
@@ -12035,8 +12143,7 @@ impl Shell {
                 // so a persistent `exec > file` is set aside for the body just as
                 // it is for the `1>&2` capture below.
                 let saved_exec_stdout = self.exec_stdout.take();
-                let saved_live_stdout =
-                    self.live_stdout.replace(WriteFd::Capture(sink.clone()));
+                let saved_live_stdout = self.live_stdout.replace(WriteFd::Capture(sink.clone()));
                 let mut o = Out::Capture(sink.clone());
                 let flow = run(self, &mut o, sin);
                 self.exec_stdout = saved_exec_stdout;
@@ -12152,7 +12259,8 @@ impl Shell {
                 ExtraFdOp::OutputFile(handle) => {
                     // The open already happened, and already reported itself if
                     // it failed — the list aborts there and never reaches here.
-                    self.open_write_fds.insert(*fd, WriteFd::File(Arc::clone(handle)));
+                    self.open_write_fds
+                        .insert(*fd, WriteFd::File(Arc::clone(handle)));
                     self.open_fds.insert(*fd, write_only_input());
                 }
                 ExtraFdOp::AliasFd { src, read, sink } => {
@@ -12270,7 +12378,11 @@ impl Shell {
         }
         // A `=~` RHS that failed to compile as a regex makes bash return 2, not
         // the ordinary 1 "expression false" — surface that distinct status.
-        self.last_status = if self.cond_regex_error { 2 } else { i32::from(!ok) };
+        self.last_status = if self.cond_regex_error {
+            2
+        } else {
+            i32::from(!ok)
+        };
         Flow::Next
     }
 
@@ -12436,7 +12548,8 @@ impl Shell {
             }
             None => {
                 // A failed match clears BASH_REMATCH (bash empties it).
-                self.arrays.insert("BASH_REMATCH".to_string(), BTreeMap::new());
+                self.arrays
+                    .insert("BASH_REMATCH".to_string(), BTreeMap::new());
                 false
             }
         }
@@ -12473,8 +12586,19 @@ impl Shell {
                 if matches!(
                     c.as_ascii(),
                     Some(
-                        '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{'
-                            | '}' | '|'
+                        '\\' | '.'
+                            | '^'
+                            | '$'
+                            | '*'
+                            | '+'
+                            | '?'
+                            | '('
+                            | ')'
+                            | '['
+                            | ']'
+                            | '{'
+                            | '}'
+                            | '|'
                     )
                 ) {
                     out.push(b'\\');
@@ -12552,12 +12676,12 @@ impl Shell {
         let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
         let saw_q = std::mem::replace(&mut self.saw_quoted_at_list, outer_q);
         broken.push(pattern);
-        let pattern = if (saw_at && self.cond_word_list_on()) || (saw_q && self.cond_quoted_list_on())
-        {
-            self.cond_word_list(&broken)
-        } else {
-            broken.concat()
-        };
+        let pattern =
+            if (saw_at && self.cond_word_list_on()) || (saw_q && self.cond_quoted_list_on()) {
+                self.cond_word_list(&broken)
+            } else {
+                broken.concat()
+            };
         echars_text(&pattern)
     }
 
@@ -12636,7 +12760,11 @@ impl Shell {
             CondBinOp::StrLt | CondBinOp::StrGt => {
                 let (a, b) = (self.expand_cond_string(l), self.expand_cond_string(r));
                 self.cond_trace_binary(invert, &a, op.text, &b);
-                if matches!(op.op, CondBinOp::StrLt) { a < b } else { a > b }
+                if matches!(op.op, CondBinOp::StrLt) {
+                    a < b
+                } else {
+                    a > b
+                }
             }
             CondBinOp::NumEq
             | CondBinOp::NumNe
@@ -13320,7 +13448,10 @@ impl Shell {
             return Some(val);
         }
         if self.integer_attr.contains(name) {
-            let cur = cur.as_deref().and_then(bytes::parse_i64).unwrap_or_default();
+            let cur = cur
+                .as_deref()
+                .and_then(bytes::parse_i64)
+                .unwrap_or_default();
             // `apply_value_attrs` has already reduced `val` to a decimal integer.
             let add = bytes::parse_i64(&val).unwrap_or_default();
             return Some(cur.wrapping_add(add).to_string().into_bytes());
@@ -13366,7 +13497,10 @@ impl Shell {
             if !append {
                 return Some(add);
             }
-            let cur = cur.as_deref().and_then(bytes::parse_i64).unwrap_or_default();
+            let cur = cur
+                .as_deref()
+                .and_then(bytes::parse_i64)
+                .unwrap_or_default();
             return Some(cur.wrapping_add(add));
         }
         let text = match cur {
@@ -13681,12 +13815,7 @@ impl Shell {
     /// A chain that names nothing, or that already designates an element and so
     /// leaves this subscript nothing to apply to, is not a readonly question at
     /// all: the store refuses those, and says so.
-    fn set_scalar_target_checked(
-        &mut self,
-        base: &str,
-        sub: Option<BStr<'_>>,
-        val: Str,
-    ) -> bool {
+    fn set_scalar_target_checked(&mut self, base: &str, sub: Option<BStr<'_>>, val: Str) -> bool {
         let Some(sub) = sub else {
             let Some(dest) = self.scalar_write_dest(base) else {
                 return false;
@@ -14167,7 +14296,11 @@ impl Shell {
             Some(i) => bfmt![
                 b"[",
                 xtrace_compound_quote(i),
-                if append { b"]+=".as_slice() } else { b"]=".as_slice() },
+                if append {
+                    b"]+=".as_slice()
+                } else {
+                    b"]=".as_slice()
+                },
                 v
             ],
             None => v,
@@ -14290,7 +14423,11 @@ impl Shell {
     /// [`Self::apply_assignment_inner`] puts the reference's subscript on the
     /// assignment it runs and leaves the spelling's own empty.
     fn elem_blame<'a>(a: &'a Assignment, spelled: &'a Assignment) -> &'a str {
-        if spelled.index.is_some() { &spelled.name } else { &a.name }
+        if spelled.index.is_some() {
+            &spelled.name
+        } else {
+            &a.name
+        }
     }
 
     /// Refuse a write to a readonly variable, with the diagnostic it owes and
@@ -14660,8 +14797,8 @@ impl Shell {
         // array subscript` and exits 1, where the same subscript on a name that
         // was *already* readonly never reaches the store at all — it is refused
         // by declare.def:849 and says `declare: x: readonly variable`.
-        let deferred =
-            a.index.is_some() || (!self.decl_builtin_ctx && !matches!(a.value, AssignRhs::Array(_)));
+        let deferred = a.index.is_some()
+            || (!self.decl_builtin_ctx && !matches!(a.value, AssignRhs::Array(_)));
         if !deferred && self.assignment_write_refused(a, spelled) {
             return false;
         }
@@ -14705,14 +14842,13 @@ impl Shell {
         //     SECONDS`, and a child's environment carries no `SECONDS`. An
         //     explicit `export SECONDS` still marks the name — that is a
         //     declaration, not an assignment.
-        let makes_scalar_var = if spelled.index.is_some()
-            || matches!(spelled.value, AssignRhs::Array(_))
-        {
-            false
-        } else {
-            !self.noassign.contains(&a.name)
-                && (a.index.is_some() || self.dyn_special_for_write(&a.name).is_none())
-        };
+        let makes_scalar_var =
+            if spelled.index.is_some() || matches!(spelled.value, AssignRhs::Array(_)) {
+                false
+            } else {
+                !self.noassign.contains(&a.name)
+                    && (a.index.is_some() || self.dyn_special_for_write(&a.name).is_none())
+            };
         if self.allexport && makes_scalar_var {
             self.mark_exported(a.name.clone());
         }
@@ -14733,13 +14869,19 @@ impl Shell {
                 // accounts for the interception a `( … )` around this performs,
                 // hence `demote: false` here.
                 let status = self.force_eof_status();
-                self.unbound_error = Some(FatalAbort { status, demote: false });
+                self.unbound_error = Some(FatalAbort {
+                    status,
+                    demote: false,
+                });
             } else if self.errexit {
                 // `parser_error` (error.c:386) ends with a direct
                 // `exit_shell (last_command_exit_value = 2)` under errexit,
                 // before the class of the failure has been decided at all — the
                 // same shape [`Self::comsub_reparse_error`]'s caller handles.
-                self.unbound_error = Some(FatalAbort { status: 2, demote: false });
+                self.unbound_error = Some(FatalAbort {
+                    status: 2,
+                    demote: false,
+                });
             } else {
                 // `set_exit_status (EXECUTION_FAILURE); … jump_to_top_level
                 // (DISCARD)` (parse.y:6472-6480): this parse unit is abandoned
@@ -14859,8 +15001,7 @@ impl Shell {
                     // An associative array is exempt, `*` being a key there like
                     // any other. See [`Shell::warn_whole_array_sub`].
                     if !is_assoc
-                        && let Some(c) =
-                            Self::whole_array_sub(&crate::unparse::word_src(idx_word))
+                        && let Some(c) = Self::whole_array_sub(&crate::unparse::word_src(idx_word))
                     {
                         self.warn_whole_array_sub(blame, c);
                         if !self.decl_builtin_ctx {
@@ -15098,7 +15239,12 @@ impl Shell {
                                 return false;
                             };
                             let sum = base.wrapping_add(n);
-                            self.assoc_set(&a.name, b"0".to_vec(), sum.to_string().into_bytes(), false);
+                            self.assoc_set(
+                                &a.name,
+                                b"0".to_vec(),
+                                sum.to_string().into_bytes(),
+                                false,
+                            );
                         } else {
                             self.assoc_set(&a.name, b"0".to_vec(), val, true);
                         }
@@ -15198,7 +15344,11 @@ impl Shell {
                                 let word = self.expand_to_string(w);
                                 words.push(word);
                             }
-                            ArrayElem::Keyed { index, value, append } => {
+                            ArrayElem::Keyed {
+                                index,
+                                value,
+                                append,
+                            } => {
                                 // Reassemble the `[idx]=val` source shape (or
                                 // `[idx]+=val`). The brackets and `=` are
                                 // literal separators, so expanding the two
@@ -15284,13 +15434,22 @@ impl Shell {
                     let mut elems: Vec<AssocElem> = Vec::new();
                     for e in items {
                         match e {
-                            ArrayElem::Keyed { index, value, append } => {
+                            ArrayElem::Keyed {
+                                index,
+                                value,
+                                append,
+                            } => {
                                 let key = self.expand_subscript_key(index);
                                 let val = self.expand_to_string(value);
                                 bail_if_expansion_failed!();
                                 self.xtrace_compound_elem(Some(&key), &val, *append);
                                 let src = elem_src(e);
-                                elems.push(AssocElem { key: Some(key), val, src, append: *append });
+                                elems.push(AssocElem {
+                                    key: Some(key),
+                                    val,
+                                    src,
+                                    append: *append,
+                                });
                             }
                             ArrayElem::Positional(w) => {
                                 // Never expanded: see the note on the bare branch
@@ -15312,9 +15471,14 @@ impl Shell {
                     // likewise reports after it.
                     self.compound_expansion_done(a);
                     for e in elems {
-                        if !self
-                            .assoc_keyed_element(a, &mut pending, e.key, e.val, &e.src, e.append)
-                        {
+                        if !self.assoc_keyed_element(
+                            a,
+                            &mut pending,
+                            e.key,
+                            e.val,
+                            &e.src,
+                            e.append,
+                        ) {
                             return false;
                         }
                     }
@@ -15401,11 +15565,19 @@ impl Shell {
                             for bw in self.expand_braces_opt(w) {
                                 for v in self.expand_word(&bw, true) {
                                     self.xtrace_compound_elem(None, &v, false);
-                                    expanded.push(IndexedElem { sub: None, val: v, append: false });
+                                    expanded.push(IndexedElem {
+                                        sub: None,
+                                        val: v,
+                                        append: false,
+                                    });
                                 }
                             }
                         }
-                        ArrayElem::Keyed { index, value, append } => {
+                        ArrayElem::Keyed {
+                            index,
+                            value,
+                            append,
+                        } => {
                             // The subscript's expanded *text*, and only that:
                             // its arithmetic is phase 2's, because bash's is —
                             // `array_expand_index` is called from the walk in
@@ -15476,7 +15648,12 @@ impl Shell {
                     .get(&a.name)
                     .and_then(|elems| elems.keys().next_back().copied())
                     .map_or(0, |k| k.saturating_add(1));
-                for IndexedElem { sub, val, append: elem_append } in expanded {
+                for IndexedElem {
+                    sub,
+                    val,
+                    append: elem_append,
+                } in expanded
+                {
                     // The subscript is settled first because bash settles it
                     // first: a subscript the array cannot hold skips the element
                     // without its value ever being looked at, so `declare -ai
@@ -15546,7 +15723,10 @@ impl Shell {
                     else {
                         return false;
                     };
-                    self.arrays.entry(a.name.clone()).or_default().insert(at, val);
+                    self.arrays
+                        .entry(a.name.clone())
+                        .or_default()
+                        .insert(at, val);
                     // `bind_array_var_internal`'s `VUNSETATTR (entry,
                     // att_invisible)` (arrayfunc.c:245). Recorded rather than
                     // inferred from the array being non-empty, because bash's
@@ -15618,7 +15798,11 @@ impl Shell {
                 bfmt![
                     b"[",
                     &xtrace_compound_quote(&key),
-                    if elem_append { b"]+=".as_slice() } else { b"]=".as_slice() },
+                    if elem_append {
+                        b"]+=".as_slice()
+                    } else {
+                        b"]=".as_slice()
+                    },
                     &xtrace_compound_quote(&val)
                 ]
             } else {
@@ -15636,7 +15820,11 @@ impl Shell {
         // read: `declare -A m=([a]=Q); m=([a]=1 [a]+=x)` gives `Qx` and not `1x`,
         // because the pending `[a]=1` is invisible, and the last pending write for
         // a key is the one that survives the swap.
-        let cur = if elem_append { self.assoc_element(&a.name, &key) } else { None };
+        let cur = if elem_append {
+            self.assoc_element(&a.name, &key)
+        } else {
+            None
+        };
         let Some(val) = self.appended_attributed_value(&a.name, cur, val, elem_append) else {
             return false;
         };
@@ -16032,7 +16220,8 @@ impl Shell {
         // `[@]`/`[*]` on a scalar is bash's `return (var_isset (var) ? 1 : 0)`,
         // and a computed scalar is set like any other. See
         // [`Shell::scalar_for_subscript`].
-        self.scalar_for_subscript(name).map_or_else(Vec::new, |v| vec![v])
+        self.scalar_for_subscript(name)
+            .map_or_else(Vec::new, |v| vec![v])
     }
 
     /// The bounds text of a slice whose `(` never closed — bash reports
@@ -16400,7 +16589,9 @@ impl Shell {
         // so only route real indexed/associative arrays through the key-value
         // path and let the positionals fall through to the per-element map
         // (where `transform_value` quotes `k`/`K` like `Q`).
-        if let BulkOp::Transform { op: k @ ('k' | 'K') } = op
+        if let BulkOp::Transform {
+            op: k @ ('k' | 'K'),
+        } = op
             && name != "@"
             && name != "*"
         {
@@ -16409,7 +16600,10 @@ impl Shell {
         // `@A` / `@a` over `[@]`/`[*]` are collection-wide, not per-element:
         // `@A` yields one re-inputtable declare/`set --`, `@a` yields each
         // element's attribute letters.
-        if let BulkOp::Transform { op: t @ ('A' | 'a') } = op {
+        if let BulkOp::Transform {
+            op: t @ ('A' | 'a'),
+        } = op
+        {
             return self.bulk_attr_transform(name, *t, fields);
         }
         // An empty/unknown/multi-char `@` transform over `[@]`/`[*]` (or the
@@ -16507,7 +16701,9 @@ impl Shell {
         let Some(name) = target.as_name().map(str::to_owned) else {
             return Vec::new();
         };
-        self.in_target_scope(&target, |sh| sh.bulk_attr_transform_resolved(&name, op, fields))
+        self.in_target_scope(&target, |sh| {
+            sh.bulk_attr_transform_resolved(&name, op, fields)
+        })
     }
 
     /// [`Self::bulk_attr_transform`] once the chain has been walked and the
@@ -16536,7 +16732,11 @@ impl Shell {
                 // Attribute letters are ASCII by construction.
                 self.attr_flag_letters(name).into_bytes()
             };
-            return if field.is_empty() { Vec::new() } else { vec![field] };
+            return if field.is_empty() {
+                Vec::new()
+            } else {
+                vec![field]
+            };
         }
         if op == 'A' {
             if positional {
@@ -16562,7 +16762,9 @@ impl Shell {
                     .collect();
                 return self.split_transform_items(items, fields);
             }
-            let items = self.format_declare_def(name).map_or_else(Vec::new, |s| vec![s]);
+            let items = self
+                .format_declare_def(name)
+                .map_or_else(Vec::new, |s| vec![s]);
             return self.split_transform_items(items, fields);
         }
         // op == 'a'
@@ -16628,7 +16830,10 @@ impl Shell {
         if !fields {
             return items;
         }
-        items.iter().flat_map(|it| self.split_transform_item(it)).collect()
+        items
+            .iter()
+            .flat_map(|it| self.split_transform_item(it))
+            .collect()
     }
 
     /// Field-split one item of a whole-collection `@A` — see
@@ -16752,7 +16957,9 @@ impl Shell {
     fn bulk_keyvalue(&mut self, name: &str, quoted: bool) -> Vec<Str> {
         let (keys, values): (Vec<Str>, Vec<Str>) = if name == "@" || name == "*" {
             let vals = self.positional.clone();
-            let keys = (1..=vals.len()).map(|i| i.to_string().into_bytes()).collect();
+            let keys = (1..=vals.len())
+                .map(|i| i.to_string().into_bytes())
+                .collect();
             (keys, vals)
         } else {
             (self.array_keys(name), self.array_elements(name))
@@ -16811,7 +17018,11 @@ impl Shell {
                 replacement,
             } => {
                 let pat = self.expand_modifier_pattern(pattern);
-                let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
+                let patsub = self
+                    .shopt
+                    .get("patsub_replacement")
+                    .copied()
+                    .unwrap_or(true);
                 ReadyBulkOp::Replace {
                     all: *all,
                     anchor: *anchor,
@@ -16825,11 +17036,7 @@ impl Shell {
                         .unwrap_or_default(),
                 }
             }
-            BulkOp::Case {
-                mode,
-                all,
-                pattern,
-            } => ReadyBulkOp::Case {
+            BulkOp::Case { mode, all, pattern } => ReadyBulkOp::Case {
                 mode: *mode,
                 all: *all,
                 pat: self.expand_modifier_pattern(pattern),
@@ -17263,7 +17470,14 @@ impl Shell {
         let scope = target.scope;
         let base = target.base.clone();
         self.in_scope(scope, &base, |sh| {
-            sh.assign_elem_placed(&name, index, value, &blame, elem_invalid_name.as_deref(), &mut debt)
+            sh.assign_elem_placed(
+                &name,
+                index,
+                value,
+                &blame,
+                elem_invalid_name.as_deref(),
+                &mut debt,
+            )
         })
     }
 
@@ -17359,8 +17573,13 @@ impl Shell {
                     };
                     if idx < 0 && Self::resolve_index(idx, bound).is_none() {
                         let src = self.expand_subscript_key(w);
-                        let line =
-                            bfmt![self.err_prefix(), blame, b"[", &src, b"]: bad array subscript"];
+                        let line = bfmt![
+                            self.err_prefix(),
+                            blame,
+                            b"[",
+                            &src,
+                            b"]: bad array subscript"
+                        ];
                         self.berrln(&line);
                         return false;
                     }
@@ -17899,8 +18118,7 @@ impl Shell {
         let empty = match base {
             Some(base) => self.dquote && self.array_elements(base).is_empty(),
             None => {
-                (self.dquote || self.no_split_star || self.cond_word)
-                    && self.positional.is_empty()
+                (self.dquote || self.no_split_star || self.cond_word) && self.positional.is_empty()
             }
         };
         if !empty {
@@ -17986,11 +18204,7 @@ impl Shell {
     /// A *recogniser*: a `None` sends the caller back to `expand_indirect`, so
     /// nothing is reported here — otherwise every complaint about the pointer
     /// would be made twice.
-    fn indirect_ref_part(
-        &mut self,
-        refname: &str,
-        index: &Option<ArrayIndex>,
-    ) -> Option<WordPart> {
+    fn indirect_ref_part(&mut self, refname: &str, index: &Option<ArrayIndex>) -> Option<WordPart> {
         if index.is_none() && self.nameref_attr.contains(refname) {
             return None;
         }
@@ -18423,7 +18637,11 @@ impl Shell {
             // Reached nothing, or reached an empty name — bash makes no
             // distinction between the two here.
             _ => {
-                let msg = bfmt![self.err_prefix(), &ptr.label, b": invalid indirect expansion\n"];
+                let msg = bfmt![
+                    self.err_prefix(),
+                    &ptr.label,
+                    b": invalid indirect expansion\n"
+                ];
                 self.emit_stderr(&msg);
                 self.arm_discard(1);
                 return false;
@@ -18570,12 +18788,7 @@ impl Shell {
     /// *supply* something for the unset case — `:-`, `:=`, `:+`, `:?` — are
     /// exempt, and those are [`Shell::expand_param_op`]'s, which does not come
     /// here.
-    fn modifier_operand(
-        &mut self,
-        operand: Operand,
-        name: &str,
-        index: &Option<Box<Word>>,
-    ) -> Str {
+    fn modifier_operand(&mut self, operand: Operand, name: &str, index: &Option<Box<Word>>) -> Str {
         match self.op_operand(operand, name, index) {
             Some(v) => v,
             None => {
@@ -19216,7 +19429,11 @@ impl Shell {
                 .rsplit(|b| matches!(b, b'/' | b'\\'))
                 .next()
                 .unwrap_or(&cwd);
-            return if base.is_empty() { b"/".to_vec() } else { base.to_vec() };
+            return if base.is_empty() {
+                b"/".to_vec()
+            } else {
+                base.to_vec()
+            };
         }
         if let Some(home) = self.param_value("HOME").filter(|h| !h.is_empty()) {
             if cwd == home {
@@ -19599,7 +19816,11 @@ impl Shell {
     /// [`Shell::dyn_touched`]), and from then on the listing tells the whole
     /// truth: the named form's letters.
     fn dynamic_special_listed_flags(&self, d: &DynamicSpecial) -> &'static str {
-        if self.dyn_touched(d.name) { d.named_flags } else { d.listed_flags }
+        if self.dyn_touched(d.name) {
+            d.named_flags
+        } else {
+            d.listed_flags
+        }
     }
 
     /// Whether `name`'s slot currently carries the integer attribute — the one
@@ -19707,7 +19928,9 @@ impl Shell {
     fn name_is_array_kind(&self, name: &str) -> bool {
         self.arrays.contains_key(name)
             || self.assoc.contains_key(name)
-            || self.dynamic_special(name).is_some_and(|d| d.listed.is_array())
+            || self
+                .dynamic_special(name)
+                .is_some_and(|d| d.listed.is_array())
     }
 
     /// Whether the array `name` — of either kind — *holds* a value, as opposed
@@ -19925,7 +20148,10 @@ impl Shell {
                 // ${r[-9]}` reports `zz` — and a name merely declared counts as
                 // found, since `find_variable` hands the invisible variable
                 // back (see [`Shell::var_entry_exists`]).
-                let blame = name.filter(|n| self.var_entry_exists(n)).unwrap_or(written).to_owned();
+                let blame = name
+                    .filter(|n| self.var_entry_exists(n))
+                    .unwrap_or(written)
+                    .to_owned();
                 // Associative subscripts are string keys, not arithmetic. A
                 // name that is not there is not an associative one either, so
                 // this is the arithmetic branch for it, exactly as bash's
@@ -19988,8 +20214,7 @@ impl Shell {
                             // The echoed subscript is the *expansion* of the
                             // subscript word, so it can hold any byte.
                             let src = self.expand_subscript_key(w);
-                            let line =
-                                bfmt![self.err_prefix(), &src, b"]: bad array subscript\n"];
+                            let line = bfmt![self.err_prefix(), &src, b"]: bad array subscript\n"];
                             self.emit_stderr(&line);
                             self.arm_discard(1);
                             self.note_shell_error(FatalWhen::ErrexitOnly);
@@ -20006,7 +20231,9 @@ impl Shell {
                     }
                 };
                 if length {
-                    val.map_or(0, |v| bytes::char_count(&v)).to_string().into_bytes()
+                    val.map_or(0, |v| bytes::char_count(&v))
+                        .to_string()
+                        .into_bytes()
                 } else {
                     match val {
                         Some(v) => v,
@@ -20021,8 +20248,7 @@ impl Shell {
                             // word there and never reaches this test; see
                             // [`Shell::raise_unbound`].
                             if self.unbound_is_error(written) {
-                                let shown =
-                                    bfmt![written, b"[", crate::unparse::word_src(w), b"]"];
+                                let shown = bfmt![written, b"[", crate::unparse::word_src(w), b"]"];
                                 self.note_unbound(written, &shown);
                             }
                             Str::new()
@@ -20258,7 +20484,8 @@ impl Shell {
         }
         // …and the ones written after every word.
         if track_words
-            && let Err(flow) = self.bind_compounds_before(usize::MAX, &argv, &sc.decl_arrays, &mut cb)
+            && let Err(flow) =
+                self.bind_compounds_before(usize::MAX, &argv, &sc.decl_arrays, &mut cb)
         {
             return flow;
         }
@@ -20601,8 +20828,14 @@ impl Shell {
                 flag_limit,
                 xtrace: self.xtrace,
             };
-            let flow = self
-                .exec_declare_with_arrays(&argv, &sc.decl_arrays, &words, prepared, out, &redir);
+            let flow = self.exec_declare_with_arrays(
+                &argv,
+                &sc.decl_arrays,
+                &words,
+                prepared,
+                out,
+                &redir,
+            );
             // The builtin ran outside [`Shell::run_builtin`], so the failure
             // class it reported has to be consumed here as well — otherwise
             // `set -o posix; export -Z x=(1)` (or `export --help x=(1)`) would
@@ -20915,9 +21148,8 @@ impl Shell {
             Flow::Next
         } else if let Some(rs) = self.func_redirects.get(name).cloned() {
             match self.resolve_redirects(&rs, out) {
-                Ok(plan) => self.exec_with_redirects(plan, out, stdin, |sh, o, s| {
-                    sh.exec_program(&body, o, s)
-                }),
+                Ok(plan) => self
+                    .exec_with_redirects(plan, out, stdin, |sh, o, s| sh.exec_program(&body, o, s)),
                 // A fatal expansion error in one of those words kills the shell:
                 // a function body is run by the shell itself, so there is no
                 // fork to confine it to — `set -u; f() { :; } > $nope; f` never
@@ -21126,7 +21358,9 @@ impl Shell {
         let frames = self.merged_frames();
         let depth = frames.len();
         if i < depth {
-            frames.get(depth.saturating_sub(1).saturating_sub(i)).map(|f| f.0.clone())
+            frames
+                .get(depth.saturating_sub(1).saturating_sub(i))
+                .map(|f| f.0.clone())
         } else if self.script_mode && i == depth {
             Some(b"main".to_vec())
         } else {
@@ -21140,7 +21374,9 @@ impl Shell {
         let frames = self.merged_frames();
         let depth = frames.len();
         if i < depth {
-            frames.get(depth.saturating_sub(1).saturating_sub(i)).map(|f| f.2)
+            frames
+                .get(depth.saturating_sub(1).saturating_sub(i))
+                .map(|f| f.2)
         } else if self.script_mode && i == depth {
             Some(0)
         } else {
@@ -21155,7 +21391,9 @@ impl Shell {
         let frames = self.merged_frames();
         let depth = frames.len();
         if i < depth {
-            frames.get(depth.saturating_sub(1).saturating_sub(i)).map(|f| f.1.clone())
+            frames
+                .get(depth.saturating_sub(1).saturating_sub(i))
+                .map(|f| f.1.clone())
         } else if self.script_mode && i == depth {
             Some(self.name.clone())
         } else {
@@ -21660,8 +21898,10 @@ impl Shell {
         // while the restart carries step 1 past it — and step 1 then *makes*
         // its variable, at a global the literal never touches.
         let mut carried: Vec<String> = Vec::new();
-        for (name, compound) in
-            names.iter().map(|n| (n, false)).chain(compound.iter().map(|n| (n, true)))
+        for (name, compound) in names
+            .iter()
+            .map(|n| (n, false))
+            .chain(compound.iter().map(|n| (n, true)))
         {
             let bind = self.global_bind_names(name, compound, flags);
             // Which name the question is asked of, then, is the whole of the
@@ -21696,13 +21936,23 @@ impl Shell {
         // Step 1's own binding, where the literal after it binds a different
         // name. It has to land before the swap below, so that the snapshot the
         // swap takes of a frame-local it emptied is the emptied one.
-        for step1 in binds.iter().filter_map(|b| b.step1.clone()).collect::<Vec<_>>() {
+        for step1 in binds
+            .iter()
+            .filter_map(|b| b.step1.clone())
+            .collect::<Vec<_>>()
+        {
             match step1 {
                 // `bind_global_variable`'s creation has no kind letter behind it
                 // — that road short-circuits before it — so what it leaves is a
                 // plain scalar whatever shape the literal is.
                 Step1Bind::EmptyGlobal(name) => {
-                    self.make_empty_global(&name, DeclScopeFlags { kind: false, ..flags });
+                    self.make_empty_global(
+                        &name,
+                        DeclScopeFlags {
+                            kind: false,
+                            ..flags
+                        },
+                    );
                 }
                 Step1Bind::EmptyLive(name) => self.empty_live_binding(&name),
             }
@@ -21713,7 +21963,11 @@ impl Shell {
         // asks `find_variable` before falling back on `find_global_variable`.
         // Each walk of a cycle warns, and the walking has to happen while there
         // is still a chain to walk: the fresh binding below destroys it.
-        for name in binds.iter().filter(|b| b.fresh).flat_map(|b| b.names.iter()) {
+        for name in binds
+            .iter()
+            .filter(|b| b.fresh)
+            .flat_map(|b| b.names.iter())
+        {
             let walk = self.walk_ref_name(name);
             self.warn_circular_walks(name, &walk, 1 + usize::from(flags.chklocal));
         }
@@ -21724,7 +21978,11 @@ impl Shell {
         // cell, its attribute — is simply gone before the elements arrive. osh
         // reaches the same binding by un-shadowing it, and would otherwise widen
         // the reference the way `declare -a` widens an ordinary scalar.
-        for name in binds.iter().filter(|b| b.fresh).flat_map(|b| b.names.iter()) {
+        for name in binds
+            .iter()
+            .filter(|b| b.fresh)
+            .flat_map(|b| b.names.iter())
+        {
             self.restore_var(name, VarSnapshot::default());
         }
         saved
@@ -21880,11 +22138,11 @@ impl Shell {
         let kind = flags.kind && (!compound || flags.assn_global);
         let end = self.global_chain_end(name);
         let names = match &end {
-            GlobalChainEnd::Reached(RefTarget { base, sub: None, scope: RefScope::Live })
-                if base == name =>
-            {
-                Vec::new()
-            }
+            GlobalChainEnd::Reached(RefTarget {
+                base,
+                sub: None,
+                scope: RefScope::Live,
+            }) if base == name => Vec::new(),
             // The two walks land on the same variable, so there is nothing for
             // the swap to move — and moving anything would be worse than
             // useless. `find_global_variable` reads only its *first* link from
@@ -21947,7 +22205,9 @@ impl Shell {
                     // so it binds it in place. The two chains share a tail — the
                     // global one only reached here by re-entering a shadowed
                     // name — so the one cell serves both.
-                    GlobalChainEnd::Ended(RefTarget { base, sub: None, .. }) => vec![base],
+                    GlobalChainEnd::Ended(RefTarget {
+                        base, sub: None, ..
+                    }) => vec![base],
                     // A chain that **gave up** — a cycle, or one past the link
                     // limit — shares no tail, and there the two commands part.
                     //
@@ -22003,9 +22263,7 @@ impl Shell {
                                 // written. (A frame-local of *this* frame
                                 // never reaches here — `chklocal` answers for
                                 // it before the mapping is used.)
-                                LiveLastRef::Here => {
-                                    Some(Step1Bind::EmptyLive(name.to_string()))
-                                }
+                                LiveLastRef::Here => Some(Step1Bind::EmptyLive(name.to_string())),
                                 LiveLastRef::Cell(cell) => Some(Step1Bind::EmptyGlobal(cell)),
                                 LiveLastRef::Nothing => None,
                             },
@@ -22018,7 +22276,11 @@ impl Shell {
                 },
             },
         };
-        GlobalBind { names, fresh: false, step1: None }
+        GlobalBind {
+            names,
+            fresh: false,
+            step1: None,
+        }
     }
 
     /// bash's `find_variable_last_nameref (name, 0)` (variables.c:2117): the
@@ -22051,7 +22313,11 @@ impl Shell {
         let mut level = 0usize;
         loop {
             if !self.nameref_attr.contains(&cur) {
-                return if cur == name { LiveLastRef::Here } else { LiveLastRef::Cell(cur) };
+                return if cur == name {
+                    LiveLastRef::Here
+                } else {
+                    LiveLastRef::Cell(cur)
+                };
             }
             level += 1;
             if level > NAMEREF_MAX {
@@ -22121,8 +22387,11 @@ impl Shell {
     fn global_chain_end(&self, name: &str) -> GlobalChainEnd {
         let Some(cell) = self.nameref_cell_in(name, 0) else {
             // Not a reference: the global binding is the answer, if there is one.
-            let here =
-                RefTarget { base: name.to_string(), sub: None, scope: RefScope::Context(0) };
+            let here = RefTarget {
+                base: name.to_string(),
+                sub: None,
+                scope: RefScope::Context(0),
+            };
             return match self.bound_in_context(name, 0) {
                 true => GlobalChainEnd::Reached(here),
                 false => GlobalChainEnd::Ended(here),
@@ -22180,7 +22449,11 @@ impl Shell {
     /// is not a local either.
     fn chklocal_reaches_this_frame(&self, name: &str) -> bool {
         let reached = match self.walk_ref_name(name).target {
-            Some(RefTarget { base, sub: None, scope: RefScope::Live }) => base,
+            Some(RefTarget {
+                base,
+                sub: None,
+                scope: RefScope::Live,
+            }) => base,
             _ => return false,
         };
         self.local_frames
@@ -22460,7 +22733,8 @@ impl Shell {
             let base = arg.get(..end).unwrap_or_default();
             // `name+=v`: the `+` belongs to the operator, not the identifier.
             let base = base.strip_suffix(b"+").unwrap_or(base);
-            if let Some(n) = bytes::as_str(base).filter(|n| crate::parser::is_valid_name(n.as_bytes()))
+            if let Some(n) =
+                bytes::as_str(base).filter(|n| crate::parser::is_valid_name(n.as_bytes()))
                 && !names.iter().any(|s: &String| s == n)
             {
                 names.push(n.to_string());
@@ -22628,9 +22902,18 @@ impl Shell {
                 self.bemit_cmd_stderr(
                     out,
                     redir,
-                    &bfmt![self.err_prefix(), b"builtin: -", c.to_str(), b": invalid option"],
+                    &bfmt![
+                        self.err_prefix(),
+                        b"builtin: -",
+                        c.to_str(),
+                        b": invalid option"
+                    ],
                 );
-                self.emit_cmd_stderr(out, redir, "builtin: usage: builtin [shell-builtin [arg ...]]");
+                self.emit_cmd_stderr(
+                    out,
+                    redir,
+                    "builtin: usage: builtin [shell-builtin [arg ...]]",
+                );
                 self.last_status = 2;
                 return Flow::Next;
             }
@@ -22669,7 +22952,12 @@ impl Shell {
         self.bemit_cmd_stderr(
             out,
             redir,
-            &bfmt![self.err_prefix(), b"builtin: ", sub, b": not a shell builtin"],
+            &bfmt![
+                self.err_prefix(),
+                b"builtin: ",
+                sub,
+                b": not a shell builtin"
+            ],
         );
         self.last_status = 1;
         Flow::Next
@@ -22683,7 +22971,11 @@ impl Shell {
     /// option off, `alias al=…; type al` says "not found" — because running the
     /// name would *not* reach the alias. Verified against bash 5.2.
     fn describe_alias(&self, name: BStr<'_>) -> Option<&Str> {
-        if self.aliases_enabled() { self.aliases.get(name) } else { None }
+        if self.aliases_enabled() {
+            self.aliases.get(name)
+        } else {
+            None
+        }
     }
 
     /// bash's description of a *function*: the `name is a function` sentence
@@ -22756,7 +23048,10 @@ impl Shell {
             }
         } else if self.builtin_enabled(target) {
             let line = if verbose {
-                format!("{target} is a{} shell builtin", self.builtin_kind_word(target.as_bytes()))
+                format!(
+                    "{target} is a{} shell builtin",
+                    self.builtin_kind_word(target.as_bytes())
+                )
             } else {
                 target.to_string()
             };
@@ -22789,8 +23084,11 @@ impl Shell {
             && !target.contains(&b'\\')
             && let Some(ps) = self.hashed_description(target)
         {
-            let line =
-                if verbose { bfmt![target, b" is hashed (", &ps, b")"] } else { ps };
+            let line = if verbose {
+                bfmt![target, b" is hashed (", &ps, b")"]
+            } else {
+                ps
+            };
             let _ = self.bwrite_line(out, redir, &line);
             return true;
         }
@@ -22848,9 +23146,9 @@ impl Shell {
         let path = match (temp_path, self.param_value("PATH")) {
             (Some(p), _) => p.to_vec(),
             (None, Some(p)) => p,
-            (None, None) if !self.env_imported => {
-                std::env::var_os("PATH").map(|p| bytes::os_to_bytes(&p)).unwrap_or_default()
-            }
+            (None, None) if !self.env_imported => std::env::var_os("PATH")
+                .map(|p| bytes::os_to_bytes(&p))
+                .unwrap_or_default(),
             (None, None) => Str::new(),
         };
         // Spelled out because the splitter below answers one empty entry for an
@@ -22880,7 +23178,11 @@ impl Shell {
     /// already end in one. (bash's `sh_makepath`, which is why `PATH=bin//`
     /// answers `bin//tool` rather than a tidied `bin/tool`.)
     fn path_candidate(dir: BStr<'_>, name: BStr<'_>) -> Str {
-        if dir.ends_with(b"/") { bfmt![dir, name] } else { bfmt![dir, b"/", name] }
+        if dir.ends_with(b"/") {
+            bfmt![dir, name]
+        } else {
+            bfmt![dir, b"/", name]
+        }
     }
 
     /// A path in the shell's spelling, as the host must spell it to be asked
@@ -22915,11 +23217,18 @@ impl Shell {
         };
         let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
         let text: Vec<Ch> = bytes::chars(path).collect();
-        value.split(|&b| b == b':').filter(|p| !p.is_empty()).any(|pat| {
-            let pat: Vec<EChar> =
-                bytes::chars(pat).map(|c| EChar { c: Some(c), quoted: false }).collect();
-            glob_match_echars_ci(&pat, &text, true, extglob)
-        })
+        value
+            .split(|&b| b == b':')
+            .filter(|p| !p.is_empty())
+            .any(|pat| {
+                let pat: Vec<EChar> = bytes::chars(pat)
+                    .map(|c| EChar {
+                        c: Some(c),
+                        quoted: false,
+                    })
+                    .collect();
+                glob_match_echars_ci(&pat, &text, true, extglob)
+            })
     }
 
     /// [`Shell::find_in_path`] as `type` and `command -v` ask it: the same
@@ -22957,7 +23266,10 @@ impl Shell {
             // The word itself is the answer — it already said which file, and
             // bash reports it back unedited (`command -v ./x` is `./x`). Only
             // the *question* is asked of the resolved path.
-            return self.probe_path(name).is_file().then(|| bytes::bytes_to_path(name));
+            return self
+                .probe_path(name)
+                .is_file()
+                .then(|| bytes::bytes_to_path(name));
         }
         for dir in self.search_dirs(temp_path) {
             let cand = Self::path_candidate(&dir, name);
@@ -23027,7 +23339,11 @@ impl Shell {
             return Some(stored);
         }
         let dotted = bfmt![b"./", &stored];
-        Some(if path_is_executable(&self.probe_path(&dotted)) { dotted } else { stored })
+        Some(if path_is_executable(&self.probe_path(&dotted)) {
+            dotted
+        } else {
+            stored
+        })
     }
 
     /// Whether a name's description should be answered from the `hash` table at
@@ -23079,7 +23395,11 @@ impl Shell {
 
     /// The `PATH=` among a command's assignment prefix, if it has one.
     fn temp_path(assigns: &[(String, Str)]) -> Option<BStr<'_>> {
-        assigns.iter().rev().find(|(k, _)| k == "PATH").map(|(_, v)| v.as_slice())
+        assigns
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.as_slice())
     }
 
     /// [`Shell::resolve_external`] for a command that carries an assignment
@@ -23370,28 +23690,25 @@ impl Shell {
             closed.stdout = true;
         } else {
             match &redir.stdout {
-                Some((path, append)) => match open_std_sink(
-                    &self.cwd,
-                    redir.stdout_write.as_ref(),
-                    path,
-                    *append,
-                ) {
-                    Ok(f) => {
-                        if redir.stderr_shares_stdout
-                            && redir.stderr.as_ref().is_some_and(|(sp, _)| sp == path)
-                            && let Ok(c) = f.try_clone()
-                        {
-                            stdout_file_for_stderr = Some(c);
+                Some((path, append)) => {
+                    match open_std_sink(&self.cwd, redir.stdout_write.as_ref(), path, *append) {
+                        Ok(f) => {
+                            if redir.stderr_shares_stdout
+                                && redir.stderr.as_ref().is_some_and(|(sp, _)| sp == path)
+                                && let Ok(c) = f.try_clone()
+                            {
+                                stdout_file_for_stderr = Some(c);
+                            }
+                            cmd.stdout(Stdio::from(f));
                         }
-                        cmd.stdout(Stdio::from(f));
+                        Err(e) => {
+                            let line = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                            self.berrln(&line);
+                            self.last_status = 1;
+                            return;
+                        }
                     }
-                    Err(e) => {
-                        let line = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
-                        self.berrln(&line);
-                        self.last_status = 1;
-                        return;
-                    }
-                },
+                }
                 None if redir.stdout_to_fd.is_some() => {
                     // `cmd >&N` (N ≥ 3): the child's fd 1 is a user-space write
                     // descriptor opened by `exec N> file` — or, when N was dup'd from
@@ -23993,7 +24310,10 @@ impl Shell {
             self.apply_child_env(
                 &mut cmd,
                 &[],
-                Some(ChildProgram { word: &argv[0], resolved: Some(&path) }),
+                Some(ChildProgram {
+                    word: &argv[0],
+                    resolved: Some(&path),
+                }),
             );
             let id = self.next_job_id();
             // Through the same funnel as every other spawn — nothing here is
@@ -24344,7 +24664,12 @@ impl Shell {
     /// variable names no descriptor, and neither does a value outside the range
     /// a descriptor can have; see [`varfd_close_target`] for the whole rule.
     fn varfd_close_fd(&mut self, name: &str) -> Result<i32, Str> {
-        match self.vars.get(name).map(Vec::as_slice).and_then(varfd_close_target) {
+        match self
+            .vars
+            .get(name)
+            .map(Vec::as_slice)
+            .and_then(varfd_close_target)
+        {
             Some(n) => Ok(n),
             None => Err(bfmt![name, b": ambiguous redirect"]),
         }
@@ -24371,7 +24696,9 @@ impl Shell {
         // is reported by the store itself, so it stands in for its own name.
         // Pre-checking readonly keeps `set_scalar_checked`'s own report from
         // double-printing with the caller's.
-        let target = self.resolve_ref_name(name).map_or_else(|| name.to_owned(), |t| t.base);
+        let target = self
+            .resolve_ref_name(name)
+            .map_or_else(|| name.to_owned(), |t| t.base);
         let err = if self.readonly.contains(&target) {
             // bash emits *two* diagnostics for a readonly varfd target: the
             // generic readonly-variable error, then a redirect-specific "cannot
@@ -25116,7 +25443,11 @@ impl Shell {
     /// half away and is answered on the write side, where the dup that asked is
     /// resolved — so the question here is only ever *what* is behind them.
     fn std_read_half(&self, plan: &RedirPlan, n: i32) -> InputFd {
-        let staged = if n == 1 { &plan.stdout_read } else { &plan.stderr_read };
+        let staged = if n == 1 {
+            &plan.stdout_read
+        } else {
+            &plan.stderr_read
+        };
         staged
             .as_ref()
             .map(Arc::clone)
@@ -25137,7 +25468,11 @@ impl Shell {
             2 => plan.stderr.is_some() || plan.stderr_is_read_only(),
             _ => false,
         };
-        if staged { AliasSink::Staged } else { AliasSink::Live }
+        if staged {
+            AliasSink::Staged
+        } else {
+            AliasSink::Live
+        }
     }
 
     /// Whether the redirect list being resolved has itself bound fd `n`, as
@@ -25390,11 +25725,7 @@ impl Shell {
     ///
     /// `Err` stays reserved for a *fatal* expansion error, which no caller
     /// rescues — see below for why it is checked before the fields are counted.
-    fn expand_redirect_word_once(
-        &mut self,
-        w: &Word,
-        kind: RedirWord,
-    ) -> Result<Option<Str>, Str> {
+    fn expand_redirect_word_once(&mut self, w: &Word, kind: RedirWord) -> Result<Option<Str>, Str> {
         let mut fields = self.expand_redirect_word(w, kind);
         // A fatal expansion error — a `set -u` reference, a `${x:?}`, a bad
         // indirect — abandons the word where it stands, and bash never looks at
@@ -25624,10 +25955,10 @@ impl Shell {
             if let Some(flow) = self.take_discard_flow() {
                 return flow;
             }
-            let code = self
-                .unbound_error
-                .take()
-                .unwrap_or(FatalAbort { status: 1, demote: true });
+            let code = self.unbound_error.take().unwrap_or(FatalAbort {
+                status: 1,
+                demote: true,
+            });
             let status = self.fatal_abort_status(code);
             self.last_status = status;
             return Flow::Exit(status);
@@ -25743,12 +26074,7 @@ impl Shell {
     /// see [`DupSaveNote`]. Only the caller knows: an external command and a
     /// `( … )` subshell fork, a builtin, function, brace group, loop, `exec`
     /// and (usually) a null command do not.
-    fn report_redirect_failure(
-        &mut self,
-        fail: &RedirFailure,
-        forked: bool,
-        out: &mut Out,
-    ) -> i32 {
+    fn report_redirect_failure(&mut self, fail: &RedirFailure, forked: bool, out: &mut Out) -> i32 {
         // bash's `sys_error`: the shell's name, with no `line N:` token, and
         // ahead of the numbered line — but through the same fd 2, so it goes
         // inside the partial-plan routing below.
@@ -26047,7 +26373,9 @@ impl Shell {
                 // which through a nameref is its target rather than the name the
                 // redirect spelled. See [`VarfdScope::Subshell`].
                 let restore = (scope == VarfdScope::Subshell).then(|| {
-                    let t = self.resolve_ref_name(name).map_or_else(|| name.clone(), |t| t.base);
+                    let t = self
+                        .resolve_ref_name(name)
+                        .map_or_else(|| name.clone(), |t| t.base);
                     let snap = self.snapshot_var(&t);
                     (t, snap)
                 });
@@ -26314,7 +26642,9 @@ impl Shell {
                 plan.clear_stderr();
                 plan.stderr_read = Some(bytes_input(body));
             }
-            _ => plan.extra_fds.push((fd, ExtraFdOp::Input(bytes_input(body)))),
+            _ => plan
+                .extra_fds
+                .push((fd, ExtraFdOp::Input(bytes_input(body)))),
         }
     }
 
@@ -26528,7 +26858,8 @@ impl Shell {
                 f if f >= 3 => {
                     let sink = Self::alias_sink(plan, n);
                     let read = read_half.unwrap_or_else(write_only_input);
-                    plan.extra_fds.push((f, ExtraFdOp::AliasFd { src: n, read, sink }));
+                    plan.extra_fds
+                        .push((f, ExtraFdOp::AliasFd { src: n, read, sink }));
                 }
                 // `0>&N` duplicates onto *stdin*, which osh does not model as a
                 // write target; the source is still validated above.
@@ -26606,8 +26937,11 @@ impl Shell {
             // read through them that fails. See [`Shell::dup_read_half`], which
             // is asked only where the answer can be kept: fd 1 and fd 2 keep no
             // read half at all.
-            let plan_src =
-                if fd == 0 || fd >= 3 || n >= 3 { self.dup_read_half(plan, n) } else { None };
+            let plan_src = if fd == 0 || fd >= 3 || n >= 3 {
+                self.dup_read_half(plan, n)
+            } else {
+                None
+            };
             if n >= 3 && plan_src.is_none() && !self.coproc_read_fds.contains_key(&n) {
                 // Never the expansion: `<&$r` names `$r`, and a bare `<&007`
                 // names `7`. See [`Shell::dup_error_subject`].
@@ -26655,7 +26989,8 @@ impl Shell {
                 match plan_src {
                     Some(read) => {
                         let sink = Self::alias_sink(plan, n);
-                        plan.extra_fds.push((fd, ExtraFdOp::AliasFd { src: n, read, sink }));
+                        plan.extra_fds
+                            .push((fd, ExtraFdOp::AliasFd { src: n, read, sink }));
                     }
                     // A `coproc` read end — the one source that is open and yet
                     // has no descriptor a plan can hold, its live pipe not
@@ -26829,9 +27164,7 @@ impl Shell {
             }
             let bound = bind == Ok(PersistentBind::Bound);
             let mut res = bind.map(|_| ());
-            if bound
-                && let Some(name) = r.varfd.as_ref().filter(|_| !redir_is_close(r))
-            {
+            if bound && let Some(name) = r.varfd.as_ref().filter(|_| !redir_is_close(r)) {
                 res = self.commit_varfd(name, fd);
             }
             if let Err(e) = res {
@@ -27130,7 +27463,14 @@ impl Shell {
             // is the test that exists to be cheap. Over-answering costs a scan
             // that finds nothing and reports nothing; under-answering would lose
             // the diagnostic outright.
-            if dquoted && matches!(p, WordPart::CommandSub { body: CmdSubBody::Backtick { .. } }) {
+            if dquoted
+                && matches!(
+                    p,
+                    WordPart::CommandSub {
+                        body: CmdSubBody::Backtick { .. }
+                    }
+                )
+            {
                 return true;
             }
             // A `<( … )` the parse left as characters is answered from the
@@ -27140,10 +27480,12 @@ impl Shell {
             // play at all. [`Shell::gobbled_procsubs`] settles it over the word's
             // own text, and a scan that finds nothing reports nothing.
             if let WordPart::Literal(text) = p {
-                return dquoted
-                    && (bytes::contains(text, b"<(") || bytes::contains(text, b">("));
+                return dquoted && (bytes::contains(text, b"<(") || bytes::contains(text, b">("));
             }
-            if let WordPart::SingleQuoted { text, parts: sub, .. } = p {
+            if let WordPart::SingleQuoted {
+                text, parts: sub, ..
+            } = p
+            {
                 if !dquoted {
                     // The `'` row *is* reached at the top level, so the run is
                     // skipped whole and holds nothing for the scan.
@@ -27208,7 +27550,10 @@ impl Shell {
                 out.push(p.clone());
                 continue;
             }
-            if let WordPart::CommandSub { body: CmdSubBody::Backtick { verbatim, tail, .. } } = p {
+            if let WordPart::CommandSub {
+                body: CmdSubBody::Backtick { verbatim, tail, .. },
+            } = p
+            {
                 if dquoted {
                     self.gobbled_backtick_subs(verbatim, tail, out);
                 }
@@ -27324,8 +27669,11 @@ impl Shell {
             // was the `<(` and the `(` is only the body's first byte. Nothing
             // this scan reports hangs on it — an arithmetic extent cannot fail
             // the way a parse can — so it is passed over rather than modelled.
-            let Some(part @ WordPart::CommandSub { body: CmdSubBody::Unread { .. } }) =
-                word.parts.first()
+            let Some(
+                part @ WordPart::CommandSub {
+                    body: CmdSubBody::Unread { .. },
+                },
+            ) = word.parts.first()
             else {
                 continue;
             };
@@ -27350,9 +27698,9 @@ impl Shell {
                     | CmdSubBody::ArithFallback { tail, .. }
                     | CmdSubBody::Backtick { tail, .. },
             } => Some(tail.len()),
-            WordPart::CommandSub { body: CmdSubBody::Parsed { tail, .. } } => {
-                tail.as_ref().map(Vec::len)
-            }
+            WordPart::CommandSub {
+                body: CmdSubBody::Parsed { tail, .. },
+            } => tail.as_ref().map(Vec::len),
             _ => None,
         }
     }
@@ -27368,7 +27716,9 @@ impl Shell {
                     | CmdSubBody::ArithFallback { tail, .. }
                     | CmdSubBody::Backtick { tail, .. },
             } => tail.extend_from_slice(suffix),
-            WordPart::CommandSub { body: CmdSubBody::Parsed { tail, .. } } => {
+            WordPart::CommandSub {
+                body: CmdSubBody::Parsed { tail, .. },
+            } => {
                 tail.get_or_insert_with(Str::new).extend_from_slice(suffix);
             }
             _ => {}
@@ -27601,11 +27951,7 @@ impl Shell {
         } else {
             broken.concat()
         };
-        if started {
-            vec![cur]
-        } else {
-            Vec::new()
-        }
+        if started { vec![cur] } else { Vec::new() }
     }
 
     /// The string an *unquoted* list parameter makes in a context that joins
@@ -27897,29 +28243,27 @@ impl Shell {
                     colon,
                     arg,
                 },
-            ] => Some(
-                match self.array_op_fields(name, *star, *op, *colon, arg) {
-                    // Only the *elements* answer to the `[*]` spelling. The
-                    // operand is a word, and the quotes reach it, so
-                    // `"${z[*]:-"${a[@]}"}"` is the two fields that word made —
-                    // the star had no elements to join.
-                    items @ SplitItems::Fields(_) => items.quoted_fields(),
-                    // A quoted `[*]` joins its elements into the one field the
-                    // star asks for. Doing it here rather than declining to the
-                    // scalar path matters: the operator has already run, and
-                    // answering `None` now would run it — and complain — twice.
-                    items if *star => {
-                        let texts = items.texts();
-                        vec![self.join_elements(&texts, true)]
-                    }
-                    items => {
-                        // The elements themselves — the one branch here that is
-                        // a list. See [`Shell::saw_quoted_list`].
-                        self.saw_quoted_list = true;
-                        items.texts()
-                    }
-                },
-            ),
+            ] => Some(match self.array_op_fields(name, *star, *op, *colon, arg) {
+                // Only the *elements* answer to the `[*]` spelling. The
+                // operand is a word, and the quotes reach it, so
+                // `"${z[*]:-"${a[@]}"}"` is the two fields that word made —
+                // the star had no elements to join.
+                items @ SplitItems::Fields(_) => items.quoted_fields(),
+                // A quoted `[*]` joins its elements into the one field the
+                // star asks for. Doing it here rather than declining to the
+                // scalar path matters: the operator has already run, and
+                // answering `None` now would run it — and complain — twice.
+                items if *star => {
+                    let texts = items.texts();
+                    vec![self.join_elements(&texts, true)]
+                }
+                items => {
+                    // The elements themselves — the one branch here that is
+                    // a list. See [`Shell::saw_quoted_list`].
+                    self.saw_quoted_list = true;
+                    items.texts()
+                }
+            }),
             // `"${x:-w}"` / `"${x:+w}"` on a *scalar*. The parameter's own value
             // is one field, but the operand is a word the quotes reach, so a
             // `[@]` inside it makes fields exactly as it would anywhere else in
@@ -28191,10 +28535,7 @@ impl Shell {
                             }
                         }
                     }
-                    if mark_empties
-                        && run_wants_field
-                        && (fields.len(), cur.len()) == before
-                    {
+                    if mark_empties && run_wants_field && (fields.len(), cur.len()) == before {
                         cur.push(EChar::MARK);
                     }
                     self.run_at_unjoins = saved_run;
@@ -28368,9 +28709,7 @@ impl Shell {
                                 // between them is. Except under an `$IFS` that
                                 // leads with a space, where bash protects
                                 // nothing at all.
-                                if part_is_plain_at(other)
-                                    && !self.ifs_leads_with_space()
-                                {
+                                if part_is_plain_at(other) && !self.ifs_leads_with_space() {
                                     for (i, el) in texts.iter().enumerate() {
                                         if i > 0 {
                                             push_chars(&mut cur, b" ", false);
@@ -28572,7 +28911,9 @@ impl Shell {
     /// element 1, where `test -v "a['1']"` — an ordinary word — reports `'1':
     /// syntax error`. See [`crate::ast::WordPart::ArithSubscript`].
     fn expand_cond_arith_string(&mut self, word: &Word) -> Str {
-        let word = Word { parts: self.arith_subscript_parts(&word.parts) };
+        let word = Word {
+            parts: self.arith_subscript_parts(&word.parts),
+        };
         self.expand_cond_string(&word)
     }
 
@@ -28617,7 +28958,10 @@ impl Shell {
             }
             let WordPart::Literal(text) = part else {
                 out.push(match part {
-                    WordPart::DoubleQuoted { parts: inner, closed } => WordPart::DoubleQuoted {
+                    WordPart::DoubleQuoted {
+                        parts: inner,
+                        closed,
+                    } => WordPart::DoubleQuoted {
                         parts: self.arith_subscript_parts(inner),
                         closed: *closed,
                     },
@@ -28716,7 +29060,9 @@ impl Shell {
         // its call (subst.c:10801-10812), so an unquoted `$*` in a subscript
         // joins rather than splitting.
         let saved_star = std::mem::replace(&mut self.no_split_star, true);
-        let val = self.expand_to_string(&Word { parts: parts.to_vec() });
+        let val = self.expand_to_string(&Word {
+            parts: parts.to_vec(),
+        });
         self.no_split_star = saved_star;
         bfmt![b"[", &backslash_quote_subscript(&val), b"]"]
     }
@@ -29426,7 +29772,9 @@ impl Shell {
                     let mut i = 0;
                     while i < cs.len() {
                         let c = cs[i];
-                        if c == '\\' && matches!(cs.get(i + 1).and_then(|c| c.as_char()), Some('&' | '\\')) {
+                        if c == '\\'
+                            && matches!(cs.get(i + 1).and_then(|c| c.as_char()), Some('&' | '\\'))
+                        {
                             out.push(ReplTok::Lit(cs[i + 1]));
                             i += 2;
                         } else if c == '&' && patsub {
@@ -29456,7 +29804,10 @@ impl Shell {
                         while i < cs.len() {
                             let c = cs[i];
                             if c == '\\'
-                                && matches!(cs.get(i + 1).and_then(|c| c.as_char()), Some('&' | '\\'))
+                                && matches!(
+                                    cs.get(i + 1).and_then(|c| c.as_char()),
+                                    Some('&' | '\\')
+                                )
                             {
                                 out.push(ReplTok::Lit(cs[i + 1]));
                                 i += 2;
@@ -29605,11 +29956,7 @@ impl Shell {
                 // at — see [`Shell::extent_consumed`].
                 self.extent_consumed = true;
                 let text = self.bad_sub_word.clone().unwrap_or_default();
-                self.emit_stderr(&bfmt![
-                    self.err_prefix(),
-                    &text,
-                    b": bad substitution\n"
-                ]);
+                self.emit_stderr(&bfmt![self.err_prefix(), &text, b": bad substitution\n"]);
                 // Only a prompt expansion suppresses the jump, and that is
                 // the one caller that keeps the undecoded text rather than
                 // the expansion — the same ending as any other unclosed
@@ -29650,7 +29997,13 @@ impl Shell {
             // (subst.c:1975-1988). Measured: `A${x:-$(( #5 ))}B` under `${…@P}`
             // is `bad substitution` and the undecoded word, where the same
             // arithmetic outside a brace is silent.
-            if let WordPart::ArithSub { bracket: false, expr, parts, tail } = sub {
+            if let WordPart::ArithSub {
+                bracket: false,
+                expr,
+                parts,
+                tail,
+            } = sub
+            {
                 let s = bfmt![b"(", &crate::unparse::parts_src(parts), b"))", tail];
                 let expr = expr.clone();
                 match self.arith_scan_count(&s, &expr) {
@@ -29662,7 +30015,11 @@ impl Shell {
             // them: `extract_command_subst` does not know which delimiter sent
             // it, so a body that will not parse fails identically. See
             // [`crate::ast::ProcSubBody::Unread`].
-            if let WordPart::ProcSub { body: ProcSubBody::Unread { src, tail, closed }, .. } = sub {
+            if let WordPart::ProcSub {
+                body: ProcSubBody::Unread { src, tail, closed },
+                ..
+            } = sub
+            {
                 let read = self.comsub_reparse_read(src, tail, *closed);
                 if let ExtentRead::Abandoned { rest, .. } = &read {
                     if !rest.is_empty() {
@@ -29695,9 +30052,9 @@ impl Shell {
                         self.comsub_reparse_read(src, tail, true)
                     })
                 }
-                CmdSubBody::Unread { src, tail, closed, .. } => {
-                    self.comsub_reparse_read(src, tail, *closed)
-                }
+                CmdSubBody::Unread {
+                    src, tail, closed, ..
+                } => self.comsub_reparse_read(src, tail, *closed),
                 // A backquote is not *parsed* by the scan that finds it:
                 // `string_extract (string, &si, "`", …)` (subst.c:1886), a plain
                 // byte hunt for the closer, so its extent cannot fail —
@@ -30034,7 +30391,10 @@ impl Shell {
             ArithFrame::RanOut => {
                 self.arith_unclosed_by_comment(expr);
                 Some(if self.prompt_expanding {
-                    ExtentRead::Abandoned { body: Str::new(), rest: Str::new() }
+                    ExtentRead::Abandoned {
+                        body: Str::new(),
+                        rest: Str::new(),
+                    }
                 } else {
                     ExtentRead::Aborted
                 })
@@ -30303,9 +30663,7 @@ impl Shell {
             // half is the *word's* first byte, which is the `$` of the `$((`
             // and so never this; a recursive frame does not get its own, which
             // is why `$((#5))` is arithmetic and not a comment.
-            if c == b'#'
-                && matches!(s.get(i.wrapping_sub(1)), Some(b'\n' | b' ' | b'\t'))
-            {
+            if c == b'#' && matches!(s.get(i.wrapping_sub(1)), Some(b'\n' | b' ' | b'\t')) {
                 in_comment = true;
                 i = i.saturating_add(1);
                 continue;
@@ -30478,7 +30836,15 @@ impl Shell {
         // reads a `$(` but knows nothing of single quotes — so the run starts
         // fresh and leaves the outer state as it found it.
         let dq = matches!(part, WordPart::DoubleQuoted { .. }) && !q.squote;
-        let saved = dq.then(|| std::mem::replace(q, ScanQuote { squote: false, dquote: true }));
+        let saved = dq.then(|| {
+            std::mem::replace(
+                q,
+                ScanQuote {
+                    squote: false,
+                    dquote: true,
+                },
+            )
+        });
         for (kind, parts) in crate::unparse::nested_parts(part) {
             if kind == crate::unparse::Nested::Index {
                 continue;
@@ -30521,7 +30887,10 @@ impl Shell {
                 // of one is its re-print, which parses back.
                 WordPart::CommandSub { .. }
                 | WordPart::ArithSub { bracket: false, .. }
-                | WordPart::ProcSub { body: ProcSubBody::Unread { .. }, .. } => {
+                | WordPart::ProcSub {
+                    body: ProcSubBody::Unread { .. },
+                    ..
+                } => {
                     // A `' … '` run hides all three; a `" … "` run hides only
                     // the two process-substitution spellings, because the `"`
                     // sends the scan into `skip_double_quoted`, whose own row
@@ -30529,7 +30898,11 @@ impl Shell {
                     // 5.2.37 under `${…@P}`: `A${z:-"P1<(echo hi⏎S1}B` reports
                     // nothing but `bad substitution`, where the same word
                     // written `$(` reports the unterminated read first.
-                    let hidden = if q.dquote { Self::procsub_spelling(p) } else { q.squote };
+                    let hidden = if q.dquote {
+                        Self::procsub_spelling(p)
+                    } else {
+                        q.squote
+                    };
                     if !hidden {
                         out.push(p);
                     }
@@ -30564,8 +30937,13 @@ impl Shell {
     /// all three openers; see [`crate::ast::SubDelim`].
     fn procsub_spelling(part: &WordPart) -> bool {
         match part {
-            WordPart::ProcSub { body: ProcSubBody::Unread { .. }, .. } => true,
-            WordPart::CommandSub { body: CmdSubBody::Unread { delim, .. } } => !delim.is_performed(),
+            WordPart::ProcSub {
+                body: ProcSubBody::Unread { .. },
+                ..
+            } => true,
+            WordPart::CommandSub {
+                body: CmdSubBody::Unread { delim, .. },
+            } => !delim.is_performed(),
             _ => false,
         }
     }
@@ -30755,7 +31133,11 @@ impl Shell {
                 // A body with no separator at all (`${x/pat}`) deletes the
                 // match, which is the empty replacement: the `Option` is the
                 // printback's distinction, not this one's.
-                let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
+                let patsub = self
+                    .shopt
+                    .get("patsub_replacement")
+                    .copied()
+                    .unwrap_or(true);
                 let repl = replacement
                     .as_deref()
                     .map(|w| self.expand_replacement(w, patsub))
@@ -30845,9 +31227,9 @@ impl Shell {
             // A `$((` that osh's lexer routed to a substitution still owes bash's
             // extent read, which can stop somewhere else entirely. See
             // [`Shell::arith_fallback_expand`].
-            WordPart::CommandSub { body: body @ CmdSubBody::ArithFallback { src, tail } } => {
-                self.arith_fallback_expand(body, src, tail)
-            }
+            WordPart::CommandSub {
+                body: body @ CmdSubBody::ArithFallback { src, tail },
+            } => self.arith_fallback_expand(body, src, tail),
             WordPart::CommandSub { body } => self.command_sub_body(body),
             // The substitution's path is a temp file name this shell generates,
             // so it is ASCII by construction — the only place a value's bytes are
@@ -30886,7 +31268,11 @@ impl Shell {
                 }
                 self.expand_indirect(refname, index)
             }
-            WordPart::IndirectOp { refname, index, target } => {
+            WordPart::IndirectOp {
+                refname,
+                index,
+                target,
+            } => {
                 // `${!ref<op>}`: resolve the reference to a target *name* (the
                 // value read through the reference, or the nameref chain's
                 // endpoint), and from there to the text the reference expands
@@ -31101,7 +31487,10 @@ impl Shell {
             .unwrap_or_else(|| bfmt![b"${", raw, b"}"]);
         self.emit_stderr(&bfmt![self.err_prefix(), &named, b": bad substitution\n"]);
         if fatal {
-            self.unbound_error = Some(FatalAbort { status: 1, demote: true });
+            self.unbound_error = Some(FatalAbort {
+                status: 1,
+                demote: true,
+            });
             self.note_report_error_exit();
         } else {
             self.arm_discard(1);
@@ -31232,7 +31621,13 @@ impl Shell {
     fn expander_word(&mut self, w: &Word, src: BStr<'_>) -> Option<Word> {
         if let [WordPart::TokenText(_)] = w.parts.as_slice() {
             let opts = self.parse_opts();
-            return crate::parser::word_tolerant_from_source_at(src, opts, Quoting::Bare, self.current_line).ok();
+            return crate::parser::word_tolerant_from_source_at(
+                src,
+                opts,
+                Quoting::Bare,
+                self.current_line,
+            )
+            .ok();
         }
         self.reread_word(src)
     }
@@ -31267,10 +31662,14 @@ impl Shell {
         }
         let opts = self.parse_opts();
         let line = self.current_line;
-        let plain = crate::parser::word_verbatim_from_source_at(src, opts, Quoting::Bare, line).ok()?;
+        let plain =
+            crate::parser::word_verbatim_from_source_at(src, opts, Quoting::Bare, line).ok()?;
         let reread = crate::parser::word_verbatim_from_source_at(
             src,
-            crate::lexer::ParseOpts { reread: true, ..opts },
+            crate::lexer::ParseOpts {
+                reread: true,
+                ..opts
+            },
             Quoting::Bare,
             line,
         )
@@ -31299,16 +31698,25 @@ impl Shell {
     /// parsed twice and found to read the same. The answer comes from comparing
     /// those two reads, never from here.
     fn reread_may_differ(src: BStr<'_>) -> bool {
-        let Some(brace) = src.find("${") else { return false };
+        let Some(brace) = src.find("${") else {
+            return false;
+        };
         let mut at = brace.saturating_add(2);
         while let Some(rest) = src.get(at..) {
-            let Some(open) = rest.find_byte(b'[') else { return false };
+            let Some(open) = rest.find_byte(b'[') else {
+                return false;
+            };
             let after = rest.get(open.saturating_add(1)..).unwrap_or_default();
-            let Some(close) = after.find_byte(b']') else { return false };
+            let Some(close) = after.find_byte(b']') else {
+                return false;
+            };
             if after.find_byte(b'}').is_some_and(|brk| brk < close) {
                 return true;
             }
-            at = at.saturating_add(open).saturating_add(close).saturating_add(2);
+            at = at
+                .saturating_add(open)
+                .saturating_add(close)
+                .saturating_add(2);
         }
         false
     }
@@ -31477,11 +31885,7 @@ impl Shell {
                 }
                 if self.prompt_expanding {
                     if *close == '}' {
-                        self.emit_stderr(&bfmt![
-                            self.err_prefix(),
-                            text,
-                            b": bad substitution\n"
-                        ]);
+                        self.emit_stderr(&bfmt![self.err_prefix(), text, b": bad substitution\n"]);
                         self.prompt_failed = true;
                         return Str::new();
                     }
@@ -31761,8 +32165,8 @@ impl Shell {
                     // as written in source (`${a[$i]?}` → `a[$i]`, unexpanded) —
                     // or, through an indirection, the reference the writer
                     // actually wrote rather than the name it resolved to.
-                    let disp = label
-                        .map_or_else(|| crate::unparse::name_sub(name, index), <[u8]>::to_vec);
+                    let disp =
+                        label.map_or_else(|| crate::unparse::name_sub(name, index), <[u8]>::to_vec);
                     let line = bfmt![self.err_prefix(), disp, b": ", text, b"\n"];
                     self.emit_stderr(&line);
                     // bash: `${var:?word}` on an unset/null parameter writes the
@@ -32049,7 +32453,11 @@ impl Shell {
     /// state through `&self`, so it lives behind a `Cell`.
     fn next_random(&self) -> u32 {
         // Numerical Recipes LCG constants.
-        let next = self.rng.get().wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let next = self
+            .rng
+            .get()
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
         self.rng.set(next);
         (next >> 16) & 0x7fff
     }
@@ -32706,11 +33114,9 @@ impl Shell {
         // bash retries with `find_variable_last_nameref_context`, whose body is
         // this one minus the "stop on a non-reference" test and so reaches the
         // same place, and binds through the last reference's cell.
-        Some(RefWalk::reached(self.last_ref_write_target(
-            &cur,
-            cur_ctx,
-            landed_ctx,
-        )))
+        Some(RefWalk::reached(
+            self.last_ref_write_target(&cur, cur_ctx, landed_ctx),
+        ))
     }
 
     /// Where a write lands when the nameref chain ran out without reaching a
@@ -32781,9 +33187,7 @@ impl Shell {
                 .nameref_attr
                 .contains(name)
                 .then(|| self.vars.get(name).map_or(&[][..], Vec::as_slice)),
-            Some(snap) => snap
-                .nameref
-                .then(|| snap.scalar.as_deref().unwrap_or(&[])),
+            Some(snap) => snap.nameref.then(|| snap.scalar.as_deref().unwrap_or(&[])),
         }
     }
 
@@ -33029,7 +33433,11 @@ impl Shell {
         let walks = self.ref_elem_write_walks(name);
         let walk = self.walk_ref_name(name);
         let owed = if walk.circular { walks } else { 0 };
-        let debt = |unmade| RefWriteDebt { name: name.to_string(), walks: owed, unmade };
+        let debt = |unmade| RefWriteDebt {
+            name: name.to_string(),
+            walks: owed,
+            unmade,
+        };
         match walk.target {
             // A cycle that escaped to global scope found somewhere to put the
             // value, so the reference survives however far the store gets —
@@ -33441,7 +33849,10 @@ impl Shell {
     /// read out of it, which is [`Self::param_elem_lookup`]'s rule for a
     /// subscripted read reached the ordinary way.
     fn ref_target_value(&mut self, base: &str, sub: BStr<'_>) -> ElemValue {
-        let Some(base) = self.resolve_ref_use_walks(base, 2).and_then(RefTarget::into_name) else {
+        let Some(base) = self
+            .resolve_ref_use_walks(base, 2)
+            .and_then(RefTarget::into_name)
+        else {
             return ElemValue::Absent;
         };
         let base = base.as_str();
@@ -33475,7 +33886,8 @@ impl Shell {
         if self.subscript_is_bad(base, idx) {
             return ElemValue::BadSubscript(base.to_string());
         }
-        self.array_element(base, idx).map_or(ElemValue::Absent, ElemValue::Value)
+        self.array_element(base, idx)
+            .map_or(ElemValue::Absent, ElemValue::Value)
     }
 
     /// `${#r}` where `r` is a reference designating an array *element* or a
@@ -33802,7 +34214,9 @@ impl Shell {
             // The separator is the first *character* of `$IFS`, so a multi-byte
             // one is taken whole; a byte that is not part of any character still
             // separates, and is emitted as itself.
-            Some(ifs) => bytes::chars(ifs).next().map_or_else(Str::new, bytes::Ch::to_str),
+            Some(ifs) => bytes::chars(ifs)
+                .next()
+                .map_or_else(Str::new, bytes::Ch::to_str),
         }
     }
 
@@ -34012,7 +34426,11 @@ impl Shell {
         }
         for w in &mut words {
             let kept = drop_marks(w).into_owned();
-            *w = if kept.is_empty() { vec![EChar::MARK] } else { kept };
+            *w = if kept.is_empty() {
+                vec![EChar::MARK]
+            } else {
+                kept
+            };
         }
         words
     }
@@ -34103,7 +34521,10 @@ impl Shell {
                     SplitItems::List(keys)
                 })
             }
-            WordPart::VarNames { prefix, star: false } => Some(SplitItems::List(
+            WordPart::VarNames {
+                prefix,
+                star: false,
+            } => Some(SplitItems::List(
                 self.var_names_with_prefix(prefix)
                     .into_iter()
                     .map(String::into_bytes)
@@ -34258,8 +34679,7 @@ impl Shell {
             "SECONDS" => Some(
                 self.seconds_base
                     .saturating_add(
-                        i64::try_from(self.seconds_anchor.elapsed().as_secs())
-                            .unwrap_or(i64::MAX),
+                        i64::try_from(self.seconds_anchor.elapsed().as_secs()).unwrap_or(i64::MAX),
                     )
                     .to_string()
                     .into_bytes(),
@@ -34465,10 +34885,16 @@ impl Shell {
         // nothing, quoted or not. So the part stands as the text it was
         // written as — no child, and no `comsub_count` bump either, because no
         // substitution ran. See [`crate::ast::SubDelim`].
-        if let CmdSubBody::Unread { delim, src, closed, .. } = body
+        if let CmdSubBody::Unread {
+            delim, src, closed, ..
+        } = body
             && !delim.is_performed()
         {
-            return bfmt![delim.bytes(), src, if *closed { b")".as_slice() } else { b"" }];
+            return bfmt![
+                delim.bytes(),
+                src,
+                if *closed { b")".as_slice() } else { b"" }
+            ];
         }
         // Count every command substitution so callers (e.g. pure assignments)
         // can tell whether one ran while expanding a value.
@@ -34497,7 +34923,9 @@ impl Shell {
 
     fn command_sub_body_inner(&mut self, body: &CmdSubBody) -> Str {
         match body {
-            CmdSubBody::Parsed { prog, src, tail, .. } => {
+            CmdSubBody::Parsed {
+                prog, src, tail, ..
+            } => {
                 // bash reads a `$( … )` body through the parser *twice*, and the
                 // second read is over the re-print rather than the source:
                 // `expand_word_internal` reaches `extract_command_subst`, which
@@ -34545,7 +34973,9 @@ impl Shell {
                 let path = self.comsub_read_file(prog);
                 self.command_sub(src, &map, path)
             }
-            CmdSubBody::Unread { src, tail, closed, .. } => {
+            CmdSubBody::Unread {
+                src, tail, closed, ..
+            } => {
                 // No first read to re-print, but the *second* one happens all
                 // the same: `expand_word_internal` reaches
                 // `extract_command_subst`, which runs `xparse_dolparen` over the
@@ -34711,12 +35141,7 @@ impl Shell {
     /// bash it is literally the same call: `extract_command_subst` runs
     /// `xparse_dolparen` over whatever text the stored word holds. `closed` says
     /// whether that text ever held a `)`; see [`CmdSubBody::Unread::closed`].
-    fn comsub_reparse_read(
-        &mut self,
-        src: BStr<'_>,
-        tail: BStr<'_>,
-        closed: bool,
-    ) -> ExtentRead {
+    fn comsub_reparse_read(&mut self, src: BStr<'_>, tail: BStr<'_>, closed: bool) -> ExtentRead {
         let Some((err, nested, stop_line)) = self.comsub_reparse_error(src, tail, closed) else {
             return ExtentRead::Closed;
         };
@@ -34750,7 +35175,10 @@ impl Shell {
             let status = self.force_eof_status();
             // `demote: false`: `force_eof_status` has already accounted for
             // whatever is in the way, so the answer stands wherever it is raised.
-            self.unbound_error = Some(FatalAbort { status, demote: false });
+            self.unbound_error = Some(FatalAbort {
+                status,
+                demote: false,
+            });
         } else if self.errexit {
             // Under errexit neither jump is reached: `parser_error` (error.c)
             // ends with a *direct* call, before the class of the failure has
@@ -34764,7 +35192,10 @@ impl Shell {
             // echo B` prints no `B` and exits 2. Same shape as the FORCE_EOF
             // branch above, which is why [`Self::force_eof_status`] answers 2
             // here too.
-            self.unbound_error = Some(FatalAbort { status: 2, demote: false });
+            self.unbound_error = Some(FatalAbort {
+                status: 2,
+                demote: false,
+            });
         } else {
             // The read's own failure is `parse_string`'s to answer: it returns
             // `-DISCARD` and `xparse_dolparen` raises it as `jump_to_top_level
@@ -34860,8 +35291,14 @@ impl Shell {
             // line as the last line of `src` is the ordinary case rather than a
             // rule of its own: a re-print's failure is normally at the `)`.
             let comp = Self::extent_composite(src, closed, tail);
-            let nth = usize::try_from(fail.line_off).unwrap_or(usize::MAX).saturating_sub(1);
-            let line = comp.split(|&b| b == b'\n').nth(nth).unwrap_or_default().to_vec();
+            let nth = usize::try_from(fail.line_off)
+                .unwrap_or(usize::MAX)
+                .saturating_sub(1);
+            let line = comp
+                .split(|&b| b == b'\n')
+                .nth(nth)
+                .unwrap_or_default()
+                .to_vec();
             out = bfmt![out, b"\n", &prefix, b"`", &line, b"'"];
         }
         Some((self.errexit_first_line(out), fail.fatal, fail.stop_line))
@@ -34958,11 +35395,14 @@ impl Shell {
         // scans opaquely, `'…'` and `` `…` ``, are exactly the ones it does not
         // translate a `$'…'` inside (parse.y takes the matched pair whole), so a
         // NUL can never be spliced into one and a cut can never leave one open.
-        let comsub = crate::unparse::array_listing_comsubs(items).into_iter().enumerate().find_map(
-            |(k, src)| {
-                crate::parser::parse_cmdsub_body_unmarked(&src, 1, opts).err().map(|e| (k, e))
-            },
-        );
+        let comsub = crate::unparse::array_listing_comsubs(items)
+            .into_iter()
+            .enumerate()
+            .find_map(|(k, src)| {
+                crate::parser::parse_cmdsub_body_unmarked(&src, 1, opts)
+                    .err()
+                    .map(|e| (k, e))
+            });
         let Some((k, e)) = comsub else {
             let listing = crate::unparse::array_listing(items);
             let e = crate::parser::word_list_lex_error(&listing, opts)?;
@@ -35035,7 +35475,8 @@ impl Shell {
             sub.exec_stdout = None;
             sub.live_stdout = Some(WriteFd::Capture(cap.clone()));
             let mut out = Out::Capture(cap.clone());
-            if let Flow::Exit(code) = sub.run_source_flow_out(src, &mut out, &StdinSrc::Inherit, map, HistRead::Off)
+            if let Flow::Exit(code) =
+                sub.run_source_flow_out(src, &mut out, &StdinSrc::Inherit, map, HistRead::Off)
             {
                 // Nothing above this is left to unwind — the substitution's
                 // subshell *is* the outermost frame here — so collapse the flow
@@ -35267,8 +35708,7 @@ impl Shell {
                 // buffer, not any persistent `exec > file` (restored below —
                 // unlike a substitution this runs in the current shell).
                 let saved_exec_stdout = self.exec_stdout.take();
-                let saved_live_stdout =
-                    self.live_stdout.replace(WriteFd::Capture(cap.clone()));
+                let saved_live_stdout = self.live_stdout.replace(WriteFd::Capture(cap.clone()));
                 // As in a command substitution, bash's subshell here runs with
                 // `-v` cleared and one expansion level deeper (`cat <(echo p)`
                 // traces `++ echo p`); osh runs the body in the current shell,
@@ -35440,7 +35880,9 @@ impl Shell {
         // [`Shell::arith_subscript_parts`] and [`arith_exp_char`].
         let rewritten;
         let w = if arith_exp_char(&src) {
-            rewritten = Word { parts: self.arith_subscript_parts(&w.parts) };
+            rewritten = Word {
+                parts: self.arith_subscript_parts(&w.parts),
+            };
             &rewritten
         } else {
             w
@@ -35914,9 +36356,9 @@ impl Shell {
         // check, but only when what follows it could be one — otherwise the `!`
         // is just the special parameter `$!` and the name is checked whole.
         let want_indir = name.first() == Some(&b'!')
-            && name.get(1).is_some_and(|c| {
-                c.is_ascii_alphanumeric() || *c == b'_' || b"#?@*".contains(c)
-            });
+            && name
+                .get(1)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_' || b"#?@*".contains(c));
         let checked = if want_indir {
             name.get(1..).unwrap_or_default()
         } else {
@@ -36249,9 +36691,8 @@ impl Shell {
                 while j < chars.len() && syn_at(&chars, j) != '`' {
                     j += 1;
                 }
-                let inner = bytes::from_chars(
-                    chars.get(start..j).unwrap_or_default().iter().copied(),
-                );
+                let inner =
+                    bytes::from_chars(chars.get(start..j).unwrap_or_default().iter().copied());
                 i = if j < chars.len() { j + 1 } else { j };
                 let sub = self.run_command_sub_text(&inner);
                 // Spliced in **verbatim**. This pass is `expand_arith_string`,
@@ -36299,9 +36740,8 @@ impl Shell {
                     // the string to `xparse_dolparen` (parse.y:4248), so a `)`
                     // that closes a `case` pattern closes nothing here. See
                     // [`crate::lexer::scan_cmdsub_body`].
-                    let rest = bytes::from_chars(
-                        chars.get(i + 2..).unwrap_or_default().iter().copied(),
-                    );
+                    let rest =
+                        bytes::from_chars(chars.get(i + 2..).unwrap_or_default().iter().copied());
                     if let Some((inner, past)) =
                         crate::lexer::scan_cmdsub_body(&rest, self.parse_opts())
                     {
@@ -36323,7 +36763,8 @@ impl Shell {
                         // so it answers with its own resume point instead, in
                         // bytes of `rest`; recount it in characters for the same
                         // reason.
-                        i = i + 2
+                        i = i
+                            + 2
                             + match stop {
                                 Some(off) => {
                                     bytes::chars(rest.get(..off).unwrap_or_default()).count()
@@ -36356,9 +36797,8 @@ impl Shell {
                         }
                         i += 1;
                     }
-                    let inner = bytes::from_chars(
-                        chars.get(start..i).unwrap_or_default().iter().copied(),
-                    );
+                    let inner =
+                        bytes::from_chars(chars.get(start..i).unwrap_or_default().iter().copied());
                     if i < chars.len() {
                         i += 1; // consume the closing '}'
                     } else {
@@ -36530,11 +36970,7 @@ impl Shell {
     /// parses the whole body **here, in the parent**, before
     /// `command_substitute` forks. Measured, that is visible:
     /// `$(( '$(echo RAN >&2; fi)' + 0 ))` prints no `RAN`.
-    fn arith_dolparen(
-        &mut self,
-        rest: BStr<'_>,
-        body: BStr<'_>,
-    ) -> Option<(Str, Option<usize>)> {
+    fn arith_dolparen(&mut self, rest: BStr<'_>, body: BStr<'_>) -> Option<(Str, Option<usize>)> {
         // Every diagnostic from this parse is one line past the body's true
         // line. `parse_string` (builtins/evalstring.c:627) opens the string with
         // `push_stream (0)` — the 0 meaning "do *not* reset the line number" —
@@ -36908,7 +37344,10 @@ impl Shell {
     /// when there is no such user — or no database at all, which is the case on
     /// the Windows host the differential test corpus runs on, and is why `~name`
     /// is left untouched there.
-    #[allow(clippy::unused_self, reason = "a shell-level lookup; the database may later be per-shell")]
+    #[allow(
+        clippy::unused_self,
+        reason = "a shell-level lookup; the database may later be per-shell"
+    )]
     fn user_home(&self, user: BStr<'_>) -> Option<Str> {
         read_passwd_home(PASSWD_FILE, user)
     }
@@ -37015,8 +37454,13 @@ impl Shell {
         // `+ eval :` and then `++ :`, and the two nest (`eval 'v=$(echo q)'`
         // traces the `echo` at three).
         self.xtrace_level = self.xtrace_level.saturating_add(1);
-        let eval_run =
-            self.run_source_flow_result(src, out, stdin, &LineMap::Offset(eval_base), HistRead::Off);
+        let eval_run = self.run_source_flow_result(
+            src,
+            out,
+            stdin,
+            &LineMap::Offset(eval_base),
+            HistRead::Off,
+        );
         self.xtrace_level = self.xtrace_level.saturating_sub(1);
         self.eval_depth = self.eval_depth.saturating_sub(1);
         self.input_names.pop();
@@ -37130,7 +37574,8 @@ impl Shell {
             // caller that built `out`, not here, so a same-command
             // `>out 3>&1` still copies the ambient fd 1. See known-issues
             // TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR.
-            let mut saved = self.install_extra_fds(&redir.extra_fds, out, StagedStdSinks::default());
+            let mut saved =
+                self.install_extra_fds(&redir.extra_fds, out, StagedStdSinks::default());
             saved.extend(self.install_std_reads(redir));
             saved
         } else {
@@ -37489,7 +37934,9 @@ impl Shell {
                         }
                     }
                     // fd 2 (`2> file` / `2>> file`).
-                    if rc == 0 && let Some((path, append)) = &redir.stderr {
+                    if rc == 0
+                        && let Some((path, append)) = &redir.stderr
+                    {
                         match open_std_sink(&self.cwd, redir.stderr_write.as_ref(), path, *append) {
                             Ok(f) => {
                                 self.set_exec_stderr(Some(WriteFd::File(std::sync::Arc::new(f))));
@@ -37516,7 +37963,9 @@ impl Shell {
                     // fd 1 / fd 2 to a user-space write descriptor's live handle
                     // (typically one saved earlier by `exec N>&1`). An unopened
                     // fd is a status-1 `N: Bad file descriptor`, as in bash.
-                    if rc == 0 && let Some(n) = redir.stdout_to_fd {
+                    if rc == 0
+                        && let Some(n) = redir.stdout_to_fd
+                    {
                         match self.write_fd_for(n, redir) {
                             Some(w) => self.exec_stdout = Some(w),
                             None => {
@@ -37525,7 +37974,9 @@ impl Shell {
                             }
                         }
                     }
-                    if rc == 0 && let Some(n) = redir.stderr_to_fd {
+                    if rc == 0
+                        && let Some(n) = redir.stderr_to_fd
+                    {
                         match self.write_fd_for(n, redir) {
                             Some(w) => self.set_exec_stderr(Some(w)),
                             None => {
@@ -37573,7 +38024,9 @@ impl Shell {
                                 // *persistent* table before this loop runs, so
                                 // `alias_write_fd` already sees the sink this
                                 // same `exec` just set.
-                                ExtraFdOp::AliasFd { src: n, read: rd, .. } => {
+                                ExtraFdOp::AliasFd {
+                                    src: n, read: rd, ..
+                                } => {
                                     self.open_fds.insert(*fd, Arc::clone(rd));
                                     match self.alias_write_fd(*n, out) {
                                         Ok(w) => {
@@ -37973,7 +38426,11 @@ impl Shell {
             // key carries the search path along with the word. (NUL cannot
             // appear in either, so joining on it cannot make two different
             // pairs collide.)
-            let key = bfmt![self.param_value("PATH").unwrap_or_default(), b"\0", &program];
+            let key = bfmt![
+                self.param_value("PATH").unwrap_or_default(),
+                b"\0",
+                &program
+            ];
             // Resolved without the `hash` cache: this is a question about a
             // file on disk, and answering it must not disturb what the shell
             // reports about which commands it has run.
@@ -38045,7 +38502,9 @@ impl Shell {
         // name it, so it is invisible to `set`, `declare -p` and `compgen -v`
         // there, and only the function importer reads it back.
         for name in &self.exported_funcs {
-            let Some(body) = self.funcs.get(name.as_slice()) else { continue };
+            let Some(body) = self.funcs.get(name.as_slice()) else {
+                continue;
+            };
             let redirects = self.func_redirects.get(name.as_slice());
             let value = crate::unparse::unparse_function_exported(
                 body,
@@ -38267,7 +38726,10 @@ impl Shell {
                 // usage error (reported on the first offending flag). A flag
                 // letter is ASCII, so the scan is byte-wise: a byte that is not
                 // one of the four is reported as the invalid option it is.
-                if let Some(c) = flags.iter().find(|c| !matches!(c, b'L' | b'P' | b'e' | b'@')) {
+                if let Some(c) = flags
+                    .iter()
+                    .find(|c| !matches!(c, b'L' | b'P' | b'e' | b'@'))
+                {
                     return self.builtin_invalid_option(
                         "cd",
                         &[b'-', *c],
@@ -38378,9 +38840,7 @@ impl Shell {
         match self.change_dir(&target) {
             Ok(mut cwd) => {
                 // `-P`: report/store the canonical (symlink-resolved) path.
-                if physical
-                    && let Ok(canon) = std::fs::canonicalize(bytes::bytes_to_path(&cwd))
-                {
+                if physical && let Ok(canon) = std::fs::canonicalize(bytes::bytes_to_path(&cwd)) {
                     cwd = shell_path(&canon);
                     self.put_var("PWD".to_string(), cwd.clone());
                 }
@@ -38622,7 +39082,11 @@ impl Shell {
         };
         for (name, snap) in scope.binds {
             // Read the prefix's value before the snapshot overwrites it.
-            let bound = if persist { self.vars.get(&name).cloned() } else { None };
+            let bound = if persist {
+                self.vars.get(&name).cloned()
+            } else {
+                None
+            };
             self.restore_var(&name, snap);
             if let Some(v) = bound
                 && let Some(v) = self.apply_value_attrs(&name, v)
@@ -38743,14 +39207,22 @@ impl Shell {
     /// "`NAME: directory stack empty`", otherwise it is
     /// "`NAME: IDX: directory stack index out of range`" — where `IDX` keeps its
     /// sign for `pushd`/`popd` but is printed bare for `dirs`.
-    fn dirstack_index(&mut self, tag: &str, spec: &DirStackSpec, keep_sign: bool) -> Result<usize, i32> {
+    fn dirstack_index(
+        &mut self,
+        tag: &str,
+        spec: &DirStackSpec,
+        keep_sign: bool,
+    ) -> Result<usize, i32> {
         let len = self.dir_stack.len().saturating_add(1);
         if spec.n >= len {
             let msg = if self.dir_stack.is_empty() {
                 format!("{tag}: directory stack empty")
             } else if keep_sign {
                 let sign = if spec.plus { '+' } else { '-' };
-                format!("{tag}: {sign}{}: directory stack index out of range", spec.n)
+                format!(
+                    "{tag}: {sign}{}: directory stack index out of range",
+                    spec.n
+                )
             } else {
                 format!("{tag}: {}: directory stack index out of range", spec.n)
             };
@@ -38899,7 +39371,12 @@ impl Shell {
                 }
             }
             // `popd` takes no directory operand at all.
-            self.berrln(&bfmt![self.err_prefix(), b"popd: ", a, b": invalid argument"]);
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"popd: ",
+                a,
+                b": invalid argument"
+            ]);
             self.errln(&format!("popd: usage: {USAGE}"));
             return 2;
         }
@@ -38928,7 +39405,13 @@ impl Shell {
     /// the shape every `pushd`/`popd`/`dirs` index-parse failure takes (status 2).
     fn dirstack_invalid_number(&mut self, tag: &str, arg: BStr<'_>, usage: &str) -> i32 {
         // `arg` is the word the user typed, so it is quoted back as its bytes.
-        self.berrln(&bfmt![self.err_prefix(), tag, b": ", arg, b": invalid number"]);
+        self.berrln(&bfmt![
+            self.err_prefix(),
+            tag,
+            b": ",
+            arg,
+            b": invalid number"
+        ]);
         self.errln(&format!("{tag}: usage: {usage}"));
         2
     }
@@ -39108,8 +39591,11 @@ impl Shell {
         let lone_spec = rest.len() == 1
             && normalize_sigspec(&rest[0]).is_some()
             && !self.shell_option_enabled("posix");
-        let (action, specs): (&[u8], &[Str]) =
-            if lone_spec { (b"-", rest) } else { (rest[0].as_slice(), &rest[1..]) };
+        let (action, specs): (&[u8], &[Str]) = if lone_spec {
+            (b"-", rest)
+        } else {
+            (rest[0].as_slice(), &rest[1..])
+        };
         if specs.is_empty() {
             // A pure builtin usage message: bash's `builtin_usage()` prints
             // `<builtin>: usage: …` with no `<name>: line N:` shell prefix. And
@@ -39168,13 +39654,7 @@ impl Shell {
     /// rather than omitted — which for the no-operand form means every signal
     /// the shell knows gets a line — happens only under an explicit `-p`; a bare
     /// `trap` still shows just what is set.
-    fn trap_print(
-        &mut self,
-        specs: &[Str],
-        print: bool,
-        out: &mut Out,
-        redir: &RedirPlan,
-    ) -> i32 {
+    fn trap_print(&mut self, specs: &[Str], print: bool, out: &mut Out, redir: &RedirPlan) -> i32 {
         let posix = self.shell_option_enabled("posix");
         // Whether a signal with no trap earns a line of its own.
         let untrapped = posix && print;
@@ -39186,8 +39666,15 @@ impl Shell {
         if specs.is_empty() {
             if untrapped {
                 for spec in all_sigspecs() {
-                    let action = self.traps.get(&spec).or_else(|| self.trap_shadow.get(&spec));
-                    buf.extend_from_slice(&trap_display_line(&spec, action.map(Vec::as_slice), posix));
+                    let action = self
+                        .traps
+                        .get(&spec)
+                        .or_else(|| self.trap_shadow.get(&spec));
+                    buf.extend_from_slice(&trap_display_line(
+                        &spec,
+                        action.map(Vec::as_slice),
+                        posix,
+                    ));
                 }
             } else {
                 let mut entries: Vec<(&String, &Str)> = self.traps.iter().collect();
@@ -39210,7 +39697,10 @@ impl Shell {
                 // borrow the lookup takes ends here rather than spanning the
                 // reporting below.
                 let line = normalize_sigspec(spec).map(|norm| {
-                    let action = self.traps.get(&norm).or_else(|| self.trap_shadow.get(&norm));
+                    let action = self
+                        .traps
+                        .get(&norm)
+                        .or_else(|| self.trap_shadow.get(&norm));
                     // Outside posix mode a signal with no trap contributes no
                     // line at all; inside, it is listed as reset.
                     (action.is_some() || untrapped)
@@ -39336,7 +39826,11 @@ impl Shell {
             sigspec = Some(spec);
             // bash reads a lone `0` as the existence check without consulting
             // the table at all.
-            signum = if spec == b"0" { Some(0) } else { decode_signal_flags(spec, !posix) };
+            signum = if spec == b"0" {
+                Some(0)
+            } else {
+                decode_signal_flags(spec, !posix)
+            };
             i += width;
         }
 
@@ -39445,7 +39939,12 @@ impl Shell {
         // A `%…` operand is a job spec and nothing else, so failing to resolve it
         // is "no such job" — never the "No such process" a stale *pid* gets.
         if job_idx.is_none() && target.starts_with(b"%") {
-            self.berrln(&bfmt![self.err_prefix(), b"kill: ", target, b": no such job"]);
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"kill: ",
+                target,
+                b": no such job"
+            ]);
             return false;
         }
         // Naming a job in `kill` puts it back on the list of jobs whose fate is
@@ -39524,7 +40023,12 @@ impl Shell {
         }
         // A pid osh did not spawn cannot be signalled without the target's
         // process-control layer; report it like bash does for a stale pid.
-        self.berrln(&bfmt![self.err_prefix(), b"kill: (", &shown, b") - No such process"]);
+        self.berrln(&bfmt![
+            self.err_prefix(),
+            b"kill: (",
+            &shown,
+            b") - No such process"
+        ]);
         false
     }
 
@@ -39578,14 +40082,25 @@ impl Shell {
     fn kill_list(&mut self, specs: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let posix = self.shell_option_enabled("posix");
         if specs.is_empty() {
-            let buf = if posix { signal_list_posix() } else { signal_list_columns() };
+            let buf = if posix {
+                signal_list_posix()
+            } else {
+                signal_list_columns()
+            };
             return self.write_bytes(out, redir, buf.as_bytes());
         }
         let mut status = 0;
         for spec in specs {
             let answer = if let Some(n) = legal_number(spec) {
-                let n = if n > 128 && n < 128 + i64::from(NSIG) { n - 128 } else { n };
-                u16::try_from(n).ok().filter(|n| *n < NSIG).and_then(signal_spec_name)
+                let n = if n > 128 && n < 128 + i64::from(NSIG) {
+                    n - 128
+                } else {
+                    n
+                };
+                u16::try_from(n)
+                    .ok()
+                    .filter(|n| *n < NSIG)
+                    .and_then(signal_spec_name)
             } else {
                 decode_signal_flags(spec, !posix).map(|n| n.to_string())
             };
@@ -39690,7 +40205,11 @@ impl Shell {
         // An absent job counts as reaped just as a taken handle does: a `wait`
         // removes the row outright. A reap never runs backwards, so once this is
         // true it stays true and the count below cannot restart.
-        let dead = self.jobs.iter().find(|j| j.pid == pid).is_none_or(|j| j.child.is_none());
+        let dead = self
+            .jobs
+            .iter()
+            .find(|j| j.pid == pid)
+            .is_none_or(|j| j.child.is_none());
         if !dead {
             return;
         }
@@ -39968,7 +40487,10 @@ impl Shell {
             };
             i += 1;
             // Valid jobs options are -lnprsx.
-            if let Some(c) = flags.iter().find(|c| !matches!(c, b'l' | b'n' | b'p' | b'r' | b's' | b'x')) {
+            if let Some(c) = flags
+                .iter()
+                .find(|c| !matches!(c, b'l' | b'n' | b'p' | b'r' | b's' | b'x'))
+            {
                 return self.builtin_invalid_option(
                     "jobs",
                     &[b'-', *c],
@@ -40233,7 +40755,11 @@ impl Shell {
         let mut found = None;
         for (idx, job) in self.jobs.iter().enumerate() {
             let hay = job.cmd.as_slice();
-            let hit = if substring { hay.contains_str(name) } else { hay.starts_with(name) };
+            let hit = if substring {
+                hay.contains_str(name)
+            } else {
+                hay.starts_with(name)
+            };
             if !hit {
                 continue;
             }
@@ -40250,7 +40776,13 @@ impl Shell {
     fn ambiguous_job_spec(&mut self, builtin: &str, text: BStr<'_>) {
         // `text` is the part of the spec the user typed that matched, so it is
         // reported as its bytes.
-        self.berrln(&bfmt![self.err_prefix(), builtin, b": ", text, b": ambiguous job spec"]);
+        self.berrln(&bfmt![
+            self.err_prefix(),
+            builtin,
+            b": ",
+            text,
+            b": ambiguous job spec"
+        ]);
     }
 
     /// Block on every job that still has a live body, and count each one as
@@ -40277,8 +40809,12 @@ impl Shell {
         // count the `wait`'s own instantaneous glance as prior knowledge, and
         // so treat a job that ended a microsecond ago as one it never waited
         // for.
-        let known: Vec<usize> =
-            self.jobs.iter().filter(|j| j.exit_seen).map(|j| j.id).collect();
+        let known: Vec<usize> = self
+            .jobs
+            .iter()
+            .filter(|j| j.exit_seen)
+            .map(|j| j.id)
+            .collect();
         // Reap anyway, so a job whose body is over does not block below.
         self.poll_jobs();
         // Every job of this shell's own has now been waited for, so what is left
@@ -40375,7 +40911,12 @@ impl Shell {
                     // an invalid option — not a negative pid — and aborts with
                     // status 2 plus the usage line.
                     _ => {
-                        self.berrln(&bfmt![self.err_prefix(), b"wait: -", *c, b": invalid option"]);
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"wait: -",
+                            *c,
+                            b": invalid option"
+                        ]);
                         self.emit_stderr(USAGE);
                         return 2;
                     }
@@ -40388,18 +40929,20 @@ impl Shell {
         // identifier is ASCII, so a word that is not text is not one either —
         // it takes the same message, quoting the bytes the user gave.
         let pid_var: Option<String> = match &pid_var {
-            Some(var) => match bytes::as_str(var).filter(|n| crate::parser::is_valid_name(n.as_bytes())) {
-                Some(name) => Some(name.to_string()),
-                None => {
-                    self.berrln(&bfmt![
-                        self.err_prefix(),
-                        b"wait: `",
-                        var,
-                        b"': not a valid identifier"
-                    ]);
-                    return 1;
+            Some(var) => {
+                match bytes::as_str(var).filter(|n| crate::parser::is_valid_name(n.as_bytes())) {
+                    Some(name) => Some(name.to_string()),
+                    None => {
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"wait: `",
+                            var,
+                            b"': not a valid identifier"
+                        ]);
+                        return 1;
+                    }
                 }
-            },
+            }
             None => None,
         };
 
@@ -40721,7 +41264,12 @@ impl Shell {
                         if let JobLookup::Ambiguous(text) = outcome {
                             self.ambiguous_job_spec("disown", &text);
                         }
-                        self.berrln(&bfmt![self.err_prefix(), b"disown: ", spec, b": no such job"]);
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"disown: ",
+                            spec,
+                            b": no such job"
+                        ]);
                         status = 1;
                     }
                 }
@@ -40874,7 +41422,11 @@ impl Shell {
             return 1;
         }
         self.poll_jobs();
-        let specs: Vec<Str> = args.iter().filter(|a| a.as_slice() != b"--").cloned().collect();
+        let specs: Vec<Str> = args
+            .iter()
+            .filter(|a| a.as_slice() != b"--")
+            .cloned()
+            .collect();
         let idxs: Vec<usize> = if specs.is_empty() {
             match self.current_job_idx() {
                 Some(idx) => vec![idx],
@@ -40945,7 +41497,12 @@ impl Shell {
             if first.as_slice() == b"--" {
                 rest = tail;
             } else if first.len() > 1 && first.starts_with(b"-") {
-                self.berrln(&bfmt![self.err_prefix(), b"caller: ", first, b": invalid option"]);
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"caller: ",
+                    first,
+                    b": invalid option"
+                ]);
                 self.emit_stderr(b"caller: usage: caller [expr]\n");
                 return 2;
             }
@@ -40976,7 +41533,12 @@ impl Shell {
                     // bash: a non-numeric expr prints the invalid-number error
                     // (with the shell location prefix) followed by the
                     // unprefixed usage line, and returns 2.
-                    self.berrln(&bfmt![self.err_prefix(), b"caller: ", expr, b": invalid number"]);
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"caller: ",
+                        expr,
+                        b": invalid number"
+                    ]);
                     self.emit_stderr(b"caller: usage: caller [expr]\n");
                     return 2;
                 };
@@ -40994,7 +41556,9 @@ impl Shell {
                 else {
                     return 1;
                 };
-                let src = self.bash_source_at(n + 1).unwrap_or_else(|| b"NULL".to_vec());
+                let src = self
+                    .bash_source_at(n + 1)
+                    .unwrap_or_else(|| b"NULL".to_vec());
                 let text = bfmt![line.to_string(), b" ", &func, b" ", src, b"\n"];
                 self.write_bytes(out, redir, &text)
             }
@@ -41073,8 +41637,13 @@ impl Shell {
         // one variable apiece: a repeated option silently replaces the earlier
         // one rather than acting twice, so `bind -q a -q b` only ever complains
         // about `b`.
-        let (mut keymap, mut fname, mut qname, mut uname, mut xspec) =
-            (None::<Str>, None::<Str>, None::<Str>, None::<Str>, None::<Str>);
+        let (mut keymap, mut fname, mut qname, mut uname, mut xspec) = (
+            None::<Str>,
+            None::<Str>,
+            None::<Str>,
+            None::<Str>,
+            None::<Str>,
+        );
         let mut rseq = None::<Str>;
         let mut i = 0usize;
         while i < args.len() {
@@ -41243,7 +41812,8 @@ impl Shell {
                     for name in crate::bind_tables::FUNCTION_NAMES {
                         match Self::bind_seqs_for(&entries, name, maps.meta()) {
                             None => text.extend_from_slice(
-                                bfmt![b"", name.as_bytes(), b" is not bound to any keys\n"].as_slice(),
+                                bfmt![b"", name.as_bytes(), b" is not bound to any keys\n"]
+                                    .as_slice(),
                             ),
                             Some(seqs) => text.extend_from_slice(
                                 bfmt![b"", name.as_bytes(), b" can be found on ", &seqs, b"\n"]
@@ -41275,9 +41845,11 @@ impl Shell {
                 // sequence differently from the one above — `\eQ` where `-p` writes
                 // `\M-Q`. `-S` is the same text as `-s` without the quoting around
                 // it, escapes and all.
-                for (wanted, readable, macros) in
-                    [(list_s, true, true), (list_ss, false, true), (list_x, true, false)]
-                {
+                for (wanted, readable, macros) in [
+                    (list_s, true, true),
+                    (list_ss, false, true),
+                    (list_x, true, false),
+                ] {
                     if !wanted {
                         continue;
                     }
@@ -41287,8 +41859,11 @@ impl Shell {
                             | (crate::bind_keys::Target::Command(v), false) => v,
                             _ => continue,
                         };
-                        let seq =
-                            crate::bind_keys::encode(e.seq, e.is_prefix, crate::bind_keys::Meta::Literal);
+                        let seq = crate::bind_keys::encode(
+                            e.seq,
+                            e.is_prefix,
+                            crate::bind_keys::Meta::Literal,
+                        );
                         let body =
                             crate::bind_keys::encode(body, false, crate::bind_keys::Meta::Literal);
                         text.extend_from_slice(
@@ -41330,7 +41905,11 @@ impl Shell {
             // away the keys `bind -p` lists under `yank-last-arg`.
             if let Some(u) = &uname {
                 let Some(rep) = crate::bind_keys::function(u) else {
-                    self.perrln(&bfmt![b"bind: `", u.as_slice(), b"': unknown function name"]);
+                    self.perrln(&bfmt![
+                        b"bind: `",
+                        u.as_slice(),
+                        b"': unknown function name"
+                    ]);
                     break 'phases 1;
                 };
                 if let Some(maps) = self.bind_maps.as_deref_mut() {
@@ -41341,7 +41920,11 @@ impl Shell {
             if let Some(q) = &qname {
                 match crate::bind_keys::function(q) {
                     None => {
-                        self.perrln(&bfmt![b"bind: `", q.as_slice(), b"': unknown function name"]);
+                        self.perrln(&bfmt![
+                            b"bind: `",
+                            q.as_slice(),
+                            b"': unknown function name"
+                        ]);
                         status = 1;
                     }
                     // A known name is answered on *stdout* — and a known name that
@@ -41374,7 +41957,10 @@ impl Shell {
             // status 0 — but it is still a phase, so it clears a `-q` failure ahead
             // of it.
             if let Some(r) = &rseq {
-                let cm = self.bind_maps.as_deref().is_some_and(crate::bind_keys::Maps::convert_meta);
+                let cm = self
+                    .bind_maps
+                    .as_deref()
+                    .is_some_and(crate::bind_keys::Maps::convert_meta);
                 let seq = crate::bind_keys::decode(r, cm);
                 if let Some(maps) = self.bind_maps.as_deref_mut() {
                     let km = maps.keymap();
@@ -41387,7 +41973,10 @@ impl Shell {
             // handing it to readline: a quoted key sequence, then a colon, then the
             // command. All three diagnostics are reachable with no line editor.
             if let Some(x) = &xspec {
-                let cm = self.bind_maps.as_deref().is_some_and(crate::bind_keys::Maps::convert_meta);
+                let cm = self
+                    .bind_maps
+                    .as_deref()
+                    .is_some_and(crate::bind_keys::Maps::convert_meta);
                 status = match Self::bind_x_spec(x, cm) {
                     Ok((seq, cmd)) => {
                         if let Some(maps) = self.bind_maps.as_deref_mut() {
@@ -41409,7 +41998,10 @@ impl Shell {
             for spec in args.get(i..).unwrap_or(&[]) {
                 // Read afresh each time: a `set convert-meta off` in an earlier
                 // operand of the same call steers the ones after it.
-                let cm = self.bind_maps.as_deref().is_some_and(crate::bind_keys::Maps::convert_meta);
+                let cm = self
+                    .bind_maps
+                    .as_deref()
+                    .is_some_and(crate::bind_keys::Maps::convert_meta);
                 match crate::bind_keys::parse_operand(spec, cm) {
                     crate::bind_keys::Operand::Nothing => {}
                     crate::bind_keys::Operand::Error(msg) => {
@@ -41575,7 +42167,11 @@ impl Shell {
             out.extend_from_slice(bfmt![b"\"", &seq, b"\""].as_slice());
             n += 1;
             if n == SHOWN {
-                out.extend_from_slice(if seqs.peek().is_some() { b", ..." } else { b"." });
+                out.extend_from_slice(if seqs.peek().is_some() {
+                    b", ..."
+                } else {
+                    b"."
+                });
                 return Some(out);
             }
             out.extend_from_slice(if seqs.peek().is_some() { b", " } else { b"." });
@@ -41762,13 +42358,21 @@ impl Shell {
                 env!("CARGO_PKG_VERSION"),
                 "\n",
             ));
-            text.push_str("These shell commands are defined internally.  Type `help' to see this list.\n");
+            text.push_str(
+                "These shell commands are defined internally.  Type `help' to see this list.\n",
+            );
             text.push_str("Type `help name' to find out more about the function `name'.\n");
-            text.push_str("Use `man -k' or `info' to find out more about commands not in this list.\n\n");
+            text.push_str(
+                "Use `man -k' or `info' to find out more about commands not in this list.\n\n",
+            );
             text.push_str("A star (*) next to a name means that the command is disabled.\n\n");
             for n in names {
                 if let Some((_, usage, _)) = HELP_TABLE.iter().find(|(hn, _, _)| hn == &n) {
-                    text.push(if self.disabled_builtins.contains(n) { '*' } else { ' ' });
+                    text.push(if self.disabled_builtins.contains(n) {
+                        '*'
+                    } else {
+                        ' '
+                    });
                     text.push_str(usage);
                     text.push('\n');
                 }
@@ -41794,7 +42398,9 @@ impl Shell {
             // back to glob (`*`/`?`) or case-sensitive prefix matching. Every
             // topic name is text, so a pattern that is not text matches none of
             // them — which is the "no help topics match" it deserves.
-            let exact = HELP_TABLE.iter().find(|(name, _, _)| name.as_bytes() == pat.as_slice());
+            let exact = HELP_TABLE
+                .iter()
+                .find(|(name, _, _)| name.as_bytes() == pat.as_slice());
             let mut matches: Vec<&(&str, &str, &str)> = if let Some(e) = exact {
                 vec![e]
             } else {
@@ -41802,7 +42408,11 @@ impl Shell {
                     .iter()
                     .filter(|(name, _, _)| {
                         if is_glob {
-                            glob_match(&pat_chars, &bytes::chars(name.as_bytes()).collect::<Vec<_>>(), false)
+                            glob_match(
+                                &pat_chars,
+                                &bytes::chars(name.as_bytes()).collect::<Vec<_>>(),
+                                false,
+                            )
                         } else {
                             name.as_bytes().starts_with(pat.as_slice())
                         }
@@ -42026,8 +42636,11 @@ impl Shell {
                             return 2;
                         }
                         _ => {
-                            return self
-                                .builtin_invalid_option("enable", &[b'-', *c], ENABLE_USAGE);
+                            return self.builtin_invalid_option(
+                                "enable",
+                                &[b'-', *c],
+                                ENABLE_USAGE,
+                            );
                         }
                     }
                 }
@@ -42040,8 +42653,12 @@ impl Shell {
 
         if names.is_empty() {
             // Listing mode. Sort for deterministic output.
-            let mut all: Vec<&str> =
-                if specials_only { SPECIAL_BUILTIN_NAMES } else { BUILTIN_NAMES }.to_vec();
+            let mut all: Vec<&str> = if specials_only {
+                SPECIAL_BUILTIN_NAMES
+            } else {
+                BUILTIN_NAMES
+            }
+            .to_vec();
             all.sort_unstable();
             let mut buf = String::new();
             for name in all {
@@ -42177,7 +42794,8 @@ impl Shell {
                     continue;
                 }
                 // `split_at` leaves the `=` on the front of the value.
-                self.aliases.set(name.to_vec(), val.get(1..).unwrap_or_default().to_vec());
+                self.aliases
+                    .set(name.to_vec(), val.get(1..).unwrap_or_default().to_vec());
             } else if let Some(val) = self.aliases.get(op.as_slice()).cloned() {
                 let line = alias_line(op, &val, reusable);
                 self.write_bytes(out, redir, &line);
@@ -42233,7 +42851,12 @@ impl Shell {
         let mut status = 0;
         for name in names {
             if !self.aliases.remove(name.as_slice()) {
-                self.berrln(&bfmt![self.err_prefix(), b"unalias: ", name, b": not found"]);
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"unalias: ",
+                    name,
+                    b": not found"
+                ]);
                 status = 1;
             }
         }
@@ -42478,7 +43101,8 @@ impl Shell {
     /// one of `-anrw` also has work to do), then `-s`, `-p`, `-d`, the file
     /// options, and finally the listing.
     fn builtin_history(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
-        const USAGE: &str = "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]";
+        const USAGE: &str =
+            "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]";
         // A `HISTSIZE` assigned since the last line was recorded has already
         // stifled the list by the time bash's builtin looks at it.
         self.hist_sync();
@@ -42706,8 +43330,7 @@ impl Shell {
                 _ => return fail(self, arg),
             },
             Some(k) => {
-                let (Some(lo_s), Some(hi_s)) =
-                    (arg.get(..k), arg.get(k.saturating_add(1)..))
+                let (Some(lo_s), Some(hi_s)) = (arg.get(..k), arg.get(k.saturating_add(1)..))
                 else {
                     return fail(self, arg);
                 };
@@ -42773,7 +43396,9 @@ impl Shell {
             return FcSpec::Idx(-1);
         }
         let real_last = len - 1;
-        let Some(s) = spec else { return FcSpec::Idx(last_hist) };
+        let Some(s) = spec else {
+            return FcSpec::Idx(last_hist);
+        };
         let (sign, digits) = match s.strip_prefix(b"-") {
             Some(rest) => (-1_isize, rest),
             None => (1, s),
@@ -42785,7 +43410,11 @@ impl Shell {
             }
             if n == 0 {
                 return if sign < 0 {
-                    if listing { FcSpec::Idx(real_last) } else { FcSpec::Invalid }
+                    if listing {
+                        FcSpec::Idx(real_last)
+                    } else {
+                        FcSpec::Invalid
+                    }
                 } else {
                     FcSpec::Idx(last_hist)
                 };
@@ -42797,7 +43426,13 @@ impl Shell {
             return FcSpec::Idx(idx);
         }
         let upto = usize::try_from(last_hist).unwrap_or(0);
-        for (j, entry) in self.history.iter().enumerate().take(upto.saturating_add(1)).rev() {
+        for (j, entry) in self
+            .history
+            .iter()
+            .enumerate()
+            .take(upto.saturating_add(1))
+            .rev()
+        {
             if entry.starts_with(s) {
                 return FcSpec::Idx(isize::try_from(j).unwrap_or(0));
             }
@@ -42852,8 +43487,7 @@ impl Shell {
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) -> i32 {
-        const USAGE: &str =
-            "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]";
+        const USAGE: &str = "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]";
         // A `HISTSIZE` assigned since the last line was recorded has already
         // stifled the list by the time bash's builtin looks at it.
         self.hist_sync();
@@ -42905,12 +43539,7 @@ impl Shell {
                         continue 'args;
                     }
                     _ => {
-                        self.berrln(&bfmt![
-                            self.err_prefix(),
-                            b"fc: -",
-                            *c,
-                            b": invalid option"
-                        ]);
+                        self.berrln(&bfmt![self.err_prefix(), b"fc: -", *c, b": invalid option"]);
                         self.errln(&format!("fc: usage: {USAGE}"));
                         return 2;
                     }
@@ -43326,7 +43955,11 @@ impl Shell {
                     c if RLIMIT_SPECS.iter().any(|s| s.opt == c) => {
                         asked += 1;
                         if let Some((prev, value)) = pending.take() {
-                            let mode = UlimitMode { want_soft, want_hard, labelled: asked > 1 };
+                            let mode = UlimitMode {
+                                want_soft,
+                                want_hard,
+                                labelled: asked > 1,
+                            };
                             let st = self.ulimit_settle(prev, value.as_deref(), mode, out, redir);
                             if st != 0 {
                                 return st;
@@ -43374,7 +44007,11 @@ impl Shell {
             // last letter, if that letter did not already have one.
             value = args.get(i).cloned();
         }
-        let mode = UlimitMode { want_soft, want_hard, labelled: asked > 1 };
+        let mode = UlimitMode {
+            want_soft,
+            want_hard,
+            labelled: asked > 1,
+        };
         self.ulimit_settle(opt, value.as_deref(), mode, out, redir)
     }
 
@@ -43450,7 +44087,6 @@ impl Shell {
         }
         0
     }
-
 
     /// Print every known resource limit in bash's `ulimit -a` format.
     fn ulimit_print_all(&mut self, show_hard: bool, out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -43955,7 +44591,13 @@ impl Shell {
         // sees the same zone even if the format somehow changed it.
         let zone = self.shell_tz();
         let text = format_printf(fmt, fargs, &mut diags, &zone.view());
-        let PrintfDiags { errors, warnings, notes, fatal, .. } = diags;
+        let PrintfDiags {
+            errors,
+            warnings,
+            notes,
+            fatal,
+            ..
+        } = diags;
         let num_status = i32::from(!errors.is_empty() || fatal.is_some());
         // Merge errors and warnings into one offset-ordered message stream so
         // they can be written *interleaved* with stdout. bash flushes pending
@@ -43969,13 +44611,19 @@ impl Shell {
             messages.push((*off, bfmt![self.err_prefix(), b"printf: ", e, b"\n"]));
         }
         for (off, w) in &warnings {
-            messages.push((*off, bfmt![self.err_prefix(), b"printf: warning: ", w, b"\n"]));
+            messages.push((
+                *off,
+                bfmt![self.err_prefix(), b"printf: warning: ", w, b"\n"],
+            ));
         }
         messages.sort_by_key(|(off, _)| *off);
         if let Some(msg) = &fatal {
             // A fatal directive truncates the output at its position, so its
             // message follows everything produced before it.
-            messages.push((text.len(), bfmt![self.err_prefix(), b"printf: ", msg, b"\n"]));
+            messages.push((
+                text.len(),
+                bfmt![self.err_prefix(), b"printf: ", msg, b"\n"],
+            ));
         }
         if let Some((base, sub)) = assign_var {
             // `-v` captures stdout into a variable; diagnostics still go to
@@ -44015,7 +44663,11 @@ impl Shell {
                 }
             }
             // A write error dominates; otherwise report the numeric-parse status.
-            if write_status != 0 { write_status } else { num_status }
+            if write_status != 0 {
+                write_status
+            } else {
+                num_status
+            }
         }
     }
 
@@ -44061,7 +44713,8 @@ impl Shell {
         // `String` and a name is spelled in the shell's identifier syntax — so a
         // name that is not text is not a valid identifier, which is the
         // complaint it already gets. The word is quoted back as its own bytes.
-        let Some(text) = bytes::as_str(name).filter(|n| crate::parser::is_valid_name(n.as_bytes())) else {
+        let Some(text) = bytes::as_str(name).filter(|n| crate::parser::is_valid_name(n.as_bytes()))
+        else {
             self.berrln(&bfmt![
                 self.err_prefix(),
                 tag,
@@ -44124,7 +44777,11 @@ impl Shell {
             return None;
         }
         let eq = attr_assignment_split(word)?;
-        let end = if eq > 0 && word.get(eq - 1) == Some(&b'+') { eq - 1 } else { eq };
+        let end = if eq > 0 && word.get(eq - 1) == Some(&b'+') {
+            eq - 1
+        } else {
+            eq
+        };
         let name = word.get(..end).unwrap_or_default();
         crate::parser::is_valid_name(name).then_some(name)
     }
@@ -44151,13 +44808,7 @@ impl Shell {
     /// `declare -a q=(1 2); readonly -A q=9` therefore reports
     /// `readonly: q: cannot convert indexed to associative array` — a
     /// `declare` refusal, spoken in `readonly`'s name.
-    fn setattr_declare(
-        &mut self,
-        tag: &str,
-        word: &Str,
-        mark: Option<u8>,
-        indexed: bool,
-    ) -> i32 {
+    fn setattr_declare(&mut self, tag: &str, word: &Str, mark: Option<u8>, indexed: bool) -> i32 {
         let mut flag = b"-g".to_vec();
         if let Some(c) = mark {
             flag.push(c);
@@ -44498,7 +45149,12 @@ impl Shell {
                 unexport,
             };
             let (k, append, value, scope) = match self.attr_operand("export", a, rule) {
-                AttrOperand::Mark { name, append, value, scope } => (name, append, value, scope),
+                AttrOperand::Mark {
+                    name,
+                    append,
+                    value,
+                    scope,
+                } => (name, append, value, scope),
                 AttrOperand::Done { status: s } => {
                     status |= s;
                     continue;
@@ -44567,7 +45223,10 @@ impl Shell {
         // refused. (`declare -x q=2` differs — it applies nothing — and
         // so does the `noassign` refusal below, which reports 0.)
         if self.readonly.contains(k) {
-            self.perrln(&format!("{}{k}: readonly variable", Self::attr_tag(assoc, indexed, "export")));
+            self.perrln(&format!(
+                "{}{k}: readonly variable",
+                Self::attr_tag(assoc, indexed, "export")
+            ));
             // In posix mode this refusal ends a non-interactive shell:
             // `export` is a special builtin, and an assignment error in
             // one is fatal. See [`Shell::posix_special_builtin_abort`].
@@ -44639,7 +45298,9 @@ impl Shell {
             let posix = self.shell_option_enabled("posix");
             let mut listing = Str::new();
             for name in &names {
-                let Some(body) = self.funcs.get(name.as_slice()) else { continue };
+                let Some(body) = self.funcs.get(name.as_slice()) else {
+                    continue;
+                };
                 // posix mode drops the body entirely and prints the one line
                 // that would re-export the function: `export -f NAME`.
                 if posix {
@@ -44881,8 +45542,10 @@ impl Shell {
                 nflags += 1;
                 break;
             }
-            let Some(flags) =
-                a.strip_prefix(b"-").or_else(|| a.strip_prefix(b"+")).filter(|f| !f.is_empty())
+            let Some(flags) = a
+                .strip_prefix(b"-")
+                .or_else(|| a.strip_prefix(b"+"))
+                .filter(|f| !f.is_empty())
             else {
                 break;
             };
@@ -44954,7 +45617,11 @@ impl Shell {
                 }
                 if let Some(body) = self.funcs.get(name) {
                     // `declare -f` — print every function's reconstructed source.
-                    listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+                    listing.extend_from_slice(&crate::unparse::unparse_function(
+                        name,
+                        body,
+                        self.func_redirects.get(name).map_or(&[][..], Vec::as_slice),
+                    ));
                 }
                 if flags.len() > 2 {
                     listing.extend_from_slice(&bfmt![b"declare ", &flags, b" ", name, b"\n"]);
@@ -45001,14 +45668,23 @@ impl Shell {
                         && let Some(line) = self.func_lines.get(name)
                         && let Some(src) = self.func_sources.get(name)
                     {
-                        listing.extend_from_slice(&bfmt![b" ", line.to_string().as_bytes(), b" ", src.as_slice()]);
+                        listing.extend_from_slice(&bfmt![
+                            b" ",
+                            line.to_string().as_bytes(),
+                            b" ",
+                            src.as_slice()
+                        ]);
                     }
                     listing.push(b'\n');
                 }
             } else {
                 // `declare -f NAME` prints the function's reconstructed source.
                 if let Some(body) = self.funcs.get(name) {
-                    listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+                    listing.extend_from_slice(&crate::unparse::unparse_function(
+                        name,
+                        body,
+                        self.func_redirects.get(name).map_or(&[][..], Vec::as_slice),
+                    ));
                 }
                 // …and `-p` adds the attribute line after it, but only when
                 // there is an attribute to report: the body already says
@@ -45118,7 +45794,11 @@ impl Shell {
     /// scalar, bash lists only `earr`. A listing with a restriction but no
     /// attribute letter keeps everything the restriction admits.
     fn listing_names(&self, want: &[char]) -> Vec<String> {
-        let attrs: Vec<char> = want.iter().copied().filter(|c| !matches!(c, 'a' | 'A')).collect();
+        let attrs: Vec<char> = want
+            .iter()
+            .copied()
+            .filter(|c| !matches!(c, 'a' | 'A'))
+            .collect();
         self.declare_p_names()
             .into_iter()
             .filter(|n| self.listing_kind_admits(n, want))
@@ -45134,7 +45814,9 @@ impl Shell {
         if let Some(d) = self.dynamic_special_listed(name) {
             // …unioned with whatever a declaration builtin has since applied,
             // which is what keeps an `export`ed one in `declare -x`.
-            return self.dynamic_special_letters(name, self.dynamic_special_listed_flags(d)).contains(c);
+            return self
+                .dynamic_special_letters(name, self.dynamic_special_listed_flags(d))
+                .contains(c);
         }
         match c {
             'i' => self.integer_attr.contains(name),
@@ -45194,7 +45876,9 @@ impl Shell {
     /// not modelled, so they simply don't appear.
     fn declare_list_filtered(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let start = Self::declare_flag_end(args);
-        let want = Self::listing_flags(Self::listing_minus_words(args.get(..start).unwrap_or_default()));
+        let want = Self::listing_flags(Self::listing_minus_words(
+            args.get(..start).unwrap_or_default(),
+        ));
         let names = self.listing_names(&want);
         let mut listing = Str::new();
         for name in &names {
@@ -45330,7 +46014,11 @@ impl Shell {
                 }
             }
         }
-        if write_status != 0 { write_status } else { status }
+        if write_status != 0 {
+            write_status
+        } else {
+            status
+        }
     }
 
     /// The names a `-p` listing was asked about: the operands left once the
@@ -45338,7 +46026,9 @@ impl Shell {
     /// -p +a q` asks about `q` alone — and no identifier can begin with either
     /// sign, so the two are told apart by position rather than by shape.
     fn print_operand_names(args: &[Str]) -> Vec<&Str> {
-        args.iter().skip_while(|a| Self::is_decl_flag_word(a)).collect()
+        args.iter()
+            .skip_while(|a| Self::is_decl_flag_word(a))
+            .collect()
     }
 
     /// The leading flag words that were spelled with a **minus**, which are the
@@ -45427,19 +46117,17 @@ impl Shell {
                     None => {
                         // The complaint carries the name the *command* was
                         // called by, so `typeset -p nosuch` says `typeset:`.
-                        self.berrln(&bfmt![
-                            self.err_prefix(),
-                            tag,
-                            b": ",
-                            name,
-                            b": not found"
-                        ]);
+                        self.berrln(&bfmt![self.err_prefix(), tag, b": ", name, b": not found"]);
                         status = 1;
                     }
                 }
             }
         }
-        if write_status != 0 { write_status } else { status }
+        if write_status != 0 {
+            write_status
+        } else {
+            status
+        }
     }
 
     /// Format one variable's `declare` definition, or `None` if it is unset.
@@ -45454,7 +46142,11 @@ impl Shell {
     /// The flag group a `declare` line carries: the attribute letters behind a
     /// `-`, or `--` when there are none.
     fn flag_group(letters: &str) -> String {
-        if letters.is_empty() { "--".to_string() } else { format!("-{letters}") }
+        if letters.is_empty() {
+            "--".to_string()
+        } else {
+            format!("-{letters}")
+        }
     }
 
     /// One `declare` line: `declare <flags> NAME<tail>`, where `tail` is empty,
@@ -45487,7 +46179,9 @@ impl Shell {
     /// The part of a `declare -p` line that comes from the variable tables, or
     /// `None` if `name` has no entry in them.
     fn format_declare_def_stored(&self, name: &str) -> Option<Str> {
-        if self.assoc.contains_key(name) || self.arrays.contains_key(name) || self.vars.contains_key(name)
+        if self.assoc.contains_key(name)
+            || self.arrays.contains_key(name)
+            || self.vars.contains_key(name)
         {
             return self
                 .format_var_assignment(name)
@@ -45498,7 +46192,12 @@ impl Shell {
             // with its attributes, or `--` if it has none — even though it is
             // unset and so has nothing to print on the right of an `=`. See
             // [`Shell::declared`].
-            return Some(bfmt![b"declare ", self.declare_attr_flags(name), b" ", name]);
+            return Some(bfmt![
+                b"declare ",
+                self.declare_attr_flags(name),
+                b" ",
+                name
+            ]);
         }
         None
     }
@@ -45514,11 +46213,19 @@ impl Shell {
         if d.listed.is_array() {
             // A call-stack array has no scalar value to read, and outside a
             // function bash prints it the way it was built — see [`DynListing`].
-            let tail: &[u8] = if d.listed == DynListing::EmptyArray { b"=()" } else { b"" };
+            let tail: &[u8] = if d.listed == DynListing::EmptyArray {
+                b"=()"
+            } else {
+                b""
+            };
             return Some(Self::declare_line(&letters, name, tail));
         }
         let val = self.param_value(name)?;
-        Some(Self::declare_line(&letters, name, &bfmt![b"=\"", &val, b"\""]))
+        Some(Self::declare_line(
+            &letters,
+            name,
+            &bfmt![b"=\"", &val, b"\""],
+        ))
     }
 
     /// The line a listing prints for a dynamic special variable, or `None` if
@@ -45529,7 +46236,11 @@ impl Shell {
         let letters = self.dynamic_special_letters(name, self.dynamic_special_listed_flags(d));
         if d.listed.is_array() {
             // A call-stack array has no scalar value cell to print from.
-            let tail: &[u8] = if d.listed == DynListing::EmptyArray { b"=()" } else { b"" };
+            let tail: &[u8] = if d.listed == DynListing::EmptyArray {
+                b"=()"
+            } else {
+                b""
+            };
             return Some(Self::declare_line(&letters, name, tail));
         }
         // The value cell, not a fresh reading: a listing walks the variable
@@ -45539,7 +46250,11 @@ impl Shell {
         // `declare -- SECONDS="7"`. An empty cell prints no value at all. See
         // [`Shell::dyn_cell`].
         match self.dynamic_special_listed_value(name) {
-            Some(v) => Some(Self::declare_line(&letters, name, &bfmt![b"=\"", &v, b"\""])),
+            Some(v) => Some(Self::declare_line(
+                &letters,
+                name,
+                &bfmt![b"=\"", &v, b"\""],
+            )),
             None => Some(Self::declare_line(&letters, name, b"")),
         }
     }
@@ -45631,7 +46346,13 @@ impl Shell {
     fn builtin_invalid_option(&mut self, builtin: &str, opt: BStr<'_>, usage: &str) -> i32 {
         // `opt` is echoed from the command line, so it is bytes: an invalid
         // option is reported as the bytes the user actually typed.
-        self.berrln(&bfmt![self.err_prefix(), builtin, b": ", opt, b": invalid option"]);
+        self.berrln(&bfmt![
+            self.err_prefix(),
+            builtin,
+            b": ",
+            opt,
+            b": invalid option"
+        ]);
         self.emit_stderr(format!("{builtin}: usage: {usage}\n").as_bytes());
         self.note_builtin_usage_error()
     }
@@ -45810,7 +46531,13 @@ impl Shell {
     /// `declare`/`typeset`/`local` — the entry point, which handles `-g` by
     /// swapping each operand's global binding into place around the declaration
     /// proper (see [`Shell::enter_global_scope`]).
-    fn builtin_declare(&mut self, args: &[Str], is_local: bool, tag: &str, flag_limit: usize) -> i32 {
+    fn builtin_declare(
+        &mut self,
+        args: &[Str],
+        is_local: bool,
+        tag: &str,
+        flag_limit: usize,
+    ) -> i32 {
         let flags = Self::declare_global_flag(args);
         if !flags.global {
             return self.builtin_declare_scoped(args, is_local, tag, flag_limit, &[]);
@@ -46802,12 +47529,12 @@ impl Shell {
             // subscript of its own already reports its base, since that is what
             // `base_name` is.) This is the scalar half of the compound path's
             // rule in [`Shell::declare_compounds_scoped`].
-            let kind_blame = if spelled.is_none() && target.as_ref().is_some_and(|t| t.sub.is_some())
-            {
-                base_name
-            } else {
-                operand_name
-            };
+            let kind_blame =
+                if spelled.is_none() && target.as_ref().is_some_and(|t| t.sub.is_some()) {
+                    base_name
+                } else {
+                    operand_name
+                };
             // …and then of the name itself, which may not already be an array.
             // A *valueless* `-n` asks the same question further down, where it
             // can also judge the value the binding already holds; here it comes
@@ -46861,8 +47588,7 @@ impl Shell {
                 .any(|f| f.iter().any(|(n, _)| n == base_name));
             // So: a readonly name stands in this operand's way unless the
             // declaration is about to shadow it with a local of its own.
-            let readonly_blocks =
-                self.readonly.contains(base_name) && !(shadow_new && held_outer);
+            let readonly_blocks = self.readonly.contains(base_name) && !(shadow_new && held_outer);
             // Whether declare.def:817 is going to refuse this operand's value
             // for not naming anything — see the refusal itself, far below.
             //
@@ -46994,7 +47720,9 @@ impl Shell {
                 && !ref_value_refused
                 && (value.is_some() || unset_readonly)
                 && (assoc || indexed || subscript.is_some())
-                && self.array_kind_conflict(base_name, assoc, indexed).is_none()
+                && self
+                    .array_kind_conflict(base_name, assoc, indexed)
+                    .is_none()
             {
                 // The scalar is discarded rather than carried in as element 0,
                 // exactly as at the widening below: the local branch rebinds
@@ -47007,9 +47735,7 @@ impl Shell {
                 // declare -aA g=5` leaves `declare -Ar g=()`.
                 if assoc {
                     self.array_kind_apply(base_name, true);
-                } else if indexed
-                    || (subscript.is_some() && !self.assoc.contains_key(base_name))
-                {
+                } else if indexed || (subscript.is_some() && !self.assoc.contains_key(base_name)) {
                     self.array_kind_apply(base_name, false);
                 }
                 if had_scalar {
@@ -47240,9 +47966,7 @@ impl Shell {
             if kind_conflict.is_none() {
                 if assoc {
                     self.array_kind_apply(base_name, true);
-                } else if indexed
-                    || (subscript.is_some() && !self.assoc.contains_key(base_name))
-                {
+                } else if indexed || (subscript.is_some() && !self.assoc.contains_key(base_name)) {
                     // A subscripted name auto-creates an *indexed* array (bash)
                     // even with no explicit `-a` and no value — but never
                     // clobbers an existing associative array of the same name.
@@ -47282,9 +48006,7 @@ impl Shell {
             // `declare -an g=()` — while the value-transforming letters are
             // applied further down and so never land at all (`local -i g=5`
             // stays `declare -n g="z"`).
-            if ref_value_refused
-                && let Some(v) = &value
-            {
+            if ref_value_refused && let Some(v) = &value {
                 self.emit_stderr(&bfmt![
                     self.err_prefix(),
                     tag,
@@ -47730,9 +48452,7 @@ impl Shell {
             // landed and this operand's value does not bind, while the flags
             // below still apply (`local +n -x g=5` leaves `declare -nx g="z"`)
             // and the operands after it are still read.
-            if ref_store_refused
-                && let Some(v) = &value
-            {
+            if ref_store_refused && let Some(v) = &value {
                 self.emit_stderr(&bfmt![
                     self.err_prefix(),
                     tag,
@@ -47900,9 +48620,12 @@ impl Shell {
                         // the same split the subscripted spelling makes (see
                         // [`Shell::with_live_binding`]).
                         if self.assoc.contains_key(name) {
-                            let cur = if append { self.scalar_store(name) } else { None };
-                            let Some(stored) =
-                                self.appended_attributed_value(name, cur, v, append)
+                            let cur = if append {
+                                self.scalar_store(name)
+                            } else {
+                                None
+                            };
+                            let Some(stored) = self.appended_attributed_value(name, cur, v, append)
                             else {
                                 // A bad `-i` value leaves the array *valued but
                                 // empty* (`declare -ai a=2+` reports `declare
@@ -47966,8 +48689,7 @@ impl Shell {
                                 // and leaves the local reference standing.
                                 sh.in_target_scope(&target, |sh| {
                                     let base = target.base.as_str();
-                                    let cur =
-                                        if append { sh.scalar_store(base) } else { None };
+                                    let cur = if append { sh.scalar_store(base) } else { None };
                                     let Some(stored) =
                                         sh.appended_attributed_value(base, cur, v, append)
                                     else {
@@ -48064,7 +48786,10 @@ impl Shell {
             };
             // The hook is on the *name*, so the value and any subscript a
             // `name=value` operand carries are cut off first.
-            let base = written.split(|&c| c == b'=' || c == b'[').next().unwrap_or_default();
+            let base = written
+                .split(|&c| c == b'=' || c == b'[')
+                .next()
+                .unwrap_or_default();
             if let Some(n) = bytes::as_str(base) {
                 self.after_var_write(n);
             }
@@ -48298,12 +49023,19 @@ impl Shell {
     /// bash skips the adjustment for it entirely.
     fn negative_index_bound(&self, name: &str) -> usize {
         if let Some(arr) = self.arrays.get(name) {
-            return arr.keys().next_back().copied().map_or(0, |k| k.saturating_add(1));
+            return arr
+                .keys()
+                .next_back()
+                .copied()
+                .map_or(0, |k| k.saturating_add(1));
         }
         // The call-stack specials are `array_p` without an entry in
         // [`Shell::arrays`], and osh lists them empty, so their `array_max_index`
         // is -1 and they bound at 0 rather than at a scalar's 1.
-        if self.dynamic_special(name).is_some_and(|d| d.listed.is_array()) {
+        if self
+            .dynamic_special(name)
+            .is_some_and(|d| d.listed.is_array())
+        {
             return 0;
         }
         usize::from(self.var_entry_exists(name))
@@ -48396,7 +49128,10 @@ impl Shell {
         // else (`d=echo; $d a=(1)`) — bash decides on the expanded word, so the
         // check waits until there is one.
         if !argv.first().map(Vec::as_slice).is_some_and(|w| {
-            matches!(w, b"declare" | b"typeset" | b"local" | b"readonly" | b"export")
+            matches!(
+                w,
+                b"declare" | b"typeset" | b"local" | b"readonly" | b"export"
+            )
         }) {
             return Ok(());
         }
@@ -48783,8 +49518,7 @@ impl Shell {
                 kind_or_scope_flag = true;
             }
             for c in flags {
-                if first_value_letter_on.is_none()
-                    && matches!(c, b'i' | b'l' | b'u' | b'c' | b'I')
+                if first_value_letter_on.is_none() && matches!(c, b'i' | b'l' | b'u' | b'c' | b'I')
                 {
                     first_value_letter_on = Some(enable);
                 }
@@ -48992,8 +49726,8 @@ impl Shell {
             // That is the same rule `binding_is_nameref` states for scalar
             // operands in [`Shell::builtin_declare_scoped`], and the one
             // `apply_assignment` already follows when it stores the values.
-            let follow =
-                self.nameref_attr.contains(&a.name) && (!make_local || self.local_binds_here(&a.name));
+            let follow = self.nameref_attr.contains(&a.name)
+                && (!make_local || self.local_binds_here(&a.name));
             // A compound operand of a declaration builtin is **three commands**,
             // not one, and the chain is walked by the first two. bash performs
             // it in `expand_declaration_argument` (subst.c:12655):
@@ -49088,7 +49822,11 @@ impl Shell {
                 // `g=(1 2)` through the same cycle goes out to the global. The
                 // two paths genuinely differ, so the escape is dropped here and
                 // the fallback below binds the name as written.
-                if make_local && walk.circular { None } else { walk.target }
+                if make_local && walk.circular {
+                    None
+                } else {
+                    walk.target
+                }
             } else {
                 if make_local && self.nameref_attr.contains(&a.name) {
                     let walk = self.walk_ref_name(&a.name);
@@ -49119,7 +49857,11 @@ impl Shell {
             // the builtin's operand loop walks `argv[1..]`, so the position is
             // one less. A compound written after every word sits past the end,
             // and the loop appends it.
-            let at = positions.get(k).copied().unwrap_or(argv.len()).saturating_sub(1);
+            let at = positions
+                .get(k)
+                .copied()
+                .unwrap_or(argv.len())
+                .saturating_sub(1);
             // Wherever the declaration would *not* bind a local — at top level,
             // and under `-g` — a reference to an element makes bash reach for
             // the reference's **base** array before anything else, and it is
@@ -49171,12 +49913,24 @@ impl Shell {
             let mut local_array_fallback = false;
             let target = match (&spelled, resolved) {
                 (Some(s), _) => s.clone(),
-                (None, Some(RefTarget { base, sub: None, .. })) => base,
+                (
+                    None,
+                    Some(RefTarget {
+                        base, sub: None, ..
+                    }),
+                ) => base,
                 // An element reference names no variable a whole array literal
                 // could bind to. bash refuses it in the compound-assignment
                 // machinery's untagged spelling — the reference's own text, not
                 // the operand's — and discards the rest of the parse unit.
-                (None, Some(RefTarget { base, sub: Some(sub), .. })) => {
+                (
+                    None,
+                    Some(RefTarget {
+                        base,
+                        sub: Some(sub),
+                        ..
+                    }),
+                ) => {
                     // A reference to a *whole* array is complained about twice,
                     // and the first line comes from a step before the refusal:
                     // the machinery hands the operand to `declare` itself to get
@@ -49230,7 +49984,13 @@ impl Shell {
                         Some(name) => bfmt![name.as_slice(), b": "],
                         None => Str::new(),
                     };
-                    let msg = bfmt![b"`", base.as_bytes(), b"[", &sub, b"]': not a valid identifier"];
+                    let msg = bfmt![
+                        b"`",
+                        base.as_bytes(),
+                        b"[",
+                        &sub,
+                        b"]': not a valid identifier"
+                    ];
                     self.berrln(&bfmt![self.err_prefix(), &tag, &msg]);
                     self.last_status = 1;
                     return Err(Flow::Discard);
@@ -50031,9 +50791,13 @@ impl Shell {
                 array: assoc || indexed,
                 unexport: false,
             };
-            let (name, append, value, scope) = match self.attr_operand("readonly", name_val, rule)
-            {
-                AttrOperand::Mark { name, append, value, scope } => (name, append, value, scope),
+            let (name, append, value, scope) = match self.attr_operand("readonly", name_val, rule) {
+                AttrOperand::Mark {
+                    name,
+                    append,
+                    value,
+                    scope,
+                } => (name, append, value, scope),
                 AttrOperand::Done { status: s } => {
                     status |= s;
                     continue;
@@ -50134,7 +50898,11 @@ impl Shell {
                         listing.extend_from_slice(&bfmt![b"readonly -f ", name, b"\n"]);
                         continue;
                     }
-                    listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+                    listing.extend_from_slice(&crate::unparse::unparse_function(
+                        name,
+                        body,
+                        self.func_redirects.get(name).map_or(&[][..], Vec::as_slice),
+                    ));
                     // The attribute line carries *every* flag the function has,
                     // not just this builtin's: a function that is both readonly
                     // and exported lists as `declare -frx NAME` from either
@@ -50240,7 +51008,11 @@ impl Shell {
                 // List every known option; `-s`/`-u` filters to on/off.
                 let mut listing = String::new();
                 for &(opt, _) in SHOPT_TABLE {
-                    let on = self.shopt.get(opt).copied().unwrap_or_else(|| self.shopt_default(opt));
+                    let on = self
+                        .shopt
+                        .get(opt)
+                        .copied()
+                        .unwrap_or_else(|| self.shopt_default(opt));
                     if (flags.set && !on) || (flags.unset && on) {
                         continue;
                     }
@@ -50260,7 +51032,8 @@ impl Shell {
                 // Option names come from a fixed table, so a name that is not
                 // text names no option — the same complaint any other unknown
                 // name gets, quoting the bytes it was given.
-                let Some(name) = bytes::as_str(name.as_slice()).filter(|n| shopt_is_known(n)) else {
+                let Some(name) = bytes::as_str(name.as_slice()).filter(|n| shopt_is_known(n))
+                else {
                     self.berrln(&bfmt![
                         self.err_prefix(),
                         b"shopt: ",
@@ -50355,7 +51128,12 @@ impl Shell {
     fn refresh_bashopts(&mut self) {
         let mut on: Vec<&str> = Vec::new();
         for &(opt, _) in SHOPT_TABLE {
-            if self.shopt.get(opt).copied().unwrap_or_else(|| self.shopt_default(opt)) {
+            if self
+                .shopt
+                .get(opt)
+                .copied()
+                .unwrap_or_else(|| self.shopt_default(opt))
+            {
                 on.push(opt);
             }
         }
@@ -50419,7 +51197,8 @@ impl Shell {
         // remaining names still get their answer.
         let mut all_on = true;
         for name in names {
-            let Some(name) = bytes::as_str(name.as_slice()).filter(|n| SETO_NAMES.contains(n)) else {
+            let Some(name) = bytes::as_str(name.as_slice()).filter(|n| SETO_NAMES.contains(n))
+            else {
                 self.berrln(&bfmt![
                     self.err_prefix(),
                     b"shopt: ",
@@ -50592,17 +51371,20 @@ impl Shell {
             // subscript is non-empty and closes the token. Anything else
             // (`e[]`, `q[0]junk`, `1abc[0]`) is an ordinary — and necessarily
             // unset — variable name, which bash quietly accepts.
-            let subscript = bytes::find(a, b"[").filter(|&open| open > 0).and_then(|open| {
-                // A valid identifier is ASCII, so the base is text whenever the
-                // token is an array reference at all.
-                let base = bytes::as_str(a.get(..open)?)
-                    .filter(|b| crate::parser::is_valid_name(b.as_bytes()))?;
-                // Quoting decides where the subscript closes — see
-                // [`skip_subscript`].
-                let close = skip_subscript(a, open).filter(|c| c.checked_add(1) == Some(a.len()))?;
-                let sub = a.get(open.saturating_add(1)..close)?;
-                (!sub.is_empty()).then_some((base, sub))
-            });
+            let subscript = bytes::find(a, b"[")
+                .filter(|&open| open > 0)
+                .and_then(|open| {
+                    // A valid identifier is ASCII, so the base is text whenever the
+                    // token is an array reference at all.
+                    let base = bytes::as_str(a.get(..open)?)
+                        .filter(|b| crate::parser::is_valid_name(b.as_bytes()))?;
+                    // Quoting decides where the subscript closes — see
+                    // [`skip_subscript`].
+                    let close =
+                        skip_subscript(a, open).filter(|c| c.checked_add(1) == Some(a.len()))?;
+                    let sub = a.get(open.saturating_add(1)..close)?;
+                    (!sub.is_empty()).then_some((base, sub))
+                });
             if let Some((base, sub_src)) = subscript {
                 // `unset name[sub]` looks the base up **once**, and removes the
                 // element through the variable that walk handed back
@@ -50652,8 +51434,9 @@ impl Shell {
                         status = 1;
                         continue;
                     }
-                    let outcome = self
-                        .in_opt_target_scope(target.as_ref(), |sh| sh.unset_element(&name, sub_src));
+                    let outcome = self.in_opt_target_scope(target.as_ref(), |sh| {
+                        sh.unset_element(&name, sub_src)
+                    });
                     match outcome {
                         ElemUnset::Done => {}
                         ElemUnset::Whole => self.unbind_var_through_ref(&name),
@@ -50766,7 +51549,9 @@ impl Shell {
                 self.unset_hook(operand);
                 continue;
             }
-            let a = &target.and_then(RefTarget::into_name).unwrap_or_else(|| a.to_string());
+            let a = &target
+                .and_then(RefTarget::into_name)
+                .unwrap_or_else(|| a.to_string());
             if self.unset_resolved_name(a, vars_only) {
                 // A refusal leaves by bash's `NEXT_VARIABLE()` before the hook
                 // — see [`Shell::unset_hook`].
@@ -50895,9 +51680,9 @@ impl Shell {
         // bash's "preserve the export attribute if the variable came from a
         // temporary environment", the one attribute `unset` does not drop.
         let from_call_env = owner.is_some_and(|idx| {
-            self.temp_shadow
-                .iter()
-                .any(|s| s.call_env && s.local_depth == idx && s.binds.iter().any(|(n, _)| n == name))
+            self.temp_shadow.iter().any(|s| {
+                s.call_env && s.local_depth == idx && s.binds.iter().any(|(n, _)| n == name)
+            })
         });
         let was_exported = self.exported.contains(name);
         self.vars.remove(name);
@@ -51287,7 +52072,11 @@ impl Shell {
                 fns.sort();
                 for name in fns {
                     if let Some(body) = self.funcs.get(name) {
-                        listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+                        listing.extend_from_slice(&crate::unparse::unparse_function(
+                            name,
+                            body,
+                            self.func_redirects.get(name).map_or(&[][..], Vec::as_slice),
+                        ));
                     }
                 }
             }
@@ -51848,8 +52637,7 @@ impl Shell {
         // The variable tables are keyed by `String` and a name is spelled in
         // the shell's identifier syntax, so a name that is not text is not a
         // valid identifier either — the same complaint covers both.
-        let Some(text) =
-            bytes::as_str(name).filter(|n| crate::parser::is_valid_name(n.as_bytes()))
+        let Some(text) = bytes::as_str(name).filter(|n| crate::parser::is_valid_name(n.as_bytes()))
         else {
             self.berrln(&bfmt![
                 self.err_prefix(),
@@ -51908,8 +52696,14 @@ impl Shell {
     /// says whether the two diagnostics are printed (bash's `sh_opterr`, which
     /// silent mode turns off for the duration of the call).
     fn sh_getopt(&mut self, pos: &[Str], scan: BStr<'_>, report: bool) -> ShGetopt {
-        let argc = i32::try_from(pos.len()).unwrap_or(i32::MAX).saturating_add(1);
-        let eof = ShGetopt { ret: None, optarg: None, optopt: b'?' };
+        let argc = i32::try_from(pos.len())
+            .unwrap_or(i32::MAX)
+            .saturating_add(1);
+        let eof = ShGetopt {
+            ret: None,
+            optarg: None,
+            optopt: b'?',
+        };
         // Past the end — including an `OPTIND` set past it by hand — reports
         // where the arguments ran out rather than parroting the value back, and
         // does so before the part-read group is even looked at.
@@ -51947,7 +52741,9 @@ impl Shell {
             self.getopts_charindex = 1;
             self.getopts_mid = true;
         }
-        let cur = Self::getopts_arg(pos, self.getopts_curopt).unwrap_or(b"").to_vec();
+        let cur = Self::getopts_arg(pos, self.getopts_curopt)
+            .unwrap_or(b"")
+            .to_vec();
         let Some(&c) = cur.get(self.getopts_charindex) else {
             return eof;
         };
@@ -51967,18 +52763,33 @@ impl Shell {
                 let msg = bfmt![&self.name, b": illegal option -- ", &[c][..]];
                 self.berrln(&msg);
             }
-            return ShGetopt { ret: Some(b'?'), optarg: None, optopt: c };
+            return ShGetopt {
+                ret: Some(b'?'),
+                optarg: None,
+                optopt: c,
+            };
         };
         if scan.get(at.saturating_add(1)) != Some(&b':') {
-            return ShGetopt { ret: Some(c), optarg: None, optopt: c };
+            return ShGetopt {
+                ret: Some(c),
+                optarg: None,
+                optopt: c,
+            };
         }
         self.getopts_mid = false;
         if self.getopts_charindex < cur.len() {
             // The rest of this argument is the option-argument, and the
             // argument is finished with either way.
-            let optarg = cur.get(self.getopts_charindex..).unwrap_or_default().to_vec();
+            let optarg = cur
+                .get(self.getopts_charindex..)
+                .unwrap_or_default()
+                .to_vec();
             self.getopts_optind = self.getopts_optind.saturating_add(1);
-            return ShGetopt { ret: Some(c), optarg: Some(optarg), optopt: c };
+            return ShGetopt {
+                ret: Some(c),
+                optarg: Some(optarg),
+                optopt: c,
+            };
         }
         if self.getopts_optind == argc {
             if report {
@@ -51990,12 +52801,26 @@ impl Shell {
             // of. So a second colon there answers `:` from here rather than
             // from the caller's missing-argument arm, and the caller, seeing no
             // `?`, plants the empty string in `OPTARG` instead of the letter.
-            let ret = if scan.first() == Some(&b':') { b':' } else { b'?' };
-            return ShGetopt { ret: Some(ret), optarg: Some(Str::new()), optopt: c };
+            let ret = if scan.first() == Some(&b':') {
+                b':'
+            } else {
+                b'?'
+            };
+            return ShGetopt {
+                ret: Some(ret),
+                optarg: Some(Str::new()),
+                optopt: c,
+            };
         }
-        let optarg = Self::getopts_arg(pos, self.getopts_optind).unwrap_or(b"").to_vec();
+        let optarg = Self::getopts_arg(pos, self.getopts_optind)
+            .unwrap_or(b"")
+            .to_vec();
         self.getopts_optind = self.getopts_optind.saturating_add(1);
-        ShGetopt { ret: Some(c), optarg: Some(optarg), optopt: c }
+        ShGetopt {
+            ret: Some(c),
+            optarg: Some(optarg),
+            optopt: c,
+        }
     }
 
     /// Set the `getopts` cursor from an assignment to `OPTIND` — bash's
@@ -52117,7 +52942,11 @@ impl Shell {
         // and a second colon there is an ordinary part of it — which is how
         // `::a:` comes to answer a missing argument differently. See
         // [`Shell::sh_getopt`].
-        let scan: Str = if silent { optstring.get(1..).unwrap_or_default().to_vec() } else { optstring.clone() };
+        let scan: Str = if silent {
+            optstring.get(1..).unwrap_or_default().to_vec()
+        } else {
+            optstring.clone()
+        };
         // Silent mode turns the diagnostics off for the duration of the call
         // and puts `sh_opterr` back afterwards, so it does not settle the
         // question `OPTERR` answers — it only overrides it here. The two are
@@ -52193,7 +53022,9 @@ impl Shell {
         if self.open_fds.contains_key(&n) || self.coproc_read_fds.contains_key(&n) {
             return true;
         }
-        self.perrln(&format!("{tag}: {n}: invalid file descriptor: Bad file descriptor"));
+        self.perrln(&format!(
+            "{tag}: {n}: invalid file descriptor: Bad file descriptor"
+        ));
         false
     }
 
@@ -52508,7 +53339,11 @@ impl Shell {
         // otherwise look satisfied by five bytes.
         let eof_status = i32::from(!terminated);
 
-        let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| b" \t\n".to_vec());
+        let ifs = self
+            .vars
+            .get("IFS")
+            .cloned()
+            .unwrap_or_else(|| b" \t\n".to_vec());
 
         if let Some(arr) = array {
             // `-a` fills a whole array, so the operand names one the same way
@@ -52549,7 +53384,10 @@ impl Shell {
                     let Some(field) = sh.apply_value_attrs(&name, field) else {
                         return 1;
                     };
-                    sh.arrays.entry(name.clone()).or_default().insert(idx, field);
+                    sh.arrays
+                        .entry(name.clone())
+                        .or_default()
+                        .insert(idx, field);
                 }
                 // `read -a DIRSTACK` writes through the dynamic hook like any
                 // other assignment — see [`Shell::after_var_write`].
@@ -52707,7 +53545,11 @@ impl Shell {
     ///
     /// Every question below is asked of that same binding, which is why they
     /// are asked under the swap rather than of whatever is live.
-    fn whole_array_write_target(&mut self, operand: &[u8], tag: &str) -> Option<(String, RefScope)> {
+    fn whole_array_write_target(
+        &mut self,
+        operand: &[u8],
+        tag: &str,
+    ) -> Option<(String, RefScope)> {
         // The variable tables are keyed by `String` and an identifier is
         // spelled in the shell's identifier syntax, so a name that is not text
         // is not a valid identifier — the complaint it already gets, quoting
@@ -52851,9 +53693,7 @@ impl Shell {
                     // is rejected the moment it is read.
                     let count_arg = |what: BStr<'_>, least: i64| -> Result<usize, i32> {
                         match legal_number(&val) {
-                            Some(n) if n >= least => {
-                                Ok(usize::try_from(n).unwrap_or(usize::MAX))
-                            }
+                            Some(n) if n >= least => Ok(usize::try_from(n).unwrap_or(usize::MAX)),
                             _ => {
                                 self.berrln(&bfmt![
                                     self.err_prefix(),
@@ -53088,13 +53928,7 @@ impl Shell {
         0
     }
 
-    fn builtin_source(
-        &mut self,
-        args: &[Str],
-        tag: &str,
-        out: &mut Out,
-        stdin: &StdinSrc,
-    ) -> i32 {
+    fn builtin_source(&mut self, args: &[Str], tag: &str, out: &mut Out, stdin: &StdinSrc) -> i32 {
         // `source`/`.` take no options: a leading `-x`-style token is a usage
         // error (bash reports it with the invoking name — `.` or `source`).
         // `--` ends option processing and is skipped.
@@ -53159,7 +53993,13 @@ impl Shell {
         // the search steps past directories — so this only ever catches the
         // operand as written.)
         if bytes::bytes_to_path(&self.host_path(path)).is_dir() {
-            self.berrln(&bfmt![self.err_prefix(), tag, b": ", path.as_slice(), b": is a directory"]);
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                tag,
+                b": ",
+                path.as_slice(),
+                b": is a directory"
+            ]);
             return 1;
         }
         // The path is opened from its own bytes, so a script whose *name* is
@@ -53228,8 +54068,13 @@ impl Shell {
                 // even when it was reached through `builtin`/`command`. See
                 // [`Shell::expand_cmd`].
                 self.expand_cmd = Some(tag.as_bytes().to_vec());
-                let run =
-                    self.run_source_flow_result(&src, out, stdin, &LineMap::Offset(0), HistRead::Off);
+                let run = self.run_source_flow_result(
+                    &src,
+                    out,
+                    stdin,
+                    &LineMap::Offset(0),
+                    HistRead::Off,
+                );
                 self.xtrace_level = self.xtrace_level.saturating_sub(1);
                 self.trap_suppress.pop();
                 self.source_stack.pop();
@@ -53556,10 +54401,16 @@ impl Shell {
                 // `enable`'s two halves. Both are sorted, being slices of the
                 // same sorted builtin table.
                 "enabled" => cands.extend(sorted(str_bytes(
-                    BUILTIN_NAMES.iter().copied().filter(|n| !self.disabled_builtins.contains(*n)),
+                    BUILTIN_NAMES
+                        .iter()
+                        .copied()
+                        .filter(|n| !self.disabled_builtins.contains(*n)),
                 ))),
                 "disabled" => cands.extend(sorted(str_bytes(
-                    BUILTIN_NAMES.iter().copied().filter(|n| self.disabled_builtins.contains(*n)),
+                    BUILTIN_NAMES
+                        .iter()
+                        .copied()
+                        .filter(|n| self.disabled_builtins.contains(*n)),
                 ))),
                 // The two option namespaces, each in the order its own builtin
                 // lists them: `shopt`'s table order, `set -o`'s alphabetical.
@@ -53601,7 +54452,9 @@ impl Shell {
                 // enabled. The names are readline's compiled-in ones, so a
                 // shell that cannot *run* a binding still knows them all.
                 "binding" => {
-                    cands.extend(str_bytes(crate::bind_tables::FUNCTION_NAMES.iter().copied()));
+                    cands.extend(str_bytes(
+                        crate::bind_tables::FUNCTION_NAMES.iter().copied(),
+                    ));
                 }
                 _ => {}
             }
@@ -53616,8 +54469,12 @@ impl Shell {
         // The word never narrows this one: bash hands back everything the
         // pattern expanded to, and hands it back in reverse.
         if let Some(pat) = &globpat {
-            let field: Vec<EChar> =
-                bytes::chars(pat).map(|c| EChar { c: Some(c), quoted: false }).collect();
+            let field: Vec<EChar> = bytes::chars(pat)
+                .map(|c| EChar {
+                    c: Some(c),
+                    quoted: false,
+                })
+                .collect();
             let mut m = glob_expand_field(
                 self.cwd.as_bytes(),
                 &field,
@@ -53633,7 +54490,11 @@ impl Shell {
 
         // ---- -W wordlist, split on IFS ----
         if let Some(wl) = &wordlist {
-            let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| b" \t\n".to_vec());
+            let ifs = self
+                .vars
+                .get("IFS")
+                .cloned()
+                .unwrap_or_else(|| b" \t\n".to_vec());
             // Splitting is per *byte*, as it is everywhere else IFS is used:
             // IFS names delimiter bytes, not characters.
             list.extend(
@@ -53748,7 +54609,12 @@ impl Shell {
                 Some(JobState::Running) => j.status.is_none(),
                 Some(JobState::Stopped) => false,
             })
-            .map(|j| j.cmd.split(|b| *b == b' ').next().map_or_else(Vec::new, <[u8]>::to_vec))
+            .map(|j| {
+                j.cmd
+                    .split(|b| *b == b' ')
+                    .next()
+                    .map_or_else(Vec::new, <[u8]>::to_vec)
+            })
             .collect()
     }
 
@@ -53800,7 +54666,10 @@ impl Shell {
     ///
     /// Not a method that needs `&mut self`, but kept alongside the other action
     /// helpers as one — the whole generation loop reads as `self.compgen_*`.
-    #[allow(clippy::unused_self, reason = "sits with the other compgen_* action helpers")]
+    #[allow(
+        clippy::unused_self,
+        reason = "sits with the other compgen_* action helpers"
+    )]
     fn compgen_service_names(&self) -> Vec<Str> {
         read_service_names(SERVICES_FILE)
     }
@@ -53811,7 +54680,10 @@ impl Shell {
     /// Read fresh every time, for the same reason as
     /// [`Shell::compgen_service_names`]: bash walks `getpwent` from the top on
     /// each completion.
-    #[allow(clippy::unused_self, reason = "sits with the other compgen_* action helpers")]
+    #[allow(
+        clippy::unused_self,
+        reason = "sits with the other compgen_* action helpers"
+    )]
     fn compgen_user_names(&self) -> Vec<Str> {
         read_colon_table_names(PASSWD_FILE)
     }
@@ -53819,7 +54691,10 @@ impl Shell {
     /// The group names the `group` (`-g`) action offers — the first field of
     /// each `/etc/group` record. bash's `getgrent`; see
     /// [`Shell::compgen_user_names`].
-    #[allow(clippy::unused_self, reason = "sits with the other compgen_* action helpers")]
+    #[allow(
+        clippy::unused_self,
+        reason = "sits with the other compgen_* action helpers"
+    )]
     fn compgen_group_names(&self) -> Vec<Str> {
         read_colon_table_names(GROUP_FILE)
     }
@@ -53883,7 +54758,8 @@ impl Shell {
         for (var, val) in COMP_ENV {
             self.put_var(var.to_string(), val.as_bytes().to_vec());
         }
-        self.arrays.insert("COMP_WORDS".to_string(), BTreeMap::new());
+        self.arrays
+            .insert("COMP_WORDS".to_string(), BTreeMap::new());
 
         let args = vec![b"compgen".to_vec(), word.to_vec(), Str::new()];
         // An `exit` inside the function unwinds the whole shell; a builtin can
@@ -54048,8 +54924,11 @@ impl Shell {
                         if lower.ends_with(ext) {
                             // The extension is stripped so the bare command
                             // name is offered, with the base name's own case.
-                            base =
-                                Some(raw.get(..raw.len().saturating_sub(ext.len())).unwrap_or_default().to_vec());
+                            base = Some(
+                                raw.get(..raw.len().saturating_sub(ext.len()))
+                                    .unwrap_or_default()
+                                    .to_vec(),
+                            );
                             break;
                         }
                     }
@@ -54080,12 +54959,18 @@ impl Shell {
 
     /// Look up a stored completion spec by target.
     fn comp_get(&self, key: &CompKey) -> Option<&CompSpec> {
-        self.comp_specs.iter().find(|(k, _)| k == key).map(|(_, s)| s)
+        self.comp_specs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, s)| s)
     }
 
     /// Mutable lookup of a stored completion spec by target.
     fn comp_get_mut(&mut self, key: &CompKey) -> Option<&mut CompSpec> {
-        self.comp_specs.iter_mut().find(|(k, _)| k == key).map(|(_, s)| s)
+        self.comp_specs
+            .iter_mut()
+            .find(|(k, _)| k == key)
+            .map(|(_, s)| s)
     }
 
     /// Insert `spec` for `key`, replacing any existing spec in place (so the
@@ -54192,7 +55077,9 @@ impl Shell {
                             match args.get(i) {
                                 Some(v) => v.clone(),
                                 None => {
-                                    self.perrln(&format!("complete: -{c}: option requires an argument"));
+                                    self.perrln(&format!(
+                                        "complete: -{c}: option requires an argument"
+                                    ));
                                     self.emit_stderr(USAGE);
                                     return 2;
                                 }
@@ -54462,7 +55349,11 @@ impl Shell {
                                 ]);
                                 return 2;
                             }
-                            if plus { del.push(val) } else { add.push(val) }
+                            if plus {
+                                del.push(val)
+                            } else {
+                                add.push(val)
+                            }
                             ci = cluster.len();
                         }
                         'D' => {
@@ -54528,8 +55419,10 @@ impl Shell {
             }
             if query {
                 let mut s = Str::from(b"compopt".as_slice());
-                let on: Vec<Str> =
-                    self.comp_get(&k).map(|sp| sp.o_opts.clone()).unwrap_or_default();
+                let on: Vec<Str> = self
+                    .comp_get(&k)
+                    .map(|sp| sp.o_opts.clone())
+                    .unwrap_or_default();
                 for o in COMP_O_ORDER {
                     let set = on.iter().any(|v| v.as_slice() == o.as_bytes());
                     s.extend_from_slice(if set { b" -o " } else { b" +o " });
@@ -54746,12 +55639,18 @@ impl Shell {
                 }
                 if is_bi {
                     let kind = self.builtin_kind_word(name);
-                    let _ = self
-                        .bwrite_line(out, redir, &bfmt![name, b" is a", kind, b" shell builtin"]);
+                    let _ = self.bwrite_line(
+                        out,
+                        redir,
+                        &bfmt![name, b" is a", kind, b" shell builtin"],
+                    );
                 }
                 for f in &files {
-                    let _ =
-                        self.bwrite_line(out, redir, &bfmt![name, b" is ", bytes::path_to_bytes(f)]);
+                    let _ = self.bwrite_line(
+                        out,
+                        redir,
+                        &bfmt![name, b" is ", bytes::path_to_bytes(f)],
+                    );
                 }
             } else {
                 if let Some(val) = &alias {
@@ -54762,8 +55661,11 @@ impl Shell {
                     self.write_function_description(name, out, redir);
                 } else if is_bi {
                     let kind = self.builtin_kind_word(name);
-                    let _ = self
-                        .bwrite_line(out, redir, &bfmt![name, b" is a", kind, b" shell builtin"]);
+                    let _ = self.bwrite_line(
+                        out,
+                        redir,
+                        &bfmt![name, b" is a", kind, b" shell builtin"],
+                    );
                 } else if let Some(p) = &hashed {
                     // A previously-run command is remembered in the hash table,
                     // and the table is asked before `$PATH` is walked again.
@@ -54893,9 +55795,7 @@ impl Shell {
         let v = p.or_expr(self)?;
         match a.get(p.pos) {
             None => Ok(v),
-            Some(t) if t.starts_with(b"-") => {
-                Err(bfmt![b"syntax error: `", t, b"' unexpected"])
-            }
+            Some(t) if t.starts_with(b"-") => Err(bfmt![b"syntax error: `", t, b"' unexpected"]),
             Some(_) => Err(b"too many arguments".to_vec()),
         }
     }
@@ -54939,8 +55839,7 @@ impl Shell {
                         Ok(f) => h.file = Some(f),
                         Err(e) => {
                             self.builtin_stdout = held;
-                            let msg =
-                                bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                            let msg = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
                             self.berrln(&msg);
                             return 1;
                         }
@@ -55141,9 +56040,11 @@ impl Shell {
             (1, Out::Pipe(w)) => {
                 pipe_writer_to_file(w).map(|f| WriteFd::File(std::sync::Arc::new(f)))
             }
-            _ if n >= 3 => self.open_write_fds.get(&n).cloned().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "Bad file descriptor")
-            }),
+            _ if n >= 3 => self
+                .open_write_fds
+                .get(&n)
+                .cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Bad file descriptor")),
             _ => self.snapshot_std_fd(n),
         }
     }
@@ -55669,11 +56570,13 @@ impl Shell {
         // reports `line 3: \`'`. `print_offending_line` is called unconditionally
         // on this branch (parse.y:6263) and simply copies an empty
         // `shell_input_line`.
-        if e.msgs.iter().any(|m| bytes::contains(m, b"syntax error near "))
-            && let Some(text) = e
-                .echo
-                .as_deref()
-                .or_else(|| map.unmap(line).map(|n| nth_source_line(src, n).unwrap_or(b"")))
+        if e.msgs
+            .iter()
+            .any(|m| bytes::contains(m, b"syntax error near "))
+            && let Some(text) = e.echo.as_deref().or_else(|| {
+                map.unmap(line)
+                    .map(|n| nth_source_line(src, n).unwrap_or(b""))
+            })
         {
             out.push_str(&bfmt![b"\n", &prefix, b"`", text, b"'"]);
         }
@@ -55710,7 +56613,9 @@ impl Shell {
     /// [`Shell::comsub_reparse_error`] / [`Shell::array_assign_reparse_error`]
     /// rather than by [`Shell::format_parse_error`], so they call this too.
     fn errexit_first_line(&self, mut out: Str) -> Str {
-        if self.errexit && let Some(nl) = bytes::find(&out, b"\n") {
+        if self.errexit
+            && let Some(nl) = bytes::find(&out, b"\n")
+        {
             out.truncate(nl);
         }
         out
@@ -55760,7 +56665,10 @@ impl Shell {
         // echoes `⏎ 3 x`, the tab gone and the newline kept.
         let mut expr = {
             let s = e.expr_override.as_deref().unwrap_or(expr);
-            let i = s.iter().position(|b| !matches!(b, b' ' | b'\t')).unwrap_or(s.len());
+            let i = s
+                .iter()
+                .position(|b| !matches!(b, b' ' | b'\t'))
+                .unwrap_or(s.len());
             s.get(i..).unwrap_or_default()
         };
         // A rejected number literal (`2#12`, `099`) truncates the echoed source
@@ -55955,9 +56863,7 @@ impl Shell {
                 // writes fail — rather than refusing the redirect, which is
                 // what the generic helper would do (bash's dup succeeds and it
                 // is the child's own write that fails).
-                Some(WriteFd::ReadOnly(src)) => {
-                    Ok(ChildOut::from(child_read_only_out(src)))
-                }
+                Some(WriteFd::ReadOnly(src)) => Ok(ChildOut::from(child_read_only_out(src))),
                 Some(w) => child_out_from_write_fd(w, "exec stderr"),
                 None => dup_std_handle(false)
                     .map(|f| ChildOut::Handle(Stdio::from(f)))
@@ -56147,7 +57053,11 @@ impl Shell {
 
 /// Let the arithmetic evaluator read shell variables.
 impl VarLookup for Shell {
-    fn note_arith_unbound(&mut self, name: &str, subscripted: bool) -> Result<(), arith::ArithError> {
+    fn note_arith_unbound(
+        &mut self,
+        name: &str,
+        subscripted: bool,
+    ) -> Result<(), arith::ArithError> {
         // An error already raised is an expression already abandoned; nothing
         // here is reached in bash either.
         if self.expansion_failed() {
@@ -56339,7 +57249,13 @@ impl VarLookup for Shell {
             // text, verbatim — bash never rewrote it to its value, because a
             // store it refuses is one the read never cached an index for. See
             // [`arith::Ix`].
-            let line = bfmt![self.err_prefix(), name, b"[", sub, b"]: bad array subscript"];
+            let line = bfmt![
+                self.err_prefix(),
+                name,
+                b"[",
+                sub,
+                b"]: bad array subscript"
+            ];
             self.berrln(&line);
             // The store is dropped, but the expression keeps its value and the
             // command its status; only `set -e` makes anything of it.
@@ -56372,7 +57288,12 @@ impl VarLookup for Shell {
         })
     }
 
-    fn set_assoc(&mut self, name: &str, key: BStr<'_>, value: i64) -> Result<(), arith::ArithError> {
+    fn set_assoc(
+        &mut self,
+        name: &str,
+        key: BStr<'_>,
+        value: i64,
+    ) -> Result<(), arith::ArithError> {
         let Some((base, scope)) = self.arith_elem_write_base(name, Self::ARITH_ASSOC_WRITE_WALKS)
         else {
             return Ok(());
@@ -56699,7 +57620,11 @@ impl RefWriteDebt {
     /// The debt of a chain that resolved — nothing owed. Also what a write with
     /// no reference in front of it carries.
     fn none() -> Self {
-        Self { name: String::new(), walks: 0, unmade: false }
+        Self {
+            name: String::new(),
+            walks: 0,
+            unmade: false,
+        }
     }
 }
 
@@ -56842,19 +57767,28 @@ struct RefWalk {
 impl RefWalk {
     /// A walk that ended on a name — the ordinary case, cycle or not.
     fn reached(target: RefTarget) -> Self {
-        Self { target: Some(target), circular: false }
+        Self {
+            target: Some(target),
+            circular: false,
+        }
     }
 
     /// A walk abandoned for depth: nothing reached, nothing said.
     fn gave_up() -> Self {
-        Self { target: None, circular: false }
+        Self {
+            target: None,
+            circular: false,
+        }
     }
 
     /// A walk that closed on itself. `Some` target where the cycle shut on a
     /// function-local variable and so escaped to global scope, `None` where it
     /// reached nothing at all.
     fn closed(target: Option<RefTarget>) -> Self {
-        Self { target, circular: true }
+        Self {
+            target,
+            circular: true,
+        }
     }
 
     /// Whether the walk ended on a name the chain really designates — bash's
@@ -57597,7 +58531,11 @@ enum ExtraFdOp {
     /// in the same list left. It is [`InputSrc::WriteOnly`] when the source has
     /// no read half to share. `sink` says which fd 1 / fd 2 the write half is a
     /// copy of — see [`AliasSink`].
-    AliasFd { src: i32, read: InputFd, sink: AliasSink },
+    AliasFd {
+        src: i32,
+        read: InputFd,
+        sink: AliasSink,
+    },
     /// Bind fd N for both reading and writing (`exec {fd}<> file`): the two
     /// halves of one `O_RDWR | O_CREAT` open (created if absent, never
     /// truncated), made by [`open_rw_pair`] at resolution time. They are
@@ -58202,8 +59140,12 @@ fn build_globignore(value: BStr<'_>, extglob: bool) -> Vec<GlobIgnorePat> {
             let comps = pat
                 .split(|&b| b == b'/')
                 .map(|comp| {
-                    let echars: Vec<EChar> =
-                        bytes::chars(comp).map(|c| EChar { c: Some(c), quoted: false }).collect();
+                    let echars: Vec<EChar> = bytes::chars(comp)
+                        .map(|c| EChar {
+                            c: Some(c),
+                            quoted: false,
+                        })
+                        .collect();
                     compile_glob(&echars, extglob)
                 })
                 .collect();
@@ -58224,7 +59166,10 @@ enum PatTok {
     Class { negate: bool, items: Vec<ClassItem> },
     /// An `extglob` group: `?(list)`, `*(list)`, `+(list)`, `@(list)`, or
     /// `!(list)`, where each alternative is itself a compiled sub-pattern.
-    Group { kind: ExtKind, alts: Vec<Vec<PatTok>> },
+    Group {
+        kind: ExtKind,
+        alts: Vec<Vec<PatTok>>,
+    },
 }
 
 /// The five `extglob` operators (bash / ksh extended pattern matching).
@@ -58340,7 +59285,13 @@ fn compile_ext_group(comp: &[EChar], start: usize, extglob: bool) -> Option<(Pat
                     if depth == 0 {
                         alts.push(cur);
                         let compiled = alts.iter().map(|a| compile_glob(a, extglob)).collect();
-                        return Some((PatTok::Group { kind, alts: compiled }, i + 1));
+                        return Some((
+                            PatTok::Group {
+                                kind,
+                                alts: compiled,
+                            },
+                            i + 1,
+                        ));
                     }
                     cur.push(e);
                 }
@@ -58389,7 +59340,10 @@ fn compile_class(comp: &[EChar], start: usize) -> Option<(PatTok, usize)> {
         {
             // A POSIX class name is ASCII; anything else names no class, and
             // `posix_class_matches` then matches nothing — as bash does.
-            let name: String = comp[i + 2..end].iter().filter_map(|e| e.as_ascii()).collect();
+            let name: String = comp[i + 2..end]
+                .iter()
+                .filter_map(|e| e.as_ascii())
+                .collect();
             items.push(ClassItem::Posix(name));
             first = false;
             i = end + 2; // past `:]`
@@ -58593,7 +59547,11 @@ fn glob_expand_field(
         // in `d*//d2` survives only as one. A prefix that was never expanded is
         // used verbatim instead, which is why `d1//*` keeps its two.
         let still_literal = literal_prefix && !has_meta;
-        let sep: BStr<'_> = if sep.is_empty() || still_literal { sep.as_slice() } else { b"/" };
+        let sep: BStr<'_> = if sep.is_empty() || still_literal {
+            sep.as_slice()
+        } else {
+            b"/"
+        };
         if globstar && is_globstar_comp(comp) {
             let mut next: Vec<Str> = Vec::new();
             for base in &cands {
@@ -58629,7 +59587,11 @@ fn glob_expand_field(
         let mut next: Vec<Str> = Vec::new();
         for base in &cands {
             if has_meta {
-                let dir: BStr<'_> = if base.is_empty() { b"." } else { base.as_slice() };
+                let dir: BStr<'_> = if base.is_empty() {
+                    b"."
+                } else {
+                    base.as_slice()
+                };
                 let toks = compile_glob(comp, extglob);
                 // With `nocaseglob`, match against an ASCII-lowercased copy of
                 // both the pattern and each filename (token structure is kept
@@ -58664,16 +59626,12 @@ fn glob_expand_field(
                     if nch.first() == Some(&Ch::U('.')) && !allow_dot {
                         continue;
                     }
-                    if dotglob
-                        && !glob_starts_with_dot(&toks)
-                        && (name == b"." || name == b"..")
-                    {
+                    if dotglob && !glob_starts_with_dot(&toks) && (name == b"." || name == b"..") {
                         continue;
                     }
                     let matched = match &toks_ci {
                         Some(tci) => {
-                            let low: Vec<Ch> =
-                                nch.iter().map(|c| c.to_ascii_lowercase()).collect();
+                            let low: Vec<Ch> = nch.iter().map(|c| c.to_ascii_lowercase()).collect();
                             match_glob_toks(tci, &low)
                         }
                         None => match_glob_toks(&toks, &nch),
@@ -58728,7 +59686,6 @@ fn is_globstar_comp(comp: &[EChar]) -> bool {
     comp.len() == 2 && comp.iter().all(|e| e.is('*') && !e.quoted)
 }
 
-
 /// Descend `base` — a glob base, so empty or ending in `/` — pushing every
 /// descendant a `**` component stands for. In terminal mode every entry is
 /// pushed; otherwise only directories, which are also the only ones recursed
@@ -58775,9 +59732,12 @@ fn globstar_descend(
 /// (fully quoted) or a glob pattern (any unquoted part).
 fn word_is_all_quoted(w: &Word) -> bool {
     !w.parts.is_empty()
-        && w.parts
-            .iter()
-            .all(|p| matches!(p, WordPart::SingleQuoted { .. } | WordPart::DoubleQuoted { .. }))
+        && w.parts.iter().all(|p| {
+            matches!(
+                p,
+                WordPart::SingleQuoted { .. } | WordPart::DoubleQuoted { .. }
+            )
+        })
 }
 
 /// Case-aware glob match whose pattern carries per-character quoting
@@ -58798,7 +59758,10 @@ fn glob_match_echars_ci(pattern: &[EChar], text: &[Ch], ci: bool, extglob: bool)
                 Some(c) => c
                     .to_lowercase()
                     .into_iter()
-                    .map(|c| EChar { c: Some(c), quoted: e.quoted })
+                    .map(|c| EChar {
+                        c: Some(c),
+                        quoted: e.quoted,
+                    })
                     .collect(),
             })
             .collect();
@@ -58817,7 +59780,10 @@ fn glob_match_echars_ci(pattern: &[EChar], text: &[Ch], ci: bool, extglob: bool)
 fn glob_match(pattern: &[Ch], text: &[Ch], extglob: bool) -> bool {
     let comp: Vec<EChar> = pattern
         .iter()
-        .map(|&c| EChar { c: Some(c), quoted: false })
+        .map(|&c| EChar {
+            c: Some(c),
+            quoted: false,
+        })
         .collect();
     let toks = compile_glob(&comp, extglob);
     match_glob_toks(&toks, text)
@@ -58949,12 +59915,18 @@ fn array_literal_word(items: &[ArrayElem]) -> Word {
         }
         match e {
             ArrayElem::Positional(w) => parts.extend(w.parts.iter().cloned()),
-            ArrayElem::Keyed { index, value, append } => {
+            ArrayElem::Keyed {
+                index,
+                value,
+                append,
+            } => {
                 parts.push(WordPart::Literal(b"[".to_vec()));
                 parts.extend(index.parts.iter().cloned());
-                parts.push(WordPart::Literal(
-                    if *append { b"]+=".to_vec() } else { b"]=".to_vec() },
-                ));
+                parts.push(WordPart::Literal(if *append {
+                    b"]+=".to_vec()
+                } else {
+                    b"]=".to_vec()
+                }));
                 parts.extend(value.parts.iter().cloned());
             }
         }
@@ -59116,7 +60088,10 @@ const SIGNALS: &[(u8, &str)] = &[
 /// The canonical name (`INT`, `USR1`, …) for a signal number, or `None` for an
 /// unknown number. Used to key self-delivered signals into the trap table.
 fn signal_name(signum: u8) -> Option<&'static str> {
-    SIGNALS.iter().find(|(num, _)| *num == signum).map(|(_, name)| *name)
+    SIGNALS
+        .iter()
+        .find(|(num, _)| *num == signum)
+        .map(|(_, name)| *name)
 }
 
 /// How `jobs` words the death of a job killed by `signum` — `Terminated`,
@@ -59340,7 +60315,11 @@ fn select_menu(items: &[Str], cols_avail: usize) -> Str {
         let mut ind = row;
         let mut pos = 0usize;
         loop {
-            let width = if pos == 0 { first_indices_len } else { indices_len };
+            let width = if pos == 0 {
+                first_indices_len
+            } else {
+                indices_len
+            };
             let Some(item) = items.get(ind) else { break };
             let label = (ind + 1).to_string();
             buf.resize(buf.len() + width.saturating_sub(label.len()), b' ');
@@ -59372,8 +60351,7 @@ const NSIG: u16 = 32;
 
 /// The pseudo signals that are not `EXIT`, in the slots bash gives them above
 /// [`NSIG`]. `EXIT` needs no entry: it is signal number zero.
-const PSEUDO_SIGNALS: &[(u16, &str)] =
-    &[(NSIG, "DEBUG"), (NSIG + 1, "ERR"), (NSIG + 2, "RETURN")];
+const PSEUDO_SIGNALS: &[(u16, &str)] = &[(NSIG, "DEBUG"), (NSIG + 1, "ERR"), (NSIG + 2, "RETURN")];
 
 /// bash's `legal_number`: the integer a word denotes, or `None` when the word
 /// is not wholly a number.
@@ -59497,7 +60475,10 @@ fn decode_signal_flags(spec: BStr<'_>, sig_prefix: bool) -> Option<u16> {
     if upper == b"EXIT" {
         return Some(0);
     }
-    if let Some((num, _)) = PSEUDO_SIGNALS.iter().find(|(_, name)| name.as_bytes() == upper) {
+    if let Some((num, _)) = PSEUDO_SIGNALS
+        .iter()
+        .find(|(_, name)| name.as_bytes() == upper)
+    {
         return Some(*num);
     }
     let bare = match upper.strip_prefix(b"SIG".as_slice()) {
@@ -59507,7 +60488,10 @@ fn decode_signal_flags(spec: BStr<'_>, sig_prefix: bool) -> Option<u16> {
         Some(_) => return None,
         None => &upper,
     };
-    SIGNALS.iter().find(|(_, name)| name.as_bytes() == bare).map(|(num, _)| u16::from(*num))
+    SIGNALS
+        .iter()
+        .find(|(_, name)| name.as_bytes() == bare)
+        .map(|(num, _)| u16::from(*num))
 }
 
 /// The canonical spec name for a number [`decode_signal`] returned: `EXIT` for
@@ -59520,7 +60504,10 @@ fn signal_spec_name(num: u16) -> Option<String> {
     if let Some((_, name)) = PSEUDO_SIGNALS.iter().find(|(n, _)| *n == num) {
         return Some((*name).to_string());
     }
-    u8::try_from(num).ok().and_then(signal_name).map(str::to_string)
+    u8::try_from(num)
+        .ok()
+        .and_then(signal_name)
+        .map(str::to_string)
 }
 
 /// Normalize a `trap` signal spec to a canonical name (`EXIT`, `ERR`, `INT`, …),
@@ -59601,8 +60588,21 @@ fn legal_alias_name(name: BStr<'_>) -> bool {
         && !name.iter().any(|b| {
             matches!(
                 b,
-                b'`' | b'\'' | b'"' | b'\\' | b'$' | b'(' | b')' | b'<' | b'>' | b';' | b'&'
-                    | b'|' | b' ' | b'\t' | b'\n' | b'/'
+                b'`' | b'\''
+                    | b'"'
+                    | b'\\'
+                    | b'$'
+                    | b'('
+                    | b')'
+                    | b'<'
+                    | b'>'
+                    | b';'
+                    | b'&'
+                    | b'|'
+                    | b' '
+                    | b'\t'
+                    | b'\n'
+                    | b'/'
             )
         })
 }
@@ -59655,7 +60655,11 @@ fn alias_line(name: BStr<'_>, val: BStr<'_>, reusable: bool) -> Str {
     if !reusable {
         return bfmt![name, b"=", &sh_single_quote(val), b"\n"];
     }
-    let dashes: &[u8] = if name.first() == Some(&b'-') { b"-- " } else { b"" };
+    let dashes: &[u8] = if name.first() == Some(&b'-') {
+        b"-- "
+    } else {
+        b""
+    };
     bfmt![b"alias ", dashes, name, b"=", &sh_single_quote(val), b"\n"]
 }
 
@@ -59663,7 +60667,10 @@ fn alias_line(name: BStr<'_>, val: BStr<'_>, reusable: bool) -> Str {
 /// (`-a` → `alias`, `-v` → `variable`, …), or `None` if the letter is not an
 /// action shortcut.
 fn comp_short_action(c: char) -> Option<&'static str> {
-    COMP_ACTIONS.iter().find(|(_, flag)| *flag == c).map(|(name, _)| *name)
+    COMP_ACTIONS
+        .iter()
+        .find(|(_, flag)| *flag == c)
+        .map(|(name, _)| *name)
 }
 
 /// Where [`Shell::compgen_hostnames`] looks when `$HOSTFILE` is unset — bash's
@@ -59696,7 +60703,9 @@ fn read_hostnames(path: BStr<'_>) -> Vec<Str> {
         // `\r` counts as whitespace here (as it does to bash's own reader), so
         // a CRLF hosts file does not leave a carriage return glued to the last
         // name on every line.
-        let mut fields = line.split(|b: &u8| b.is_ascii_whitespace()).filter(|f| !f.is_empty());
+        let mut fields = line
+            .split(|b: &u8| b.is_ascii_whitespace())
+            .filter(|f| !f.is_empty());
         // The address; a line with nothing else on it contributes no names.
         if fields.next().is_none() {
             continue;
@@ -59742,7 +60751,9 @@ fn read_service_names(path: BStr<'_>) -> Vec<Str> {
         };
         // `\r` counts as whitespace, so a CRLF file does not leave a carriage
         // return glued to a name that is alone on its line.
-        let mut fields = line.split(|b: &u8| b.is_ascii_whitespace()).filter(|f| !f.is_empty());
+        let mut fields = line
+            .split(|b: &u8| b.is_ascii_whitespace())
+            .filter(|f| !f.is_empty());
         names.extend(fields.next().map(<[u8]>::to_vec));
     }
     names
@@ -60004,7 +61015,11 @@ fn comp_quote_name(name: BStr<'_>) -> Str {
         prev = Some(c);
         meta
     });
-    if quote { sh_single_quote(name) } else { name.to_vec() }
+    if quote {
+        sh_single_quote(name)
+    } else {
+        name.to_vec()
+    }
 }
 
 /// Render a completion spec as a re-executable `complete …` line (matching
@@ -60144,8 +61159,8 @@ fn printf_quote(s: BStr<'_>) -> Str {
             // metacharacters and reserved-word punctuation, the globbing
             // characters, the expansion characters — and `,`, for braces.
             b' ' | b'\t' | b'\n' | b'\'' | b'"' | b'\\' | b'|' | b'&' | b';' | b'(' | b')'
-            | b'<' | b'>' | b'!' | b'{' | b'}' | b'*' | b'[' | b'?' | b']' | b'^' | b'$'
-            | b'`' | b',' => true,
+            | b'<' | b'>' | b'!' | b'{' | b'}' | b'*' | b'[' | b'?' | b']' | b'^' | b'$' | b'`'
+            | b',' => true,
             // A tilde only expands at the front of a word or just after the
             // `=` or `:` of an assignment-looking one, so `a~` needs nothing.
             b'~' => match i.checked_sub(1).and_then(|p| s.get(p)) {
@@ -60256,7 +61271,11 @@ fn xtrace_meta(c: char, prev: Option<Ch>) -> bool {
 /// (which always quotes) and from `%q` (which backslash-escapes).
 fn xtrace_quote_with(s: BStr<'_>, empty_bare: bool) -> Str {
     if s.is_empty() {
-        return if empty_bare { Str::new() } else { b"''".to_vec() };
+        return if empty_bare {
+            Str::new()
+        } else {
+            b"''".to_vec()
+        };
     }
     let mut prev: Option<Ch> = None;
     // A byte that decodes to no character is no metacharacter either — every
@@ -60529,9 +61548,7 @@ fn param_replace(
             let mut done = false;
             while i < v.len() {
                 let can_replace = !done || all;
-                if can_replace
-                    && let Some(end) = glob_match_at(pattern, m, i, extglob)
-                {
+                if can_replace && let Some(end) = glob_match_at(pattern, m, i, extglob) {
                     if end > i {
                         // Non-empty match: consume the matched span.
                         result.extend_from_slice(&build_repl(replacement, &v[i..end]));
@@ -60570,35 +61587,135 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
     (":", ":", "Null command."),
     ("true", "true", "Return a successful result."),
     ("false", "false", "Return an unsuccessful result."),
-    ("cd", "cd [-L|[-P [-e]] [-@]] [dir]", "Change the shell working directory."),
-    ("pwd", "pwd [-LPW]", "Print the name of the current working directory."),
-    ("pushd", "pushd [-n] [+N | -N | dir]", "Add directories to stack."),
-    ("popd", "popd [-n] [+N | -N]", "Remove directories from stack."),
+    (
+        "cd",
+        "cd [-L|[-P [-e]] [-@]] [dir]",
+        "Change the shell working directory.",
+    ),
+    (
+        "pwd",
+        "pwd [-LPW]",
+        "Print the name of the current working directory.",
+    ),
+    (
+        "pushd",
+        "pushd [-n] [+N | -N | dir]",
+        "Add directories to stack.",
+    ),
+    (
+        "popd",
+        "popd [-n] [+N | -N]",
+        "Remove directories from stack.",
+    ),
     ("dirs", "dirs [-clpv] [+N] [-N]", "Display directory stack."),
-    ("echo", "echo [-neE] [arg ...]", "Write arguments to the standard output."),
-    ("printf", "printf [-v var] format [arguments]", "Formats and prints ARGUMENTS under control of the FORMAT."),
-    ("export", "export [-fn] [name[=value] ...] or export -p", "Set export attribute for shell variables."),
-    ("declare", "declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]", "Set variable values and attributes."),
-    ("typeset", "typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]", "Set variable values and attributes."),
-    ("local", "local [option] name[=value] ...", "Define local variables."),
-    ("readonly", "readonly [-aAf] [name[=value] ...] or readonly -p", "Mark shell variables as unchangeable."),
-    ("shopt", "shopt [-pqsu] [-o] [optname ...]", "Set and unset shell options."),
-    ("unset", "unset [-f] [-v] [-n] [name ...]", "Unset values and attributes of shell variables and functions."),
-    ("set", "set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]", "Set or unset values of shell options and positional parameters."),
+    (
+        "echo",
+        "echo [-neE] [arg ...]",
+        "Write arguments to the standard output.",
+    ),
+    (
+        "printf",
+        "printf [-v var] format [arguments]",
+        "Formats and prints ARGUMENTS under control of the FORMAT.",
+    ),
+    (
+        "export",
+        "export [-fn] [name[=value] ...] or export -p",
+        "Set export attribute for shell variables.",
+    ),
+    (
+        "declare",
+        "declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]",
+        "Set variable values and attributes.",
+    ),
+    (
+        "typeset",
+        "typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]",
+        "Set variable values and attributes.",
+    ),
+    (
+        "local",
+        "local [option] name[=value] ...",
+        "Define local variables.",
+    ),
+    (
+        "readonly",
+        "readonly [-aAf] [name[=value] ...] or readonly -p",
+        "Mark shell variables as unchangeable.",
+    ),
+    (
+        "shopt",
+        "shopt [-pqsu] [-o] [optname ...]",
+        "Set and unset shell options.",
+    ),
+    (
+        "unset",
+        "unset [-f] [-v] [-n] [name ...]",
+        "Unset values and attributes of shell variables and functions.",
+    ),
+    (
+        "set",
+        "set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]",
+        "Set or unset values of shell options and positional parameters.",
+    ),
     ("shift", "shift [n]", "Shift positional parameters."),
-    ("getopts", "getopts optstring name [arg ...]", "Parse option arguments."),
-    ("mapfile", "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]", "Read lines from the standard input into an indexed array variable."),
-    ("readarray", "readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]", "Read lines from a file into an array variable."),
-    ("command", "command [-pVv] command [arg ...]", "Execute a simple command or display information about commands."),
-    ("builtin", "builtin [shell-builtin [arg ...]]", "Execute shell builtins."),
-    ("read", "read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]", "Read a line from the standard input and split it into fields."),
+    (
+        "getopts",
+        "getopts optstring name [arg ...]",
+        "Parse option arguments.",
+    ),
+    (
+        "mapfile",
+        "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]",
+        "Read lines from the standard input into an indexed array variable.",
+    ),
+    (
+        "readarray",
+        "readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]",
+        "Read lines from a file into an array variable.",
+    ),
+    (
+        "command",
+        "command [-pVv] command [arg ...]",
+        "Execute a simple command or display information about commands.",
+    ),
+    (
+        "builtin",
+        "builtin [shell-builtin [arg ...]]",
+        "Execute shell builtins.",
+    ),
+    (
+        "read",
+        "read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]",
+        "Read a line from the standard input and split it into fields.",
+    ),
     ("test", "test [expr]", "Evaluate conditional expression."),
     ("[", "[ arg... ]", "Evaluate conditional expression."),
-    ("let", "let arg [arg ...]", "Evaluate arithmetic expressions."),
-    ("eval", "eval [arg ...]", "Execute arguments as a shell command."),
-    ("source", "source filename [arguments]", "Execute commands from a file in the current shell."),
-    (".", ". filename [arguments]", "Execute commands from a file in the current shell."),
-    ("type", "type [-afptP] name [name ...]", "Display information about command type."),
+    (
+        "let",
+        "let arg [arg ...]",
+        "Evaluate arithmetic expressions.",
+    ),
+    (
+        "eval",
+        "eval [arg ...]",
+        "Execute arguments as a shell command.",
+    ),
+    (
+        "source",
+        "source filename [arguments]",
+        "Execute commands from a file in the current shell.",
+    ),
+    (
+        ".",
+        ". filename [arguments]",
+        "Execute commands from a file in the current shell.",
+    ),
+    (
+        "type",
+        "type [-afptP] name [name ...]",
+        "Display information about command type.",
+    ),
     (
         "compgen",
         "compgen [-abcdefgjksuv] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [word]",
@@ -60614,14 +61731,38 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
         "compopt [-o|+o option] [-DEI] [name ...]",
         "Modify or display completion options.",
     ),
-    ("trap", "trap [-lp] [[arg] signal_spec ...]", "Trap signals and other events."),
-    ("jobs", "jobs [-lnprs] [jobspec ...] or jobs -x command [args]", "Display status of jobs."),
-    ("kill", "kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]", "Send a signal to a job."),
-    ("wait", "wait [-fn] [-p var] [id ...]", "Wait for job completion and return exit status."),
-    ("disown", "disown [-h] [-ar] [jobspec ... | pid ...]", "Remove jobs from current shell."),
+    (
+        "trap",
+        "trap [-lp] [[arg] signal_spec ...]",
+        "Trap signals and other events.",
+    ),
+    (
+        "jobs",
+        "jobs [-lnprs] [jobspec ...] or jobs -x command [args]",
+        "Display status of jobs.",
+    ),
+    (
+        "kill",
+        "kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]",
+        "Send a signal to a job.",
+    ),
+    (
+        "wait",
+        "wait [-fn] [-p var] [id ...]",
+        "Wait for job completion and return exit status.",
+    ),
+    (
+        "disown",
+        "disown [-h] [-ar] [jobspec ... | pid ...]",
+        "Remove jobs from current shell.",
+    ),
     ("fg", "fg [job_spec]", "Move job to the foreground."),
     ("bg", "bg [job_spec ...]", "Move jobs to the background."),
-    ("caller", "caller [expr]", "Return the context of the current subroutine call."),
+    (
+        "caller",
+        "caller [expr]",
+        "Return the context of the current subroutine call.",
+    ),
     ("times", "times", "Display process times."),
     ("suspend", "suspend [-f]", "Suspend shell execution."),
     (
@@ -60629,38 +61770,134 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
         "bind [-lpsvPSVX] [-m keymap] [-f filename] [-q name] [-u name] [-r keyseq] [-x keyseq:shell-command] [keyseq:readline-function or readline-command]",
         "Set Readline key bindings and variables.",
     ),
-    ("hash", "hash [-lr] [-p pathname] [-dt] [name ...]", "Remember or display program locations."),
-    ("history", "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]", "Display or manipulate the history list."),
-    ("fc", "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]", "Display or execute commands from the history list."),
-    ("umask", "umask [-p] [-S] [mode]", "Display or set file mode mask."),
-    ("ulimit", "ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]", "Modify shell resource limits."),
-    ("exec", "exec [-cl] [-a name] [command [argument ...]] [redirection ...]", "Replace the shell with the given command."),
+    (
+        "hash",
+        "hash [-lr] [-p pathname] [-dt] [name ...]",
+        "Remember or display program locations.",
+    ),
+    (
+        "history",
+        "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]",
+        "Display or manipulate the history list.",
+    ),
+    (
+        "fc",
+        "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]",
+        "Display or execute commands from the history list.",
+    ),
+    (
+        "umask",
+        "umask [-p] [-S] [mode]",
+        "Display or set file mode mask.",
+    ),
+    (
+        "ulimit",
+        "ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]",
+        "Modify shell resource limits.",
+    ),
+    (
+        "exec",
+        "exec [-cl] [-a name] [command [argument ...]] [redirection ...]",
+        "Replace the shell with the given command.",
+    ),
     ("exit", "exit [n]", "Exit the shell."),
     ("logout", "logout [n]", "Exit a login shell."),
     ("return", "return [n]", "Return from a shell function."),
     ("break", "break [n]", "Exit for, while, or until loops."),
-    ("continue", "continue [n]", "Resume for, while, or until loops."),
-    ("enable", "enable [-a] [-dnps] [-f filename] [name ...]", "Enable and disable shell builtins."),
-    ("alias", "alias [-p] [name[=value] ... ]", "Define or display aliases."),
-    ("unalias", "unalias [-a] name [name ...]", "Remove each NAME from the list of defined aliases."),
-    ("help", "help [-dms] [pattern ...]", "Display information about builtin commands."),
+    (
+        "continue",
+        "continue [n]",
+        "Resume for, while, or until loops.",
+    ),
+    (
+        "enable",
+        "enable [-a] [-dnps] [-f filename] [name ...]",
+        "Enable and disable shell builtins.",
+    ),
+    (
+        "alias",
+        "alias [-p] [name[=value] ... ]",
+        "Define or display aliases.",
+    ),
+    (
+        "unalias",
+        "unalias [-a] name [name ...]",
+        "Remove each NAME from the list of defined aliases.",
+    ),
+    (
+        "help",
+        "help [-dms] [pattern ...]",
+        "Display information about builtin commands.",
+    ),
     // Shell keywords / compound-command constructs. bash's `help` documents
     // these reserved-word topics alongside the builtins; the names match bash's
     // internal topic names so `help while`, `help (( `, `help [[`, etc. resolve.
-    ("for", "for NAME [in WORDS ... ] ; do COMMANDS; done", "Execute commands for each member in a list."),
-    ("for ((", "for (( exp1; exp2; exp3 )); do COMMANDS; done", "Arithmetic for loop."),
-    ("while", "while COMMANDS; do COMMANDS-2; done", "Execute commands as long as a test succeeds."),
-    ("until", "until COMMANDS; do COMMANDS-2; done", "Execute commands as long as a test does not succeed."),
-    ("if", "if COMMANDS; then COMMANDS; [ elif COMMANDS; then COMMANDS; ]... [ else COMMANDS; ] fi", "Execute commands based on conditional."),
-    ("case", "case WORD in [PATTERN [| PATTERN]...) COMMANDS ;;]... esac", "Execute commands based on pattern matching."),
-    ("select", "select NAME [in WORDS ... ;] do COMMANDS; done", "Select words from a list and execute commands."),
-    ("function", "function name { COMMANDS ; } or name () { COMMANDS ; }", "Define shell function."),
-    ("time", "time [-p] pipeline", "Report time consumed by pipeline's execution."),
-    ("coproc", "coproc [NAME] command [redirections]", "Create a coprocess named NAME."),
+    (
+        "for",
+        "for NAME [in WORDS ... ] ; do COMMANDS; done",
+        "Execute commands for each member in a list.",
+    ),
+    (
+        "for ((",
+        "for (( exp1; exp2; exp3 )); do COMMANDS; done",
+        "Arithmetic for loop.",
+    ),
+    (
+        "while",
+        "while COMMANDS; do COMMANDS-2; done",
+        "Execute commands as long as a test succeeds.",
+    ),
+    (
+        "until",
+        "until COMMANDS; do COMMANDS-2; done",
+        "Execute commands as long as a test does not succeed.",
+    ),
+    (
+        "if",
+        "if COMMANDS; then COMMANDS; [ elif COMMANDS; then COMMANDS; ]... [ else COMMANDS; ] fi",
+        "Execute commands based on conditional.",
+    ),
+    (
+        "case",
+        "case WORD in [PATTERN [| PATTERN]...) COMMANDS ;;]... esac",
+        "Execute commands based on pattern matching.",
+    ),
+    (
+        "select",
+        "select NAME [in WORDS ... ;] do COMMANDS; done",
+        "Select words from a list and execute commands.",
+    ),
+    (
+        "function",
+        "function name { COMMANDS ; } or name () { COMMANDS ; }",
+        "Define shell function.",
+    ),
+    (
+        "time",
+        "time [-p] pipeline",
+        "Report time consumed by pipeline's execution.",
+    ),
+    (
+        "coproc",
+        "coproc [NAME] command [redirections]",
+        "Create a coprocess named NAME.",
+    ),
     ("{ ... }", "{ COMMANDS ; }", "Group commands as a unit."),
-    ("(( ... ))", "(( expression ))", "Evaluate arithmetic expression."),
-    ("[[ ... ]]", "[[ expression ]]", "Execute conditional command."),
-    ("variables", "variables - Names and meanings of some shell variables", "Common shell variable names and usage."),
+    (
+        "(( ... ))",
+        "(( expression ))",
+        "Evaluate arithmetic expression.",
+    ),
+    (
+        "[[ ... ]]",
+        "[[ expression ]]",
+        "Execute conditional command.",
+    ),
+    (
+        "variables",
+        "variables - Names and meanings of some shell variables",
+        "Common shell variable names and usage.",
+    ),
 ];
 
 /// The long help body bash prints under each topic's short description: the
@@ -60679,7 +61916,9 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
 /// ends with a genuinely *empty* line, and no re-indentation rule produces
 /// both. Storing what bash prints sidesteps the question entirely.
 const HELP_BODIES: &[(&str, &str)] = &[
-    (".", r#"    Read and execute commands from FILENAME in the current shell.  The
+    (
+        ".",
+        r#"    Read and execute commands from FILENAME in the current shell.  The
     entries in $PATH are used to find the directory containing FILENAME.
     If any ARGUMENTS are supplied, they become the positional parameters
     when FILENAME is executed.
@@ -60687,16 +61926,25 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns the status of the last command executed in FILENAME; fails if
     FILENAME cannot be read.
-"#),
-    (":", r#"    No effect; the command does nothing.
+"#,
+    ),
+    (
+        ":",
+        r#"    No effect; the command does nothing.
     
     Exit Status:
     Always succeeds.
-"#),
-    ("[", r#"    This is a synonym for the "test" builtin, but the last argument must
+"#,
+    ),
+    (
+        "[",
+        r#"    This is a synonym for the "test" builtin, but the last argument must
     be a literal `]', to match the opening `['.
-"#),
-    ("alias", r#"    Without arguments, `alias' prints the list of aliases in the reusable
+"#,
+    ),
+    (
+        "alias",
+        r#"    Without arguments, `alias' prints the list of aliases in the reusable
     form `alias NAME=VALUE' on standard output.
     
     Otherwise, an alias is defined for each NAME whose VALUE is given.
@@ -60709,15 +61957,21 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     alias returns true unless a NAME is supplied for which no alias has been
     defined.
-"#),
-    ("bg", r#"    Place the jobs identified by each JOB_SPEC in the background, as if they
+"#,
+    ),
+    (
+        "bg",
+        r#"    Place the jobs identified by each JOB_SPEC in the background, as if they
     had been started with `&'.  If JOB_SPEC is not present, the shell's notion
     of the current job is used.
     
     Exit Status:
     Returns success unless job control is not enabled or an error occurs.
-"#),
-    ("bind", r#"    Bind a key sequence to a Readline function or a macro, or set a
+"#,
+    ),
+    (
+        "bind",
+        r#"    Bind a key sequence to a Readline function or a macro, or set a
     Readline variable.  The non-option argument syntax is equivalent to
     that found in ~/.inputrc, but must be passed as a single argument:
     e.g., bind '"\C-x\C-r": re-read-init-file'.
@@ -60748,22 +62002,31 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     bind returns 0 unless an unrecognized option is given or an error occurs.
-"#),
-    ("break", r#"    Exit a FOR, WHILE or UNTIL loop.  If N is specified, break N enclosing
+"#,
+    ),
+    (
+        "break",
+        r#"    Exit a FOR, WHILE or UNTIL loop.  If N is specified, break N enclosing
     loops.
     
     Exit Status:
     The exit status is 0 unless N is not greater than or equal to 1.
-"#),
-    ("builtin", r#"    Execute SHELL-BUILTIN with arguments ARGs without performing command
+"#,
+    ),
+    (
+        "builtin",
+        r#"    Execute SHELL-BUILTIN with arguments ARGs without performing command
     lookup.  This is useful when you wish to reimplement a shell builtin
     as a shell function, but need to execute the builtin within the function.
     
     Exit Status:
     Returns the exit status of SHELL-BUILTIN, or false if SHELL-BUILTIN is
     not a shell builtin.
-"#),
-    ("caller", r#"    Without EXPR, returns "$line $filename".  With EXPR, returns
+"#,
+    ),
+    (
+        "caller",
+        r#"    Without EXPR, returns "$line $filename".  With EXPR, returns
     "$line $subroutine $filename"; this extra information can be used to
     provide a stack trace.
     
@@ -60773,8 +62036,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns 0 unless the shell is not executing a shell function or EXPR
     is invalid.
-"#),
-    ("cd", r#"    Change the current directory to DIR.  The default DIR is the value of the
+"#,
+    ),
+    (
+        "cd",
+        r#"    Change the current directory to DIR.  The default DIR is the value of the
     HOME shell variable. If DIR is "-", it is converted to $OLDPWD.
     
     The variable CDPATH defines the search path for the directory containing
@@ -60805,8 +62071,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns 0 if the directory is changed, and if $PWD is set successfully when
     -P is used; non-zero otherwise.
-"#),
-    ("command", r#"    Runs COMMAND with ARGS suppressing  shell function lookup, or display
+"#,
+    ),
+    (
+        "command",
+        r#"    Runs COMMAND with ARGS suppressing  shell function lookup, or display
     information about the specified COMMANDs.  Can be used to invoke commands
     on disk when a function with the same name exists.
     
@@ -60818,15 +62087,21 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns exit status of COMMAND, or failure if COMMAND is not found.
-"#),
-    ("compgen", r#"    Intended to be used from within a shell function generating possible
+"#,
+    ),
+    (
+        "compgen",
+        r#"    Intended to be used from within a shell function generating possible
     completions.  If the optional WORD argument is supplied, matches against
     WORD are generated.
     
     Exit Status:
     Returns success unless an invalid option is supplied or an error occurs.
-"#),
-    ("complete", r#"    For each NAME, specify how arguments are to be completed.  If no options
+"#,
+    ),
+    (
+        "complete",
+        r#"    For each NAME, specify how arguments are to be completed.  If no options
     are supplied, existing completion specifications are printed in a way that
     allows them to be reused as input.
     
@@ -60847,8 +62122,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless an invalid option is supplied or an error occurs.
-"#),
-    ("compopt", r#"    Modify the completion options for each NAME, or, if no NAMEs are supplied,
+"#,
+    ),
+    (
+        "compopt",
+        r#"    Modify the completion options for each NAME, or, if no NAMEs are supplied,
     the completion currently being executed.  If no OPTIONs are given, print
     the completion options for each NAME or the current completion specification.
     
@@ -60871,14 +62149,20 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns success unless an invalid option is supplied or NAME does not
     have a completion specification defined.
-"#),
-    ("continue", r#"    Resumes the next iteration of the enclosing FOR, WHILE or UNTIL loop.
+"#,
+    ),
+    (
+        "continue",
+        r#"    Resumes the next iteration of the enclosing FOR, WHILE or UNTIL loop.
     If N is specified, resumes the Nth enclosing loop.
     
     Exit Status:
     The exit status is 0 unless N is not greater than or equal to 1.
-"#),
-    ("declare", r#"    Declare variables and give them attributes.  If no NAMEs are given,
+"#,
+    ),
+    (
+        "declare",
+        r#"    Declare variables and give them attributes.  If no NAMEs are given,
     display the attributes and values of all variables.
     
     Options:
@@ -60913,8 +62197,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns success unless an invalid option is supplied or a variable
     assignment error occurs.
-"#),
-    ("dirs", r#"    Display the list of currently remembered directories.  Directories
+"#,
+    ),
+    (
+        "dirs",
+        r#"    Display the list of currently remembered directories.  Directories
     find their way onto the list with the `pushd' command; you can get
     back up through the list with the `popd' command.
     
@@ -60937,8 +62224,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless an invalid option is supplied or an error occurs.
-"#),
-    ("disown", r#"    Removes each JOBSPEC argument from the table of active jobs.  Without
+"#,
+    ),
+    (
+        "disown",
+        r#"    Removes each JOBSPEC argument from the table of active jobs.  Without
     any JOBSPECs, the shell uses its notion of the current job.
     
     Options:
@@ -60949,8 +62239,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless an invalid option or JOBSPEC is given.
-"#),
-    ("echo", r#"    Display the ARGs, separated by a single space character and followed by a
+"#,
+    ),
+    (
+        "echo",
+        r#"    Display the ARGs, separated by a single space character and followed by a
     newline, on the standard output.
     
     Options:
@@ -60981,8 +62274,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless a write error occurs.
-"#),
-    ("enable", r#"    Enables and disables builtin shell commands.  Disabling allows you to
+"#,
+    ),
+    (
+        "enable",
+        r#"    Enables and disables builtin shell commands.  Disabling allows you to
     execute a disk command which has the same name as a shell builtin
     without using a full pathname.
     
@@ -61003,14 +62299,20 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless NAME is not a shell builtin or an error occurs.
-"#),
-    ("eval", r#"    Combine ARGs into a single string, use the result as input to the shell,
+"#,
+    ),
+    (
+        "eval",
+        r#"    Combine ARGs into a single string, use the result as input to the shell,
     and execute the resulting commands.
     
     Exit Status:
     Returns exit status of command or success if command is null.
-"#),
-    ("exec", r#"    Execute COMMAND, replacing this shell with the specified program.
+"#,
+    ),
+    (
+        "exec",
+        r#"    Execute COMMAND, replacing this shell with the specified program.
     ARGUMENTS become the arguments to COMMAND.  If COMMAND is not specified,
     any redirections take effect in the current shell.
     
@@ -61024,11 +62326,17 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless COMMAND is not found or a redirection error occurs.
-"#),
-    ("exit", r#"    Exits the shell with a status of N.  If N is omitted, the exit status
+"#,
+    ),
+    (
+        "exit",
+        r#"    Exits the shell with a status of N.  If N is omitted, the exit status
     is that of the last command executed.
-"#),
-    ("export", r#"    Marks each NAME for automatic export to the environment of subsequently
+"#,
+    ),
+    (
+        "export",
+        r#"    Marks each NAME for automatic export to the environment of subsequently
     executed commands.  If VALUE is supplied, assign VALUE before exporting.
     
     Options:
@@ -61040,11 +62348,17 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless an invalid option is given or NAME is invalid.
-"#),
-    ("false", r#"    Exit Status:
+"#,
+    ),
+    (
+        "false",
+        r#"    Exit Status:
     Always fails.
-"#),
-    ("fc", r#"    fc is used to list or edit and re-execute commands from the history list.
+"#,
+    ),
+    (
+        "fc",
+        r#"    fc is used to list or edit and re-execute commands from the history list.
     FIRST and LAST can be numbers specifying the range, or FIRST can be a
     string, which means the most recent command beginning with that
     string.
@@ -61065,15 +62379,21 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success or status of executed command; non-zero if an error occurs.
-"#),
-    ("fg", r#"    Place the job identified by JOB_SPEC in the foreground, making it the
+"#,
+    ),
+    (
+        "fg",
+        r#"    Place the job identified by JOB_SPEC in the foreground, making it the
     current job.  If JOB_SPEC is not present, the shell's notion of the
     current job is used.
     
     Exit Status:
     Status of command placed in foreground, or failure if an error occurs.
-"#),
-    ("getopts", r#"    Getopts is used by shell procedures to parse positional parameters
+"#,
+    ),
+    (
+        "getopts",
+        r#"    Getopts is used by shell procedures to parse positional parameters
     as options.
     
     OPTSTRING contains the option letters to be recognized; if a letter
@@ -61108,8 +62428,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns success if an option is found; fails if the end of options is
     encountered or an error occurs.
-"#),
-    ("hash", r#"    Determine and remember the full pathname of each command NAME.  If
+"#,
+    ),
+    (
+        "hash",
+        r#"    Determine and remember the full pathname of each command NAME.  If
     no arguments are given, information about remembered commands is displayed.
     
     Options:
@@ -61126,8 +62449,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless NAME is not found or an invalid option is given.
-"#),
-    ("help", r#"    Displays brief summaries of builtin commands.  If PATTERN is
+"#,
+    ),
+    (
+        "help",
+        r#"    Displays brief summaries of builtin commands.  If PATTERN is
     specified, gives detailed help on all commands matching PATTERN,
     otherwise the list of help topics is printed.
     
@@ -61142,8 +62468,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless PATTERN is not found or an invalid option is given.
-"#),
-    ("history", r#"    Display the history list with line numbers, prefixing each modified
+"#,
+    ),
+    (
+        "history",
+        r#"    Display the history list with line numbers, prefixing each modified
     entry with a `*'.  An argument of N lists only the last N entries.
     
     Options:
@@ -61171,8 +62500,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless an invalid option is given or an error occurs.
-"#),
-    ("jobs", r#"    Lists the active jobs.  JOBSPEC restricts output to that job.
+"#,
+    ),
+    (
+        "jobs",
+        r#"    Lists the active jobs.  JOBSPEC restricts output to that job.
     Without options, the status of all active jobs is displayed.
     
     Options:
@@ -61190,8 +62522,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns success unless an invalid option is given or an error occurs.
     If -x is used, returns the exit status of COMMAND.
-"#),
-    ("kill", r#"    Send the processes identified by PID or JOBSPEC the signal named by
+"#,
+    ),
+    (
+        "kill",
+        r#"    Send the processes identified by PID or JOBSPEC the signal named by
     SIGSPEC or SIGNUM.  If neither SIGSPEC nor SIGNUM is present, then
     SIGTERM is assumed.
     
@@ -61208,8 +62543,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless an invalid option is given or an error occurs.
-"#),
-    ("let", r#"    Evaluate each ARG as an arithmetic expression.  Evaluation is done in
+"#,
+    ),
+    (
+        "let",
+        r#"    Evaluate each ARG as an arithmetic expression.  Evaluation is done in
     fixed-width integers with no check for overflow, though division by 0
     is trapped and flagged as an error.  The following list of operators is
     grouped into levels of equal-precedence operators.  The levels are listed
@@ -61247,8 +62585,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     If the last ARG evaluates to 0, let returns 1; let returns 0 otherwise.
-"#),
-    ("local", r#"    Create a local variable called NAME, and give it VALUE.  OPTION can
+"#,
+    ),
+    (
+        "local",
+        r#"    Create a local variable called NAME, and give it VALUE.  OPTION can
     be any option accepted by `declare'.
     
     Local variables can only be used within a function; they are visible
@@ -61257,11 +62598,17 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns success unless an invalid option is supplied, a variable
     assignment error occurs, or the shell is not executing a function.
-"#),
-    ("logout", r#"    Exits a login shell with exit status N.  Returns an error if not executed
+"#,
+    ),
+    (
+        "logout",
+        r#"    Exits a login shell with exit status N.  Returns an error if not executed
     in a login shell.
-"#),
-    ("mapfile", r#"    Read lines from the standard input into the indexed array variable ARRAY, or
+"#,
+    ),
+    (
+        "mapfile",
+        r#"    Read lines from the standard input into the indexed array variable ARRAY, or
     from file descriptor FD if the -u option is supplied.  The variable MAPFILE
     is the default ARRAY.
     
@@ -61290,8 +62637,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns success unless an invalid option is given or ARRAY is readonly or
     not an indexed array.
-"#),
-    ("popd", r#"    Removes entries from the directory stack.  With no arguments, removes
+"#,
+    ),
+    (
+        "popd",
+        r#"    Removes entries from the directory stack.  With no arguments, removes
     the top directory from the stack, and changes to the new top directory.
     
     Options:
@@ -61312,8 +62662,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns success unless an invalid argument is supplied or the directory
     change fails.
-"#),
-    ("printf", r#"    Options:
+"#,
+    ),
+    (
+        "printf",
+        r#"    Options:
       -v var	assign the output to shell variable VAR rather than
     		display it on the standard output
     
@@ -61341,8 +62694,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns success unless an invalid option is given or a write or assignment
     error occurs.
-"#),
-    ("pushd", r#"    Adds a directory to the top of the directory stack, or rotates
+"#,
+    ),
+    (
+        "pushd",
+        r#"    Adds a directory to the top of the directory stack, or rotates
     the stack, making the new top of the stack the current working
     directory.  With no arguments, exchanges the top two directories.
     
@@ -61367,8 +62723,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns success unless an invalid argument is supplied or the directory
     change fails.
-"#),
-    ("pwd", r#"    Options:
+"#,
+    ),
+    (
+        "pwd",
+        r#"    Options:
       -L	print the value of $PWD if it names the current working
     		directory
       -P	print the physical directory, without any symbolic links
@@ -61379,8 +62738,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns 0 unless an invalid option is given or the current directory
     cannot be read.
-"#),
-    ("read", r#"    Reads a single line from the standard input, or from file descriptor FD
+"#,
+    ),
+    (
+        "read",
+        r#"    Reads a single line from the standard input, or from file descriptor FD
     if the -u option is supplied.  The line is split into fields as with word
     splitting, and the first word is assigned to the first NAME, the second
     word to the second NAME, and so on, with any leftover words assigned to
@@ -61421,10 +62783,16 @@ const HELP_BODIES: &[(&str, &str)] = &[
     The return code is zero, unless end-of-file is encountered, read times out
     (in which case it's greater than 128), a variable assignment error occurs,
     or an invalid file descriptor is supplied as the argument to -u.
-"#),
-    ("readarray", r#"    A synonym for `mapfile'.
-"#),
-    ("readonly", r#"    Mark each NAME as read-only; the values of these NAMEs may not be
+"#,
+    ),
+    (
+        "readarray",
+        r#"    A synonym for `mapfile'.
+"#,
+    ),
+    (
+        "readonly",
+        r#"    Mark each NAME as read-only; the values of these NAMEs may not be
     changed by subsequent assignment.  If VALUE is supplied, assign VALUE
     before marking as read-only.
     
@@ -61439,15 +62807,21 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless an invalid option is given or NAME is invalid.
-"#),
-    ("return", r#"    Causes a function or sourced script to exit with the return value
+"#,
+    ),
+    (
+        "return",
+        r#"    Causes a function or sourced script to exit with the return value
     specified by N.  If N is omitted, the return status is that of the
     last command executed within the function or script.
     
     Exit Status:
     Returns N, or failure if the shell is not executing a function or script.
-"#),
-    ("set", r#"    Change the value of shell attributes and positional parameters, or
+"#,
+    ),
+    (
+        "set",
+        r#"    Change the value of shell attributes and positional parameters, or
     display the names and values of shell variables.
     
     Options:
@@ -61526,14 +62900,20 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless an invalid option is given.
-"#),
-    ("shift", r#"    Rename the positional parameters $N+1,$N+2 ... to $1,$2 ...  If N is
+"#,
+    ),
+    (
+        "shift",
+        r#"    Rename the positional parameters $N+1,$N+2 ... to $1,$2 ...  If N is
     not given, it is assumed to be 1.
     
     Exit Status:
     Returns success unless N is negative or greater than $#.
-"#),
-    ("shopt", r#"    Change the setting of each shell option OPTNAME.  Without any option
+"#,
+    ),
+    (
+        "shopt",
+        r#"    Change the setting of each shell option OPTNAME.  Without any option
     arguments, list each supplied OPTNAME, or all shell options if no
     OPTNAMEs are given, with an indication of whether or not each is set.
     
@@ -61547,8 +62927,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns success if OPTNAME is enabled; fails if an invalid option is
     given or OPTNAME is disabled.
-"#),
-    ("source", r#"    Read and execute commands from FILENAME in the current shell.  The
+"#,
+    ),
+    (
+        "source",
+        r#"    Read and execute commands from FILENAME in the current shell.  The
     entries in $PATH are used to find the directory containing FILENAME.
     If any ARGUMENTS are supplied, they become the positional parameters
     when FILENAME is executed.
@@ -61556,8 +62939,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns the status of the last command executed in FILENAME; fails if
     FILENAME cannot be read.
-"#),
-    ("suspend", r#"    Suspend the execution of this shell until it receives a SIGCONT signal.
+"#,
+    ),
+    (
+        "suspend",
+        r#"    Suspend the execution of this shell until it receives a SIGCONT signal.
     Unless forced, login shells and shells without job control cannot be
     suspended.
     
@@ -61567,8 +62953,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless job control is not enabled or an error occurs.
-"#),
-    ("test", r#"    Exits with a status of 0 (true) or 1 (false) depending on
+"#,
+    ),
+    (
+        "test",
+        r#"    Exits with a status of 0 (true) or 1 (false) depending on
     the evaluation of EXPR.  Expressions may be unary or binary.  Unary
     expressions are often used to examine the status of a file.  There
     are string operators and numeric comparison operators as well.
@@ -61643,14 +63032,20 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Exit Status:
     Returns success if EXPR evaluates to true; fails if EXPR evaluates to
     false or an invalid argument is given.
-"#),
-    ("times", r#"    Prints the accumulated user and system times for the shell and all of its
+"#,
+    ),
+    (
+        "times",
+        r#"    Prints the accumulated user and system times for the shell and all of its
     child processes.
     
     Exit Status:
     Always succeeds.
-"#),
-    ("trap", r#"    Defines and activates handlers to be run when the shell receives signals
+"#,
+    ),
+    (
+        "trap",
+        r#"    Defines and activates handlers to be run when the shell receives signals
     or other conditions.
     
     ARG is a command to be read and executed when the shell receives the
@@ -61679,11 +63074,17 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless a SIGSPEC is invalid or an invalid option is given.
-"#),
-    ("true", r#"    Exit Status:
+"#,
+    ),
+    (
+        "true",
+        r#"    Exit Status:
     Always succeeds.
-"#),
-    ("type", r#"    For each NAME, indicate how it would be interpreted if used as a
+"#,
+    ),
+    (
+        "type",
+        r#"    For each NAME, indicate how it would be interpreted if used as a
     command name.
     
     Options:
@@ -61706,10 +63107,16 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success if all of the NAMEs are found; fails if any are not found.
-"#),
-    ("typeset", r#"    A synonym for `declare'.  See `help declare'.
-"#),
-    ("ulimit", r#"    Provides control over the resources available to the shell and processes
+"#,
+    ),
+    (
+        "typeset",
+        r#"    A synonym for `declare'.  See `help declare'.
+"#,
+    ),
+    (
+        "ulimit",
+        r#"    Provides control over the resources available to the shell and processes
     it creates, on systems that allow such control.
     
     Options:
@@ -61752,8 +63159,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless an invalid option is supplied or an error occurs.
-"#),
-    ("umask", r#"    Sets the user file-creation mask to MODE.  If MODE is omitted, prints
+"#,
+    ),
+    (
+        "umask",
+        r#"    Sets the user file-creation mask to MODE.  If MODE is omitted, prints
     the current value of the mask.
     
     If MODE begins with a digit, it is interpreted as an octal number;
@@ -61765,13 +63175,19 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless MODE is invalid or an invalid option is given.
-"#),
-    ("unalias", r#"    Options:
+"#,
+    ),
+    (
+        "unalias",
+        r#"    Options:
       -a	remove all alias definitions
     
     Return success unless a NAME is not an existing alias.
-"#),
-    ("unset", r#"    For each NAME, remove the corresponding variable or function.
+"#,
+    ),
+    (
+        "unset",
+        r#"    For each NAME, remove the corresponding variable or function.
     
     Options:
       -f	treat each NAME as a shell function
@@ -61786,8 +63202,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns success unless an invalid option is given or a NAME is read-only.
-"#),
-    ("wait", r#"    Waits for each process identified by an ID, which may be a process ID or a
+"#,
+    ),
+    (
+        "wait",
+        r#"    Waits for each process identified by an ID, which may be a process ID or a
     job specification, and reports its termination status.  If ID is not
     given, waits for all currently active child processes, and the return
     status is zero.  If ID is a job specification, waits for all processes
@@ -61809,16 +63228,22 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Returns the status of the last ID; fails if ID is invalid or an invalid
     option is given, or if -n is supplied and the shell has no unwaited-for
     children.
-"#),
-    ("for", r#"    The `for' loop executes a sequence of commands for each member in a
+"#,
+    ),
+    (
+        "for",
+        r#"    The `for' loop executes a sequence of commands for each member in a
     list of items.  If `in WORDS ...;' is not present, then `in "$@"' is
     assumed.  For each element in WORDS, NAME is set to that element, and
     the COMMANDS are executed.
     
     Exit Status:
     Returns the status of the last command executed.
-"#),
-    ("for ((", r#"    Equivalent to
+"#,
+    ),
+    (
+        "for ((",
+        r#"    Equivalent to
     	(( EXP1 ))
     	while (( EXP2 )); do
     		COMMANDS
@@ -61829,20 +63254,29 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns the status of the last command executed.
-"#),
-    ("while", r#"    Expand and execute COMMANDS-2 as long as the final command in COMMANDS has
+"#,
+    ),
+    (
+        "while",
+        r#"    Expand and execute COMMANDS-2 as long as the final command in COMMANDS has
     an exit status of zero.
     
     Exit Status:
     Returns the status of the last command executed.
-"#),
-    ("until", r#"    Expand and execute COMMANDS-2 as long as the final command in COMMANDS has
+"#,
+    ),
+    (
+        "until",
+        r#"    Expand and execute COMMANDS-2 as long as the final command in COMMANDS has
     an exit status which is not zero.
     
     Exit Status:
     Returns the status of the last command executed.
-"#),
-    ("if", r#"    The `if COMMANDS' list is executed.  If its exit status is zero, then the
+"#,
+    ),
+    (
+        "if",
+        r#"    The `if COMMANDS' list is executed.  If its exit status is zero, then the
     `then COMMANDS' list is executed.  Otherwise, each `elif COMMANDS' list is
     executed in turn, and if its exit status is zero, the corresponding
     `then COMMANDS' list is executed and the if command completes.  Otherwise,
@@ -61852,14 +63286,20 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns the status of the last command executed.
-"#),
-    ("case", r#"    Selectively execute COMMANDS based upon WORD matching PATTERN.  The
+"#,
+    ),
+    (
+        "case",
+        r#"    Selectively execute COMMANDS based upon WORD matching PATTERN.  The
     `|' is used to separate multiple patterns.
     
     Exit Status:
     Returns the status of the last command executed.
-"#),
-    ("select", r#"    The WORDS are expanded, generating a list of words.  The
+"#,
+    ),
+    (
+        "select",
+        r#"    The WORDS are expanded, generating a list of words.  The
     set of expanded words is printed on the standard error, each
     preceded by a number.  If `in WORDS' is not present, `in "$@"'
     is assumed.  The PS3 prompt is then displayed and a line read
@@ -61873,16 +63313,22 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     Returns the status of the last command executed.
-"#),
-    ("function", r#"    Create a shell function named NAME.  When invoked as a simple command,
+"#,
+    ),
+    (
+        "function",
+        r#"    Create a shell function named NAME.  When invoked as a simple command,
     NAME runs COMMANDs in the calling shell's context.  When NAME is invoked,
     the arguments are passed to the function as $1...$n, and the function's
     name is in $FUNCNAME.
     
     Exit Status:
     Returns success unless NAME is readonly.
-"#),
-    ("time", r#"    Execute PIPELINE and print a summary of the real time, user CPU time,
+"#,
+    ),
+    (
+        "time",
+        r#"    Execute PIPELINE and print a summary of the real time, user CPU time,
     and system CPU time spent executing PIPELINE when it terminates.
     
     Options:
@@ -61892,28 +63338,40 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     The return status is the return status of PIPELINE.
-"#),
-    ("coproc", r#"    Execute COMMAND asynchronously, with the standard output and standard
+"#,
+    ),
+    (
+        "coproc",
+        r#"    Execute COMMAND asynchronously, with the standard output and standard
     input of the command connected via a pipe to file descriptors assigned
     to indices 0 and 1 of an array variable NAME in the executing shell.
     The default NAME is "COPROC".
     
     Exit Status:
     The coproc command returns an exit status of 0.
-"#),
-    ("{ ... }", r#"    Run a set of commands in a group.  This is one way to redirect an
+"#,
+    ),
+    (
+        "{ ... }",
+        r#"    Run a set of commands in a group.  This is one way to redirect an
     entire set of commands.
     
     Exit Status:
     Returns the status of the last command executed.
-"#),
-    ("(( ... ))", r#"    The EXPRESSION is evaluated according to the rules for arithmetic
+"#,
+    ),
+    (
+        "(( ... ))",
+        r#"    The EXPRESSION is evaluated according to the rules for arithmetic
     evaluation.  Equivalent to `let "EXPRESSION"'.
     
     Exit Status:
     Returns 1 if EXPRESSION evaluates to 0; returns 0 otherwise.
-"#),
-    ("[[ ... ]]", r#"    Returns a status of 0 or 1 depending on the evaluation of the conditional
+"#,
+    ),
+    (
+        "[[ ... ]]",
+        r#"    Returns a status of 0 or 1 depending on the evaluation of the conditional
     expression EXPRESSION.  Expressions are composed of the same primaries used
     by the `test' builtin, and may be combined using the following operators:
     
@@ -61932,8 +63390,11 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
     Exit Status:
     0 or 1 depending on value of EXPRESSION.
-"#),
-    ("variables", r#"    BASH_VERSION	Version information for this Bash.
+"#,
+    ),
+    (
+        "variables",
+        r#"    BASH_VERSION	Version information for this Bash.
     CDPATH	A colon-separated list of directories to search
     		for directories given as arguments to `cd'.
     GLOBIGNORE	A colon-separated list of patterns describing filenames to
@@ -61982,7 +63443,8 @@ const HELP_BODIES: &[(&str, &str)] = &[
     HISTIGNORE	A colon-separated list of patterns used to decide which
     		commands should be saved on the history list.
 
-"#),
+"#,
+    ),
 ];
 
 /// The long help body for a topic, or `""` if the table somehow lacks one.
@@ -62182,10 +63644,7 @@ fn builtin_wants_help(name: &str, args: &[Str], in_function: bool) -> bool {
                     if sp + 1 < word.len() {
                         // `-d,` — the rest of the word is the argument.
                         i += 1;
-                    } else if args
-                        .get(i + 1)
-                        .is_some_and(|n| mark == b':' || notopt(n))
-                    {
+                    } else if args.get(i + 1).is_some_and(|n| mark == b':' || notopt(n)) {
                         // The next word is the argument — including when that
                         // word is `--help`, which is why `mapfile -d --help`
                         // sets the delimiter rather than printing anything.
@@ -62207,16 +63666,67 @@ fn builtin_wants_help(name: &str, args: &[Str], in_function: bool) -> bool {
 }
 
 const BUILTIN_NAMES: &[&str] = &[
-    ":", "true", "false", "cd", "pwd", "pushd", "popd", "dirs", "echo", "printf", "export",
-    "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
-    "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
-    ".", "type", "trap", "jobs", "kill", "wait", "disown", "fg", "bg", "caller", "times", "suspend",
-    "bind", "hash",
-    "history", "fc", "umask",
-    "ulimit", "exec",
-    "exit", "logout", "return", "break", "continue", "enable", "alias", "unalias", "help",
+    ":",
+    "true",
+    "false",
+    "cd",
+    "pwd",
+    "pushd",
+    "popd",
+    "dirs",
+    "echo",
+    "printf",
+    "export",
+    "declare",
+    "typeset",
+    "local",
+    "readonly",
+    "shopt",
+    "unset",
+    "set",
+    "shift",
+    "getopts",
+    "mapfile",
+    "readarray",
+    "command",
+    "builtin",
+    "read",
+    "test",
+    "[",
+    "let",
+    "eval",
+    "source",
+    ".",
+    "type",
+    "trap",
+    "jobs",
+    "kill",
+    "wait",
+    "disown",
+    "fg",
+    "bg",
+    "caller",
+    "times",
+    "suspend",
+    "bind",
+    "hash",
+    "history",
+    "fc",
+    "umask",
+    "ulimit",
+    "exec",
+    "exit",
+    "logout",
+    "return",
+    "break",
+    "continue",
+    "enable",
+    "alias",
+    "unalias",
+    "help",
     "compgen",
-    "complete", "compopt",
+    "complete",
+    "compopt",
 ];
 
 /// One builtin invocation as the dispatcher hands it over: the command itself,
@@ -62330,22 +63840,102 @@ struct UlimitMode {
 /// The resource limits osh models, in the order bash prints them for `-a`.
 /// Values/units mirror Linux bash; defaults are conventional soft limits.
 const RLIMIT_SPECS: &[RlimitSpec] = &[
-    RlimitSpec { opt: 'c', label: "core file size", unit: "blocks", default: Some(0) },
-    RlimitSpec { opt: 'd', label: "data seg size", unit: "kbytes", default: None },
-    RlimitSpec { opt: 'e', label: "scheduling priority", unit: "", default: Some(0) },
-    RlimitSpec { opt: 'f', label: "file size", unit: "blocks", default: None },
-    RlimitSpec { opt: 'i', label: "pending signals", unit: "", default: None },
-    RlimitSpec { opt: 'l', label: "max locked memory", unit: "kbytes", default: None },
-    RlimitSpec { opt: 'm', label: "max memory size", unit: "kbytes", default: None },
-    RlimitSpec { opt: 'n', label: "open files", unit: "", default: Some(1024) },
-    RlimitSpec { opt: 'p', label: "pipe size", unit: "512 bytes", default: Some(8) },
-    RlimitSpec { opt: 'q', label: "POSIX message queues", unit: "bytes", default: Some(819200) },
-    RlimitSpec { opt: 'r', label: "real-time priority", unit: "", default: Some(0) },
-    RlimitSpec { opt: 's', label: "stack size", unit: "kbytes", default: Some(8192) },
-    RlimitSpec { opt: 't', label: "cpu time", unit: "seconds", default: None },
-    RlimitSpec { opt: 'u', label: "max user processes", unit: "", default: None },
-    RlimitSpec { opt: 'v', label: "virtual memory", unit: "kbytes", default: None },
-    RlimitSpec { opt: 'x', label: "file locks", unit: "", default: None },
+    RlimitSpec {
+        opt: 'c',
+        label: "core file size",
+        unit: "blocks",
+        default: Some(0),
+    },
+    RlimitSpec {
+        opt: 'd',
+        label: "data seg size",
+        unit: "kbytes",
+        default: None,
+    },
+    RlimitSpec {
+        opt: 'e',
+        label: "scheduling priority",
+        unit: "",
+        default: Some(0),
+    },
+    RlimitSpec {
+        opt: 'f',
+        label: "file size",
+        unit: "blocks",
+        default: None,
+    },
+    RlimitSpec {
+        opt: 'i',
+        label: "pending signals",
+        unit: "",
+        default: None,
+    },
+    RlimitSpec {
+        opt: 'l',
+        label: "max locked memory",
+        unit: "kbytes",
+        default: None,
+    },
+    RlimitSpec {
+        opt: 'm',
+        label: "max memory size",
+        unit: "kbytes",
+        default: None,
+    },
+    RlimitSpec {
+        opt: 'n',
+        label: "open files",
+        unit: "",
+        default: Some(1024),
+    },
+    RlimitSpec {
+        opt: 'p',
+        label: "pipe size",
+        unit: "512 bytes",
+        default: Some(8),
+    },
+    RlimitSpec {
+        opt: 'q',
+        label: "POSIX message queues",
+        unit: "bytes",
+        default: Some(819200),
+    },
+    RlimitSpec {
+        opt: 'r',
+        label: "real-time priority",
+        unit: "",
+        default: Some(0),
+    },
+    RlimitSpec {
+        opt: 's',
+        label: "stack size",
+        unit: "kbytes",
+        default: Some(8192),
+    },
+    RlimitSpec {
+        opt: 't',
+        label: "cpu time",
+        unit: "seconds",
+        default: None,
+    },
+    RlimitSpec {
+        opt: 'u',
+        label: "max user processes",
+        unit: "",
+        default: None,
+    },
+    RlimitSpec {
+        opt: 'v',
+        label: "virtual memory",
+        unit: "kbytes",
+        default: None,
+    },
+    RlimitSpec {
+        opt: 'x',
+        label: "file locks",
+        unit: "",
+        default: None,
+    },
 ];
 
 const ULIMIT_USAGE: &str = "ulimit: usage: ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]\n";
@@ -62354,7 +63944,10 @@ const ULIMIT_USAGE: &str = "ulimit: usage: ulimit [-SHabcdefiklmnpqrstuvxPRT] [l
 /// hard = unlimited (osh does not enforce, so an unlimited hard ceiling is the
 /// honest model — see `TD-OILS-ULIMIT`).
 fn default_rlimits() -> std::collections::HashMap<char, (Option<u64>, Option<u64>)> {
-    RLIMIT_SPECS.iter().map(|s| (s.opt, (s.default, None))).collect()
+    RLIMIT_SPECS
+        .iter()
+        .map(|s| (s.opt, (s.default, None)))
+        .collect()
 }
 
 /// Format a limit value for display (`None` → `unlimited`).
@@ -62432,7 +64025,10 @@ fn is_assignment_word(word: &Word) -> bool {
     // Optional array subscript `[...]`.
     if i < bytes.len() && bytes[i] == b'[' {
         // `bytes` shadows the module, hence the fully-qualified `find`.
-        match bytes.get(i..).and_then(|rest| crate::bytes::find(rest, b"]")) {
+        match bytes
+            .get(i..)
+            .and_then(|rest| crate::bytes::find(rest, b"]"))
+        {
             Some(close) => i += close + 1,
             None => return false,
         }
@@ -62743,7 +64339,8 @@ fn system_hostname() -> Option<String> {
         // the call, and `n` is a live local. The call writes at most `n` code
         // units into it and reports through `n` how many it wrote — or, having
         // written none, how many it needs.
-        let ok = unsafe { GetComputerNameExW(COMPUTER_NAME_DNS_HOSTNAME, buf.as_mut_ptr(), &raw mut n) };
+        let ok =
+            unsafe { GetComputerNameExW(COMPUTER_NAME_DNS_HOSTNAME, buf.as_mut_ptr(), &raw mut n) };
         if ok != 0 {
             let name = String::from_utf16_lossy(buf.get(..usize::try_from(n).ok()?)?);
             return Some(name).filter(|s| !s.is_empty());
@@ -62803,7 +64400,10 @@ fn atoi(s: BStr<'_>) -> isize {
 /// `OPTIND` and `OPTERR` are read this way, so ` -3junk` is -3 and `zz` is 0 —
 /// and, because the result lands in an `int`, a number too big for 32 bits is
 /// not "past the end" but whatever its low 32 bits say.
-#[allow(clippy::cast_possible_truncation, reason = "C's `atoi` returns an `int`")]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "C's `atoi` returns an `int`"
+)]
 fn atoi_c_int(s: BStr<'_>) -> i32 {
     let t = bytes::trim_start(s);
     let (sign, digits) = match t.strip_prefix(b"-".as_slice()) {
@@ -62899,7 +64499,10 @@ const EMULATED_DEVICES: &[(&[u8], &[u8])] = &[(b"/dev/null", b"NUL")];
 /// node, so the path is returned unchanged.
 #[cfg(windows)]
 fn map_device_path(path: BStr<'_>) -> BStr<'_> {
-    EMULATED_DEVICES.iter().find(|(p, _)| *p == path).map_or(path, |&(_, native)| native)
+    EMULATED_DEVICES
+        .iter()
+        .find(|(p, _)| *p == path)
+        .map_or(path, |&(_, native)| native)
 }
 
 /// What the `test`/`[`/`[[` file primaries say about an emulated pseudo-device.
@@ -62930,7 +64533,10 @@ fn emulated_device_unary(path: BStr<'_>, op: BStr<'_>) -> Option<bool> {
     if !EMULATED_DEVICES.iter().any(|(p, _)| *p == path) {
         return None;
     }
-    Some(matches!(op, b"-e" | b"-a" | b"-c" | b"-r" | b"-w" | b"-O" | b"-G"))
+    Some(matches!(
+        op,
+        b"-e" | b"-a" | b"-c" | b"-r" | b"-w" | b"-O" | b"-G"
+    ))
 }
 
 #[cfg(not(windows))]
@@ -63019,7 +64625,9 @@ fn wrap_parse_message(msg: BStr<'_>, prefix: BStr<'_>) -> Str {
 /// way bash does on its second diagnostic line.
 fn nth_source_line(src: BStr<'_>, line: u32) -> Option<BStr<'_>> {
     let idx = usize::try_from(line).ok()?.checked_sub(1)?;
-    src.split(|&b| b == b'\n').nth(idx).map(|l| l.strip_suffix(b"\r").unwrap_or(l))
+    src.split(|&b| b == b'\n')
+        .nth(idx)
+        .map(|l| l.strip_suffix(b"\r").unwrap_or(l))
 }
 
 /// Create/truncate (or open for append) an output redirect's target *now*,
@@ -64104,7 +65712,6 @@ fn quote_set_value(v: BStr<'_>) -> Str {
     v.to_vec()
 }
 
-
 /// One of the shell's punctuation parameters — the names that are not
 /// identifiers and that the shell answers for itself.
 fn is_special_param(name: &str) -> bool {
@@ -64158,9 +65765,7 @@ fn subscript_base(s: &str) -> Option<&str> {
     // right rather than a base with a subscript: not one bash will accept.
     let close = skip_subscript(s.as_bytes(), open);
     match close {
-        Some(c) if c.checked_add(1) == Some(s.len()) && c > open.saturating_add(1) => {
-            s.get(..open)
-        }
+        Some(c) if c.checked_add(1) == Some(s.len()) && c > open.saturating_add(1) => s.get(..open),
         // `[` that never closes, an empty `name[]`, or text past the `]` — not a
         // name either way, so it is answered whole and refused as one.
         _ => Some(s),
@@ -64200,9 +65805,7 @@ fn is_identifier(s: &str) -> bool {
 /// the scalar rewrite ([`rename_param_target`]).
 fn array_target_part(part: &WordPart, name: String, star: bool) -> Option<WordPart> {
     Some(match part {
-        WordPart::ParamOp {
-            op, colon, arg, ..
-        } => WordPart::ArrayOp {
+        WordPart::ParamOp { op, colon, arg, .. } => WordPart::ArrayOp {
             name,
             star,
             op: *op,
@@ -64240,10 +65843,7 @@ fn array_target_part(part: &WordPart, name: String, star: bool) -> Option<WordPa
             },
         },
         WordPart::ParamCase {
-            mode,
-            all,
-            pattern,
-            ..
+            mode, all, pattern, ..
         } => WordPart::ArrayBulk {
             name,
             star,
@@ -64263,7 +65863,12 @@ fn array_target_part(part: &WordPart, name: String, star: bool) -> Option<WordPa
             star,
             op: BulkOp::BadTransform { op: op.clone() },
         },
-        WordPart::ParamSubstr { offset, length, unclosed, .. } => WordPart::ArraySlice {
+        WordPart::ParamSubstr {
+            offset,
+            length,
+            unclosed,
+            ..
+        } => WordPart::ArraySlice {
             name,
             star,
             offset: offset.clone(),
@@ -64348,7 +65953,11 @@ fn unescape_read_line(s: BStr<'_>) -> Str {
 fn read_split(line: BStr<'_>, ifs: BStr<'_>, raw: bool, limit: Option<usize>) -> Vec<Str> {
     // Empty IFS disables splitting entirely: the whole line is one field.
     if ifs.is_empty() {
-        let whole = if raw { line.to_vec() } else { unescape_read_line(line) };
+        let whole = if raw {
+            line.to_vec()
+        } else {
+            unescape_read_line(line)
+        };
         return vec![whole];
     }
     // IFS holds *characters*, and the line is split character-wise, so a
@@ -64548,7 +66157,9 @@ fn format_printf_once(
                     crate::escape::EscapeMode::PrintfFormat,
                 );
                 if let Some(msg) = d.bad {
-                    diags.notes.push((diags.base + out.len(), msg.as_bytes().to_vec()));
+                    diags
+                        .notes
+                        .push((diags.base + out.len(), msg.as_bytes().to_vec()));
                 }
             }
             b'%' => {
@@ -64623,7 +66234,9 @@ fn format_conversion(
             diags.errors.push((star_off, bfmt![&raw, b": ", kind]));
         }
         if n.signed_overflow {
-            diags.warnings.push((star_off, bfmt![&raw, b": Numerical result out of range"]));
+            diags
+                .warnings
+                .push((star_off, bfmt![&raw, b": Numerical result out of range"]));
         }
         n.signed
     };
@@ -64679,7 +66292,10 @@ fn format_conversion(
     // The width and precision are runs of ASCII digits collected just above, so
     // reading them back as text cannot fail on a non-UTF-8 byte.
     let digits_to_usize = |d: &[u8]| -> usize {
-        std::str::from_utf8(d).ok().and_then(|t| t.parse().ok()).unwrap_or(0)
+        std::str::from_utf8(d)
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0)
     };
     let width_n: usize = digits_to_usize(&width);
     let prec_n: Option<usize> = prec.as_ref().map(|p| digits_to_usize(p));
@@ -64724,7 +66340,11 @@ fn format_conversion(
                 // `printf '%(%Y)T' abc` complains and still prints `1970`.
                 let n = star_arg(args, arg_i, diags);
                 #[allow(clippy::cast_possible_wrap)]
-                if n == -1 || n == -2 { unix_time().0 as i64 } else { n }
+                if n == -1 || n == -2 {
+                    unix_time().0 as i64
+                } else {
+                    n
+                }
             } else {
                 #[allow(clippy::cast_possible_wrap)]
                 {
@@ -64827,10 +66447,8 @@ fn format_conversion(
             // Interpret `echo -e`-style backslash escapes in the argument; `\c`
             // stops all further output. Unlike `echo -e`, `%b` also accepts
             // octal without the `\0` prefix and reports a malformed `\x`/`\u`.
-            let r = crate::escape::unescape_echo(
-                &next_arg(arg_i),
-                crate::escape::EscapeMode::PrintfB,
-            );
+            let r =
+                crate::escape::unescape_echo(&next_arg(arg_i), crate::escape::EscapeMode::PrintfB);
             stop = r.stopped;
             for (off, msg) in r.bad {
                 diags.notes.push((field_off + off, msg.as_bytes().to_vec()));
@@ -64870,7 +66488,8 @@ fn format_conversion(
                 diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
             if n.signed_overflow {
-                diags.warnings
+                diags
+                    .warnings
                     .push((field_off, bfmt![&raw, b": Numerical result out of range"]));
             }
             let (p, b) = split_sign(&n.signed.to_string(), plus, space);
@@ -64884,7 +66503,8 @@ fn format_conversion(
                 diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
             if n.unsigned_overflow {
-                diags.warnings
+                diags
+                    .warnings
                     .push((field_off, bfmt![&raw, b": Numerical result out of range"]));
             }
             n.unsigned.to_string().into_bytes()
@@ -64896,7 +66516,8 @@ fn format_conversion(
                 diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
             if n.unsigned_overflow {
-                diags.warnings
+                diags
+                    .warnings
                     .push((field_off, bfmt![&raw, b": Numerical result out of range"]));
             }
             let v = n.unsigned;
@@ -64913,7 +66534,8 @@ fn format_conversion(
                 diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
             if n.unsigned_overflow {
-                diags.warnings
+                diags
+                    .warnings
                     .push((field_off, bfmt![&raw, b": Numerical result out of range"]));
             }
             let v = n.unsigned;
@@ -64929,7 +66551,8 @@ fn format_conversion(
                 diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
             if n.unsigned_overflow {
-                diags.warnings
+                diags
+                    .warnings
                     .push((field_off, bfmt![&raw, b": Numerical result out of range"]));
             }
             let v = n.unsigned;
@@ -65316,12 +66939,28 @@ fn push_prompt_strftime(out: &mut Str, fmt: &[u8], epoch: i64, tz: &Zone<'_>) {
 /// rule came from a `TZ` string or from a zoneinfo file's transition table.
 fn format_strftime(fmt: &[u8], epoch: i64, tz: &Zone<'_>) -> Str {
     const WDAY_FULL: [&[u8]; 7] = [
-        b"Sunday", b"Monday", b"Tuesday", b"Wednesday", b"Thursday", b"Friday", b"Saturday",
+        b"Sunday",
+        b"Monday",
+        b"Tuesday",
+        b"Wednesday",
+        b"Thursday",
+        b"Friday",
+        b"Saturday",
     ];
     const WDAY_ABBR: [&[u8]; 7] = [b"Sun", b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat"];
     const MON_FULL: [&[u8]; 12] = [
-        b"January", b"February", b"March", b"April", b"May", b"June", b"July", b"August",
-        b"September", b"October", b"November", b"December",
+        b"January",
+        b"February",
+        b"March",
+        b"April",
+        b"May",
+        b"June",
+        b"July",
+        b"August",
+        b"September",
+        b"October",
+        b"November",
+        b"December",
     ];
     const MON_ABBR: [&[u8]; 12] = [
         b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov",
@@ -65410,7 +67049,11 @@ fn format_strftime(fmt: &[u8], epoch: i64, tz: &Zone<'_>) -> Str {
             // (`%U`) or first Monday (`%W`), and every day before that is week
             // `00`. So 2006-01-01, a Sunday, is `%U` 01 but `%W` 00.
             b'U' | b'W' => {
-                let first = if c == b'U' { ctx.wday } else { (ctx.wday + 6) % 7 };
+                let first = if c == b'U' {
+                    ctx.wday
+                } else {
+                    (ctx.wday + 6) % 7
+                };
                 // `yday` counts from 1; the arithmetic wants it from 0.
                 let doy = ctx.yday.saturating_sub(1);
                 let week = (doy + 7 - i64::try_from(first).unwrap_or(0)).div_euclid(7);
@@ -65608,8 +67251,9 @@ fn parse_printf_int_checked(s: &[u8]) -> PrintfInt {
         Some(r) => (true, r),
         None => (false, t.strip_prefix(b"+").unwrap_or(t)),
     };
-    let (radix, digits) = if let Some(h) =
-        body.strip_prefix(b"0x").or_else(|| body.strip_prefix(b"0X"))
+    let (radix, digits) = if let Some(h) = body
+        .strip_prefix(b"0x")
+        .or_else(|| body.strip_prefix(b"0X"))
     {
         (16u32, h)
     } else if body.first() == Some(&b'0') && body.get(1).is_some_and(u8::is_ascii_digit) {
@@ -65620,7 +67264,10 @@ fn parse_printf_int_checked(s: &[u8]) -> PrintfInt {
         (10u32, body)
     };
     // Consume the leading run of digits valid for the radix.
-    let valid_len = digits.iter().take_while(|&&b| char::from(b).is_digit(radix)).count();
+    let valid_len = digits
+        .iter()
+        .take_while(|&&b| char::from(b).is_digit(radix))
+        .count();
     let consumed = digits.get(..valid_len).unwrap_or_default();
     let remaining = digits.get(valid_len..).unwrap_or_default();
     // The base the *message* names is not the base the value was read in.
@@ -65651,7 +67298,11 @@ fn parse_printf_int_checked(s: &[u8]) -> PrintfInt {
     let i64_max_mag = u128::from(i64::MAX.unsigned_abs());
     let i64_min_mag = u128::from(i64::MIN.unsigned_abs());
     let unsigned_overflow = mag > u64_max;
-    let signed_overflow = if neg { mag > i64_min_mag } else { mag > i64_max_mag };
+    let signed_overflow = if neg {
+        mag > i64_min_mag
+    } else {
+        mag > i64_max_mag
+    };
     let signed = if neg {
         if mag >= i64_min_mag {
             i64::MIN
@@ -65702,7 +67353,14 @@ fn parse_printf_float_checked(s: &[u8]) -> (f64, Option<&'static str>) {
     // `0` with junk after it.
     if let Some((v, used)) = parse_hex_float(t) {
         let rest = t.get(used..).unwrap_or_default();
-        return (v, if rest.is_empty() { None } else { Some(sh_invalidnum_kind(s)) });
+        return (
+            v,
+            if rest.is_empty() {
+                None
+            } else {
+                Some(sh_invalidnum_kind(s))
+            },
+        );
     }
     if let Some(v) = parse(t) {
         return (v, None);
@@ -65759,7 +67417,9 @@ fn parse_hex_float(t: &[u8]) -> Option<(f64, usize)> {
             i += 1;
             continue;
         }
-        let Some(d) = char::from(b).to_digit(16) else { break };
+        let Some(d) = char::from(b).to_digit(16) else {
+            break;
+        };
         any = true;
         if digits < 28 {
             mant = (mant << 4) | u128::from(d);
@@ -65798,9 +67458,14 @@ fn parse_hex_float(t: &[u8]) -> Option<(f64, usize)> {
         let start = j;
         let mut e: i32 = 0;
         while let Some(&b) = body.get(j) {
-            let Some(d) = char::from(b).to_digit(10) else { break };
+            let Some(d) = char::from(b).to_digit(10) else {
+                break;
+            };
             // Saturate: an exponent this large already decides the result.
-            e = e.saturating_mul(10).saturating_add(i32::try_from(d).unwrap_or(0)).min(1 << 20);
+            e = e
+                .saturating_mul(10)
+                .saturating_add(i32::try_from(d).unwrap_or(0))
+                .min(1 << 20);
             j += 1;
         }
         if j > start {
@@ -65951,7 +67616,11 @@ fn format_a(f: f64, prec: Option<usize>, upper: bool) -> String {
     let mantissa = bits & 0x000f_ffff_ffff_ffff; // low 52 bits
     let (mut lead, exp2) = if exp_bits == 0 {
         // Zero or subnormal.
-        if mantissa == 0 { (0u64, 0i64) } else { (0u64, -1022) }
+        if mantissa == 0 {
+            (0u64, 0i64)
+        } else {
+            (0u64, -1022)
+        }
     } else {
         (1u64, exp_bits - 1023)
     };
@@ -65970,7 +67639,11 @@ fn format_a(f: f64, prec: Option<usize>, upper: bool) -> String {
                 true
             } else {
                 // Exact halfway: round to even (up if the kept digit is odd).
-                let last = if p == 0 { lead } else { u64::from(digits[p - 1]) };
+                let last = if p == 0 {
+                    lead
+                } else {
+                    u64::from(digits[p - 1])
+                };
                 last % 2 == 1
             };
             digits.truncate(p);
@@ -66394,9 +68067,15 @@ fn unary_access(path: &std::path::Path, op: BStr<'_>) -> bool {
         b"-w" => !md.permissions().readonly(),
         _ => {
             md.is_dir()
-                || path.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|e| {
-                    matches!(e.to_ascii_lowercase().as_str(), "exe" | "com" | "bat" | "cmd")
-                })
+                || path
+                    .extension()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .is_some_and(|e| {
+                        matches!(
+                            e.to_ascii_lowercase().as_str(),
+                            "exe" | "com" | "bat" | "cmd"
+                        )
+                    })
         }
     }
 }
@@ -66475,8 +68154,19 @@ fn unary_owner(path: &std::path::Path, _op: BStr<'_>) -> bool {
 fn is_test_binary_op(op: BStr<'_>) -> bool {
     matches!(
         op,
-        b"=" | b"==" | b"!=" | b"<" | b">" | b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge"
-            | b"-nt" | b"-ot" | b"-ef"
+        b"=" | b"=="
+            | b"!="
+            | b"<"
+            | b">"
+            | b"-eq"
+            | b"-ne"
+            | b"-lt"
+            | b"-le"
+            | b"-gt"
+            | b"-ge"
+            | b"-nt"
+            | b"-ot"
+            | b"-ef"
     )
 }
 
@@ -66650,7 +68340,11 @@ mod tests {
         assert!(run("typeset --help").0.starts_with("typeset: typeset "));
         assert!(run("declare --help").0.starts_with("declare: declare "));
         assert!(run(". --help").0.starts_with(".: . filename"));
-        assert!(run("source --help").0.starts_with("source: source filename"));
+        assert!(
+            run("source --help")
+                .0
+                .starts_with("source: source filename")
+        );
     }
 
     /// `--help` is seen where the option scan is still running, and nowhere
@@ -66676,7 +68370,11 @@ mod tests {
         assert_eq!(run("cd ---help >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
         assert_eq!(run("cd -help >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
         // A flag with a required argument takes the next word whatever it is.
-        assert!(run("mapfile -d , --help").0.starts_with("mapfile: mapfile "));
+        assert!(
+            run("mapfile -d , --help")
+                .0
+                .starts_with("mapfile: mapfile ")
+        );
         assert_eq!(run("mapfile -d --help </dev/null; echo rc=$?").0, "rc=0\n");
         // One whose argument is optional does not take an option-shaped word,
         // so the scan reaches the request behind it.
@@ -66685,7 +68383,10 @@ mod tests {
         assert!(run("set -o --help").0.starts_with("set: set "));
         // An invalid option ends the scan with a diagnostic of its own; the
         // request behind it is never reached.
-        assert_eq!(run("type -z --help >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
+        assert_eq!(
+            run("type -z --help >/dev/null 2>&1; echo rc=$?").0,
+            "rc=2\n"
+        );
     }
 
     /// The builtins whose help test is made once, of the first word only.
@@ -66703,7 +68404,10 @@ mod tests {
         assert!(run("times --help").0.starts_with("times: times"));
         assert!(run("getopts --help").0.starts_with("getopts: getopts "));
         // One word further in and it is an operand again.
-        assert_eq!(run("kill -l --help >/dev/null 2>&1; echo rc=$?").0, "rc=0\n");
+        assert_eq!(
+            run("kill -l --help >/dev/null 2>&1; echo rc=$?").0,
+            "rc=0\n"
+        );
         assert_eq!(run("let 1 --help >/dev/null 2>&1; echo rc=$?").0, "rc=0\n");
         assert_eq!(run("dirs -l --help >/dev/null 2>&1").0, "");
     }
@@ -66731,16 +68435,25 @@ mod tests {
     #[test]
     fn the_two_wrapper_builtins_answer_the_help_request_themselves() {
         assert_eq!(run("command --help").0, run("help command").0);
-        assert_eq!(run("command --help >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
+        assert_eq!(
+            run("command --help >/dev/null 2>&1; echo rc=$?").0,
+            "rc=2\n"
+        );
         assert_eq!(run("builtin --help").0, run("help builtin").0);
-        assert_eq!(run("builtin --help >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
+        assert_eq!(
+            run("builtin --help >/dev/null 2>&1; echo rc=$?").0,
+            "rc=2\n"
+        );
         // `command` still sees it after its own flags; `builtin` does not, and
         // there it is the wrapped builtin's own request instead.
         assert_eq!(run("command -v --help").0, run("help command").0);
         assert_eq!(run("builtin cd --help").0, run("help cd").0);
         assert_eq!(run("command cd --help").0, run("help cd").0);
         // Past a `--` it is an operand again — a command name to run.
-        assert_eq!(run("command -- --help >/dev/null 2>&1; echo rc=$?").0, "rc=127\n");
+        assert_eq!(
+            run("command -- --help >/dev/null 2>&1; echo rc=$?").0,
+            "rc=127\n"
+        );
     }
 
     /// `bind` runs the scan but has no arm to catch what it finds.
@@ -67032,7 +68745,10 @@ mod tests {
         // The crate directory has a `Cargo.toml`; a shell standing in it would
         // match the pattern rather than leave it alone.
         let (out, _) = run("echo Cargo.tom*");
-        assert_eq!(out, "Cargo.tom*\n", "the shell is standing in the crate: {out:?}");
+        assert_eq!(
+            out, "Cargo.tom*\n",
+            "the shell is standing in the crate: {out:?}"
+        );
 
         let (out, _) = run("printf '%s\\n' \"$PWD\" \"$(pwd)\"");
         let seen: Vec<&str> = out.lines().collect();
@@ -67043,7 +68759,10 @@ mod tests {
         // It is one directory for the whole test, not one per shell: the several
         // shells a test builds have to be able to see each other's files.
         assert_eq!(run("> made-by-an-earlier-shell").0, "");
-        assert_eq!(run("echo made-by-an-earlier-shel*").0, "made-by-an-earlier-shell\n");
+        assert_eq!(
+            run("echo made-by-an-earlier-shel*").0,
+            "made-by-an-earlier-shell\n"
+        );
     }
 
     /// The harness's other contract: a test shell's `$PATH` reaches the host's
@@ -67064,9 +68783,13 @@ mod tests {
         let profile = deps.parent().expect("profile directory");
         let hay = path.replace('\\', "/").to_ascii_lowercase();
         for dir in [deps, profile] {
-            let needle = dir.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+            let needle = dir
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase();
             assert!(
-                !hay.split([':', ';']).any(|e| e.trim_end_matches('/') == needle),
+                !hay.split([':', ';'])
+                    .any(|e| e.trim_end_matches('/') == needle),
                 "cargo's {needle} is still on the test shell's $PATH"
             );
         }
@@ -67075,8 +68798,14 @@ mod tests {
         let (found, rc) = run("command -v cat");
         if rc == 0 {
             let found = found.trim().replace('\\', "/").to_ascii_lowercase();
-            let prof = profile.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
-            assert!(!found.starts_with(&prof), "`cat` resolved into the build tree: {found}");
+            let prof = profile
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase();
+            assert!(
+                !found.starts_with(&prof),
+                "`cat` resolved into the build tree: {found}"
+            );
         }
     }
 
@@ -67167,7 +68896,10 @@ mod tests {
         // bash prints for it — `syntax error: unexpected end of file`, at a
         // line two past the input's last — still differs. See
         // TD-OILS-A-CONTINUATION-AT-END-OF-INPUT-DOES-NOT-MOVE-THE-READER.)
-        assert_eq!(run("eval 'case a in a) echo hit;; esac\\' 2>/dev/null\necho rc=$?").0, "rc=2\n");
+        assert_eq!(
+            run("eval 'case a in a) echo hit;; esac\\' 2>/dev/null\necho rc=$?").0,
+            "rc=2\n"
+        );
         assert_eq!(run("eval 'case a in a) echo hit;; esac'").0, "hit\n");
         // A `.`/`source`d file is read as a string too — bash reads it whole
         // and hands it to `parse_and_execute` — so it keeps the backslash a
@@ -67205,7 +68937,10 @@ mod tests {
             "( echo a",
             "select x in a b; do",
         ] {
-            assert!(sh.parse_incomplete(src.as_bytes()), "should be incomplete: {src:?}");
+            assert!(
+                sh.parse_incomplete(src.as_bytes()),
+                "should be incomplete: {src:?}"
+            );
         }
         // --- incomplete: open quotes / substitutions ---
         for src in [
@@ -67215,11 +68950,17 @@ mod tests {
             "echo `date",
             "echo $((1 +",
         ] {
-            assert!(sh.parse_incomplete(src.as_bytes()), "should be incomplete: {src:?}");
+            assert!(
+                sh.parse_incomplete(src.as_bytes()),
+                "should be incomplete: {src:?}"
+            );
         }
         // --- incomplete: line ends on a binary/pipe operator ---
         for src in ["echo a &&", "echo a ||", "echo a |", "echo a |&"] {
-            assert!(sh.parse_incomplete(src.as_bytes()), "should be incomplete: {src:?}");
+            assert!(
+                sh.parse_incomplete(src.as_bytes()),
+                "should be incomplete: {src:?}"
+            );
         }
         // --- incomplete: dangling here-document (body not yet typed) ---
         for src in [
@@ -67229,7 +68970,10 @@ mod tests {
             "cat <<'Q'",
             "while read x; do echo $x; done <<IN",
         ] {
-            assert!(sh.parse_incomplete(src.as_bytes()), "should be incomplete (heredoc): {src:?}");
+            assert!(
+                sh.parse_incomplete(src.as_bytes()),
+                "should be incomplete (heredoc): {src:?}"
+            );
         }
         // --- complete: a full command must NOT be flagged incomplete ---
         for src in [
@@ -67246,7 +68990,10 @@ mod tests {
             "",
             "   ",
         ] {
-            assert!(!sh.parse_incomplete(src.as_bytes()), "should be complete: {src:?}");
+            assert!(
+                !sh.parse_incomplete(src.as_bytes()),
+                "should be complete: {src:?}"
+            );
         }
         // --- genuine syntax errors: NOT incomplete (more input can't fix) ---
         for src in ["echo )", "echo a; ; echo b", "done", "fi", "esac"] {
@@ -67295,7 +69042,8 @@ mod tests {
         {
             let _g = env_guard();
             let mut sh = new_shell();
-            sh.vars.insert("HOSTNAME".to_string(), b"preset.local".to_vec());
+            sh.vars
+                .insert("HOSTNAME".to_string(), b"preset.local".to_vec());
             sh.import_environment();
             assert_eq!(sh.vars.get("HOSTNAME").map(as_text), Some("preset.local"));
         }
@@ -67588,7 +69336,12 @@ mod tests {
 
         // Each case: the source, then its full diagnostic, then the one line that
         // survives errexit — which is always the full form's first line.
-        for src in ["echo hello world (", ":\n:\necho a | | b", "if true", "[[ a b ]]"] {
+        for src in [
+            "echo hello world (",
+            ":\n:\necho a | | b",
+            "if true",
+            "[[ a b ]]",
+        ] {
             let e = parse(src.as_bytes()).unwrap_err();
             sh.errexit = false;
             let full = parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0));
@@ -67627,7 +69380,11 @@ mod tests {
         sh.set_interactive_shell(false);
         let check = |sh: &Shell, src: &str, want: &str| {
             let e = parse(src.as_bytes()).unwrap_err();
-            assert_eq!(parse_error(sh, &e, src.as_bytes(), &LineMap::Offset(0)), want, "src: {src}");
+            assert_eq!(
+                parse_error(sh, &e, src.as_bytes(), &LineMap::Offset(0)),
+                want,
+                "src: {src}"
+            );
         };
         // A bare word primary followed by another word: bash wanted a binary
         // operator. Covers a plain operand, a non-`[[` operator, and a unary
@@ -67741,7 +69498,11 @@ mod tests {
         // quote on a later line does not suppress the lines before it. The
         // incremental parser must therefore hand back every complete unit first
         // and only then report the lexer error.
-        let mut ip = crate::parser::IncrementalParser::new("echo one\necho two\nv='abc\n".as_bytes(), 0, crate::lexer::ParseOpts::default());
+        let mut ip = crate::parser::IncrementalParser::new(
+            "echo one\necho two\nv='abc\n".as_bytes(),
+            0,
+            crate::lexer::ParseOpts::default(),
+        );
         let mut units = 0;
         loop {
             match ip.next_unit(None, crate::lexer::ParseOpts::default()) {
@@ -67749,14 +69510,20 @@ mod tests {
                 Some(Err(e)) => {
                     assert_eq!(units, 2, "both complete lines are handed out first");
                     assert_eq!(e.line, Some(3));
-                    assert!(bytes::contains(&e.msg(), b"unexpected EOF while looking for"));
+                    assert!(bytes::contains(
+                        &e.msg(),
+                        b"unexpected EOF while looking for"
+                    ));
                     break;
                 }
                 None => panic!("the lexer error must surface"),
             }
         }
         // The error also ends the iteration.
-        assert!(ip.next_unit(None, crate::lexer::ParseOpts::default()).is_none());
+        assert!(
+            ip.next_unit(None, crate::lexer::ParseOpts::default())
+                .is_none()
+        );
     }
 
     /// An unterminated-here-document warning comes from bash's *reader*, so its
@@ -67799,15 +69566,21 @@ mod tests {
 
         // A unit that both warns and fails to parse releases the warning anyway:
         // bash prints it *before* the `unexpected end of file`.
-        let mut ip =
-            crate::parser::IncrementalParser::new("if true; then\ncat <<EOF\nbody".as_bytes(), 0, opts);
+        let mut ip = crate::parser::IncrementalParser::new(
+            "if true; then\ncat <<EOF\nbody".as_bytes(),
+            0,
+            opts,
+        );
         assert_eq!(unit(&mut ip), (true, true, vec!["EOF/2/3".to_string()]));
 
         // …but a syntax error on an *earlier* line suppresses it entirely, because
         // bash abandons the input without ever reading the here-document's line.
         // (Measured: `echo one )` + an unterminated here-doc warns not at all.)
-        let mut ip =
-            crate::parser::IncrementalParser::new("echo one )\ncat <<EOF\nbody".as_bytes(), 0, opts);
+        let mut ip = crate::parser::IncrementalParser::new(
+            "echo one )\ncat <<EOF\nbody".as_bytes(),
+            0,
+            opts,
+        );
         assert_eq!(unit(&mut ip), (true, true, vec![]));
         assert_eq!(unit(&mut ip), (false, false, vec![]));
 
@@ -67830,8 +69603,11 @@ mod tests {
         // complete line has left no token for the record to name. `echo hi` still
         // runs first, silently — measured against bash, which prints `one`, then
         // the warning, then the syntax error.
-        let mut ip =
-            crate::parser::IncrementalParser::new("echo hi\nx=$(cat <<EOF\nbody".as_bytes(), 0, opts);
+        let mut ip = crate::parser::IncrementalParser::new(
+            "echo hi\nx=$(cat <<EOF\nbody".as_bytes(),
+            0,
+            opts,
+        );
         assert_eq!(unit(&mut ip), (true, false, vec![]));
         assert_eq!(unit(&mut ip), (true, true, vec!["EOF/2/3".to_string()]));
         assert_eq!(unit(&mut ip), (false, false, vec![]));
@@ -67947,26 +69723,32 @@ mod tests {
         // never got to the `}`.
         assert_eq!(spans("{ echo a\n) bad\n}\n"), ["{ echo a\n) bad\n"]);
         // Earlier units are untouched, and each still ends at its own line.
-        assert_eq!(spans("echo one\necho two;;\necho three\n"), ["echo one\n", "echo two;;\n"]);
+        assert_eq!(
+            spans("echo one\necho two;;\necho three\n"),
+            ["echo one\n", "echo two;;\n"]
+        );
         // An unclosed construct is the same rule from the other end: the reader
         // ran to end of input looking for the close, so every line it passed on
         // the way belongs to the unit that reports it.
         assert_eq!(spans("echo \"\n"), ["echo \"\n"]);
-        assert_eq!(spans("echo one\necho \"unterm\necho three\n"), [
-            "echo one\n",
-            "echo \"unterm\necho three\n",
-        ]);
+        assert_eq!(
+            spans("echo one\necho \"unterm\necho three\n"),
+            ["echo one\n", "echo \"unterm\necho three\n",]
+        );
         assert_eq!(spans("echo $(\n"), ["echo $(\n"]);
         assert_eq!(spans("cat <<E \"\n"), ["cat <<E \"\n"]);
         // A unit that parses is unaffected: one line, echoed once.
         assert_eq!(spans("echo a; echo b\n"), ["echo a; echo b\n"]);
-        assert_eq!(spans("if true; then\necho x\nfi\n"), ["if true; then\necho x\nfi\n"]);
+        assert_eq!(
+            spans("if true; then\necho x\nfi\n"),
+            ["if true; then\necho x\nfi\n"]
+        );
         // Including one whose newline swallowed a here-document body — the span
         // already ran past the body, so nothing stretches it further.
-        assert_eq!(spans("cat <<E\nbody\nE\necho after\n"), [
-            "cat <<E\nbody\nE\n",
-            "echo after\n",
-        ]);
+        assert_eq!(
+            spans("cat <<E\nbody\nE\necho after\n"),
+            ["cat <<E\nbody\nE\n", "echo after\n",]
+        );
     }
 
     /// The other half of the same reduction: a here-document whose body the lex
@@ -68110,7 +69892,8 @@ mod tests {
         // A `#` that starts the word is a comment, so there is no word.
         for src in ["cat <<#c", "cat << #c", "cat <<-\t#c"] {
             assert!(
-                err(src).starts_with("osh: -c: line 1: syntax error near unexpected token `newline'"),
+                err(src)
+                    .starts_with("osh: -c: line 1: syntax error near unexpected token `newline'"),
                 "{src:?}"
             );
         }
@@ -68136,7 +69919,10 @@ mod tests {
         let sh = "shopt -s expand_aliases\nalias B='mapfile -t v <<'\n";
         let show = "echo \"[${v[0]}]\"\n";
         // The word after the alias word is the delimiter.
-        assert_eq!(run(&format!("{sh}B E\nbody one\nE\n{show}")).0, "[body one]\n");
+        assert_eq!(
+            run(&format!("{sh}B E\nbody one\nE\n{show}")).0,
+            "[body one]\n"
+        );
         // With its quoting: `"E"` and `\E` stop the body expanding, and an
         // unquoted one leaves it expanding — delimiters are never expanded
         // themselves, so `E$x` is literal.
@@ -68148,7 +69934,10 @@ mod tests {
             run(&format!("{sh}B \\E\nalso lit $PWD\nE\n{show}")).0,
             "[also lit $PWD]\n"
         );
-        assert_eq!(run(&format!("{sh}x=zz\nB E$x\nnow\nE$x\n{show}")).0, "[now]\n");
+        assert_eq!(
+            run(&format!("{sh}x=zz\nB E$x\nnow\nE$x\n{show}")).0,
+            "[now]\n"
+        );
         // The rest of the calling line is still the calling line.
         assert_eq!(
             run(&format!("{sh}B E; echo tail\ngathered\nE\n{show}")).0,
@@ -68216,7 +70005,10 @@ mod tests {
         let sh = "shopt -s expand_aliases\n";
         // The body is the next line of the file.
         assert_eq!(
-            run(&format!("{sh}alias A='mapfile -t v <<E'\nA\nfrom the file\nE\necho \"[${{v[0]}}]\"\n")).0,
+            run(&format!(
+                "{sh}alias A='mapfile -t v <<E'\nA\nfrom the file\nE\necho \"[${{v[0]}}]\"\n"
+            ))
+            .0,
             "[from the file]\n"
         );
         // A body written in the value is read back as commands, and they are
@@ -68228,7 +70020,10 @@ mod tests {
         // With no newline in the value the gather waits for the calling line's
         // own, so the whole line keeps the alias word's number.
         assert_eq!(
-            run(&format!("{sh}alias N='mapfile -t v <<E; echo \"tail at $LINENO\"'\nN\nreal\nE\n")).0,
+            run(&format!(
+                "{sh}alias N='mapfile -t v <<E; echo \"tail at $LINENO\"'\nN\nreal\nE\n"
+            ))
+            .0,
             "tail at 3\n"
         );
         // One moving cursor in declaration order, whichever text each `<<` was
@@ -68243,19 +70038,32 @@ mod tests {
         );
         // `<<-` and a quoted delimiter travel through the splice unchanged.
         assert_eq!(
-            run(&format!("{sh}alias D='mapfile -t v <<-E'\nD\n\tstripped\n\tE\necho \"[${{v[0]}}]\"\n")).0,
+            run(&format!(
+                "{sh}alias D='mapfile -t v <<-E'\nD\n\tstripped\n\tE\necho \"[${{v[0]}}]\"\n"
+            ))
+            .0,
             "[stripped]\n"
         );
         assert_eq!(
-            run(&format!("{sh}alias Q='mapfile -t v <<\"E\"'\nQ\n$HOME\nE\necho \"[${{v[0]}}]\"\n")).0,
+            run(&format!(
+                "{sh}alias Q='mapfile -t v <<\"E\"'\nQ\n$HOME\nE\necho \"[${{v[0]}}]\"\n"
+            ))
+            .0,
             "[$HOME]\n"
         );
         // Nothing about the enclosing construct matters: the gather happens at a
         // newline, and a compound has newlines like anything else.
-        for wrap in ["if true; then\n@fi\n", "f() {\n@}\nf\n", "for x in 1; do\n@done\n"] {
+        for wrap in [
+            "if true; then\n@fi\n",
+            "f() {\n@}\nf\n",
+            "for x in 1; do\n@done\n",
+        ] {
             let body = wrap.replace('@', "S\nnested\nE\n");
             assert_eq!(
-                run(&format!("{sh}alias S='mapfile -t v <<E'\n{body}echo \"[${{v[0]}}]\"\n")).0,
+                run(&format!(
+                    "{sh}alias S='mapfile -t v <<E'\n{body}echo \"[${{v[0]}}]\"\n"
+                ))
+                .0,
                 "[nested]\n",
                 "{body:?}"
             );
@@ -68268,7 +70076,10 @@ mod tests {
         );
         // A body is not code, so it need not lex as code.
         assert_eq!(
-            run(&format!("{sh}alias S='mapfile -t v <<E'\nS\nit's \"fine\nE\necho \"[${{v[0]}}]\"\n")).0,
+            run(&format!(
+                "{sh}alias S='mapfile -t v <<E'\nS\nit's \"fine\nE\necho \"[${{v[0]}}]\"\n"
+            ))
+            .0,
             "[it's \"fine]\n"
         );
     }
@@ -68290,7 +70101,10 @@ mod tests {
             "done\n"
         );
         assert_eq!(
-            run(&format!("{sh}alias N='false &'\nN& echo and\nwait\necho done\n")).0,
+            run(&format!(
+                "{sh}alias N='false &'\nN& echo and\nwait\necho done\n"
+            ))
+            .0,
             "done\n"
         );
         // A substitution opened in the value closes on the calling line.
@@ -68313,7 +70127,10 @@ mod tests {
         assert_eq!(run(&format!("{sh}alias V='echo ab'\nV cd\n")).0, "ab cd\n");
         // Nor does the alias word itself extend into what follows it.
         assert_eq!(
-            run(&format!("{sh}alias W='echo W-ran'\nWx() {{ echo Wx; }}\nWx\n")).0,
+            run(&format!(
+                "{sh}alias W='echo W-ran'\nWx() {{ echo Wx; }}\nWx\n"
+            ))
+            .0,
             "Wx\n"
         );
     }
@@ -68359,7 +70176,10 @@ mod tests {
         // A value whose own first word is the delimiter is `AL_BEINGEXPANDED`
         // there, so it stands for itself rather than recurring.
         assert_eq!(
-            run(&format!("{sh}alias Z='Z'\nalias S='cat << '\nS Z\nbody\nZ\n")).0,
+            run(&format!(
+                "{sh}alias Z='Z'\nalias S='cat << '\nS Z\nbody\nZ\n"
+            ))
+            .0,
             "body\n"
         );
     }
@@ -68410,7 +70230,10 @@ mod tests {
         assert!(parse("for 1abc in x; do :; done".as_bytes()).is_ok());
         assert_eq!(
             run("for 1abc in x; do echo NO; done 2>&1; echo rc=$?; echo after"),
-            ("osh: `1abc': not a valid identifier\nrc=1\nafter\n".to_string(), 0)
+            (
+                "osh: `1abc': not a valid identifier\nrc=1\nafter\n".to_string(),
+                0
+            )
         );
     }
 
@@ -68504,10 +70327,7 @@ mod tests {
         // Pipeline: first stage L1 pipes into a stage that echoes its own line.
         assert_eq!(run_cmd("echo one |\ncat\necho $LINENO"), "one\n3\n");
         // And-or list: each stage sees its own line (2 then 3).
-        assert_eq!(
-            run_cmd("true &&\necho $LINENO &&\necho $LINENO"),
-            "2\n3\n"
-        );
+        assert_eq!(run_cmd("true &&\necho $LINENO &&\necho $LINENO"), "2\n3\n");
         // Simple sequential commands: line advances per command.
         assert_eq!(run_cmd("echo start\necho $LINENO"), "start\n2\n");
     }
@@ -68683,16 +70503,10 @@ mod tests {
         );
         assert_eq!(
             run_cmd("readonly ro=1; { (( ro=5 )); echo after; } 2>&1"),
-            (
-                "osh: line 1: ro: readonly variable\nafter\n".to_string(),
-                0
-            )
+            ("osh: line 1: ro: readonly variable\nafter\n".to_string(), 0)
         );
         // A well-formed subscript is of course unaffected.
-        assert_eq!(
-            run_cmd("(( a[1+1]=9 )); echo \"${a[2]}\"").0,
-            "9\n"
-        );
+        assert_eq!(run_cmd("(( a[1+1]=9 )); echo \"${a[2]}\"").0, "9\n");
     }
 
     #[test]
@@ -68755,7 +70569,10 @@ mod tests {
             "osh: line 1: nope: unbound variable\n"
         );
         // A read-modify-write reads; the plain assignment beside it does not.
-        assert_eq!(run_cmd("set -u; { (( nope = 5 )); echo \"$nope\"; } 2>&1"), "5\n");
+        assert_eq!(
+            run_cmd("set -u; { (( nope = 5 )); echo \"$nope\"; } 2>&1"),
+            "5\n"
+        );
         assert_eq!(
             run_cmd("set -u; { (( nope += 5 )); echo tail; } 2>&1"),
             "osh: line 1: nope: unbound variable\n"
@@ -69071,7 +70888,10 @@ mod tests {
         }
         // Stage 1: the values — and a keyed element's subscript — see the old
         // array, which they could not if the clearing came first.
-        assert_eq!(run_cmd("a=(1 2)\na=(9 ${a[0]})\necho \"[${a[*]}]\""), "[9 1]\n");
+        assert_eq!(
+            run_cmd("a=(1 2)\na=(9 ${a[0]})\necho \"[${a[*]}]\""),
+            "[9 1]\n"
+        );
         assert_eq!(
             run_cmd("declare -A h=([k]=old)\nh=([n]=${h[k]})\necho \"[${h[n]}]\""),
             "[old]\n"
@@ -69117,7 +70937,10 @@ echo \"[${i[a]}] [${i[x]-absent}]\""
             "[9] [1]\n"
         );
         // The empty literal still clears, in both flavours.
-        assert_eq!(run_cmd("a=(1 2 3); a=(); echo \"[${a[*]}] ${#a[@]}\""), "[] 0\n");
+        assert_eq!(
+            run_cmd("a=(1 2 3); a=(); echo \"[${a[*]}] ${#a[@]}\""),
+            "[] 0\n"
+        );
         assert_eq!(
             run_cmd("declare -A m=([k]=v); m=(); echo \"[${m[k]-absent}] ${#m[@]}\""),
             "[absent] 0\n"
@@ -69268,7 +71091,7 @@ echo "$x $y""#)
 read _ <&"${COPROC[0]}"
 [[ -n $COPROC_PID ]] && echo haspid
 echo bye >&"${COPROC[1]}""#)
-                .0,
+            .0,
             "haspid\n"
         );
     }
@@ -69377,7 +71200,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("x=1 </dev/null c 2>/dev/null", ""),
         ];
         for (src, want) in cases {
-            assert_eq!(&run_with_aliases("alias c='echo HIT'", src).0, want, "{src}");
+            assert_eq!(
+                &run_with_aliases("alias c='echo HIT'", src).0,
+                want,
+                "{src}"
+            );
         }
         // A `;;` ends a `case` arm, and what follows one is the next arm's
         // *pattern* — never a command, so never expanded.
@@ -69395,13 +71222,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn expand_aliases_shopt_is_recognized() {
         // `shopt -s/-u/-q expand_aliases` is a valid bash option name and must
         // not error with "invalid shell option name" (regression).
-        assert_eq!(run("shopt -s expand_aliases; echo done"), ("done\n".into(), 0));
-        assert_eq!(run("shopt -u expand_aliases; echo done"), ("done\n".into(), 0));
+        assert_eq!(
+            run("shopt -s expand_aliases; echo done"),
+            ("done\n".into(), 0)
+        );
+        assert_eq!(
+            run("shopt -u expand_aliases; echo done"),
+            ("done\n".into(), 0)
+        );
         // Toggling is observable via `shopt -q`.
-        assert_eq!(run("shopt -s expand_aliases; shopt -q expand_aliases; echo $?").0, "0\n");
-        assert_eq!(run("shopt -u expand_aliases; shopt -q expand_aliases; echo $?").0, "1\n");
+        assert_eq!(
+            run("shopt -s expand_aliases; shopt -q expand_aliases; echo $?").0,
+            "0\n"
+        );
+        assert_eq!(
+            run("shopt -u expand_aliases; shopt -q expand_aliases; echo $?").0,
+            "1\n"
+        );
         // It appears in the bare `shopt` listing.
-        assert!(run("shopt").0.contains("expand_aliases"), "got: {:?}", run("shopt").0);
+        assert!(
+            run("shopt").0.contains("expand_aliases"),
+            "got: {:?}",
+            run("shopt").0
+        );
     }
 
     #[test]
@@ -69427,10 +71270,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(take_capture(&buf), b"hi\n");
         // Even though the alias is in the table, run_source in command mode does
         // not expand it; here we prove the gate itself is off by default.
-        assert!(!sh.aliases_enabled(), "expand_aliases should default off in command mode");
+        assert!(
+            !sh.aliases_enabled(),
+            "expand_aliases should default off in command mode"
+        );
         // Opting in flips the gate on.
         sh.run_source("shopt -s expand_aliases".as_bytes());
-        assert!(sh.aliases_enabled(), "shopt -s expand_aliases should enable expansion");
+        assert!(
+            sh.aliases_enabled(),
+            "shopt -s expand_aliases should enable expansion"
+        );
     }
 
     #[test]
@@ -69442,7 +71291,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = new_shell();
         // Default (tty-like) REPL: interactive, aliases on.
         assert!(sh.is_interactive(), "default REPL should be interactive");
-        assert!(sh.aliases_enabled(), "interactive REPL expands aliases by default");
+        assert!(
+            sh.aliases_enabled(),
+            "interactive REPL expands aliases by default"
+        );
         // Flip to non-interactive (piped stdin): aliases now default off.
         sh.set_interactive_shell(false);
         assert!(!sh.is_interactive(), "piped-stdin REPL is non-interactive");
@@ -69452,7 +71304,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // Opting in still flips the gate on, matching bash.
         sh.run_source("shopt -s expand_aliases".as_bytes());
-        assert!(sh.aliases_enabled(), "shopt -s expand_aliases enables expansion");
+        assert!(
+            sh.aliases_enabled(),
+            "shopt -s expand_aliases enables expansion"
+        );
     }
 
     #[test]
@@ -69470,7 +71325,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh2 = new_shell();
         sh2.set_script_mode();
         sh2.set_interactive_shell(true);
-        assert!(sh2.is_interactive(), "`-i script` is an interactive shell too");
+        assert!(
+            sh2.is_interactive(),
+            "`-i script` is an interactive shell too"
+        );
 
         // Without `-i` the binary computes `false` for both, which is the case
         // every ordinary `-c`/script invocation takes.
@@ -69522,10 +71380,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn alias_trailing_blank_expands_next_word() {
         // A value ending in a blank makes the following word alias-eligible.
-        let (o, _) = run_with_aliases(
-            "alias sudo='echo SUDO '; alias ll='echo LL'",
-            "sudo ll",
-        );
+        let (o, _) = run_with_aliases("alias sudo='echo SUDO '; alias ll='echo LL'", "sudo ll");
         assert_eq!(o, "SUDO echo LL\n");
     }
 
@@ -69548,7 +71403,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // dash and a subscript-looking tail are all fine. Measured in bash 5.2.
         let (o, s) = run("alias 1a=v 'a-b=v' 'a[0]=v' 'x!'=v; alias");
         assert_eq!(s, 0);
-        assert_eq!(o, "alias 1a='v'\nalias a-b='v'\nalias a[0]='v'\nalias x!='v'\n");
+        assert_eq!(
+            o,
+            "alias 1a='v'\nalias a-b='v'\nalias a[0]='v'\nalias x!='v'\n"
+        );
     }
 
     #[test]
@@ -69563,14 +71421,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             b'\t', b'\n', b'/',
         ] {
             let (_, s) = run(&format!("alias $'a\\x{bad:02x}b=v' 2>/dev/null"));
-            assert_eq!(s, 1, "expected a name holding {:?} to be refused", bad as char);
+            assert_eq!(
+                s, 1,
+                "expected a name holding {:?} to be refused",
+                bad as char
+            );
         }
         let (o, s) = run("alias f1=1 'a b=2' f2=3 2>/dev/null; alias");
         assert_eq!(s, 0, "the listing that follows succeeds on its own");
         assert_eq!(o, "alias f1='1'\nalias f2='3'\n");
         let (o, s) = run("alias f1=1 'a b=2' f2=3 2>&1 >/dev/null");
         assert_eq!(s, 1);
-        assert!(o.ends_with("alias: `a b': invalid alias name\n"), "got {o:?}");
+        assert!(
+            o.ends_with("alias: `a b': invalid alias name\n"),
+            "got {o:?}"
+        );
     }
 
     #[test]
@@ -69624,9 +71489,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Inside it, a listing with no `-p` is bare — the whole table, a named
         // query, and the dash-leading name whose `-- ` goes with the word it
         // was there to guard.
-        assert_eq!(run(&format!("{SET}set -o posix; alias")).0, "-foo='x'\nll='ls -l'\n");
-        assert_eq!(run(&format!("{SET}set -o posix; alias ll")).0, "ll='ls -l'\n");
-        assert_eq!(run(&format!("{SET}set -o posix; alias -- -foo")).0, "-foo='x'\n");
+        assert_eq!(
+            run(&format!("{SET}set -o posix; alias")).0,
+            "-foo='x'\nll='ls -l'\n"
+        );
+        assert_eq!(
+            run(&format!("{SET}set -o posix; alias ll")).0,
+            "ll='ls -l'\n"
+        );
+        assert_eq!(
+            run(&format!("{SET}set -o posix; alias -- -foo")).0,
+            "-foo='x'\n"
+        );
         // `-p` is reusable whatever the mode, for the table dump it forces and
         // for the operands after it alike.
         assert_eq!(
@@ -69640,7 +71514,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Defining is not a listing either way, and the word comes back when
         // the mode goes.
         assert_eq!(run(&format!("{SET}set -o posix; alias z=1")).0, "");
-        assert_eq!(run(&format!("{SET}set -o posix; set +o posix; alias ll")).0, "alias ll='ls -l'\n");
+        assert_eq!(
+            run(&format!("{SET}set -o posix; set +o posix; alias ll")).0,
+            "alias ll='ls -l'\n"
+        );
     }
 
     /// The half of posix mode's redirection-word rule the corpus cannot reach:
@@ -69708,7 +71585,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // …but not the rest of the same line: bash reads a whole logical line
         // before parsing it, so `a` here is still an ordinary word.
-        assert_eq!(run_script("shopt -s expand_aliases\nalias a='echo A'; a").1, 127);
+        assert_eq!(
+            run_script("shopt -s expand_aliases\nalias a='echo A'; a").1,
+            127
+        );
 
         // The trailing-blank rule makes the next word expandable too.
         assert_eq!(
@@ -69908,7 +71788,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("shopt -s xpg_echo; echo -n 'a\\tb'").0, "a\tb");
         assert_eq!(run("shopt -s xpg_echo; echo 'a\\cb'").0, "a");
         // The dialect is `-e`'s, down to `\0101` needing its leading zero.
-        assert_eq!(run("shopt -s xpg_echo; echo -n '\\0101\\101\\x41'").0, "A\\101A");
+        assert_eq!(
+            run("shopt -s xpg_echo; echo -n '\\0101\\101\\x41'").0,
+            "A\\101A"
+        );
         // A word that is not a flag still ends the scan without being eaten.
         assert_eq!(run("shopt -s xpg_echo; echo -x 'a\\tb'").0, "-x a\tb\n");
     }
@@ -69946,11 +71829,17 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("[[ -o posix ]]").1, 1);
         assert_eq!(run("POSIXLY_CORRECT=; [[ -o posix ]]").1, 0);
         assert_eq!(run("POSIXLY_CORRECT=0; [[ -o posix ]]").1, 0);
-        assert_eq!(run("POSIXLY_CORRECT=1; unset POSIXLY_CORRECT; [[ -o posix ]]").1, 1);
+        assert_eq!(
+            run("POSIXLY_CORRECT=1; unset POSIXLY_CORRECT; [[ -o posix ]]").1,
+            1
+        );
         assert_eq!(run("POSIXLY_CORRECT=1; [ -o posix ]").1, 0);
         // `set -o posix` writes `y`, but only over an absent value.
         assert_eq!(run("set -o posix; echo \"[$POSIXLY_CORRECT]\"").0, "[y]\n");
-        assert_eq!(run("POSIXLY_CORRECT=x; set -o posix; echo \"[$POSIXLY_CORRECT]\"").0, "[x]\n");
+        assert_eq!(
+            run("POSIXLY_CORRECT=x; set -o posix; echo \"[$POSIXLY_CORRECT]\"").0,
+            "[x]\n"
+        );
         // `set +o posix` unsets it, reaching past a `readonly` that the `unset`
         // builtin itself would refuse.
         assert_eq!(
@@ -69964,9 +71853,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run(scoped).0, "in\nout\n");
         // …and it is listed wherever an option is.
         assert!(run("set -o posix; echo \"$SHELLOPTS\"").0.contains("posix"));
-        assert!(run("POSIXLY_CORRECT=1; echo \"$SHELLOPTS\"").0.contains("posix"));
+        assert!(
+            run("POSIXLY_CORRECT=1; echo \"$SHELLOPTS\"")
+                .0
+                .contains("posix")
+        );
         assert!(!run("echo \"$SHELLOPTS\"").0.contains("posix"));
-        assert_eq!(run("set -o posix; set -o | grep '^posix'").0, "posix          \ton\n");
+        assert_eq!(
+            run("set -o posix; set -o | grep '^posix'").0,
+            "posix          \ton\n"
+        );
         assert_eq!(run("shopt -qo posix").1, 1);
         assert_eq!(run("shopt -so posix; shopt -qo posix").1, 0);
         // It has never been one of the `$-` letters.
@@ -69978,10 +71874,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // POSIX makes an assignment prefix on a *special* builtin an ordinary
         // assignment; bash obeys that in posix mode only.
         assert_eq!(run("A=1 eval ':'; echo \"[${A-unset}]\"").0, "[unset]\n");
-        assert_eq!(run("set -o posix; A=1 eval ':'; echo \"[${A-unset}]\"").0, "[1]\n");
+        assert_eq!(
+            run("set -o posix; A=1 eval ':'; echo \"[${A-unset}]\"").0,
+            "[1]\n"
+        );
         assert_eq!(run("set -o posix; A=1 :; echo \"[${A-unset}]\"").0, "[1]\n");
         // A regular builtin, and a function, are unaffected.
-        assert_eq!(run("set -o posix; A=1 true; echo \"[${A-unset}]\"").0, "[unset]\n");
+        assert_eq!(
+            run("set -o posix; A=1 true; echo \"[${A-unset}]\"").0,
+            "[unset]\n"
+        );
         assert_eq!(
             run("set -o posix; f() { :; }; A=1 f; echo \"[${A-unset}]\"").0,
             "[unset]\n"
@@ -70066,7 +71968,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("osh_readf_{}_{}.txt", std::process::id(), nanos));
+        let path =
+            std::env::temp_dir().join(format!("osh_readf_{}_{}.txt", std::process::id(), nanos));
         let p = path.to_string_lossy().replace('\\', "/");
         std::fs::write(&path, b"hello world\nsecond line\n").expect("write");
         let (o, st) = run(&format!("x=$(< {p}); echo \"[$x]\""));
@@ -70089,14 +71992,23 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("osh_piecewise_{}_{}.txt", std::process::id(), nanos));
+        let path = std::env::temp_dir().join(format!(
+            "osh_piecewise_{}_{}.txt",
+            std::process::id(),
+            nanos
+        ));
         let p = path.to_string_lossy().replace('\\', "/");
         run(&format!("kill -l 9 -x 15 > {p} 2>/dev/null"));
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "KILL\nTERM\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "KILL\nTERM\n"
+        );
         // `>>` reaches the same file without the first piece being lost either.
         run(&format!("kill -l 1 2 >> {p}"));
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "KILL\nTERM\nHUP\nINT\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "KILL\nTERM\nHUP\nINT\n"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -70206,9 +72118,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // The same top-level cases under `-c` command mode -> 127.
         assert_eq!(run_cmd_mode("set -u; echo $undef; echo after").1, 127);
-        assert_eq!(run_cmd_mode("unset q; echo ${q:?} 2>/dev/null; echo after").1, 127);
+        assert_eq!(
+            run_cmd_mode("unset q; echo ${q:?} 2>/dev/null; echo after").1,
+            127
+        );
         assert_eq!(run_cmd_mode("set -u; { echo $undef; }").1, 127);
-        assert_eq!(run_cmd_mode("f(){ echo $undef; }; set -u; f; echo after").1, 127);
+        assert_eq!(
+            run_cmd_mode("f(){ echo $undef; }; set -u; f; echo after").1,
+            127
+        );
         assert_eq!(run_cmd_mode("set -u; x=$undef").1, 127);
         assert_eq!(run_cmd_mode("set -u; a=($undef)").1, 127);
 
@@ -70233,11 +72151,23 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // which merely return non-zero. Covers `declare -i NAME=EXPR`, a plain
         // assignment to an already-`-i` variable, `declare -ia` array elements,
         // and `name[i]=EXPR`. Both syntax errors and division by zero abort.
-        assert_eq!(run("declare -i k=\"3 apples\"; echo after"), (String::new(), 1));
+        assert_eq!(
+            run("declare -i k=\"3 apples\"; echo after"),
+            (String::new(), 1)
+        );
         assert_eq!(run("declare -i k=\"1/0\"; echo after"), (String::new(), 1));
-        assert_eq!(run("declare -i k; k=\"3 apples\"; echo after"), (String::new(), 1));
-        assert_eq!(run("declare -ia arr=(1 \"2 x\" 3); echo after"), (String::new(), 1));
-        assert_eq!(run("declare -i a[0]=\"2 x\"; echo after"), (String::new(), 1));
+        assert_eq!(
+            run("declare -i k; k=\"3 apples\"; echo after"),
+            (String::new(), 1)
+        );
+        assert_eq!(
+            run("declare -ia arr=(1 \"2 x\" 3); echo after"),
+            (String::new(), 1)
+        );
+        assert_eq!(
+            run("declare -i a[0]=\"2 x\"; echo after"),
+            (String::new(), 1)
+        );
         // A valid integer initializer still works and is non-fatal.
         assert_eq!(run("declare -i k=\"5+3\"; echo $k").0, "8\n");
         // A bare word that is a (bare) identifier is a variable reference -> 0,
@@ -70247,7 +72177,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // In a subshell / command substitution the abort is status 1 and does
         // NOT abort the parent.
         assert_eq!(run("(declare -i k=\"3 apples\"); echo done").1, 0);
-        assert_eq!(run("x=$(declare -i k=\"3 apples\"; echo in); echo $?").0, "1\n");
+        assert_eq!(
+            run("x=$(declare -i k=\"3 apples\"; echo in); echo $?").0,
+            "1\n"
+        );
 
         // `let` / `(( ))` remain non-fatal (the following command still runs).
         assert_eq!(run("let \"3 apples\" 2>/dev/null; echo after").0, "after\n");
@@ -70264,11 +72197,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // comparisons are non-fatal.
 
         // Array subscript read with a bad arithmetic expression -> fatal.
-        assert_eq!(run("a=(1 2 3); echo ${a[3 x]}; echo after"), (String::new(), 1));
+        assert_eq!(
+            run("a=(1 2 3); echo ${a[3 x]}; echo after"),
+            (String::new(), 1)
+        );
         // Substring offset with a bad arithmetic expression -> fatal.
-        assert_eq!(run("x=abcdef; echo ${x:1 z}; echo after"), (String::new(), 1));
+        assert_eq!(
+            run("x=abcdef; echo ${x:1 z}; echo after"),
+            (String::new(), 1)
+        );
         // Substring length with a bad arithmetic expression -> fatal.
-        assert_eq!(run("x=abcdef; echo ${x:1:2 z}; echo after"), (String::new(), 1));
+        assert_eq!(
+            run("x=abcdef; echo ${x:1:2 z}; echo after"),
+            (String::new(), 1)
+        );
 
         // In a subshell the abort is status 1 and does NOT abort the parent.
         assert_eq!(run("a=(1 2 3); (echo ${a[3 x]}); echo done").1, 0);
@@ -70276,8 +72218,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // `[[ … -eq … ]]` / `[ … -eq … ]` arithmetic errors are NOT fatal: the
         // conditional reports non-zero but the following command still runs.
-        assert_eq!(run("[[ \"3 x\" -eq 5 ]] 2>/dev/null; echo after").0, "after\n");
-        assert_eq!(run("[ \"3 x\" -eq 5 ] 2>/dev/null; echo after").0, "after\n");
+        assert_eq!(
+            run("[[ \"3 x\" -eq 5 ]] 2>/dev/null; echo after").0,
+            "after\n"
+        );
+        assert_eq!(
+            run("[ \"3 x\" -eq 5 ] 2>/dev/null; echo after").0,
+            "after\n"
+        );
     }
 
     #[test]
@@ -70293,7 +72241,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // append, or evaluated under the integer attribute.
         assert_eq!(run("y=old\ny=p$(( a + ))q\necho \"[$y]\"").0, "[old]\n");
         assert_eq!(run("z=old\nz+=$(( a + ))\necho \"[$z]\"").0, "[old]\n");
-        assert_eq!(run("declare -i n=7\nn=$(( a + ))\necho \"[$n]\"").0, "[7]\n");
+        assert_eq!(
+            run("declare -i n=7\nn=$(( a + ))\necho \"[$n]\"").0,
+            "[7]\n"
+        );
         // Element assignments, both array kinds.
         assert_eq!(
             run("a=(o1 o2)\na[0]=$(( a + ))\necho \"[${a[*]}]\"").0,
@@ -70317,7 +72268,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // the pairs before the failing one — the one place a partial result
         // survives. A non-append one swaps at the end, so nothing survives.
         assert_eq!(
-            run("declare -A p=([k]=o)\np+=( [i]=good [j]=$(( a + )) )\necho \"${#p[@]} [${p[i]}]\"").0,
+            run(
+                "declare -A p=([k]=o)\np+=( [i]=good [j]=$(( a + )) )\necho \"${#p[@]} [${p[i]}]\""
+            )
+            .0,
             "2 [good]\n"
         );
         assert_eq!(
@@ -70325,7 +72279,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "2 [pv]\n"
         );
         assert_eq!(
-            run("declare -A r=([k]=o)\nr=( [i]=good [j]=$(( a + )) )\necho \"${#r[@]} [${r[k]}]\"").0,
+            run("declare -A r=([k]=o)\nr=( [i]=good [j]=$(( a + )) )\necho \"${#r[@]} [${r[k]}]\"")
+                .0,
             "1 [o]\n"
         );
         // A name that did not exist is not created, and an array that had no
@@ -70343,8 +72298,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "declare -A em\n"
         );
         // `declare`/`export` and a command prefix agree.
-        assert_eq!(run("d=old\ndeclare d=$(( a + ))\necho \"[$d]\"").0, "[old]\n");
-        assert_eq!(run("export e=old\nexport e=$(( a + ))\necho \"[$e]\"").0, "[old]\n");
+        assert_eq!(
+            run("d=old\ndeclare d=$(( a + ))\necho \"[$d]\"").0,
+            "[old]\n"
+        );
+        assert_eq!(
+            run("export e=old\nexport e=$(( a + ))\necho \"[$e]\"").0,
+            "[old]\n"
+        );
         assert_eq!(run("p=old\np=$(( a + )) true\necho \"[$p]\"").0, "[old]\n");
         // An assignment that is not made is not traced, either.
         assert_eq!(
@@ -70360,9 +72321,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // substring where a negative length counts back from the end. Fatal at
         // the main shell (status 1, aborts), status 1 without aborting the parent
         // inside a subshell.
-        assert_eq!(run("a=(1 2 3 4 5); echo ${a[@]:1:-1}; echo after"), (String::new(), 1));
-        assert_eq!(run("a=(1 2 3); echo ${a[*]:0:-5}; echo after"), (String::new(), 1));
-        assert_eq!(run("set -- a b c d e; echo ${@:1:-1}; echo after"), (String::new(), 1));
+        assert_eq!(
+            run("a=(1 2 3 4 5); echo ${a[@]:1:-1}; echo after"),
+            (String::new(), 1)
+        );
+        assert_eq!(
+            run("a=(1 2 3); echo ${a[*]:0:-5}; echo after"),
+            (String::new(), 1)
+        );
+        assert_eq!(
+            run("set -- a b c d e; echo ${@:1:-1}; echo after"),
+            (String::new(), 1)
+        );
         // Subshell: fails with 1 but the parent survives to run `echo done`.
         assert_eq!(run("(a=(1 2 3); echo ${a[@]:0:-1}); echo done").1, 0);
         assert_eq!(run("x=$(a=(1 2 3); echo ${a[@]:0:-1}); echo $?").0, "1\n");
@@ -70378,7 +72348,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Arithmetic-error diagnostics go through the shell's stderr routing, so
         // a command-scoped `2>/dev/null` silences them (bash parity) — regression
         // for a prior `eprintln!` that bypassed the redirect.
-        assert_eq!(run("let \"3 apples\" 2>/dev/null; echo after"), ("after\n".into(), 0));
+        assert_eq!(
+            run("let \"3 apples\" 2>/dev/null; echo after"),
+            ("after\n".into(), 0)
+        );
         assert_eq!(
             run("declare -i k=\"3 apples\" 2>/dev/null; echo after"),
             (String::new(), 1)
@@ -70612,9 +72585,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn for_in_list_takes_reserved_words_as_plain_words() {
         // The `in …` list is not command position, so nothing in it is a
         // reserved word — not even `do`/`done`. Measured against bash 5.2.
-        let (o, _) = run("for x in if then elif else fi while until do done; do printf '[%s]' \"$x\"; done");
+        let (o, _) =
+            run("for x in if then elif else fi while until do done; do printf '[%s]' \"$x\"; done");
         assert_eq!(o, "[if][then][elif][else][fi][while][until][do][done]");
-        let (o, _) = run("for x in case esac in function time coproc select; do printf '[%s]' \"$x\"; done");
+        let (o, _) =
+            run("for x in case esac in function time coproc select; do printf '[%s]' \"$x\"; done");
         assert_eq!(o, "[case][esac][in][function][time][coproc][select]");
         // Only the *first* word after the loop variable is the `in` keyword.
         let (o, _) = run("for x in in in; do printf '[%s]' \"$x\"; done");
@@ -70624,11 +72599,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // (through `eval`, so the diagnostic is redirectable — a parse error in
         // the outer source would abort before any redirect could apply).
         let (o, rc) = run("eval 'for x in a b do echo hi; done' 2>&1; echo \"rc=$?\"");
-        assert!(o.contains("syntax error near unexpected token `done'"), "{o:?}");
+        assert!(
+            o.contains("syntax error near unexpected token `done'"),
+            "{o:?}"
+        );
         assert!(o.ends_with("rc=2\n"), "{o:?}");
         assert_eq!(rc, 0);
         // No `in` at all iterates `"$@"`; an empty `in` iterates nothing.
-        let (o, _) = run("set -- p q; for x; do printf '[%s]' \"$x\"; done; echo; for x in; do echo NOT-REACHED; done");
+        let (o, _) = run(
+            "set -- p q; for x; do printf '[%s]' \"$x\"; done; echo; for x in; do echo NOT-REACHED; done",
+        );
         assert_eq!(o, "[p][q]\n");
     }
 
@@ -70640,7 +72620,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn while_with_break() {
-        let (o, _) = run("x=0; while true; do echo $x; x=$((x+1)); if [ $x -ge 3 ]; then break; fi; done");
+        let (o, _) =
+            run("x=0; while true; do echo $x; x=$((x+1)); if [ $x -ge 3 ]; then break; fi; done");
         assert_eq!(o, "0\n1\n2\n");
     }
 
@@ -70736,8 +72717,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("a=(x y z); [[ -v a ]] && echo arr").0, "arr\n");
         assert_eq!(run("a=(x y z); [[ -v a[1] ]] && echo e1").0, "e1\n");
         assert_eq!(run("a=([5]=x); [[ -v a[2] ]] || echo gap").0, "gap\n");
-        assert_eq!(run("declare -A m; m[k]=v; [[ -v m[k] ]] && echo key").0, "key\n");
-        assert_eq!(run("declare -A m; [[ -v m[nope] ]] || echo nokey").0, "nokey\n");
+        assert_eq!(
+            run("declare -A m; m[k]=v; [[ -v m[k] ]] && echo key").0,
+            "key\n"
+        );
+        assert_eq!(
+            run("declare -A m; [[ -v m[nope] ]] || echo nokey").0,
+            "nokey\n"
+        );
     }
 
     #[test]
@@ -70775,7 +72762,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "[] [3] [3] []\n"
         );
         assert_eq!(run("set -- a b c; echo [${#:0:1}] [${#:1}]").0, "[3] []\n");
-        assert_eq!(run("set -- a b c; echo [${#/3/z}] [${#//3/z}]").0, "[z] [z]\n");
+        assert_eq!(
+            run("set -- a b c; echo [${#/3/z}] [${#//3/z}]").0,
+            "[z] [z]\n"
+        );
         assert_eq!(run("set -- a b c; echo [${#@Q}]").0, "['3']\n");
         // …and when the remainder opens no operator either, neither reading
         // works and bash refuses the word.
@@ -70829,7 +72819,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let (out, _) = run(&format!("set -- a b; echo [${{{name}:+y}}]"));
             assert_eq!(out, "[y]\n", "for {name}");
         }
-        assert_eq!(run("set -- ab cd; echo [${@^}] [${*^}] [${1^}]").0, "[Ab Cd] [Ab Cd] [Ab]\n");
+        assert_eq!(
+            run("set -- ab cd; echo [${@^}] [${*^}] [${1^}]").0,
+            "[Ab Cd] [Ab Cd] [Ab]\n"
+        );
         // A subscript belongs to an identifier and to nothing else, so it is a
         // bad substitution on every special and on a positional too.
         for name in ["@", "*", "$", "0", "1"] {
@@ -70939,21 +72932,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // A nameref to an array element writes the element, and one to a name
         // nothing has bound creates it.
-        let (o, _) = run(
-            "declare -a q=(p q r); declare -n r='q[1]'; \
-             select r in a b; do break; done <<< \"2\"; declare -p q",
-        );
+        let (o, _) = run("declare -a q=(p q r); declare -n r='q[1]'; \
+             select r in a b; do break; done <<< \"2\"; declare -p q");
         assert_eq!(o, "declare -a q=([0]=\"p\" [1]=\"b\" [2]=\"r\")\n");
-        let (o, _) = run(
-            "declare -n r=fresh; select r in a b; do break; done <<< \"1\"; declare -p fresh",
-        );
+        let (o, _) =
+            run("declare -n r=fresh; select r in a b; do break; done <<< \"1\"; declare -p fresh");
         assert_eq!(o, "declare -- fresh=\"a\"\n");
 
         // A chain is followed to its end.
-        let (o, _) = run(
-            "u=orig; declare -n m=u; declare -n n=m; \
-             select n in a b; do break; done <<< \"2\"; declare -p n m u",
-        );
+        let (o, _) = run("u=orig; declare -n m=u; declare -n n=m; \
+             select n in a b; do break; done <<< \"2\"; declare -p n m u");
         assert_eq!(
             o,
             "declare -n n=\"m\"\ndeclare -n m=\"u\"\ndeclare -- u=\"b\"\n"
@@ -70961,18 +72949,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // Every refusal gives up the loop with status 1, leaving the target as
         // it was. A circular chain blames the name written…
-        let (o, st) = run(
-            "declare -n c1=c2; declare -n c2=c1; \
-             select c1 in a b; do echo RAN; break; done <<< \"1\"",
-        );
+        let (o, st) = run("declare -n c1=c2; declare -n c2=c1; \
+             select c1 in a b; do echo RAN; break; done <<< \"1\"");
         assert_eq!(o, "");
         assert_eq!(st, 1);
         // …a readonly target blames the name *resolved* to, not the one
         // written…
-        let (o, st) = run(
-            "readonly ro=frozen; declare -n n=ro; \
-             select n in a b; do echo RAN; break; done <<< \"1\"; echo \"[$ro]\"",
-        );
+        let (o, st) = run("readonly ro=frozen; declare -n n=ro; \
+             select n in a b; do echo RAN; break; done <<< \"1\"; echo \"[$ro]\"");
         assert_eq!(o, "[frozen]\n");
         assert_eq!(st, 0); // the trailing `echo` is the last command
         // …and a name the shell maintains itself refuses silently.
@@ -70982,10 +72966,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // The write is the same store as any other, so the attributes of
         // whatever it lands on still apply.
-        let (o, _) = run(
-            "declare -i t; declare -n r=t; \
-             select r in 3*4 z; do break; done <<< \"1\"; declare -p t",
-        );
+        let (o, _) = run("declare -i t; declare -n r=t; \
+             select r in 3*4 z; do break; done <<< \"1\"; declare -p t");
         assert_eq!(o, "declare -i t=\"12\"\n");
     }
 
@@ -71009,7 +72991,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         };
         // A list that fits on one row is transposed into one *column* — the
         // familiar `select` look.
-        assert_eq!(select_menu(&items("aaaa bbbb cccc"), 80), "1) aaaa\n2) bbbb\n3) cccc\n");
+        assert_eq!(
+            select_menu(&items("aaaa bbbb cccc"), 80),
+            "1) aaaa\n2) bbbb\n3) cccc\n"
+        );
         // Twelve one-character items at 80 columns: stride 1+2+2+2 = 7, so
         // 80/7 = 11 columns, 2 rows, then 6 columns. Column-major, and the
         // first column's indices are one digit wide while the rest are two.
@@ -71036,7 +73021,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // A short final column just ends its row — no trailing padding.
         assert_eq!(
-            select_menu(&items("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccc"), 80),
+            select_menu(
+                &items(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccc"
+                ),
+                80
+            ),
             "1) aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  3) cccccccccccccccccccccccccccccc\n\
              2) bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
         );
@@ -71079,7 +73069,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // An EOF-terminated `select` reports status 1 and clears REPLY,
         // overwriting whatever was there before — the signal that the user ran
         // out of input rather than leaving via `break`.
-        let (o, _) = run("REPLY=preset; select x in a b; do break; done < /dev/null; echo \"s=$? r=[$REPLY] x=${x-unset}\"");
+        let (o, _) = run(
+            "REPLY=preset; select x in a b; do break; done < /dev/null; echo \"s=$? r=[$REPLY] x=${x-unset}\"",
+        );
         assert_eq!(o, "\ns=1 r=[] x=unset\n");
     }
 
@@ -71115,9 +73107,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A final line ending at EOF without a newline still assigns the value
         // but reports status 1 (matching bash). Here: two reads of "a\nb" — the
         // first line is newline-terminated (rc 0), the second hits EOF (rc 1).
-        let (o, _) = run(
-            "printf 'a\\nb' | { read x; echo \"rc1=$? x=$x\"; read y; echo \"rc2=$? y=$y\"; }",
-        );
+        let (o, _) =
+            run("printf 'a\\nb' | { read x; echo \"rc1=$? x=$x\"; read y; echo \"rc2=$? y=$y\"; }");
         assert_eq!(o, "rc1=0 x=a\nrc2=1 y=b\n");
         // A newline-terminated single line reports success.
         let (o2, _) = run("printf 'a\\n' | { read x; echo \"rc=$? x=$x\"; }");
@@ -71174,9 +73165,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn read_last_name_soaks_only_when_fields_outnumber_names() {
         let r = |ifs: &str, input: &str, names: &str| {
-            let show =
-                names.split(' ').map(|n| format!("printf '[%s]' \"${n}\";")).collect::<String>();
-            run(&format!("IFS='{ifs}' read -r {names} <<< '{input}'; {show}")).0
+            let show = names
+                .split(' ')
+                .map(|n| format!("printf '[%s]' \"${n}\";"))
+                .collect::<String>();
+            run(&format!(
+                "IFS='{ifs}' read -r {names} <<< '{input}'; {show}"
+            ))
+            .0
         };
         // Two fields, two names: no soaking, so the trailing `:` is simply gone.
         assert_eq!(r(":", "a:b:", "x y"), "[a][b]");
@@ -71211,9 +73207,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// the `-d`/`-n`/`-N` record path, which never stripped it.
     #[test]
     fn read_keeps_a_carriage_return_before_the_newline() {
-        assert_eq!(run(r#"printf 'a\r\n' | { IFS= read -r l; printf '[%s]' "$l"; }"#).0, "[a\r]");
+        assert_eq!(
+            run(r#"printf 'a\r\n' | { IFS= read -r l; printf '[%s]' "$l"; }"#).0,
+            "[a\r]"
+        );
         // Default IFS does not list `\r`, so splitting does not remove it either.
-        assert_eq!(run(r#"printf 'a\r\n' | { read -r l; printf '[%s]' "$l"; }"#).0, "[a\r]");
+        assert_eq!(
+            run(r#"printf 'a\r\n' | { read -r l; printf '[%s]' "$l"; }"#).0,
+            "[a\r]"
+        );
         // Interior and repeated CRs are data too.
         assert_eq!(
             run(r#"printf 'p\r\rq\n' | { IFS= read -r l; printf '[%s]' "$l"; }"#).0,
@@ -71315,7 +73317,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // live value with the fixed bash attributes, rather than "not found" —
         // the value counters (`BASHPID`/`RANDOM`/`SECONDS`) carry `-i`, the rest
         // print `--`. Previously osh errored here even though `$NAME` expanded.
-        assert_eq!(run("declare -p BASH_SUBSHELL").0, "declare -- BASH_SUBSHELL=\"0\"\n");
+        assert_eq!(
+            run("declare -p BASH_SUBSHELL").0,
+            "declare -- BASH_SUBSHELL=\"0\"\n"
+        );
         assert_eq!(run("declare -p LINENO").0, "declare -- LINENO=\"1\"\n");
         assert_eq!(run("declare -p SECONDS").0, "declare -i SECONDS=\"0\"\n");
         // BASHPID / EPOCHSECONDS have runtime-dependent values, so just assert
@@ -71343,13 +73348,25 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "declare -i OPTIND=\"1\"\ndeclare -- OPTERR=\"1\"\n"
         );
         // The preamble shape that needs the seed.
-        assert_eq!(run(r#"set -- a b; shift $((OPTIND - 1)); echo "$*""#).0, "a b\n");
+        assert_eq!(
+            run(r#"set -- a b; shift $((OPTIND - 1)); echo "$*""#).0,
+            "a b\n"
+        );
         // `OPTIND` carries the integer attribute, so an assignment to it is
         // evaluated as arithmetic; `OPTERR` does not. That asymmetry is bash's.
-        assert_eq!(run("OPTIND=3+4; declare -p OPTIND").0, "declare -i OPTIND=\"7\"\n");
-        assert_eq!(run("OPTERR=3+4; declare -p OPTERR").0, "declare -- OPTERR=\"3+4\"\n");
+        assert_eq!(
+            run("OPTIND=3+4; declare -p OPTIND").0,
+            "declare -i OPTIND=\"7\"\n"
+        );
+        assert_eq!(
+            run("OPTERR=3+4; declare -p OPTERR").0,
+            "declare -- OPTERR=\"3+4\"\n"
+        );
         // A scan still starts at 1 and leaves the index past the last option.
-        assert_eq!(run("set -- -a -b x; while getopts ab o; do :; done; echo $OPTIND").0, "3\n");
+        assert_eq!(
+            run("set -- -a -b x; while getopts ab o; do :; done; echo $OPTIND").0,
+            "3\n"
+        );
     }
 
     #[test]
@@ -71380,9 +73397,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, st) = run(r#"a=$SRANDOM; b=$SRANDOM; echo "$a $b""#);
         assert_eq!(st, 0);
         let (a, b) = o.trim().split_once(' ').expect("two values");
-        let (a, b) = (a.parse::<u64>().expect("numeric"), b.parse::<u64>().expect("numeric"));
+        let (a, b) = (
+            a.parse::<u64>().expect("numeric"),
+            b.parse::<u64>().expect("numeric"),
+        );
         assert_ne!(a, b, "two reads returned the same value: {o:?}");
-        assert!(a <= u64::from(u32::MAX) && b <= u64::from(u32::MAX), "not 32-bit: {o:?}");
+        assert!(
+            a <= u64::from(u32::MAX) && b <= u64::from(u32::MAX),
+            "not 32-bit: {o:?}"
+        );
         // An assignment is swallowed: it neither takes effect nor leaves a
         // stored variable behind that would shadow the dynamic read.
         assert_ne!(run("SRANDOM=5; echo $SRANDOM").0.trim(), "5");
@@ -71416,7 +73439,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// names bash prints.
     #[test]
     fn listings_report_dynamic_special_variables() {
-        let lines = |src: &str| run(src).0.lines().map(str::to_string).collect::<Vec<String>>();
+        let lines = |src: &str| {
+            run(src)
+                .0
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<String>>()
+        };
         let has = |v: &[String], s: &str| v.iter().any(|l| l == s);
 
         let all = lines("declare -p");
@@ -71430,7 +73459,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(has(&all, "declare -- SECONDS"), "got {all:?}");
         // `PPID` is a real binding rather than a computed one, so it is the one
         // entry that lists *with* a value; only its shape is fixed.
-        assert!(all.iter().any(|l| l.starts_with("declare -ir PPID=\"")), "got {all:?}");
+        assert!(
+            all.iter().any(|l| l.starts_with("declare -ir PPID=\"")),
+            "got {all:?}"
+        );
 
         // The flag-filtered listings select on the same attributes.
         let ints = lines("declare -i");
@@ -71441,14 +73473,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(has(&arrays, "declare -a BASH_SOURCE=()"), "got {arrays:?}");
         assert!(has(&arrays, "declare -a BASH_LINENO=()"), "got {arrays:?}");
         let ro = lines("readonly -p");
-        assert!(ro.iter().any(|l| l.starts_with("declare -ir PPID=\"")), "got {ro:?}");
+        assert!(
+            ro.iter().any(|l| l.starts_with("declare -ir PPID=\"")),
+            "got {ro:?}"
+        );
         // …and a dynamic special without the letter stays out of that listing.
         assert!(!ro.iter().any(|l| l.contains("RANDOM")), "got {ro:?}");
 
         // A real binding shadows the table rather than doubling it: inside a
         // function `BASH_SOURCE` has a live entry, and the listing prints that.
         let inner = lines("f(){ declare -p; }; f");
-        assert_eq!(inner.iter().filter(|l| l.contains(" BASH_SOURCE")).count(), 1, "got {inner:?}");
+        assert_eq!(
+            inner.iter().filter(|l| l.contains(" BASH_SOURCE")).count(),
+            1,
+            "got {inner:?}"
+        );
         assert!(!has(&inner, "declare -a BASH_SOURCE=()"), "got {inner:?}");
     }
 
@@ -71472,7 +73511,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(run("echo ${!BASH*}").0.contains("BASH_ARGV0"));
         // `+=` appends to the current `$0` (osh uses a predictable append; see
         // the note in `apply_assignment` about bash's obscure `+=` quirk).
-        assert_eq!(run("BASH_ARGV0=ab; BASH_ARGV0+=cd; echo \"$0\"").0, "abcd\n");
+        assert_eq!(
+            run("BASH_ARGV0=ab; BASH_ARGV0+=cd; echo \"$0\"").0,
+            "abcd\n"
+        );
     }
 
     #[test]
@@ -71485,7 +73527,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "<[><a><b><]>\n"
         );
         // Leading boundary whitespace splits `pre` from the first field.
-        assert_eq!(run(r#"x="  a  "; printf "<%s>" pre$x; echo"#).0, "<pre><a>\n");
+        assert_eq!(
+            run(r#"x="  a  "; printf "<%s>" pre$x; echo"#).0,
+            "<pre><a>\n"
+        );
         // Trailing boundary whitespace splits the last field from `suf`.
         assert_eq!(
             run(r#"x="  a  "; printf "<%s>" ${x}suf; echo"#).0,
@@ -71509,10 +73554,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // A bare non-whitespace delimiter after literal content closes that
         // field (no empty field appears).
-        assert_eq!(
-            run(r#"IFS=:; x=":"; printf "<%s>" a$x; echo"#).0,
-            "<a>\n"
-        );
+        assert_eq!(run(r#"IFS=:; x=":"; printf "<%s>" a$x; echo"#).0, "<a>\n");
         // Mixed IFS `ws* nonws ws*` between two literals collapses to a single
         // delimiter (the non-whitespace char is absorbed into the whitespace
         // run), so no empty field appears between `pre` and `suf`.
@@ -71584,10 +73626,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("read -u ' 0' x <<< hi; echo \"[$x]\"").0, "[hi]\n");
         // A refused count names the base it reached for, and only a lowercase
         // `x` is a hex prefix.
-        assert_eq!(run("read -n 0x3 x <<< hi 2>&1").0, "osh: read: 0x3: invalid hex number\n");
-        assert_eq!(run("read -N 012x x <<< hi 2>&1").0, "osh: read: 012x: invalid octal number\n");
-        assert_eq!(run("read -n 0X3 x <<< hi 2>&1").0, "osh: read: 0X3: invalid number\n");
-        assert_eq!(run("read -n '' x <<< hi 2>&1").0, "osh: read: : invalid number\n");
+        assert_eq!(
+            run("read -n 0x3 x <<< hi 2>&1").0,
+            "osh: read: 0x3: invalid hex number\n"
+        );
+        assert_eq!(
+            run("read -N 012x x <<< hi 2>&1").0,
+            "osh: read: 012x: invalid octal number\n"
+        );
+        assert_eq!(
+            run("read -n 0X3 x <<< hi 2>&1").0,
+            "osh: read: 0X3: invalid number\n"
+        );
+        assert_eq!(
+            run("read -n '' x <<< hi 2>&1").0,
+            "osh: read: : invalid number\n"
+        );
         // The descriptor keeps its own complaint whatever the word looks like.
         assert_eq!(
             run("read -u 0x1 x <<< hi 2>&1").0,
@@ -71646,18 +73700,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // bash: a plain scalar assignment (or `read`) to an existing indexed
         // array updates element 0, leaving the other elements intact.
         assert_eq!(run("a=(1 2 3); a=x; echo \"$a ${a[@]}\"").0, "x x 2 3\n");
-        assert_eq!(run("a=(1 2 3); read a <<< 'q'; echo \"$a ${a[@]}\"").0, "q q 2 3\n");
+        assert_eq!(
+            run("a=(1 2 3); read a <<< 'q'; echo \"$a ${a[@]}\"").0,
+            "q q 2 3\n"
+        );
         // Integer attribute still evaluates the RHS and lands in element 0.
-        assert_eq!(run("declare -ia a=(1 2 3); a=4+5; echo \"$a ${a[@]}\"").0, "9 9 2 3\n");
+        assert_eq!(
+            run("declare -ia a=(1 2 3); a=4+5; echo \"$a ${a[@]}\"").0,
+            "9 9 2 3\n"
+        );
     }
 
     #[test]
     fn declare_array_literal_applies_value_attributes() {
         // `declare -ia`/`-ai` sets the integer attribute on the array, so later
         // element assignments evaluate arithmetically.
-        assert_eq!(run("declare -ai b=(1 2 3); b[1]=6+6; echo \"${b[@]}\"").0, "1 12 3\n");
+        assert_eq!(
+            run("declare -ai b=(1 2 3); b[1]=6+6; echo \"${b[@]}\"").0,
+            "1 12 3\n"
+        );
         // `declare -ua` uppercases values stored into the array.
-        assert_eq!(run("declare -ua u=(ab cd); u[0]=xy; echo \"${u[@]}\"").0, "XY CD\n");
+        assert_eq!(
+            run("declare -ua u=(ab cd); u[0]=xy; echo \"${u[@]}\"").0,
+            "XY CD\n"
+        );
         // `declare -ra` makes the array readonly: a later element assignment is
         // fatal in a non-interactive shell (bash) — the shell exits with status
         // 1, so the following `echo` lines never run.
@@ -71775,7 +73841,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(o2, "osh: [: x: integer expression expected\ndone\n");
         // The `builtin` wrapper's own "not a shell builtin" diagnostic:
         let (o3, _) = run("builtin no_such_builtin_xyz 2>&1; echo done");
-        assert_eq!(o3, "osh: builtin: no_such_builtin_xyz: not a shell builtin\ndone\n");
+        assert_eq!(
+            o3,
+            "osh: builtin: no_such_builtin_xyz: not a shell builtin\ndone\n"
+        );
     }
 
     #[test]
@@ -71825,8 +73894,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("test x -a y -Q z 2>&1").0,
             "osh: test: syntax error: `-Q' unexpected\n"
         );
-        assert_eq!(run("test a b c d e 2>&1").0, "osh: test: too many arguments\n");
-        assert_eq!(run("test '(' x ')' '(' 2>&1").0, "osh: test: too many arguments\n");
+        assert_eq!(
+            run("test a b c d e 2>&1").0,
+            "osh: test: too many arguments\n"
+        );
+        assert_eq!(
+            run("test '(' x ')' '(' 2>&1").0,
+            "osh: test: too many arguments\n"
+        );
         assert_eq!(run("test a b c d e; echo $?").0, "2\n");
         // A group that ran out of words asks for the paren; one that hit a word
         // that is not the paren says which word it found instead.
@@ -71844,13 +73919,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("test '(' -z x ')'; echo $?").0, "1\n");
         // `[` still needs its bracket, quoted bash's way.
         assert_eq!(run("[ x 2>&1").0, "osh: [: missing `]'\n");
-        assert_eq!(run("[ x ] extra 2>&1; echo $?").0, "osh: [: missing `]'\n2\n");
+        assert_eq!(
+            run("[ x ] extra 2>&1; echo $?").0,
+            "osh: [: missing `]'\n2\n"
+        );
     }
 
     #[test]
     fn read_exact_nchars() {
         // `-N N` reads exactly N characters, ignoring delimiters/spaces.
-        assert_eq!(run("read -N 5 x <<< 'a b c d'; echo \"[$x]\"").0, "[a b c]\n");
+        assert_eq!(
+            run("read -N 5 x <<< 'a b c d'; echo \"[$x]\"").0,
+            "[a b c]\n"
+        );
         // A short read (fewer than N available) yields status 1.
         assert_eq!(run("read -N 20 x <<< 'abc'; echo $?").0, "1\n");
     }
@@ -71877,7 +73958,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("type echo").0, "echo is a shell builtin\n");
         assert_eq!(run("type while").0, "while is a shell keyword\n");
         // `type g` now prints the reconstructed function body after the header.
-        assert_eq!(run("g() { :; }; type g").0, "g is a function\ng () \n{ \n    :\n}\n");
+        assert_eq!(
+            run("g() { :; }; type g").0,
+            "g is a function\ng () \n{ \n    :\n}\n"
+        );
     }
 
     /// `-a` chooses how many meanings are described and `-t` only changes what
@@ -71890,8 +73974,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let src = "shopt -s expand_aliases\ncd() { :; }\nalias cd='echo x'\ntype -at cd";
         assert_eq!(run_script(src).0, "alias\nfunction\nbuiltin\n");
         // The letters compose in either order and in either spelling.
-        assert_eq!(run_script(&src.replace("-at", "-ta")).0, "alias\nfunction\nbuiltin\n");
-        assert_eq!(run_script(&src.replace("-at", "-t -a")).0, "alias\nfunction\nbuiltin\n");
+        assert_eq!(
+            run_script(&src.replace("-at", "-ta")).0,
+            "alias\nfunction\nbuiltin\n"
+        );
+        assert_eq!(
+            run_script(&src.replace("-at", "-t -a")).0,
+            "alias\nfunction\nbuiltin\n"
+        );
         // A keyword outranks nothing here: it is simply one more meaning.
         assert_eq!(
             run_script("shopt -s expand_aliases\nalias if='echo x'\ntype -at if").0,
@@ -71906,7 +73996,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// are scanned within a bundle rather than matched as whole words.
     #[test]
     fn command_describe_options_bundle_and_the_last_one_wins() {
-        assert_eq!(run("f() { :; }; command -vV f").0, "f is a function\nf () \n{ \n    :\n}\n");
+        assert_eq!(
+            run("f() { :; }; command -vV f").0,
+            "f is a function\nf () \n{ \n    :\n}\n"
+        );
         assert_eq!(run("f() { :; }; command -Vv f").0, "f\n");
         // `-p` is not a describe option, so it only rides along.
         assert_eq!(run("f() { :; }; command -pv f").0, "f\n");
@@ -71920,9 +74013,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn command_describes_every_operand_and_keeps_going_past_a_miss() {
         assert_eq!(run("f() { :; }; command -v f while").0, "f\nwhile\n");
-        assert_eq!(run("f() { :; }; command -v osh_no_such_xyz f; echo $?").0, "f\n0\n");
-        assert_eq!(run("f() { :; }; command -v f osh_no_such_xyz; echo $?").0, "f\n0\n");
-        assert_eq!(run("command -v osh_no_such_xyz osh_no_other_xyz; echo $?").0, "1\n");
+        assert_eq!(
+            run("f() { :; }; command -v osh_no_such_xyz f; echo $?").0,
+            "f\n0\n"
+        );
+        assert_eq!(
+            run("f() { :; }; command -v f osh_no_such_xyz; echo $?").0,
+            "f\n0\n"
+        );
+        assert_eq!(
+            run("command -v osh_no_such_xyz osh_no_other_xyz; echo $?").0,
+            "1\n"
+        );
         // With no operand at all there is nothing to describe, and that is not
         // a failure.
         assert_eq!(run("command -v; echo $?").0, "0\n");
@@ -71936,9 +74038,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// why the message has to consult the plan explicitly.
     #[test]
     fn command_describe_miss_follows_the_commands_own_stderr() {
-        assert_eq!(run("x=$(command -V osh_no_such_xyz 2>&1); echo \"[$x] $?\"").0,
-            "[osh: command: osh_no_such_xyz: not found] 1\n");
-        assert_eq!(run("command -V osh_no_such_xyz 2>/dev/null; echo $?").0, "1\n");
+        assert_eq!(
+            run("x=$(command -V osh_no_such_xyz 2>&1); echo \"[$x] $?\"").0,
+            "[osh: command: osh_no_such_xyz: not found] 1\n"
+        );
+        assert_eq!(
+            run("command -V osh_no_such_xyz 2>/dev/null; echo $?").0,
+            "1\n"
+        );
         // A closed fd 2 has nowhere to be told, and the status still stands.
         assert_eq!(run("command -V osh_no_such_xyz 2>&-; echo $?").0, "1\n");
         // Every operand is described, so a later one still reports.
@@ -71947,24 +74054,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "[osh: command: osh_a_xyz: not found\nosh: command: osh_b_xyz: not found]\n"
         );
         // `-v` never reports a miss at all, redirected or not.
-        assert_eq!(run("x=$(command -v osh_no_such_xyz 2>&1); echo \"[$x] $?\"").0, "[] 1\n");
+        assert_eq!(
+            run("x=$(command -v osh_no_such_xyz 2>&1); echo \"[$x] $?\"").0,
+            "[] 1\n"
+        );
     }
 
     #[test]
     fn nocasematch_case_and_test() {
         // Default: case is case-sensitive.
-        assert_eq!(
-            run("case ABC in abc) echo y;; *) echo n;; esac").0,
-            "n\n"
-        );
+        assert_eq!(run("case ABC in abc) echo y;; *) echo n;; esac").0, "n\n");
         // With nocasematch, `case` folds case.
         assert_eq!(
             run("shopt -s nocasematch; case ABC in abc) echo y;; *) echo n;; esac").0,
             "y\n"
         );
         // `[[ == ]]` glob and literal both fold case under nocasematch.
-        assert_eq!(run("shopt -s nocasematch; [[ Hello == h* ]] && echo y").0, "y\n");
-        assert_eq!(run("shopt -s nocasematch; [[ Hello == hello ]] && echo y").0, "y\n");
+        assert_eq!(
+            run("shopt -s nocasematch; [[ Hello == h* ]] && echo y").0,
+            "y\n"
+        );
+        assert_eq!(
+            run("shopt -s nocasematch; [[ Hello == hello ]] && echo y").0,
+            "y\n"
+        );
         // Sanity: without it, the literal comparison is case-sensitive.
         assert_eq!(run("[[ Hello == hello ]] && echo y || echo n").0, "n\n");
     }
@@ -71983,9 +74096,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run(&format!("{on} echo \"${{v%abc}}\"")).0, "abcABC\n");
         // Only the matching folds: the surviving text keeps its own case, and
         // an `&` in the replacement reproduces what was actually there.
-        assert_eq!(run("shopt -s nocasematch; w=HeLLo; echo \"${w/ll/[&]}\"").0, "He[LL]o\n");
+        assert_eq!(
+            run("shopt -s nocasematch; w=HeLLo; echo \"${w/ll/[&]}\"").0,
+            "He[LL]o\n"
+        );
         // A bracket expression folds with everything else.
-        assert_eq!(run("shopt -s nocasematch; v=abcABC; echo \"${v//[A-C]/.}\"").0, "......\n");
+        assert_eq!(
+            run("shopt -s nocasematch; v=abcABC; echo \"${v//[A-C]/.}\"").0,
+            "......\n"
+        );
         // Off again, the same expansions are case-sensitive.
         assert_eq!(run("v=abcABC; echo \"${v/ABC/X}\"").0, "abcX\n");
         assert_eq!(run("w=HeLLo; echo \"${w/hello/X}\"").0, "HeLLo\n");
@@ -72041,7 +74160,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The diagnostic body matches bash's arithmetic error, tagged `[[`.
         let (msg, _) = run("[[ 10 -eq 10.0 ]] 2>&1");
         assert!(
-            msg.contains("[[: 10.0: syntax error: invalid arithmetic operator (error token is \".0\")"),
+            msg.contains(
+                "[[: 10.0: syntax error: invalid arithmetic operator (error token is \".0\")"
+            ),
             "got: {msg:?}"
         );
         // Left operand is evaluated first and short-circuits: only its error is
@@ -72315,9 +74436,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         //       return ((vflags && invisible_p (v)) ? v : (SHELL_VAR *)0);
         //
         // and the indirection asks with `vflags == 0`.
-        let e = |setup: &str, body: &str| {
-            run(&format!("{setup}{{ printf '<%s>' {body}; }} 2>&1")).0
-        };
+        let e =
+            |setup: &str, body: &str| run(&format!("{setup}{{ printf '<%s>' {body}; }} 2>&1")).0;
         let cell_less = "declare -n n1; declare -n n3=n1; ";
         for body in ["${!n1}", "${!n1:-D}", "${!n1-D}", "${!n1@Q}", "${!n1#x}"] {
             assert_eq!(
@@ -72341,8 +74461,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A chain whose end merely names nothing does point.
         assert_eq!(e("declare -n n2=nosuch; ", "${!n2}"), "<nosuch>");
         assert_eq!(e("declare u1; declare -n n6=u1; ", "${!n6:-D}"), "<u1>");
-        assert_eq!(e("declare -n n7=tgt; tgt=T; unset tgt; ", "${!n7}"), "<tgt>");
-        assert_eq!(e("v=V; declare -n n4=v; declare -n n5=n4; ", "${!n5}"), "<v>");
+        assert_eq!(
+            e("declare -n n7=tgt; tgt=T; unset tgt; ", "${!n7}"),
+            "<tgt>"
+        );
+        assert_eq!(
+            e("v=V; declare -n n4=v; declare -n n5=n4; ", "${!n5}"),
+            "<v>"
+        );
         assert_eq!(
             e(
                 "declare -a ar=(x y); declare -n er=ar[1]; declare -n er2=er; ",
@@ -72418,7 +74544,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
         // A name the bound *reads* still reports on its own behalf.
         assert_eq!(
-            run(&format!("{vars}set -u; {{ printf '<%s>' ${{!p:zz}}; }} 2>&1")).0,
+            run(&format!(
+                "{vars}set -u; {{ printf '<%s>' ${{!p:zz}}; }} 2>&1"
+            ))
+            .0,
             "osh: zz: unbound variable\n"
         );
         // …and a bound that evaluates is untouched.
@@ -72454,7 +74583,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "osh: a[$i]: parameter null or not set\n"
         );
         // Only the complaint is renamed: an assignment still reaches the target.
-        assert_eq!(run("p=t; echo \"[${!p:=v}]\"; echo \"t=[$t]\"").0, "[v]\nt=[v]\n");
+        assert_eq!(
+            run("p=t; echo \"[${!p:=v}]\"; echo \"t=[$t]\"").0,
+            "[v]\nt=[v]\n"
+        );
     }
 
     #[test]
@@ -72463,7 +74595,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // both ends of the indirection may carry a subscript, independently.
         assert_eq!(run("a=(xv yv); xv=HIT; echo ${!a[0]}").0, "HIT\n");
         assert_eq!(run("a=(xv yv); n=1; yv=H2; echo ${!a[n]}").0, "H2\n");
-        assert_eq!(run("declare -A m=([k]=vv); vv=HIT; echo ${!m[k]}").0, "HIT\n");
+        assert_eq!(
+            run("declare -A m=([k]=vv); vv=HIT; echo ${!m[k]}").0,
+            "HIT\n"
+        );
         assert_eq!(run("a=(b); b=(p q r); echo ${!a[0]}").0, "p\n");
         assert_eq!(run("a=('b[1]'); b=(p q r); echo ${!a[0]}").0, "q\n");
         assert_eq!(run("a=('b[@]'); b=(p q r); echo ${!a[0]}").0, "p q r\n");
@@ -72473,18 +74608,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // A nameref is followed like any other name here — the "expand to the
         // target's name" rule is only for a *bare* `${!ref}`.
-        assert_eq!(run("a=(xv); xv=HIT; declare -n r=a; echo ${!r[0]} ${!r}").0, "HIT a\n");
+        assert_eq!(
+            run("a=(xv); xv=HIT; declare -n r=a; echo ${!r[0]} ${!r}").0,
+            "HIT a\n"
+        );
         // The name pointed at is validated the same way: empty or malformed is
         // a fatal "invalid variable name", merely unset expands to nothing.
-        assert_eq!(run("a=(nosuch); echo \"[${!a[0]}]\"; echo AFTER").0, "[]\nAFTER\n");
+        assert_eq!(
+            run("a=(nosuch); echo \"[${!a[0]}]\"; echo AFTER").0,
+            "[]\nAFTER\n"
+        );
         assert_eq!(
             run("a=(1bad); { echo \"[${!a[0]}]\"; } 2>&1; echo AFTER").0,
             "osh: 1bad: invalid variable name\n"
         );
         // An element that is not there is not a pointer that is not there: the
         // reference simply points nowhere, and the command carries on…
-        assert_eq!(run("a=(x); echo \"[${!a[9]}]\"; echo AFTER").0, "[]\nAFTER\n");
-        assert_eq!(run("declare -A m; echo \"[${!m[k]}]\"; echo AFTER").0, "[]\nAFTER\n");
+        assert_eq!(
+            run("a=(x); echo \"[${!a[9]}]\"; echo AFTER").0,
+            "[]\nAFTER\n"
+        );
+        assert_eq!(
+            run("declare -A m; echo \"[${!m[k]}]\"; echo AFTER").0,
+            "[]\nAFTER\n"
+        );
         // …whereas a reference whose *variable* does not exist had nothing to
         // point with at all, and is the fatal case — quoting the subscript as it
         // was written rather than as it evaluated.
@@ -72619,11 +74766,17 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("declare -a o=(v); v=hi; echo ${!o[@]}").0, "0\n");
         assert_eq!(run("declare -a o=(v); v=hi; echo ${!o[@]#h}").0, "i\n");
         assert_eq!(run("declare -a o=(v); v=hi; echo ${!o[*]#h}").0, "i\n");
-        assert_eq!(run("declare -a o=(v); v=hello; echo ${!o[@]:1:3}").0, "ell\n");
+        assert_eq!(
+            run("declare -a o=(v); v=hello; echo ${!o[@]:1:3}").0,
+            "ell\n"
+        );
         assert_eq!(run("declare -a o=(v); v=hi; echo ${!o[@]@Q}").0, "'hi'\n");
         // The name is built with the *derived* join, which is the surprise: the
         // same reference written out joins with a space whatever `$IFS` says.
-        assert_eq!(run("declare -a t=(v v); IFS=:; x=\"${t[@]}\"; echo \"$x\"").0, "v v\n");
+        assert_eq!(
+            run("declare -a t=(v v); IFS=:; x=\"${t[@]}\"; echo \"$x\"").0,
+            "v v\n"
+        );
         let (o, s) = run("declare -a t=(v v); IFS=:; echo ${!t[@]#h}");
         assert_eq!((o.as_str(), s), ("", 1));
         // An empty `$IFS` falls back to a space for `[@]` and to nothing for
@@ -72631,8 +74784,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // bare key listing is not that join: unquoted, `${!a[*]}` is one of the
         // forms that joins with `[@]`'s separator (see [`Shell::split_items`]),
         // so its own empty-`$IFS` answer has the space back.
-        assert_eq!(run("declare -a h=(he llo); IFS=; hello=y; echo ${!h[*]}x").0, "0 1x\n");
-        assert_eq!(run("declare -a h=(he llo); IFS=; hello=y; echo ${!h[*]#z}").0, "y\n");
+        assert_eq!(
+            run("declare -a h=(he llo); IFS=; hello=y; echo ${!h[*]}x").0,
+            "0 1x\n"
+        );
+        assert_eq!(
+            run("declare -a h=(he llo); IFS=; hello=y; echo ${!h[*]#z}").0,
+            "y\n"
+        );
         let (o, s) = run("declare -a h=(he llo); IFS=; echo ${!h[@]#z}");
         assert_eq!((o.as_str(), s), ("", 1));
         // Three ways of having no name: unset is fatal, set-but-empty points
@@ -72665,7 +74824,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // parameter. Otherwise the `!` *is* the parameter — `$!`, the last
         // background job's pid — and the rest is an operator on it. The pid
         // itself varies, so each case is checked against `$!`.
-        for expr in ["${!}", "${!-x}", "${!:-x}", "${!=x}", "${!:?m}", "${!^}", "${!,}"] {
+        for expr in [
+            "${!}", "${!-x}", "${!:-x}", "${!=x}", "${!:?m}", "${!^}", "${!,}",
+        ] {
             let script = format!("true & pid=$!; [ \"{expr}\" = \"$pid\" ] && echo same");
             assert_eq!(run(&script).0, "same\n", "{expr}");
         }
@@ -72696,7 +74857,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // parameter reads the same way, and carries a modifier the same way.
         let setup = "one=ONEVAL; two=TWOVAL; set -- one two;";
         assert_eq!(run(&format!("{setup} echo \"[${{!1}}]\"")).0, "[ONEVAL]\n");
-        assert_eq!(run(&format!("{setup} echo \"[${{!1,,}}]\"")).0, "[oneval]\n");
+        assert_eq!(
+            run(&format!("{setup} echo \"[${{!1,,}}]\"")).0,
+            "[oneval]\n"
+        );
         assert_eq!(run(&format!("{setup} echo \"[${{!1#ONE}}]\"")).0, "[VAL]\n");
         // `$#` is 2 here, so the referent's *value* is `2` and the parameter
         // read through it is `$2`.
@@ -72721,13 +74885,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run(&format!("{setup} echo \"[${{!@:0:3}}]\"")).0, "[One]\n");
         assert_eq!(run(&format!("{setup} echo \"[${{!@#One}}]\"")).0, "[Val]\n");
         assert_eq!(run(&format!("{setup} echo \"[${{!@%Val}}]\"")).0, "[One]\n");
-        assert_eq!(run(&format!("{setup} echo \"[${{!@//a/X}}]\"")).0, "[OneVXl]\n");
-        assert_eq!(run(&format!("{setup} echo \"[${{!@@Q}}]\"")).0, "['OneVal']\n");
-        assert_eq!(run(&format!("{setup} echo \"[${{!@:-z}}]\"")).0, "[OneVal]\n");
+        assert_eq!(
+            run(&format!("{setup} echo \"[${{!@//a/X}}]\"")).0,
+            "[OneVXl]\n"
+        );
+        assert_eq!(
+            run(&format!("{setup} echo \"[${{!@@Q}}]\"")).0,
+            "['OneVal']\n"
+        );
+        assert_eq!(
+            run(&format!("{setup} echo \"[${{!@:-z}}]\"")).0,
+            "[OneVal]\n"
+        );
         // Case modification is the one modifier bash refuses to combine with an
         // `@` referent — and accepts with a `*` one. The asymmetry is bash's.
-        assert_eq!(run(&format!("{setup} echo \"[${{!*^^}}]\"")).0, "[ONEVAL]\n");
-        assert_eq!(run(&format!("{setup} echo \"[${{!*,,}}]\"")).0, "[oneval]\n");
+        assert_eq!(
+            run(&format!("{setup} echo \"[${{!*^^}}]\"")).0,
+            "[ONEVAL]\n"
+        );
+        assert_eq!(
+            run(&format!("{setup} echo \"[${{!*,,}}]\"")).0,
+            "[oneval]\n"
+        );
         for expr in ["${!@^}", "${!@^^}", "${!@,}", "${!@,,}"] {
             let (out, code) = run_script(&format!("{setup} echo \"[{expr}]\"; echo after"));
             assert_eq!((out.as_str(), code), ("", 1), "{expr}");
@@ -72735,7 +74914,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // No positionals at all: nothing to indirect *through*, so the
         // reference points nowhere and reads as unset — not as the malformed
         // target an empty-but-present one would be.
-        assert_eq!(run("set --; echo \"[${!@}][${!@:-z}][${!@+y}][${!@#x}]\"").0, "[][z][][]\n");
+        assert_eq!(
+            run("set --; echo \"[${!@}][${!@:-z}][${!@+y}][${!@#x}]\"").0,
+            "[][z][][]\n"
+        );
         let (out, code) = run_script("set -- \"\"; echo \"[${!@:-z}]\"; echo after");
         assert_eq!((out.as_str(), code), ("", 1));
         // Round-trips through the unparser: the stand-in name the modifier was
@@ -72807,16 +74989,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "9\n"
         );
         // `set -a` gives the assigned name the export attribute.
-        assert_eq!(run("set -a; ((x=5)); declare -p x").0, "declare -x x=\"5\"\n");
+        assert_eq!(
+            run("set -a; ((x=5)); declare -p x").0,
+            "declare -x x=\"5\"\n"
+        );
         // An element reference through a nameref reaches the referent's
         // elements, on both sides of the `=` and for both kinds of subscript.
         assert_eq!(run("a=(1 2 3); declare -n r=a; echo $((r[1]))").0, "2\n");
+        assert_eq!(run("declare -n r=a; ((r[1]=5)); echo \"${a[1]}\"").0, "5\n");
         assert_eq!(
-            run("declare -n r=a; ((r[1]=5)); echo \"${a[1]}\"").0,
-            "5\n"
-        );
-        assert_eq!(
-            run("declare -A m=([k]=7); declare -n r=m; echo $((r[k])); ((r[j]=8)); echo \"${m[j]}\"").0,
+            run(
+                "declare -A m=([k]=7); declare -n r=m; echo $((r[k])); ((r[j]=8)); echo \"${m[j]}\""
+            )
+            .0,
             "7\n8\n"
         );
     }
@@ -72837,8 +75022,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // The array is what carries the readonly attribute, so it is the array
         // the refusal names.
-        let err = run("readonly -a q=(1); declare -n r=q[0]; { read r <<< hi; } 2>&1; declare -p q").0;
-        assert_eq!(err, "osh: q: readonly variable\ndeclare -ar q=([0]=\"1\")\n");
+        let err =
+            run("readonly -a q=(1); declare -n r=q[0]; { read r <<< hi; } 2>&1; declare -p q").0;
+        assert_eq!(
+            err,
+            "osh: q: readonly variable\ndeclare -ar q=([0]=\"1\")\n"
+        );
     }
 
     #[test]
@@ -72943,9 +75132,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             .0
         };
         for body in [
-            "${!1@}", "${!1*}", "${!2@}", "${!9@}", "${!12@}", "${!1[0]@}", "${!1s@}",
+            "${!1@}",
+            "${!1*}",
+            "${!2@}",
+            "${!9@}",
+            "${!12@}",
+            "${!1[0]@}",
+            "${!1s@}",
         ] {
-            assert_eq!(e(body), format!("osh: {body}: bad substitution\n"), "{body}");
+            assert_eq!(
+                e(body),
+                format!("osh: {body}: bad substitution\n"),
+                "{body}"
+            );
         }
         // A mark the scan *stopped at* is an operator after all, and reads the
         // pointer like any other indirection.
@@ -73003,7 +75202,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "declare -A q; q[k]=v",
             "declare -a q=()",
         ] {
-            assert_eq!(run(&format!("{assign}; echo [${{!q*}}]")).0, "[q]\n", "{assign}");
+            assert_eq!(
+                run(&format!("{assign}; echo [${{!q*}}]")).0,
+                "[q]\n",
+                "{assign}"
+            );
             assert_eq!(
                 run(&format!("{assign}; echo [$(compgen -A variable q)]")).0,
                 "[q]\n",
@@ -73016,8 +75219,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `compgen -A arrayvar` is the array-valued subset of that same
         // listing — not every variable, and not a bare declaration either.
         assert_eq!(run("q=(1); echo [$(compgen -A arrayvar q)]").0, "[q]\n");
-        assert_eq!(run("declare -A q; q[k]=v; echo [$(compgen -A arrayvar q)]").0, "[q]\n");
-        assert_eq!(run("declare -a q; echo [$(compgen -A arrayvar q)]").0, "[]\n");
+        assert_eq!(
+            run("declare -A q; q[k]=v; echo [$(compgen -A arrayvar q)]").0,
+            "[q]\n"
+        );
+        assert_eq!(
+            run("declare -a q; echo [$(compgen -A arrayvar q)]").0,
+            "[]\n"
+        );
         assert_eq!(run("q=1; echo [$(compgen -A arrayvar q)]").0, "[]\n");
         // A call-stack array is an array; a computed scalar is not.
         assert_eq!(
@@ -73174,7 +75383,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // A *missing* name is a different thing: a usage error, settled before
         // the scan and worth 2.
-        assert_eq!(run("set -- -a; getopts a 2>/dev/null; echo \"rc=$?\"").0, "rc=2\n");
+        assert_eq!(
+            run("set -- -a; getopts a 2>/dev/null; echo \"rc=$?\"").0,
+            "rc=2\n"
+        );
     }
 
     #[test]
@@ -73228,7 +75440,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "o=c ind=4\n"
         );
         assert_eq!(
-            run("set -- -a -b; unset OPTIND; OPTIND=abc; getopts ab o; echo \"o=$o ind=$OPTIND\"").0,
+            run("set -- -a -b; unset OPTIND; OPTIND=abc; getopts ab o; echo \"o=$o ind=$OPTIND\"")
+                .0,
             "o=a ind=2\n"
         );
     }
@@ -73256,7 +75469,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // Writing `OPTIND` moves the argument cursor, but only a value bash
         // calls *start over* — 1, 0, or negative — throws the letters away.
-        for w in ["OPTIND=1", "OPTIND=0", "OPTIND=-3", "unset OPTIND", "OPTIND="] {
+        for w in [
+            "OPTIND=1",
+            "OPTIND=0",
+            "OPTIND=-3",
+            "unset OPTIND",
+            "OPTIND=",
+        ] {
             assert_eq!(
                 run(&format!(
                     "set -- -ab -cd; getopts abcd o; {w}; getopts abcd o; echo \"$o/$OPTIND\""
@@ -73294,7 +75513,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             );
         }
         // Empty or absent is the 1 that is the default.
-        for w in ["OPTERR=", "unset OPTERR", "OPTERR=1", "OPTERR=2", "OPTERR=-1"] {
+        for w in [
+            "OPTERR=",
+            "unset OPTERR",
+            "OPTERR=1",
+            "OPTERR=2",
+            "OPTERR=-1",
+        ] {
             assert_eq!(
                 run(&format!("OPTERR=0; {w}; set -- -x; getopts ab o 2>&1")).0,
                 "osh: illegal option -- x\n",
@@ -73420,13 +75645,17 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Only the loud mode ever takes `OPTARG` away, and it unbinds the name
         // itself rather than following the nameref — destroying both.
         assert_eq!(
-            run("set -- -x; declare -n OPTARG=q; getopts ab o 2>/dev/null; declare -p OPTARG q 2>&1")
-                .0,
+            run(
+                "set -- -x; declare -n OPTARG=q; getopts ab o 2>/dev/null; declare -p OPTARG q 2>&1"
+            )
+            .0,
             "osh: declare: OPTARG: not found\nosh: declare: q: not found\n"
         );
         assert_eq!(
-            run("set -- -a; declare -n OPTARG=q; getopts a: o 2>/dev/null; declare -p OPTARG q 2>&1")
-                .0,
+            run(
+                "set -- -a; declare -n OPTARG=q; getopts a: o 2>/dev/null; declare -p OPTARG q 2>&1"
+            )
+            .0,
             "osh: declare: OPTARG: not found\nosh: declare: q: not found\n"
         );
         // The silent mode writes instead, so the nameref survives.
@@ -73550,10 +75779,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let src = "cb() { printf 'cb %s [%s] cur=[%s]\\n' \"$1\" \"$2\" \"${arr[$1]}\"; }\n\
                    mapfile -t -C cb -c 1 arr <<< $'p\\nq'\n\
                    printf 'final=%s\\n' \"${arr[*]}\"";
-        assert_eq!(
-            run(src).0,
-            "cb 0 [p] cur=[]\ncb 1 [q] cur=[]\nfinal=p q\n"
-        );
+        assert_eq!(run(src).0, "cb 0 [p] cur=[]\ncb 1 [q] cur=[]\nfinal=p q\n");
     }
 
     #[test]
@@ -73583,11 +75809,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn mapfile_an_empty_callback_makes_the_index_the_command() {
         // The index runs as a command and is not found — once per line — and the
         // array is filled all the same.
-        let (o, _) = run(
-            "{ mapfile -t -C '' -c 1 arr <<< $'a\\nb'; } 2>&1\n\
-             echo \"rc=$? ${arr[*]}\""
+        let (o, _) = run("{ mapfile -t -C '' -c 1 arr <<< $'a\\nb'; } 2>&1\n\
+             echo \"rc=$? ${arr[*]}\"");
+        assert_eq!(
+            o,
+            "osh: 0: command not found\nosh: 1: command not found\nrc=0 a b\n"
         );
-        assert_eq!(o, "osh: 0: command not found\nosh: 1: command not found\nrc=0 a b\n");
         // It is the *stored* index, so `-O` moves it…
         let (o, _) = run("{ mapfile -t -C '' -O 5 -c 1 arr <<< a; } 2>&1");
         assert_eq!(o, "osh: 5: command not found\n");
@@ -73624,25 +75851,52 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let feed = "<<< $'l1\\nl2\\nl3'";
         // A letter that takes an argument swallows the rest of its cluster, and
         // a letter that takes none can share the cluster with it.
-        assert_eq!(run(&format!("mapfile -n2 a {feed}; echo ${{#a[@]}}")).0, "2\n");
-        assert_eq!(run(&format!("mapfile -tn 2 a {feed}; echo [${{a[*]}}]")).0, "[l1 l2]\n");
-        assert_eq!(run(&format!("mapfile -td, a {feed}; echo ${{#a[@]}}")).0, "1\n");
+        assert_eq!(
+            run(&format!("mapfile -n2 a {feed}; echo ${{#a[@]}}")).0,
+            "2\n"
+        );
+        assert_eq!(
+            run(&format!("mapfile -tn 2 a {feed}; echo [${{a[*]}}]")).0,
+            "[l1 l2]\n"
+        );
+        assert_eq!(
+            run(&format!("mapfile -td, a {feed}; echo ${{#a[@]}}")).0,
+            "1\n"
+        );
         // `--` ends the options, and what follows is the name — even one that
         // looks like an option, which is then rejected as the name it is.
-        assert_eq!(run(&format!("mapfile -t -- a {feed}; echo [${{a[*]}}]")).0, "[l1 l2 l3]\n");
+        assert_eq!(
+            run(&format!("mapfile -t -- a {feed}; echo [${{a[*]}}]")).0,
+            "[l1 l2 l3]\n"
+        );
         let (o, s) = run(&format!("mapfile -- -t {feed} 2>&1"));
-        assert_eq!((o.as_str(), s), ("osh: mapfile: `-t': not a valid identifier\n", 1));
+        assert_eq!(
+            (o.as_str(), s),
+            ("osh: mapfile: `-t': not a valid identifier\n", 1)
+        );
         // The scan stops at the first operand, so an option written after the
         // name is just a word bash never looks at.
-        assert_eq!(run(&format!("mapfile a -t {feed}; echo \"[${{a[0]}}]\"")).0, "[l1\n]\n");
+        assert_eq!(
+            run(&format!("mapfile a -t {feed}; echo \"[${{a[0]}}]\"")).0,
+            "[l1\n]\n"
+        );
         // An invalid letter is named on its own, not with the cluster it sat in.
         let (o, s) = run(&format!("mapfile -ta {feed} 2>&1"));
-        assert!(o.starts_with("osh: mapfile: -a: invalid option\n"), "got {o:?}");
+        assert!(
+            o.starts_with("osh: mapfile: -a: invalid option\n"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
         // A missing option argument is a usage error, with the synopsis.
         let (o, s) = run("mapfile -n 2>&1");
-        assert!(o.starts_with("osh: mapfile: -n: option requires an argument\n"), "got {o:?}");
-        assert!(o.contains("mapfile: usage: mapfile [-d delim]"), "got {o:?}");
+        assert!(
+            o.starts_with("osh: mapfile: -n: option requires an argument\n"),
+            "got {o:?}"
+        );
+        assert!(
+            o.contains("mapfile: usage: mapfile [-d delim]"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
     }
 
@@ -73652,8 +75906,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The three counts are read the way every other number bash reads is:
         // surrounding blanks are skipped, a sign is allowed, and anything left
         // over means it was not a number.
-        assert_eq!(run(&format!("mapfile -n ' 2 ' a {feed}; echo ${{#a[@]}}")).0, "2\n");
-        assert_eq!(run(&format!("mapfile -n +2 a {feed}; echo ${{#a[@]}}")).0, "2\n");
+        assert_eq!(
+            run(&format!("mapfile -n ' 2 ' a {feed}; echo ${{#a[@]}}")).0,
+            "2\n"
+        );
+        assert_eq!(
+            run(&format!("mapfile -n +2 a {feed}; echo ${{#a[@]}}")).0,
+            "2\n"
+        );
         for (opt, val, what) in [
             ("-n", "x", "line count"),
             ("-n", "2x", "line count"),
@@ -73668,14 +75928,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("-c", "0", "callback quantum"),
         ] {
             let (o, s) = run(&format!("mapfile {opt} {val} a {feed} 2>&1"));
-            assert_eq!((o.as_str(), s), (&*format!("osh: mapfile: {val}: invalid {what}\n"), 1));
+            assert_eq!(
+                (o.as_str(), s),
+                (&*format!("osh: mapfile: {val}: invalid {what}\n"), 1)
+            );
         }
         // The check happens as the option is read, so the first bad one decides
         // — and it beats the generation a good one would have driven.
-        let (o, _) =
-            run(&format!("mapfile -n 2 -O y a {feed} 2>&1; echo rc=$?; declare -p a 2>&1"));
-        assert!(o.starts_with("osh: mapfile: y: invalid array origin\nrc=1\n"), "got {o:?}");
-        assert!(o.contains("declare: a: not found"), "the array must be untouched: {o:?}");
+        let (o, _) = run(&format!(
+            "mapfile -n 2 -O y a {feed} 2>&1; echo rc=$?; declare -p a 2>&1"
+        ));
+        assert!(
+            o.starts_with("osh: mapfile: y: invalid array origin\nrc=1\n"),
+            "got {o:?}"
+        );
+        assert!(
+            o.contains("declare: a: not found"),
+            "the array must be untouched: {o:?}"
+        );
     }
 
     #[test]
@@ -73721,10 +75991,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A closed/out-of-range fd and a non-numeric spec reproduce bash's two
         // distinct diagnostics, both status 1.
         let (o, s) = run("mapfile -u 9 arr 2>&1");
-        assert!(o.contains("mapfile: 9: invalid file descriptor: Bad file descriptor"), "got {o:?}");
+        assert!(
+            o.contains("mapfile: 9: invalid file descriptor: Bad file descriptor"),
+            "got {o:?}"
+        );
         assert_eq!(s, 1);
         let (o, s) = run("readarray -u abc arr 2>&1");
-        assert!(o.contains("readarray: abc: invalid file descriptor specification"), "got {o:?}");
+        assert!(
+            o.contains("readarray: abc: invalid file descriptor specification"),
+            "got {o:?}"
+        );
         assert_eq!(s, 1);
     }
 
@@ -73767,9 +76043,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("declare -i n; printf -v n '%s' '3+4'; declare -p n").0,
             "declare -i n=\"7\"\n"
         );
-        assert_eq!(run("declare -u u; printf -v u '%s' abc; echo \"$u\"").0, "ABC\n");
-        assert_eq!(run("declare -l l; printf -v l '%s' ABC; echo \"$l\"").0, "abc\n");
-        assert_eq!(run("declare -c c; printf -v c '%s' abc; echo \"$c\"").0, "Abc\n");
+        assert_eq!(
+            run("declare -u u; printf -v u '%s' abc; echo \"$u\"").0,
+            "ABC\n"
+        );
+        assert_eq!(
+            run("declare -l l; printf -v l '%s' ABC; echo \"$l\"").0,
+            "abc\n"
+        );
+        assert_eq!(
+            run("declare -c c; printf -v c '%s' abc; echo \"$c\"").0,
+            "Abc\n"
+        );
         // …a nameref is followed, to a variable or to one element…
         assert_eq!(
             run("t=orig; declare -n r=t; printf -v r '%s' via; echo \"$t\"").0,
@@ -73800,15 +76085,17 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("a=(x); readonly a; declare -n r=a; \
                  { printf -v 'r[0]' '%s' z; } 2>&1; echo \"rc=$?\"")
-                .0,
+            .0,
             "osh: r: readonly variable\nrc=1\n"
         );
         // A name the shell maintains refuses silently, and a chain that names
         // nothing warns and refuses.
         assert_eq!(run("printf -v GROUPS '%s' x; echo \"rc=$?\"").0, "rc=1\n");
         assert_eq!(
-            run("declare -n c1=c2; declare -n c2=c1; { printf -v c1 '%s' x; } 2>&1; echo \"rc=$?\"")
-                .0,
+            run(
+                "declare -n c1=c2; declare -n c2=c1; { printf -v c1 '%s' x; } 2>&1; echo \"rc=$?\""
+            )
+            .0,
             "osh: warning: c1: circular name reference\nrc=1\n"
         );
         // A bad `-i` expression is signed by the builtin that named the target,
@@ -73860,8 +76147,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // (The `run` harness captures stdout/stderr into *separate* buffers, so
         // it cannot exercise this ordering — hence a direct unit test.)
         fn merged(text: &str, diags: &[(usize, &str)]) -> String {
-            let owned: Vec<(usize, Str)> =
-                diags.iter().map(|(o, m)| (*o, (*m).as_bytes().to_vec())).collect();
+            let owned: Vec<(usize, Str)> = diags
+                .iter()
+                .map(|(o, m)| (*o, (*m).as_bytes().to_vec()))
+                .collect();
             let mut s = Str::new();
             for seg in printf_output_segments(text.as_bytes(), &owned) {
                 match seg {
@@ -73872,10 +76161,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
         // `printf '%d\n' 1 bad 2` → text "1\n0\n2\n", error tagged at offset 2
         // (start of the 2nd field, just after the flushed "1\n").
-        assert_eq!(
-            merged("1\n0\n2\n", &[(2, "E:bad\n")]),
-            "1\nE:bad\n0\n2\n"
-        );
+        assert_eq!(merged("1\n0\n2\n", &[(2, "E:bad\n")]), "1\nE:bad\n0\n2\n");
         // `printf '%d %d %d\n' 1 bad 3` → text "1 0 3\n"; error at offset 2 has
         // no preceding newline, so it precedes the whole (buffered) line.
         assert_eq!(merged("1 0 3\n", &[(2, "E:bad\n")]), "E:bad\n1 0 3\n");
@@ -73956,7 +76242,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("printf '%u' -99999999999999999999"),
             ("18446744073709551615".to_string(), 0)
         );
-        assert_eq!(run("printf '%x' 99999999999999999999"), ("ffffffffffffffff".to_string(), 0));
+        assert_eq!(
+            run("printf '%x' 99999999999999999999"),
+            ("ffffffffffffffff".to_string(), 0)
+        );
         assert_eq!(run("printf '%o' -1").0, "1777777777777777777777");
         // u64::MAX is exact; MAX+1 saturates.
         assert_eq!(
@@ -73968,7 +76257,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("18446744073709551615".to_string(), 0)
         );
         // In-range negatives still wrap (unchanged behaviour).
-        assert_eq!(run("printf '%u' -1"), ("18446744073709551615".to_string(), 0));
+        assert_eq!(
+            run("printf '%u' -1"),
+            ("18446744073709551615".to_string(), 0)
+        );
         assert_eq!(run("printf '%x' -1"), ("ffffffffffffffff".to_string(), 0));
     }
 
@@ -74033,12 +76325,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("printf 'A%*sB' abc 42 2>/dev/null"), ("A42B".into(), 1));
         assert_eq!(run("printf 'A%.*sB' abc zzz 2>/dev/null"), ("AB".into(), 1));
         // Both stars are read, so both are complained about.
-        assert_eq!(run("printf 'A%*.*sB' p q zzz 2>&1 >/dev/null").0.lines().count(), 2);
+        assert_eq!(
+            run("printf 'A%*.*sB' p q zzz 2>&1 >/dev/null")
+                .0
+                .lines()
+                .count(),
+            2
+        );
         // A missing argument is an empty one, and an empty one is a valid zero.
         assert_eq!(run("printf 'A%*sB'"), ("AB".into(), 0));
         // The seconds of `%(…)T` are converted the same way, and an empty
         // strftime format means `%X`, not an empty result.
-        assert_eq!(run("TZ=UTC printf 'A%(%Y)TB' abc 2>/dev/null"), ("A1970B".into(), 1));
+        assert_eq!(
+            run("TZ=UTC printf 'A%(%Y)TB' abc 2>/dev/null"),
+            ("A1970B".into(), 1)
+        );
         assert_eq!(run("TZ=UTC printf '%()T' 0"), ("00:00:00".into(), 0));
     }
 
@@ -74057,7 +76358,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The width still pads with spaces, and never with zeros.
         assert_eq!(run("TZ=UTC printf '[%12.2(%Y)T]' 0").0, "[          19]");
         assert_eq!(run("TZ=UTC printf '[%-12.2(%Y)T]' 0").0, "[19          ]");
-        assert_eq!(run("TZ=UTC printf '[%012.6(%Y-%m-%d)T]' 0").0, "[      1970-0]");
+        assert_eq!(
+            run("TZ=UTC printf '[%012.6(%Y-%m-%d)T]' 0").0,
+            "[      1970-0]"
+        );
     }
 
     #[test]
@@ -74130,10 +76434,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // own work: `-i` evaluates `1`, not the `1002` the whole string spells.
         assert_eq!(run(r"declare -i n; printf -v n '1\0002'; echo $n").0, "1\n");
         // An element is stored no differently, indexed or not.
-        assert_eq!(run(r"declare -A h; printf -v 'h[k]' 'e\0f'; echo ${#h[k]}").0, "1\n");
+        assert_eq!(
+            run(r"declare -A h; printf -v 'h[k]' 'e\0f'; echo ${#h[k]}").0,
+            "1\n"
+        );
         assert_eq!(run(r"printf -v 'a[0]' 'g\0h'; echo ${#a[0]}").0, "1\n");
         // Nothing is left for a listing to spell, so neither form shows a byte.
-        assert_eq!(run(r"printf -v v 'a\0b'; declare -p v").0, "declare -- v=\"a\"\n");
+        assert_eq!(
+            run(r"printf -v v 'a\0b'; declare -p v").0,
+            "declare -- v=\"a\"\n"
+        );
     }
 
     #[test]
@@ -74141,13 +76451,25 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `read` is the one place a NUL is dropped byte by byte instead of
         // ending the value, so the two bytes around it come back adjacent
         // (bash read.def:771). It is not counted toward `-n`/`-N` either.
-        assert_eq!(run(r"printf 'p\0q\n' | { read -r r; echo ${#r} $r; }").0, "2 pq\n");
-        assert_eq!(run(r"printf 'p\0q\n' | { read -r -N 2 c; echo ${#c} $c; }").0, "2 pq\n");
+        assert_eq!(
+            run(r"printf 'p\0q\n' | { read -r r; echo ${#r} $r; }").0,
+            "2 pq\n"
+        );
+        assert_eq!(
+            run(r"printf 'p\0q\n' | { read -r -N 2 c; echo ${#c} $c; }").0,
+            "2 pq\n"
+        );
         // Unless the NUL is the delimiter, which has to end the record.
-        assert_eq!(run(r"printf 'p\0q\n' | { read -r -d '' d; echo ${#d} $d; }").0, "1 p\n");
+        assert_eq!(
+            run(r"printf 'p\0q\n' | { read -r -d '' d; echo ${#d} $d; }").0,
+            "1 p\n"
+        );
         // Input that is only NULs reads as if it were empty: the name is
         // cleared and the status is 1.
-        assert_eq!(run(r"x=PRESET; printf '\0\0' | { read -r x; echo $? [$x]; }").0, "1 []\n");
+        assert_eq!(
+            run(r"x=PRESET; printf '\0\0' | { read -r x; echo $? [$x]; }").0,
+            "1 []\n"
+        );
     }
 
     #[test]
@@ -74157,10 +76479,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A `#` only starts a comment where a word starts, and a `~` only
         // expands at the front or just past an assignment's `=` or `:`.
         assert_eq!(run("printf '%q|%q' 'a#b' '#ab'").0, "a#b|\\#ab");
-        assert_eq!(run("printf '%q|%q|%q|%q' 'a~' '~a' 'x=~a' 'x:~a'").0, "a~|\\~a|x=\\~a|x:\\~a");
+        assert_eq!(
+            run("printf '%q|%q|%q|%q' 'a~' '~a' 'x=~a' 'x:~a'").0,
+            "a~|\\~a|x=\\~a|x:\\~a"
+        );
         // Bytes the deny list does not name pass through untouched, including
         // the ones a safe list would have had to enumerate.
-        assert_eq!(run("printf '%q' 'a.b/c:d+e-f=g@h%i_j'").0, "a.b/c:d+e-f=g@h%i_j");
+        assert_eq!(
+            run("printf '%q' 'a.b/c:d+e-f=g@h%i_j'").0,
+            "a.b/c:d+e-f=g@h%i_j"
+        );
     }
 
     #[test]
@@ -74411,7 +76739,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `-N` reads exactly N characters and assigns them raw, without IFS
         // splitting or trimming (leading/trailing whitespace preserved).
         assert_eq!(run("read -N 3 x <<< 'ab cd'; echo \"[$x]\"").0, "[ab ]\n");
-        assert_eq!(run("read -N 5 x <<< '  hi  there'; echo \"[$x]\"").0, "[  hi ]\n");
+        assert_eq!(
+            run("read -N 5 x <<< '  hi  there'; echo \"[$x]\"").0,
+            "[  hi ]\n"
+        );
         // With several names the whole record goes to the first; the rest clear.
         assert_eq!(
             run("read -N 5 a b <<< 'x y z w'; echo \"[$a][$b]\"").0,
@@ -74477,10 +76808,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // An element of a readonly array cannot be unset (bash reports the base
         // name), and the array is left intact.
         let (out, status) = run("readonly arr=(1 2); unset arr[0]; echo $?; declare -p arr");
-        assert_eq!(
-            out,
-            "1\ndeclare -ar arr=([0]=\"1\" [1]=\"2\")\n"
-        );
+        assert_eq!(out, "1\ndeclare -ar arr=([0]=\"1\" [1]=\"2\")\n");
         assert_eq!(status, 0); // last command (declare -p) succeeds
         // A readonly associative element is likewise protected.
         assert_eq!(
@@ -74512,16 +76840,25 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // specifiers report the offsetless rendering the fields above assume.
         assert_eq!(run("printf '%(%z %Z)T\\n' 0").0, "+0000 UTC\n");
         // Space-padded hours (%k 24h, %l 12h) and the %r 12-hour clock.
-        assert_eq!(run("printf '%(%k|%l|%r)T\\n' 1000000000").0, " 1| 1|01:46:40 AM\n");
+        assert_eq!(
+            run("printf '%(%k|%l|%r)T\\n' 1000000000").0,
+            " 1| 1|01:46:40 AM\n"
+        );
         // C-locale compound specifiers %c/%x/%X.
         assert_eq!(
             run("printf '%(%c)T\\n' 1000000000").0,
             "Sun Sep  9 01:46:40 2001\n"
         );
-        assert_eq!(run("printf '%(%x %X)T\\n' 1000000000").0, "09/09/01 01:46:40\n");
+        assert_eq!(
+            run("printf '%(%x %X)T\\n' 1000000000").0,
+            "09/09/01 01:46:40\n"
+        );
         // ISO 8601 week date (%G week-year, %V week number, %g 2-digit year).
         // 2001-09-09 is ISO week 36 of 2001.
-        assert_eq!(run("printf '%(%G-W%V-%g)T\\n' 1000000000").0, "2001-W36-01\n");
+        assert_eq!(
+            run("printf '%(%G-W%V-%g)T\\n' 1000000000").0,
+            "2001-W36-01\n"
+        );
         // Boundary: 2021-01-01 (Fri) belongs to ISO week 53 of 2020.
         assert_eq!(run("printf '%(%G-W%V)T\\n' 1609459200").0, "2020-W53\n");
         // Boundary: 2018-12-31 (Mon) belongs to ISO week 01 of 2019.
@@ -74809,7 +77146,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `set -n` (noexec) runs, then latches: every later command is parsed
         // but not executed. The `set -n` itself executes because noexec is off
         // when it is reached.
-        assert_eq!(run("echo before; set -n; echo after; echo also").0, "before\n");
+        assert_eq!(
+            run("echo before; set -n; echo after; echo also").0,
+            "before\n"
+        );
         // Assignments and expansions after noexec do not run either.
         assert_eq!(run("set -n; x=5; echo $x").0, "");
     }
@@ -74853,7 +77193,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn invocation_options_apply_set_and_shopt_state() {
         // `-e` (errexit): a failing command aborts before the next runs.
-        let (out, _) = run_with(|sh| assert!(sh.apply_short_options("e", true).is_ok()), "false; echo after");
+        let (out, _) = run_with(
+            |sh| assert!(sh.apply_short_options("e", true).is_ok()),
+            "false; echo after",
+        );
         assert_eq!(out, "", "errexit should stop before `echo after`");
 
         // A `-eu` cluster enables both; `[[ -o … ]]` reflects each.
@@ -75052,7 +77395,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // reflect the flag, both short (`-E`) and long (`-o errtrace`) spellings.
         assert_eq!(run("[[ -o errtrace ]] && echo on || echo off").0, "off\n");
         assert_eq!(run("set -E; [[ -o errtrace ]] && echo on").0, "on\n");
-        assert_eq!(run("set -o errtrace; [[ -o errtrace ]] && echo on").0, "on\n");
+        assert_eq!(
+            run("set -o errtrace; [[ -o errtrace ]] && echo on").0,
+            "on\n"
+        );
         assert!(run("set -E; echo \"$-\"").0.contains('E'));
         // bash orders `E` before `T` in `$-` (…,C,E,H,P,T).
         let dollar_dash = run("set -ET; echo \"$-\"").0;
@@ -75110,8 +77456,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn set_errexit_condition_exempt() {
         // Failing commands in a condition do not trigger errexit.
-        assert_eq!(run("set -e; if false; then echo t; fi; echo done").0, "done\n");
-        assert_eq!(run("set -e; while false; do echo x; done; echo done").0, "done\n");
+        assert_eq!(
+            run("set -e; if false; then echo t; fi; echo done").0,
+            "done\n"
+        );
+        assert_eq!(
+            run("set -e; while false; do echo x; done; echo done").0,
+            "done\n"
+        );
         // A non-final `&&` operand failure is exempt; a negated command too.
         assert_eq!(run("set -e; false && echo skip; echo done").0, "done\n");
         assert_eq!(run("set -e; ! true; echo done").0, "done\n");
@@ -75131,9 +77483,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // after the final `&&`/`||`, and for a `!`-negated pipeline — and the
         // exemption PROPAGATES into the body of a function invoked there. So a
         // bare failing command inside such a function does not abort the shell.
-        assert_eq!(run("set -e; f() { false; echo A; }; f || echo caught").0, "A\n");
-        assert_eq!(run("set -e; f() { false; echo A; }; f && echo B; echo C").0, "A\nB\nC\n");
-        assert_eq!(run("set -e; f() { false; echo A; }; ! f; echo done").0, "A\ndone\n");
+        assert_eq!(
+            run("set -e; f() { false; echo A; }; f || echo caught").0,
+            "A\n"
+        );
+        assert_eq!(
+            run("set -e; f() { false; echo A; }; f && echo B; echo C").0,
+            "A\nB\nC\n"
+        );
+        assert_eq!(
+            run("set -e; f() { false; echo A; }; ! f; echo done").0,
+            "A\ndone\n"
+        );
         // A brace group in an exempt position is exempt throughout too.
         assert_eq!(run("set -e; { false; echo A; } || echo caught").0, "A\n");
         // The exemption reaches through a nested call chain.
@@ -75152,7 +77513,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A subshell executed where errexit is being ignored runs its whole body
         // with errexit suppressed (bash/POSIX): the intermediate failure does not
         // abort it. `( false; echo sub )` on the left of `||` prints `sub`.
-        assert_eq!(run("set -e; ( false; echo sub ) || echo subcaught").0, "sub\n");
+        assert_eq!(
+            run("set -e; ( false; echo sub ) || echo subcaught").0,
+            "sub\n"
+        );
         // Same in an if-condition, and for a multi-failure body.
         assert_eq!(
             run("set -e; if ( false; echo X ); then echo t; else echo f; fi").0,
@@ -75178,7 +77542,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run(r#"set -e; x=$(false; echo A); echo "[$x]""#).0, "[A]\n");
         // Multiple intermediate failures are likewise tolerated; only the final
         // command's status becomes $? of the substitution.
-        assert_eq!(run(r#"set -e; x=$(false; echo A; false; echo B; true); echo "[$x]""#).0, "[A\nB]\n");
+        assert_eq!(
+            run(r#"set -e; x=$(false; echo A; false; echo B; true); echo "[$x]""#).0,
+            "[A\nB]\n"
+        );
     }
 
     #[test]
@@ -75224,7 +77591,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // Every route into the mode counts, including the variable spellings and
         // a `local` copy of it going out of scope.
-        assert_eq!(run("POSIXLY_CORRECT=1; shopt -p shift_verbose").0, "shopt -s shift_verbose\n");
+        assert_eq!(
+            run("POSIXLY_CORRECT=1; shopt -p shift_verbose").0,
+            "shopt -s shift_verbose\n"
+        );
         assert_eq!(
             run("POSIXLY_CORRECT=1; unset POSIXLY_CORRECT; shopt -p shift_verbose").0,
             "shopt -u shift_verbose\n"
@@ -75249,7 +77619,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(o.contains("shift: shift count out of range"), "{o:?}");
         // Posix mode reaches the message only *through* the option, so opting
         // back out inside the mode is silent again.
-        assert_eq!(run("set -o posix; shopt -u shift_verbose; shift 5 2>&1; echo rc=$?").0, "rc=1\n");
+        assert_eq!(
+            run("set -o posix; shopt -u shift_verbose; shift 5 2>&1; echo rc=$?").0,
+            "rc=1\n"
+        );
     }
 
     #[test]
@@ -75259,9 +77632,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // so it names `--` rather than the count behind it. The "numeric
         // argument required" complaint comes from *inside* `get_numeric_arg`,
         // past the `--`, and names the count.
-        assert_eq!(run("shift -- -2 2>&1").0, "osh: shift: --: shift count out of range\n");
-        assert_eq!(run("shift -2 2>&1").0, "osh: shift: -2: shift count out of range\n");
-        assert_eq!(run("shift -- zz 2>&1").0, "osh: shift: zz: numeric argument required\n");
+        assert_eq!(
+            run("shift -- -2 2>&1").0,
+            "osh: shift: --: shift count out of range\n"
+        );
+        assert_eq!(
+            run("shift -2 2>&1").0,
+            "osh: shift: -2: shift count out of range\n"
+        );
+        assert_eq!(
+            run("shift -- zz 2>&1").0,
+            "osh: shift: zz: numeric argument required\n"
+        );
         // The same as-written rule on the past-the-end path, which only speaks
         // at all with `shift_verbose` on.
         assert_eq!(
@@ -75282,12 +77664,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A blank between the sign and the digits is not part of a number, and
         // neither is an exponent or a hex prefix — `shift` names none of the
         // bases, it only ever asks for a numeric argument.
-        assert_eq!(run("shift '+ 1' 2>&1").0, "osh: shift: + 1: numeric argument required\n");
-        assert_eq!(run("shift 0x1 2>&1").0, "osh: shift: 0x1: numeric argument required\n");
-        assert_eq!(run("shift '' 2>&1").0, "osh: shift: : numeric argument required\n");
+        assert_eq!(
+            run("shift '+ 1' 2>&1").0,
+            "osh: shift: + 1: numeric argument required\n"
+        );
+        assert_eq!(
+            run("shift 0x1 2>&1").0,
+            "osh: shift: 0x1: numeric argument required\n"
+        );
+        assert_eq!(
+            run("shift '' 2>&1").0,
+            "osh: shift: : numeric argument required\n"
+        );
         // A negative count is a number, so it reaches the range check rather
         // than the numeric one — with the blank still in the word bash names.
-        assert_eq!(run("shift ' -1' 2>&1").0, "osh: shift:  -1: shift count out of range\n");
+        assert_eq!(
+            run("shift ' -1' 2>&1").0,
+            "osh: shift:  -1: shift count out of range\n"
+        );
     }
 
     #[test]
@@ -75301,7 +77695,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(s, 0);
         // It unwinds past an `&&`/`||` arm, out of a loop and out of a function
         // body — none of those is a boundary for it.
-        assert_eq!(run("shift 1 2 2>&1 && echo and; echo no").0, "osh: shift: too many arguments\n");
+        assert_eq!(
+            run("shift 1 2 2>&1 && echo and; echo no").0,
+            "osh: shift: too many arguments\n"
+        );
         assert_eq!(
             run("for i in 1 2; do echo $i; shift 9 9 2>&1; done; echo no\necho done").0,
             "1\nosh: shift: too many arguments\ndone\n"
@@ -75320,7 +77717,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(o2, "[osh: shift: too many arguments] rc=1\n");
         // The count is parsed first, so a bad one is the ordinary failure and
         // the line continues.
-        assert_eq!(run("shift x 2 2>&1; echo rc=$?").0, "osh: shift: x: numeric argument required\nrc=1\n");
+        assert_eq!(
+            run("shift x 2 2>&1; echo rc=$?").0,
+            "osh: shift: x: numeric argument required\nrc=1\n"
+        );
     }
 
     #[test]
@@ -75363,7 +77763,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // (errexit on) but processing aborts at `-Z` with status 2.
         assert_eq!(run("set -e -Z 2>&1 | head -1; echo x").1, 0);
         // Standard bash `-o` names osh does not model are accepted as no-ops.
-        assert_eq!(run("set -o vi; set -o posix; set -o emacs; echo ok").0, "ok\n");
+        assert_eq!(
+            run("set -o vi; set -o posix; set -o emacs; echo ok").0,
+            "ok\n"
+        );
         assert_eq!(run("set -o vi; set -o posix; set -o emacs; echo ok").1, 0);
         // Short flags bash accepts but osh does not model are no-ops too.
         assert_eq!(run("set -h; set -m; set -b; echo ok").0, "ok\n");
@@ -75731,7 +78134,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn posix_mode_narrows_what_a_function_may_be_called() {
         // Outside posix mode bash's grammar takes almost any word as a function
         // name, and only a quoted or expanded one is refused — mildly.
-        for name in ["a-b", "a.b", "1f", "@", "%f", "a[1]", "f?", "a/b", "unset", "set"] {
+        for name in [
+            "a-b", "a.b", "1f", "@", "%f", "a[1]", "f?", "a/b", "unset", "set",
+        ] {
             assert_eq!(
                 run_script(&format!("eval '{name}() {{ :; }}'\necho tail")),
                 ("tail\n".to_string(), 0),
@@ -75746,7 +78151,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "times", "trap", "unset",
         ] {
             assert_eq!(
-                run_script(&format!("set -o posix; eval '{name}() {{ :; }}'\necho tail")),
+                run_script(&format!(
+                    "set -o posix; eval '{name}() {{ :; }}'\necho tail"
+                )),
                 (String::new(), 2),
                 "{name}"
             );
@@ -75781,7 +78188,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // `$POSIXLY_CORRECT` is the same switch, and leaving the mode gives the
         // names back.
-        assert_eq!(run_script("POSIXLY_CORRECT=1; a-b() { :; }\necho tail"), (String::new(), 2));
+        assert_eq!(
+            run_script("POSIXLY_CORRECT=1; a-b() { :; }\necho tail"),
+            (String::new(), 2)
+        );
         assert_eq!(
             run_script("POSIXLY_CORRECT=1; unset POSIXLY_CORRECT; a-b() { echo ok; }; a-b"),
             ("ok\n".to_string(), 0)
@@ -75803,8 +78213,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Hence the shape of every case: define first, switch after — and
         // switch through `$POSIXLY_CORRECT` rather than `set -o posix`, since a
         // function named `set` would otherwise eat the switch itself.
-        let posix =
-            |name: &str, body: &str| run_script(&format!("{name}() {{ echo FN; }}\nPOSIXLY_CORRECT=1\n{body}"));
+        let posix = |name: &str, body: &str| {
+            run_script(&format!(
+                "{name}() {{ echo FN; }}\nPOSIXLY_CORRECT=1\n{body}"
+            ))
+        };
         // Outside the mode the function wins…
         assert_eq!(
             run_script("unset() { echo FN; }; v=1; unset v; echo \"v=${v-gone}\""),
@@ -75815,9 +78228,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             posix("unset", "v=1; unset v; echo \"v=${v-gone}\""),
             ("v=gone\n".to_string(), 0)
         );
-        assert_eq!(posix("shift", "set -- a b; shift; echo $#"), ("1\n".to_string(), 0));
+        assert_eq!(
+            posix("shift", "set -- a b; shift; echo $#"),
+            ("1\n".to_string(), 0)
+        );
         assert_eq!(posix("eval", "eval 'echo EV'"), ("EV\n".to_string(), 0));
-        assert_eq!(posix("set", "set -- a b c; echo $#"), ("3\n".to_string(), 0));
+        assert_eq!(
+            posix("set", "set -- a b c; echo $#"),
+            ("3\n".to_string(), 0)
+        );
         assert_eq!(posix(":", ":; echo rc=$?"), ("rc=0\n".to_string(), 0));
         assert_eq!(
             posix("break", "for i in 1 2 3; do break; done; echo i=$i"),
@@ -75843,14 +78262,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `enable -n` takes the builtin out of the running, and the function is
         // reachable again.
         assert_eq!(
-            posix("unset", "enable -n unset; v=1; unset v; echo \"v=${v-gone}\""),
+            posix(
+                "unset",
+                "enable -n unset; v=1; unset v; echo \"v=${v-gone}\""
+            ),
             ("FN\nv=1\n".to_string(), 0)
         );
         // Only *execution* looks the other way round: everything that merely
         // describes a name still finds the function, and `unset -f` removes it.
-        assert_eq!(posix("unset", "type -t unset"), ("function\n".to_string(), 0));
-        assert_eq!(posix("unset", "command -v unset"), ("unset\n".to_string(), 0));
-        assert_eq!(posix("unset", "declare -F unset"), ("unset\n".to_string(), 0));
+        assert_eq!(
+            posix("unset", "type -t unset"),
+            ("function\n".to_string(), 0)
+        );
+        assert_eq!(
+            posix("unset", "command -v unset"),
+            ("unset\n".to_string(), 0)
+        );
+        assert_eq!(
+            posix("unset", "declare -F unset"),
+            ("unset\n".to_string(), 0)
+        );
         assert_eq!(
             posix("unset", "unset -f unset; declare -F unset; echo rc=$?"),
             ("rc=1\n".to_string(), 0)
@@ -75858,7 +78289,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The prefixes reach the builtin either way, as they did before.
         for prefix in ["command", "builtin"] {
             assert_eq!(
-                posix("unset", &format!("v=1; {prefix} unset v; echo \"v=${{v-gone}}\"")),
+                posix(
+                    "unset",
+                    &format!("v=1; {prefix} unset v; echo \"v=${{v-gone}}\"")
+                ),
                 ("v=gone\n".to_string(), 0),
                 "{prefix}"
             );
@@ -75887,7 +78321,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             );
         }
         // Only the sixteen: every other builtin keeps the plain wording.
-        for n in ["cd", "read", "echo", "printf", "local", "declare", "command", "builtin"] {
+        for n in [
+            "cd", "read", "echo", "printf", "local", "declare", "command", "builtin",
+        ] {
             assert_eq!(
                 run(&format!("set -o posix; type {n}")).0,
                 format!("{n} is a shell builtin\n"),
@@ -75900,7 +78336,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "unset is a special shell builtin\nexport is a special shell builtin\n\
              cd is a shell builtin\n"
         );
-        assert_eq!(run("set -o posix; command -V unset").0, "unset is a special shell builtin\n");
+        assert_eq!(
+            run("set -o posix; command -V unset").0,
+            "unset is a special shell builtin\n"
+        );
         // …and none of the ones that answer with a machine-readable word.
         assert_eq!(run("set -o posix; type -t unset").0, "builtin\n");
         assert_eq!(run("set -o posix; type -at unset").0, "builtin\n");
@@ -75945,8 +78384,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 .join("|")
         };
         // One letter selects the names carrying it…
-        assert_eq!(mine("declare -rp"), r#"declare -r ZZR="3"|declare -rx ZZRX="5""#);
-        assert_eq!(mine("declare -xp"), r#"declare -rx ZZRX="5"|declare -x ZZX="2""#);
+        assert_eq!(
+            mine("declare -rp"),
+            r#"declare -r ZZR="3"|declare -rx ZZRX="5""#
+        );
+        assert_eq!(
+            mine("declare -xp"),
+            r#"declare -rx ZZRX="5"|declare -x ZZX="2""#
+        );
         // …and several union among themselves, rather than intersecting.
         assert_eq!(
             mine("declare -rxp"),
@@ -75954,7 +78399,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // `-a`/`-A` are not attributes but *restrictions* on the source list, so
         // they intersect with the rest: the indexed arrays that are integer.
-        assert_eq!(mine("declare -ap"), r#"declare -ai ZZAI=([0]="7")|declare -a ZZAR=([0]="1")"#);
+        assert_eq!(
+            mine("declare -ap"),
+            r#"declare -ai ZZAI=([0]="7")|declare -a ZZAR=([0]="1")"#
+        );
         assert_eq!(mine("declare -aip"), r#"declare -ai ZZAI=([0]="7")"#);
         // Nothing is both kinds at once, and no name is `-t`.
         assert_eq!(mine("declare -aAp"), "");
@@ -75969,7 +78417,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(mine("declare").starts_with(r#"ZZA=1|ZZAI=([0]="7")"#));
         assert!(!mine("declare ZZQ; declare").contains("ZZQ"));
         // A name operand turns the flags back into a declaration.
-        assert_eq!(mine("declare -r ZZA; declare -p ZZA"), r#"declare -r ZZA="1""#);
+        assert_eq!(
+            mine("declare -r ZZA; declare -p ZZA"),
+            r#"declare -r ZZA="1""#
+        );
     }
 
     #[test]
@@ -76009,9 +78460,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `p` selects listing mode whichever sign carries it — for `local` as
         // well as `declare`, which is what reading only the minus direction in
         // `local`'s routing got wrong.
-        assert_eq!(run("f() { local w=W; local +p; }; f").0, "declare -- w=\"W\"\n");
-        assert_eq!(run("f() { local w=W; local +rp; }; f").0, "declare -- w=\"W\"\n");
-        assert_eq!(run("f() { local +p w; }; f 2>&1").0, "main: local: w: not found\n");
+        assert_eq!(
+            run("f() { local w=W; local +p; }; f").0,
+            "declare -- w=\"W\"\n"
+        );
+        assert_eq!(
+            run("f() { local w=W; local +rp; }; f").0,
+            "declare -- w=\"W\"\n"
+        );
+        assert_eq!(
+            run("f() { local +p w; }; f 2>&1").0,
+            "main: local: w: not found\n"
+        );
         // A `--` ends the scan too, so a `-p` written behind one is an operand
         // and a bad name — not a request to list. The routing walked straight
         // past the `--` (it is a flag word like any other to
@@ -76038,9 +78498,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         };
         // Every other attribute letter is dropped — including the *other*
         // builtin's, so neither listing ever shows the attribute it is not about.
-        assert_eq!(rewrite(b"export", r#"declare -rx RX="1""#), r#"export RX="1""#);
-        assert_eq!(rewrite(b"readonly", r#"declare -rx RX="1""#), r#"readonly RX="1""#);
-        assert_eq!(rewrite(b"readonly", r#"declare -ir N="5""#), r#"readonly N="5""#);
+        assert_eq!(
+            rewrite(b"export", r#"declare -rx RX="1""#),
+            r#"export RX="1""#
+        );
+        assert_eq!(
+            rewrite(b"readonly", r#"declare -rx RX="1""#),
+            r#"readonly RX="1""#
+        );
+        assert_eq!(
+            rewrite(b"readonly", r#"declare -ir N="5""#),
+            r#"readonly N="5""#
+        );
         // …except `-a`/`-A`, which survive.
         assert_eq!(
             rewrite(b"readonly", r#"declare -air N=([0]="1")"#),
@@ -76061,7 +78530,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(rewrite(b"export", "declare -x"), "declare -x");
         // End to end, where the listing is small enough to be deterministic:
         // the `-f` form drops the body entirely.
-        assert_eq!(run("f(){ :; }; export -f f; set -o posix; export -pf").0, "export -f f\n");
+        assert_eq!(
+            run("f(){ :; }; export -f f; set -o posix; export -pf").0,
+            "export -f f\n"
+        );
         assert_eq!(
             run("f(){ :; }; readonly -f f; set -o posix; readonly -pf").0,
             "readonly -f f\n"
@@ -76102,7 +78574,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("zqfunc(){ :; }; set -o posix; declare -f zqfunc").0,
             "zqfunc () \n{ \n    :\n}\n"
         );
-        assert_eq!(run("zqfunc(){ :; }; set -o posix; declare -F").0, "declare -f zqfunc\n");
+        assert_eq!(
+            run("zqfunc(){ :; }; set -o posix; declare -F").0,
+            "declare -f zqfunc\n"
+        );
     }
 
     /// `-f` and `-v` name two different namespaces, so `unset` refuses both at
@@ -76147,7 +78622,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "osh: shift: --: shift count out of range\ns=1\n"
         );
         // A shift that fits stays silent and succeeds.
-        assert_eq!(run("set -o posix; set -- a b; shift 2 2>&1; echo s=$? $#").0, "s=0 0\n");
+        assert_eq!(
+            run("set -o posix; set -- a b; shift 2 2>&1; echo s=$? $#").0,
+            "s=0 0\n"
+        );
         // The other two complaints are not posix-gated.
         assert_eq!(
             run("shift abc 2>&1; echo s=$?").0,
@@ -76270,21 +78748,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             BUDGET,
         );
         assert_eq!(st, 0);
-        assert!(out.contains("maximum nesting level exceeded"), "got {out:?}");
+        assert!(
+            out.contains("maximum nesting level exceeded"),
+            "got {out:?}"
+        );
         assert!(out.ends_with("after rc=1\n"), "got {out:?}");
         // The depth reached is a real depth, not zero: ordinary shallow work is
         // nowhere near the ceiling.
-        let depth: u32 = run_budgeted("f() { c=$((c+1)); f; }\nc=0\nf 2>/dev/null\necho $c", BUDGET)
-            .0
-            .trim()
-            .parse()
-            .expect("a depth");
+        let depth: u32 = run_budgeted(
+            "f() { c=$((c+1)); f; }\nc=0\nf 2>/dev/null\necho $c",
+            BUDGET,
+        )
+        .0
+        .trim()
+        .parse()
+        .expect("a depth");
         assert!(depth > 3, "tripped almost immediately: {depth}");
         // An `eval` recursion is native recursion too, and is caught the same
         // way — the guard sits where every nested construct passes, not on the
         // function-call path alone.
         let (out, _) = run_budgeted("e() { eval e; }\n{ e; } 2>&1\necho \"after rc=$?\"", BUDGET);
-        assert!(out.contains("maximum nesting level exceeded"), "got {out:?}");
+        assert!(
+            out.contains("maximum nesting level exceeded"),
+            "got {out:?}"
+        );
         assert!(out.ends_with("after rc=1\n"), "got {out:?}");
         // The shell is still usable afterwards — the recursion unwound rather
         // than taking the process with it, which is what lets the binary go on
@@ -76321,9 +78808,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.set_stack_budget(stack_budget(SHELL_STACK_SIZE));
         assert!(!sh.stack_exhausted());
         sh.stack_base = sh.stack_base.saturating_add(SHELL_STACK_SIZE);
-        assert!(sh.stack_exhausted(), "a stale origin is what has to trip it");
+        assert!(
+            sh.stack_exhausted(),
+            "a stale origin is what has to trip it"
+        );
         sh.rebase_stack(SHELL_STACK_SIZE);
-        assert!(!sh.stack_exhausted(), "re-anchoring makes it a real depth again");
+        assert!(
+            !sh.stack_exhausted(),
+            "re-anchoring makes it a real depth again"
+        );
 
         // End to end: with a budget in force, a pipeline stage — which runs on a
         // spawned thread — still executes its commands. Un-rebased this failed
@@ -76398,7 +78891,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // g called on line 2 (inside f), f called on line 3.
         assert_eq!(run(src).0, "2 3\n");
         // Parallel arrays are all unset outside any function.
-        assert_eq!(run("echo [${BASH_LINENO[@]}][${BASH_SOURCE[@]}]").0, "[][]\n");
+        assert_eq!(
+            run("echo [${BASH_LINENO[@]}][${BASH_SOURCE[@]}]").0,
+            "[][]\n"
+        );
     }
 
     #[test]
@@ -76421,14 +78917,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Returning from a call pops only the frame it pushed; the static base
         // frame (count 0) survives.
         assert_eq!(
-            run("shopt -s extdebug; f(){ :; }; f a b c; echo \"[${BASH_ARGC[@]}][${BASH_ARGV[@]}]\"").0,
+            run(
+                "shopt -s extdebug; f(){ :; }; f a b c; echo \"[${BASH_ARGC[@]}][${BASH_ARGV[@]}]\""
+            )
+            .0,
             "[0][]\n"
         );
         // Without extdebug, osh leaves BASH_ARGC/BASH_ARGV unset. (bash exposes an
         // undocumented top-level base frame here via a lazy-materialisation
         // artifact; osh follows the documented "extended debugging mode only"
         // contract — see known-issues.md TD-OILS-MISSING-SPECIAL-ARRAYS.)
-        assert_eq!(run("f(){ echo \"[${BASH_ARGC[@]:-U}]\"; }; f a b").0, "[U]\n");
+        assert_eq!(
+            run("f(){ echo \"[${BASH_ARGC[@]:-U}]\"; }; f a b").0,
+            "[U]\n"
+        );
         // Enabling extdebug inside a function captures that function's positional
         // params as the base frame, then a nested call pushes on top.
         assert_eq!(
@@ -76503,7 +79005,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn bash_aliases_and_cmds_live_assoc() {
         // BASH_ALIASES is present-when-empty and rendered as an empty assoc.
-        assert_eq!(run("declare -p BASH_ALIASES").0, "declare -A BASH_ALIASES=()\n");
+        assert_eq!(
+            run("declare -p BASH_ALIASES").0,
+            "declare -A BASH_ALIASES=()\n"
+        );
         assert_eq!(run("declare -p BASH_CMDS").0, "declare -A BASH_CMDS=()\n");
         // Defining an alias makes it visible through the mirror (element read,
         // count, and declare -p all reflect the live alias table).
@@ -76518,7 +79023,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // Writing an element goes back to the source: BASH_ALIASES[x]=… creates a
         // real alias, and += appends to the existing alias value.
-        assert_eq!(run("BASH_ALIASES[gg]=grep; alias gg").0, "alias gg='grep'\n");
+        assert_eq!(
+            run("BASH_ALIASES[gg]=grep; alias gg").0,
+            "alias gg='grep'\n"
+        );
         assert_eq!(
             run("BASH_ALIASES[x]=a; BASH_ALIASES[x]+=b; alias x").0,
             "alias x='ab'\n"
@@ -76554,7 +79062,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.set_interactive_shell(false);
         sh.set_execution_string(b"echo hi");
         let buf = capture_sink();
-        let prog = parse("echo \"[$BASH_EXECUTION_STRING]\"; echo ${!BASH*}".as_bytes()).expect("parse");
+        let prog =
+            parse("echo \"[$BASH_EXECUTION_STRING]\"; echo ${!BASH*}".as_bytes()).expect("parse");
         {
             let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -76694,25 +79203,35 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run(&format!("{on}declare -i v=9; f")).0,
             "declare -i v=\"9\"\n"
         );
-        assert_eq!(run(&format!("{on}v=g; v=temp f")).0, "declare -x v=\"temp\"\n");
+        assert_eq!(
+            run(&format!("{on}v=g; v=temp f")).0,
+            "declare -x v=\"temp\"\n"
+        );
         // The nameref marking is the exception: `-n` is dropped, the value (the
         // target's *name*) is kept.
         assert_eq!(
-            run(&format!("{on}g() {{ local t=target; local -n v=t; f; }}; g")).0,
+            run(&format!(
+                "{on}g() {{ local t=target; local -n v=t; f; }}; g"
+            ))
+            .0,
             "declare -- v=\"t\"\n"
         );
         // The inheritance happens before the declaration's value is assigned, so
         // an inherited `-i` converts it; and an explicit flag is *added*.
         assert_eq!(
-            run("shopt -s localvar_inherit; f() { local v=own; declare -p v; }; \
-                 g() { local -i v=7; f; }; g")
-                .0,
+            run(
+                "shopt -s localvar_inherit; f() { local v=own; declare -p v; }; \
+                 g() { local -i v=7; f; }; g"
+            )
+            .0,
             "declare -i v=\"0\"\n"
         );
         assert_eq!(
-            run("shopt -s localvar_inherit; f() { local -x v; declare -p v; }; \
-                 g() { local -i v=7; f; }; g")
-                .0,
+            run(
+                "shopt -s localvar_inherit; f() { local -x v; declare -p v; }; \
+                 g() { local -i v=7; f; }; g"
+            )
+            .0,
             "declare -ix v=\"7\"\n"
         );
         // With the option off it is the ordinary fresh local again.
@@ -76735,7 +79254,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("o() { local v=OUT; m; echo \"[$v]\"; }; \
                  m() { local -I v; echo \"[$v]\"; v=MID; i; }; \
                  i() { echo \"[$v]\"; }; o")
-                .0,
+            .0,
             "[OUT]\n[MID]\n[OUT]\n"
         );
         // The *nearest* scope that has the name wins, so a frame without it is
@@ -76800,21 +79319,23 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("a=g; i1() { unset a; echo \"[${a-U}]\"; }; \
                  i2() { local a=two; i1; echo \"[${a-U}]\"; }; i2; echo \"[${a-U}]\"")
-                .0,
+            .0,
             "[g]\n[g]\n[g]\n"
         );
         // One level per `unset`, three frames deep.
         assert_eq!(
-            run("a=g; l1() { unset a; echo \"[${a-U}]\"; unset a; echo \"[${a-U}]\"; }; \
-                 l2() { local a=two; l1; }; l3() { local a=three; l2; }; l3")
-                .0,
+            run(
+                "a=g; l1() { unset a; echo \"[${a-U}]\"; unset a; echo \"[${a-U}]\"; }; \
+                 l2() { local a=two; l1; }; l3() { local a=three; l2; }; l3"
+            )
+            .0,
             "[three]\n[g]\n"
         );
         // The revealed binding brings its attributes back with it.
         assert_eq!(
             run("declare -i b=1; o1() { unset b; declare -p b; }; \
                  o2() { local b=two; o1; }; o2")
-                .0,
+            .0,
             "declare -i b=\"1\"\n"
         );
         // The frame has nothing left to restore, so a write after the unset
@@ -76826,9 +79347,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // …unless `localvar_unset` makes every frame behave like the current
         // one, in which case the write lands on the still-shadowed local.
         assert_eq!(
-            run("shopt -s localvar_unset; a=g; q1() { unset a; a=fromq1; }; \
-                 q2() { local a=two; q1; }; q2; echo \"$a\"")
-                .0,
+            run(
+                "shopt -s localvar_unset; a=g; q1() { unset a; a=fromq1; }; \
+                 q2() { local a=two; q1; }; q2; echo \"$a\""
+            )
+            .0,
             "g\n"
         );
         // A call's temporary environment is the same scope level as that call's
@@ -76852,9 +79375,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // a function underneath it shadows the prefix normally and popping the
         // local reveals the prefix's binding rather than the global.
         assert_eq!(
-            run("q=1; aa1() { unset q; declare -p q; }; aa2() { local q=2; aa1; }; \
-                 q=3 eval 'aa2'")
-                .0,
+            run(
+                "q=1; aa1() { unset q; declare -p q; }; aa2() { local q=2; aa1; }; \
+                 q=3 eval 'aa2'"
+            )
+            .0,
             "declare -x q=\"3\"\n"
         );
     }
@@ -76864,7 +79389,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `local -` makes the `set` options local to the function: options
         // changed after the `local -` are reverted on return, matching bash.
         // xtrace enabled inside must not persist after the function returns.
-        let src = "f(){ local -; set -x; :; }; f; echo \"$-\" | grep -q x && echo leaked || echo clean";
+        let src =
+            "f(){ local -; set -x; :; }; f; echo \"$-\" | grep -q x && echo leaked || echo clean";
         assert_eq!(run(src).0, "clean\n");
         // The `$-` letters visible after the call must not include `x`.
         let src2 = "f(){ local -; set -x; :; }; f; case $- in *x*) echo has;; *) echo none;; esac";
@@ -76907,7 +79433,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Found where it was made, and from an inner frame by the ordinary
         // scope walk — but not before the frame, nor after it returns.
         assert_eq!(run("f(){ local -; declare -p -; }; f").0, "declare -- -\n");
-        assert_eq!(run("g(){ declare -p -; }; f(){ local -; g; }; f").0, "declare -- -\n");
+        assert_eq!(
+            run("g(){ declare -p -; }; f(){ local -; g; }; f").0,
+            "declare -- -\n"
+        );
         assert_eq!(
             run("declare -p - 2>&1; echo rc=$?").0,
             "osh: declare: -: not found\nrc=1\n"
@@ -76919,7 +79448,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // It holds nothing, and `$-` is a different thing entirely — the
         // special parameter goes on answering with the option letters, under
         // its own name and through an indirection alike.
-        assert_eq!(run("f(){ local -; test -v - && echo v || echo u; }; f").0, "u\n");
+        assert_eq!(
+            run("f(){ local -; test -v - && echo v || echo u; }; f").0,
+            "u\n"
+        );
         assert_eq!(
             run("f(){ local -; s=$-; n=-; [ \"${!n}\" = \"$s\" ] && echo same; }; f").0,
             "same\n"
@@ -76966,7 +79498,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "rc=0\ndeclare -- -\n"
         );
         // A subshell inherits it, and two frames each get their own.
-        assert_eq!(run("f(){ local -; ( declare -p - ); }; f").0, "declare -- -\n");
+        assert_eq!(
+            run("f(){ local -; ( declare -p - ); }; f").0,
+            "declare -- -\n"
+        );
         assert_eq!(
             run("g(){ local -; local -p; declare -p -; }; f(){ local -; g; local -p; }; f").0,
             "local -\ndeclare -- -\nlocal -\n"
@@ -77037,7 +79572,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(o, "hi\nrc=0\n");
         assert_eq!(s, 0);
         // The command's failure status is preserved, not overridden by the error.
-        assert_eq!(run("readonly c=1; c=2 false 2>/dev/null; echo \"rc=$?\"").0, "rc=1\n");
+        assert_eq!(
+            run("readonly c=1; c=2 false 2>/dev/null; echo \"rc=$?\"").0,
+            "rc=1\n"
+        );
         // The readonly var is left unchanged; a *non*-readonly sibling prefix on
         // the same command still takes effect in the child environment.
         let (o2, _) = run("readonly c=1; c=2 export d=5 2>/dev/null; echo \"c=$c d=$d\"");
@@ -77072,13 +79610,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("readonly -a a=(1 2); ((a[0]=5)) 2>/dev/null; echo \"${a[0]}\"").0,
             "1\n"
         );
-        assert_eq!(run("readonly x=1; let x=5 2>/dev/null; echo \"rc=$?\"").0, "rc=1\n");
         assert_eq!(
-            run("readonly x=1; for ((x=0;x<2;x++)); do echo hi; done 2>/dev/null; echo \"rc=$?\"").0,
+            run("readonly x=1; let x=5 2>/dev/null; echo \"rc=$?\"").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("readonly x=1; for ((x=0;x<2;x++)); do echo hi; done 2>/dev/null; echo \"rc=$?\"")
+                .0,
             "rc=1\n"
         );
         // A branch not taken never reaches the store, so nothing is refused.
-        assert_eq!(run("readonly x=1; ((0 ? x=2 : 5)); echo \"rc=$?\"").0, "rc=0\n");
+        assert_eq!(
+            run("readonly x=1; ((0 ? x=2 : 5)); echo \"rc=$?\"").0,
+            "rc=0\n"
+        );
     }
 
     #[test]
@@ -77086,14 +79631,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `for`/`select` used to write the word straight into the scalar table,
         // so the loop variable's attributes and the shell's own options — which
         // every other assignment obeys — passed it by.
-        assert_eq!(run("declare -i n; for n in 1+1 x; do echo \"$n\"; done").0, "2\n0\n");
-        assert_eq!(run("declare -u U; for U in ab; do echo \"$U\"; done").0, "AB\n");
-        assert_eq!(run("set -a; for v in a b; do :; done; declare -p v").0, "declare -x v=\"b\"\n");
+        assert_eq!(
+            run("declare -i n; for n in 1+1 x; do echo \"$n\"; done").0,
+            "2\n0\n"
+        );
+        assert_eq!(
+            run("declare -u U; for U in ab; do echo \"$U\"; done").0,
+            "AB\n"
+        );
+        assert_eq!(
+            run("set -a; for v in a b; do :; done; declare -p v").0,
+            "declare -x v=\"b\"\n"
+        );
         // An existing array takes the word at element 0, leaving the rest.
-        assert_eq!(run("q=(1 2 3); for q in x; do :; done; echo \"${q[@]}\"").0, "x 2 3\n");
+        assert_eq!(
+            run("q=(1 2 3); for q in x; do :; done; echo \"${q[@]}\"").0,
+            "x 2 3\n"
+        );
         // A nameref is the exception: bash stores into the reference itself and
         // leaves what it refers to alone.
-        assert_eq!(run("declare -n r=z; for r in a b; do :; done; echo \"[$z]\"").0, "[]\n");
+        assert_eq!(
+            run("declare -n r=z; for r in a b; do :; done; echo \"[$z]\"").0,
+            "[]\n"
+        );
         // `select` binds its choice the same way, and refuses a readonly name
         // once the choice has been read — giving up the loop with status 1.
         assert_eq!(
@@ -77112,8 +79672,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // serve as one: bash finds out at the first binding and gives up the
         // loop with status 1, leaving the value alone. The rest of the command
         // list still runs — only the loop is abandoned.
-        let (o, _) =
-            run("readonly x=1; for x in a b; do echo body; done 2>/dev/null; echo \"rc=$? x=$x\"; echo after");
+        let (o, _) = run(
+            "readonly x=1; for x in a b; do echo body; done 2>/dev/null; echo \"rc=$? x=$x\"; echo after",
+        );
         assert_eq!(o, "rc=1 x=1\nafter\n");
         // "At the first binding" is literal: a loop over an empty list never
         // tries, and so never complains.
@@ -77252,7 +79813,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // error (like a command-position `a[x y]=v`), unlike a bad `-i` value
         // which bash tags `declare:`. The fatal expansion aborts the command.
         let (o, _) = run("declare \"x[a b]=v\" 2>&1");
-        assert_eq!(o, "osh: a b: syntax error in expression (error token is \"b\")\n");
+        assert_eq!(
+            o,
+            "osh: a b: syntax error in expression (error token is \"b\")\n"
+        );
         // A non-identifier declare target is rejected with status 1, quoting the
         // original argument (`bad@name=v`, `1x=v`, unbalanced `h[a`).
         let (o, s) = run("declare bad@name=v 2>&1");
@@ -77280,9 +79844,17 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "declare -g \"\"",
             "typeset \"\"",
         ] {
-            let tag = if cmd.starts_with("typeset") { "typeset" } else { "declare" };
+            let tag = if cmd.starts_with("typeset") {
+                "typeset"
+            } else {
+                "declare"
+            };
             let (o, s) = run(&format!("{cmd} 2>&1"));
-            assert_eq!(o, format!("osh: {tag}: `': not a valid identifier\n"), "{cmd}");
+            assert_eq!(
+                o,
+                format!("osh: {tag}: `': not a valid identifier\n"),
+                "{cmd}"
+            );
             assert_eq!(s, 1, "{cmd}");
         }
         let (o, s) = run("f(){ local \"\"; }; f 2>&1");
@@ -77334,11 +79906,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "main: local: warning: : circular name reference\n\
              main: local: `': not a valid identifier\n"
         );
-        assert_eq!(run("declare -n '=x' 2>&1").0, "osh: declare: `=x': not a valid identifier\n");
-        assert_eq!(run("declare -n '=' 2>&1").0, "osh: declare: `=': not a valid identifier\n");
+        assert_eq!(
+            run("declare -n '=x' 2>&1").0,
+            "osh: declare: `=x': not a valid identifier\n"
+        );
+        assert_eq!(
+            run("declare -n '=' 2>&1").0,
+            "osh: declare: `=': not a valid identifier\n"
+        );
         // The listing forms already answered for it and still do.
         assert_eq!(run("declare -p \"\" 2>&1").0, "osh: declare: : not found\n");
-        assert_eq!(run("f(){ local -p \"\"; }; f 2>&1").0, "main: local: : not found\n");
+        assert_eq!(
+            run("f(){ local -p \"\"; }; f 2>&1").0,
+            "main: local: : not found\n"
+        );
     }
 
     /// A `declare`/`local` that binds a **function-local** pays a fixed price
@@ -77366,7 +79947,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // carries and whether or not it makes an array. `declare` and `typeset`
         // bind locals inside a function too, so the two cycle spellings below
         // are the same cycle written twice.
-        for cyc in ["local -n g=z; local -n z=g;", "declare -n g=z; declare -n z=g;"] {
+        for cyc in [
+            "local -n g=z; local -n z=g;",
+            "declare -n g=z; declare -n z=g;",
+        ] {
             for src in [
                 "local g",
                 "local -i g",
@@ -77448,14 +80032,23 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let w = "main: warning: g: circular name reference\n";
         let cyc = "declare -n g=z; declare -n z=g;";
         let (out, st) = run(&format!("f() {{ {cyc} declare -n g=\"a b\"; }}; f 2>&1"));
-        assert_eq!(out, "main: declare: `a b': invalid variable name for name reference\n");
+        assert_eq!(
+            out,
+            "main: declare: `a b': invalid variable name for name reference\n"
+        );
         assert_eq!(st, 1);
 
         // …while the self-reference warning, whose value *is* accepted, is
         // printed ahead of the two the local branch then makes, plus the one
         // the assignment itself makes.
         let (out, st) = run(&format!("f() {{ {cyc} declare -n g=g; }}; f 2>&1"));
-        assert_eq!(out, format!("main: declare: warning: g: circular name reference\n{}", w.repeat(3)));
+        assert_eq!(
+            out,
+            format!(
+                "main: declare: warning: g: circular name reference\n{}",
+                w.repeat(3)
+            )
+        );
         assert_eq!(st, 0);
 
         // The append form skips `valid_nameref_value` entirely and names no
@@ -77487,20 +80080,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn a_global_scope_declaration_whose_global_chain_dies_binds_the_live_chains_last_reference() {
         // A cycle among the globals: the builtin's own walk gives up, and the
         // frame's reference names the global written.
-        let (out, st) = run(
-            "declare -n g=z; declare -n z=g; \
-             f() { local -n g=w; declare -g g=1; }; f 2>/dev/null; declare -p g z w",
+        let (out, st) = run("declare -n g=z; declare -n z=g; \
+             f() { local -n g=w; declare -g g=1; }; f 2>/dev/null; declare -p g z w");
+        assert_eq!(
+            out,
+            "declare -n g=\"z\"\ndeclare -n z=\"g\"\ndeclare -- w=\"1\"\n"
         );
-        assert_eq!(out, "declare -n g=\"z\"\ndeclare -n z=\"g\"\ndeclare -- w=\"1\"\n");
         assert_eq!(st, 0);
 
         // The same chain merely *ending* on an unset name is walkable, so the
         // global-only walk answers and the frame's reference is never consulted:
         // the value lands on the end of the chain as written at top level.
-        let (out, st) = run(
-            "declare -n g=z; \
-             f() { local -n g=w; declare -g g=1; }; f; declare -p g z",
-        );
+        let (out, st) = run("declare -n g=z; \
+             f() { local -n g=w; declare -g g=1; }; f; declare -p g z");
         assert_eq!(out, "declare -n g=\"z\"\ndeclare -- z=\"1\"\n");
         assert_eq!(st, 0);
 
@@ -77509,10 +80101,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `find_global_variable (name)` finds one and `nameref_transform_name`
         // is never reached. Only the builtin proper, running last against the
         // frame's reference, goes to `w` — so the value and the mark part.
-        let (out, st) = run(
-            "declare -n g=z; \
-             f() { local -n g=w; readonly g=(1 2); }; f; declare -p g z w",
-        );
+        let (out, st) = run("declare -n g=z; \
+             f() { local -n g=w; readonly g=(1 2); }; f; declare -p g z w");
         assert_eq!(
             out,
             "declare -n g=\"z\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\ndeclare -r w\n"
@@ -77557,10 +80147,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn a_kind_letter_makes_a_fresh_global_under_the_name_as_written() {
         // The same shape as the first case of the sibling test above, one letter
         // apart: the array is on `g`, not on the frame's `w`.
-        let (out, st) = run(
-            "declare -n g=z; declare -n z=g; \
-             f() { local -n g=w; declare -ga g=(1 2); }; f 2>/dev/null; declare -p g z",
-        );
+        let (out, st) = run("declare -n g=z; declare -n z=g; \
+             f() { local -n g=w; declare -ga g=(1 2); }; f 2>/dev/null; declare -p g z");
         assert_eq!(
             out,
             "declare -a g=([0]=\"1\" [1]=\"2\")\ndeclare -n z=\"g\"\n"
@@ -77578,10 +80166,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // and here it splits the command in two, since only the *first* of the
         // three steps has the kind. The array is made fresh on `g`; the builtin
         // proper, running after it against the frame's reference, marks `w`.
-        let (out, st) = run(
-            "declare -n g=z; declare -n z=g; \
-             f() { local -n g=w; readonly -a g=(1 2); }; f 2>/dev/null; declare -p g z w",
-        );
+        let (out, st) = run("declare -n g=z; declare -n z=g; \
+             f() { local -n g=w; readonly -a g=(1 2); }; f 2>/dev/null; declare -p g z w");
         assert_eq!(
             out,
             "declare -a g=([0]=\"1\" [1]=\"2\")\ndeclare -n z=\"g\"\ndeclare -r w\n"
@@ -77589,10 +80175,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(st, 0);
 
         // …where the very same command without it takes the live chain's cell.
-        let (out, st) = run(
-            "declare -n g=z; declare -n z=g; \
-             f() { local -n g=w; readonly g=(1 2); }; f 2>/dev/null; declare -p g w",
-        );
+        let (out, st) = run("declare -n g=z; declare -n z=g; \
+             f() { local -n g=w; readonly g=(1 2); }; f 2>/dev/null; declare -p g w");
         assert_eq!(
             out,
             "declare -n g=\"z\"\ndeclare -ar w=([0]=\"1\" [1]=\"2\")\n"
@@ -77602,10 +80186,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A chain that merely *dies* was restarted before the shape was chosen,
         // so the name bound is the one the restart arrived at, not the one
         // written — the letter does not reach back past it.
-        let (out, st) = run(
-            "declare -n g=z; \
-             f() { local -n g=w; declare -ga g=(1 2); }; f; declare -p g z",
-        );
+        let (out, st) = run("declare -n g=z; \
+             f() { local -n g=w; declare -ga g=(1 2); }; f; declare -p g z");
         assert_eq!(
             out,
             "declare -n g=\"z\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\n"
@@ -77661,10 +80243,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn the_restart_happens_before_chklocal_so_step_one_outlives_the_frames_own_binding() {
         // The frame keeps the elements; `z` — where the global chain died — is
         // left existing and empty by step 1 alone.
-        let (out, st) = run(
-            "declare -n g=z; \
-             f() { local g=5; readonly g=(1 2); declare -p g; }; f; declare -p g z",
-        );
+        let (out, st) = run("declare -n g=z; \
+             f() { local g=5; readonly g=(1 2); declare -p g; }; f; declare -p g z");
         assert_eq!(
             out,
             "declare -ar g=([0]=\"1\" [1]=\"2\")\ndeclare -n g=\"z\"\ndeclare -- z\n"
@@ -77686,10 +80266,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
 
         // A longer chain restarts on the far end of it.
-        let (out, st) = run(
-            "declare -n g=z; declare -n z=y; \
-             f() { local g=5; readonly -a g=(1 2); }; f; declare -p y",
-        );
+        let (out, st) = run("declare -n g=z; declare -n z=y; \
+             f() { local g=5; readonly -a g=(1 2); }; f; declare -p y");
         assert_eq!(out, "declare -a y\n");
         assert_eq!(st, 0);
 
@@ -77702,10 +80280,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // A global cycle answers nothing, so `find_global_variable_last_nameref`
         // has no reference to restart from either.
-        let (out, st) = run(
-            "declare -n g=z; declare -n z=g; \
-             f() { local g=5; readonly -a g=(1 2); declare -p g; }; f 2>/dev/null; declare -p z",
-        );
+        let (out, st) = run("declare -n g=z; declare -n z=g; \
+             f() { local g=5; readonly -a g=(1 2); declare -p g; }; f 2>/dev/null; declare -p z");
         assert_eq!(
             out,
             "declare -ar g=([0]=\"1\" [1]=\"2\")\ndeclare -n z=\"g\"\n"
@@ -77720,8 +80296,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 "declare -n g=z; f() {{ local g=5; {cmd}; declare -p g; }}; f; declare -p z"
             ));
             assert_eq!(
-                out,
-                "declare -- g=\"5\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\n",
+                out, "declare -- g=\"5\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\n",
                 "{cmd}"
             );
             assert_eq!(st, 0, "{cmd}");
@@ -77779,8 +80354,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 "declare -n g=z; f() {{ {cmd}; }}; f; declare -p g z"
             ));
             assert_eq!(
-                out,
-                "declare -n g=\"z\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\n",
+                out, "declare -n g=\"z\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\n",
                 "{cmd}"
             );
             assert_eq!(st, 0, "{cmd}");
@@ -77841,9 +80415,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `chklocal` keeps the builtin at home where nothing moves it, and the
         // lowercase letter alone carries it out — so the very same literal
         // leaves two different frames' bindings behind.
-        let (out, st) = run(
-            "g=old; f() { local g=loc; declare -gGa g=(1 2); declare -p g; }; f; declare -p g",
-        );
+        let (out, st) =
+            run("g=old; f() { local g=loc; declare -gGa g=(1 2); declare -p g; }; f; declare -p g");
         assert_eq!(
             out,
             "declare -a g=([0]=\"loc\")\ndeclare -a g=([0]=\"1\" [1]=\"2\")\n"
@@ -77890,22 +80463,25 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let (out, st) = run(&format!(
                 "declare -n g=z; f() {{ local -a g=(9); {cmd} -A g=([k]=v); declare -p g; }}; f; declare -p z"
             ));
-            assert_eq!(out, format!("declare -A{mark} g=([k]=\"v\" )\ndeclare -A z\n"), "{cmd}");
+            assert_eq!(
+                out,
+                format!("declare -A{mark} g=([k]=\"v\" )\ndeclare -A z\n"),
+                "{cmd}"
+            );
             assert_eq!(st, 0, "{cmd}");
         }
         // `z` already holds the kind asked for: still nothing to refuse.
-        let (out, st) = run(
-            "declare -n g=z; declare -A z=([q]=1)
-             f() { local -a g=(9); readonly -A g=([k]=v); declare -p g; }; f; declare -p z",
+        let (out, st) = run("declare -n g=z; declare -A z=([q]=1)
+             f() { local -a g=(9); readonly -A g=([k]=v); declare -p g; }; f; declare -p z");
+        assert_eq!(
+            out,
+            "declare -Ar g=([k]=\"v\" )\ndeclare -A z=([q]=\"1\" )\n"
         );
-        assert_eq!(out, "declare -Ar g=([k]=\"v\" )\ndeclare -A z=([q]=\"1\" )\n");
         assert_eq!(st, 0);
         // `z` holds the *other* kind, so step 1 refuses — naming `g`, the name
         // as written, the restart not having happened.
-        let (out, st) = run(
-            "declare -n g=z; declare -a z=(7)
-             f() { local -a g=(9); readonly -A g=([k]=v); declare -p g; }; f",
-        );
+        let (out, st) = run("declare -n g=z; declare -a z=(7)
+             f() { local -a g=(9); readonly -A g=([k]=v); declare -p g; }; f");
         assert_eq!(out, "");
         assert_eq!(st, 1);
         // The conversion replaces the storage: nothing is carried across as
@@ -77956,7 +80532,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         ));
         assert_eq!(
             out,
-            format!("{}declare -n g=\"z\"\ndeclare -a w=([0]=\"1\" [1]=\"2\")\n", w.repeat(2))
+            format!(
+                "{}declare -n g=\"z\"\ndeclare -a w=([0]=\"1\" [1]=\"2\")\n",
+                w.repeat(2)
+            )
         );
         assert_eq!(st, 0);
 
@@ -78001,12 +80580,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // did. `-G` is the builtin's letter alone and never reaches the word
         // flags, so its literal still parts.
         for (cmd, want) in [
-            ("readonly g=(1 2)", "declare -n g=\"z\"\ndeclare -ar w=([0]=\"1\" [1]=\"2\")\n"),
-            ("export g=(1 2)", "declare -n g=\"z\"\ndeclare -ax w=([0]=\"1\" [1]=\"2\")\n"),
-            ("declare -gG g=(1 2)", "declare -a g=([0]=\"1\" [1]=\"2\")\ndeclare -- w\n"),
+            (
+                "readonly g=(1 2)",
+                "declare -n g=\"z\"\ndeclare -ar w=([0]=\"1\" [1]=\"2\")\n",
+            ),
+            (
+                "export g=(1 2)",
+                "declare -n g=\"z\"\ndeclare -ax w=([0]=\"1\" [1]=\"2\")\n",
+            ),
+            (
+                "declare -gG g=(1 2)",
+                "declare -a g=([0]=\"1\" [1]=\"2\")\ndeclare -- w\n",
+            ),
         ] {
-            let (out, st) =
-                run(&format!("{over} f() {{ local -n g=w; {cmd}; }}; f; declare -p g w"));
+            let (out, st) = run(&format!(
+                "{over} f() {{ local -n g=w; {cmd}; }}; f; declare -p g w"
+            ));
             assert_eq!(out, want, "{cmd}");
             assert_eq!(st, 0, "{cmd}");
         }
@@ -78038,18 +80627,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("zzz() { local q; readonly -A g=([k]=v); }; zzz", "main: "),
             ("zzz() { x=$(true); readonly -A g=([k]=v); }; zzz", "main: "),
             // A pipeline does not, bash forking for every element of one.
-            ("zzz() { true | true; readonly -A g=([k]=v); }; zzz", "main: zzz: "),
+            (
+                "zzz() { true | true; readonly -A g=([k]=v); }; zzz",
+                "main: zzz: ",
+            ),
             // The innermost call is the one that named it.
             ("i() { readonly -A g=([k]=v); }; o() { i; }; o", "main: i: "),
-            ("i() { readonly -A g=([k]=v); }; o() { true; i; }; o", "main: i: "),
+            (
+                "i() { readonly -A g=([k]=v); }; o() { true; i; }; o",
+                "main: i: ",
+            ),
             // A group keeps it; a loop or a conditional does not.
             ("zzz() { { readonly -A g=([k]=v); }; }; zzz", "main: zzz: "),
-            ("zzz() { for i in 1; do readonly -A g=([k]=v); done; }; zzz", "main: "),
-            ("zzz() { if true; then readonly -A g=([k]=v); fi; }; zzz", "main: "),
+            (
+                "zzz() { for i in 1; do readonly -A g=([k]=v); done; }; zzz",
+                "main: ",
+            ),
+            (
+                "zzz() { if true; then readonly -A g=([k]=v); fi; }; zzz",
+                "main: ",
+            ),
             // `eval` names itself for the first command of its string.
             ("eval \"readonly -A g=([k]=v)\"", "osh: eval: "),
             ("eval \"true; readonly -A g=([k]=v)\"", "osh: "),
-            ("eval \"zzz() { readonly -A g=([k]=v); }; zzz\"", "main: zzz: "),
+            (
+                "eval \"zzz() { readonly -A g=([k]=v); }; zzz\"",
+                "main: zzz: ",
+            ),
             // At the top of a script there is no command around it at all.
             ("readonly -A g=([k]=v)", "osh: "),
         ] {
@@ -78093,7 +80697,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         ));
         assert_eq!(
             out,
-            format!("{}declare -an g=([0]=\"1\" [1]=\"2\")\nAFTER\nosh: declare: g: not found\n", w.repeat(4))
+            format!(
+                "{}declare -an g=([0]=\"1\" [1]=\"2\")\nAFTER\nosh: declare: g: not found\n",
+                w.repeat(4)
+            )
         );
         // The trailing listing of the name that was never created.
         assert_eq!(st, 1);
@@ -78144,14 +80751,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             .map(|i| format!("local -n n{i}=n{};", i + 1))
             .collect::<String>()
             + "local -n n10=n1;";
-        let (out, st) = run(&format!("f() {{ {deep} local n1=(1 2); declare -p n1; }}; f 2>&1"));
+        let (out, st) = run(&format!(
+            "f() {{ {deep} local n1=(1 2); declare -p n1; }}; f 2>&1"
+        ));
         assert_eq!(out, "declare -an n1=([0]=\"1\" [1]=\"2\")\n");
         assert_eq!(st, 0);
 
         // A chain that reaches something is walked as often and says nothing.
         let (out, st) =
             run("f() { local w=1; local -n g=w; local g=(1 2); declare -p g w; }; f 2>&1");
-        assert_eq!(out, "declare -n g=\"w\"\ndeclare -a w=([0]=\"1\" [1]=\"2\")\n");
+        assert_eq!(
+            out,
+            "declare -n g=\"w\"\ndeclare -a w=([0]=\"1\" [1]=\"2\")\n"
+        );
         assert_eq!(st, 0);
 
         // A *bare* compound is no declaration: it follows the escape out to the
@@ -78211,9 +80823,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // The declare family keeps both halves together: step 1 is a `local`,
         // so the array *is* what the reference reached.
-        let (out, st) =
-            run("f() { local -n g=z; declare g=(1 2); declare -p g z; }; f 2>&1; \
-                 echo AFTER; declare -p g 2>&1");
+        let (out, st) = run(
+            "f() { local -n g=z; declare g=(1 2); declare -p g z; }; f 2>&1; \
+                 echo AFTER; declare -p g 2>&1",
+        );
         assert_eq!(
             out,
             "declare -n g=\"z\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\nAFTER\n\
@@ -78223,16 +80836,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // A *global* nameref parts nothing — chklocal finds no local of this
         // frame either way, so the global the walk reaches takes both halves.
-        for src in ["f() { readonly g=(1 2); declare -p g z; }; f", "readonly g=(1 2); declare -p g z"] {
+        for src in [
+            "f() { readonly g=(1 2); declare -p g z; }; f",
+            "readonly g=(1 2); declare -p g z",
+        ] {
             let (out, st) = run(&format!("declare -n g=z; {src} 2>&1"));
-            assert_eq!(out, "declare -n g=\"z\"\ndeclare -ar z=([0]=\"1\" [1]=\"2\")\n", "{src}");
+            assert_eq!(
+                out, "declare -n g=\"z\"\ndeclare -ar z=([0]=\"1\" [1]=\"2\")\n",
+                "{src}"
+            );
             assert_eq!(st, 0, "{src}");
         }
 
         // Nor does a local the reference actually reaches: chklocal accepts it,
         // so the value lands there and the marking finds the same place.
-        let (out, st) = run("f() { local z=Z; local -n g=z; readonly g=(1 2); declare -p g z; }; f 2>&1");
-        assert_eq!(out, "declare -n g=\"z\"\ndeclare -ar z=([0]=\"1\" [1]=\"2\")\n");
+        let (out, st) =
+            run("f() { local z=Z; local -n g=z; readonly g=(1 2); declare -p g z; }; f 2>&1");
+        assert_eq!(
+            out,
+            "declare -n g=\"z\"\ndeclare -ar z=([0]=\"1\" [1]=\"2\")\n"
+        );
         assert_eq!(st, 0);
 
         // Every operand is split alike, compound or scalar, and the scalar ones
@@ -78250,14 +80873,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // builtins inside a function and fatal for `readonly`/`export` there,
         // exactly as it is fatal for everything at top level.
         for (src, want) in [
-            ("f() { declare -ga m=(1 2); echo reached; }; f; echo out=$?", true),
-            ("f() { readonly -a m=(1 2); echo reached; }; f; echo out=$?", false),
-            ("f() { export -a m=(1 2); echo reached; }; f; echo out=$?", false),
+            (
+                "f() { declare -ga m=(1 2); echo reached; }; f; echo out=$?",
+                true,
+            ),
+            (
+                "f() { readonly -a m=(1 2); echo reached; }; f; echo out=$?",
+                false,
+            ),
+            (
+                "f() { export -a m=(1 2); echo reached; }; f; echo out=$?",
+                false,
+            ),
             ("readonly -a m=(1 2); echo reached", false),
         ] {
             let out = run(&format!("declare -A m=([a]=1); {{ {src}; }} 2>&1")).0;
             assert_eq!(out.contains("reached"), want, "{src} -> {out:?}");
-            assert!(out.contains("cannot convert associative to indexed array"), "{src}");
+            assert!(
+                out.contains("cannot convert associative to indexed array"),
+                "{src}"
+            );
         }
     }
 
@@ -78336,7 +80971,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("declare -g g=(1 2)", 0),
         ] {
             let out = run(&format!("f() {{ {loc} {src}; }}; f 2>&1")).0;
-            assert_eq!(out.matches("circular").count(), want, "local {src} -> {out:?}");
+            assert_eq!(
+                out.matches("circular").count(),
+                want,
+                "local {src} -> {out:?}"
+            );
         }
     }
 
@@ -78358,8 +80997,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         for (src, rc, printed, msg) in [
             // An option letter neither takes: refused with status 2, and nothing
             // marked — though the literal bound two commands ago.
-            ("readonly -Z g=(1 2)", 2, arr, "readonly: -Z: invalid option"),
-            ("readonly -x g=(1 2)", 2, arr, "readonly: -x: invalid option"),
+            (
+                "readonly -Z g=(1 2)",
+                2,
+                arr,
+                "readonly: -Z: invalid option",
+            ),
+            (
+                "readonly -x g=(1 2)",
+                2,
+                arr,
+                "readonly: -x: invalid option",
+            ),
             ("export -r g=(1 2)", 2, arr, "export: -r: invalid option"),
             // `-i` is the row that reaches both halves: refused by the builtin,
             // but copied into the truncated `declare` that types the array.
@@ -78376,10 +81025,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("readonly -n g=(1 2)", 0, arr, ""),
             ("export -n g=(1 2)", 0, arr, ""),
             // `-p` given names marks them and prints nothing extra.
-            ("readonly -p g=(1 2)", 0, "declare -ar g=([0]=\"1\" [1]=\"2\")", ""),
-            ("export -p g=(1 2)", 0, "declare -ax g=([0]=\"1\" [1]=\"2\")", ""),
-            ("readonly -- g=(1 2)", 0, "declare -ar g=([0]=\"1\" [1]=\"2\")", ""),
-            ("readonly g=(1 2)", 0, "declare -ar g=([0]=\"1\" [1]=\"2\")", ""),
+            (
+                "readonly -p g=(1 2)",
+                0,
+                "declare -ar g=([0]=\"1\" [1]=\"2\")",
+                "",
+            ),
+            (
+                "export -p g=(1 2)",
+                0,
+                "declare -ax g=([0]=\"1\" [1]=\"2\")",
+                "",
+            ),
+            (
+                "readonly -- g=(1 2)",
+                0,
+                "declare -ar g=([0]=\"1\" [1]=\"2\")",
+                "",
+            ),
+            (
+                "readonly g=(1 2)",
+                0,
+                "declare -ar g=([0]=\"1\" [1]=\"2\")",
+                "",
+            ),
             // A word these two do not take as an option is an operand, and only
             // that operand is lost: `g` is still marked.
             (
@@ -78435,7 +81104,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("local -a g[1]=9", "declare -a g=([1]=\"9\")\n"),
             ("local -A g[k]=9", "declare -A g=([k]=\"9\" )\n"),
         ] {
-            let (out, st) = run(&format!("f() {{ local g=5; {src}; declare -p g; }}; f 2>&1"));
+            let (out, st) = run(&format!(
+                "f() {{ local g=5; {src}; declare -p g; }}; f 2>&1"
+            ));
             assert_eq!(out, want, "{src}");
             assert_eq!(st, 0, "{src}");
         }
@@ -78456,8 +81127,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
 
         // An array already of the asked-for kind is not rebound at all.
-        let (out, st) =
-            run("f() { local -a g=(1 2); local g[5]=9; declare -p g; }; f 2>&1");
+        let (out, st) = run("f() { local -a g=(1 2); local g[5]=9; declare -p g; }; f 2>&1");
         assert_eq!(out, "declare -a g=([0]=\"1\" [1]=\"2\" [5]=\"9\")\n");
         assert_eq!(st, 0);
     }
@@ -78599,7 +81269,10 @@ st=1
         ));
         assert_eq!(
             out,
-            format!("{}declare -- g=\"5\"\nAFTER\ndeclare -n g=\"z\"\n", w.repeat(2))
+            format!(
+                "{}declare -- g=\"5\"\nAFTER\ndeclare -n g=\"z\"\n",
+                w.repeat(2)
+            )
         );
         assert_eq!(st, 0);
 
@@ -78628,7 +81301,10 @@ st=1
             ("declare -a g; declare +a g=5", r#"declare -a g"#),
             ("declare -a g; declare +a g", r#"declare -a g"#),
             ("declare -a g=(); declare +a g=5", r#"declare -a g=()"#),
-            ("declare -a g=(1); declare +a g=5", r#"declare -a g=([0]="1")"#),
+            (
+                "declare -a g=(1); declare +a g=5",
+                r#"declare -a g=([0]="1")"#,
+            ),
             ("declare -A g; declare +A g=5", r#"declare -A g"#),
             ("declare -A g; declare -aA g=5", r#"declare -A g"#),
             ("declare -A g; declare -aA g", r#"declare -A g"#),
@@ -78690,26 +81366,59 @@ st=1
         // A parenthesised value on a name that is already an array is a
         // compound array literal, with no letter on the command at all.
         for (src, shape) in [
-            (r#"declare -a g; declare g='(1 2)'"#, r#"declare -a g=([0]="1" [1]="2")"#),
-            (r#"declare -a g=(7 8); declare g='(1 2)'"#, r#"declare -a g=([0]="1" [1]="2")"#),
-            (r#"declare -A g; declare g='(1 2)'"#, r#"declare -A g=([1]="2" )"#),
-            (r#"declare -A g=([k]=1); declare g='(1 2)'"#, r#"declare -A g=([1]="2" )"#),
-            (r#"declare -a g; typeset g='(1 2)'"#, r#"declare -a g=([0]="1" [1]="2")"#),
+            (
+                r#"declare -a g; declare g='(1 2)'"#,
+                r#"declare -a g=([0]="1" [1]="2")"#,
+            ),
+            (
+                r#"declare -a g=(7 8); declare g='(1 2)'"#,
+                r#"declare -a g=([0]="1" [1]="2")"#,
+            ),
+            (
+                r#"declare -A g; declare g='(1 2)'"#,
+                r#"declare -A g=([1]="2" )"#,
+            ),
+            (
+                r#"declare -A g=([k]=1); declare g='(1 2)'"#,
+                r#"declare -A g=([1]="2" )"#,
+            ),
+            (
+                r#"declare -a g; typeset g='(1 2)'"#,
+                r#"declare -a g=([0]="1" [1]="2")"#,
+            ),
             (
                 r#"declare -a g=(7 8); declare g+='(1 2)'"#,
                 r#"declare -a g=([0]="7" [1]="8" [2]="1" [3]="2")"#,
             ),
             // The letter says the same thing on a name that has no kind yet…
-            (r#"declare -a g='(1 2)'"#, r#"declare -a g=([0]="1" [1]="2")"#),
+            (
+                r#"declare -a g='(1 2)'"#,
+                r#"declare -a g=([0]="1" [1]="2")"#,
+            ),
             // …and without either, the parentheses are just text.
             (r#"declare g='(1 2)'"#, r#"declare -- g="(1 2)""#),
             (r#"g=5; declare g='(1 2)'"#, r#"declare -- g="(1 2)""#),
             // An unparenthesised value is element zero, letter or no letter.
-            (r#"declare -a g=(7 8); declare g=9"#, r#"declare -a g=([0]="9" [1]="8")"#),
-            (r#"declare -a g=(7 8); declare g+=9"#, r#"declare -a g=([0]="79" [1]="8")"#),
-            (r#"declare -A g=([k]=1); declare g=9"#, r#"declare -A g=([0]="9" [k]="1" )"#),
-            (r#"declare -ai g=(7 8); declare g=4+4"#, r#"declare -ai g=([0]="8" [1]="8")"#),
-            (r#"declare -au g=(7 8); declare g=ab"#, r#"declare -au g=([0]="AB" [1]="8")"#),
+            (
+                r#"declare -a g=(7 8); declare g=9"#,
+                r#"declare -a g=([0]="9" [1]="8")"#,
+            ),
+            (
+                r#"declare -a g=(7 8); declare g+=9"#,
+                r#"declare -a g=([0]="79" [1]="8")"#,
+            ),
+            (
+                r#"declare -A g=([k]=1); declare g=9"#,
+                r#"declare -A g=([0]="9" [k]="1" )"#,
+            ),
+            (
+                r#"declare -ai g=(7 8); declare g=4+4"#,
+                r#"declare -ai g=([0]="8" [1]="8")"#,
+            ),
+            (
+                r#"declare -au g=(7 8); declare g=ab"#,
+                r#"declare -au g=([0]="AB" [1]="8")"#,
+            ),
         ] {
             let out = run(&format!("{src}; declare -p g")).0;
             assert_eq!(out, format!("{shape}\n"), "{src}");
@@ -78722,12 +81431,18 @@ st=1
             "declare -a g=(7 8); f() { local g=5; declare g='(1 2)'; declare -p g; }; f; \
              echo AFTER; declare -p g",
         );
-        assert_eq!(out, "declare -- g=\"(1 2)\"\nAFTER\ndeclare -a g=([0]=\"7\" [1]=\"8\")\n");
+        assert_eq!(
+            out,
+            "declare -- g=\"(1 2)\"\nAFTER\ndeclare -a g=([0]=\"7\" [1]=\"8\")\n"
+        );
         let (out, _) = run(
             "g=5; f() { local -a g=(7 8); declare g='(1 2)'; declare -p g; }; f; \
              echo AFTER; declare -p g",
         );
-        assert_eq!(out, "declare -a g=([0]=\"1\" [1]=\"2\")\nAFTER\ndeclare -- g=\"5\"\n");
+        assert_eq!(
+            out,
+            "declare -a g=([0]=\"1\" [1]=\"2\")\nAFTER\ndeclare -- g=\"5\"\n"
+        );
     }
 
     /// `declare -g name[sub]=value` reaches two variables: the declaration is
@@ -78743,28 +81458,80 @@ st=1
         // left *visible* — declare.def:802 re-hides only when there was no
         // value at all.
         for (src, inside, after) in [
-            ("local g=5; declare -g g[1]=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -a g=()"),
-            ("local g=5; local -g g[1]=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -a g=()"),
-            ("local g=5; typeset -g g[1]=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -a g=()"),
-            ("local g=5; declare -g g[1]+=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -a g=()"),
+            (
+                "local g=5; declare -g g[1]=9",
+                r#"declare -a g=([0]="5" [1]="9")"#,
+                "declare -a g=()",
+            ),
+            (
+                "local g=5; local -g g[1]=9",
+                r#"declare -a g=([0]="5" [1]="9")"#,
+                "declare -a g=()",
+            ),
+            (
+                "local g=5; typeset -g g[1]=9",
+                r#"declare -a g=([0]="5" [1]="9")"#,
+                "declare -a g=()",
+            ),
+            (
+                "local g=5; declare -g g[1]+=9",
+                r#"declare -a g=([0]="5" [1]="9")"#,
+                "declare -a g=()",
+            ),
             // The widening puts the old scalar at [0], which [0]=9 then takes.
-            ("local g=5; declare -g g[0]=9", r#"declare -a g=([0]="9")"#, "declare -a g=()"),
+            (
+                "local g=5; declare -g g[0]=9",
+                r#"declare -a g=([0]="9")"#,
+                "declare -a g=()",
+            ),
             // Every letter goes on the global, and folds nothing on the way
             // past: `local_aflags = aflags & ASS_APPEND` (declare.def:957), so
             // the store folds by the *live* variable's attributes.
-            ("local g=5; declare -g -r g[1]=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -ar g=()"),
-            ("local g=5; declare -g -i g[1]=4+4", r#"declare -a g=([0]="5" [1]="4+4")"#, "declare -ai g=()"),
-            ("local g=5; declare -g -x g[1]=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -ax g=()"),
-            ("local g=5; declare -g -u g[1]=ab", r#"declare -a g=([0]="5" [1]="ab")"#, "declare -au g=()"),
+            (
+                "local g=5; declare -g -r g[1]=9",
+                r#"declare -a g=([0]="5" [1]="9")"#,
+                "declare -ar g=()",
+            ),
+            (
+                "local g=5; declare -g -i g[1]=4+4",
+                r#"declare -a g=([0]="5" [1]="4+4")"#,
+                "declare -ai g=()",
+            ),
+            (
+                "local g=5; declare -g -x g[1]=9",
+                r#"declare -a g=([0]="5" [1]="9")"#,
+                "declare -ax g=()",
+            ),
+            (
+                "local g=5; declare -g -u g[1]=ab",
+                r#"declare -a g=([0]="5" [1]="ab")"#,
+                "declare -au g=()",
+            ),
             // The two halves need not agree on the kind: `-A` makes the global
             // associative while the live scalar widens to an *indexed* array,
             // where the key `k` arith-evaluates to 0.
-            ("local g=5; declare -g -A g[k]=9", r#"declare -a g=([0]="9")"#, "declare -A g=()"),
-            ("local -A g; declare -g g[k]=9", r#"declare -A g=([k]="9" )"#, "declare -a g=()"),
+            (
+                "local g=5; declare -g -A g[k]=9",
+                r#"declare -a g=([0]="9")"#,
+                "declare -A g=()",
+            ),
+            (
+                "local -A g; declare -g g[k]=9",
+                r#"declare -A g=([k]="9" )"#,
+                "declare -a g=()",
+            ),
             // A valueless operand leaves the global unvalued (`offset == 0`).
-            ("local g=5; declare -g g[1]", r#"declare -- g="5""#, "declare -a g"),
+            (
+                "local g=5; declare -g g[1]",
+                r#"declare -- g="5""#,
+                "declare -a g",
+            ),
             // Only the operand carrying a subscript is split.
-            ("local g=5; declare -g g=9", r#"declare -- g="5""#, r#"declare -- g="9""#),
+            (
+                "local g=5; declare -g g=9",
+                r#"declare -- g="5""#,
+                r#"declare -- g="9""#,
+            ),
         ] {
             let (out, _) = run(&format!(
                 "f() {{ {src}; declare -p g; }}; f; echo AFTER; declare -p g"
@@ -78775,8 +81542,16 @@ st=1
         // A global that was already there is converted by the declaration and
         // still never stored into.
         for (pre, inside, after) in [
-            ("g=7;", r#"declare -a g=([0]="5" [1]="9")"#, r#"declare -a g=([0]="7")"#),
-            ("declare -a g=(7 8);", r#"declare -a g=([0]="5" [1]="9")"#, r#"declare -a g=([0]="7" [1]="8")"#),
+            (
+                "g=7;",
+                r#"declare -a g=([0]="5" [1]="9")"#,
+                r#"declare -a g=([0]="7")"#,
+            ),
+            (
+                "declare -a g=(7 8);",
+                r#"declare -a g=([0]="5" [1]="9")"#,
+                r#"declare -a g=([0]="7" [1]="8")"#,
+            ),
         ] {
             let (out, _) = run(&format!(
                 "{pre} f() {{ local g=5; declare -g g[1]=9; declare -p g; }}; f; echo AFTER; declare -p g"
@@ -78822,7 +81597,10 @@ st=1
         // With nothing to shadow it there is only one variable to reach, and
         // both halves land on it.
         let (out, _) = run("f() { declare -g g[1]=9; declare -p g; }; f; echo AFTER; declare -p g");
-        assert_eq!(out, "declare -a g=([1]=\"9\")\nAFTER\ndeclare -a g=([1]=\"9\")\n");
+        assert_eq!(
+            out,
+            "declare -a g=([1]=\"9\")\nAFTER\ndeclare -a g=([1]=\"9\")\n"
+        );
     }
 
     /// The **whole-array** spelling splits the same way, and for the same
@@ -78836,33 +81614,97 @@ st=1
     fn a_global_array_declaration_stores_into_whichever_binding_is_live() {
         // The local takes the element; the global is declared and left empty.
         for (src, inside, after) in [
-            ("local g=5; declare -g -a g=9", r#"declare -a g=([0]="9")"#, "declare -a g=()"),
-            ("local g=5; typeset -g -a g=9", r#"declare -a g=([0]="9")"#, "declare -a g=()"),
-            ("local g=5; local -g -a g=9", r#"declare -a g=([0]="9")"#, "declare -a g=()"),
+            (
+                "local g=5; declare -g -a g=9",
+                r#"declare -a g=([0]="9")"#,
+                "declare -a g=()",
+            ),
+            (
+                "local g=5; typeset -g -a g=9",
+                r#"declare -a g=([0]="9")"#,
+                "declare -a g=()",
+            ),
+            (
+                "local g=5; local -g -a g=9",
+                r#"declare -a g=([0]="9")"#,
+                "declare -a g=()",
+            ),
             // `+=` appends onto the *live* value, which is the local's.
-            ("local g=5; declare -g -a g+=9", r#"declare -a g=([0]="59")"#, "declare -a g=()"),
+            (
+                "local g=5; declare -g -a g+=9",
+                r#"declare -a g=([0]="59")"#,
+                "declare -a g=()",
+            ),
             // Only element zero is taken; the rest of a live array stands.
-            ("local -a g=(1 2); declare -g -a g=9", r#"declare -a g=([0]="9" [1]="2")"#, "declare -a g=()"),
-            ("local -a g=(1 2); declare -g -a g+=9", r#"declare -a g=([0]="19" [1]="2")"#, "declare -a g=()"),
+            (
+                "local -a g=(1 2); declare -g -a g=9",
+                r#"declare -a g=([0]="9" [1]="2")"#,
+                "declare -a g=()",
+            ),
+            (
+                "local -a g=(1 2); declare -g -a g+=9",
+                r#"declare -a g=([0]="19" [1]="2")"#,
+                "declare -a g=()",
+            ),
             // Every letter goes on the global and folds nothing on the way
             // past: the fold is the live variable's own.
-            ("local g=5; declare -g -a -i g=4+4", r#"declare -a g=([0]="4+4")"#, "declare -ai g=()"),
-            ("local -i g=5; declare -g -a g=4+4", r#"declare -ai g=([0]="8")"#, "declare -a g=()"),
-            ("local g=5; declare -g -a -u g=ab", r#"declare -a g=([0]="ab")"#, "declare -au g=()"),
-            ("local -u g=5; declare -g -a g=ab", r#"declare -au g=([0]="AB")"#, "declare -a g=()"),
+            (
+                "local g=5; declare -g -a -i g=4+4",
+                r#"declare -a g=([0]="4+4")"#,
+                "declare -ai g=()",
+            ),
+            (
+                "local -i g=5; declare -g -a g=4+4",
+                r#"declare -ai g=([0]="8")"#,
+                "declare -a g=()",
+            ),
+            (
+                "local g=5; declare -g -a -u g=ab",
+                r#"declare -a g=([0]="ab")"#,
+                "declare -au g=()",
+            ),
+            (
+                "local -u g=5; declare -g -a g=ab",
+                r#"declare -au g=([0]="AB")"#,
+                "declare -a g=()",
+            ),
             // `ASS_FORCE`: a readonly live binding takes the element anyway.
-            ("local -r g=5; declare -g -a g=9", r#"declare -ar g=([0]="9")"#, "declare -a g=()"),
+            (
+                "local -r g=5; declare -g -a g=9",
+                r#"declare -ar g=([0]="9")"#,
+                "declare -a g=()",
+            ),
             // `array_p (entry) == 0` sends an associative live binding through
             // `convert_var_to_array` too, which drops its keys.
-            ("local -A g; declare -g -a g=9", r#"declare -a g=([0]="9")"#, "declare -a g=()"),
+            (
+                "local -A g; declare -g -a g=9",
+                r#"declare -a g=([0]="9")"#,
+                "declare -a g=()",
+            ),
             // The associative half is handed `var`, so `-A` does not split…
-            ("local g=5; declare -g -A g=9", r#"declare -- g="5""#, r#"declare -A g=([0]="9" )"#),
+            (
+                "local g=5; declare -g -A g=9",
+                r#"declare -- g="5""#,
+                r#"declare -A g=([0]="9" )"#,
+            ),
             // …nor does a compound literal, which is assigned to the variable…
-            ("local g=5; declare -g -a g=(1 2)", r#"declare -- g="5""#, r#"declare -a g=([0]="1" [1]="2")"#),
+            (
+                "local g=5; declare -g -a g=(1 2)",
+                r#"declare -- g="5""#,
+                r#"declare -a g=([0]="1" [1]="2")"#,
+            ),
             // …nor a plain scalar, which never reaches the array branch.
-            ("local g=5; declare -g g=9", r#"declare -- g="5""#, r#"declare -- g="9""#),
+            (
+                "local g=5; declare -g g=9",
+                r#"declare -- g="5""#,
+                r#"declare -- g="9""#,
+            ),
             // A valueless operand makes the global and leaves it unvalued.
-            ("local g=5; declare -g -a g", r#"declare -- g="5""#, "declare -a g"),
+            (
+                "local g=5; declare -g -a g",
+                r#"declare -- g="5""#,
+                "declare -a g",
+            ),
         ] {
             let (out, _) = run(&format!(
                 "f() {{ {src}; declare -p g; }}; f; echo AFTER; declare -p g"
@@ -78874,14 +81716,39 @@ st=1
         // all — `array_exists` is judged on `var` (declare.def:885) — so a
         // flagless operand splits too when the global is already an array.
         for (pre, src, inside, after) in [
-            ("declare -a g=(7 8);", "local g=5; declare -g g=9", r#"declare -a g=([0]="9")"#, r#"declare -a g=([0]="7" [1]="8")"#),
-            ("declare -a g=(7 8);", "local g=5; declare -g g+=9", r#"declare -a g=([0]="59")"#, r#"declare -a g=([0]="7" [1]="8")"#),
-            ("declare -a g=(7 8);", "local -a g=(1 2); declare -g g=9", r#"declare -a g=([0]="9" [1]="2")"#, r#"declare -a g=([0]="7" [1]="8")"#),
+            (
+                "declare -a g=(7 8);",
+                "local g=5; declare -g g=9",
+                r#"declare -a g=([0]="9")"#,
+                r#"declare -a g=([0]="7" [1]="8")"#,
+            ),
+            (
+                "declare -a g=(7 8);",
+                "local g=5; declare -g g+=9",
+                r#"declare -a g=([0]="59")"#,
+                r#"declare -a g=([0]="7" [1]="8")"#,
+            ),
+            (
+                "declare -a g=(7 8);",
+                "local -a g=(1 2); declare -g g=9",
+                r#"declare -a g=([0]="9" [1]="2")"#,
+                r#"declare -a g=([0]="7" [1]="8")"#,
+            ),
             // An associative global answers yes as well, and keeps the store.
-            ("declare -A g=([k]=1);", "local g=5; declare -g g=9", r#"declare -- g="5""#, r#"declare -A g=([0]="9" [k]="1" )"#),
+            (
+                "declare -A g=([k]=1);",
+                "local g=5; declare -g g=9",
+                r#"declare -- g="5""#,
+                r#"declare -A g=([0]="9" [k]="1" )"#,
+            ),
             // A global that was already there is converted, and still never
             // stored into: the widening carries its old scalar to element 0.
-            ("g=7;", "local g=5; declare -g -a g=9", r#"declare -a g=([0]="9")"#, r#"declare -a g=([0]="7")"#),
+            (
+                "g=7;",
+                "local g=5; declare -g -a g=9",
+                r#"declare -a g=([0]="9")"#,
+                r#"declare -a g=([0]="7")"#,
+            ),
         ] {
             let (out, _) = run(&format!(
                 "{pre} f() {{ {src}; declare -p g; }}; f; echo AFTER; declare -p g"
@@ -78895,7 +81762,10 @@ st=1
             "f() { local -n g=w; local w=1; declare -g -a g=9; declare -p g w; }; f; \
              echo AFTER; declare -p g",
         );
-        assert_eq!(out, "declare -n g=\"w\"\ndeclare -a w=([0]=\"9\")\nAFTER\ndeclare -a g=()\n");
+        assert_eq!(
+            out,
+            "declare -n g=\"w\"\ndeclare -a w=([0]=\"9\")\nAFTER\ndeclare -a g=()\n"
+        );
 
         // A chain that escaped a cycle names an outer context, and the element
         // belongs there — to the very global the declaration just made.
@@ -78924,7 +81794,10 @@ st=1
 
         // With nothing to shadow it there is only one variable to reach.
         let (out, _) = run("f() { declare -g -a g=9; declare -p g; }; f; echo AFTER; declare -p g");
-        assert_eq!(out, "declare -a g=([0]=\"9\")\nAFTER\ndeclare -a g=([0]=\"9\")\n");
+        assert_eq!(
+            out,
+            "declare -a g=([0]=\"9\")\nAFTER\ndeclare -a g=([0]=\"9\")\n"
+        );
 
         // `-G` asks for this frame's own binding first (declare.def:283 gives
         // `chklocal` only to it), so there is no swap to undo and no split to
@@ -79016,9 +81889,8 @@ st=1
 
         // An array already there keeps its elements: the widening is a no-op
         // and the refusal only ever stopped the store.
-        let (out, _) = run(
-            "f() { local -r g=(1); declare g[1]=9; echo \"st=$?\"; declare -p g; }; f 2>&1",
-        );
+        let (out, _) =
+            run("f() { local -r g=(1); declare g[1]=9; echo \"st=$?\"; declare -p g; }; f 2>&1");
         assert_eq!(
             out,
             "main: declare: g: readonly variable\nst=1\ndeclare -ar g=([0]=\"1\")\n"
@@ -79039,7 +81911,10 @@ st=1
             "f() { local -r g=5; declare -g -a g=9; echo \"st=$?\"; declare -p g; }; f 2>&1; \
              echo AFTER; declare -p g",
         );
-        assert_eq!(out, "st=0\ndeclare -ar g=([0]=\"9\")\nAFTER\ndeclare -a g=()\n");
+        assert_eq!(
+            out,
+            "st=0\ndeclare -ar g=([0]=\"9\")\nAFTER\ndeclare -a g=()\n"
+        );
 
         // :614 is itself what refuses a *shadow* of a readonly global —
         // `make_local_variable` returns 0 rather than widening anything — so
@@ -79055,9 +81930,8 @@ st=1
         );
 
         // Neighbours that ask for no array at all are untouched by any of it.
-        let (out, _) = run(
-            "f() { local -r g=5; local g=9; echo \"st=$?\"; declare -p g; }; f 2>&1",
-        );
+        let (out, _) =
+            run("f() { local -r g=5; local g=9; echo \"st=$?\"; declare -p g; }; f 2>&1");
         assert_eq!(
             out,
             "main: local: g: readonly variable\nst=1\ndeclare -r g=\"5\"\n"
@@ -79086,10 +81960,22 @@ st=1
         // The declaration is the global's; the element goes to the live
         // binding, and every conversion it meets there is the live one's.
         for (src, inside, after) in [
-            ("readonly -a g=9", "declare -ar g=([0]=\"9\")", "declare -ar g=()"),
-            ("export -a g=9", "declare -ax g=([0]=\"9\")", "declare -ax g=()"),
+            (
+                "readonly -a g=9",
+                "declare -ar g=([0]=\"9\")",
+                "declare -ar g=()",
+            ),
+            (
+                "export -a g=9",
+                "declare -ax g=([0]=\"9\")",
+                "declare -ax g=()",
+            ),
             // `+=` appends to what the *local* holds, not to the empty global.
-            ("readonly -a g+=9", "declare -ar g=([0]=\"59\")", "declare -ar g=()"),
+            (
+                "readonly -a g+=9",
+                "declare -ar g=([0]=\"59\")",
+                "declare -ar g=()",
+            ),
         ] {
             let (out, _) = run(&format!(
                 "f() {{ local g=5; {src}; declare -p g; }}; ( f 2>&1; echo AFTER; declare -p g )"
@@ -79098,9 +81984,21 @@ st=1
         }
         // The live binding's own letters keep working on the element.
         for (decl, src, inside) in [
-            ("local -a g=(1 2)", "readonly -a g=9", "declare -ar g=([0]=\"9\" [1]=\"2\")"),
-            ("local -i g=5", "readonly -a g=4+4", "declare -air g=([0]=\"8\")"),
-            ("local -u g=5", "readonly -a g=ab", "declare -aru g=([0]=\"AB\")"),
+            (
+                "local -a g=(1 2)",
+                "readonly -a g=9",
+                "declare -ar g=([0]=\"9\" [1]=\"2\")",
+            ),
+            (
+                "local -i g=5",
+                "readonly -a g=4+4",
+                "declare -air g=([0]=\"8\")",
+            ),
+            (
+                "local -u g=5",
+                "readonly -a g=ab",
+                "declare -aru g=([0]=\"AB\")",
+            ),
         ] {
             let (out, _) = run(&format!(
                 "f() {{ {decl}; {src}; declare -p g; }}; ( f 2>&1; echo AFTER; declare -p g )"
@@ -79123,8 +82021,16 @@ st=1
         // declaration's *own* variable, so `-A` does not split: the local is
         // left alone and the whole array lands on the global.
         for (src, inside, after) in [
-            ("readonly -A g=9", "declare -r g=\"5\"", "declare -Ar g=([0]=\"9\" )"),
-            ("export -A g=9", "declare -x g=\"5\"", "declare -Ax g=([0]=\"9\" )"),
+            (
+                "readonly -A g=9",
+                "declare -r g=\"5\"",
+                "declare -Ar g=([0]=\"9\" )",
+            ),
+            (
+                "export -A g=9",
+                "declare -x g=\"5\"",
+                "declare -Ax g=([0]=\"9\" )",
+            ),
         ] {
             let (out, _) = run(&format!(
                 "f() {{ local g=5; {src}; echo \"st=$?\"; declare -p g; }}; \
@@ -79149,12 +82055,18 @@ st=1
             "f() { local g=5; readonly -an g=9; echo \"st=$?\"; declare -p g; }; \
              ( f 2>&1; echo AFTER; declare -p g )",
         );
-        assert_eq!(out, "st=0\ndeclare -a g=([0]=\"9\")\nAFTER\ndeclare -a g=()\n");
+        assert_eq!(
+            out,
+            "st=0\ndeclare -a g=([0]=\"9\")\nAFTER\ndeclare -a g=()\n"
+        );
         let (out, _) = run(
             "f() { local g=5; export -an g=9; echo \"st=$?\"; declare -p g; }; \
              ( f 2>&1; echo AFTER; declare -p g )",
         );
-        assert_eq!(out, "st=0\ndeclare -a g=([0]=\"9\")\nAFTER\ndeclare -ax g=()\n");
+        assert_eq!(
+            out,
+            "st=0\ndeclare -a g=([0]=\"9\")\nAFTER\ndeclare -ax g=()\n"
+        );
 
         // A refusal from the declaration is spoken in the *calling* builtin's
         // name: `declare_builtin` is a plain C call, so `this_command_name` is
@@ -79169,9 +82081,8 @@ st=1
             "main: readonly: q: cannot convert indexed to associative array\nst=1\n\
              declare -ar q=([0]=\"1\" [1]=\"2\")\n"
         );
-        let (out, _) = run(
-            "( declare -A m=([k]=1); export -a m=9; echo \"st=$?\"; declare -p m ) 2>&1",
-        );
+        let (out, _) =
+            run("( declare -A m=([k]=1); export -a m=9; echo \"st=$?\"; declare -p m ) 2>&1");
         assert_eq!(
             out,
             "osh: export: m: cannot convert associative to indexed array\nst=1\n\
@@ -79201,33 +82112,40 @@ st=1
                 "f() {{ local g=5; {src}; echo \"st=$?\"; declare -p g; }}; \
                  ( f; echo AFTER; declare -p g ) 2>&1"
             ));
-            let shape = if src.starts_with("readonly") { "-r" } else { "-x" };
+            let shape = if src.starts_with("readonly") {
+                "-r"
+            } else {
+                "-x"
+            };
             assert_eq!(
                 out,
                 format!("st=0\ndeclare {shape} g=\"5\"\nAFTER\nosh: declare: g: not found\n"),
                 "{src}"
             );
         }
-        let (out, _) = run(
-            "f() { local g=5; readonly -a g[1]=9; echo \"st=$?\"; declare -p g; }; ( f 2>&1 )",
-        );
+        let (out, _) =
+            run("f() { local g=5; readonly -a g[1]=9; echo \"st=$?\"; declare -p g; }; ( f 2>&1 )");
         assert_eq!(
             out,
             "main: readonly: `g[1]': not a valid identifier\nst=1\ndeclare -- g=\"5\"\n"
         );
         let (out, _) = run("f() { readonly -a 1bad=9; echo \"st=$?\"; }; ( f 2>&1 )");
-        assert_eq!(out, "main: readonly: `1bad=9': not a valid identifier\nst=1\n");
+        assert_eq!(
+            out,
+            "main: readonly: `1bad=9': not a valid identifier\nst=1\n"
+        );
 
         // Neither is a plain scalar operand, nor a compound literal.
         let (out, _) = run(
             "f() { local g=5; readonly g=9; echo \"st=$?\"; declare -p g; }; \
              ( f; echo AFTER; declare -p g ) 2>&1",
         );
-        assert_eq!(out, "st=0\ndeclare -r g=\"9\"\nAFTER\nosh: declare: g: not found\n");
-        let (out, _) = run(
-            "f() { local g=5; readonly -a g=(1 2); declare -p g; }; \
-             ( f; echo AFTER; declare -p g ) 2>&1",
+        assert_eq!(
+            out,
+            "st=0\ndeclare -r g=\"9\"\nAFTER\nosh: declare: g: not found\n"
         );
+        let (out, _) = run("f() { local g=5; readonly -a g=(1 2); declare -p g; }; \
+             ( f; echo AFTER; declare -p g ) 2>&1");
         assert_eq!(
             out,
             "declare -ar g=([0]=\"1\" [1]=\"2\")\nAFTER\nosh: declare: g: not found\n"
@@ -79236,10 +82154,8 @@ st=1
         // Each operand is rewritten on its own — `list->next` is unhooked and
         // restored around the call — so a neighbour without a value is still
         // an ordinary marking.
-        let (out, _) = run(
-            "f() { local g=5; readonly -a g=9 h=8; declare -p g h; }; \
-             ( f 2>&1; echo AFTER; declare -p g h )",
-        );
+        let (out, _) = run("f() { local g=5; readonly -a g=9 h=8; declare -p g h; }; \
+             ( f 2>&1; echo AFTER; declare -p g h )");
         assert_eq!(
             out,
             "declare -ar g=([0]=\"9\")\ndeclare -ar h=([0]=\"8\")\n\
@@ -79250,11 +82166,11 @@ st=1
 
         // A nameref operand is handed to the declaration whole, and the
         // marking that follows finds the same chain.
-        let (out, _) = run("f() { w=5; declare -n r=w; export -a r=9; declare -p r w; }; ( f 2>&1 )");
+        let (out, _) =
+            run("f() { w=5; declare -n r=w; export -a r=9; declare -p r w; }; ( f 2>&1 )");
         assert_eq!(out, "declare -n r=\"w\"\ndeclare -ax w=([0]=\"9\")\n");
-        let (out, _) = run(
-            "f() { w=5; declare -n r=w; readonly -a r+=9; declare -p r w; }; ( f 2>&1 )",
-        );
+        let (out, _) =
+            run("f() { w=5; declare -n r=w; readonly -a r+=9; declare -p r w; }; ( f 2>&1 )");
         assert_eq!(out, "declare -n r=\"w\"\ndeclare -ar w=([0]=\"59\")\n");
         let (out, _) = run(
             "f() { declare -n c1=c2; declare -n c2=c1; export -a c1=5; echo \"st=$?\"; \
@@ -79341,14 +82257,12 @@ st=1
 
         // …and the operand as written where no local shadow is made at all,
         // which at top level is every operand.
-        let (out, _) =
-            run("( declare -n r=g; g=1; readonly g; declare r=5; echo \"st=$?\" ) 2>&1");
+        let (out, _) = run("( declare -n r=g; g=1; readonly g; declare r=5; echo \"st=$?\" ) 2>&1");
         assert_eq!(out, "osh: declare: r: readonly variable\nst=1\n");
         // A name the frame already holds is a re-declaration, not a shadow, so
         // it meets :849 and the written name too.
-        let (out, _) = run(
-            "f() { local -r g=1; local -n r=g; declare r=9; echo \"st=$?\"; }; ( f 2>&1 )",
-        );
+        let (out, _) =
+            run("f() { local -r g=1; local -n r=g; declare r=9; echo \"st=$?\"; }; ( f 2>&1 )");
         assert_eq!(out, "main: declare: r: readonly variable\nst=1\n");
 
         // The element store names the reference, whatever it stored into — and
@@ -79371,13 +82285,13 @@ st=1
 
         // …and so does every spelling of `bad array subscript`, through a
         // declaration operand or written out on its own.
-        for (write, blame) in [
-            ("r[-9]=9", "r[-9]"),
-            ("r[]=9", "r[]"),
-            ("r[*]=9", "r[*]"),
-        ] {
+        for (write, blame) in [("r[-9]=9", "r[-9]"), ("r[]=9", "r[]"), ("r[*]=9", "r[*]")] {
             let (out, _) = run(&format!("( declare -n r=g; g=(1 2); {write} ) 2>&1"));
-            assert_eq!(out, format!("osh: {blame}: bad array subscript\n"), "{write}");
+            assert_eq!(
+                out,
+                format!("osh: {blame}: bad array subscript\n"),
+                "{write}"
+            );
         }
         let (out, _) = run("( declare -A m=([k]=1); declare -n r=m; r['']=9 ) 2>&1");
         assert_eq!(out, "osh: r['']: bad array subscript\n");
@@ -79385,7 +82299,10 @@ st=1
             "f() { local -n r=g; declare 'r[-9]=9'; echo \"st=$?\"; declare -p g; }; \
              ( g=(1 2); f 2>&1 )",
         );
-        assert_eq!(out, "main: r[-9]: bad array subscript\nst=1\ndeclare -a g\n");
+        assert_eq!(
+            out,
+            "main: r[-9]: bad array subscript\nst=1\ndeclare -a g\n"
+        );
 
         // The store itself still goes where the chain points.
         let (out, _) = run(
@@ -79483,7 +82400,10 @@ st=1
         let (out, _) = run(&format!("( {cyc} a[1]=9; declare -p a b ) 2>&1"));
         assert_eq!(
             out,
-            format!("{}declare -a a=([1]=\"9\")\ndeclare -n b=\"a\"\n", w.repeat(2))
+            format!(
+                "{}declare -a a=([1]=\"9\")\ndeclare -n b=\"a\"\n",
+                w.repeat(2)
+            )
         );
         let (out, _) = run(&format!(
             "( {cyc} read 'a[-1]' <<< x; echo \"st=$?\"; declare -p a b ) 2>&1"
@@ -79509,13 +82429,13 @@ st=1
         }
         let (out, _) = run(&format!("( {ro} declare -n s=r; read 's[0]' <<< x ) 2>&1"));
         assert_eq!(out, "osh: s: readonly variable\n");
-        let (out, _) = run(
-            "( declare -A q=([k]=1); readonly q; declare -n r=q; echo \"${r[j]:=v}\" ) 2>&1",
-        );
+        let (out, _) =
+            run("( declare -A q=([k]=1); readonly q; declare -n r=q; echo \"${r[j]:=v}\" ) 2>&1");
         assert_eq!(out, "osh: r: readonly variable\n");
         // An *unsubscripted* write is the other way round: it is bound by the
         // walk that named it, and so blames what it resolved to.
-        let (out, _) = run("( q=1; readonly q; declare -n r=q; read r <<< x; echo \"st=$?\" ) 2>&1");
+        let (out, _) =
+            run("( q=1; readonly q; declare -n r=q; read r <<< x; echo \"st=$?\" ) 2>&1");
         assert_eq!(out, "osh: q: readonly variable\nst=1\n");
 
         // A variable the shell maintains is refused at that same bind.
@@ -79572,15 +82492,23 @@ st=1
         let cyc = "declare -n a=b; declare -n b=a;";
 
         // The subscript is judged against the nothing the walk found.
-        let (out, _) = run(&format!("( {cyc} i=0; echo \"[${{a[i++]}}]\"; echo \"i=$i\" ) 2>&1"));
+        let (out, _) = run(&format!(
+            "( {cyc} i=0; echo \"[${{a[i++]}}]\"; echo \"i=$i\" ) 2>&1"
+        ));
         assert_eq!(out, format!("{}[]\ni=1\n", w.repeat(2)));
         let (out, _) = run(&format!("( {cyc} echo \"[${{a[1+]}}]\" ) 2>&1"));
         assert_eq!(
             out,
-            format!("{}osh: 1+: syntax error: operand expected (error token is \"+\")\n", w.repeat(2))
+            format!(
+                "{}osh: 1+: syntax error: operand expected (error token is \"+\")\n",
+                w.repeat(2)
+            )
         );
         let (out, _) = run(&format!("( {cyc} echo \"[${{a[-1]}}]\" ) 2>&1"));
-        assert_eq!(out, format!("{}osh: a: bad array subscript\n[]\n", w.repeat(2)));
+        assert_eq!(
+            out,
+            format!("{}osh: a: bad array subscript\n[]\n", w.repeat(2))
+        );
         let (out, _) = run(&format!("( {cyc} echo \"[${{a[0]}}]\" ) 2>&1"));
         assert_eq!(out, format!("{}[]\n", w.repeat(2)));
         // A reference that already designates one element has no array left for
@@ -79596,12 +82524,23 @@ st=1
         assert_eq!(out, "osh: nosuch: bad array subscript\n[]\n");
 
         // Every form that reads a value asks the same question.
-        for (form, tail) in [("-D", "[D]\n"), (":-D", "[D]\n"), ("+S", "[]\n"), ("/x/y", "[]\n")] {
+        for (form, tail) in [
+            ("-D", "[D]\n"),
+            (":-D", "[D]\n"),
+            ("+S", "[]\n"),
+            ("/x/y", "[]\n"),
+        ] {
             let (out, _) = run(&format!("( {cyc} echo \"[${{a[-1]{form}}}]\" ) 2>&1"));
-            assert_eq!(out, format!("{}osh: a: bad array subscript\n{tail}", w.repeat(2)), "{form}");
+            assert_eq!(
+                out,
+                format!("{}osh: a: bad array subscript\n{tail}", w.repeat(2)),
+                "{form}"
+            );
         }
         // …including the side effect, which happens even where nothing is found.
-        let (out, _) = run(&format!("( {cyc} i=0; echo \"[${{a[i++]-D}}]\"; echo \"i=$i\" ) 2>&1"));
+        let (out, _) = run(&format!(
+            "( {cyc} i=0; echo \"[${{a[i++]-D}}]\"; echo \"i=$i\" ) 2>&1"
+        ));
         assert_eq!(out, format!("{}[D]\ni=1\n", w.repeat(2)));
 
         // An unsubscripted read of the same chain has nothing to judge — and,
@@ -79621,7 +82560,10 @@ st=1
         let (out, _) = run(&format!("( {cyc} set -u; echo \"[${{a[-1]}}]\" ) 2>&1"));
         assert_eq!(
             out,
-            format!("{}osh: a: bad array subscript\nosh: a[-1]: unbound variable\n", w.repeat(2))
+            format!(
+                "{}osh: a: bad array subscript\nosh: a[-1]: unbound variable\n",
+                w.repeat(2)
+            )
         );
         let (out, _) = run(&format!("( {cyc} set -u; echo \"[${{#a[0]}}]\" ) 2>&1"));
         assert_eq!(out, format!("{w}osh: a: unbound variable\n"));
@@ -79667,14 +82609,31 @@ st=1
         // The operators read their base value through the other path, which
         // asks it too — and the `:=` write below still quotes the reference
         // whole, as every write does.
-        for (form, tail) in [("-D", "[D]\n"), (":-D", "[D]\n"), ("+S", "[]\n"), ("#x", "[]\n")] {
-            let (out, _) = run(&format!("( declare -n r=yy; echo \"[${{r[-1]{form}}}]\" ) 2>&1"));
-            assert_eq!(out, format!("osh: r: bad array subscript\n{tail}"), "{form}");
+        for (form, tail) in [
+            ("-D", "[D]\n"),
+            (":-D", "[D]\n"),
+            ("+S", "[]\n"),
+            ("#x", "[]\n"),
+        ] {
+            let (out, _) = run(&format!(
+                "( declare -n r=yy; echo \"[${{r[-1]{form}}}]\" ) 2>&1"
+            ));
+            assert_eq!(
+                out,
+                format!("osh: r: bad array subscript\n{tail}"),
+                "{form}"
+            );
         }
         let (out, _) = run("( declare -n r=yy; echo \"[${r[-1]:=w}]\" ) 2>&1");
-        assert_eq!(out, "osh: r: bad array subscript\nosh: r[-1]: bad array subscript\n");
+        assert_eq!(
+            out,
+            "osh: r: bad array subscript\nosh: r[-1]: bad array subscript\n"
+        );
         let (out, _) = run("( declare -n r=yy; set -u; echo \"[${r[-1]}]\" ) 2>&1");
-        assert_eq!(out, "osh: r: bad array subscript\nosh: r[-1]: unbound variable\n");
+        assert_eq!(
+            out,
+            "osh: r: bad array subscript\nosh: r[-1]: unbound variable\n"
+        );
 
         // Which frame the entry is in makes no difference to the question, only
         // to its answer: the lookup happens where the walk arrived.
@@ -79763,7 +82722,10 @@ st=1
         ));
         assert_eq!(
             out,
-            format!("{}[w]\n--\ndeclare -a a=([0]=\"p\" [1]=\"q\" [9]=\"w\")\n", w.repeat(4))
+            format!(
+                "{}[w]\n--\ndeclare -a a=([0]=\"p\" [1]=\"q\" [9]=\"w\")\n",
+                w.repeat(4)
+            )
         );
         let (out, _) = run(&format!(
             "f() {{ {cyc} echo \"[${{a[-1]:=w}}]\"; }}; \
@@ -79771,7 +82733,10 @@ st=1
         ));
         assert_eq!(
             out,
-            format!("{}[q]\n--\ndeclare -a a=([0]=\"p\" [1]=\"q\")\n", w.repeat(2))
+            format!(
+                "{}[q]\n--\ndeclare -a a=([0]=\"p\" [1]=\"q\")\n",
+                w.repeat(2)
+            )
         );
         // An associative outer binding is bound through the entry already in
         // hand, so it walks once fewer — and the key still lands in the global.
@@ -79781,7 +82746,10 @@ st=1
         ));
         assert_eq!(
             out,
-            format!("{}[w]\n--\ndeclare -A a=([k]=\"w\" [j]=\"1\" )\n", w.repeat(3))
+            format!(
+                "{}[w]\n--\ndeclare -A a=([k]=\"w\" [j]=\"1\" )\n",
+                w.repeat(3)
+            )
         );
 
         // The sibling writes already went where the walk pointed.
@@ -79850,7 +82818,10 @@ st=1
         let (out, _) = run("( i=0; echo \"[${!nosuch[i++]}]\"; echo \"i=$i\" ) 2>&1");
         assert_eq!(out, "osh: nosuch[i++]: invalid indirect expansion\n");
         let (out, _) = run("( echo \"[${!nosuch[0+]}]\" ) 2>&1");
-        assert_eq!(out, "osh: 0+: syntax error: operand expected (error token is \"+\")\n");
+        assert_eq!(
+            out,
+            "osh: 0+: syntax error: operand expected (error token is \"+\")\n"
+        );
 
         // A name that is there gets no second complaint: the bad subscript is
         // the whole of it, and the expansion is an ordinary empty one.
@@ -79880,7 +82851,9 @@ st=1
         let (out, _) = run(&format!("( {cyc} echo \"[${{!a[-1]}}]\" ) 2>&1"));
         assert_eq!(
             out,
-            format!("{w}{w}osh: a: bad array subscript\n{w}osh: a[-1]: invalid indirect expansion\n")
+            format!(
+                "{w}{w}osh: a: bad array subscript\n{w}osh: a[-1]: invalid indirect expansion\n"
+            )
         );
         // The side effect belongs to the read, so it lands between the two
         // walks that pay for it and the third that follows.
@@ -79937,7 +82910,10 @@ st=1
         let (out, _) = run("( GROUPS[*]=9 ) 2>&1");
         assert_eq!(out, "osh: GROUPS[*]: bad array subscript\n");
         let (out, _) = run("( GROUPS[1+]=9 ) 2>&1");
-        assert_eq!(out, "osh: 1+: syntax error: operand expected (error token is \"+\")\n");
+        assert_eq!(
+            out,
+            "osh: 1+: syntax error: operand expected (error token is \"+\")\n"
+        );
         // …and its side effects happen, refusal or not.
         let (out, _) = run("( i=0; GROUPS[i++]=9; echo \"i=$i\" ) 2>&1");
         assert_eq!(out, "i=1\n");
@@ -79948,7 +82924,8 @@ st=1
         // nothing — the three call-stack views keep exactly what they had.
         let (out, _) = run("( BASH_LINENO[3]=9; echo \"st=$?\"; declare -p BASH_LINENO ) 2>&1");
         assert_eq!(out, "st=0\ndeclare -a BASH_LINENO=()\n");
-        let (out, _) = run("f() { FUNCNAME[9]=9; echo \"st=$?\"; declare -p FUNCNAME; }; ( f ) 2>&1");
+        let (out, _) =
+            run("f() { FUNCNAME[9]=9; echo \"st=$?\"; declare -p FUNCNAME; }; ( f ) 2>&1");
         assert_eq!(out, "st=0\ndeclare -a FUNCNAME=([0]=\"f\")\n");
 
         // Silent and successful, but still one more thing that sets an
@@ -80006,14 +82983,33 @@ st=1
         // The element store is refused, and the value the array already had
         // stands — under `-i`, under `+=`, and for both kinds of array.
         for (src, shape) in [
-            ("declare -a a=(x y); declare -r 'a[1]=9'", "declare -ar a=([0]=\"x\" [1]=\"y\")"),
-            ("declare -a a=(x y); declare -ri 'a[1]=4+4'", "declare -air a=([0]=\"x\" [1]=\"y\")"),
-            ("declare -a a=(1 2); declare -r 'a[1]+=9'", "declare -ar a=([0]=\"1\" [1]=\"2\")"),
-            ("declare -a a=(x y); declare -rx 'a[1]=9'", "declare -arx a=([0]=\"x\" [1]=\"y\")"),
-            ("declare -A a=([k]=1); declare -r 'a[k]=9'", "declare -Ar a=([k]=\"1\" )"),
+            (
+                "declare -a a=(x y); declare -r 'a[1]=9'",
+                "declare -ar a=([0]=\"x\" [1]=\"y\")",
+            ),
+            (
+                "declare -a a=(x y); declare -ri 'a[1]=4+4'",
+                "declare -air a=([0]=\"x\" [1]=\"y\")",
+            ),
+            (
+                "declare -a a=(1 2); declare -r 'a[1]+=9'",
+                "declare -ar a=([0]=\"1\" [1]=\"2\")",
+            ),
+            (
+                "declare -a a=(x y); declare -rx 'a[1]=9'",
+                "declare -arx a=([0]=\"x\" [1]=\"y\")",
+            ),
+            (
+                "declare -A a=([k]=1); declare -r 'a[k]=9'",
+                "declare -Ar a=([k]=\"1\" )",
+            ),
         ] {
             let (out, _) = run(&format!("( {src}; echo \"st=$?\"; declare -p a ) 2>&1"));
-            assert_eq!(out, format!("osh: a: readonly variable\nst=0\n{shape}\n"), "{src}");
+            assert_eq!(
+                out,
+                format!("osh: a: readonly variable\nst=0\n{shape}\n"),
+                "{src}"
+            );
         }
 
         // The *whole-array* store a few lines above it carries `ASS_FORCE`, so
@@ -80021,8 +83017,9 @@ st=1
         let (out, _) =
             run("( declare -a a=(x y); declare -r a=(p q); echo \"st=$?\"; declare -p a ) 2>&1");
         assert_eq!(out, "st=0\ndeclare -ar a=([0]=\"p\" [1]=\"q\")\n");
-        let (out, _) =
-            run("( declare -A m=([k]=1); declare -r m=([j]=2); echo \"st=$?\"; declare -p m ) 2>&1");
+        let (out, _) = run(
+            "( declare -A m=([k]=1); declare -r m=([j]=2); echo \"st=$?\"; declare -p m ) 2>&1",
+        );
         assert_eq!(out, "st=0\ndeclare -Ar m=([j]=\"2\" )\n");
 
         // A second operand of the same command meets the *tagged* :849 refusal
@@ -80045,7 +83042,10 @@ st=1
             "( declare -a a=(x y); declare -r 'a[1]=9'; a[0]=z; echo \"st2=$?\"; \
              declare -p a; echo REACHED ) 2>&1",
         );
-        assert_eq!(out, "osh: a: readonly variable\nosh: a: readonly variable\n");
+        assert_eq!(
+            out,
+            "osh: a: readonly variable\nosh: a: readonly variable\n"
+        );
         let (out, _) = run_script(
             "( set -o posix; declare -a a=(x y); declare -r 'a[1]=9'; echo \"st=$?\"; \
              echo REACHED ) 2>&1",
@@ -80067,7 +83067,10 @@ st=1
         // `assign_array_element` returns NULL for that one.
         let (out, _) =
             run("( declare -a x=(1); declare -r 'x[-9]=9'; echo \"st=$?\"; declare -p x ) 2>&1");
-        assert_eq!(out, "osh: x[-9]: bad array subscript\nst=1\ndeclare -ar x=([0]=\"1\")\n");
+        assert_eq!(
+            out,
+            "osh: x[-9]: bad array subscript\nst=1\ndeclare -ar x=([0]=\"1\")\n"
+        );
         let (out, _) = run(
             "( declare -a x=(1); declare -r 'x[-9]=9' 'x[0]=7'; echo \"st=$?\"; \
              declare -p x ) 2>&1",
@@ -80085,17 +83088,30 @@ st=1
         for (src, shape) in [
             ("local -r x=5; declare -g 'x[1]=9'", "declare -r x=\"5\""),
             ("local -r x=5; declare -g 'x[-1]=9'", "declare -r x=\"5\""),
-            ("local -r x=(1 2); declare -g 'x[3]=9'", "declare -ar x=([0]=\"1\" [1]=\"2\")"),
-            ("local -rA x=([k]=1); declare -g 'x[j]=9'", "declare -Ar x=([k]=\"1\" )"),
+            (
+                "local -r x=(1 2); declare -g 'x[3]=9'",
+                "declare -ar x=([0]=\"1\" [1]=\"2\")",
+            ),
+            (
+                "local -rA x=([k]=1); declare -g 'x[j]=9'",
+                "declare -Ar x=([k]=\"1\" )",
+            ),
         ] {
             let (out, _) = run(&format!(
                 "f() {{ {src}; echo \"st=$?\"; declare -p x; }}; ( f ) 2>&1"
             ));
-            assert_eq!(out, format!("main: x: readonly variable\nst=0\n{shape}\n"), "{src}");
+            assert_eq!(
+                out,
+                format!("main: x: readonly variable\nst=0\n{shape}\n"),
+                "{src}"
+            );
         }
         let (out, _) =
             run("( declare -r x=5; declare -g 'x[1]=9'; echo \"st=$?\"; declare -p x ) 2>&1");
-        assert_eq!(out, "osh: declare: x: readonly variable\nst=1\ndeclare -r x=\"5\"\n");
+        assert_eq!(
+            out,
+            "osh: declare: x: readonly variable\nst=1\ndeclare -r x=\"5\"\n"
+        );
 
         // Under `-g` the mark and the store part company: the global takes the
         // `r`, the live local takes the element, and nothing is reported.
@@ -80115,8 +83131,14 @@ st=1
         for (src, tail) in [
             ("x=5; x[-1]=9", "declare -a x=([0]=\"9\")\n"),
             ("declare -i x; x[-1]=9", "declare -ai x=([0]=\"9\")\n"),
-            ("declare -a x=([5]=q); x[-1]=9", "declare -a x=([5]=\"9\")\n"),
-            ("declare -a x=(1 2 3); x[-1]=9", "declare -a x=([0]=\"1\" [1]=\"2\" [2]=\"9\")\n"),
+            (
+                "declare -a x=([5]=q); x[-1]=9",
+                "declare -a x=([5]=\"9\")\n",
+            ),
+            (
+                "declare -a x=(1 2 3); x[-1]=9",
+                "declare -a x=([0]=\"1\" [1]=\"2\" [2]=\"9\")\n",
+            ),
         ] {
             let (out, _) = run(&format!("( {src}; declare -p x ) 2>&1"));
             assert_eq!(out, tail, "{src}");
@@ -80128,7 +83150,11 @@ st=1
             ("declare -a x=(); x[-1]=9", "-1"),
         ] {
             let (out, _) = run(&format!("( {src}; echo \"st=$?\"; echo REACHED ) 2>&1"));
-            assert_eq!(out, format!("osh: x[{sub}]: bad array subscript\n"), "{src}");
+            assert_eq!(
+                out,
+                format!("osh: x[{sub}]: bad array subscript\n"),
+                "{src}"
+            );
         }
         let (out, _) = run("f() { local x; x[-1]=9; declare -p x; }; ( f ) 2>&1");
         assert_eq!(out, "declare -a x=([0]=\"9\")\n");
@@ -80167,7 +83193,10 @@ st=1
             .0;
             assert_eq!(
                 out,
-                format!("{}main: {tag}: not a valid identifier\nst=1\n{shape}\n", w.repeat(2)),
+                format!(
+                    "{}main: {tag}: not a valid identifier\nst=1\n{shape}\n",
+                    w.repeat(2)
+                ),
                 "{src}"
             );
         }
@@ -80232,13 +83261,14 @@ st=1
         let (out, _) = run(
             "f() { local -n g=nosuch; local +n g=5; echo \"st=$?\"; declare -p g nosuch; }; f 2>&1",
         );
-        assert_eq!(out, "st=0\ndeclare -n g=\"nosuch\"\ndeclare -- nosuch=\"5\"\n");
-
-        let (out, _) = run(
-            "declare -n gg=zz; declare -n zz=gg; \
-             f() { local +n gg=5; echo \"st=$?\"; declare -p gg; }; f 2>&1; \
-             echo AFTER; declare -p gg",
+        assert_eq!(
+            out,
+            "st=0\ndeclare -n g=\"nosuch\"\ndeclare -- nosuch=\"5\"\n"
         );
+
+        let (out, _) = run("declare -n gg=zz; declare -n zz=gg; \
+             f() { local +n gg=5; echo \"st=$?\"; declare -p gg; }; f 2>&1; \
+             echo AFTER; declare -p gg");
         assert_eq!(
             out,
             format!(
@@ -80252,7 +83282,10 @@ st=1
         );
         assert_eq!(
             out,
-            format!("{}main: local: g: readonly variable\nst=1\ndeclare -nr g=\"z\"\n", w.repeat(2))
+            format!(
+                "{}main: local: g: readonly variable\nst=1\ndeclare -nr g=\"z\"\n",
+                w.repeat(2)
+            )
         );
     }
 
@@ -80291,7 +83324,11 @@ st=1
             ("declare -rq=1", "-q"),
         ] {
             let (o, s) = run(&format!("{cmd} 2>&1"));
-            assert_eq!(o, format!("osh: declare: {bad}: invalid option\n{DECL}"), "{cmd}");
+            assert_eq!(
+                o,
+                format!("osh: declare: {bad}: invalid option\n{DECL}"),
+                "{cmd}"
+            );
             assert_eq!(s, 2, "{cmd}");
         }
         let (o, s) = run("typeset -pq 2>&1");
@@ -80301,7 +83338,10 @@ st=1
         let (o, s) = run("f(){ local -pq v; }; f 2>&1");
         assert_eq!(o, format!("main: local: -q: invalid option\n{LOC}"));
         assert_eq!(s, 2);
-        assert_eq!(run("f(){ local -=1; }; f 2>&1").0, format!("main: local: -=: invalid option\n{LOC}"));
+        assert_eq!(
+            run("f(){ local -=1; }; f 2>&1").0,
+            format!("main: local: -=: invalid option\n{LOC}")
+        );
         // But `local`'s older refusal still comes first: outside a function
         // there is nothing to be local *to*, and bash says so before it ever
         // reads the flags.
@@ -80317,7 +83357,10 @@ st=1
         assert_eq!(s, 1);
         // And the letters that are real are still taken: `-ax` is an exported
         // array, not two options one of which happens to be spelled `x`.
-        assert_eq!(run("declare -ax q=(1); declare -p q").0, "declare -ax q=([0]=\"1\")\n");
+        assert_eq!(
+            run("declare -ax q=(1); declare -p q").0,
+            "declare -ax q=([0]=\"1\")\n"
+        );
         assert_eq!(run("f(){ local -p; }; f; echo rc=$?").0, "rc=0\n");
     }
 
@@ -80371,7 +83414,10 @@ st=1
         // A bad *subscript expression* (`a[x y]=v`) is untagged even under
         // `declare -i`, and discards the parse unit — no `after`.
         let (o, s) = run("{ declare -i \"a[x y]=v\"; } 2>&1; echo after");
-        assert_eq!(o, "osh: x y: syntax error in expression (error token is \"y\")\n");
+        assert_eq!(
+            o,
+            "osh: x y: syntax error in expression (error token is \"y\")\n"
+        );
         assert_eq!(s, 1);
     }
 
@@ -80385,7 +83431,10 @@ st=1
         // osh used to report a bespoke message and exit 2, losing every later
         // line (TD-OILS-BAD-ARRAY-LITERAL-IS-FATAL).
         let (o, s) = run("exec 2>&1\na=(x; y)\necho after=$?");
-        assert_eq!(o, "osh: syntax error near unexpected token `;'\nosh: `a=(x; y)'\nafter=1\n");
+        assert_eq!(
+            o,
+            "osh: syntax error near unexpected token `;'\nosh: `a=(x; y)'\nafter=1\n"
+        );
         assert_eq!(s, 0);
         // The *unit* dies, not the line: `;` chains `echo one` into the same
         // unit, so it never runs either.
@@ -80399,7 +83448,10 @@ st=1
         // Recovery resumes past the literal's closing `)`, so a literal spanning
         // lines is blamed where the operator is and only its own unit is lost.
         let (o, s) = run("exec 2>&1\na=(x\ny; z)\necho after=$?");
-        assert_eq!(o, "osh: syntax error near unexpected token `;'\nosh: `y; z)'\nafter=1\n");
+        assert_eq!(
+            o,
+            "osh: syntax error near unexpected token `;'\nosh: `y; z)'\nafter=1\n"
+        );
         assert_eq!(s, 0);
         // bash names the longest operator it finds.
         for (src, tok) in [
@@ -80433,7 +83485,10 @@ st=1
         // `<<` and leaves the following lines to be read as ordinary commands
         // instead of taking them as a here-document body.
         let (o, s) = run("exec 2>&1\na=(x; y\necho after");
-        assert_eq!(o, "osh: syntax error near unexpected token `;'\nosh: `a=(x; y'\nafter\n");
+        assert_eq!(
+            o,
+            "osh: syntax error near unexpected token `;'\nosh: `a=(x; y'\nafter\n"
+        );
         assert_eq!(s, 0);
         let (o, _) = run("exec 2>&1\na=(x <<EOF\necho body\nEOF");
         assert_eq!(
@@ -80452,7 +83507,8 @@ st=1
         // Every case below therefore ends with a line that MUST appear.
         //
         // Write with an underflowing subscript.
-        let (o, s) = run("a=(1 2 3)\n{ a[-9]=v; echo same-line; } 2>&1\necho \"next=$? n=${#a[@]}\"");
+        let (o, s) =
+            run("a=(1 2 3)\n{ a[-9]=v; echo same-line; } 2>&1\necho \"next=$? n=${#a[@]}\"");
         assert_eq!(o, "osh: a[-9]: bad array subscript\nnext=1 n=3\n");
         assert_eq!(s, 0);
         // Length form.
@@ -80460,7 +83516,8 @@ st=1
         assert_eq!(o, "osh: -9]: bad array subscript\nstill-alive\n");
         assert_eq!(s, 0);
         // Invalid indirect expansion (`${!ptr}` where the target is not a name).
-        let (o, s) = run("ptr='not a name'\n{ echo \"v=${!ptr}\"; } 2>&1\necho \"st=$?\"\necho alive");
+        let (o, s) =
+            run("ptr='not a name'\n{ echo \"v=${!ptr}\"; } 2>&1\necho \"st=$?\"\necho alive");
         assert_eq!(o, "osh: not a name: invalid variable name\nst=1\nalive\n");
         assert_eq!(s, 0);
         // `${a[@]=v}` on an unset array: bash reports status **2**, not 1.
@@ -80469,9 +83526,14 @@ st=1
         assert_eq!(s, 0);
         // As a `declare` operand the underflow does not even discard — it only
         // fails the builtin, so the *same line* continues.
-        let (o, s) = run("a=(1 2 3)\n{ declare a[-9]=v; echo \"same-line=$?\"; } 2>&1\necho \"next=$? n=${#a[@]}\"");
+        let (o, s) = run(
+            "a=(1 2 3)\n{ declare a[-9]=v; echo \"same-line=$?\"; } 2>&1\necho \"next=$? n=${#a[@]}\"",
+        );
         // `declare` fails before `echo` runs, so its diagnostic comes first.
-        assert_eq!(o, "osh: a[-9]: bad array subscript\nsame-line=1\nnext=0 n=3\n");
+        assert_eq!(
+            o,
+            "osh: a[-9]: bad array subscript\nsame-line=1\nnext=0 n=3\n"
+        );
         assert_eq!(s, 0);
         // …but a malformed arithmetic *value* under `-i` still discards.
         let (o, s) = run("{ declare -i b=1+*2; echo \"same=$?\"; } 2>&1\necho \"next=$?\"");
@@ -80693,7 +83755,10 @@ st=1
             )
         };
         assert_eq!(status, 0);
-        assert_eq!(take_capture(&buf), b"/tmp/a\xffb.sh|/tmp/a\xffb.sh|2 main /tmp/a\xffb.sh\n");
+        assert_eq!(
+            take_capture(&buf),
+            b"/tmp/a\xffb.sh|/tmp/a\xffb.sh|2 main /tmp/a\xffb.sh\n"
+        );
     }
 
     #[test]
@@ -80733,7 +83798,10 @@ st=1
 
     #[test]
     fn declare_p_arrays() {
-        assert_eq!(run("a=(x y); declare -p a").0, "declare -a a=([0]=\"x\" [1]=\"y\")\n");
+        assert_eq!(
+            run("a=(x y); declare -p a").0,
+            "declare -a a=([0]=\"x\" [1]=\"y\")\n"
+        );
         // bash prints a non-empty associative array with a trailing space
         // before the closing paren.
         assert_eq!(
@@ -80781,12 +83849,25 @@ st=1
         assert_eq!(run("declare -i n; declare -p n").0, "declare -i n\n");
         assert_eq!(run("readonly q; declare -p q").0, "declare -r q\n");
         assert_eq!(run("export e; declare -p e").0, "declare -x e\n");
-        assert_eq!(run("declare n; [[ -v n ]]; echo $?; echo [${n-unset}]").0, "1\n[unset]\n");
+        assert_eq!(
+            run("declare n; [[ -v n ]]; echo $?; echo [${n-unset}]").0,
+            "1\n[unset]\n"
+        );
         // Clearing the last attribute leaves the variable behind, not nothing.
-        assert_eq!(run("declare -i n; declare +i n; declare -p n").0, "declare -- n\n");
+        assert_eq!(
+            run("declare -i n; declare +i n; declare -p n").0,
+            "declare -- n\n"
+        );
         // The attribute-filtered listing counts it; a bare `set` and
         // `${!prefix@}`, which are about values, pass over it.
-        assert_eq!(run("declare -i zq; declare -i").0.lines().filter(|l| l.ends_with(" zq")).count(), 1);
+        assert_eq!(
+            run("declare -i zq; declare -i")
+                .0
+                .lines()
+                .filter(|l| l.ends_with(" zq"))
+                .count(),
+            1
+        );
         assert_eq!(run("declare -i zq; set | grep -c '^zq'").0, "0\n");
         assert_eq!(run("declare -i zq; echo [${!zq@}]").0, "[]\n");
         // `unset` takes it away again — and because it *is* a variable, it is the
@@ -80794,14 +83875,20 @@ st=1
         assert_eq!(run("declare n; unset n; declare -p n").1, 1);
         assert_eq!(run("f() { echo fn; }; declare f; unset f; f").0, "fn\n");
         // A `local` declaration exists for the call only.
-        assert_eq!(run("f() { local n; declare -p n; }; f; declare -p n").0, "declare -- n\n");
+        assert_eq!(
+            run("f() { local n; declare -p n; }; f; declare -p n").0,
+            "declare -- n\n"
+        );
         assert_eq!(run("f() { local n; }; f; declare -p n").1, 1);
     }
 
     #[test]
     fn declare_p_quotes_specials() {
         // A value with a double quote and `$` is backslash-escaped.
-        assert_eq!(run("x='a\"b$c'; declare -p x").0, "declare -- x=\"a\\\"b\\$c\"\n");
+        assert_eq!(
+            run("x='a\"b$c'; declare -p x").0,
+            "declare -- x=\"a\\\"b\\$c\"\n"
+        );
     }
 
     #[test]
@@ -80837,7 +83924,10 @@ st=1
         assert_eq!(run("echo a{b,c,d}e").0, "abe ace ade\n");
         assert_eq!(run("echo {1..5}").0, "1 2 3 4 5\n");
         assert_eq!(run("echo {1..9..2}").0, "1 3 5 7 9\n");
-        assert_eq!(run("echo file{01..03}.txt").0, "file01.txt file02.txt file03.txt\n");
+        assert_eq!(
+            run("echo file{01..03}.txt").0,
+            "file01.txt file02.txt file03.txt\n"
+        );
         assert_eq!(run("echo {a..c}{1,2}").0, "a1 a2 b1 b2 c1 c2\n");
         // Quoted braces stay literal; invalid braces stay literal.
         assert_eq!(run("echo '{a,b}'").0, "{a,b}\n");
@@ -80892,7 +83982,10 @@ st=1
         assert_eq!(run("v=$'\\a'; echo \"${v@Q}\"").0, "$'\\a'\n");
         assert_eq!(run("v=$'\\x1b'; echo \"${v@Q}\"").0, "$'\\E'\n");
         assert_eq!(run("v=$'\\x7f'; echo \"${v@Q}\"").0, "$'\\177'\n");
-        assert_eq!(run("v=$'a\\tb\\x01c'; echo \"${v@Q}\"").0, "$'a\\tb\\001c'\n");
+        assert_eq!(
+            run("v=$'a\\tb\\x01c'; echo \"${v@Q}\"").0,
+            "$'a\\tb\\001c'\n"
+        );
         assert_eq!(run("printf '%q\\n' $'\\x01'").0, "$'\\001'\n");
         assert_eq!(run("printf '%q\\n' $'\\x1b'").0, "$'\\E'\n");
     }
@@ -80918,7 +84011,10 @@ st=1
             "osh: ${x@QU}: bad substitution\n"
         );
         // Element form: unset element → empty; set element → bad substitution.
-        assert_eq!(run("a=(p q); echo \"[${a[9]@Z}]\"; echo done").0, "[]\ndone\n");
+        assert_eq!(
+            run("a=(p q); echo \"[${a[9]@Z}]\"; echo done").0,
+            "[]\ndone\n"
+        );
         assert_eq!(
             run("a=(p q); { echo \"${a[0]@Z}\"; } 2>&1").0,
             "osh: ${a[0]@Z}: bad substitution\n"
@@ -80986,7 +84082,10 @@ st=1
         assert_eq!(run("command -v echo").0, "echo\n");
         assert_eq!(run("command -V echo").0, "echo is a shell builtin\n");
         // A function shadowing a builtin is bypassed by `command`.
-        assert_eq!(run("echo() { printf OVERRIDE; }; command echo hi").0, "hi\n");
+        assert_eq!(
+            run("echo() { printf OVERRIDE; }; command echo hi").0,
+            "hi\n"
+        );
         // -v on a function prints the name; an unknown name → status 1, no output.
         assert_eq!(run("greet() { :; }; command -v greet").0, "greet\n");
         assert_eq!(run("command -v no_such_cmd_xyz; echo $?").0, "1\n");
@@ -81015,7 +84114,10 @@ st=1
         assert_eq!(run("builtin command false; echo $?").0, "1\n");
         assert_eq!(run("x=$(command builtin echo F); echo \"[$x]\"").0, "[F]\n");
         // A function of the same name is still bypassed at every level.
-        assert_eq!(run("echo() { printf OVER; }; command builtin echo G").0, "G\n");
+        assert_eq!(
+            run("echo() { printf OVER; }; command builtin echo G").0,
+            "G\n"
+        );
     }
 
     /// `enable -n` takes a builtin out of the table `builtin` looks in, so the
@@ -81028,7 +84130,10 @@ st=1
             "osh: builtin: echo: not a shell builtin\nrc=1\n"
         );
         // Re-enabling brings it back.
-        assert_eq!(run("enable -n echo; enable echo; builtin echo hi").0, "hi\n");
+        assert_eq!(
+            run("enable -n echo; enable echo; builtin echo hi").0,
+            "hi\n"
+        );
         // The wrapper's own name is no more special than any other: disabling
         // it takes the *outer* one away too, and the shell then goes looking for
         // an external of that name — which is not there.
@@ -81047,21 +84152,36 @@ st=1
     /// where every other regular builtin is: after the function table.
     #[test]
     fn a_function_shadows_either_wrapper() {
-        assert_eq!(run("command() { echo \"F $*\"; }; command echo hi").0, "F echo hi\n");
-        assert_eq!(run("builtin() { echo \"F $*\"; }; builtin echo hi").0, "F echo hi\n");
+        assert_eq!(
+            run("command() { echo \"F $*\"; }; command echo hi").0,
+            "F echo hi\n"
+        );
+        assert_eq!(
+            run("builtin() { echo \"F $*\"; }; builtin echo hi").0,
+            "F echo hi\n"
+        );
         assert_eq!(
             run("set -o posix; command() { echo \"F $*\"; }; command echo hi").0,
             "F echo hi\n"
         );
         // …and `builtin` is how the real one is reached past the function.
-        assert_eq!(run("command() { echo F; }; builtin command echo hi").0, "hi\n");
+        assert_eq!(
+            run("command() { echo F; }; builtin command echo hi").0,
+            "hi\n"
+        );
     }
 
     #[test]
     fn special_var_random() {
         // Deterministic when reseeded, and within bash's 15-bit range.
-        assert_eq!(run("RANDOM=1; a=$RANDOM; RANDOM=1; b=$RANDOM; [ \"$a\" = \"$b\" ] && echo same").0, "same\n");
-        assert_eq!(run("RANDOM=7; r=$RANDOM; [ \"$r\" -ge 0 ] && [ \"$r\" -lt 32768 ] && echo ok").0, "ok\n");
+        assert_eq!(
+            run("RANDOM=1; a=$RANDOM; RANDOM=1; b=$RANDOM; [ \"$a\" = \"$b\" ] && echo same").0,
+            "same\n"
+        );
+        assert_eq!(
+            run("RANDOM=7; r=$RANDOM; [ \"$r\" -ge 0 ] && [ \"$r\" -lt 32768 ] && echo ok").0,
+            "ok\n"
+        );
     }
 
     #[test]
@@ -81116,10 +84236,16 @@ st=1
         let (out, st) = run("echo $PPID");
         assert_eq!(st, 0);
         let v = out.trim_end();
-        assert!(!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()), "got {out:?}");
+        assert!(
+            !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()),
+            "got {out:?}"
+        );
         // Constant across two reads, and across a subshell (bash carries the
         // startup value into `( … )` unchanged).
-        assert_eq!(run("a=$PPID; b=$( echo $PPID ); [ \"$a\" = \"$b\" ] && echo same").0, "same\n");
+        assert_eq!(
+            run("a=$PPID; b=$( echo $PPID ); [ \"$a\" = \"$b\" ] && echo same").0,
+            "same\n"
+        );
         // Prefix listing includes it, and `declare -p` reports it readonly-int.
         assert!(run("echo ${!P*}").0.split_whitespace().any(|n| n == "PPID"));
         assert!(run("declare -p PPID").0.starts_with("declare -ir PPID="));
@@ -81164,9 +84290,15 @@ st=1
     /// group and one *early* inside a `for`, an `if` or a function body.
     #[test]
     fn an_arithmetic_command_stands_on_the_line_its_closing_paren_is_on() {
-        assert_eq!(run("{\necho one\n(( x = LINENO ))\n}\necho \"x=$x\"").0, "one\nx=3\n");
+        assert_eq!(
+            run("{\necho one\n(( x = LINENO ))\n}\necho \"x=$x\"").0,
+            "one\nx=3\n"
+        );
         // The `((` is on line 2 and the `))` on line 3; bash says 3.
-        assert_eq!(run("for i in 1; do\n(( y =\n   LINENO ))\ndone\necho \"y=$y\"").0, "y=3\n");
+        assert_eq!(
+            run("for i in 1; do\n(( y =\n   LINENO ))\ndone\necho \"y=$y\"").0,
+            "y=3\n"
+        );
         // A function body is no different, and the enclosing line comes back
         // afterwards — `echo $LINENO` on line 6 still reads 6.
         assert_eq!(
@@ -81200,7 +84332,10 @@ st=1
         // Single line: close line 1, rank 0.
         assert_eq!(run("x=$(echo $LINENO); echo $x").0, "1\n");
         // Two body lines, close on line 2 → 2 and 3, *not* 1 and 2.
-        assert_eq!(run("y=$(echo $LINENO\necho $LINENO)\necho \"$y\"").0, "2\n3\n");
+        assert_eq!(
+            run("y=$(echo $LINENO\necho $LINENO)\necho \"$y\"").0,
+            "2\n3\n"
+        );
         // A blank body line carries no command, so it does not advance the rank:
         // close line 3 → 3 and 4, not 3 and 5.
         assert_eq!(
@@ -81225,7 +84360,10 @@ st=1
         // An element of a compound assignment is numbered from the assignment's
         // line, not its own: the closing `)` is on line 3 and so is the answer,
         // but the element sits on line 2.
-        assert_eq!(run("arr=(\n\"$(echo $LINENO)\"\n)\necho ${arr[0]}").0, "3\n");
+        assert_eq!(
+            run("arr=(\n\"$(echo $LINENO)\"\n)\necho ${arr[0]}").0,
+            "3\n"
+        );
         // …and `declare` takes its line from the *opening* line, which is where
         // the two disagree in the other direction: close line 3, answer 1.
         assert_eq!(
@@ -81249,7 +84387,10 @@ st=1
         // One line: close line 1 → 1, same answer either scheme would give.
         assert_eq!(run("b=`echo $LINENO`; echo $b").0, "1\n");
         // Two body lines, close on line 2 → 2 and 3.
-        assert_eq!(run("y=`echo $LINENO\necho $LINENO`\necho \"$y\"").0, "2\n3\n");
+        assert_eq!(
+            run("y=`echo $LINENO\necho $LINENO`\necho \"$y\"").0,
+            "2\n3\n"
+        );
         // A blank body line *does* advance here; the same body inside `$( … )`
         // would have it re-printed away.
         assert_eq!(
@@ -81312,7 +84453,10 @@ st=1
             "A 6\n"
         );
         // The ordinary expansion-error discard drifts exactly the same way.
-        assert_eq!(run("if true; then\n  echo ${a[1-]}\nfi\necho \"A $LINENO\"").0, "A 3\n");
+        assert_eq!(
+            run("if true; then\n  echo ${a[1-]}\nfi\necho \"A $LINENO\"").0,
+            "A 3\n"
+        );
         // A function call restores the counter — `unwind_protect_int
         // (line_number)`, `execute_cmd.c:5095`, and unwind-protects *do* run on
         // a longjmp — but restores it to the *call site*, not to the unit's last
@@ -81415,7 +84559,13 @@ st=1
         // still plain afterwards, and never appears in `export -p`. bash keeps
         // `_` out of the export set because the `_` a child sees names the
         // child's own program, not this shell's last word.
-        for req in ["export _", "export _=v", "declare -x _", "typeset -x _", "set -a"] {
+        for req in [
+            "export _",
+            "export _=v",
+            "declare -x _",
+            "typeset -x _",
+            "set -a",
+        ] {
             let script = format!("{req}; declare -p _; export -p");
             let (out, code) = run_script(&script);
             assert_eq!(code, 0, "{req}");
@@ -81423,7 +84573,10 @@ st=1
             assert!(!out.contains("declare -x _"), "{req}: {out}");
         }
         // `set -a` still exports every *other* assignment made under it.
-        assert_eq!(run("set -a; _=x; v=1; declare -p v").0, "declare -x v=\"1\"\n");
+        assert_eq!(
+            run("set -a; _=x; v=1; declare -p v").0,
+            "declare -x v=\"1\"\n"
+        );
     }
 
     #[test]
@@ -81435,7 +84588,10 @@ st=1
         // An ERR trap sees the command that failed. (Trap stdout is not captured
         // by the harness, so capture BASH_COMMAND into a variable and read it
         // back after the trap has run.)
-        assert_eq!(run("trap 'ERRCMD=$BASH_COMMAND' ERR\nfalse\necho \"$ERRCMD\"").0, "false\n");
+        assert_eq!(
+            run("trap 'ERRCMD=$BASH_COMMAND' ERR\nfalse\necho \"$ERRCMD\"").0,
+            "false\n"
+        );
     }
 
     #[test]
@@ -81571,13 +84727,19 @@ st=1
         }
 
         let mut sh = new_shell();
-        sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(dir.path()));
+        sh.vars
+            .insert("PATH".to_string(), bytes::path_to_bytes(dir.path()));
         let cmds = sh.compgen_path_commands(b"");
         // The executable is offered by its bare name; the `.json` is not (in
         // either its raw or extension-stripped form).
-        assert!(cmds.iter().any(|c| c.as_slice() == b"mycmd"), "expected mycmd in {cmds:?}");
         assert!(
-            !cmds.iter().any(|c| c.as_slice() == b"mycfg" || c.as_slice() == b"mycfg.json"),
+            cmds.iter().any(|c| c.as_slice() == b"mycmd"),
+            "expected mycmd in {cmds:?}"
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| c.as_slice() == b"mycfg" || c.as_slice() == b"mycfg.json"),
             "config file leaked into {cmds:?}"
         );
     }
@@ -81607,8 +84769,12 @@ st=1
         }
 
         let mut sh = new_shell();
-        sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(dir.path()));
-        assert!(sh.find_in_path(b"mytool", None).is_some(), "executable not found in PATH");
+        sh.vars
+            .insert("PATH".to_string(), bytes::path_to_bytes(dir.path()));
+        assert!(
+            sh.find_in_path(b"mytool", None).is_some(),
+            "executable not found in PATH"
+        );
 
         // A non-executable, plain-named data file. On Unix the missing exec bit
         // must make the search skip it (returning None); on Windows executability
@@ -81656,7 +84822,8 @@ st=1
             bfmt![bytes::path_to_bytes(&p1), b":", bytes::path_to_bytes(&p2)],
         );
         assert_eq!(
-            sh.find_source_in_path(b"lib.sh").map(|p| bytes::bytes_to_path(&p).is_file()),
+            sh.find_source_in_path(b"lib.sh")
+                .map(|p| bytes::bytes_to_path(&p).is_file()),
             Some(true),
             "the directory in the first entry was taken for the file"
         );
@@ -81677,11 +84844,15 @@ st=1
         let mut sh = new_shell();
         sh.cwd = b"/here".to_vec();
         let dirs = |sh: &mut Shell, over: Option<&[u8]>| {
-            sh.search_dirs(over).iter().map(|d| String::from_utf8_lossy(d).into_owned()).collect::<Vec<_>>()
+            sh.search_dirs(over)
+                .iter()
+                .map(|d| String::from_utf8_lossy(d).into_owned())
+                .collect::<Vec<_>>()
         };
         // `:` on every host, because that is the shell's separator rather than
         // the host's (see [`split_search_path`]).
-        sh.vars.insert("PATH".to_string(), b"/abs:rel::/tail/".to_vec());
+        sh.vars
+            .insert("PATH".to_string(), b"/abs:rel::/tail/".to_vec());
         assert_eq!(
             dirs(&mut sh, None),
             // Every entry survives as typed — `rel` is *not* made absolute, or
@@ -81691,7 +84862,10 @@ st=1
             // below, which is why the spelling matters.
             vec!["/abs", "rel", ".", "/tail/"]
         );
-        assert_eq!(Shell::path_candidate(b"/tail/", b"cmd"), b"/tail/cmd".to_vec());
+        assert_eq!(
+            Shell::path_candidate(b"/tail/", b"cmd"),
+            b"/tail/cmd".to_vec()
+        );
         assert_eq!(Shell::path_candidate(b"rel", b"cmd"), b"rel/cmd".to_vec());
         // A `PATH=` written as a command prefix is searched instead, without
         // being stored: the shell's own `$PATH` is untouched by the lookup.
@@ -81718,7 +84892,10 @@ st=1
     #[test]
     fn the_search_path_separator_is_the_shell_s_own() {
         let split = |s: &[u8]| {
-            split_search_path(s).iter().map(|d| String::from_utf8_lossy(d).into_owned()).collect::<Vec<_>>()
+            split_search_path(s)
+                .iter()
+                .map(|d| String::from_utf8_lossy(d).into_owned())
+                .collect::<Vec<_>>()
         };
         assert_eq!(split(b"/usr/bin:/bin"), vec!["/usr/bin", "/bin"]);
         assert_eq!(split(b"bin"), vec!["bin"]);
@@ -81762,15 +84939,24 @@ st=1
         // start with does not match.
         for pat in [&b"*tool"[..], b"bin/*", b"bin/tool", b"bin*", b"*/tool"] {
             sh.vars.insert("EXECIGNORE".to_string(), pat.to_vec());
-            assert!(ignored(&mut sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
+            assert!(
+                ignored(&mut sh, b"bin/tool"),
+                "{}",
+                String::from_utf8_lossy(pat)
+            );
         }
         for pat in [&b"tool"[..], b"*/bin/*", b"xin/tool"] {
             sh.vars.insert("EXECIGNORE".to_string(), pat.to_vec());
-            assert!(!ignored(&mut sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
+            assert!(
+                !ignored(&mut sh, b"bin/tool"),
+                "{}",
+                String::from_utf8_lossy(pat)
+            );
         }
 
         // A list, with the empty entries skipped rather than matching everything.
-        sh.vars.insert("EXECIGNORE".to_string(), b"::*/nope:bin/tool:".to_vec());
+        sh.vars
+            .insert("EXECIGNORE".to_string(), b"::*/nope:bin/tool:".to_vec());
         assert!(ignored(&mut sh, b"bin/tool"));
         assert!(!ignored(&mut sh, b"bin/other"));
 
@@ -81778,9 +84964,14 @@ st=1
         // directory as readily as the file.
         for pat in [&b"bin/TOOL"[..], b"bin/tOOl", b"BIN/tool"] {
             sh.vars.insert("EXECIGNORE".to_string(), pat.to_vec());
-            assert!(ignored(&mut sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
+            assert!(
+                ignored(&mut sh, b"bin/tool"),
+                "{}",
+                String::from_utf8_lossy(pat)
+            );
         }
-        sh.vars.insert("EXECIGNORE".to_string(), b"bin/tool".to_vec());
+        sh.vars
+            .insert("EXECIGNORE".to_string(), b"bin/tool".to_vec());
         assert!(ignored(&mut sh, b"BIN/TOOL"));
 
         // A pattern that will not parse is a pattern that matches nothing, not
@@ -81789,7 +84980,8 @@ st=1
         assert!(!ignored(&mut sh, b"bin/tool"));
 
         // `extglob` is honoured, so the same value means different things.
-        sh.vars.insert("EXECIGNORE".to_string(), b"bin/@(tool|helper)".to_vec());
+        sh.vars
+            .insert("EXECIGNORE".to_string(), b"bin/@(tool|helper)".to_vec());
         assert!(!ignored(&mut sh, b"bin/tool"));
         sh.shopt.insert("extglob".to_string(), true);
         assert!(ignored(&mut sh, b"bin/tool"));
@@ -81815,7 +85007,10 @@ st=1
         // child's `argv[0]` and `cmd.exe` reads `/WINDOWS` there as switches.
         assert_eq!(host_program(b"cat"), b"cat".to_vec());
         #[cfg(windows)]
-        assert_eq!(host_program(b"C:/WINDOWS/system32/cmd.exe"), br"C:\WINDOWS\system32\cmd.exe".to_vec());
+        assert_eq!(
+            host_program(b"C:/WINDOWS/system32/cmd.exe"),
+            br"C:\WINDOWS\system32\cmd.exe".to_vec()
+        );
         #[cfg(not(windows))]
         assert_eq!(host_program(b"/usr/bin/cat"), b"/usr/bin/cat".to_vec());
     }
@@ -81832,20 +85027,32 @@ st=1
         // Read: the stage sees the entry, exactly as a fork of this shell would.
         assert_eq!(sh.resolve_external_forked(b"tool", &[]), Some(p.clone()));
         // …but the hit count it would have bumped stays where it was.
-        assert_eq!(sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h), Some(3));
+        assert_eq!(
+            sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h),
+            Some(3)
+        );
         // The non-forked path is the one that counts the use.
         assert_eq!(sh.resolve_external(b"tool"), Some(p));
-        assert_eq!(sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h), Some(4));
+        assert_eq!(
+            sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h),
+            Some(4)
+        );
 
         // A `PATH=` prefix takes the table out of the picture altogether: the
         // search runs against that `$PATH` and finds nothing there.
         let prefix = [("PATH".to_string(), b"/nowhere".to_vec())];
         assert_eq!(sh.resolve_external_forked(b"tool", &prefix), None);
-        assert_eq!(sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h), Some(4));
+        assert_eq!(
+            sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h),
+            Some(4)
+        );
         // The same for a command run in *this* shell: bash neither consults the
         // table nor adds to it for a lookup made under a prefix `$PATH`.
         assert_eq!(sh.resolve_external_with(b"tool", &prefix), None);
-        assert_eq!(sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h), Some(4));
+        assert_eq!(
+            sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h),
+            Some(4)
+        );
     }
 
     /// A remembered command is *described* by a path the table does not hold:
@@ -81868,8 +85075,7 @@ st=1
         #[cfg(not(windows))]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
 
         let mut sh = new_shell();
@@ -81880,7 +85086,9 @@ st=1
         // description of it gains the `./` that stops it being re-searched as a
         // bare name.
         assert_eq!(
-            sh.cmd_hash.get(b"tool".as_slice()).map(|(p, _)| bytes::path_to_bytes(p)),
+            sh.cmd_hash
+                .get(b"tool".as_slice())
+                .map(|(p, _)| bytes::path_to_bytes(p)),
             Some(b"bin/tool".to_vec())
         );
         assert_eq!(sh.hashed_description(b"tool"), Some(b"./bin/tool".to_vec()));
@@ -81895,8 +85103,15 @@ st=1
         assert_eq!(sh.hashed_description(b"tool"), Some(b"bin/tool".to_vec()));
 
         // An absolute entry never needs the prefix, whether or not it resolves.
-        sh.hash_remember(b"abs".to_vec(), std::path::PathBuf::from("/nowhere/tool"), 0);
-        assert_eq!(sh.hashed_description(b"abs"), Some(b"/nowhere/tool".to_vec()));
+        sh.hash_remember(
+            b"abs".to_vec(),
+            std::path::PathBuf::from("/nowhere/tool"),
+            0,
+        );
+        assert_eq!(
+            sh.hashed_description(b"abs"),
+            Some(b"/nowhere/tool".to_vec())
+        );
         // A name the table does not hold has no description to give.
         assert_eq!(sh.hashed_description(b"other"), None);
 
@@ -81918,7 +85133,9 @@ st=1
         // searches the parent's `PATH`, so a plain spawn of this would succeed.
         let host_name = if cfg!(windows) { "cmd" } else { "sh" };
         let mut pc = PCommand::new(host_name);
-        pc.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        pc.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         let Err(e) = spawn_resolved(&mut pc, host_name.as_bytes(), None, ClosedStd::default())
         else {
             panic!("an unresolved bare word must not spawn");
@@ -81951,7 +85168,11 @@ st=1
         let before = STD_HANDLE_SLOTS.map(|slot| unsafe { GetStdHandle(slot) });
         // All three at once: the write side borrows the stdout and stderr slots
         // the same way the read side borrows stdin's.
-        let all = ClosedStd { stdin: true, stdout: true, stderr: true };
+        let all = ClosedStd {
+            stdin: true,
+            stdout: true,
+            stderr: true,
+        };
 
         // A spawn that succeeds. `cmd` is on every Windows host's `PATH`, and
         // `/c exit 0` neither reads nor writes anything.
@@ -81960,7 +85181,10 @@ st=1
         let mut child =
             spawn_with_closed_std(&mut pc, all).expect("cmd must be spawnable on a Windows host");
         // SAFETY: as above.
-        assert_eq!(STD_HANDLE_SLOTS.map(|slot| unsafe { GetStdHandle(slot) }), before);
+        assert_eq!(
+            STD_HANDLE_SLOTS.map(|slot| unsafe { GetStdHandle(slot) }),
+            before
+        );
         let _ = child.wait();
 
         // …and one that does not: the slots are put back by the guard's `Drop`
@@ -81968,13 +85192,19 @@ st=1
         let mut pc = PCommand::new("./no-such-program-zq");
         assert!(spawn_with_closed_std(&mut pc, all).is_err());
         // SAFETY: as above.
-        assert_eq!(STD_HANDLE_SLOTS.map(|slot| unsafe { GetStdHandle(slot) }), before);
+        assert_eq!(
+            STD_HANDLE_SLOTS.map(|slot| unsafe { GetStdHandle(slot) }),
+            before
+        );
     }
 
     #[test]
     fn compgen_actions_and_decorate() {
         // Function/builtin/variable actions draw from live shell state.
-        assert_eq!(run("f1(){ :; }; f2(){ :; }; compgen -A function f2").0, "f2\n");
+        assert_eq!(
+            run("f1(){ :; }; f2(){ :; }; compgen -A function f2").0,
+            "f2\n"
+        );
         assert_eq!(run("compgen -b tru").0, "true\n");
         // Variables come from a hash map (unordered); sort before asserting.
         let vout = run("xy=1; xyz=2; z=3; compgen -v xy").0;
@@ -82000,7 +85230,10 @@ st=1
         // `--` terminates options; the following argument is the word to
         // complete — even when it begins with `-`. Regression: previously `--`
         // itself was consumed as the word, so nothing prefix-matched.
-        assert_eq!(run("compgen -W 'apple apricot banana' -- ap").0, "apple\napricot\n");
+        assert_eq!(
+            run("compgen -W 'apple apricot banana' -- ap").0,
+            "apple\napricot\n"
+        );
         assert_eq!(run("compgen -W '-a -b -c' -- -a").0, "-a\n");
         // `--` with no following word offers every candidate.
         assert_eq!(run("compgen -W 'one two' --").0, "one\ntwo\n");
@@ -82011,7 +85244,10 @@ st=1
         // Option names come out in the order their own builtin lists them:
         // `shopt`'s table order, `set -o`'s alphabetical one.
         assert_eq!(run("compgen -A shopt a").0, "autocd\nassoc_expand_once\n");
-        assert_eq!(run("compgen -A setopt no").0, "noclobber\nnoexec\nnoglob\nnolog\nnotify\nnounset\n");
+        assert_eq!(
+            run("compgen -A setopt no").0,
+            "noclobber\nnoexec\nnoglob\nnolog\nnotify\nnounset\n"
+        );
         // `enabled`/`disabled` are the two halves of the builtin table, and a
         // name moves between them as `enable -n` turns it off.
         assert_eq!(run("compgen -A disabled").0, "");
@@ -82020,7 +85256,10 @@ st=1
         assert_eq!(run("enable -n echo; compgen -A enabled ech").0, "");
         // Every spec `trap` accepts: EXIT, the signals in number order under
         // their SIG names, then the pseudo-signals.
-        assert_eq!(run("compgen -A signal SIGT").0, "SIGTRAP\nSIGTERM\nSIGTSTP\nSIGTTIN\nSIGTTOU\n");
+        assert_eq!(
+            run("compgen -A signal SIGT").0,
+            "SIGTRAP\nSIGTERM\nSIGTSTP\nSIGTTIN\nSIGTTOU\n"
+        );
         assert_eq!(run("compgen -A signal E").0, "EXIT\nERR\n");
         assert_eq!(run("compgen -A signal RET").0, "RETURN\n");
         // Help topics are the builtins and the compound-command constructs
@@ -82043,7 +85282,10 @@ st=1
         // Reserved words keep the grammar's table order, not alphabetical.
         assert_eq!(run("compgen -k i").0, "if\nin\n");
         // Names come out sorted, however they went into the shell's tables.
-        assert_eq!(run("zf(){ :;}; af(){ :;}; compgen -A function").0, "af\nzf\n");
+        assert_eq!(
+            run("zf(){ :;}; af(){ :;}; compgen -A function").0,
+            "af\nzf\n"
+        );
         assert_eq!(run("zv=1; za=2; compgen -v z").0, "za\nzv\n");
         assert_eq!(run("export ZB=1 ZA=2; compgen -e Z").0, "ZA\nZB\n");
         // `arrayvar` is the array-valued subset, not every variable.
@@ -82143,17 +85385,32 @@ st=1
         assert_eq!(run("compgen -P ''"), (String::new(), 1));
         // `-A`/`-o` names are checked against the same tables `complete` uses.
         let (o, s) = run("compgen -A nosuch x 2>&1");
-        assert_eq!((o.as_str(), s), ("osh: compgen: nosuch: invalid action name\n", 2));
+        assert_eq!(
+            (o.as_str(), s),
+            ("osh: compgen: nosuch: invalid action name\n", 2)
+        );
         let (o, s) = run("compgen -o nosuchopt 2>&1");
-        assert_eq!((o.as_str(), s), ("osh: compgen: nosuchopt: invalid option name\n", 2));
+        assert_eq!(
+            (o.as_str(), s),
+            ("osh: compgen: nosuchopt: invalid option name\n", 2)
+        );
         // The check happens as the option is read, so it beats a later error
         // and beats the generation a valid option would have driven.
         let (o, s) = run("compgen -W 'a b' -A nosuch 2>&1");
-        assert_eq!((o.as_str(), s), ("osh: compgen: nosuch: invalid action name\n", 2));
+        assert_eq!(
+            (o.as_str(), s),
+            ("osh: compgen: nosuch: invalid action name\n", 2)
+        );
         // A missing option argument is a usage error, with the synopsis.
         let (o, s) = run("compgen -W 2>&1");
-        assert!(o.starts_with("osh: compgen: -W: option requires an argument\n"), "got {o:?}");
-        assert!(o.contains("compgen: usage: compgen [-abcdefgjksuv]"), "got {o:?}");
+        assert!(
+            o.starts_with("osh: compgen: -W: option requires an argument\n"),
+            "got {o:?}"
+        );
+        assert!(
+            o.contains("compgen: usage: compgen [-abcdefgjksuv]"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
     }
 
@@ -82170,8 +85427,11 @@ st=1
         // Compare as sets: the order is the directory's own, which is the
         // filesystem's business rather than the shell's.
         let g = |rest: &str| {
-            let mut v: Vec<String> =
-                run(&format!("cd {base}\ncompgen {rest}")).0.lines().map(str::to_string).collect();
+            let mut v: Vec<String> = run(&format!("cd {base}\ncompgen {rest}"))
+                .0
+                .lines()
+                .map(str::to_string)
+                .collect();
             v.sort();
             v
         };
@@ -82186,7 +85446,6 @@ st=1
         assert_eq!(g("-f a"), ["a1", "adir"]);
         // The rule follows the word's directory component, not the cwd.
         assert_eq!(g("-f adir/."), ["adir/.", "adir/.."]);
-
     }
 
     #[test]
@@ -82222,7 +85481,6 @@ st=1
         // An -o that says nothing about candidates still asks for a compspec,
         // so it gets the empty-answer status rather than the silent success.
         assert_eq!(g("-o nosort a"), (String::new(), 1));
-
     }
 
     #[test]
@@ -82247,10 +85505,12 @@ st=1
         assert_eq!(g("-G 'a*' -G 'b*'"), "b1\n");
         // A pattern that matches nothing contributes nothing, and with no other
         // source the empty answer is status 1.
-        assert_eq!(run(&format!("cd {base}\ncompgen -G 'nosuch*'")), (String::new(), 1));
+        assert_eq!(
+            run(&format!("cd {base}\ncompgen -G 'nosuch*'")),
+            (String::new(), 1)
+        );
         // Sources are emitted in bash's fixed order: actions, then -G, then -W.
         assert_eq!(g("-k -G 'a*' -W 'iq' i"), "if\nin\nadir\na1\niq\n");
-
     }
 
     #[test]
@@ -82264,7 +85524,10 @@ st=1
             format!("{warn}compgen|wo|\nzz\n")
         );
         // It runs in the current shell, so what it changes stays changed…
-        assert_eq!(run("f() { x=$2; COMPREPLY=(a); }; compgen -F f q >/dev/null 2>&1; echo \"<$x>\"").0, "<q>\n");
+        assert_eq!(
+            run("f() { x=$2; COMPREPLY=(a); }; compgen -F f q >/dev/null 2>&1; echo \"<$x>\"").0,
+            "<q>\n"
+        );
         // …but the completion environment it reads is bound only for the call,
         // and describes an empty line, there being none.
         assert_eq!(
@@ -82278,8 +85541,14 @@ st=1
         );
         // A scalar answers as one match (even an empty one); an associative
         // COMPREPLY answers nothing at all, as in bash.
-        assert_eq!(run("f() { COMPREPLY=one; }; compgen -F f q 2>/dev/null").0, "one\n");
-        assert_eq!(run("f() { COMPREPLY=; }; compgen -F f q 2>/dev/null"), ("\n".to_string(), 0));
+        assert_eq!(
+            run("f() { COMPREPLY=one; }; compgen -F f q 2>/dev/null").0,
+            "one\n"
+        );
+        assert_eq!(
+            run("f() { COMPREPLY=; }; compgen -F f q 2>/dev/null"),
+            ("\n".to_string(), 0)
+        );
         assert_eq!(
             run("f() { declare -A COMPREPLY=([k]=v); }; compgen -F f q 2>/dev/null"),
             (String::new(), 1)
@@ -82294,10 +85563,16 @@ st=1
         // does not name the builtin that asked.
         assert_eq!(
             run("compgen -F nosuch q 2>&1"),
-            (format!("{warn}osh: completion: function `nosuch' not found\n"), 1)
+            (
+                format!("{warn}osh: completion: function `nosuch' not found\n"),
+                1
+            )
         );
         // The warning waits for the whole option scan, so a usage error wins…
-        assert_eq!(run("f() { :; }; compgen -F f -A bogus q 2>&1").0, "osh: compgen: bogus: invalid action name\n");
+        assert_eq!(
+            run("f() { :; }; compgen -F f -A bogus q 2>&1").0,
+            "osh: compgen: bogus: invalid action name\n"
+        );
         // …and it is said once however many times `-F` was written, the last
         // one being the function that runs (one compspec slot).
         assert_eq!(
@@ -82307,7 +85582,8 @@ st=1
         // Its matches sit after the actions and the wordlist, and -X/-P/-S
         // still apply to them.
         assert_eq!(
-            run("f() { COMPREPLY=(iq ix); }; compgen -k -W 'iw' -F f -X 'ix' -P '<' i 2>/dev/null").0,
+            run("f() { COMPREPLY=(iq ix); }; compgen -k -W 'iw' -F f -X 'ix' -P '<' i 2>/dev/null")
+                .0,
             "<if\n<in\n<iw\n<iq\n"
         );
     }
@@ -82322,7 +85598,10 @@ st=1
             run("compgen -C 'printf \"[%s]\\n\"' 'a b' 2>&1").0,
             format!("{warn}[compgen]\n[a b]\n[]\n")
         );
-        assert_eq!(run("compgen -C 'echo hi' x 2>/dev/null").0, "hi compgen x \n");
+        assert_eq!(
+            run("compgen -C 'echo hi' x 2>/dev/null").0,
+            "hi compgen x \n"
+        );
         // Output is split into lines with the blank ones dropped; the rest are
         // kept verbatim, and none of them is narrowed to the word.
         assert_eq!(
@@ -82331,7 +85610,10 @@ st=1
         );
         // It is a subshell, so nothing it assigns survives; and its status is
         // ignored — an empty answer is what makes the status 1.
-        assert_eq!(run("y=out; compgen -C 'y=in; echo z' q 2>/dev/null; echo \"<$y>\"").0, "z compgen q \n<out>\n");
+        assert_eq!(
+            run("y=out; compgen -C 'y=in; echo z' q 2>/dev/null; echo \"<$y>\"").0,
+            "z compgen q \n<out>\n"
+        );
         assert_eq!(run("compgen -C 'exit 3' q 2>/dev/null"), (String::new(), 1));
         // Both warnings are printed when both sources are asked for, always in
         // this order rather than the order they were written.
@@ -82344,7 +85626,10 @@ st=1
         );
         // A second -C overwrites the first — one compspec slot — and -X/-P
         // still apply to what the command answered.
-        assert_eq!(run("compgen -C 'echo aa' -C 'echo bb' q 2>/dev/null").0, "bb compgen q \n");
+        assert_eq!(
+            run("compgen -C 'echo aa' -C 'echo bb' q 2>/dev/null").0,
+            "bb compgen q \n"
+        );
         assert_eq!(
             run("compgen -C 'printf \"keep\\ndrop\\n\"' -X 'drop' -P '<' q 2>/dev/null").0,
             "<keep\n"
@@ -82367,7 +85652,10 @@ st=1
         // `running` drops a job that has already finished; `job` keeps it,
         // because a job stays in the table until something sweeps it.
         assert_eq!(run("true & sleep 0.3; compgen -A job").0, "true\n");
-        assert_eq!(run("true & sleep 0.3; compgen -A running"), (String::new(), 1));
+        assert_eq!(
+            run("true & sleep 0.3; compgen -A running"),
+            (String::new(), 1)
+        );
         // osh has no stopped jobs, so that action never answers anything.
         assert_eq!(run("sleep 0.4 & compgen -A stopped"), (String::new(), 1));
         // With no jobs at all there is nothing to offer.
@@ -82381,20 +85669,21 @@ st=1
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock")
                 .as_nanos();
-            let p = std::env::temp_dir()
-                .join(format!("osh_hosts_{}_{nanos}.txt", std::process::id()));
+            let p =
+                std::env::temp_dir().join(format!("osh_hosts_{}_{nanos}.txt", std::process::id()));
             std::fs::write(&p, src).expect("write");
             let got = read_hostnames(p.to_string_lossy().replace('\\', "/").as_bytes());
             std::fs::remove_file(&p).ok();
-            got.iter().map(|n| String::from_utf8_lossy(n).into_owned()).collect::<Vec<_>>()
+            got.iter()
+                .map(|n| String::from_utf8_lossy(n).into_owned())
+                .collect::<Vec<_>>()
         };
         // The first field is the address; every field after it is a name, and
         // tabs separate as well as spaces.
-        assert_eq!(names("1.2.3.4 alpha alpha.example\n5.6.7.8\tbeta\n"), [
-            "alpha",
-            "alpha.example",
-            "beta"
-        ]);
+        assert_eq!(
+            names("1.2.3.4 alpha alpha.example\n5.6.7.8\tbeta\n"),
+            ["alpha", "alpha.example", "beta"]
+        );
         // A `#` starts a comment wherever it is: the names before it on the
         // line still count, and a line that begins with one contributes none.
         assert_eq!(names("# all comment\n1.1.1.1 a b # c d\n"), ["a", "b"]);
@@ -82417,29 +85706,50 @@ st=1
 
         let mut sh = new_shell();
         run_in(&mut sh, &format!("HOSTFILE={base}/a"));
-        assert_eq!(run_in(&mut sh, "compgen -A hostname").0, "alpha\nalpha.example\n");
+        assert_eq!(
+            run_in(&mut sh, "compgen -A hostname").0,
+            "alpha\nalpha.example\n"
+        );
         // The word narrows the answer, as for every other action.
-        assert_eq!(run_in(&mut sh, "compgen -A hostname alpha.").0, "alpha.example\n");
-        assert_eq!(run_in(&mut sh, "compgen -A hostname zz"), (String::new(), 1));
+        assert_eq!(
+            run_in(&mut sh, "compgen -A hostname alpha.").0,
+            "alpha.example\n"
+        );
+        assert_eq!(
+            run_in(&mut sh, "compgen -A hostname zz"),
+            (String::new(), 1)
+        );
 
         // Naming a different file *adds* to what is already offered…
         run_in(&mut sh, &format!("HOSTFILE={base}/b"));
-        assert_eq!(run_in(&mut sh, "compgen -A hostname").0, "alpha\nalpha.example\nbeta\n");
+        assert_eq!(
+            run_in(&mut sh, "compgen -A hostname").0,
+            "alpha\nalpha.example\nbeta\n"
+        );
         // …while unsetting the variable throws the list away, so the next file
         // named starts from nothing.
         run_in(&mut sh, "unset HOSTFILE");
         run_in(&mut sh, &format!("HOSTFILE={base}/a"));
-        assert_eq!(run_in(&mut sh, "compgen -A hostname").0, "alpha\nalpha.example\n");
+        assert_eq!(
+            run_in(&mut sh, "compgen -A hostname").0,
+            "alpha\nalpha.example\n"
+        );
 
         // A file that cannot be read adds nothing and is not an error: the list
         // already there still answers.
         run_in(&mut sh, &format!("HOSTFILE={base}/nosuch"));
-        assert_eq!(run_in(&mut sh, "compgen -A hostname").0, "alpha\nalpha.example\n");
+        assert_eq!(
+            run_in(&mut sh, "compgen -A hostname").0,
+            "alpha\nalpha.example\n"
+        );
         // With the list cleared and no readable file, there is nothing to
         // offer — `compgen`'s ordinary empty answer, not a diagnostic.
         run_in(&mut sh, "unset HOSTFILE");
         run_in(&mut sh, &format!("HOSTFILE={base}/nosuch"));
-        assert_eq!(run_in(&mut sh, "compgen -A hostname 2>&1"), (String::new(), 1));
+        assert_eq!(
+            run_in(&mut sh, "compgen -A hostname 2>&1"),
+            (String::new(), 1)
+        );
     }
 
     #[test]
@@ -82454,14 +85764,22 @@ st=1
             std::fs::write(&p, src).expect("write");
             let got = read_service_names(p.to_string_lossy().replace('\\', "/").as_bytes());
             std::fs::remove_file(&p).ok();
-            got.iter().map(|n| String::from_utf8_lossy(n).into_owned()).collect::<Vec<_>>()
+            got.iter()
+                .map(|n| String::from_utf8_lossy(n).into_owned())
+                .collect::<Vec<_>>()
         };
         // The name is the first field; the port/protocol and every alias after
         // it are skipped, and tabs separate as well as spaces.
-        assert_eq!(names("echo\t7/tcp\ndiscard 9/tcp sink null\n"), ["echo", "discard"]);
+        assert_eq!(
+            names("echo\t7/tcp\ndiscard 9/tcp sink null\n"),
+            ["echo", "discard"]
+        );
         // A `#` starts a comment wherever it is: a trailing one leaves the name
         // alone, and a line that begins with one contributes nothing.
-        assert_eq!(names("# a header\nsystat 11/tcp users  #Active users\n"), ["systat"]);
+        assert_eq!(
+            names("# a header\nsystat 11/tcp users  #Active users\n"),
+            ["systat"]
+        );
         // Blank and whitespace-only lines contribute nothing.
         assert_eq!(names("\n   \nftp 21/tcp\n"), ["ftp"]);
         // Nothing is deduplicated — a service with a tcp and a udp line is two
@@ -82479,8 +85797,7 @@ st=1
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let p =
-            std::env::temp_dir().join(format!("osh_{tag}_{}_{nanos}.txt", std::process::id()));
+        let p = std::env::temp_dir().join(format!("osh_{tag}_{}_{nanos}.txt", std::process::id()));
         std::fs::write(&p, src).expect("write");
         let got = f(p.to_string_lossy().replace('\\', "/").as_bytes());
         std::fs::remove_file(&p).ok();
@@ -82498,21 +85815,31 @@ st=1
             })
         };
         // A passwd record's name is everything before the first colon.
-        assert_eq!(names("root:x:0:0:root:/root:/bin/sh\namy:x:1000:1000::/home/amy:/bin/sh\n"), [
-            "root", "amy"
-        ]);
+        assert_eq!(
+            names("root:x:0:0:root:/root:/bin/sh\namy:x:1000:1000::/home/amy:/bin/sh\n"),
+            ["root", "amy"]
+        );
         // A group record has fewer fields but the same first one.
-        assert_eq!(names("wheel:x:10:amy,bo\nusers:x:100:\n"), ["wheel", "users"]);
+        assert_eq!(
+            names("wheel:x:10:amy,bo\nusers:x:100:\n"),
+            ["wheel", "users"]
+        );
         // Blank lines, and lines whose first non-blank byte is `#`, are skipped
         // — that is glibc's whole comment rule for these files.
-        assert_eq!(names("\n   \n# a comment\n\t# an indented one\nroot:x:0:0::/:/sh\n"), ["root"]);
+        assert_eq!(
+            names("\n   \n# a comment\n\t# an indented one\nroot:x:0:0::/:/sh\n"),
+            ["root"]
+        );
         // A `#` anywhere else is data: it is part of a GECOS field, not the
         // start of a comment, so the record still counts.
         assert_eq!(names("bo:x:1:1:B #1:/home/bo:/bin/sh\n"), ["bo"]);
         // Leading blanks are skipped rather than made part of the name.
         assert_eq!(names("  amy:x:1:1::/home/amy:/bin/sh\n"), ["amy"]);
         // A record with no colon does not parse, and an empty name is no name.
-        assert_eq!(names("nonsense\n:x:0:0::/:/sh\namy:x:1:1::/:/sh\n"), ["amy"]);
+        assert_eq!(
+            names("nonsense\n:x:0:0::/:/sh\namy:x:1:1::/:/sh\n"),
+            ["amy"]
+        );
         // Nothing is deduplicated, and a file with no final newline still
         // yields its last record.
         assert_eq!(names("a:x:1:1::/:/sh\na:x:2:2::/:/sh"), ["a", "a"]);
@@ -82625,7 +85952,11 @@ st=1
         for name in NOASSIGN_VARS {
             let (out, st) = run(&format!("{name}=(1 2); echo reached"));
             assert_eq!((out.as_str(), st), ("", 1), "{name}=(1 2)");
-            assert_eq!(run(&format!("{name}+=(1); echo reached")).0, "", "{name}+=(1)");
+            assert_eq!(
+                run(&format!("{name}+=(1); echo reached")).0,
+                "",
+                "{name}+=(1)"
+            );
         }
         // A *following line* is a separate parse unit and still runs, which is
         // what makes this a discard rather than an exit.
@@ -82635,11 +85966,17 @@ st=1
         // (which gives up the loop on its first iteration, so an empty list is
         // still a success).
         assert_eq!(run("read FUNCNAME <<<hi; echo $?").0, "1\n");
-        assert_eq!(run("for FUNCNAME in a b; do echo body; done; echo $?").0, "1\n");
+        assert_eq!(
+            run("for FUNCNAME in a b; do echo body; done; echo $?").0,
+            "1\n"
+        );
         assert_eq!(run("for FUNCNAME in; do echo body; done; echo $?").0, "0\n");
         // `unset` sheds the attribute along with the rest, leaving an ordinary
         // name — for the two of the six that can be unset at all.
-        assert_eq!(run("unset FUNCNAME; FUNCNAME=(1 2); echo \"${FUNCNAME[*]}\"").0, "1 2\n");
+        assert_eq!(
+            run("unset FUNCNAME; FUNCNAME=(1 2); echo \"${FUNCNAME[*]}\"").0,
+            "1 2\n"
+        );
         assert_eq!(run("unset GROUPS; GROUPS=9; echo $GROUPS").0, "9\n");
         for name in NOUNSET_VARS {
             let (out, _) = run(&format!("unset {name} 2>&1; echo $?"));
@@ -82668,19 +86005,39 @@ st=1
         }
         // Arithmetic refuses it as an *error* would: the expression is abandoned
         // where it stands, so `(( ))`/`let` report 1 …
-        for expr in ["(( GROUPS = 5 ))", "(( GROUPS[0] = 5 ))", "(( GROUPS++ ))", "let GROUPS=7"] {
+        for expr in [
+            "(( GROUPS = 5 ))",
+            "(( GROUPS[0] = 5 ))",
+            "(( GROUPS++ ))",
+            "let GROUPS=7",
+        ] {
             let (out, _) = run(&format!("{expr} 2>&1; echo \"rc=$?\"; echo after"));
             assert_eq!(out, "rc=1\nafter\n", "{expr}");
         }
         // … an assignment earlier in a comma list stands and a later one never
         // happens …
-        assert_eq!(run("x=9; (( x = 3, GROUPS = 5 )); echo \"$? $x\"").0, "1 3\n");
-        assert_eq!(run("x=9; (( GROUPS = 5, x = 3 )); echo \"$? $x\"").0, "1 9\n");
+        assert_eq!(
+            run("x=9; (( x = 3, GROUPS = 5 )); echo \"$? $x\"").0,
+            "1 3\n"
+        );
+        assert_eq!(
+            run("x=9; (( GROUPS = 5, x = 3 )); echo \"$? $x\"").0,
+            "1 9\n"
+        );
         // … and in expansion position it is fatal to the command list.
-        assert_eq!(run("echo \"[$(( GROUPS = 5 ))]\"; echo unreachable"), (String::new(), 1));
+        assert_eq!(
+            run("echo \"[$(( GROUPS = 5 ))]\"; echo unreachable"),
+            (String::new(), 1)
+        );
         // Shedding the attribute makes every one of them ordinary again.
-        assert_eq!(run("unset GROUPS; printf -v GROUPS x; echo \"$? $GROUPS\"").0, "0 x\n");
-        assert_eq!(run("unset GROUPS; (( GROUPS = 5 )); echo \"$? $GROUPS\"").0, "0 5\n");
+        assert_eq!(
+            run("unset GROUPS; printf -v GROUPS x; echo \"$? $GROUPS\"").0,
+            "0 x\n"
+        );
+        assert_eq!(
+            run("unset GROUPS; (( GROUPS = 5 )); echo \"$? $GROUPS\"").0,
+            "0 5\n"
+        );
     }
 
     /// A declaration builtin refuses them by *where the binding would land*: a
@@ -82695,16 +86052,33 @@ st=1
         // rendered *attributes* are host-independent enough to assert on.
         let attrs = |script: &str| {
             let (out, _) = run(script);
-            out.split_once("GROUPS").map(|(a, _)| a.to_string()).unwrap_or(out)
+            out.split_once("GROUPS")
+                .map(|(a, _)| a.to_string())
+                .unwrap_or(out)
         };
-        assert_eq!(attrs("declare -x GROUPS=5; declare -p GROUPS"), "declare -a ");
-        assert_eq!(attrs("export GROUPS=5; echo $?; declare -p GROUPS"), "0\ndeclare -ax ");
-        assert_eq!(attrs("readonly GROUPS=5; echo $?; declare -p GROUPS"), "0\ndeclare -ar ");
+        assert_eq!(
+            attrs("declare -x GROUPS=5; declare -p GROUPS"),
+            "declare -a "
+        );
+        assert_eq!(
+            attrs("export GROUPS=5; echo $?; declare -p GROUPS"),
+            "0\ndeclare -ax "
+        );
+        assert_eq!(
+            attrs("readonly GROUPS=5; echo $?; declare -p GROUPS"),
+            "0\ndeclare -ar "
+        );
         // A valueless declaration asks for no assignment, so nothing is refused.
         assert_eq!(run("declare GROUPS; echo $?").0, "0\n");
-        assert_eq!(attrs("declare -u GROUPS; declare -p GROUPS"), "declare -au ");
+        assert_eq!(
+            attrs("declare -u GROUPS; declare -p GROUPS"),
+            "declare -au "
+        );
         // Only this operand is skipped; the ones after it still bind.
-        assert_eq!(run("declare GROUPS=5 z=9; declare -p z").0, "declare -- z=\"9\"\n");
+        assert_eq!(
+            run("declare GROUPS=5 z=9; declare -p z").0,
+            "declare -- z=\"9\"\n"
+        );
         // A *local* one says so, tagged with the builtin — even with no value,
         // because binding a local of the name is itself the refused assignment.
         for (script, tag) in [
@@ -82733,10 +86107,16 @@ st=1
                 .find(|n| script.contains(n))
                 .unwrap_or("GROUPS");
             let (out, _) = run(&format!("{{ declare -r {name}; {script} ; }} 2>&1"));
-            assert!(out.ends_with(&format!("{name}: readonly variable\n1\n")), "{script}: {out:?}");
+            assert!(
+                out.ends_with(&format!("{name}: readonly variable\n1\n")),
+                "{script}: {out:?}"
+            );
         }
         // `-g` and `export` name the global, so they take the global refusal.
-        assert_eq!(run("f() { declare -g GROUPS=5; echo $?; }; f 2>&1").0, "1\n");
+        assert_eq!(
+            run("f() { declare -g GROUPS=5; echo $?; }; f 2>&1").0,
+            "1\n"
+        );
         assert_eq!(run("f() { export GROUPS=5; echo $?; }; f 2>&1").0, "0\n");
         // A `-g` asks for no shadow, so it never reaches the ordering above: a
         // readonly global refuses the *value* first, one check earlier still.
@@ -82747,21 +86127,31 @@ st=1
         // Without the readonly the un-assignable refusal is the one there, which
         // is what makes this an ordering between two refusals rather than a
         // readonly name swallowing the other.
-        assert_eq!(run("f() { declare -g GROUPS=5; echo $?; }; f 2>&1").0, "1\n");
+        assert_eq!(
+            run("f() { declare -g GROUPS=5; echo $?; }; f 2>&1").0,
+            "1\n"
+        );
         // A compound literal splits the same way — and the local half is reported
         // *twice*: by the compound-assignment machinery, which inside a function
         // tags its diagnostics with the function's name, and by the builtin.
-        let (out, _) = run("zebra() { declare GROUPS=(1 2) after=(9); declare -p after; }; zebra 2>&1");
+        let (out, _) =
+            run("zebra() { declare GROUPS=(1 2) after=(9); declare -p after; }; zebra 2>&1");
         assert!(
             out.contains("zebra: GROUPS: variable may not be assigned value\n")
                 && out.contains("declare: GROUPS: variable may not be assigned value\n")
                 && out.ends_with("declare -a after=([0]=\"9\")\n"),
             "{out:?}"
         );
-        assert_eq!(run("f() { declare -g GROUPS=(1 2); echo $?; }; f 2>&1").0, "0\n");
+        assert_eq!(
+            run("f() { declare -g GROUPS=(1 2); echo $?; }; f 2>&1").0,
+            "0\n"
+        );
         // At top level a compound is not special-cased: it takes the same silent
         // parse-unit discard a bare `GROUPS=(1 2)` does, so `after` never binds.
-        assert_eq!(run("declare GROUPS=(1 2) after=(9); declare -p after").0, "");
+        assert_eq!(
+            run("declare GROUPS=(1 2) after=(9); declare -p after").0,
+            ""
+        );
     }
 
     /// A readonly target refuses `export NAME=value`'s *store*, but the export
@@ -82770,8 +86160,15 @@ st=1
     /// which diagnostic comes out.
     #[test]
     fn a_refused_export_still_exports() {
-        for script in ["export q=2", "export q+=2", "export -a q=2", "export -p q=2"] {
-            let (out, _) = run(&format!("readonly q=1; {script}; echo \"rc=$?\"; declare -p q"));
+        for script in [
+            "export q=2",
+            "export q+=2",
+            "export -a q=2",
+            "export -p q=2",
+        ] {
+            let (out, _) = run(&format!(
+                "readonly q=1; {script}; echo \"rc=$?\"; declare -p q"
+            ));
             assert_eq!(out, "rc=1\ndeclare -rx q=\"1\"\n", "{script}");
         }
         // …and `-n` takes it off by the same route.
@@ -82824,7 +86221,9 @@ st=1
             "declare -ar q=([0]=\"1\" [1]=\"2\")\n"
         );
         for script in ["declare -x", "declare -r", "local -x"] {
-            let (out, _) = run(&format!("f() {{ {script} q=(1 2); }}; f; declare -p q 2>/dev/null"));
+            let (out, _) = run(&format!(
+                "f() {{ {script} q=(1 2); }}; f; declare -p q 2>/dev/null"
+            ));
             assert_eq!(out, "", "{script}");
         }
     }
@@ -82866,20 +86265,29 @@ st=1
         // An indexed array, as `declare -a` — not a scalar, and not readonly:
         // bash lets the name be `unset`, after which it is an ordinary name.
         assert!(run("declare -p GROUPS").0.starts_with("declare -a GROUPS="));
-        assert_eq!(run("unset GROUPS; echo ${GROUPS+set}-${GROUPS[@]+set}").0, "-\n");
+        assert_eq!(
+            run("unset GROUPS; echo ${GROUPS+set}-${GROUPS[@]+set}").0,
+            "-\n"
+        );
     }
 
     #[test]
     fn complete_register_and_print() {
         // A registered spec round-trips through `complete -p NAME` verbatim.
-        assert_eq!(run("complete -W 'x y z' foo; complete -p foo").0, "complete -W 'x y z' foo\n");
+        assert_eq!(
+            run("complete -W 'x y z' foo; complete -p foo").0,
+            "complete -W 'x y z' foo\n"
+        );
         // `-F` function name is printed unquoted; other values are single-quoted.
         assert_eq!(
             run("complete -F _f -o bashdefault prog; complete -p prog").0,
             "complete -o bashdefault -F _f prog\n"
         );
         // Redefinition replaces the previous spec (keeps its slot).
-        assert_eq!(run("complete -W a c; complete -W b c; complete -p c").0, "complete -W 'b' c\n");
+        assert_eq!(
+            run("complete -W a c; complete -W b c; complete -p c").0,
+            "complete -W 'b' c\n"
+        );
         // A bare name stores an empty spec.
         assert_eq!(run("complete cmd; complete -p cmd").0, "complete cmd\n");
     }
@@ -82919,12 +86327,24 @@ st=1
     #[test]
     fn complete_remove_and_special_targets() {
         // `-r NAME` removes just that spec; `-r` with no args clears all.
-        assert_eq!(run("complete -W a x; complete -r x; complete -p x; echo rc=$?").0, "rc=1\n");
-        assert_eq!(run("complete -W a x; complete -W b y; complete -r; complete -p").0, "");
+        assert_eq!(
+            run("complete -W a x; complete -r x; complete -p x; echo rc=$?").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("complete -W a x; complete -W b y; complete -r; complete -p").0,
+            ""
+        );
         // `-D`/`-E`/`-I` store the special default/empty/initial specs.
-        assert_eq!(run("complete -F _d -D; complete -pD").0, "complete -F _d -D\n");
+        assert_eq!(
+            run("complete -F _d -D; complete -pD").0,
+            "complete -F _d -D\n"
+        );
         // With -D present, command names are ignored.
-        assert_eq!(run("complete -D -W x -F _f name; complete -p").0, "complete -W 'x' -F _f -D\n");
+        assert_eq!(
+            run("complete -D -W x -F _f name; complete -p").0,
+            "complete -W 'x' -F _f -D\n"
+        );
     }
 
     #[test]
@@ -82954,7 +86374,10 @@ st=1
             "complete -o nospace -o plusdirs -W 'a' cmd\n"
         );
         assert_eq!(
-            run("complete -o nospace -o dirnames -W a cmd; compopt +o nospace cmd; complete -p cmd").0,
+            run(
+                "complete -o nospace -o dirnames -W a cmd; compopt +o nospace cmd; complete -p cmd"
+            )
+            .0,
             "complete -o dirnames -W 'a' cmd\n"
         );
         // A nameless compopt (no completion function running) is status 1.
@@ -82974,16 +86397,25 @@ st=1
     fn compopt_without_an_option_reports_the_whole_state() {
         const ALL_OFF: &str = "+o bashdefault +o default +o dirnames +o filenames \
                                +o noquote +o nosort +o nospace +o plusdirs";
-        assert_eq!(run("complete -W a cmd; compopt cmd").0, format!("compopt {ALL_OFF} cmd\n"));
+        assert_eq!(
+            run("complete -W a cmd; compopt cmd").0,
+            format!("compopt {ALL_OFF} cmd\n")
+        );
         assert_eq!(
             run("complete -o dirnames -o nospace -W a cmd; compopt cmd").0,
             "compopt +o bashdefault +o default -o dirnames +o filenames \
              +o noquote +o nosort -o nospace +o plusdirs cmd\n"
         );
         // A special reports under the flag it was defined with...
-        assert_eq!(run("complete -W a -D; compopt -D").0, format!("compopt {ALL_OFF} -D\n"));
+        assert_eq!(
+            run("complete -W a -D; compopt -D").0,
+            format!("compopt {ALL_OFF} -D\n")
+        );
         // ...and a name that needs quoting is quoted, as in `complete -p`.
-        assert_eq!(run("complete -W a 'x y'; compopt 'x y'").0, format!("compopt {ALL_OFF} 'x y'\n"));
+        assert_eq!(
+            run("complete -W a 'x y'; compopt 'x y'").0,
+            format!("compopt {ALL_OFF} 'x y'\n")
+        );
         // Targets are answered in the order written, and not deduplicated.
         assert_eq!(
             run("complete -W a c1; complete -W a c2; compopt c2 c1 c2").0,
@@ -83012,12 +86444,33 @@ st=1
             "complete -o nospace -W 'a' -D\n"
         );
         // `+D` sets the same flag `-D` does: only `o` reads the sign.
-        assert_eq!(run("complete -W a -D; compopt +D; echo rc=$?").0.lines().last(), Some("rc=0"));
+        assert_eq!(
+            run("complete -W a -D; compopt +D; echo rc=$?")
+                .0
+                .lines()
+                .last(),
+            Some("rc=0")
+        );
         // Only the first of the three, in D-E-I order, and it drops the names.
-        assert_eq!(run("complete -W a -D; compopt -I -E -D; echo rc=$?").0.lines().last(), Some("rc=0"));
-        assert_eq!(run("complete -W a nm; compopt -D nm; echo rc=$?").0, "rc=1\n");
+        assert_eq!(
+            run("complete -W a -D; compopt -I -E -D; echo rc=$?")
+                .0
+                .lines()
+                .last(),
+            Some("rc=0")
+        );
+        assert_eq!(
+            run("complete -W a nm; compopt -D nm; echo rc=$?").0,
+            "rc=1\n"
+        );
         // A name written first ends the options, so `-D` after it is a name.
-        assert_eq!(run("complete -W a nm; compopt nm -D 2>/dev/null; echo rc=$?").0.lines().last(), Some("rc=1"));
+        assert_eq!(
+            run("complete -W a nm; compopt nm -D 2>/dev/null; echo rc=$?")
+                .0
+                .lines()
+                .last(),
+            Some("rc=1")
+        );
         // A lone `-` or `+` is a word, not an empty cluster.
         assert_eq!(run("compopt - ; echo rc=$?").0, "rc=1\n");
         assert_eq!(run("compopt + ; echo rc=$?").0, "rc=1\n");
@@ -83065,9 +86518,15 @@ st=1
         // — with a plain sentence rather than the usage line an unknown flag
         // gets, and without falling back to the listing.
         let (out, st) = run("shopt -su nocaseglob 2>&1");
-        assert_eq!(out, "osh: shopt: cannot set and unset shell options simultaneously\n");
+        assert_eq!(
+            out,
+            "osh: shopt: cannot set and unset shell options simultaneously\n"
+        );
         assert_eq!(st, 1);
-        assert_eq!(run("shopt -su nocaseglob 2>/dev/null; shopt nocaseglob").0, "nocaseglob     \toff\n");
+        assert_eq!(
+            run("shopt -su nocaseglob 2>/dev/null; shopt nocaseglob").0,
+            "nocaseglob     \toff\n"
+        );
         // An unknown flag is the earlier complaint of the two.
         assert_eq!(run("shopt -zsu 2>/dev/null").1, 2);
     }
@@ -83080,15 +86539,24 @@ st=1
         assert_eq!(st, 1);
         // …even when every name it *could* answer for is on, so the failure is
         // the name and not the state.
-        assert_eq!(run("shopt -s nocaseglob; shopt bogus nocaseglob 2>/dev/null").1, 1);
+        assert_eq!(
+            run("shopt -s nocaseglob; shopt bogus nocaseglob 2>/dev/null").1,
+            1
+        );
     }
 
     #[test]
     fn shopt_o_renders_the_reinput_form_as_a_set_command() {
         // Under `-o` the option belongs to `set`, so the command that would
         // restore it is a `set` one — where the plain status form is shared.
-        assert_eq!(run("shopt -o -p xtrace nounset").0, "set +o xtrace\nset +o nounset\n");
-        assert_eq!(run("set -o pipefail; shopt -o -p pipefail").0, "set -o pipefail\n");
+        assert_eq!(
+            run("shopt -o -p xtrace nounset").0,
+            "set +o xtrace\nset +o nounset\n"
+        );
+        assert_eq!(
+            run("set -o pipefail; shopt -o -p pipefail").0,
+            "set -o pipefail\n"
+        );
         assert_eq!(run("shopt -o xtrace").0, "xtrace         \toff\n");
     }
 
@@ -83112,10 +86580,20 @@ st=1
         // a script to decide: the verb is accepted and does nothing, which is
         // not the failure an unknown name would give.
         assert_eq!(run("shopt -s login_shell 2>&1"), (String::new(), 0));
-        assert_eq!(run("shopt -s login_shell; shopt login_shell").0, "login_shell    \toff\n");
-        assert_eq!(run("shopt -s restricted_shell; shopt restricted_shell").0, "restricted_shell\toff\n");
+        assert_eq!(
+            run("shopt -s login_shell; shopt login_shell").0,
+            "login_shell    \toff\n"
+        );
+        assert_eq!(
+            run("shopt -s restricted_shell; shopt restricted_shell").0,
+            "restricted_shell\toff\n"
+        );
         // …and nothing reaches $BASHOPTS either.
-        assert!(!run("shopt -s login_shell; echo $BASHOPTS").0.contains("login_shell"));
+        assert!(
+            !run("shopt -s login_shell; echo $BASHOPTS")
+                .0
+                .contains("login_shell")
+        );
     }
 
     /// The `-l`/`--login` side of `login_shell`, which only the binary can set —
@@ -83131,17 +86609,29 @@ st=1
                 let mut o = Out::Capture(buf.clone());
                 sh.run_source_out(src.as_bytes(), &mut o, 0)
             };
-            (String::from_utf8_lossy(&take_capture(&buf)).into_owned(), status)
+            (
+                String::from_utf8_lossy(&take_capture(&buf)).into_owned(),
+                status,
+            )
         };
 
         let mut sh = new_shell();
         sh.set_login_shell();
-        assert_eq!(out(&mut sh, "shopt login_shell"), ("login_shell    \ton\n".to_string(), 0));
-        assert_eq!(out(&mut sh, "shopt -p login_shell").0, "shopt -s login_shell\n");
+        assert_eq!(
+            out(&mut sh, "shopt login_shell"),
+            ("login_shell    \ton\n".to_string(), 0)
+        );
+        assert_eq!(
+            out(&mut sh, "shopt -p login_shell").0,
+            "shopt -s login_shell\n"
+        );
         assert!(out(&mut sh, "echo $BASHOPTS").0.contains("login_shell"));
         // Still read-only: `shopt -u` is accepted and does nothing, exactly as
         // `shopt -s` is on a shell that was not started as a login shell.
-        assert_eq!(out(&mut sh, "shopt -u login_shell; shopt login_shell").0, "login_shell    \ton\n");
+        assert_eq!(
+            out(&mut sh, "shopt -u login_shell; shopt login_shell").0,
+            "login_shell    \ton\n"
+        );
         // And `logout` is now `exit` — the refusal is gone, and the status is
         // the operand's.
         let mut sh = new_shell();
@@ -83159,7 +86649,10 @@ st=1
         // of them ends the shell.
         for src in ["logout", "logout abc", "logout 3 4"] {
             let (o, st) = run(&format!("{src} 2>&1; echo \"rc=$?\"; echo alive"));
-            assert_eq!(o, "osh: logout: not login shell: use `exit'\nrc=1\nalive\n", "{src}");
+            assert_eq!(
+                o, "osh: logout: not login shell: use `exit'\nrc=1\nalive\n",
+                "{src}"
+            );
             assert_eq!(st, 0, "{src}");
         }
     }
@@ -83170,8 +86663,14 @@ st=1
         // `jump_to_top_level(DISCARD)`. Not an exit — the rest of the current
         // top-level unit goes, the next one runs, and the status is 1.
         for name in ["exit", "return"] {
-            let (o, st) = run(&format!("{name} 3 4 2>&1; echo same-unit\necho next-unit rc=$?\n"));
-            assert_eq!(o, format!("osh: {name}: too many arguments\nnext-unit rc=1\n"), "{name}");
+            let (o, st) = run(&format!(
+                "{name} 3 4 2>&1; echo same-unit\necho next-unit rc=$?\n"
+            ));
+            assert_eq!(
+                o,
+                format!("osh: {name}: too many arguments\nnext-unit rc=1\n"),
+                "{name}"
+            );
             assert_eq!(st, 0, "{name}");
         }
         // The `--` form is stripped first, so the second operand is still found.
@@ -83206,7 +86705,11 @@ st=1
              interactive_comments:patsub_replacement:progcomp:promptvars:sourcepath\n"
         );
         // Enabling `autocd` inserts it in sorted position.
-        assert!(run("shopt -s autocd; echo $BASHOPTS").0.starts_with("autocd:checkwinsize:"));
+        assert!(
+            run("shopt -s autocd; echo $BASHOPTS")
+                .0
+                .starts_with("autocd:checkwinsize:")
+        );
     }
 
     #[test]
@@ -83242,7 +86745,10 @@ st=1
             run("readonly 1bad=2 2>&1").0,
             "osh: readonly: `1bad=2': not a valid identifier\n"
         );
-        assert_eq!(run("export '' 2>&1").0, "osh: export: `': not a valid identifier\n");
+        assert_eq!(
+            run("export '' 2>&1").0,
+            "osh: export: `': not a valid identifier\n"
+        );
         // One bad name costs only itself: the rest are still declared, and the
         // call reports the failure once it has worked through them all.
         let (o, _) = run("readonly x=1 1bad=2 y=3 2>&1; echo rc=$?; declare -p x y");
@@ -83257,10 +86763,20 @@ st=1
         // `-p` only decides what a *nameless* `readonly` does. Given names there
         // is nothing left for it to answer, so bash marks them exactly as a plain
         // `readonly` would and prints nothing at all.
-        assert_eq!(run("readonly -p q=5; echo \"[$q]\"; q=6; echo rc=$?").0, "[5]\n");
-        assert_eq!(run("readonly -p q=5; { q=6; } 2>&1").0, "osh: q: readonly variable\n");
+        assert_eq!(
+            run("readonly -p q=5; echo \"[$q]\"; q=6; echo rc=$?").0,
+            "[5]\n"
+        );
+        assert_eq!(
+            run("readonly -p q=5; { q=6; } 2>&1").0,
+            "osh: q: readonly variable\n"
+        );
         // …whereas with no names it is the listing, which `-p` merely spells out.
-        assert!(run("readonly q=5; readonly -p").0.contains("declare -r q=\"5\"\n"));
+        assert!(
+            run("readonly q=5; readonly -p")
+                .0
+                .contains("declare -r q=\"5\"\n")
+        );
     }
 
     /// An assign-default into an *element* of a readonly scalar is refused, and
@@ -83280,8 +86796,7 @@ st=1
     #[test]
     fn an_assign_default_into_a_readonly_element_is_refused_and_fatal() {
         assert_eq!(
-            run(r#"f() { echo "[${t[1]:=w}]"; }; { ( declare -r t=v; f ); } 2>&1; echo "rc=$?""#)
-                .0,
+            run(r#"f() { echo "[${t[1]:=w}]"; }; { ( declare -r t=v; f ); } 2>&1; echo "rc=$?""#).0,
             "main: t: readonly variable\nrc=2\n"
         );
         assert_eq!(
@@ -83360,17 +86875,29 @@ st=1
         // `help NAME` prints a "NAME: usage" line then an indented description
         // (bash prefixes the synopsis with the builtin name and a colon).
         let out = run("help cd").0;
-        assert!(out.contains("cd: cd [-L|[-P [-e]] [-@]] [dir]"), "got: {out:?}");
-        assert!(out.contains("    Change the shell working directory."), "got: {out:?}");
+        assert!(
+            out.contains("cd: cd [-L|[-P [-e]] [-@]] [dir]"),
+            "got: {out:?}"
+        );
+        assert!(
+            out.contains("    Change the shell working directory."),
+            "got: {out:?}"
+        );
         // `-s` prints only the "NAME: usage" line, no description.
         let out = run("help -s pwd").0;
         assert_eq!(out, "pwd: pwd [-LPW]\n");
         // `-d` prints only the short description.
-        assert_eq!(run("help -d true").0, "true - Return a successful result.\n");
+        assert_eq!(
+            run("help -d true").0,
+            "true - Return a successful result.\n"
+        );
         // A glob pattern (contains `*`/`?`) matches whole topic names and is
         // headed by bash's keyword banner.
         let out = run("help -s 'tru*'").0;
-        assert_eq!(out, "Shell commands matching keyword `tru*'\n\ntrue: true\n");
+        assert_eq!(
+            out,
+            "Shell commands matching keyword `tru*'\n\ntrue: true\n"
+        );
         // A plain pattern is a case-sensitive *prefix* match, listed
         // alphabetically with no banner (bash's `help ech` → echo).
         assert_eq!(run("help -s ech").0, "echo: echo [-neE] [arg ...]\n");
@@ -83381,7 +86908,10 @@ st=1
         // An exact topic-name match wins over a longer prefix sibling: `help
         // for` resolves to `for` alone (not `for ((`), `help time` to `time`
         // (not `times`). Only a non-exact prefix lists every sibling.
-        assert_eq!(run("help -s for").0, "for: for NAME [in WORDS ... ] ; do COMMANDS; done\n");
+        assert_eq!(
+            run("help -s for").0,
+            "for: for NAME [in WORDS ... ] ; do COMMANDS; done\n"
+        );
         assert_eq!(run("help -s time").0, "time: time [-p] pipeline\n");
         assert_eq!(
             run("help -s ti").0,
@@ -83389,8 +86919,14 @@ st=1
         );
         // Shell keywords are documented topics too: `help while` etc. resolve.
         let out = run("help while").0;
-        assert!(out.contains("while: while COMMANDS; do COMMANDS-2; done"), "got: {out:?}");
-        assert_eq!(run("help -s if").0, "if: if COMMANDS; then COMMANDS; [ elif COMMANDS; then COMMANDS; ]... [ else COMMANDS; ] fi\n");
+        assert!(
+            out.contains("while: while COMMANDS; do COMMANDS-2; done"),
+            "got: {out:?}"
+        );
+        assert_eq!(
+            run("help -s if").0,
+            "if: if COMMANDS; then COMMANDS; [ elif COMMANDS; then COMMANDS; ]... [ else COMMANDS; ] fi\n"
+        );
         // Topic names with punctuation resolve via the prefix rule.
         assert_eq!(run("help -s '(('").0, "(( ... )): (( expression ))\n");
         assert_eq!(run("help -s '[['").0, "[[ ... ]]: [[ expression ]]\n");
@@ -83398,8 +86934,14 @@ st=1
         // lines, then every builtin synopsis (sorted); spot-check.
         let out = run("help").0;
         assert!(out.starts_with("osh (Oils for SlateOS) "), "got: {out:?}");
-        assert!(!out.contains("GNU bash"), "must not claim GNU bash: {out:?}");
-        assert!(out.contains("Type `help name' to find out more"), "got: {out:?}");
+        assert!(
+            !out.contains("GNU bash"),
+            "must not claim GNU bash: {out:?}"
+        );
+        assert!(
+            out.contains("Type `help name' to find out more"),
+            "got: {out:?}"
+        );
         assert!(out.contains("echo [-neE] [arg ...]"), "got: {out:?}");
         assert!(out.contains("help [-dms] [pattern ...]"), "got: {out:?}");
         // Every synopsis carries bash's enabled marker in column one: a space
@@ -83414,7 +86956,10 @@ st=1
         assert!(out.contains("\n*echo [-neE] [arg ...]\n"), "got: {out:?}");
         // A reserved word can never be starred — it is not a builtin, so
         // `enable -n` refuses it and it can never be in the disabled set.
-        assert!(out.contains("\n if COMMANDS; then COMMANDS;"), "got: {out:?}");
+        assert!(
+            out.contains("\n if COMMANDS; then COMMANDS;"),
+            "got: {out:?}"
+        );
         // Unknown topic is a status-1 error with no stdout.
         let (o, code) = run("help nosuchbuiltin");
         assert_eq!(o, "");
@@ -83428,7 +86973,10 @@ st=1
         assert_eq!(run("HOME=/h; x=~/a:~/b; echo \"$x\"").0, "/h/a:/h/b\n");
         // A tilde inside a preceding parameter expansion is preserved, while a
         // literal tilde following a literal `:` is expanded.
-        assert_eq!(run("HOME=/h; p=/one; x=$p:~/bin; echo \"$x\"").0, "/one:/h/bin\n");
+        assert_eq!(
+            run("HOME=/h; p=/one; x=$p:~/bin; echo \"$x\"").0,
+            "/one:/h/bin\n"
+        );
         // A quoted tilde is NOT expanded.
         assert_eq!(run("HOME=/h; x=~/a:'~/b'; echo \"$x\"").0, "/h/a:~/b\n");
         // ~+ / ~- work in assignment position too.
@@ -83476,7 +87024,10 @@ st=1
         );
         assert_eq!(run("HOME=/h; readonly R=~/r; echo \"$R\"").0, "/h/r\n");
         // A quoted tilde stays literal even for a declaration builtin.
-        assert_eq!(run("HOME=/h; export Q=~/a:'~/b'; echo \"$Q\"").0, "/h/a:~/b\n");
+        assert_eq!(
+            run("HOME=/h; export Q=~/a:'~/b'; echo \"$Q\"").0,
+            "/h/a:~/b\n"
+        );
         // The append form NAME+=value expands its RHS too, for declare, export,
         // and readonly alike (previously mis-parsed as a var named "NAME+").
         assert_eq!(
@@ -83500,10 +87051,7 @@ st=1
         );
         // The RHS is not word-split even when it contains spaces (assignment
         // context), unlike an ordinary command word.
-        assert_eq!(
-            run("HOME=/h; v='a b'; export S=$v; echo \"$S\"").0,
-            "a b\n"
-        );
+        assert_eq!(run("HOME=/h; v='a b'; export S=$v; echo \"$S\"").0, "a b\n");
     }
 
     #[test]
@@ -83523,7 +87071,10 @@ st=1
         // `read_passwd_home`); one that does not resolve is left untouched,
         // rather than falling back on `$HOME`.
         assert_eq!(run("echo ~nosuchuser42/bin").0, "~nosuchuser42/bin\n");
-        assert_eq!(run("HOME=/home/me; echo ~nosuchuser42").0, "~nosuchuser42\n");
+        assert_eq!(
+            run("HOME=/home/me; echo ~nosuchuser42").0,
+            "~nosuchuser42\n"
+        );
     }
 
     #[test]
@@ -83590,8 +87141,16 @@ st=1
         // all, a target that does not exist, an *element* target (nothing is
         // named `a[1]`, so it has no attributes of its own), and a cycle — for
         // which bash also warns, at the point of use.
-        for decl in ["declare -n r", "declare -n r=nosuch", "a=(x y); declare -n r=a[1]"] {
-            assert_eq!(run(&format!("{decl}; echo \"[${{r@a}}][${{r@A}}]\"")).0, "[][]\n", "{decl}");
+        for decl in [
+            "declare -n r",
+            "declare -n r=nosuch",
+            "a=(x y); declare -n r=a[1]",
+        ] {
+            assert_eq!(
+                run(&format!("{decl}; echo \"[${{r@a}}][${{r@A}}]\"")).0,
+                "[][]\n",
+                "{decl}"
+            );
         }
         // (The redirect is on a group, so that it is already in place when the
         // words inside it expand and the warning is emitted.)
@@ -83614,10 +87173,17 @@ st=1
             ("declare -A v", "declare -A v"),
             ("declare v", ""),
         ] {
-            assert_eq!(run(&format!("{decl}; echo \"[${{v@A}}]\"")).0, format!("[{want}]\n"), "{decl}");
+            assert_eq!(
+                run(&format!("{decl}; echo \"[${{v@A}}]\"")).0,
+                format!("[{want}]\n"),
+                "{decl}"
+            );
         }
         // Unsetting takes the attributes with it, so nothing is left to report.
-        assert_eq!(run("declare -i v=1; unset -v v; echo \"[${v@a}][${v@A}]\"").0, "[][]\n");
+        assert_eq!(
+            run("declare -i v=1; unset -v v; echo \"[${v@a}][${v@A}]\"").0,
+            "[][]\n"
+        );
     }
 
     #[test]
@@ -83666,8 +87232,14 @@ st=1
         assert_eq!(trace("unset PS4; :"), "+ unset PS4\n:\n");
         // Substitution inside PS4: expanded per line, and an empty result
         // contributes nothing rather than printing the unexpanded text.
-        assert_eq!(trace("PS4='+${x:+ }'; x=; :"), "+ PS4='+${x:+ }'\n+x=\n+:\n");
-        assert_eq!(trace("PS4='+ $((1+1)) '; :"), "+ PS4='+ $((1+1)) '\n+ 2 :\n");
+        assert_eq!(
+            trace("PS4='+${x:+ }'; x=; :"),
+            "+ PS4='+${x:+ }'\n+x=\n+:\n"
+        );
+        assert_eq!(
+            trace("PS4='+ $((1+1)) '; :"),
+            "+ PS4='+ $((1+1)) '\n+ 2 :\n"
+        );
         // Tracing is off while PS4 expands, so a command substitution in it
         // cannot trace itself into the prefix.
         assert_eq!(trace("PS4='+$(echo q) '; :"), "+ PS4='+$(echo q) '\n+q :\n");
@@ -83812,8 +87384,14 @@ st=1
         // `[[ == ]]`, or the `${…#pat}`/`${…/pat/…}`/`${…^pat}` operators.
 
         // case: escaped `*` matches only a literal `*`.
-        assert_eq!(run(r#"case "aXb" in a\*b) echo M;; *) echo N;; esac"#).0, "N\n");
-        assert_eq!(run(r#"case "a*b" in a\*b) echo M;; *) echo N;; esac"#).0, "M\n");
+        assert_eq!(
+            run(r#"case "aXb" in a\*b) echo M;; *) echo N;; esac"#).0,
+            "N\n"
+        );
+        assert_eq!(
+            run(r#"case "a*b" in a\*b) echo M;; *) echo N;; esac"#).0,
+            "M\n"
+        );
         // [[ == ]]: same, plus escaped `?`.
         assert_eq!(run(r#"[[ "aXb" == a\*b ]] && echo M || echo N"#).0, "N\n");
         assert_eq!(run(r#"[[ "a*b" == a\*b ]] && echo M || echo N"#).0, "M\n");
@@ -83834,7 +87412,10 @@ st=1
 
         // Regression guard: a metacharacter supplied by an *unquoted* expansion
         // stays LIVE (only the literal backslash escape suppresses it).
-        assert_eq!(run(r#"pat="a*b"; [[ "aXYZb" == $pat ]] && echo M || echo N"#).0, "M\n");
+        assert_eq!(
+            run(r#"pat="a*b"; [[ "aXYZb" == $pat ]] && echo M || echo N"#).0,
+            "M\n"
+        );
         assert_eq!(run(r#"x=aXbc; p="a?b"; echo "${x#$p}""#).0, "c\n");
         assert_eq!(run(r#"x=a.b.c; echo "${x//./_}""#).0, "a_b_c\n");
 
@@ -83848,9 +87429,18 @@ st=1
         // produce zero-width matches in `${var//pat/repl}`: bash inserts the
         // replacement at each such position and advances one character. An
         // *empty* pattern (`${x///-}`) is a no-op, so it must NOT trigger this.
-        assert_eq!(run("shopt -s extglob; x=aXbXc; echo ${x//?(X)/-}").0, "-a--b--c\n");
-        assert_eq!(run("shopt -s extglob; x=aXbXc; echo ${x//*(X)/-}").0, "-a--b--c\n");
-        assert_eq!(run("shopt -s extglob; x=abc; echo ${x//?(z)/-}").0, "-a-b-c\n");
+        assert_eq!(
+            run("shopt -s extglob; x=aXbXc; echo ${x//?(X)/-}").0,
+            "-a--b--c\n"
+        );
+        assert_eq!(
+            run("shopt -s extglob; x=aXbXc; echo ${x//*(X)/-}").0,
+            "-a--b--c\n"
+        );
+        assert_eq!(
+            run("shopt -s extglob; x=abc; echo ${x//?(z)/-}").0,
+            "-a-b-c\n"
+        );
         // Single (non-global) replace inserts at the first position only.
         assert_eq!(run("shopt -s extglob; x=abc; echo ${x/?(z)/-}").0, "-abc\n");
         // Empty pattern stays a no-op (regression guard for the fix).
@@ -83922,7 +87512,10 @@ st=1
         // bash applies expansion and quote removal but neither word-splitting nor
         // operator tokenization, so leading/trailing/embedded whitespace is
         // literal (previously osh trimmed it via the word-splitting lexer).
-        assert_eq!(run("s=world; echo \"[${s/#/hello }]\"").0, "[hello world]\n");
+        assert_eq!(
+            run("s=world; echo \"[${s/#/hello }]\"").0,
+            "[hello world]\n"
+        );
         assert_eq!(run("s=world; echo \"[${s/o/O }]\"").0, "[wO rld]\n");
         assert_eq!(run("s=world; echo \"[${s/w/ X}]\"").0, "[ Xorld]\n");
         // A literal space as the pattern.
@@ -84017,8 +87610,14 @@ st=1
         // An unset element drops the value entirely (`declare -a a`).
         assert_eq!(run("a=(x y); echo \"${a[9]@A}\"").0, "declare -a a\n");
         // Associative: bare name is key "0"; unset there → no value.
-        assert_eq!(run("declare -A m; m[k]=v; echo \"[${m@A}]\"").0, "[declare -A m]\n");
-        assert_eq!(run("declare -A m; m[0]=z; echo \"${m@A}\"").0, "declare -A m='z'\n");
+        assert_eq!(
+            run("declare -A m; m[k]=v; echo \"[${m@A}]\"").0,
+            "[declare -A m]\n"
+        );
+        assert_eq!(
+            run("declare -A m; m[0]=z; echo \"${m@A}\"").0,
+            "declare -A m='z'\n"
+        );
         // The WHOLE array/assoc form is `${a[@]@A}` / `${a[*]@A}` — a full
         // re-inputtable `declare` (see `array_transform_at_a_whole`).
         assert_eq!(
@@ -84037,7 +87636,10 @@ st=1
         // whether `set -u` has anything to say, and rendering `@A`'s element.
         // A side-effecting subscript is what makes the count visible.
         let once = "declare -A m=([k]=v); echo \"${m[$(echo E >&2; echo k)]@A}\"";
-        assert_eq!(run(&format!("{{ {once} ; }} 2>&1")).0, "E\ndeclare -A m='v'\n");
+        assert_eq!(
+            run(&format!("{{ {once} ; }} 2>&1")).0,
+            "E\ndeclare -A m='v'\n"
+        );
         let once_a = "declare -A m=([k]=v); echo \"${m[$(echo E >&2; echo k)]@a}\"";
         assert_eq!(run(&format!("{{ {once_a} ; }} 2>&1")).0, "E\nA\n");
 
@@ -84045,7 +87647,10 @@ st=1
         // — for either operator, and whether or not `@A` had any use for the
         // answer. So the subscript runs twice.
         let twice = "declare -A m=([k]=v); echo \"${m[$(echo E >&2; echo no)]@A}\"";
-        assert_eq!(run(&format!("{{ {twice} ; }} 2>&1")).0, "E\nE\ndeclare -A m\n");
+        assert_eq!(
+            run(&format!("{{ {twice} ; }} 2>&1")).0,
+            "E\nE\ndeclare -A m\n"
+        );
         let twice_a = "declare -A m=([k]=v); echo \"${m[$(echo E >&2; echo no)]@a}\"";
         assert_eq!(run(&format!("{{ {twice_a} ; }} 2>&1")).0, "E\nE\nA\n");
         // A variable that does not exist at all is nothing in the same way.
@@ -84069,15 +87674,24 @@ st=1
         // fault happens between the two.
         let unset_u = "set -u; declare -A m=([k]=v); echo \"${m[$(echo E >&2; echo no)]@A}\"";
         let (out, _) = run(&format!("{{ {unset_u} ; }} 2>&1"));
-        assert!(out.starts_with("E\n") && !out.starts_with("E\nE"), "{out:?}");
+        assert!(
+            out.starts_with("E\n") && !out.starts_with("E\nE"),
+            "{out:?}"
+        );
         assert!(out.contains("unbound variable"), "{out:?}");
 
         // An indirection's operand is not the element `@A` renders — for a
         // nameref it is the *name* the reference holds — so that element is
         // read here rather than reused, and `${!r@A}` recreates the target with
         // the target's own value.
-        assert_eq!(run("n=(x y); declare -n r=n; echo \"${!r@A}\"").0, "declare -a n='x'\n");
-        assert_eq!(run("n=(x y); declare -n r=n; echo \"${r@A}\"").0, "declare -a n='x'\n");
+        assert_eq!(
+            run("n=(x y); declare -n r=n; echo \"${!r@A}\"").0,
+            "declare -a n='x'\n"
+        );
+        assert_eq!(
+            run("n=(x y); declare -n r=n; echo \"${r@A}\"").0,
+            "declare -a n='x'\n"
+        );
         assert_eq!(run("s=hi; p=s; echo \"${!p@A}\"").0, "s='hi'\n");
     }
 
@@ -84085,7 +87699,10 @@ st=1
     fn a_variable_transform_renders_the_element_not_the_storage_cell() {
         // A scalar's element 0 is the scalar, and every other subscript names
         // nothing — so `${s[5]@A}` is the valueless form even though `s` is set.
-        assert_eq!(run("s=hi; echo \"[${s@A}] [${s[0]@A}] [${s[5]@A}]\"").0, "[s='hi'] [s='hi'] []\n");
+        assert_eq!(
+            run("s=hi; echo \"[${s@A}] [${s[0]@A}] [${s[5]@A}]\"").0,
+            "[s='hi'] [s='hi'] []\n"
+        );
         // Valueless is not empty: the bare declaration is printed whenever
         // there is an attribute to recreate, which is the array form's rule for
         // an unset element applied to a scalar.
@@ -84101,25 +87718,53 @@ st=1
         );
         // A name carrying no attribute has nothing to recreate either way, so
         // it is the empty string rather than a bare `declare`.
-        assert_eq!(run("declare t1; t2=v; echo \"[${t1@A}] [${t2[9]@A}]\"").0, "[] []\n");
+        assert_eq!(
+            run("declare t1; t2=v; echo \"[${t1@A}] [${t2[9]@A}]\"").0,
+            "[] []\n"
+        );
 
         // The shell's own scalars are the case where there is nothing but the
         // element: no storage cell to fall back on, and attributes that live in
         // the dynamic-special table rather than in the attribute sets. `@a` has
         // to agree with `declare -p` about the `-i` nothing ever set.
-        assert_eq!(run("echo \"[${SECONDS@a}] [${PPID@a}] [${PWD@a}]\"").0, "[i] [ir] [x]\n");
-        assert_eq!(run("echo \"[${LINENO@a}] [${EPOCHSECONDS@a}]\"").0, "[] []\n");
+        assert_eq!(
+            run("echo \"[${SECONDS@a}] [${PPID@a}] [${PWD@a}]\"").0,
+            "[i] [ir] [x]\n"
+        );
+        assert_eq!(
+            run("echo \"[${LINENO@a}] [${EPOCHSECONDS@a}]\"").0,
+            "[] []\n"
+        );
         // …and the rendering carries them and a value both.
-        assert!(run("echo \"${SECONDS@A}\"").0.starts_with("declare -i SECONDS="), "{:?}", run("echo \"${SECONDS@A}\"").0);
-        assert!(run("echo \"${PWD@A}\"").0.starts_with("declare -x PWD="), "{:?}", run("echo \"${PWD@A}\"").0);
+        assert!(
+            run("echo \"${SECONDS@A}\"")
+                .0
+                .starts_with("declare -i SECONDS="),
+            "{:?}",
+            run("echo \"${SECONDS@A}\"").0
+        );
+        assert!(
+            run("echo \"${PWD@A}\"").0.starts_with("declare -x PWD="),
+            "{:?}",
+            run("echo \"${PWD@A}\"").0
+        );
         // A name with no letters renders as a plain assignment, as any other
         // unattributed variable does.
-        assert!(run("echo \"${EPOCHSECONDS@A}\"").0.starts_with("EPOCHSECONDS="), "{:?}", run("echo \"${EPOCHSECONDS@A}\"").0);
+        assert!(
+            run("echo \"${EPOCHSECONDS@A}\"")
+                .0
+                .starts_with("EPOCHSECONDS="),
+            "{:?}",
+            run("echo \"${EPOCHSECONDS@A}\"").0
+        );
         // Assigning does not shed them: the write is taken by the shell rather
         // than making a binding that could shadow the table.
         assert_eq!(run("RANDOM=7; echo \"[${RANDOM@a}]\"").0, "[i]\n");
         // `unset` is what takes the name out of the shell's hands.
-        assert_eq!(run("unset SECONDS; echo \"[${SECONDS@a}] [${SECONDS@A}]\"").0, "[] []\n");
+        assert_eq!(
+            run("unset SECONDS; echo \"[${SECONDS@a}] [${SECONDS@A}]\"").0,
+            "[] []\n"
+        );
     }
 
     #[test]
@@ -84140,8 +87785,14 @@ st=1
             "declare -ar a=([0]=\"1\" [1]=\"2\")\n"
         );
         // Positional params render as a single `set -- 'a' 'b' …` statement.
-        assert_eq!(run("set -- a b c; echo \"${@@A}\"").0, "set -- 'a' 'b' 'c'\n");
-        assert_eq!(run("set -- a b c; echo \"${*@A}\"").0, "set -- 'a' 'b' 'c'\n");
+        assert_eq!(
+            run("set -- a b c; echo \"${@@A}\"").0,
+            "set -- 'a' 'b' 'c'\n"
+        );
+        assert_eq!(
+            run("set -- a b c; echo \"${*@A}\"").0,
+            "set -- 'a' 'b' 'c'\n"
+        );
         // `@a` yields one attribute-letter field per element.
         assert_eq!(run("declare -a a=(1 2 3); echo \"${a[@]@a}\"").0, "a a a\n");
         assert_eq!(run("declare -ar a=(1 2); echo \"${a[@]@a}\"").0, "ar ar\n");
@@ -84156,11 +87807,20 @@ st=1
         // drops the `declare --` entirely for a name with no attributes.
         assert_eq!(run("s='a b'; echo \"[${s[@]@A}]\"").0, "[s='a b']\n");
         assert_eq!(run("s='a b'; echo \"[${s[*]@A}]\"").0, "[s='a b']\n");
-        assert_eq!(run("declare -i iv=7; echo \"[${iv[@]@A}]\"").0, "[declare -i iv='7']\n");
-        assert_eq!(run("declare -u uv=abc; echo \"[${uv[@]@A}]\"").0, "[declare -u uv='ABC']\n");
+        assert_eq!(
+            run("declare -i iv=7; echo \"[${iv[@]@A}]\"").0,
+            "[declare -i iv='7']\n"
+        );
+        assert_eq!(
+            run("declare -u uv=abc; echo \"[${uv[@]@A}]\"").0,
+            "[declare -u uv='ABC']\n"
+        );
         // Declared and never assigned renders the bare declaration, as the
         // scalar form does.
-        assert_eq!(run("declare -x xx; echo \"[${xx[@]@A}]\"").0, "[declare -x xx]\n");
+        assert_eq!(
+            run("declare -x xx; echo \"[${xx[@]@A}]\"").0,
+            "[declare -x xx]\n"
+        );
 
         // An empty answer is *no field*, not one empty field — so these expand
         // to nothing at all rather than to an empty word.
@@ -84173,10 +87833,17 @@ st=1
 
         // The dynamic specials are scalars with no storage cell, and they get
         // the same treatment — including the letters that live in the table.
-        assert_eq!(run("set -- \"${SECONDS[@]@A}\"; echo \"$#:$1\"").0, "1:declare -i SECONDS='0'\n");
+        assert_eq!(
+            run("set -- \"${SECONDS[@]@A}\"; echo \"$#:$1\"").0,
+            "1:declare -i SECONDS='0'\n"
+        );
         assert_eq!(run("set -- \"${SECONDS[@]@a}\"; echo \"$#:$1\"").0, "1:i\n");
         // A name in the table with no letters renders the plain assignment.
-        assert!(run("echo \"${LINENO[@]@A}\"").0.starts_with("LINENO='"), "{:?}", run("echo \"${LINENO[@]@A}\"").0);
+        assert!(
+            run("echo \"${LINENO[@]@A}\"").0.starts_with("LINENO='"),
+            "{:?}",
+            run("echo \"${LINENO[@]@A}\"").0
+        );
         assert_eq!(run("set -- \"${LINENO[@]@a}\"; echo $#").0, "0\n");
     }
 
@@ -84194,8 +87861,14 @@ st=1
         assert_eq!(run(&src("${n[*]^^}")).0, "[X:Y:Z]\n");
         assert_eq!(run(&src("${n[*]:-D}")).0, "[x:y:z]\n");
         // An empty `IFS` joins with nothing, an unset one with a space.
-        assert_eq!(run("declare -a n=(x y z); IFS=; echo \"[${n[*]@Q}]\"").0, "['x''y''z']\n");
-        assert_eq!(run("declare -a n=(x y z); unset IFS; echo \"[${!n[*]}]\"").0, "[0 1 2]\n");
+        assert_eq!(
+            run("declare -a n=(x y z); IFS=; echo \"[${n[*]@Q}]\"").0,
+            "['x''y''z']\n"
+        );
+        assert_eq!(
+            run("declare -a n=(x y z); unset IFS; echo \"[${!n[*]}]\"").0,
+            "[0 1 2]\n"
+        );
 
         // Only the star form asks. Every `[@]` spelling is one field per
         // element however `$IFS` reads.
@@ -84207,8 +87880,14 @@ st=1
         assert_eq!(run(&cnt("${n[@]:-D}")).0, "3:y\n");
 
         // The positional forms are the same reference.
-        assert_eq!(run("set -- 'a b' c; IFS=:; echo \"[${*@Q}]\"").0, "['a b':'c']\n");
-        assert_eq!(run("set -- 'a b' c; IFS=:; set -- \"${@@Q}\"; echo \"$#\"").0, "2\n");
+        assert_eq!(
+            run("set -- 'a b' c; IFS=:; echo \"[${*@Q}]\"").0,
+            "['a b':'c']\n"
+        );
+        assert_eq!(
+            run("set -- 'a b' c; IFS=:; set -- \"${@@Q}\"; echo \"$#\"").0,
+            "2\n"
+        );
     }
 
     #[test]
@@ -84219,7 +87898,10 @@ st=1
         let src = |e: &str| format!("declare -a n=(p q r); IFS=:; x=\"{e}\"; echo \"[$x]\"");
         assert_eq!(run(&src("${n[@]}")).0, "[p q r]\n");
         assert_eq!(run(&src("${n[@]:-w}")).0, "[p q r]\n");
-        assert_eq!(run("set -- s t u; IFS=:; x=\"$@\"; echo \"[$x]\"").0, "[s t u]\n");
+        assert_eq!(
+            run("set -- s t u; IFS=:; x=\"$@\"; echo \"[$x]\"").0,
+            "[s t u]\n"
+        );
         // Every list an operator derived joins with `$IFS`, exactly as the `[*]`
         // spelling does.
         assert_eq!(run(&src("${!n[@]}")).0, "[0:1:2]\n");
@@ -84228,16 +87910,34 @@ st=1
         assert_eq!(run(&src("${n[@]^^}")).0, "[P:Q:R]\n");
         assert_eq!(run(&src("${n[@]#p}")).0, "[:q:r]\n");
         assert_eq!(run(&src("${n[@]/q/Z}")).0, "[p:Z:r]\n");
-        assert_eq!(run("zz1=1; zz2=2; IFS=:; x=\"${!zz@}\"; echo \"[$x]\"").0, "[zz1:zz2]\n");
-        assert_eq!(run("set -- s t u; IFS=:; x=\"${@:1:2}\"; echo \"[$x]\"").0, "[s:t]\n");
-        assert_eq!(run("set -- s t; IFS=:; x=\"${@@Q}\"; echo \"[$x]\"").0, "['s':'t']\n");
+        assert_eq!(
+            run("zz1=1; zz2=2; IFS=:; x=\"${!zz@}\"; echo \"[$x]\"").0,
+            "[zz1:zz2]\n"
+        );
+        assert_eq!(
+            run("set -- s t u; IFS=:; x=\"${@:1:2}\"; echo \"[$x]\"").0,
+            "[s:t]\n"
+        );
+        assert_eq!(
+            run("set -- s t; IFS=:; x=\"${@@Q}\"; echo \"[$x]\"").0,
+            "['s':'t']\n"
+        );
         // Where the two spellings part company: an empty `$IFS` makes `[@]` fall
         // back to a space while `[*]` joins with nothing. An unset one is a
         // space either way, which is what hides the whole rule from a test that
         // never sets `$IFS`.
-        assert_eq!(run("declare -a n=(p q r); IFS=; x=\"${n[@]@Q}\"; echo \"[$x]\"").0, "['p' 'q' 'r']\n");
-        assert_eq!(run("declare -a n=(p q r); IFS=; x=\"${n[*]@Q}\"; echo \"[$x]\"").0, "['p''q''r']\n");
-        assert_eq!(run("declare -a n=(p q r); unset IFS; x=\"${!n[@]}\"; echo \"[$x]\"").0, "[0 1 2]\n");
+        assert_eq!(
+            run("declare -a n=(p q r); IFS=; x=\"${n[@]@Q}\"; echo \"[$x]\"").0,
+            "['p' 'q' 'r']\n"
+        );
+        assert_eq!(
+            run("declare -a n=(p q r); IFS=; x=\"${n[*]@Q}\"; echo \"[$x]\"").0,
+            "['p''q''r']\n"
+        );
+        assert_eq!(
+            run("declare -a n=(p q r); unset IFS; x=\"${!n[@]}\"; echo \"[$x]\"").0,
+            "[0 1 2]\n"
+        );
     }
 
     #[test]
@@ -84250,27 +87950,18 @@ st=1
             "new\n"
         );
         // Retargeting: create the target lazily through the nameref.
-        assert_eq!(
-            run("declare -n ref=t; ref=made; echo $t").0,
-            "made\n"
-        );
+        assert_eq!(run("declare -n ref=t; ref=made; echo $t").0, "made\n");
     }
 
     #[test]
     fn nameref_array_access() {
         // A nameref to an array reads/writes its elements.
-        assert_eq!(
-            run("a=(x y z); declare -n r=a; echo ${r[1]}").0,
-            "y\n"
-        );
+        assert_eq!(run("a=(x y z); declare -n r=a; echo ${r[1]}").0, "y\n");
         assert_eq!(
             run("a=(x y z); declare -n r=a; echo \"${r[@]}\"").0,
             "x y z\n"
         );
-        assert_eq!(
-            run("a=(x y z); declare -n r=a; echo ${#r[@]}").0,
-            "3\n"
-        );
+        assert_eq!(run("a=(x y z); declare -n r=a; echo ${#r[@]}").0, "3\n");
         // Writing an element through the nameref hits the target array.
         assert_eq!(
             run("a=(x y z); declare -n r=a; r[1]=Y; echo \"${a[@]}\"").0,
@@ -84310,9 +88001,15 @@ st=1
         // A nameref's value *is* the name it refers to, so `declare -n NAME`
         // judges what the binding already holds, exactly as the assignment
         // form judges what it is given.
-        assert_eq!(run("q=0; declare -n q; declare -p q").0, "declare -- q=\"0\"\n");
+        assert_eq!(
+            run("q=0; declare -n q; declare -p q").0,
+            "declare -- q=\"0\"\n"
+        );
         assert_eq!(run("q=0; declare -n q; echo rc=$?").0, "rc=1\n");
-        assert_eq!(run("q=zz; declare -n q; declare -p q").0, "declare -n q=\"zz\"\n");
+        assert_eq!(
+            run("q=zz; declare -n q; declare -p q").0,
+            "declare -n q=\"zz\"\n"
+        );
         // A subscript is an ordinary shell word; only the base must be a name.
         assert_eq!(
             run("q='a[1]'; declare -n q; declare -p q").0,
@@ -84320,7 +88017,10 @@ st=1
         );
         // The self-reference rule of the assignment form does *not* apply: this
         // command supplied no value, so there is no circle it could have made.
-        assert_eq!(run("q=q; declare -n q; declare -p q").0, "declare -n q=\"q\"\n");
+        assert_eq!(
+            run("q=q; declare -n q; declare -p q").0,
+            "declare -n q=\"q\"\n"
+        );
         assert_eq!(run("q=q; declare -n q=q; echo rc=$?").0, "rc=1\n");
         // Nothing stored is nothing to judge.
         assert_eq!(run("declare -n q; declare -p q").0, "declare -n q\n");
@@ -84332,8 +88032,14 @@ st=1
         assert_eq!(run("declare -a q; declare -n q; echo rc=$?").0, "rc=1\n");
         // The refusal abandons the whole operand — neither `-n` nor the letters
         // beside it are applied — while later operands still bind.
-        assert_eq!(run("q=0; declare -rnu q; declare -p q").0, "declare -- q=\"0\"\n");
-        assert_eq!(run("q=0; declare -n q z=zz; declare -p z").0, "declare -n z=\"zz\"\n");
+        assert_eq!(
+            run("q=0; declare -rnu q; declare -p q").0,
+            "declare -- q=\"0\"\n"
+        );
+        assert_eq!(
+            run("q=0; declare -n q z=zz; declare -p z").0,
+            "declare -n z=\"zz\"\n"
+        );
         // `+n` removes the attribute and so judges nothing.
         assert_eq!(run("q=0; declare +n q; echo rc=$?").0, "rc=0\n");
         // A `local` shadows the value before it can be judged; `-g` names the
@@ -84342,7 +88048,10 @@ st=1
             run("q=0; f() { declare -n q; declare -p q; }; f").0,
             "declare -n q\n"
         );
-        assert_eq!(run("q=0; f() { declare -gn q; }; f; declare -p q").0, "declare -- q=\"0\"\n");
+        assert_eq!(
+            run("q=0; f() { declare -gn q; }; f; declare -p q").0,
+            "declare -- q=\"0\"\n"
+        );
         // A dynamic variable is judged by the value its function computes.
         assert_eq!(run("declare -n SECONDS; echo rc=$?").0, "rc=1\n");
         assert_eq!(run("declare -n BASH_SOURCE; echo rc=$?").0, "rc=1\n");
@@ -84360,33 +88069,66 @@ st=1
         // variable's name, so the value attributes it arrived with go — they
         // would fold or arithmetically mangle that name — while `-x`, `-t` and
         // `-r`, which describe the binding rather than what is in it, stay.
-        assert_eq!(run("declare -iu q; declare -n q=t; declare -p q").0, "declare -n q=\"t\"\n");
-        assert_eq!(run("declare -l q; declare -n q=t; declare -p q").0, "declare -n q=\"t\"\n");
+        assert_eq!(
+            run("declare -iu q; declare -n q=t; declare -p q").0,
+            "declare -n q=\"t\"\n"
+        );
+        assert_eq!(
+            run("declare -l q; declare -n q=t; declare -p q").0,
+            "declare -n q=\"t\"\n"
+        );
         assert_eq!(
             run("declare -x q; declare -t q; declare -n q=t; declare -p q").0,
             "declare -ntx q=\"t\"\n"
         );
         // The `-n` half decides on its own, so a `+n` beside it clears them too.
-        assert_eq!(run("declare -i q; declare -n +n q=t; declare -p q").0, "declare -- q=\"t\"\n");
+        assert_eq!(
+            run("declare -i q; declare -n +n q=t; declare -p q").0,
+            "declare -- q=\"t\"\n"
+        );
         // This command's own letters then apply on top, and they apply to the
         // name the reference holds — the whole of it, subscript included.
-        assert_eq!(run("declare -i q; declare -nu q=t; declare -p q").0, "declare -nu q=\"T\"\n");
-        assert_eq!(run("declare -nl v=TQ; declare -p v").0, "declare -nl v=\"tq\"\n");
-        assert_eq!(run("declare -nc v=tq; declare -p v").0, "declare -nc v=\"Tq\"\n");
-        assert_eq!(run("declare -nu v='m[aB]'; declare -p v").0, "declare -nu v=\"M[AB]\"\n");
-        assert_eq!(run("declare -nu v=t; declare -nu v+=q; declare -p v").0, "declare -nu v=\"TQ\"\n");
+        assert_eq!(
+            run("declare -i q; declare -nu q=t; declare -p q").0,
+            "declare -nu q=\"T\"\n"
+        );
+        assert_eq!(
+            run("declare -nl v=TQ; declare -p v").0,
+            "declare -nl v=\"tq\"\n"
+        );
+        assert_eq!(
+            run("declare -nc v=tq; declare -p v").0,
+            "declare -nc v=\"Tq\"\n"
+        );
+        assert_eq!(
+            run("declare -nu v='m[aB]'; declare -p v").0,
+            "declare -nu v=\"M[AB]\"\n"
+        );
+        assert_eq!(
+            run("declare -nu v=t; declare -nu v+=q; declare -p v").0,
+            "declare -nu v=\"TQ\"\n"
+        );
         // …so the reference really does lead to the folded name.
-        assert_eq!(run("declare -nu v=t; v=5; declare -p T").0, "declare -- T=\"5\"\n");
+        assert_eq!(
+            run("declare -nu v=t; v=5; declare -p T").0,
+            "declare -- T=\"5\"\n"
+        );
 
         // `-i` is the one that cannot be honoured: it reduces what is stored to
         // a number, and a number is no name for a reference to hold. bash keeps
         // the attributes it can, declines to make the reference, and refuses the
         // assignment silently — the value it judged was one it computed.
         assert_eq!(run("declare -ni v=t; echo rc=$?").0, "rc=1\n");
-        assert_eq!(run("declare -ni v=t; declare -p v 2>&1").0, "osh: declare: v: not found\n");
+        assert_eq!(
+            run("declare -ni v=t; declare -p v 2>&1").0,
+            "osh: declare: v: not found\n"
+        );
         // A name that was not already there keeps none of the attributes either,
         // since bash hangs them on the variable the refused binding never made.
-        assert_eq!(run("declare -ni v=t; v=3+4; declare -p v").0, "declare -- v=\"3+4\"\n");
+        assert_eq!(
+            run("declare -ni v=t; v=3+4; declare -p v").0,
+            "declare -- v=\"3+4\"\n"
+        );
         assert_eq!(
             run("declare -x v; declare -ni v=t; declare -p v").0,
             "declare -ix v\n"
@@ -84401,7 +88143,10 @@ st=1
             "declare -in v=\"t\"\n"
         );
         // `+i` rescues it: by the time the value binds the attribute is gone.
-        assert_eq!(run("declare -ni +i v=t; declare -p v").0, "declare -n v=\"t\"\n");
+        assert_eq!(
+            run("declare -ni +i v=t; declare -p v").0,
+            "declare -n v=\"t\"\n"
+        );
         // Only this operand is dropped — but the arithmetic still runs, so a
         // malformed target name is the same syntax error that discards the rest.
         assert_eq!(run("declare -ni v=t ok=w; echo rc=$?").0, "rc=1\n");
@@ -84418,9 +88163,15 @@ st=1
 
         // An array kind named beside `-n` takes the name for itself: nothing can
         // be both a reference to one name and a collection of elements.
-        assert_eq!(run("declare -na v=t; declare -p v").0, "declare -a v=([0]=\"t\")\n");
+        assert_eq!(
+            run("declare -na v=t; declare -p v").0,
+            "declare -a v=([0]=\"t\")\n"
+        );
         assert_eq!(run("declare -na v; declare -p v").0, "declare -a v\n");
-        assert_eq!(run("declare -nA v=t; declare -p v").0, "declare -A v=([0]=\"t\" )\n");
+        assert_eq!(
+            run("declare -nA v=t; declare -p v").0,
+            "declare -A v=([0]=\"t\" )\n"
+        );
         assert_eq!(
             run("declare -n v=t; declare -na v=q; declare -p v").0,
             "declare -a v=([0]=\"q\")\n"
@@ -84472,7 +88223,10 @@ st=1
     fn nameref_cycle_reads_as_unset() {
         // A cycle is a reference with nowhere to go. osh used to stop at the
         // last name walked, so `$a` expanded to the *string* `b`.
-        assert_eq!(run("declare -n a=b; declare -n b=a; echo \"[$a]\"").0, "[]\n");
+        assert_eq!(
+            run("declare -n a=b; declare -n b=a; echo \"[$a]\"").0,
+            "[]\n"
+        );
         assert_eq!(
             run("declare -n a=b; declare -n b=a; echo \"[${a:-def}]\"").0,
             "[def]\n"
@@ -84515,10 +88269,7 @@ st=1
             run("declare -n r=missing; [ -v r ]; echo rc=$?").0,
             "rc=1\n"
         );
-        assert_eq!(
-            run("declare -n r=t; t=1; [ -v r ]; echo rc=$?").0,
-            "rc=0\n"
-        );
+        assert_eq!(run("declare -n r=t; t=1; [ -v r ]; echo rc=$?").0, "rc=0\n");
         // A target naming an array *element* reads through, but `-v` looks the
         // resolved text up as a plain variable name and so never finds it.
         assert_eq!(
@@ -84651,7 +88402,10 @@ st=1
         assert_eq!(param_substr(b"a\xffb", 1, Some(1)), Ok(b"\xff".to_vec()));
         assert_eq!(param_substr(b"a\xffb", 2, None), Ok(b"b".to_vec()));
         // `${v#?}` strips it as a single character.
-        assert_eq!(param_trim(b"\xffab", &field_lit("?"), false, false, false), b"ab");
+        assert_eq!(
+            param_trim(b"\xffab", &field_lit("?"), false, false, false),
+            b"ab"
+        );
         // `${v//?/-}` replaces it with one replacement, not three.
         assert_eq!(
             param_replace(
@@ -84691,7 +88445,10 @@ st=1
         assert!(g("[a-c[:digit:]]", "7"));
         // The classic left-trim idiom: strip everything from the first
         // non-space onward, leaving the leading whitespace.
-        assert_eq!(param_trim(b"  trim  ", &field_lit("[![:space:]]*"), true, true, false), b"  ");
+        assert_eq!(
+            param_trim(b"  trim  ", &field_lit("[![:space:]]*"), true, true, false),
+            b"  "
+        );
         // Shortest leading-whitespace `#` strip removes just one space char.
         assert_eq!(
             param_trim(b"  trim  ", &field_lit("[[:space:]]*"), false, false, false),
@@ -84819,10 +88576,8 @@ st=1
     #[test]
     fn cond_regex_bash_rematch() {
         // Whole match in [0], captures in [1..]; extract via ${BASH_REMATCH[n]}.
-        let (o, _) = run(
-            "[[ 2026-07-18 =~ ([0-9]+)-([0-9]+)-([0-9]+) ]]; \
-             echo \"${BASH_REMATCH[0]} ${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}\"",
-        );
+        let (o, _) = run("[[ 2026-07-18 =~ ([0-9]+)-([0-9]+)-([0-9]+) ]]; \
+             echo \"${BASH_REMATCH[0]} ${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}\"");
         assert_eq!(o, "2026-07-18 2026 07 18\n");
     }
 
@@ -84957,7 +88712,10 @@ st=1
             "found\n"
         );
         // unset removes it — no fallback to the real process environment.
-        assert_eq!(run_imported("unset PATH; echo \"[${PATH-gone}]\"").0, "[gone]\n");
+        assert_eq!(
+            run_imported("unset PATH; echo \"[${PATH-gone}]\"").0,
+            "[gone]\n"
+        );
     }
 
     #[test]
@@ -85055,9 +88813,18 @@ st=1
         // A compound stage does.
         assert_eq!(run("{ echo $BASH_SUBSHELL; } | cat").0, "1\n");
         assert_eq!(run("if :; then echo $BASH_SUBSHELL; fi | cat").0, "1\n");
-        assert_eq!(run("for i in 1; do echo $BASH_SUBSHELL; done | cat").0, "1\n");
-        assert_eq!(run("while :; do echo $BASH_SUBSHELL; break; done | cat").0, "1\n");
-        assert_eq!(run("case x in x) echo $BASH_SUBSHELL;; esac | cat").0, "1\n");
+        assert_eq!(
+            run("for i in 1; do echo $BASH_SUBSHELL; done | cat").0,
+            "1\n"
+        );
+        assert_eq!(
+            run("while :; do echo $BASH_SUBSHELL; break; done | cat").0,
+            "1\n"
+        );
+        assert_eq!(
+            run("case x in x) echo $BASH_SUBSHELL;; esac | cat").0,
+            "1\n"
+        );
         // `( … ) | cat` is one fork, counted once — not two.
         assert_eq!(run("( echo $BASH_SUBSHELL ) | cat").0, "1\n");
         assert_eq!(run("( ( echo $BASH_SUBSHELL ) ) | cat").0, "2\n");
@@ -85101,11 +88868,20 @@ st=1
         // is what this level reads and each level further in reads one more.
         assert_eq!(run("BASH_SUBSHELL=9; echo $BASH_SUBSHELL").0, "9\n");
         assert_eq!(run("BASH_SUBSHELL=9; ( echo $BASH_SUBSHELL )").0, "10\n");
-        assert_eq!(run("BASH_SUBSHELL=9; ( ( echo $BASH_SUBSHELL ) )").0, "11\n");
-        assert_eq!(run("BASH_SUBSHELL=9; echo $(echo $BASH_SUBSHELL)").0, "10\n");
+        assert_eq!(
+            run("BASH_SUBSHELL=9; ( ( echo $BASH_SUBSHELL ) )").0,
+            "11\n"
+        );
+        assert_eq!(
+            run("BASH_SUBSHELL=9; echo $(echo $BASH_SUBSHELL)").0,
+            "10\n"
+        );
         // Assigned one level in, and the level itself is what it counts from.
         assert_eq!(run("( BASH_SUBSHELL=9; echo $BASH_SUBSHELL )").0, "9\n");
-        assert_eq!(run("( BASH_SUBSHELL=9; ( echo $BASH_SUBSHELL ) )").0, "10\n");
+        assert_eq!(
+            run("( BASH_SUBSHELL=9; ( echo $BASH_SUBSHELL ) )").0,
+            "10\n"
+        );
         // …and a subshell's counter is its own: the parent reads on unchanged.
         assert_eq!(run("( BASH_SUBSHELL=9 ); echo $BASH_SUBSHELL").0, "0\n");
         // The string is read as a plain decimal, as the other computed names
@@ -85128,9 +88904,18 @@ st=1
         // function for this name never asks about the integer attribute — where
         // `SECONDS`'s does. An *appending* assignment is arithmetic either way:
         // bash forms the appended value before the assign function is reached.
-        assert_eq!(run("declare -i BASH_SUBSHELL; BASH_SUBSHELL=3+4; echo $BASH_SUBSHELL").0, "0\n");
-        assert_eq!(run("declare -i SECONDS; SECONDS=3+4; echo $SECONDS").0, "7\n");
-        assert_eq!(run("declare -i BASH_SUBSHELL; BASH_SUBSHELL+=5; echo $BASH_SUBSHELL").0, "5\n");
+        assert_eq!(
+            run("declare -i BASH_SUBSHELL; BASH_SUBSHELL=3+4; echo $BASH_SUBSHELL").0,
+            "0\n"
+        );
+        assert_eq!(
+            run("declare -i SECONDS; SECONDS=3+4; echo $SECONDS").0,
+            "7\n"
+        );
+        assert_eq!(
+            run("declare -i BASH_SUBSHELL; BASH_SUBSHELL+=5; echo $BASH_SUBSHELL").0,
+            "5\n"
+        );
         assert_eq!(
             run("( declare -i BASH_SUBSHELL; BASH_SUBSHELL+=5; echo $BASH_SUBSHELL )").0,
             "6\n"
@@ -85138,14 +88923,20 @@ st=1
         // A `+=` without the attribute runs the value cell and the new text
         // together — and the cell is filled by a *reading*, never by an
         // assignment, so a pristine one appends to nothing at all.
-        assert_eq!(run("BASH_SUBSHELL=7; BASH_SUBSHELL+=5; echo $BASH_SUBSHELL").0, "5\n");
+        assert_eq!(
+            run("BASH_SUBSHELL=7; BASH_SUBSHELL+=5; echo $BASH_SUBSHELL").0,
+            "5\n"
+        );
         assert_eq!(
             run("BASH_SUBSHELL=7; : $BASH_SUBSHELL; BASH_SUBSHELL+=5; echo $BASH_SUBSHELL").0,
             "75\n"
         );
         // The assignment leaves no ordinary variable behind: the name goes on
         // computing, which is what makes the reading move with the depth above.
-        assert_eq!(run("BASH_SUBSHELL=9; declare -p BASH_SUBSHELL").0, "declare -- BASH_SUBSHELL=\"9\"\n");
+        assert_eq!(
+            run("BASH_SUBSHELL=9; declare -p BASH_SUBSHELL").0,
+            "declare -- BASH_SUBSHELL=\"9\"\n"
+        );
     }
 
     #[test]
@@ -85157,14 +88948,23 @@ st=1
         assert_eq!(run("declare -i q; declare q=3+4; echo $q").0, "7\n");
         assert_eq!(run("declare -u q; declare q=ab; echo $q").0, "AB\n");
         assert_eq!(run("declare -i q=10; declare q+=3+4; echo $q").0, "17\n");
-        assert_eq!(run("set -a; declare q=1; declare -p q").0, "declare -x q=\"1\"\n");
-        assert_eq!(run("declare BASH_SUBSHELL=9; echo $BASH_SUBSHELL; ( echo $BASH_SUBSHELL )").0, "9\n10\n");
+        assert_eq!(
+            run("set -a; declare q=1; declare -p q").0,
+            "declare -x q=\"1\"\n"
+        );
+        assert_eq!(
+            run("declare BASH_SUBSHELL=9; echo $BASH_SUBSHELL; ( echo $BASH_SUBSHELL )").0,
+            "9\n10\n"
+        );
         assert_eq!(run("declare SECONDS=7; echo $SECONDS").0, "7\n");
         assert_eq!(run("declare -i SECONDS=3+4; echo $SECONDS").0, "7\n");
         assert_eq!(run("typeset BASH_SUBSHELL=4; echo $BASH_SUBSHELL").0, "4\n");
         // The reseed is `RANDOM`'s own assign function, so it has to have run.
         assert_eq!(
-            run("declare RANDOM=1; a=$RANDOM; declare RANDOM=1; b=$RANDOM; [ $a = $b ] && echo same").0,
+            run(
+                "declare RANDOM=1; a=$RANDOM; declare RANDOM=1; b=$RANDOM; [ $a = $b ] && echo same"
+            )
+            .0,
             "same\n"
         );
         // A malformed `-i` expression discards the command, abandoning every
@@ -85178,11 +88978,23 @@ st=1
             run("f() { local BASH_SUBSHELL=9; echo $BASH_SUBSHELL; }; f; echo $BASH_SUBSHELL").0,
             "9\n0\n"
         );
-        assert_eq!(run("f() { local SECONDS=9; echo $SECONDS; }; f; echo $SECONDS").0, "9\n0\n");
-        assert_eq!(run("f() { local SECONDS; SECONDS=7; echo $SECONDS; }; f; echo $SECONDS").0, "7\n0\n");
-        assert_eq!(run("f() { local SECONDS; echo ${SECONDS-UNSET}; }; f").0, "UNSET\n");
+        assert_eq!(
+            run("f() { local SECONDS=9; echo $SECONDS; }; f; echo $SECONDS").0,
+            "9\n0\n"
+        );
+        assert_eq!(
+            run("f() { local SECONDS; SECONDS=7; echo $SECONDS; }; f; echo $SECONDS").0,
+            "7\n0\n"
+        );
+        assert_eq!(
+            run("f() { local SECONDS; echo ${SECONDS-UNSET}; }; f").0,
+            "UNSET\n"
+        );
         // …and `-g` names the global, which is the computed one.
-        assert_eq!(run("f() { declare -g BASH_SUBSHELL=9; }; f; echo $BASH_SUBSHELL").0, "9\n");
+        assert_eq!(
+            run("f() { declare -g BASH_SUBSHELL=9; }; f; echo $BASH_SUBSHELL").0,
+            "9\n"
+        );
         // A bare `declare` in a frame is a `local`, so it shadows the same way.
         assert_eq!(
             run("f() { declare BASH_SUBSHELL=9; echo $BASH_SUBSHELL; }; f; echo $BASH_SUBSHELL").0,
@@ -85197,7 +89009,10 @@ st=1
         // reads back what was written, an assignment to it writes that binding
         // rather than moving the counter, and the shell's own comes back
         // untouched when the command ends.
-        assert_eq!(run("SECONDS=100 eval 'echo $SECONDS'; echo $SECONDS").0, "100\n0\n");
+        assert_eq!(
+            run("SECONDS=100 eval 'echo $SECONDS'; echo $SECONDS").0,
+            "100\n0\n"
+        );
         assert_eq!(run("LINENO=9 eval 'echo $LINENO'").0, "9\n");
         assert_eq!(
             run("BASH_SUBSHELL=9 eval 'echo $BASH_SUBSHELL'; echo $BASH_SUBSHELL").0,
@@ -85208,24 +89023,37 @@ st=1
         // …and it reads the same however often, where the computed one would
         // not: `$RANDOM` draws a fresh number on every read.
         assert_eq!(run("RANDOM=5 eval 'echo $RANDOM $RANDOM'").0, "5 5\n");
-        assert_eq!(run("LINENO=9 eval 'echo $LINENO; echo $LINENO'").0, "9\n9\n");
+        assert_eq!(
+            run("LINENO=9 eval 'echo $LINENO; echo $LINENO'").0,
+            "9\n9\n"
+        );
         // A function's body is inside the scope, and a subshell of one.
-        assert_eq!(run("f() { echo $SECONDS; }; SECONDS=100 f; echo $SECONDS").0, "100\n0\n");
+        assert_eq!(
+            run("f() { echo $SECONDS; }; SECONDS=100 f; echo $SECONDS").0,
+            "100\n0\n"
+        );
         assert_eq!(
             run("SECONDS=100 eval 'f() { echo $SECONDS; }; f; ( echo $SECONDS )'").0,
             "100\n100\n"
         );
         // An assignment under it writes the binding, so nothing escapes.
-        assert_eq!(run("SECONDS=100 eval 'SECONDS=5; echo $SECONDS'; echo $SECONDS").0, "5\n0\n");
         assert_eq!(
-            run("BASH_SUBSHELL=9 eval 'BASH_SUBSHELL=5; echo $BASH_SUBSHELL'; echo $BASH_SUBSHELL").0,
+            run("SECONDS=100 eval 'SECONDS=5; echo $SECONDS'; echo $SECONDS").0,
+            "5\n0\n"
+        );
+        assert_eq!(
+            run("BASH_SUBSHELL=9 eval 'BASH_SUBSHELL=5; echo $BASH_SUBSHELL'; echo $BASH_SUBSHELL")
+                .0,
             "5\n0\n"
         );
         // The string is taken as written — the prefix neither parses it as a
         // number nor consults the attributes the global was declared with.
         assert_eq!(run("SECONDS=zz eval 'echo $SECONDS'").0, "zz\n");
         assert_eq!(run("SECONDS=3+4 eval 'echo $SECONDS'").0, "3+4\n");
-        assert_eq!(run("declare -i SECONDS; SECONDS=3+4 eval 'echo $SECONDS'").0, "3+4\n");
+        assert_eq!(
+            run("declare -i SECONDS; SECONDS=3+4 eval 'echo $SECONDS'").0,
+            "3+4\n"
+        );
         // A prefix on a special builtin does not persist (bash is not in POSIX
         // mode here), so the clock is still the shell's afterwards.
         assert_eq!(run("SECONDS=100 :; echo $SECONDS").0, "0\n");
@@ -85237,13 +89065,17 @@ st=1
             "1\n1\n"
         );
         // …or the value function, which the scope was only standing in front of.
-        assert_eq!(run("SECONDS=100 eval 'unset SECONDS; echo ${SECONDS-UNSET}'").0, "0\n");
+        assert_eq!(
+            run("SECONDS=100 eval 'unset SECONDS; echo ${SECONDS-UNSET}'").0,
+            "0\n"
+        );
         assert_eq!(run("LINENO=9 eval 'unset LINENO; echo $LINENO'").0, "1\n");
         // The same holds for a `local`, except that unsetting one leaves the
         // name unset for the frame: only the shadow was ever removed, so the
         // shell's own is still there when the frame pops.
         assert_eq!(
-            run("f() { local SECONDS=9; unset SECONDS; echo ${SECONDS-UNSET}; }; f; echo $SECONDS").0,
+            run("f() { local SECONDS=9; unset SECONDS; echo ${SECONDS-UNSET}; }; f; echo $SECONDS")
+                .0,
             "UNSET\n0\n"
         );
         assert_eq!(
@@ -85387,11 +89219,17 @@ st=1
         // A non-numeric expression evaluates to 0.
         assert_eq!(run("declare -i q=abc; echo $q").0, "0\n");
         // `+i` removes the attribute; assignments become plain strings again.
-        assert_eq!(run("declare -i w=4; declare +i w; w=1+2; echo $w").0, "1+2\n");
+        assert_eq!(
+            run("declare -i w=4; declare +i w; w=1+2; echo $w").0,
+            "1+2\n"
+        );
         // Integer array elements are evaluated too.
         assert_eq!(run("declare -ia arr; arr[0]=3+4; echo ${arr[0]}").0, "7\n");
         // `declare -p` reflects the integer attribute.
-        assert_eq!(run("declare -i n=9; declare -p n").0, "declare -i n=\"9\"\n");
+        assert_eq!(
+            run("declare -i n=9; declare -p n").0,
+            "declare -i n=\"9\"\n"
+        );
     }
 
     #[test]
@@ -85407,13 +89245,22 @@ st=1
         // But *within one cluster* two conflicting case flags cancel to none
         // (bash: `-ul`/`-lu`/`-cl`… store the value unchanged, no attribute).
         assert_eq!(run("declare -ul v=AbC; echo $v").0, "AbC\n");
-        assert_eq!(run("declare -ul v=AbC; declare -p v").0, "declare -- v=\"AbC\"\n");
+        assert_eq!(
+            run("declare -ul v=AbC; declare -p v").0,
+            "declare -- v=\"AbC\"\n"
+        );
         // `+u` removes the attribute.
-        assert_eq!(run("declare -u q=abc; declare +u q; q=def; echo $q").0, "def\n");
+        assert_eq!(
+            run("declare -u q=abc; declare +u q; q=def; echo $q").0,
+            "def\n"
+        );
         // Array elements are folded too.
         assert_eq!(run("declare -u arr; arr[0]=xy; echo ${arr[0]}").0, "XY\n");
         // `declare -p` reflects the case attribute.
-        assert_eq!(run("declare -l s=Hi; declare -p s").0, "declare -l s=\"hi\"\n");
+        assert_eq!(
+            run("declare -l s=Hi; declare -p s").0,
+            "declare -l s=\"hi\"\n"
+        );
     }
 
     #[test]
@@ -85421,7 +89268,10 @@ st=1
         // `declare -c` (bash's att_capcase): uppercase the first character and
         // lowercase the rest. Verified byte-for-byte against bash 5.x.
         assert_eq!(run("declare -c x=hELLO; echo $x").0, "Hello\n");
-        assert_eq!(run("declare -c x='hello world'; echo \"$x\"").0, "Hello world\n");
+        assert_eq!(
+            run("declare -c x='hello world'; echo \"$x\"").0,
+            "Hello world\n"
+        );
         assert_eq!(run("declare -c x=HELLO; echo $x").0, "Hello\n");
         assert_eq!(run("declare -c x=a; echo $x").0, "A\n");
         // A leading non-letter blocks capitalization; the rest is lowercased.
@@ -85429,20 +89279,38 @@ st=1
         // The attribute persists across reassignment.
         assert_eq!(run("declare -c x=foo; x=bAR; echo $x").0, "Bar\n");
         // Array elements are capitalized too.
-        assert_eq!(run("declare -c a; a=(oNE tWO); echo \"${a[@]}\"").0, "One Two\n");
+        assert_eq!(
+            run("declare -c a; a=(oNE tWO); echo \"${a[@]}\"").0,
+            "One Two\n"
+        );
         // `typeset -c` and `local -c` behave identically.
         assert_eq!(run("typeset -c x=wORLD; echo $x").0, "World\n");
-        assert_eq!(run("f() { local -c y=hELLO; echo \"$y\"; }; f").0, "Hello\n");
+        assert_eq!(
+            run("f() { local -c y=hELLO; echo \"$y\"; }; f").0,
+            "Hello\n"
+        );
         // A function-local `-c` does not leak to the caller's variable.
-        assert_eq!(run("f() { local -c y=hi; }; y=OUTER; f; echo $y").0, "OUTER\n");
+        assert_eq!(
+            run("f() { local -c y=hi; }; y=OUTER; f; echo $y").0,
+            "OUTER\n"
+        );
         // `declare -p` shows `-c`, ordered after i/r/x (`-rc`, `-xc`, `-ic`).
-        assert_eq!(run("declare -c x=foo; declare -p x").0, "declare -c x=\"Foo\"\n");
-        assert_eq!(run("declare -cr x=foo; declare -p x").0, "declare -rc x=\"Foo\"\n");
+        assert_eq!(
+            run("declare -c x=foo; declare -p x").0,
+            "declare -c x=\"Foo\"\n"
+        );
+        assert_eq!(
+            run("declare -cr x=foo; declare -p x").0,
+            "declare -rc x=\"Foo\"\n"
+        );
         // `${x@a}` reports the `c` flag (after i/r/x).
         assert_eq!(run("declare -c x=Ab; echo ${x@a}").0, "c\n");
         assert_eq!(run("declare -cx x=Ab; echo ${x@a}").0, "xc\n");
         // `+c` removes the attribute.
-        assert_eq!(run("declare -c x=foo; declare +c x; x=bAR; echo $x").0, "bAR\n");
+        assert_eq!(
+            run("declare -c x=foo; declare +c x; x=bAR; echo $x").0,
+            "bAR\n"
+        );
     }
 
     #[test]
@@ -85534,7 +89402,12 @@ st=1
     }
 
     fn field_lit(s: &str) -> Vec<EChar> {
-        bytes::chars(s.as_bytes()).map(|c| EChar { c: Some(c), quoted: false }).collect()
+        bytes::chars(s.as_bytes())
+            .map(|c| EChar {
+                c: Some(c),
+                quoted: false,
+            })
+            .collect()
     }
 
     #[test]
@@ -85558,7 +89431,10 @@ st=1
     fn glob_quoted_metachar_is_literal() {
         // A quoted `*` is a literal star, never a pattern.
         let mut field = field_lit("");
-        field.push(EChar { c: Some(Ch::U('*')), quoted: true });
+        field.push(EChar {
+            c: Some(Ch::U('*')),
+            quoted: true,
+        });
         let toks = compile_glob(&field, false);
         assert!(match_glob_toks(&toks, &[Ch::U('*')]));
         assert!(!match_glob_toks(&toks, &[Ch::U('a')]));
@@ -85579,21 +89455,41 @@ st=1
         let basename = |p: &Str| p.rsplit(|&b| b == b'/').next().unwrap_or(p).to_vec();
 
         // `*.txt` matches the two text files (sorted), not the log or hidden.
-        let mut txt: Vec<Str> =
-            glob_expand_field(&cwd, &field_lit(&format!("{uniq}/*.txt")), false, false, false, false)
-                .iter()
-                .map(&basename)
-                .collect();
+        let mut txt: Vec<Str> = glob_expand_field(
+            &cwd,
+            &field_lit(&format!("{uniq}/*.txt")),
+            false,
+            false,
+            false,
+            false,
+        )
+        .iter()
+        .map(&basename)
+        .collect();
         txt.sort();
         assert_eq!(txt, vec![b"a.txt".to_vec(), b"b.txt".to_vec()]);
 
         // `*` honors the leading-dot rule (no `.hidden`).
-        let all = glob_expand_field(&cwd, &field_lit(&format!("{uniq}/*")), false, false, false, false);
+        let all = glob_expand_field(
+            &cwd,
+            &field_lit(&format!("{uniq}/*")),
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(all.iter().all(|p| !p.ends_with(b".hidden")));
         assert_eq!(all.len(), 3);
 
         // An explicit leading `.` matches hidden files.
-        let dot = glob_expand_field(&cwd, &field_lit(&format!("{uniq}/.*")), false, false, false, false);
+        let dot = glob_expand_field(
+            &cwd,
+            &field_lit(&format!("{uniq}/.*")),
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(dot.iter().any(|p| p.ends_with(b".hidden")));
     }
 
@@ -85615,13 +89511,21 @@ st=1
              cd -P {base}/sub\n\
              echo \"P=[$PWD] pP=[$(pwd -P)]\"\n"
         ));
-        assert!(!o.contains('\\'), "no backslash may appear in reported paths: {o:?}");
-        assert!(!o.contains("//?/"), "the \\\\?\\ prefix must be stripped: {o:?}");
-        assert!(o.contains("base=sub\n"), "${{PWD##*/}} must yield the basename: {o:?}");
+        assert!(
+            !o.contains('\\'),
+            "no backslash may appear in reported paths: {o:?}"
+        );
+        assert!(
+            !o.contains("//?/"),
+            "the \\\\?\\ prefix must be stripped: {o:?}"
+        );
+        assert!(
+            o.contains("base=sub\n"),
+            "${{PWD##*/}} must yield the basename: {o:?}"
+        );
         for line in o.lines() {
             assert!(
-                line.matches(&format!("{base}/sub")).count() >= 1
-                    || line.starts_with("base="),
+                line.matches(&format!("{base}/sub")).count() >= 1 || line.starts_with("base="),
                 "every path should be the shell-form path: {line:?}"
             );
         }
@@ -85662,15 +89566,16 @@ st=1
         assert_eq!(out, "rc=0 [/]\n/\npwd=/\n");
         // Element 0 is the current directory, which the stack does not own:
         // writing it is ignored and never moves the shell.
-        let (out, _) = run(
-            "DIRSTACK[0]=/nowhere; \
-             test \"${DIRSTACK[0]}\" = \"$(pwd)\" && echo unchanged; echo \"rc=$?\"",
-        );
+        let (out, _) = run("DIRSTACK[0]=/nowhere; \
+             test \"${DIRSTACK[0]}\" = \"$(pwd)\" && echo unchanged; echo \"rc=$?\"");
         assert_eq!(out, "unchanged\nrc=0\n");
         // An element past the end has nowhere to go and is dropped, so neither
         // an explicit index nor an append can grow the array.
         assert_eq!(run("DIRSTACK[5]=q; echo \"$? ${#DIRSTACK[@]}\"").0, "0 1\n");
-        assert_eq!(run("DIRSTACK+=(zz); echo \"$? ${#DIRSTACK[@]}\"").0, "0 1\n");
+        assert_eq!(
+            run("DIRSTACK+=(zz); echo \"$? ${#DIRSTACK[@]}\"").0,
+            "0 1\n"
+        );
         // Being elementwise, a whole-array assignment does not replace the
         // array: with two entries, `a` is ignored, `b` written and `c` dropped.
         let (out, _) = run(&format!(
@@ -85744,7 +89649,8 @@ st=1
         }
         // The hook each assignment used to run goes with the value function, so
         // `RANDOM=5` stores 5 instead of reseeding the generator…
-        let (out, _) = run("unset RANDOM; RANDOM=5; a=$RANDOM; b=$RANDOM; [ \"$a\" = \"$b\" ] && echo stable");
+        let (out, _) =
+            run("unset RANDOM; RANDOM=5; a=$RANDOM; b=$RANDOM; [ \"$a\" = \"$b\" ] && echo stable");
         assert_eq!(out, "stable\n");
         // …and `SECONDS=5` stores 5 instead of rebasing the counter. The
         // attributes went with the binding too, so it is `--`, not `-i`.
@@ -85755,21 +89661,31 @@ st=1
         assert_eq!(run("unset LINENO; echo \"[$LINENO]\"").0, "[]\n");
         // It is gone from the listings and from `${!prefix@}` as well.
         assert_eq!(run("unset SECONDS; declare -p SECONDS").1, 1);
-        assert_eq!(run("unset EPOCHSECONDS; echo \"${!EPOCH@}\"").0, "EPOCHREALTIME\n");
+        assert_eq!(
+            run("unset EPOCHSECONDS; echo \"${!EPOCH@}\"").0,
+            "EPOCHREALTIME\n"
+        );
         let listed = "case \"$(declare -i)\" in *'declare -i RANDOM'*) echo present;; \
                       *) echo gone;; esac";
         assert_eq!(run(&format!("unset RANDOM; {listed}")).0, "gone\n");
         assert_eq!(run(listed).0, "present\n");
         // `unset` names the *variable*, not a function of the same name.
-        let (out, _) = run("RANDOM() { echo hi; }; unset RANDOM; RANDOM; echo \"[${RANDOM-UNSET}]\"");
+        let (out, _) =
+            run("RANDOM() { echo hi; }; unset RANDOM; RANDOM; echo \"[${RANDOM-UNSET}]\"");
         assert_eq!(out, "hi\n[UNSET]\n");
         // `PPID` is readonly, so it never gets there: the unset fails and the
         // value function survives.
         let (out, status) = run("unset PPID; echo \"rc=$? [$PPID]\"");
         assert_eq!(status, 0);
-        assert!(out.starts_with("rc=1 [") && !out.starts_with("rc=1 []"), "{out}");
+        assert!(
+            out.starts_with("rc=1 [") && !out.starts_with("rc=1 []"),
+            "{out}"
+        );
         // A subshell's `unset` does not reach the parent.
-        assert_eq!(run("( unset RANDOM ); echo \"${RANDOM:+dynamic}\"").0, "dynamic\n");
+        assert_eq!(
+            run("( unset RANDOM ); echo \"${RANDOM:+dynamic}\"").0,
+            "dynamic\n"
+        );
     }
 
     #[test]
@@ -85809,7 +89725,10 @@ st=1
         assert_eq!(run(&format!("f() {{ : $SECONDS; }}; f; {i}")).0, "valued\n");
         // `unset` empties the slot again, along with the rest of the binding.
         assert_eq!(run(&format!(": $SECONDS; unset SECONDS; {i}")).0, "gone\n");
-        assert_eq!(run(&format!(": $SECONDS; unset SECONDS; {s}")).0, "absent\n");
+        assert_eq!(
+            run(&format!(": $SECONDS; unset SECONDS; {s}")).0,
+            "absent\n"
+        );
         // `PPID` starts out valued, so it is in every listing from the first
         // line — including a bare `set`.
         assert_eq!(
@@ -85850,24 +89769,31 @@ st=1
         // The read is still live: the assignment rebases the counter or is
         // dropped, but it never freezes the name at the assigned string.
         assert_eq!(run("LINENO=7; echo $LINENO").0, "1\n");
-        assert_eq!(run("BASHPID=7; [ \"$BASHPID\" = 7 ] && echo frozen || echo live").0, "live\n");
+        assert_eq!(
+            run("BASHPID=7; [ \"$BASHPID\" = 7 ] && echo frozen || echo live").0,
+            "live\n"
+        );
         assert_eq!(
             run("EPOCHSECONDS=7; [ \"$EPOCHSECONDS\" = 7 ] && echo frozen || echo live").0,
             "live\n"
         );
         // A listing prints the cell, not a fresh reading, so it goes stale
         // where the named form does not: the same `RANDOM` twice running.
-        let (out, _) = run(
-            "declare -p RANDOM >/dev/null; \
+        let (out, _) = run("declare -p RANDOM >/dev/null; \
              a=$(declare -p | grep '^declare -i RANDOM'); \
              b=$(declare -p | grep '^declare -i RANDOM'); \
-             [ \"$a\" = \"$b\" ] && echo same || echo differ",
-        );
+             [ \"$a\" = \"$b\" ] && echo same || echo differ");
         assert_eq!(out, "same\n");
         // `unset` empties the cell with the rest of the binding, and what a
         // later assignment makes is an ordinary variable.
-        assert_eq!(run(&format!("SECONDS=7; unset SECONDS; {}", p("SECONDS"))).0, "bare\n");
-        assert_eq!(run("SECONDS=7; unset SECONDS; SECONDS=9; echo $SECONDS").0, "9\n");
+        assert_eq!(
+            run(&format!("SECONDS=7; unset SECONDS; {}", p("SECONDS"))).0,
+            "bare\n"
+        );
+        assert_eq!(
+            run("SECONDS=7; unset SECONDS; SECONDS=9; echo $SECONDS").0,
+            "9\n"
+        );
     }
 
     #[test]
@@ -85891,14 +89817,25 @@ st=1
             ("zz", "\"0\"\n", "\"0\"\n"),
             ("3+4", "\"0\"\n", "\"7\"\n"),
         ] {
-            assert_eq!(cell(&format!("SECONDS={val}"), "SECONDS"), secs, "SECONDS={val}");
-            assert_eq!(cell(&format!("RANDOM={val}"), "RANDOM"), rand, "RANDOM={val}");
+            assert_eq!(
+                cell(&format!("SECONDS={val}"), "SECONDS"),
+                secs,
+                "SECONDS={val}"
+            );
+            assert_eq!(
+                cell(&format!("RANDOM={val}"), "RANDOM"),
+                rand,
+                "RANDOM={val}"
+            );
         }
         assert_eq!(cell(": $SECONDS; SECONDS=3+4", "SECONDS"), "\"7\"\n");
         // `+=` resolves against the cell: string append without the `-i`,
         // numeric addition with it.
         assert_eq!(cell("SECONDS=100; SECONDS+=5", "SECONDS"), "\"1005\"\n");
-        assert_eq!(cell(": $SECONDS; SECONDS=100; SECONDS+=5", "SECONDS"), "\"105\"\n");
+        assert_eq!(
+            cell(": $SECONDS; SECONDS=100; SECONDS+=5", "SECONDS"),
+            "\"105\"\n"
+        );
         assert_eq!(cell("RANDOM=100; RANDOM+=5", "RANDOM"), "\"105\"\n");
         assert_eq!(cell("SECONDS+=5", "SECONDS"), "\"5\"\n");
         // The number is what the side effect acts on, so the counter counts on
@@ -85922,24 +89859,53 @@ st=1
         // reading rather than writing the number in.
         let h = run("echo $HISTCMD").0.trim_end().to_string();
         for (decl, want) in [
-            ("declare -a HISTCMD", format!("declare -ai HISTCMD=([0]=\"{h}\")\n")),
-            ("declare -A HISTCMD", format!("declare -Ai HISTCMD=([0]=\"{h}\" )\n")),
-            ("HISTCMD[1]=9", format!("declare -ai HISTCMD=([0]=\"{h}\" [1]=\"9\")\n")),
-            ("HISTCMD+=(9)", format!("declare -ai HISTCMD=([0]=\"{h}\" [1]=\"9\")\n")),
+            (
+                "declare -a HISTCMD",
+                format!("declare -ai HISTCMD=([0]=\"{h}\")\n"),
+            ),
+            (
+                "declare -A HISTCMD",
+                format!("declare -Ai HISTCMD=([0]=\"{h}\" )\n"),
+            ),
+            (
+                "HISTCMD[1]=9",
+                format!("declare -ai HISTCMD=([0]=\"{h}\" [1]=\"9\")\n"),
+            ),
+            (
+                "HISTCMD+=(9)",
+                format!("declare -ai HISTCMD=([0]=\"{h}\" [1]=\"9\")\n"),
+            ),
             // The carried `-i` reaches the very element being assigned…
-            ("HISTCMD[1]=3+4", format!("declare -ai HISTCMD=([0]=\"{h}\" [1]=\"7\")\n")),
+            (
+                "HISTCMD[1]=3+4",
+                format!("declare -ai HISTCMD=([0]=\"{h}\" [1]=\"7\")\n"),
+            ),
             // …and the elements a literal supplies, which replace the carried
             // one outright (so `zz` is the `-i` reading of element 0 here, not
             // the value function's).
-            ("declare -a HISTCMD=(zz 3+4)", "declare -ai HISTCMD=([0]=\"0\" [1]=\"7\")\n".to_string()),
+            (
+                "declare -a HISTCMD=(zz 3+4)",
+                "declare -ai HISTCMD=([0]=\"0\" [1]=\"7\")\n".to_string(),
+            ),
             // A `local` shadowed the binding first, so there is nothing to
             // convert and the local array starts empty.
-            ("f() { local -a HISTCMD; declare -p HISTCMD; }; f #", "declare -a HISTCMD\n".to_string()),
+            (
+                "f() { local -a HISTCMD; declare -p HISTCMD; }; f #",
+                "declare -a HISTCMD\n".to_string(),
+            ),
         ] {
-            assert_eq!(run(&format!("{decl}; declare -p HISTCMD")).0, want, "{decl}");
+            assert_eq!(
+                run(&format!("{decl}; declare -p HISTCMD")).0,
+                want,
+                "{decl}"
+            );
         }
         // `PPID` brings its `r` across and goes on refusing.
-        assert!(run("declare -a PPID; declare -p PPID").0.starts_with("declare -air PPID=([0]=\""));
+        assert!(
+            run("declare -a PPID; declare -p PPID")
+                .0
+                .starts_with("declare -air PPID=([0]=\"")
+        );
         assert_eq!(run("declare -a PPID; PPID[1]=3; echo unreachable").0, "");
         // A malformed subscript converts nothing: the name is still the scalar
         // it was, `-i` and all.
@@ -85954,21 +89920,33 @@ st=1
     fn converting_a_dynamic_variable_takes_its_value_function_away() {
         // Element 0 is frozen at the reading the conversion took: a converted
         // `LINENO` reports the same line for ever after…
-        assert_eq!(run("declare -a LINENO\necho $LINENO\necho $LINENO").0, "1\n1\n");
+        assert_eq!(
+            run("declare -a LINENO\necho $LINENO\necho $LINENO").0,
+            "1\n1\n"
+        );
         // …and a converted `RANDOM` stops varying.
         let varies = "a=$RANDOM; b=$RANDOM; [ \"$a\" = \"$b\" ] && echo stable || echo varying";
         assert_eq!(run(varies).0, "varying\n");
         assert_eq!(run(&format!("declare -a RANDOM; {varies}")).0, "stable\n");
         // The binding is gone in the sense `unset` means it: nothing comes back.
-        assert_eq!(run("declare -a HISTCMD; unset HISTCMD; declare -p HISTCMD").0, "");
+        assert_eq!(
+            run("declare -a HISTCMD; unset HISTCMD; declare -p HISTCMD").0,
+            ""
+        );
         assert_eq!(
             run("declare -a HISTCMD; unset HISTCMD; HISTCMD=zz; declare -p HISTCMD").0,
             "declare -- HISTCMD=\"zz\"\n"
         );
         // An ordinary scalar widens the same way, which is where the carried
         // element 0 a negative subscript counts back from comes from.
-        assert_eq!(run("w=5; w[1]=9; declare -p w").0, "declare -a w=([0]=\"5\" [1]=\"9\")\n");
-        assert_eq!(run("w=5; w[-1]=9; declare -p w").0, "declare -a w=([0]=\"9\")\n");
+        assert_eq!(
+            run("w=5; w[1]=9; declare -p w").0,
+            "declare -a w=([0]=\"5\" [1]=\"9\")\n"
+        );
+        assert_eq!(
+            run("w=5; w[-1]=9; declare -p w").0,
+            "declare -a w=([0]=\"9\")\n"
+        );
     }
 
     #[test]
@@ -86000,16 +89978,27 @@ st=1
             );
             // A malformed `-i` value is an arithmetic syntax error, which
             // discards the whole command — later operands included.
-            assert_eq!(run(&format!("declare -i q; {tag} q=3+ ok=1; echo un")).0, "", "{tag}");
+            assert_eq!(
+                run(&format!("declare -i q; {tag} q=3+ ok=1; echo un")).0,
+                "",
+                "{tag}"
+            );
         }
         // A dynamic special keeps its value function.
         assert_eq!(run("export SECONDS=100; echo \"[$SECONDS]\"").0, "[100]\n");
-        assert!(run("export HISTCMD=9; declare -p HISTCMD").0.starts_with("declare -ix HISTCMD="));
+        assert!(
+            run("export HISTCMD=9; declare -p HISTCMD")
+                .0
+                .starts_with("declare -ix HISTCMD=")
+        );
         // (`set -x` traces the assignment as well as the builtin, which the
         // harness cannot see — stderr goes to the terminal. Covered by
         // tests/corpus/export-readonly-store.sh.)
         // A value that arrived expanded is not expanded again.
-        assert_eq!(run("HOME=/h; export Q=~/a:'~/b'; echo \"$Q\"").0, "/h/a:~/b\n");
+        assert_eq!(
+            run("HOME=/h; export Q=~/a:'~/b'; echo \"$Q\"").0,
+            "/h/a:~/b\n"
+        );
         assert_eq!(run("export S='$notavar'; echo \"$S\"").0, "$notavar\n");
         // The refusals these two have of their own still come first: the value
         // is refused, the attribute is applied anyway.
@@ -86173,7 +90162,10 @@ st=1
         // is validated as a reference name, and a subscript on it is refused.
         assert_eq!(run("declare -n +n r='a b'; echo \"rc=$?\"").0, "rc=1\n");
         assert_eq!(run("declare -n +n r[1]=w; echo \"rc=$?\"").0, "rc=1\n");
-        assert_eq!(run("declare -t +t x=5; declare -p x").0, "declare -- x=\"5\"\n");
+        assert_eq!(
+            run("declare -t +t x=5; declare -p x").0,
+            "declare -- x=\"5\"\n"
+        );
         // The same letter twice in one direction is not a conflict.
         assert_eq!(
             run("declare -i -i x=3+4; declare -p x").0,
@@ -86323,7 +90315,11 @@ st=1
             ("declare -A +a q=([k]=x)", "declare -A q=([k]=\"x\" )\n"),
             ("declare -a +A q=(x)", "declare -a q=([0]=\"x\")\n"),
         ] {
-            assert_eq!(run(&format!("{src}; echo rc=$?; declare -p q")).0, format!("rc=0\n{want}"), "{src}");
+            assert_eq!(
+                run(&format!("{src}; echo rc=$?; declare -p q")).0,
+                format!("rc=0\n{want}"),
+                "{src}"
+            );
         }
         // A bare, subscripted or scalar operand binds *after* the check, so its
         // value never lands — but one that carried a value still leaves the
@@ -86334,7 +90330,10 @@ st=1
             ("declare -aA -l q=zz", "declare -A q=()\n"),
         ] {
             assert_eq!(
-                run(&format!("{{ {src}; }} 2>/dev/null; echo rc=$?; declare -p q")).0,
+                run(&format!(
+                    "{{ {src}; }} 2>/dev/null; echo rc=$?; declare -p q"
+                ))
+                .0,
                 format!("rc=1\n{want}"),
                 "{src}"
             );
@@ -86359,7 +90358,10 @@ st=1
         // `+a`/`+A` outrank it: both refusals come from the same lookup and the
         // destroy complaint is the one bash makes.
         let (o, _) = run("declare -a q=(1 2); { declare -aA +a q; } 2>&1");
-        assert_eq!(o, "osh: declare: q: cannot destroy array variables in this way\n");
+        assert_eq!(
+            o,
+            "osh: declare: q: cannot destroy array variables in this way\n"
+        );
         // Only the `declare` family checks. `readonly`/`export` are separate
         // entry points, and they apply their attribute as usual.
         for (src, want) in [
@@ -86374,9 +90376,15 @@ st=1
         }
         // The tag follows the builtin that was named.
         let (o, _) = run("{ typeset -aA q=(1); } 2>&1");
-        assert_eq!(o, "osh: typeset: q: cannot convert associative to indexed array\n");
+        assert_eq!(
+            o,
+            "osh: typeset: q: cannot convert associative to indexed array\n"
+        );
         let (o, _) = run("f(){ local -aA q=(1); }; f 2>&1");
-        assert_eq!(o, "main: local: q: cannot convert associative to indexed array\n");
+        assert_eq!(
+            o,
+            "main: local: q: cannot convert associative to indexed array\n"
+        );
     }
 
     /// `-n` and a compound operand together ask for a reference that is also an
@@ -86402,12 +90410,18 @@ st=1
             ("declare -n -t q=(1)", "declare -a q=([0]=\"1\")\n"),
             // It outranks the destroy refusal and the array-kind conflict, in
             // either order, and the `-A` still wins the kind.
-            ("declare -a q=(9); declare -n +a q=(1)", "declare -a q=([0]=\"1\")\n"),
+            (
+                "declare -a q=(9); declare -n +a q=(1)",
+                "declare -a q=([0]=\"1\")\n",
+            ),
             ("declare -n -a -A q=(1)", "declare -A q=([1]=\"\" )\n"),
             ("declare -a -A -n q=(1)", "declare -A q=([1]=\"\" )\n"),
         ] {
             assert_eq!(
-                run(&format!("{{ {src}; }} 2>/dev/null; echo rc=$?; declare -p q")).0,
+                run(&format!(
+                    "{{ {src}; }} 2>/dev/null; echo rc=$?; declare -p q"
+                ))
+                .0,
                 format!("rc=1\n{want}"),
                 "{src}"
             );
@@ -86422,9 +90436,11 @@ st=1
         // A name that is *already* a reference is not being made one: the
         // literal binds through it into the target, which bash accepts.
         assert_eq!(
-            run("declare -A t=([k]=v); declare -n r=t; { declare -n r=(z); } 2>&1; \
-                 echo rc=$?; declare -p t")
-                .0,
+            run(
+                "declare -A t=([k]=v); declare -n r=t; { declare -n r=(z); } 2>&1; \
+                 echo rc=$?; declare -p t"
+            )
+            .0,
             "rc=0\ndeclare -A t=([z]=\"\" )\n"
         );
         // Bare and subscripted operands are not compounds, and `+n` alone does
@@ -86436,7 +90452,10 @@ st=1
         );
         // The tag follows the builtin that was named.
         let (o, _) = run("{ typeset -n q=(1); } 2>&1");
-        assert_eq!(o, "osh: typeset: q: reference variable cannot be an array\n");
+        assert_eq!(
+            o,
+            "osh: typeset: q: reference variable cannot be an array\n"
+        );
         let (o, _) = run("f(){ local -n q=(1); }; f 2>&1");
         assert_eq!(o, "main: local: q: reference variable cannot be an array\n");
         // `readonly`/`export` read `-n` as their own flag, so they never refuse.
@@ -86487,7 +90506,11 @@ st=1
             "declare -p -a -A q=(3)",
             "declare -p -n q=(1)",
         ] {
-            assert_eq!(run(&format!("{{ {src}; }} 2>&1 >/dev/null; echo rc=$?")).0, "rc=0\n", "{src}");
+            assert_eq!(
+                run(&format!("{{ {src}; }} 2>&1 >/dev/null; echo rc=$?")).0,
+                "rc=0\n",
+                "{src}"
+            );
         }
         // An unknown name is complained about under the name the command was
         // *called* by, and the answers interleave in operand order.
@@ -86656,8 +90679,14 @@ st=1
         // normally run once the literal has bound, so the name keeps the fold or
         // the integer attribute the literal bound under.
         for (src, want) in [
-            ("declare -a q=(1); declare +a -l +l q=(AB)", "declare -al q=([0]=\"ab\")\n"),
-            ("declare -a q=(1); declare +a -i +i q=(2+3)", "declare -ai q=([0]=\"5\")\n"),
+            (
+                "declare -a q=(1); declare +a -l +l q=(AB)",
+                "declare -al q=([0]=\"ab\")\n",
+            ),
+            (
+                "declare -a q=(1); declare +a -i +i q=(2+3)",
+                "declare -ai q=([0]=\"5\")\n",
+            ),
             // The array this very command makes is one it cannot un-make.
             ("declare +a -l +l q=(AB)", "declare -al q=([0]=\"ab\")\n"),
             ("declare +a -i +i q=(2+3)", "declare -ai q=([0]=\"5\")\n"),
@@ -86667,7 +90696,10 @@ st=1
             ),
         ] {
             assert_eq!(
-                run(&format!("{{ {src}; }} 2>/dev/null; echo rc=$?; declare -p q")).0,
+                run(&format!(
+                    "{{ {src}; }} 2>/dev/null; echo rc=$?; declare -p q"
+                ))
+                .0,
                 format!("rc=1\n{want}"),
                 "{src}"
             );
@@ -86747,8 +90779,10 @@ st=1
         );
         // A caller's local reference is not this frame's binding either.
         assert_eq!(
-            run("w=5; o() { local -n r=w; i; }; i() { declare r=9; declare -p r; }; o; declare -p w")
-                .0,
+            run(
+                "w=5; o() { local -n r=w; i; }; i() { declare r=9; declare -p r; }; o; declare -p w"
+            )
+            .0,
             "declare -- r=\"9\"\ndeclare -- w=\"5\"\n"
         );
         // `-g` writes the global binding, and consults that one — from behind a
@@ -86804,7 +90838,10 @@ st=1
         // A *scalar* operand's refusals split the same way. Raised against the
         // word the command was handed:
         for (src, want) in [
-            ("readonly t=1; declare -n r=t; declare r=9", "declare: r: readonly variable\n"),
+            (
+                "readonly t=1; declare -n r=t; declare r=9",
+                "declare: r: readonly variable\n",
+            ),
             (
                 "declare -A t=([k]=v); declare -n r=t; declare -a r=z",
                 "declare: r: cannot convert associative to indexed array\n",
@@ -86839,7 +90876,8 @@ st=1
         // A local binding does not follow a *global* reference: the frame is
         // about to make its own array of that name, so it merely shadows it.
         assert_eq!(
-            run("w=5; declare -n r=w; f() { declare -a r=(z); declare -p r; }; f; declare -p w r").0,
+            run("w=5; declare -n r=w; f() { declare -a r=(z); declare -p r; }; f; declare -p w r")
+                .0,
             "declare -a r=([0]=\"z\")\ndeclare -- w=\"5\"\ndeclare -n r=\"w\"\n"
         );
         // The frame's *own* reference is followed, and the target it names
@@ -86859,14 +90897,20 @@ st=1
         // An *array*-shaped store lands on the name the walk started from, and
         // that name stops being a reference — bash has no array namerefs.
         for (src, want) in [
-            ("read -a c1 <<< 'p q'", "declare -a c1=([0]=\"p\" [1]=\"q\")\n"),
+            (
+                "read -a c1 <<< 'p q'",
+                "declare -a c1=([0]=\"p\" [1]=\"q\")\n",
+            ),
             ("mapfile -t c1 <<< x", "declare -a c1=([0]=\"x\")\n"),
             ("c1=(a b)", "declare -a c1=([0]=\"a\" [1]=\"b\")\n"),
             ("c1=()", "declare -a c1=()\n"),
             ("declare -A c1=([k]=v)", "declare -A c1=([k]=\"v\" )\n"),
         ] {
             assert_eq!(
-                run(&format!("{{ {cyc} {src}; }} 2>&1; echo \"rc=$?\"; declare -p c1")).0,
+                run(&format!(
+                    "{{ {cyc} {src}; }} 2>&1; echo \"rc=$?\"; declare -p c1"
+                ))
+                .0,
                 format!("{w}rc=0\n{want}"),
                 "{src}"
             );
@@ -86883,7 +90927,10 @@ st=1
             ("printf -v 'c1[0]' x", "declare -a c1=([0]=\"x\")\n"),
         ] {
             assert_eq!(
-                run(&format!("{{ {cyc} {src}; }} 2>&1; echo \"rc=$?\"; declare -p c1")).0,
+                run(&format!(
+                    "{{ {cyc} {src}; }} 2>&1; echo \"rc=$?\"; declare -p c1"
+                ))
+                .0,
                 format!("{w}{w}rc=0\n{want}"),
                 "{src}"
             );
@@ -86910,7 +90957,10 @@ st=1
         // ends the shell it is in — the `echo` after it never runs.
         for src in ["c1=x", "c1+=x"] {
             assert_eq!(
-                run(&format!("({cyc} {src}; echo unreached) 2>&1; echo \"rc=$?\"")).0,
+                run(&format!(
+                    "({cyc} {src}; echo unreached) 2>&1; echo \"rc=$?\""
+                ))
+                .0,
                 format!("{w}rc=1\n"),
                 "{src}"
             );
@@ -86938,14 +90988,19 @@ st=1
         // other end of the cycle still names `c1`, and `c1` is no longer a
         // reference, so the cycle is gone and the value reads back through it.
         assert_eq!(
-            run(&format!("{{ {cyc} read -a c1 <<< x; }} 2>&1; echo \"[${{c2[0]}}]\"")).0,
+            run(&format!(
+                "{{ {cyc} read -a c1 <<< x; }} 2>&1; echo \"[${{c2[0]}}]\""
+            ))
+            .0,
             format!("{w}[x]\n"),
         );
         // The blame is the name that was *written*, however long the chain.
         assert_eq!(
-            run("{ declare -n a1=a2; declare -n a2=a3; declare -n a3=a1; read -a a1 <<< x; } 2>&1; \
-                 declare -p a1 a2")
-                .0,
+            run(
+                "{ declare -n a1=a2; declare -n a2=a3; declare -n a3=a1; read -a a1 <<< x; } 2>&1; \
+                 declare -p a1 a2"
+            )
+            .0,
             "osh: warning: a1: circular name reference\n\
              declare -a a1=([0]=\"x\")\ndeclare -n a2=\"a3\"\n",
         );
@@ -86992,8 +91047,14 @@ st=1
         // A store is dropped, and complains once more than a read that shares
         // the expression with it: `a[@]++` both reads and stores.
         for (src, want) in [
-            ("(( a[@] = 5 )); echo \"rc=$?\"", format!("{}rc=0\n", bad("a", '@'))),
-            ("let \"a[@] = 5\"; echo \"rc=$?\"", format!("{}rc=0\n", bad("a", '@'))),
+            (
+                "(( a[@] = 5 )); echo \"rc=$?\"",
+                format!("{}rc=0\n", bad("a", '@')),
+            ),
+            (
+                "let \"a[@] = 5\"; echo \"rc=$?\"",
+                format!("{}rc=0\n", bad("a", '@')),
+            ),
             (
                 "(( a[@]++ )); echo \"rc=$?\"",
                 format!("{}rc=1\n", bad("a", '@').repeat(2)),
@@ -87012,7 +91073,10 @@ st=1
 
         // Reached only when actually evaluated.
         assert_eq!(
-            run(&format!("{{ {a} echo \"[$(( 1 ? 7 : a[@] ))][$(( 0 && a[@] ))]\"; }} 2>&1")).0,
+            run(&format!(
+                "{{ {a} echo \"[$(( 1 ? 7 : a[@] ))][$(( 0 && a[@] ))]\"; }} 2>&1"
+            ))
+            .0,
             "[7][0]\n",
         );
 
@@ -87030,7 +91094,9 @@ st=1
         for (sub, token) in [(" @", "@"), ("@ ", "@ "), ("'@'", "'@'"), ("@@", "@@")] {
             assert_eq!(
                 run(&format!("{{ {a} echo \"[$(( a[{sub}] ))]\"; }} 2>&1")).0,
-                format!("osh: {token}: syntax error: operand expected (error token is \"{token}\")\n"),
+                format!(
+                    "osh: {token}: syntax error: operand expected (error token is \"{token}\")\n"
+                ),
                 "a[{sub}]"
             );
         }
@@ -87038,7 +91104,10 @@ st=1
         // The name is blamed as written: a reference is followed to find the
         // array, but the array found has no bearing on the complaint.
         assert_eq!(
-            run(&format!("{{ {a} declare -n r=a; echo \"[$(( r[@] ))]\"; }} 2>&1")).0,
+            run(&format!(
+                "{{ {a} declare -n r=a; echo \"[$(( r[@] ))]\"; }} 2>&1"
+            ))
+            .0,
             format!("{}[0]\n", bad("r", '@')),
         );
         // Including a reference that already names one element, which the
@@ -87148,17 +91217,21 @@ st=1
         // Losing the attribute is what breaks the cycle: `c2` still names `c1`,
         // and `c1` is no longer a reference, so the write reads back through it.
         assert_eq!(
-            run(&format!("{{ {cyc} (( c1[0] = 5 )); }} 2>&1; echo \"[${{c2[0]}}]\"")).0,
+            run(&format!(
+                "{{ {cyc} (( c1[0] = 5 )); }} 2>&1; echo \"[${{c2[0]}}]\""
+            ))
+            .0,
             format!("{}[5]\n", w.repeat(3)),
         );
 
         // The blame is the name that was written, however long the chain.
         assert_eq!(
-            run("{ declare -n a1=a2; declare -n a2=a3; declare -n a3=a1; (( a1[0] = 9 )); } 2>&1; \
-                 declare -p a1")
-                .0,
-            "osh: warning: a1: circular name reference\n".repeat(3)
-                + "declare -a a1=([0]=\"9\")\n",
+            run(
+                "{ declare -n a1=a2; declare -n a2=a3; declare -n a3=a1; (( a1[0] = 9 )); } 2>&1; \
+                 declare -p a1"
+            )
+            .0,
+            "osh: warning: a1: circular name reference\n".repeat(3) + "declare -a a1=([0]=\"9\")\n",
         );
 
         // A chain that resolves pays none of this: one walk, no warning, and the
@@ -87365,7 +91438,10 @@ st=1
         // None of it changes a value — the reads are all empty, and `${#…}` is
         // 0 either way.
         assert_eq!(
-            run(&format!("{{ {cyc} echo \"[${{c1[0]}}][${{#c1}}][${{#c1[@]}}]\"; }} 2>/dev/null")).0,
+            run(&format!(
+                "{{ {cyc} echo \"[${{c1[0]}}][${{#c1}}][${{#c1[@]}}]\"; }} 2>/dev/null"
+            ))
+            .0,
             "[][0][0]\n",
         );
 
@@ -87409,7 +91485,7 @@ st=1
         assert_eq!(
             run("g=GVAL; i() { local -n g=g; printf '[%s]' \"$g\"; }
                  o() { local g=OUTER; i; }; o 2>/dev/null")
-                .0,
+            .0,
             "[GVAL]",
         );
         // A mutual cycle between two locals escapes the same way, each name to
@@ -87417,22 +91493,26 @@ st=1
         assert_eq!(
             run("a1=GA; a2=GB; f() { local -n a1=a2; local -n a2=a1
                  printf '[%s][%s]' \"$a1\" \"$a2\"; }; f 2>/dev/null")
-                .0,
+            .0,
             "[GA][GB]",
         );
         // …and the global it lands on is taken as it stands, reference or not:
         // `find_global_variable_noref` does not follow one.
         assert_eq!(
-            run("t=TGT; declare -n p=t; f() { local -n p=p; printf '[%s]' \"$p\"; }; f 2>/dev/null")
-                .0,
+            run(
+                "t=TGT; declare -n p=t; f() { local -n p=p; printf '[%s]' \"$p\"; }; f 2>/dev/null"
+            )
+            .0,
             // The global `p` is itself a reference; its *cell* is the answer.
             "[t]",
         );
         // An array behind it answers every array question.
         assert_eq!(
-            run("n=(x y z); f() { local -n n=n
-                 printf '[%s]' \"${n[@]}\" \"${n[1]}\" \"${!n[@]}\" \"${#n[@]}\"; }; f 2>/dev/null")
-                .0,
+            run(
+                "n=(x y z); f() { local -n n=n
+                 printf '[%s]' \"${n[@]}\" \"${n[1]}\" \"${!n[@]}\" \"${#n[@]}\"; }; f 2>/dev/null"
+            )
+            .0,
             "[x][y][z][y][0][1][2][3]",
         );
         // A write binds the global and leaves the reference intact…
@@ -87447,9 +91527,11 @@ st=1
         );
         // With no global of that name there is nothing to find.
         assert_eq!(
-            run("f() { local -n z=z; printf '[%s]' \"$z\"; [ -v z ] || printf '<unset>'; }
-                 f 2>/dev/null")
-                .0,
+            run(
+                "f() { local -n z=z; printf '[%s]' \"$z\"; [ -v z ] || printf '<unset>'; }
+                 f 2>/dev/null"
+            )
+            .0,
             "[]<unset>",
         );
         // Every walk warns, declaration included: `check_selfref` tags the
@@ -87462,7 +91544,10 @@ st=1
         // function or out of one.
         let cyc = "declare -n c1=c2; declare -n c2=c1;";
         assert_eq!(
-            run(&format!("{cyc} printf '[%s]' \"$c1\"; f() {{ printf '[%s]' \"$c1\"; }}; f")).0,
+            run(&format!(
+                "{cyc} printf '[%s]' \"$c1\"; f() {{ printf '[%s]' \"$c1\"; }}; f"
+            ))
+            .0,
             "[][]",
         );
     }
@@ -87516,9 +91601,11 @@ st=1
         );
         // Seven links resolve inside one context…
         assert_eq!(
-            run("sev() { local -n s1=s2 s2=s3 s3=s4 s4=s5 s5=s6 s6=s7 s7=s8; local s8=EIGHT
+            run(
+                "sev() { local -n s1=s2 s2=s3 s3=s4 s4=s5 s5=s6 s6=s7 s7=s8; local s8=EIGHT
                         s1=W; printf '[st=%s][%s]' \"$?\" \"$s8\"; }
-                 sev 2>&1; printf '[g=%s]' \"${s1-UNSET}\"")
+                 sev 2>&1; printf '[g=%s]' \"${s1-UNSET}\""
+            )
             .0,
             "[st=0][W][g=UNSET]",
         );
@@ -87526,10 +91613,12 @@ st=1
         // `&nameref_maxloop_value` back, and `bind_variable` warns and binds
         // the **global** of the name the walk started from, leaving the local
         // reference intact.
-        let out = run("cap() { local -n u1=u2 u2=u3 u3=u4 u4=u5 u5=u6 u6=u7 u7=u8 u8=u9
+        let out = run(
+            "cap() { local -n u1=u2 u2=u3 u3=u4 u4=u5 u5=u6 u6=u7 u7=u8 u8=u9
                                local u10=TEN
                                u1=W; printf '[st=%s][u10=%s][u1=%s]' \"$?\" \"$u10\" \"$u1\"; }
-                       cap 2>&1; printf '[g=%s]' \"${u1-UNSET}\"")
+                       cap 2>&1; printf '[g=%s]' \"${u1-UNSET}\"",
+        )
         .0;
         assert!(out.contains("circular name reference"), "{out:?}");
         assert!(out.ends_with("[st=0][u10=TEN][u1=][g=W]"), "{out:?}");
@@ -87636,9 +91725,10 @@ st=1
     /// evaluated later still, inside `assign_array_element`.
     #[test]
     fn an_element_assignment_is_traced_with_its_value_expanded() {
-        let out =
-            run("exec 2>&1\nf() { echo \"v$1\"; }\ni=2\nset -x\na[$i]=$(f e)\na[1+1]=$(f a)\nset +x")
-                .0;
+        let out = run(
+            "exec 2>&1\nf() { echo \"v$1\"; }\ni=2\nset -x\na[$i]=$(f e)\na[1+1]=$(f a)\nset +x",
+        )
+        .0;
         // The subscript is traced as written; the value as it came out.
         assert!(out.contains("+ a[$i]=ve\n"), "{out:?}");
         assert!(out.contains("+ a[1+1]=va\n"), "{out:?}");
@@ -87676,22 +91766,34 @@ st=1
         assert_eq!(out.matches("circular").count(), 2, "{out:?}");
 
         // An associative array pays one walk for the store…
-        for src in ["m[j]=W", "read 'm[j]' <<< W", "printf -v 'm[j]' W", "m[j]+=W"] {
-            let out =
-                run(&format!("declare -A m=([k]=V); f() {{ local -n m=m; {src}; }}; f 2>&1")).0;
+        for src in [
+            "m[j]=W",
+            "read 'm[j]' <<< W",
+            "printf -v 'm[j]' W",
+            "m[j]+=W",
+        ] {
+            let out = run(&format!(
+                "declare -A m=([k]=V); f() {{ local -n m=m; {src}; }}; f 2>&1"
+            ))
+            .0;
             assert_eq!(out.matches("circular").count(), 2 + 1, "{src} -> {out:?}");
         }
         assert_eq!(
-            run("declare -A m=([k]=V); f() { local -n m=m; m[j]=W; }; f 2>/dev/null
-                 declare -p m")
-                .0,
+            run(
+                "declare -A m=([k]=V); f() { local -n m=m; m[j]=W; }; f 2>/dev/null
+                 declare -p m"
+            )
+            .0,
             "declare -A m=([k]=\"V\" [j]=\"W\" )\n",
         );
         // …and everything the first walk did *not* find one in takes the
         // indexed arm and pays a second: an indexed array, a scalar the store
         // converts, and a name with nothing behind it at all.
         for (setup, want) in [
-            ("declare -a v=(1 2);", "declare -a v=([0]=\"1\" [1]=\"W\")\n"),
+            (
+                "declare -a v=(1 2);",
+                "declare -a v=([0]=\"1\" [1]=\"W\")\n",
+            ),
             ("v=S;", "declare -a v=([0]=\"S\" [1]=\"W\")\n"),
             ("", "declare -a v=([1]=\"W\")\n"),
         ] {
@@ -87701,7 +91803,11 @@ st=1
                 assert_eq!(out.matches("circular").count(), 2 + 2, "{full} -> {out:?}");
             }
             let full = format!("{setup} f() {{ local -n v=v; v[1]=W; }}; f");
-            assert_eq!(run(&format!("{full} 2>/dev/null; declare -p v")).0, want, "{setup}");
+            assert_eq!(
+                run(&format!("{full} 2>/dev/null; declare -p v")).0,
+                want,
+                "{setup}"
+            );
         }
         // A whole-array fill resolves once whatever it lands on, which is what
         // makes it differ from the element store beside it by a line.
@@ -87719,7 +91825,7 @@ st=1
         // finds no variable at all and the indexed arm takes it.
         let out = run("declare -A m=([k]=V); declare -n c1=c2; declare -n c2=c1
                        { c1[j]=W; } 2>&1")
-            .0;
+        .0;
         assert_eq!(out.matches("circular").count(), 2, "{out:?}");
     }
 
@@ -87755,28 +91861,46 @@ st=1
             ("declare -a ea=(1 2 3);", "unset 'ea[@]'"),
             ("ea=S;", "unset 'ea[1]'"),
         ] {
-            let out = run(&format!("{label} f() {{ local -n ea=ea; {body}; }}; f 2>&1")).0;
-            assert_eq!(out.matches("circular").count(), 2 + 1, "{label} {body} -> {out:?}");
+            let out = run(&format!(
+                "{label} f() {{ local -n ea=ea; {body}; }}; f 2>&1"
+            ))
+            .0;
+            assert_eq!(
+                out.matches("circular").count(),
+                2 + 1,
+                "{label} {body} -> {out:?}"
+            );
         }
         // Index 0 of a non-array is a whole-variable unbind *by name*, which
         // walks again; so is a lookup that answered nothing at all.
         for (label, body) in [("ea=S;", "unset 'ea[0]'"), ("", "unset 'ea[0]'")] {
-            let out = run(&format!("{label} f() {{ local -n ea=ea; {body}; }}; f 2>&1")).0;
-            assert_eq!(out.matches("circular").count(), 2 + 2, "{label} {body} -> {out:?}");
+            let out = run(&format!(
+                "{label} f() {{ local -n ea=ea; {body}; }}; f 2>&1"
+            ))
+            .0;
+            assert_eq!(
+                out.matches("circular").count(),
+                2 + 2,
+                "{label} {body} -> {out:?}"
+            );
         }
 
         // The removal lands in the scope the walk named — the global the escape
         // reached, not the frame the reference sits in.
         assert_eq!(
-            run("declare -a ea=(1 2 3); f() { local -n ea=ea; unset 'ea[1]'; }
-                 f 2>/dev/null; declare -p ea")
-                .0,
+            run(
+                "declare -a ea=(1 2 3); f() { local -n ea=ea; unset 'ea[1]'; }
+                 f 2>/dev/null; declare -p ea"
+            )
+            .0,
             "declare -a ea=([0]=\"1\" [2]=\"3\")\n",
         );
         assert_eq!(
-            run("declare -a ea=(1 2 3); f() { local -n ea=ea; unset 'ea[@]'; }
-                 f 2>/dev/null; declare -p ea")
-                .0,
+            run(
+                "declare -a ea=(1 2 3); f() { local -n ea=ea; unset 'ea[@]'; }
+                 f 2>/dev/null; declare -p ea"
+            )
+            .0,
             "declare -a ea=()\n",
         );
         // …but the by-name unbind does not: what goes is the local reference in
@@ -87784,7 +91908,7 @@ st=1
         assert_eq!(
             run("es=S; f() { local -n es=es; unset 'es[0]'; declare -p es; }
                  f 2>/dev/null; declare -p es")
-                .0,
+            .0,
             "declare -- es\ndeclare -- es=\"S\"\n",
         );
 
@@ -87806,8 +91930,10 @@ st=1
         // A name with no binding at all is never even probed: the subscript is
         // not evaluated, so arithmetic that would be a syntax error is silent.
         assert_eq!(
-            run("unset 'nosuch1[x y]' 2>&1; echo \"st=$?\"; unset 'nosuch2[@]' 2>&1; echo \"st=$?\"")
-                .0,
+            run(
+                "unset 'nosuch1[x y]' 2>&1; echo \"st=$?\"; unset 'nosuch2[@]' 2>&1; echo \"st=$?\""
+            )
+            .0,
             "st=0\nst=0\n",
         );
         // A function answers where no variable does, and the subscript applies
@@ -87816,7 +91942,7 @@ st=1
         assert_eq!(
             run("f() { :; }; unset 'f[0]'; echo \"st=$?\"; declare -F f
                  g() { :; }; unset 'g[1]' 2>&1; echo \"st=$?\"; declare -F g")
-                .0,
+            .0,
             "st=0\nf\nosh: unset: g: not an array variable\nst=1\ng\n",
         );
 
@@ -87825,7 +91951,7 @@ st=1
         assert_eq!(
             run("declare -a a1=(1 2 3); declare -n r1='a1[2]'
                  unset 'r1[0]'; echo \"st=$?\"; declare -p a1")
-                .0,
+            .0,
             "st=0\ndeclare -a a1=([0]=\"1\" [1]=\"2\")\n",
         );
         assert_eq!(
@@ -87836,16 +91962,24 @@ st=1
         // goes is the operand the walk started from.
         let out = run("declare -n c1=c2; declare -n c2=c1
                        unset 'c1[0]' 2>&1; echo \"st=$?\"; declare -p c1 c2 2>&1")
-            .0;
+        .0;
         assert_eq!(out.matches("circular").count(), 2, "{out:?}");
-        assert!(out.ends_with("st=0\nosh: declare: c1: not found\ndeclare -n c2=\"c1\"\n"), "{out:?}");
+        assert!(
+            out.ends_with("st=0\nosh: declare: c1: not found\ndeclare -n c2=\"c1\"\n"),
+            "{out:?}"
+        );
         // …and nothing was found to consult the readonly attribute on, so the
         // attribute does not refuse the removal the way it refuses a written
         // element of a readonly array.
-        let out = run("{ declare -n e1=e2; declare -n e2=e1; readonly e1; } 2>/dev/null
-                       unset 'e1[0]' 2>&1; echo \"st=$?\"; declare -p e1 2>&1")
-            .0;
-        assert!(out.ends_with("st=0\nosh: declare: e1: not found\n"), "{out:?}");
+        let out = run(
+            "{ declare -n e1=e2; declare -n e2=e1; readonly e1; } 2>/dev/null
+                       unset 'e1[0]' 2>&1; echo \"st=$?\"; declare -p e1 2>&1",
+        )
+        .0;
+        assert!(
+            out.ends_with("st=0\nosh: declare: e1: not found\n"),
+            "{out:?}"
+        );
     }
 
     /// A nameref chain is followed eight links and no further, and a cycle is
@@ -87881,7 +92015,8 @@ st=1
     fn a_nameref_chain_is_followed_eight_links_and_no_further() {
         // `n1…n12` each name the next; `n13` holds the value. So `n5` is eight
         // links from it and reads through, `n4` is nine and does not.
-        let chain = "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do eval \"declare -n n$i=n$((i+1))\"; done
+        let chain =
+            "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do eval \"declare -n n$i=n$((i+1))\"; done
                      n13=DEEP;";
         let out = run(&format!(
             "{chain} exec 2>&1
@@ -87921,8 +92056,7 @@ st=1
         // it lands there and takes the attribute off it — again silently.
         let out = run(&format!("{chain} n4[0]=X 2>&1; declare -p n13 n4")).0;
         assert_eq!(
-            out,
-            "declare -- n13=\"DEEP\"\ndeclare -a n4=([0]=\"X\")\n",
+            out, "declare -- n13=\"DEEP\"\ndeclare -a n4=([0]=\"X\")\n",
             "{out:?}",
         );
 
@@ -87948,7 +92082,7 @@ st=1
                        f2() { local -n h1=h2; local -n h2=h3; local -n h3=h2
                               printf '[%s]' \"${h1}\"; }
                        f2 2>&1")
-            .0;
+        .0;
         assert_eq!(out, "[]", "{out:?}");
     }
 
@@ -87966,7 +92100,10 @@ st=1
         // Unsubscripted: two walks, nothing stored, and the command abandoned —
         // the text after it never runs.
         for src in ["${c1:=v}", "${c1=v}"] {
-            let out = run(&format!("{{ {cyc} echo \"[{src}]\"; echo not-reached; }} 2>&1")).0;
+            let out = run(&format!(
+                "{{ {cyc} echo \"[{src}]\"; echo not-reached; }} 2>&1"
+            ))
+            .0;
             assert_eq!(out.matches("circular").count(), 2, "{src} -> {out:?}");
             assert!(!out.contains("not-reached"), "{src} -> {out:?}");
         }
@@ -87982,7 +92119,10 @@ st=1
             assert_eq!(out.matches("circular").count(), 4, "{src} -> {out:?}");
             assert!(out.ends_with("[v]\n"), "{src} -> {out:?}");
             assert_eq!(
-                run(&format!("{{ {cyc} echo \"[{src}]\"; }} 2>/dev/null; declare -p c1")).0,
+                run(&format!(
+                    "{{ {cyc} echo \"[{src}]\"; }} 2>/dev/null; declare -p c1"
+                ))
+                .0,
                 format!("[v]\n{want}"),
             );
         }
@@ -88003,7 +92143,10 @@ st=1
         for sub in ["@", "*"] {
             let out = run(&format!("{{ {cyc} echo \"[${{c1[{sub}]:=v}}]\"; }} 2>&1")).0;
             assert_eq!(out.matches("circular").count(), 3, "{sub} -> {out:?}");
-            assert!(out.ends_with(&format!("c1[{sub}]: bad array subscript\n")), "{out:?}");
+            assert!(
+                out.ends_with(&format!("c1[{sub}]: bad array subscript\n")),
+                "{out:?}"
+            );
         }
         let out = run(&format!(
             "{{ {cyc} echo \"[${{c1[@]:=$(echo SIDE >&2)}}]\"; }} 2>&1"
@@ -88079,7 +92222,11 @@ st=1
             ("declare -rA m=([k]=1); echo \"[${m[k]:=v}]\"", "[1]"),
         ] {
             let (out, st) = run(&format!("{{ {src}; echo reached; }} 2>&1"));
-            assert_eq!((out.as_str(), st), (&*format!("{want}\nreached\n"), 0), "{src}");
+            assert_eq!(
+                (out.as_str(), st),
+                (&*format!("{want}\nreached\n"), 0),
+                "{src}"
+            );
         }
 
         // The subscript is judged first, so a readonly array given a bad one
@@ -88125,8 +92272,14 @@ st=1
             );
         }
         // An empty scalar is a value like any other; nothing at all is not.
-        assert_eq!(run("t=; t[1]=w; declare -p t").0, "declare -a t=([0]=\"\" [1]=\"w\")\n");
-        assert_eq!(run("unset t; t[1]=w; declare -p t").0, "declare -a t=([1]=\"w\")\n");
+        assert_eq!(
+            run("t=; t[1]=w; declare -p t").0,
+            "declare -a t=([0]=\"\" [1]=\"w\")\n"
+        );
+        assert_eq!(
+            run("unset t; t[1]=w; declare -p t").0,
+            "declare -a t=([1]=\"w\")\n"
+        );
         // The attributes come with it.
         assert_eq!(
             run("export t=v; echo \"[${t[1]:=w}]\"; declare -p t").0,
@@ -88138,8 +92291,12 @@ st=1
         );
 
         // `-1` counts back over the element about to exist, so it replaces it.
-        for src in ["t[-1]=w", "printf -v 't[-1]' w", "read 't[-1]' <<< w", "declare -n r=t[-1]; r=w"]
-        {
+        for src in [
+            "t[-1]=w",
+            "printf -v 't[-1]' w",
+            "read 't[-1]' <<< w",
+            "declare -n r=t[-1]; r=w",
+        ] {
             assert_eq!(
                 run(&format!("t=v; {{ {src}; }} 2>&1; declare -p t")).0,
                 "declare -a t=([0]=\"w\")\n",
@@ -88174,7 +92331,10 @@ st=1
         );
 
         // An existing array keeps its own bound, scalar rule or no.
-        assert_eq!(run("a=(x y); a[-1]=w; declare -p a").0, "declare -a a=([0]=\"x\" [1]=\"w\")\n");
+        assert_eq!(
+            run("a=(x y); a[-1]=w; declare -p a").0,
+            "declare -a a=([0]=\"x\" [1]=\"w\")\n"
+        );
     }
 
     /// `unset` looks a nameref operand up twice, so a circular chain is reported
@@ -88215,7 +92375,10 @@ st=1
         );
         // `-n` asks nothing of the chain and says nothing.
         assert_eq!(
-            run(&format!("{cyc}; {{ unset -n c1; echo \"rc=$?\"; }} 2>&1; declare -p c2")).0,
+            run(&format!(
+                "{cyc}; {{ unset -n c1; echo \"rc=$?\"; }} 2>&1; declare -p c2"
+            ))
+            .0,
             "rc=0\ndeclare -n c2=\"c1\"\n"
         );
         // A longer cycle is no different: only the operand's own binding goes.
@@ -88257,7 +92420,10 @@ st=1
             ("export -n c1=5", 2, 1),
         ] {
             assert_eq!(
-                run(&format!("{cyc}; {{ {src}; echo \"rc=$?\"; }} 2>&1; declare -p c1")).0,
+                run(&format!(
+                    "{cyc}; {{ {src}; echo \"rc=$?\"; }} 2>&1; declare -p c1"
+                ))
+                .0,
                 format!("{}rc={rc}\ndeclare -n c1=\"c2\"\n", w.repeat(walks)),
                 "{src}"
             );
@@ -88271,29 +92437,48 @@ st=1
             ("readonly -a c1=5", "declare -ar c1=([0]=\"5\")\n"),
         ] {
             assert_eq!(
-                run(&format!("{cyc}; {{ {src}; echo \"rc=$?\"; }} 2>&1; declare -p c1")).0,
+                run(&format!(
+                    "{cyc}; {{ {src}; echo \"rc=$?\"; }} 2>&1; declare -p c1"
+                ))
+                .0,
                 format!("{w}rc=0\n{want}"),
                 "{src}"
             );
         }
         // …so the far end names an ordinary array afterwards.
         assert_eq!(
-            run(&format!("{cyc}; export -a c1=5 2>/dev/null; c2[1]=z; declare -p c1")).0,
+            run(&format!(
+                "{cyc}; export -a c1=5 2>/dev/null; c2[1]=z; declare -p c1"
+            ))
+            .0,
             "declare -ax c1=([0]=\"5\" [1]=\"z\")\n"
         );
         // Without a value the letter creates nothing for these two builtins, so
         // there is no write to fall back on.
-        assert_eq!(run("export -a fresh; declare -p fresh").0, "declare -x fresh\n");
-        assert_eq!(run("readonly -a fresh; declare -p fresh").0, "declare -r fresh\n");
+        assert_eq!(
+            run("export -a fresh; declare -p fresh").0,
+            "declare -x fresh\n"
+        );
+        assert_eq!(
+            run("readonly -a fresh; declare -p fresh").0,
+            "declare -r fresh\n"
+        );
         // A chain that resolves is silent however often it is walked, and both
         // the mark and the store land at the far end.
         for (src, want) in [
             ("export r", "declare -n r=\"w\"\ndeclare -x w=\"5\"\n"),
             ("readonly r=9", "declare -n r=\"w\"\ndeclare -r w=\"9\"\n"),
-            ("export -a r=9", "declare -n r=\"w\"\ndeclare -ax w=([0]=\"9\")\n"),
+            (
+                "export -a r=9",
+                "declare -n r=\"w\"\ndeclare -ax w=([0]=\"9\")\n",
+            ),
             ("export -n r", "declare -n r=\"w\"\ndeclare -- w=\"5\"\n"),
         ] {
-            assert_eq!(run(&format!("w=5; declare -n r=w; {src}; declare -p r w")).0, want, "{src}");
+            assert_eq!(
+                run(&format!("w=5; declare -n r=w; {src}; declare -p r w")).0,
+                want,
+                "{src}"
+            );
         }
     }
 
@@ -88313,7 +92498,10 @@ st=1
             ("readonly e=V1", "declare -r e=\"V1\"\n"),
         ] {
             assert_eq!(
-                run(&format!("e=E; f() {{ local -n e=e; {src}; }}; f 2>/dev/null; declare -p e")).0,
+                run(&format!(
+                    "e=E; f() {{ local -n e=e; {src}; }}; f 2>/dev/null; declare -p e"
+                ))
+                .0,
                 want,
                 "{src}"
             );
@@ -88345,7 +92533,11 @@ st=1
         ] {
             let out = run(&format!("e=E; f() {{ local -n e=e; {src}; }}; f 2>&1")).0;
             // Two of them are the declaration's own.
-            assert_eq!(out.matches("circular").count(), walks + 2, "{src} -> {out:?}");
+            assert_eq!(
+                out.matches("circular").count(),
+                walks + 2,
+                "{src} -> {out:?}"
+            );
         }
         let out = run("f() { local -n z=z; export z; }; f 2>&1").0;
         assert_eq!(out.matches("circular").count(), 4, "{out:?}");
@@ -88368,7 +92560,10 @@ st=1
             ("typeset -a c1", "declare -a c1\n"),
             ("declare -a +n c1", "declare -a c1\n"),
             ("declare -a c1=x", "declare -a c1=([0]=\"x\")\n"),
-            ("declare -a c1=(x y)", "declare -a c1=([0]=\"x\" [1]=\"y\")\n"),
+            (
+                "declare -a c1=(x y)",
+                "declare -a c1=([0]=\"x\" [1]=\"y\")\n",
+            ),
         ] {
             assert_eq!(
                 run(&format!("{cyc}; {{ {src}; }} 2>&1; declare -p c1")).0,
@@ -88379,16 +92574,28 @@ st=1
         // …and the cycle really is gone afterwards: `c2` still names `c1`, but
         // `c1` is an ordinary array now, so the far end reaches it.
         assert_eq!(
-            run(&format!("{cyc}; declare -a c1 2>/dev/null; c2[1]=z; declare -p c1")).0,
+            run(&format!(
+                "{cyc}; declare -a c1 2>/dev/null; c2[1]=z; declare -p c1"
+            ))
+            .0,
             "declare -a c1=([1]=\"z\")\n"
         );
         // An operand that makes nothing has nowhere to put a declaration, so it
         // is dropped with the status left alone — and pays for two walks, the
         // lookup that decides what is being declared and the one that would
         // have done it.
-        for src in ["declare c1", "declare -i c1", "declare -x c1", "declare c1=5", "declare +n c1"] {
+        for src in [
+            "declare c1",
+            "declare -i c1",
+            "declare -x c1",
+            "declare c1=5",
+            "declare +n c1",
+        ] {
             assert_eq!(
-                run(&format!("{cyc}; {{ {src}; echo \"rc=$?\"; }} 2>&1; declare -p c1")).0,
+                run(&format!(
+                    "{cyc}; {{ {src}; echo \"rc=$?\"; }} 2>&1; declare -p c1"
+                ))
+                .0,
                 "osh: warning: c1: circular name reference\n\
                  osh: warning: c1: circular name reference\n\
                  rc=0\ndeclare -n c1=\"c2\"\n",
@@ -88397,7 +92604,10 @@ st=1
         }
         // Once there is a name to argue about, the two letters argue as usual.
         assert_eq!(
-            run(&format!("{cyc}; {{ declare -aA c1; echo \"rc=$?\"; }} 2>&1; declare -p c1")).0,
+            run(&format!(
+                "{cyc}; {{ declare -aA c1; echo \"rc=$?\"; }} 2>&1; declare -p c1"
+            ))
+            .0,
             "osh: warning: c1: circular name reference\n\
              osh: declare: c1: cannot convert associative to indexed array\n\
              rc=1\ndeclare -A c1\n"
@@ -88406,9 +92616,18 @@ st=1
         // `export` and `readonly` the array comes from the assignment, so
         // without one there is nothing to make and the operand follows the
         // ordinary rule.
-        assert_eq!(run("export -a fresh; declare -p fresh").0, "declare -x fresh\n");
-        assert_eq!(run("readonly -a fresh; declare -p fresh").0, "declare -r fresh\n");
-        assert_eq!(run("declare -a fresh; declare -p fresh").0, "declare -a fresh\n");
+        assert_eq!(
+            run("export -a fresh; declare -p fresh").0,
+            "declare -x fresh\n"
+        );
+        assert_eq!(
+            run("readonly -a fresh; declare -p fresh").0,
+            "declare -r fresh\n"
+        );
+        assert_eq!(
+            run("declare -a fresh; declare -p fresh").0,
+            "declare -a fresh\n"
+        );
         // A longer cycle is no different, and a chain that resolves declares
         // what it points at while staying a reference.
         assert_eq!(
@@ -88453,7 +92672,10 @@ st=1
         }
         // A removal follows just as an enable does.
         assert_eq!(
-            run(&format!("{r}; declare -x w; declare +x +n r; declare -p w r")).0,
+            run(&format!(
+                "{r}; declare -x w; declare +x +n r; declare -p w r"
+            ))
+            .0,
             "declare -- w=\"5\"\ndeclare -- r=\"w\"\n"
         );
         // The letter comes off the *last* reference in the chain, not the name
@@ -88497,7 +92719,8 @@ st=1
         // them, because the operand makes no array and so walks the chain
         // twice; see `makes_array` in [`Shell::builtin_declare_scoped`].
         assert_eq!(
-            run("declare -n c1=c2; declare -n c2=c1; { declare -x +n c1; } 2>&1; declare -p c1 c2").0,
+            run("declare -n c1=c2; declare -n c2=c1; { declare -x +n c1; } 2>&1; declare -p c1 c2")
+                .0,
             "osh: warning: c1: circular name reference\n\
              osh: warning: c1: circular name reference\n\
              declare -n c1=\"c2\"\ndeclare -n c2=\"c1\"\n"
@@ -88519,7 +92742,10 @@ st=1
         // itself — the target's *name*, which the reference held, going with it
         // rather than surviving as element 0.
         assert_eq!(
-            run(&format!("{r}; declare r[1]=9; echo \"rc=$?\"; declare -p w r")).0,
+            run(&format!(
+                "{r}; declare r[1]=9; echo \"rc=$?\"; declare -p w r"
+            ))
+            .0,
             "rc=0\ndeclare -- w=\"5\"\ndeclare -a r=([1]=\"9\")\n"
         );
         assert_eq!(
@@ -88532,7 +92758,9 @@ st=1
             "rc=0\ndeclare -ai a\n"
         );
         // Two subscripts cannot stand: nothing is *named* `arr[1]`.
-        let (out, _) = run("declare -a arr=(1 2); declare -n r=arr[1]; declare -i r[0]; echo \"rc=$?\"; declare -p arr");
+        let (out, _) = run(
+            "declare -a arr=(1 2); declare -n r=arr[1]; declare -i r[0]; echo \"rc=$?\"; declare -p arr",
+        );
         assert_eq!(out, "rc=1\ndeclare -a arr=([0]=\"1\" [1]=\"2\")\n");
         // A declaration binding a *local* array builds it from the resolved
         // name, so there a valued operand follows like any other.
@@ -88543,12 +92771,18 @@ st=1
         // A reference the frame is only shadowing is not followed at all, so
         // nothing is dropped and the local is an ordinary array.
         assert_eq!(
-            run(&format!("{r}; f() {{ declare r[1]=9; declare -p r; }}; f; declare -p w r")).0,
+            run(&format!(
+                "{r}; f() {{ declare r[1]=9; declare -p r; }}; f; declare -p w r"
+            ))
+            .0,
             "declare -a r=([1]=\"9\")\ndeclare -- w=\"5\"\ndeclare -n r=\"w\"\n"
         );
         // And a `-n` operand may not carry a subscript at all.
         assert_eq!(
-            run(&format!("{r}; declare -n r[1]=w; echo \"rc=$?\"; declare -p r")).0,
+            run(&format!(
+                "{r}; declare -n r[1]=w; echo \"rc=$?\"; declare -p r"
+            ))
+            .0,
             "rc=1\ndeclare -n r=\"w\"\n"
         );
     }
@@ -88569,7 +92803,10 @@ st=1
         // store through the reference, and still report success.
         for tag in ["export", "readonly"] {
             assert_eq!(
-                run(&format!("{elem}; {tag} r=9; echo \"rc=$?\"; declare -p arr")).0,
+                run(&format!(
+                    "{elem}; {tag} r=9; echo \"rc=$?\"; declare -p arr"
+                ))
+                .0,
                 "rc=0\ndeclare -a arr=([0]=\"1\" [1]=\"9\")\n",
                 "{tag}"
             );
@@ -88587,12 +92824,23 @@ st=1
         // to go makes it a failure.
         let circ = "declare -n a=b; declare -n b=a";
         for decl in ["declare -i a", "export a", "readonly a"] {
-            assert_eq!(run(&format!("{circ}; {decl}; echo \"rc=$?\"")).0, "rc=0\n", "{decl}");
+            assert_eq!(
+                run(&format!("{circ}; {decl}; echo \"rc=$?\"")).0,
+                "rc=0\n",
+                "{decl}"
+            );
         }
         for decl in ["export a=5", "readonly a=5"] {
-            assert_eq!(run(&format!("{circ}; {decl}; echo \"rc=$?\"")).0, "rc=1\n", "{decl}");
+            assert_eq!(
+                run(&format!("{circ}; {decl}; echo \"rc=$?\"")).0,
+                "rc=1\n",
+                "{decl}"
+            );
         }
-        assert_eq!(run(&format!("{circ}; declare -i a; declare -p a")).0, "declare -n a=\"b\"\n");
+        assert_eq!(
+            run(&format!("{circ}; declare -i a; declare -p a")).0,
+            "declare -n a=\"b\"\n"
+        );
     }
 
     #[test]
@@ -88608,7 +92856,11 @@ st=1
             ("export SECONDS; export -n SECONDS", "-i"),
             ("declare -u RANDOM", "-iu"),
         ] {
-            let name = if decl.contains("RANDOM") { "RANDOM" } else { "SECONDS" };
+            let name = if decl.contains("RANDOM") {
+                "RANDOM"
+            } else {
+                "SECONDS"
+            };
             let (out, _) = run(&format!("{decl}; declare -p {name}"));
             assert!(
                 out.starts_with(&format!("declare {want} {name}=\"")) && !out.contains("=\"\""),
@@ -88616,9 +92868,14 @@ st=1
             );
         }
         // `PPID` is readonly to begin with, so `export` adds to `-ir`.
-        assert!(run("export PPID; declare -p PPID").0.starts_with("declare -irx PPID=\""));
+        assert!(
+            run("export PPID; declare -p PPID")
+                .0
+                .starts_with("declare -irx PPID=\"")
+        );
         // The value function is still doing the computing.
-        let (out, _) = run("declare RANDOM; a=$RANDOM; b=$RANDOM; [ \"$a\" != \"$b\" ] && echo varying");
+        let (out, _) =
+            run("declare RANDOM; a=$RANDOM; b=$RANDOM; [ \"$a\" != \"$b\" ] && echo varying");
         assert_eq!(out, "varying\n");
         // What the declaration changes is that the name's slot is filled in:
         // bash's listings walk the variable table and pass over the ones that
@@ -88642,9 +92899,15 @@ st=1
             "f() { local SECONDS; declare -p SECONDS; echo \"[${SECONDS-UNSET}]\"; }; f; \
              declare -p SECONDS",
         );
-        assert!(out.starts_with("declare -- SECONDS\n[UNSET]\ndeclare -i SECONDS=\""), "{out}");
+        assert!(
+            out.starts_with("declare -- SECONDS\n[UNSET]\ndeclare -i SECONDS=\""),
+            "{out}"
+        );
         // `unset` drops the declaration with the rest of the binding.
-        assert_eq!(run("export SECONDS; unset SECONDS; declare -p SECONDS").1, 1);
+        assert_eq!(
+            run("export SECONDS; unset SECONDS; declare -p SECONDS").1,
+            1
+        );
         // And none of it escapes the subshell that did it.
         assert_eq!(run(&format!("( declare SECONDS ); {listed}")).0, "gone\n");
     }
@@ -88658,8 +92921,14 @@ st=1
         // `declare -a q` leaves behind.
         assert_eq!(run("declare -p FUNCNAME").0, "declare -a FUNCNAME\n");
         assert_eq!(run("declare -p FUNCNAME").1, 0);
-        assert_eq!(run("declare -p BASH_SOURCE").0, "declare -a BASH_SOURCE=()\n");
-        assert_eq!(run("declare -p BASH_LINENO").0, "declare -a BASH_LINENO=()\n");
+        assert_eq!(
+            run("declare -p BASH_SOURCE").0,
+            "declare -a BASH_SOURCE=()\n"
+        );
+        assert_eq!(
+            run("declare -p BASH_LINENO").0,
+            "declare -a BASH_LINENO=()\n"
+        );
         // The flag-filtered listings report it too…
         assert_eq!(run("declare -a | grep -c '^declare -a FUNCNAME$'").0, "1\n");
         // …while every listing built from *values* passes over it, exactly as
@@ -88674,7 +92943,10 @@ st=1
         );
         // The expansion side does not follow the listing: the name is reported
         // and still expands unset, until a call settles the two.
-        assert_eq!(run("echo set=[${FUNCNAME+SET}] n=[${#FUNCNAME[@]}]").0, "set=[] n=[0]\n");
+        assert_eq!(
+            run("echo set=[${FUNCNAME+SET}] n=[${#FUNCNAME[@]}]").0,
+            "set=[] n=[0]\n"
+        );
         // (`n` is 1 rather than bash's 2 for a script only because this harness
         // has no enclosing `main` frame; the corpus case measures the depth.)
         assert_eq!(
@@ -88695,7 +92967,10 @@ st=1
             "rc=1\ndeclare -a FUNCNAME\n"
         );
         // …and `-a` is the kind it already has, so it is a no-op.
-        assert_eq!(run("declare -a FUNCNAME; declare -p FUNCNAME").0, "declare -a FUNCNAME\n");
+        assert_eq!(
+            run("declare -a FUNCNAME; declare -p FUNCNAME").0,
+            "declare -a FUNCNAME\n"
+        );
 
         // `unset` is the one thing that tells the three apart for good: bash
         // refuses the two it assigned and lets `FUNCNAME` go, after which a
@@ -88801,7 +93076,10 @@ st=1
     fn globignore_moves_the_dotglob_option() {
         // Assigning the name turns the option on, and losing the name turns it
         // off again — even when the option was the user's own doing.
-        assert_eq!(run("shopt dotglob; GLOBIGNORE=x; shopt dotglob").0, "dotglob        \toff\ndotglob        \ton\n");
+        assert_eq!(
+            run("shopt dotglob; GLOBIGNORE=x; shopt dotglob").0,
+            "dotglob        \toff\ndotglob        \ton\n"
+        );
         assert_eq!(
             run("shopt -s dotglob; GLOBIGNORE=x; unset GLOBIGNORE; shopt dotglob").0,
             "dotglob        \toff\n"
@@ -88811,7 +93089,10 @@ st=1
             run("shopt -s dotglob; GLOBIGNORE=; shopt dotglob").0,
             "dotglob        \ton\n"
         );
-        assert_eq!(run("GLOBIGNORE=; shopt dotglob").0, "dotglob        \toff\n");
+        assert_eq!(
+            run("GLOBIGNORE=; shopt dotglob").0,
+            "dotglob        \toff\n"
+        );
         // The option can be turned off underneath a set variable, and the next
         // assignment turns it back on.
         assert_eq!(
@@ -88951,7 +93232,10 @@ st=1
     #[test]
     fn glob_no_match_stays_literal() {
         // With no match and no `nullglob`, the pattern is left as the word.
-        assert_eq!(run("echo osh_definitely_no_such_glob_*.zzz").0, "osh_definitely_no_such_glob_*.zzz\n");
+        assert_eq!(
+            run("echo osh_definitely_no_such_glob_*.zzz").0,
+            "osh_definitely_no_such_glob_*.zzz\n"
+        );
     }
 
     #[test]
@@ -88993,7 +93277,12 @@ st=1
         }
         // A closed one *is* a pattern, and vanishes under `nullglob` when it
         // matches nothing — in whichever component it closes.
-        for word in ["[abc]", "[q]osh_no_such_glob_zzz", "[a]b/c]", "osh_no_such_dir_zzz/[ab]"] {
+        for word in [
+            "[abc]",
+            "[q]osh_no_such_glob_zzz",
+            "[a]b/c]",
+            "osh_no_such_dir_zzz/[ab]",
+        ] {
             assert_eq!(
                 run(&format!("shopt -s nullglob; echo x {word} y")).0,
                 "x y\n",
@@ -89029,8 +93318,7 @@ st=1
         // offending line only. A same-line trailing command is swallowed, but a
         // command on the *next* line still runs — bash discards only the failing
         // line, not the whole script. Verified byte-for-byte against bash 5.2.
-        let (mout, mst) =
-            run("shopt -s failglob\necho osh_no_*.zzz; echo also_skipped\necho done");
+        let (mout, mst) = run("shopt -s failglob\necho osh_no_*.zzz; echo also_skipped\necho done");
         assert_eq!(mout, "done\n");
         assert_eq!(mst, 0);
     }
@@ -89039,7 +93327,10 @@ st=1
     fn shopt_query_status() {
         // `shopt -q name` returns 0 iff the option is set.
         assert_eq!(run("shopt -q nullglob; echo $?").0, "1\n");
-        assert_eq!(run("shopt -s nullglob; shopt -q nullglob; echo $?").0, "0\n");
+        assert_eq!(
+            run("shopt -s nullglob; shopt -q nullglob; echo $?").0,
+            "0\n"
+        );
     }
 
     #[test]
@@ -89109,9 +93400,8 @@ st=1
         let pb = db.slashed();
 
         // pushd a, pushd b -> stack top is b, next is a. popd returns to a.
-        let script = format!(
-            "pushd {pa}\npushd {pb}\necho ---\ndirs +0\ndirs +1\npopd\necho ===\ndirs +0"
-        );
+        let script =
+            format!("pushd {pa}\npushd {pb}\necho ---\ndirs +0\ndirs +1\npopd\necho ===\ndirs +0");
         let (o, _) = run(&script);
 
         // Restore the process cwd before asserting (run() moved it).
@@ -89266,7 +93556,10 @@ st=1
             Some(String::from_utf8_lossy(&r).into_owned())
         };
         // POSIX `-p` form: two decimals, space-separated, no leading newline.
-        assert_eq!(report("", 1.5, true, false).as_deref(), Some("real 1.50\nuser 0.00\nsys 0.00\n"));
+        assert_eq!(
+            report("", 1.5, true, false).as_deref(),
+            Some("real 1.50\nuser 0.00\nsys 0.00\n")
+        );
         // Default (bash) form: leading newline, tab-separated, NmS.SSSs.
         assert_eq!(
             report("", 62.25, false, false).as_deref(),
@@ -89287,8 +93580,14 @@ st=1
         // A set `$TIMEFORMAT` displaces both the default and the shell-times
         // form — which is how a posix-mode bare `time` can be made to print an
         // elapsed figure after all — but never `-p`'s.
-        assert_eq!(report("TIMEFORMAT='R=%R'", 1.5, false, false).as_deref(), Some("R=1.500\n"));
-        assert_eq!(report("TIMEFORMAT='R=%R'", 1.5, false, true).as_deref(), Some("R=1.500\n"));
+        assert_eq!(
+            report("TIMEFORMAT='R=%R'", 1.5, false, false).as_deref(),
+            Some("R=1.500\n")
+        );
+        assert_eq!(
+            report("TIMEFORMAT='R=%R'", 1.5, false, true).as_deref(),
+            Some("R=1.500\n")
+        );
         assert_eq!(
             report("TIMEFORMAT='R=%R'", 1.5, true, false).as_deref(),
             Some("real 1.50\nuser 0.00\nsys 0.00\n")
@@ -89306,8 +93605,14 @@ st=1
         };
         // A precision of 0..=3, then an optional `l` for the minutes form. The
         // fraction truncates rather than rounds: 140 ms at two places is 0.14.
-        assert_eq!(render("%R|%2R|%1R|%0R", 0.1409).as_deref(), Some("0.140|0.14|0.1|0\n"));
-        assert_eq!(render("%lR|%2lR|%0lR", 62.25).as_deref(), Some("1m2.250s|1m2.25s|1m2s\n"));
+        assert_eq!(
+            render("%R|%2R|%1R|%0R", 0.1409).as_deref(),
+            Some("0.140|0.14|0.1|0\n")
+        );
+        assert_eq!(
+            render("%lR|%2lR|%0lR", 62.25).as_deref(),
+            Some("1m2.250s|1m2.25s|1m2s\n")
+        );
         // A precision above 3 clamps, but only one digit is ever read — so the
         // second digit of `%99R` is what the directive test then rejects.
         assert_eq!(render("%4R|%9R", 0.5).as_deref(), Some("0.500|0.500\n"));
@@ -89353,10 +93658,16 @@ st=1
         // A bad format is a `builtin_error`, not a `report_error`: neither
         // errexit nor posix mode ends the shell on it, and `$?` is untouched.
         let (o2, s2) = run("set -e; TIMEFORMAT='%z'; { time :; } 2>&1; echo after rc=$?");
-        assert_eq!(o2, "osh: TIMEFORMAT: `z': invalid format character\nafter rc=0\n");
+        assert_eq!(
+            o2,
+            "osh: TIMEFORMAT: `z': invalid format character\nafter rc=0\n"
+        );
         assert_eq!(s2, 0);
         let (o3, _) = run("set -o posix; TIMEFORMAT='%z'; { time :; } 2>&1; echo after");
-        assert_eq!(o3, "osh: TIMEFORMAT: `z': invalid format character\nafter\n");
+        assert_eq!(
+            o3,
+            "osh: TIMEFORMAT: `z': invalid format character\nafter\n"
+        );
     }
 
     #[test]
@@ -89377,7 +93688,9 @@ st=1
         // The test is on the word *as written*: quoted, escaped and expanded
         // forms keep the reserved word and time a command named `-p`.
         for w in ["\"-p\"", "\\-p", "$D"] {
-            let (o, rc) = run(&format!("set -o posix\nD=-p\n{{ time {w} echo hi ; }} 2>&1"));
+            let (o, rc) = run(&format!(
+                "set -o posix\nD=-p\n{{ time {w} echo hi ; }} 2>&1"
+            ));
             assert_eq!(rc, 127, "time {w}: {o:?}");
             assert!(o.contains("-p: command not found"), "time {w}: {o:?}");
             assert!(o.contains("\nreal\t"), "time {w} was not timed: {o:?}");
@@ -89418,9 +93731,7 @@ st=1
             let o = run(src).0;
             let lines: Vec<&str> = o.lines().collect();
             assert!(
-                lines.len() == 2
-                    && well_formed(lines[0], "user")
-                    && well_formed(lines[1], "sys"),
+                lines.len() == 2 && well_formed(lines[0], "user") && well_formed(lines[1], "sys"),
                 "got {o:?}"
             );
         };
@@ -89429,7 +93740,9 @@ st=1
         // is one — bash's test is the word list and the redirections.
         shell_report("set -o posix\n{ ! time ; } 2>&1");
         assert!(
-            run("set -o posix\n{ time x=1 ; } 2>&1").0.contains("\nreal\t"),
+            run("set -o posix\n{ time x=1 ; } 2>&1")
+                .0
+                .contains("\nreal\t"),
             "an assignment is a command"
         );
         assert!(
@@ -89442,10 +93755,8 @@ st=1
         // elapsed figure out of a posix bare `time` — and the figure is the
         // *shell's* lifetime, not the null command's zero span, so it does not
         // shrink as the script goes on.
-        let (o, _) = run(
-            "set -o posix\nTIMEFORMAT='%3R'\n{ time ; } 2>&1\n\
-             for i in 1 2 3; do for j in 1 2 3 4 5 6 7 8 9; do :; done; done\n{ time ; } 2>&1",
-        );
+        let (o, _) = run("set -o posix\nTIMEFORMAT='%3R'\n{ time ; } 2>&1\n\
+             for i in 1 2 3; do for j in 1 2 3 4 5 6 7 8 9; do :; done; done\n{ time ; } 2>&1");
         let mut it = o.lines().map(|l| l.parse::<f64>().expect("elapsed"));
         let (first, second) = (it.next().expect("first"), it.next().expect("second"));
         assert!(second >= first, "lifetime went backwards: {o:?}");
@@ -89482,10 +93793,8 @@ st=1
         // bash's `trap -p` prints real signals with a `SIG` prefix but the
         // pseudo-signals (EXIT/ERR/DEBUG/RETURN) bare, ordered EXIT, then real
         // signals by number, then DEBUG, ERR, RETURN.
-        let (o, _) = run(
-            "trap 'e' EXIT; trap 'h' HUP; trap 'i' INT; \
-             trap 'd' DEBUG; trap 'r' RETURN; trap 'x' ERR; trap -p",
-        );
+        let (o, _) = run("trap 'e' EXIT; trap 'h' HUP; trap 'i' INT; \
+             trap 'd' DEBUG; trap 'r' RETURN; trap 'x' ERR; trap -p");
         // The DEBUG trap fires before each command, emitting stray `d` lines;
         // keep only the `trap --` listing lines to check prefix and ordering.
         let lines: Vec<&str> = o.lines().filter(|l| l.starts_with("trap --")).collect();
@@ -89564,10 +93873,12 @@ st=1
             SpawnTarget::Other,
             true,
         );
-        assert_eq!(text(&ex), ["exec: /a/zz: cannot execute: Permission denied"]);
+        assert_eq!(
+            text(&ex),
+            ["exec: /a/zz: cannot execute: Permission denied"]
+        );
         assert_eq!(ex.1, 126);
-        let plain =
-            spawn_error_message(
+        let plain = spawn_error_message(
             b"/a/zz",
             None,
             &Error::from(ErrorKind::PermissionDenied),
@@ -89586,7 +93897,10 @@ st=1
         );
         assert_eq!(
             text(&ex),
-            ["/a/d: Is a directory", "exec: /a/d: cannot execute: Is a directory"]
+            [
+                "/a/d: Is a directory",
+                "exec: /a/d: cannot execute: Is a directory"
+            ]
         );
         assert_eq!(ex.1, 126);
     }
@@ -89618,7 +93932,10 @@ st=1
         );
         assert_eq!(
             text(&dir_exec),
-            ["/a/d: Is a directory", "exec: /a/d: cannot execute: Is a directory"]
+            [
+                "/a/d: Is a directory",
+                "exec: /a/d: cannot execute: Is a directory"
+            ]
         );
         // A trailing separator never reaches the host: the error it fails with
         // says nothing about the file, so the two POSIX answers are supplied.
@@ -89677,7 +93994,10 @@ st=1
         assert_eq!(t(b"sub"), SpawnTarget::Other);
         assert_eq!(t(b""), SpawnTarget::Other);
         // A `$PATH` search's answer is asked about directly.
-        assert_eq!(spawn_target(b"", b"sub", Some(&dir.path.join("sub"))), SpawnTarget::Dir);
+        assert_eq!(
+            spawn_target(b"", b"sub", Some(&dir.path.join("sub"))),
+            SpawnTarget::Dir
+        );
     }
 
     #[test]
@@ -89693,7 +94013,10 @@ st=1
             SpawnTarget::Other,
             false,
         );
-        assert_eq!(diag_text(&miss), ["./s.sh: cannot execute: required file not found"]);
+        assert_eq!(
+            diag_text(&miss),
+            ["./s.sh: cannot execute: required file not found"]
+        );
         assert_eq!(miss.1, 127);
         // Anything else names it, and does so through the printer that has no
         // line number in its prologue — hence the `!`.
@@ -89704,7 +94027,10 @@ st=1
             SpawnTarget::Other,
             false,
         );
-        assert_eq!(diag_text(&bad), ["!./s.sh: /tmp: bad interpreter: Permission denied"]);
+        assert_eq!(
+            diag_text(&bad),
+            ["!./s.sh: /tmp: bad interpreter: Permission denied"]
+        );
         assert_eq!(bad.1, 126);
         // `exec` adds a second line, and it reports an `errno` bash has already
         // cleared — hence a line that says nothing went wrong, under the
@@ -89718,7 +94044,10 @@ st=1
         );
         assert_eq!(
             diag_text(&as_exec),
-            ["!/a/s.sh: /tmp: bad interpreter: Permission denied", "/a/s.sh: No error"]
+            [
+                "!/a/s.sh: /tmp: bad interpreter: Permission denied",
+                "/a/s.sh: No error"
+            ]
         );
         assert_eq!(as_exec.1, 126);
         // A missing interpreter says the same under `exec` as without it.
@@ -89729,7 +94058,10 @@ st=1
             SpawnTarget::Other,
             true,
         );
-        assert_eq!(diag_text(&miss_exec), ["/a/s.sh: cannot execute: required file not found"]);
+        assert_eq!(
+            diag_text(&miss_exec),
+            ["/a/s.sh: cannot execute: required file not found"]
+        );
         assert_eq!(miss_exec.1, 127);
     }
 
@@ -89747,8 +94079,14 @@ st=1
         // Blanks around the line are trimmed at both ends, and the run between
         // the interpreter and its argument is not part of either.
         assert_eq!(s(b"#!  \t/bin/sh \t \n"), Some(("/bin/sh".into(), None)));
-        assert_eq!(s(b"#!/bin/sh -x\n"), Some(("/bin/sh".into(), Some("-x".into()))));
-        assert_eq!(s(b"#! /bin/sh \t -x  \n"), Some(("/bin/sh".into(), Some("-x".into()))));
+        assert_eq!(
+            s(b"#!/bin/sh -x\n"),
+            Some(("/bin/sh".into(), Some("-x".into())))
+        );
+        assert_eq!(
+            s(b"#! /bin/sh \t -x  \n"),
+            Some(("/bin/sh".into(), Some("-x".into())))
+        );
         // Everything after the interpreter is ONE argument, blanks and all —
         // the kernel's rule, not bash's own fallback's word split.
         assert_eq!(
@@ -89760,7 +94098,10 @@ st=1
         // A CRLF file's `\r` is not a blank, so it stays on the last word and
         // the interpreter it names does not exist — as on Linux.
         assert_eq!(s(b"#!/bin/sh\r\n"), Some(("/bin/sh\r".into(), None)));
-        assert_eq!(s(b"#!/bin/sh -x\r\n"), Some(("/bin/sh".into(), Some("-x\r".into()))));
+        assert_eq!(
+            s(b"#!/bin/sh -x\r\n"),
+            Some(("/bin/sh".into(), Some("-x\r".into())))
+        );
         // No interpreter named at all: not a refusal, a fall-through to shell
         // source. So is a file that never began `#!`.
         assert_eq!(s(b"#!\necho hi\n"), None);
@@ -89838,7 +94179,10 @@ st=1
         }
         // A `#!` naming nothing is `ENOEXEC` on a kernel that reads the line,
         // which is the same fall-through: shell source like any other text.
-        for (name, body) in [("bare.sh", b"#!\necho hi\n".as_slice()), ("blank.sh", b"#!  \nx\n")] {
+        for (name, body) in [
+            ("bare.sh", b"#!\necho hi\n".as_slice()),
+            ("blank.sh", b"#!  \nx\n"),
+        ] {
             let p = write(name, body);
             assert_eq!(
                 shell_script_indirection(&p),
@@ -89945,7 +94289,10 @@ st=1
         assert!(o.contains("exec: -Z: invalid option"), "got {o:?}");
         assert!(o.contains("rc=2"), "got {o:?}");
         let (o, _) = run("( exec -a; echo rc=$? ) 2>&1");
-        assert!(o.contains("exec: -a: option requires an argument"), "got {o:?}");
+        assert!(
+            o.contains("exec: -a: option requires an argument"),
+            "got {o:?}"
+        );
         assert!(o.contains("rc=2"), "got {o:?}");
         // Options with nothing to run are just the redirections: status 0, and
         // the shell carries on.
@@ -89976,7 +94323,10 @@ st=1
         // folds the error onto the captured stdout.
         let (o, _) = run("f() { return abc; echo unreached; }; f 2>&1; echo rc=$?");
         assert!(!o.contains("unreached"), "return did not unwind: {o:?}");
-        assert!(o.contains("return: abc: numeric argument required"), "got {o:?}");
+        assert!(
+            o.contains("return: abc: numeric argument required"),
+            "got {o:?}"
+        );
         assert!(o.contains("rc=2"), "got {o:?}");
         // A numeric arg still works normally.
         assert_eq!(run("f() { return 7; }; f; echo $?").0, "7\n");
@@ -89985,8 +94335,14 @@ st=1
         // `return` arg emits BOTH the "numeric argument required" line and the
         // "can only return" line, exiting 2.
         let (o, s) = run("return -Z 2>&1");
-        assert!(o.contains("return: -Z: numeric argument required"), "got {o:?}");
-        assert!(o.contains("return: can only `return' from a function or sourced script"), "got {o:?}");
+        assert!(
+            o.contains("return: -Z: numeric argument required"),
+            "got {o:?}"
+        );
+        assert!(
+            o.contains("return: can only `return' from a function or sourced script"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
     }
 
@@ -89997,7 +94353,10 @@ st=1
         // treats `--` as end-of-options, and a bare `-` as the optstring operand.
         let (o, s) = run("getopts -Z 2>&1");
         assert!(o.contains("getopts: -Z: invalid option"), "got {o:?}");
-        assert!(o.contains("getopts: usage: getopts optstring name [arg ...]"), "got {o:?}");
+        assert!(
+            o.contains("getopts: usage: getopts optstring name [arg ...]"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
         let (o, s) = run("getopts -ab name 2>&1");
         assert!(o.contains("getopts: -a: invalid option"), "got {o:?}");
@@ -90045,10 +94404,16 @@ st=1
     fn kill_l_rejects_bad_specs() {
         // An unknown name and an out-of-range number are invalid specs (rc 1).
         let (o, s) = run("kill -l BOGUS 2>&1");
-        assert!(o.contains("kill: BOGUS: invalid signal specification"), "got {o:?}");
+        assert!(
+            o.contains("kill: BOGUS: invalid signal specification"),
+            "got {o:?}"
+        );
         assert_eq!(s, 1);
         let (o, s) = run("kill -l 99 2>&1");
-        assert!(o.contains("kill: 99: invalid signal specification"), "got {o:?}");
+        assert!(
+            o.contains("kill: 99: invalid signal specification"),
+            "got {o:?}"
+        );
         assert_eq!(s, 1);
     }
 
@@ -90073,13 +94438,19 @@ st=1
         // Single-space separated with no trailing space, and no numbers, no
         // tabs and no `SIG` anywhere — the columnar layout is gone entirely.
         assert!(!o.contains("  ") && !o.contains(" \n"), "got {o:?}");
-        assert!(!o.contains('\t') && !o.contains(')') && !o.contains("SIG"), "got {o:?}");
+        assert!(
+            !o.contains('\t') && !o.contains(')') && !o.contains("SIG"),
+            "got {o:?}"
+        );
         // `-L` exists to *force* the columns, and the mode wins over it.
         assert_eq!(run("set -o posix; kill -L").0, o);
         // The mode is `$POSIXLY_CORRECT`, so the environment spelling agrees.
         assert_eq!(run("POSIXLY_CORRECT=1 kill -l").0, o);
         // Leaving the mode restores the columns.
-        assert_eq!(run("set -o posix; set +o posix; kill -l").0, run("kill -l").0);
+        assert_eq!(
+            run("set -o posix; set +o posix; kill -l").0,
+            run("kill -l").0
+        );
         // `trap -l` is *not* in this rule: bash moves only `kill`'s listing.
         assert_eq!(run("set -o posix; trap -l").0, run("trap -l").0);
     }
@@ -90091,7 +94462,10 @@ st=1
         // Both directions of `kill -l`: the prefixed name stops resolving…
         assert_eq!(run("kill -l SIGTERM").0, "15\n");
         let (o, s) = run("set -o posix; kill -l SIGTERM 2>&1");
-        assert!(o.contains("kill: SIGTERM: invalid signal specification"), "got {o:?}");
+        assert!(
+            o.contains("kill: SIGTERM: invalid signal specification"),
+            "got {o:?}"
+        );
         assert_eq!(s, 1);
         // …while the bare name still does, and case is still insignificant for
         // it. The refusal is case-insensitive too: it is the prefix that is
@@ -90099,7 +94473,10 @@ st=1
         assert_eq!(run("set -o posix; kill -l TERM").0, "15\n");
         assert_eq!(run("set -o posix; kill -l term").0, "15\n");
         let (o, _) = run("set -o posix; kill -l sIgTeRm 2>&1");
-        assert!(o.contains("kill: sIgTeRm: invalid signal specification"), "got {o:?}");
+        assert!(
+            o.contains("kill: sIgTeRm: invalid signal specification"),
+            "got {o:?}"
+        );
         // The number → name direction never printed the prefix, so it is
         // unmoved — including the exit-status form and `0`.
         assert_eq!(run("set -o posix; kill -l 9").0, "KILL\n");
@@ -90110,7 +94487,10 @@ st=1
         assert_eq!(run("set -o posix; kill -l EXIT").0, run("kill -l EXIT").0);
         assert_eq!(run("set -o posix; kill -l DEBUG").0, run("kill -l DEBUG").0);
         let (o, s) = run("kill -l SIGEXIT 2>&1");
-        assert!(o.contains("kill: SIGEXIT: invalid signal specification"), "got {o:?}");
+        assert!(
+            o.contains("kill: SIGEXIT: invalid signal specification"),
+            "got {o:?}"
+        );
         assert_eq!(s, 1);
         // Every sending spelling takes the same gate: `-SIG…`, `-s SIG…` and
         // `-n SIG…`. (`kill -0` on the shell's own pid is the harmless probe;
@@ -90125,7 +94505,10 @@ st=1
         // …and the bare spellings, plus a number, are untouched.
         for form in ["-CONT", "-s CONT", "-sCONT", "-n 18", "-18"] {
             let (o, _) = run(&format!("set -o posix; kill {form} $$ 2>&1"));
-            assert!(!o.contains("invalid signal specification"), "{form}: got {o:?}");
+            assert!(
+                !o.contains("invalid signal specification"),
+                "{form}: got {o:?}"
+            );
         }
         // `trap` is not in this rule at all — measured against bash 5.2.37.
         let (o, s) = run("set -o posix; trap ':' SIGUSR1; trap -p");
@@ -90160,7 +94543,10 @@ st=1
         assert_eq!(s, 2);
         // A bad `-SIGSPEC` is an invalid signal specification (rc 1).
         let (o, s) = run("kill -BOGUS 123 2>&1");
-        assert!(o.contains("kill: BOGUS: invalid signal specification"), "got {o:?}");
+        assert!(
+            o.contains("kill: BOGUS: invalid signal specification"),
+            "got {o:?}"
+        );
         assert_eq!(s, 1);
         // A pid osh never spawned is "No such process" (rc 1).
         let (o, s) = run("kill 999999 2>&1");
@@ -90276,7 +94662,10 @@ st=1
     #[test]
     fn trap_with_a_lone_signal_resets_it_rather_than_showing_it() {
         // A lone signal name takes the trap away — it does not print it.
-        assert_eq!(run("trap 'echo T' USR1; trap USR1; trap -p USR1; echo done").0, "done\n");
+        assert_eq!(
+            run("trap 'echo T' USR1; trap USR1; trap -p USR1; echo done").0,
+            "done\n"
+        );
         // …including EXIT, which would otherwise fire.
         assert_eq!(run("(trap 'echo E' EXIT; trap EXIT; echo in)").0, "in\n");
         assert_eq!(run("(trap 'echo E' EXIT; echo in)").0, "in\nE\n");
@@ -90284,9 +94673,15 @@ st=1
         assert_eq!(run("(trap 'echo E' EXIT; trap 0; echo in)").0, "in\n");
         // A *second* operand makes the first one the action, even when it is
         // itself the name of a signal.
-        assert_eq!(run("trap USR1 INT; trap -p INT").0, "trap -- 'USR1' SIGINT\n");
+        assert_eq!(
+            run("trap USR1 INT; trap -p INT").0,
+            "trap -- 'USR1' SIGINT\n"
+        );
         // The option terminator does not change the count.
-        assert_eq!(run("trap 'echo T' INT; trap -- INT; trap -p INT; echo done").0, "done\n");
+        assert_eq!(
+            run("trap 'echo T' INT; trap -- INT; trap -p INT; echo done").0,
+            "done\n"
+        );
         // A lone operand that names no signal has no reading left, so it is the
         // usage error an action with no signals would be.
         for a in ["BOGUS", "-", "", ":", "echo hi"] {
@@ -90345,9 +94740,15 @@ st=1
             run(&format!("{SET}set -o posix; trap")).0,
             "trap -- 'echo E' EXIT\ntrap -- 'echo U' USR1\n"
         );
-        assert_eq!(run(&format!("{SET}set -o posix; trap -p USR1")).0, "trap -- 'echo U' USR1\n");
+        assert_eq!(
+            run(&format!("{SET}set -o posix; trap -p USR1")).0,
+            "trap -- 'echo U' USR1\n"
+        );
         // …and comes back when posix mode goes.
-        assert_eq!(run(&format!("{SET}trap -p USR1")).0, "trap -- 'echo U' SIGUSR1\n");
+        assert_eq!(
+            run(&format!("{SET}trap -p USR1")).0,
+            "trap -- 'echo U' SIGUSR1\n"
+        );
         // The pseudo-signals never had a prefix to drop. (The two `D`s are the
         // DEBUG trap itself firing before `set` and before `trap`.)
         assert_eq!(
@@ -90368,7 +94769,10 @@ st=1
         // Outside posix mode it contributes nothing, as ever.
         assert_eq!(run("trap -p QUIT; echo done").0, "done\n");
         // An ignored trap is the empty action, not a reset.
-        assert_eq!(run("trap '' INT; set -o posix; trap -p INT").0, "trap -- '' INT\n");
+        assert_eq!(
+            run("trap '' INT; set -o posix; trap -p INT").0,
+            "trap -- '' INT\n"
+        );
 
         // With no operands, posix `trap -p` lists every signal the shell knows,
         // in the table's own order. The signal *set* is the host's, so this can
@@ -90424,7 +94828,8 @@ st=1
         let buf = capture_sink();
         {
             let mut out = Out::Capture(buf.clone());
-            let prog = parse("trap 'echo P' EXIT; ( echo in ); echo out".as_bytes()).expect("parse");
+            let prog =
+                parse("trap 'echo P' EXIT; ( echo in ); echo out".as_bytes()).expect("parse");
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         let buf = take_capture(&buf);
@@ -90526,7 +94931,10 @@ st=1
     fn run_marker(src: &str, var: &str) -> String {
         let mut sh = new_shell();
         sh.run_source(src.as_bytes());
-        sh.vars.get(var).map(|v| as_text(v).to_string()).unwrap_or_default()
+        sh.vars
+            .get(var)
+            .map(|v| as_text(v).to_string())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -90562,7 +94970,10 @@ st=1
         // untraced function fires neither the source's nor the function's
         // RETURN. With functrace both fire.
         assert_eq!(
-            run_marker(&format!("{t}; h() {{ . {plain}; }}; h; S=\"$S after\""), "S"),
+            run_marker(
+                &format!("{t}; h() {{ . {plain}; }}; h; S=\"$S after\""),
+                "S"
+            ),
             " insrc after"
         );
         assert_eq!(
@@ -90698,7 +95109,8 @@ st=1
     /// byte-for-byte against bash 5.x.
     #[test]
     fn cmdsub_inherits_trace_traps_only_under_functrace() {
-        let (o, _) = run("f() { echo body; }\nset -T\ntrap 'echo RET' RETURN\nx=$(f)\necho \"[$x]\"");
+        let (o, _) =
+            run("f() { echo body; }\nset -T\ntrap 'echo RET' RETURN\nx=$(f)\necho \"[$x]\"");
         assert_eq!(o, "[body\nRET]\n");
         // Without `set -T` the trap is reset in the subshell, so nothing fires
         // there — and nothing leaks to the terminal either.
@@ -90739,7 +95151,11 @@ st=1
         let mut sh = new_shell();
         sh.run_source("trap 'echo bye > /dev/null' EXIT".as_bytes());
         sh.last_status = 2;
-        assert_eq!(sh.run_exit_trap(), None, "a normal handler leaves the status alone");
+        assert_eq!(
+            sh.run_exit_trap(),
+            None,
+            "a normal handler leaves the status alone"
+        );
 
         // Fired at most once, and a shell with no EXIT trap reports nothing.
         let mut sh = new_shell();
@@ -90766,14 +95182,20 @@ st=1
     fn top_level_exit_latches_exit_requested() {
         let mut sh = new_shell();
         sh.run_source("echo hi > /dev/null".as_bytes());
-        assert!(!sh.exit_requested(), "an ordinary command does not request exit");
+        assert!(
+            !sh.exit_requested(),
+            "an ordinary command does not request exit"
+        );
 
         assert_eq!(sh.run_source("exit 3".as_bytes()), 3);
         assert!(sh.exit_requested());
 
         let mut sh = new_shell();
         sh.run_source("( exit 4 )".as_bytes());
-        assert!(!sh.exit_requested(), "a subshell exit stays inside the subshell");
+        assert!(
+            !sh.exit_requested(),
+            "a subshell exit stays inside the subshell"
+        );
         assert_eq!(sh.last_status, 4);
     }
 
@@ -90784,14 +95206,25 @@ st=1
     fn mapfile_callback_exit_unwinds_shell() {
         let path = scratch_script("mapfile_cb_exit", "a\nb\nc\n");
         let mut sh = new_shell();
-        let code = sh.run_source(format!(
-            "cb() {{ CB=\"$CB $1\"; exit 5; }}\nmapfile -C cb -c 1 arr < {path}\nAFTER=1"
-        ).as_bytes());
+        let code = sh.run_source(
+            format!("cb() {{ CB=\"$CB $1\"; exit 5; }}\nmapfile -C cb -c 1 arr < {path}\nAFTER=1")
+                .as_bytes(),
+        );
         assert_eq!(code, 5);
         assert!(sh.exit_requested());
-        assert_eq!(sh.vars.get("CB").map(as_text), Some(" 0"), "one callback, then unwind");
-        assert!(sh.arrays.get("arr").is_none_or(BTreeMap::is_empty), "array not assigned");
-        assert!(!sh.vars.contains_key("AFTER"), "commands after the mapfile do not run");
+        assert_eq!(
+            sh.vars.get("CB").map(as_text),
+            Some(" 0"),
+            "one callback, then unwind"
+        );
+        assert!(
+            sh.arrays.get("arr").is_none_or(BTreeMap::is_empty),
+            "array not assigned"
+        );
+        assert!(
+            !sh.vars.contains_key("AFTER"),
+            "commands after the mapfile do not run"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -90848,7 +95281,10 @@ st=1
         let (o, _) = run(&format!(
             "arr=(x y z w v); mapfile -t -O 1 arr < {path}; echo \"${{arr[*]}}\""
         ));
-        assert_eq!(o, "x a b c v\n", "-O keeps elements outside the written range");
+        assert_eq!(
+            o, "x a b c v\n",
+            "-O keeps elements outside the written range"
+        );
         // Without -O the array is replaced wholesale, trailing elements gone.
         let (o2, _) = run(&format!(
             "arr=(x y z w v); mapfile -t arr < {path}; echo \"${{arr[*]}}\""
@@ -90875,7 +95311,10 @@ st=1
             "osh: return: can only `return' from a function or sourced script\ns=2\n"
         );
         // Inside a function, `return` unwinds normally with its status.
-        assert_eq!(run("f() { echo in; return 7; echo out; }; f; echo $?").0, "in\n7\n");
+        assert_eq!(
+            run("f() { echo in; return 7; echo out; }; f; echo $?").0,
+            "in\n7\n"
+        );
         // A `return` in a subshell inside a function exits just the subshell.
         assert_eq!(
             run("f() { ( echo a; return 5; echo b ); echo \"s=$?\"; }; f").0,
@@ -90896,7 +95335,8 @@ st=1
         assert_eq!(o, "a=0\nb=44\n");
         let (o2, _) = run("( exit -1 ); echo \"c=$?\"; ( exit -300 ); echo \"d=$?\"");
         assert_eq!(o2, "c=255\nd=212\n");
-        let (o3, _) = run("f() { return 260; }; f; echo \"e=$?\"; g() { return -1; }; g; echo \"f=$?\"");
+        let (o3, _) =
+            run("f() { return 260; }; f; echo \"e=$?\"; g() { return -1; }; g; echo \"f=$?\"");
         assert_eq!(o3, "e=4\nf=255\n");
         // Beyond i32 range is a legitimate value to bash (it masks it), not the
         // "numeric argument required" error a narrower parse would produce.
@@ -90922,7 +95362,8 @@ st=1
         );
         assert_eq!(o3, "purged=127\n");
         // `wait -n` reaps the same way, so its status is remembered too.
-        let (o4, _) = run("( exit 9 ) & p=$!; wait -n >/dev/null; wait $p 2>/dev/null; echo \"n=$?\"");
+        let (o4, _) =
+            run("( exit 9 ) & p=$!; wait -n >/dev/null; wait $p 2>/dev/null; echo \"n=$?\"");
         assert_eq!(o4, "n=9\n");
         // A pid that was never ours is still the 127 error case.
         let (o5, _) = run("wait 1 2>/dev/null; echo \"stranger=$?\"");
@@ -91063,10 +95504,7 @@ st=1
             run("readonly r=1; readonly -n r; echo rc=$?; declare -p r").0,
             "rc=0\ndeclare -r r=\"1\"\n"
         );
-        assert_eq!(
-            run("readonly r=1; readonly -n r=2; echo rc=$?").0,
-            "rc=1\n"
-        );
+        assert_eq!(run("readonly r=1; readonly -n r=2; echo rc=$?").0, "rc=1\n");
         // The array letters still apply: only the builtin's own attribute is
         // withheld.
         assert_eq!(
@@ -91128,7 +95566,10 @@ st=1
             run("declare -a x=(1); declare +a x 2>&1; echo rc=$?").0,
             "osh: declare: x: cannot destroy array variables in this way\nrc=1\n"
         );
-        assert_eq!(run("declare -x y=1; declare +x y; declare -p y").0, "declare -- y=\"1\"\n");
+        assert_eq!(
+            run("declare -x y=1; declare +x y; declare -p y").0,
+            "declare -- y=\"1\"\n"
+        );
     }
 
     /// bash has one loop over a declaration builtin's operands, so the refusals
@@ -91141,8 +95582,14 @@ st=1
     fn declaration_refusals_come_out_in_operand_order() {
         let conv =
             |n: &str| format!("osh: declare: {n}: cannot convert associative to indexed array\n");
-        assert_eq!(run("declare -aA m1=(1) m2=zz 2>&1").0, conv("m1") + &conv("m2"));
-        assert_eq!(run("declare -aA m1=zz m2=(1) 2>&1").0, conv("m1") + &conv("m2"));
+        assert_eq!(
+            run("declare -aA m1=(1) m2=zz 2>&1").0,
+            conv("m1") + &conv("m2")
+        );
+        assert_eq!(
+            run("declare -aA m1=zz m2=(1) 2>&1").0,
+            conv("m1") + &conv("m2")
+        );
         assert_eq!(
             run("declare -aA a=(1) b=zz c=(2) d=ww 2>&1").0,
             conv("a") + &conv("b") + &conv("c") + &conv("d")
@@ -91250,7 +95697,11 @@ st=1
             ("export -na=1", "-="),
         ] {
             let (o, s) = run(&format!("{cmd} 2>&1"));
-            assert_eq!(o, format!("osh: export: {bad}: invalid option\n{USAGE}"), "{cmd}");
+            assert_eq!(
+                o,
+                format!("osh: export: {bad}: invalid option\n{USAGE}"),
+                "{cmd}"
+            );
             assert_eq!(s, 2, "{cmd}");
         }
         // Only a *leading* word is scanned: once an operand has been seen the
@@ -91327,9 +95778,18 @@ st=1
         // every `local`, so a re-declaration silently destroyed the value the
         // caller had just set.
         let f = |body: &str| run(&format!("f(){{ {body}; }}; f")).0;
-        assert_eq!(f("local -i n=5; local n; declare -p n"), "declare -i n=\"5\"\n");
-        assert_eq!(f("local -l s=AB; local s; declare -p s"), "declare -l s=\"ab\"\n");
-        assert_eq!(f("local -x e=1; local e; declare -p e"), "declare -x e=\"1\"\n");
+        assert_eq!(
+            f("local -i n=5; local n; declare -p n"),
+            "declare -i n=\"5\"\n"
+        );
+        assert_eq!(
+            f("local -l s=AB; local s; declare -p s"),
+            "declare -l s=\"ab\"\n"
+        );
+        assert_eq!(
+            f("local -x e=1; local e; declare -p e"),
+            "declare -x e=\"1\"\n"
+        );
         assert_eq!(
             f("local -a a=(1 2); local a; declare -p a"),
             "declare -a a=([0]=\"1\" [1]=\"2\")\n"
@@ -91341,9 +95801,18 @@ st=1
         // The first `local` still shadows: the outer binding's value *and* its
         // attributes are dropped, including its array kind.
         let g = |setup: &str, body: &str| run(&format!("{setup} f(){{ {body}; }}; f")).0;
-        assert_eq!(g("declare -i o=5;", "local o; declare -p o"), "declare -- o\n");
-        assert_eq!(g("declare -l o=AB;", "local o; declare -p o"), "declare -- o\n");
-        assert_eq!(g("declare -a o=(1);", "local o; declare -p o"), "declare -- o\n");
+        assert_eq!(
+            g("declare -i o=5;", "local o; declare -p o"),
+            "declare -- o\n"
+        );
+        assert_eq!(
+            g("declare -l o=AB;", "local o; declare -p o"),
+            "declare -- o\n"
+        );
+        assert_eq!(
+            g("declare -a o=(1);", "local o; declare -p o"),
+            "declare -- o\n"
+        );
     }
 
     #[test]
@@ -91354,10 +95823,19 @@ st=1
         // that keeps it as element 0. The name still reports as *valued*, which
         // is the difference between `declare -a x=()` and a bare `declare -a x`.
         let f = |body: &str| run(&format!("f(){{ {body}; }}; f")).0;
-        assert_eq!(f("local x=5; local -a x; declare -p x"), "declare -a x=()\n");
-        assert_eq!(f("local x=5; local -A x; declare -p x"), "declare -A x=()\n");
+        assert_eq!(
+            f("local x=5; local -a x; declare -p x"),
+            "declare -a x=()\n"
+        );
+        assert_eq!(
+            f("local x=5; local -A x; declare -p x"),
+            "declare -A x=()\n"
+        );
         // Other attributes on the name survive the widening.
-        assert_eq!(f("local -i n=5; local -a n; declare -p n"), "declare -ai n=()\n");
+        assert_eq!(
+            f("local -i n=5; local -a n; declare -p n"),
+            "declare -ai n=()\n"
+        );
         // With no value to begin with there is nothing to drop, so the name
         // stays unvalued and prints as a bare declaration.
         assert_eq!(f("local x; local -a x; declare -p x"), "declare -a x\n");
@@ -91380,21 +95858,39 @@ st=1
         // On a *variable* `-t` is inert even in bash — it only has to survive
         // into `declare -p`, `${v@a}` and a `declare -t` listing. osh parsed the
         // letter and dropped it.
-        assert_eq!(run("declare -tirx v=1; declare -p v").0, "declare -irtx v=\"1\"\n");
-        assert_eq!(run("declare -t v=1; declare +t v; declare -p v").0, "declare -- v=\"1\"\n");
-        assert_eq!(run("declare -t q=1; echo \"${q@a}|${q@A}\"").0, "t|declare -t q='1'\n");
+        assert_eq!(
+            run("declare -tirx v=1; declare -p v").0,
+            "declare -irtx v=\"1\"\n"
+        );
+        assert_eq!(
+            run("declare -t v=1; declare +t v; declare -p v").0,
+            "declare -- v=\"1\"\n"
+        );
+        assert_eq!(
+            run("declare -t q=1; echo \"${q@a}|${q@A}\"").0,
+            "t|declare -t q='1'\n"
+        );
         // A nameless `-t` is a listing filtered by the attribute.
         assert_eq!(
             run("declare -t a=1; b=2; declare -ti c=3; declare -t").0,
             "declare -t a=\"1\"\ndeclare -it c=\"3\"\n"
         );
         // The kind and the case letter bracket the attribute letters.
-        assert_eq!(run("declare -ta v=(1); declare -p v").0, "declare -at v=([0]=\"1\")\n");
-        assert_eq!(run("declare -tu v=ab; declare -p v").0, "declare -tu v=\"AB\"\n");
+        assert_eq!(
+            run("declare -ta v=(1); declare -p v").0,
+            "declare -at v=([0]=\"1\")\n"
+        );
+        assert_eq!(
+            run("declare -tu v=ab; declare -p v").0,
+            "declare -tu v=\"AB\"\n"
+        );
         // bash emits the attribute letters in a fixed order (`i n r t x`), not
         // the order they were written; osh had `n` before `i`.
         assert_eq!(run("declare -ni v; declare -p v").0, "declare -in v\n");
-        assert_eq!(run("declare -tinlrx v; declare -p v").0, "declare -inrtxl v\n");
+        assert_eq!(
+            run("declare -tinlrx v; declare -p v").0,
+            "declare -inrtxl v\n"
+        );
         // It is a per-name attribute like the others: a `local` does not inherit
         // it, and `unset` drops it.
         assert_eq!(
@@ -91414,8 +95910,14 @@ st=1
         );
         // With no names, `-r`/`-t` filter the listing rather than marking
         // anything, and they union — as the variable listing's letters do.
-        assert_eq!(run(&format!("{setup} declare -Ft")).0, "declare -frt f\ndeclare -ft h\n");
-        assert_eq!(run(&format!("{setup} declare -Fr")).0, "declare -frt f\ndeclare -fr g\n");
+        assert_eq!(
+            run(&format!("{setup} declare -Ft")).0,
+            "declare -frt f\ndeclare -ft h\n"
+        );
+        assert_eq!(
+            run(&format!("{setup} declare -Fr")).0,
+            "declare -frt f\ndeclare -fr g\n"
+        );
         assert_eq!(
             run(&format!("{setup} declare -Frt")).0,
             "declare -frt f\ndeclare -fr g\ndeclare -ft h\n"
@@ -91448,21 +95950,38 @@ st=1
             "declare -f g\ndeclare -ftx h\n"
         );
         // Written either way round, in either sign, and past a `--`.
-        for cmd in ["declare -Fp g", "declare -pF g", "declare -F -p g", "declare -p -F g",
-                    "declare -F +p g", "declare -Fpg g", "declare -Ffp g", "declare -Fp -- g"] {
+        for cmd in [
+            "declare -Fp g",
+            "declare -pF g",
+            "declare -F -p g",
+            "declare -p -F g",
+            "declare -F +p g",
+            "declare -Fpg g",
+            "declare -Ffp g",
+            "declare -Fp -- g",
+        ] {
             assert_eq!(run(&format!("{setup} {cmd}")).0, "declare -f g\n", "{cmd}");
         }
         // `-f` prints the body either way; `-p` adds the attribute line after
         // it, but only for a function that has an attribute to report.
-        assert_eq!(run(&format!("{setup} declare -fp g")).0, "g () \n{ \n    :\n}\n");
+        assert_eq!(
+            run(&format!("{setup} declare -fp g")).0,
+            "g () \n{ \n    :\n}\n"
+        );
         assert_eq!(
             run(&format!("{setup} declare -fp h")).0,
             "h () \n{ \n    :\n}\ndeclare -ftx h\n"
         );
         // A name that is no function is silent without `-p` and reported with
         // it — under the name the command was written by.
-        assert_eq!(run(&format!("{setup} declare -F nope 2>&1")), (String::new(), 1));
-        assert_eq!(run(&format!("{setup} declare -f nope 2>&1")), (String::new(), 1));
+        assert_eq!(
+            run(&format!("{setup} declare -F nope 2>&1")),
+            (String::new(), 1)
+        );
+        assert_eq!(
+            run(&format!("{setup} declare -f nope 2>&1")),
+            (String::new(), 1)
+        );
         assert_eq!(
             run(&format!("{setup} declare -Fp nope 2>&1")),
             ("osh: declare: nope: not found\n".to_string(), 1)
@@ -91482,7 +96001,12 @@ st=1
         );
         // `-p` runs before any attribute would be applied, so the routes that
         // are mutations without it are listings with it — and mark nothing.
-        for cmd in ["declare -frp g", "declare -fxp g", "declare -ftp g", "declare -Frp g"] {
+        for cmd in [
+            "declare -frp g",
+            "declare -fxp g",
+            "declare -ftp g",
+            "declare -Frp g",
+        ] {
             assert_eq!(
                 run(&format!("{setup} {cmd} >/dev/null; declare -Fp g")).0,
                 "declare -f g\n",
@@ -91537,7 +96061,7 @@ st=1
         assert_eq!(
             run("f(){ local x=5; g; declare -p x; }; \
                  g(){ local x=7; declare -g x=9; declare -p x; }; f; declare -p x")
-                .0,
+            .0,
             "declare -- x=\"7\"\ndeclare -- x=\"5\"\ndeclare -- x=\"9\"\n"
         );
         // With no local in the way `-g` is an ordinary global declaration.
@@ -91802,14 +96326,20 @@ st=1
         );
         // A bad `-i` value discards the command (as it does for a scalar), leaves
         // the array *valued but empty*, and abandons every operand after it.
-        let (o, _) = run("declare -ai bad=2+ ok=1 2>/dev/null\ndeclare -p bad\ndeclare -p ok 2>/dev/null; echo \"ok=$?\"");
+        let (o, _) = run(
+            "declare -ai bad=2+ ok=1 2>/dev/null\ndeclare -p bad\ndeclare -p ok 2>/dev/null; echo \"ok=$?\"",
+        );
         assert_eq!(o, "declare -ai bad=()\nok=1\n");
         // The same for a *scalar* declaration, where the name is left
         // created-but-unset rather than valued-empty.
-        let (o2, _) = run("declare -i bad=2+ ok=1 2>/dev/null\ndeclare -p bad\ndeclare -p ok 2>/dev/null; echo \"ok=$?\"");
+        let (o2, _) = run(
+            "declare -i bad=2+ ok=1 2>/dev/null\ndeclare -p bad\ndeclare -p ok 2>/dev/null; echo \"ok=$?\"",
+        );
         assert_eq!(o2, "declare -i bad\nok=1\n");
         // And for a subscripted operand.
-        let (o3, _) = run("declare -ai b[0]=2+ ok=1 2>/dev/null\ndeclare -p b\ndeclare -p ok 2>/dev/null; echo \"ok=$?\"");
+        let (o3, _) = run(
+            "declare -ai b[0]=2+ ok=1 2>/dev/null\ndeclare -p b\ndeclare -p ok 2>/dev/null; echo \"ok=$?\"",
+        );
         assert_eq!(o3, "declare -ai b=()\nok=1\n");
     }
 
@@ -91818,22 +96348,24 @@ st=1
         // The *first* element chooses the mode. Unsubscripted first ⇒ the whole
         // list is consumed as alternating key/value words (a bare list is not an
         // error at all), and a trailing odd word gets the empty string.
-        let (o, _) = run(
-            "declare -A m=(a 1 b 2 c); echo \"n=${#m[@]} a=${m[a]} b=${m[b]} c=[${m[c]}]\"",
-        );
+        let (o, _) =
+            run("declare -A m=(a 1 b 2 c); echo \"n=${#m[@]} a=${m[a]} b=${m[b]} c=[${m[c]}]\"");
         assert_eq!(o, "n=3 a=1 b=2 c=[]\n");
         // In pair mode a later `[k]=v` is *not* interpreted — it is a literal key.
-        let (o2, _) = run("declare -A p=(x 1 [y]=2); echo \"n=${#p[@]} lit=${p['[y]=2']-missing}\"");
+        let (o2, _) =
+            run("declare -A p=(x 1 [y]=2); echo \"n=${#p[@]} lit=${p['[y]=2']-missing}\"");
         assert_eq!(o2, "n=2 lit=\n");
         // Subscripted first ⇒ the other mode, where a bare word is rejected by
         // name (status still 0) while the rest of the list still lands. bash
         // quotes the word for a `declare` operand and not for a bare `m=(…)`.
-        let (o3, _) = run("{ declare -A k=([a]=1 loose [b]=2); } 2>&1\necho \"s=$? a=${k[a]} b=${k[b]}\"");
+        let (o3, _) =
+            run("{ declare -A k=([a]=1 loose [b]=2); } 2>&1\necho \"s=$? a=${k[a]} b=${k[b]}\"");
         assert_eq!(
             o3,
             "osh: k: 'loose': must use subscript when assigning associative array\ns=0 a=1 b=2\n"
         );
-        let (o5, _) = run("declare -A k2\n{ k2=([a]=1 loose [b]=2); } 2>&1\necho \"s=$? n=${#k2[@]}\"");
+        let (o5, _) =
+            run("declare -A k2\n{ k2=([a]=1 loose [b]=2); } 2>&1\necho \"s=$? n=${#k2[@]}\"");
         assert_eq!(
             o5,
             "osh: k2: loose: must use subscript when assigning associative array\ns=0 n=2\n"
@@ -91880,7 +96412,8 @@ st=1
         let (o2, _) = run("declare -A m2\ne=\n{ m2=([$e]=v); } 2>&1\necho \"s=$? n=${#m2[@]}\"");
         assert_eq!(o2, "osh: [$e]=v: bad array subscript\ns=0 n=0\n");
         // …and the same in pair mode, where the key is a bare element.
-        let (o3, _) = run("{ declare -A p=(k1 v1 \"\" x k2 v2); } 2>&1\necho \"n=${#p[@]} k2=${p[k2]}\"");
+        let (o3, _) =
+            run("{ declare -A p=(k1 v1 \"\" x k2 v2); } 2>&1\necho \"n=${#p[@]} k2=${p[k2]}\"");
         assert_eq!(o3, "osh: '': bad array subscript\nn=2 k2=v2\n");
         let (o4, _) = run("declare -A p2\n{ p2=(\"\" v); } 2>&1\necho \"n=${#p2[@]}\"");
         assert_eq!(o4, "osh: \"\": bad array subscript\nn=0\n");
@@ -91897,7 +96430,10 @@ st=1
         let (o, _) = run("s='x y'; declare -A m=(a $s b); declare -p m");
         assert_eq!(o, "declare -A m=([b]=\"\" [a]=\"x y\" )\n");
         let (o2, _) = run("s='x y'; declare -a n=(a $s b); declare -p n");
-        assert_eq!(o2, "declare -a n=([0]=\"a\" [1]=\"x\" [2]=\"y\" [3]=\"b\")\n");
+        assert_eq!(
+            o2,
+            "declare -a n=([0]=\"a\" [1]=\"x\" [2]=\"y\" [3]=\"b\")\n"
+        );
         // Brace expansion does not run either, so the braces are part of the key.
         assert_eq!(
             run("declare -A m=({a,b} 1); declare -p m").0,
@@ -91984,7 +96520,10 @@ st=1
         // ever being looked at, so the `-i` evaluation below never runs and its
         // division is never reported.
         let (o, _) = run("declare -ai n\n{ n=([-5]=1/0); } 2>&1\ndeclare -p n; echo \"s=$?\"");
-        assert_eq!(o, "osh: [-5]=1/0: bad array subscript\ndeclare -ai n=()\ns=0\n");
+        assert_eq!(
+            o,
+            "osh: [-5]=1/0: bad array subscript\ndeclare -ai n=()\ns=0\n"
+        );
     }
 
     #[test]
@@ -92031,7 +96570,10 @@ st=1
         // Only reaching back past the start has nowhere to live — and an empty
         // array has no end to count from at all.
         let (o, _) = run("declare -a c=(p q)\n{ c+=([-3]=Z); } 2>&1\ndeclare -p c");
-        assert_eq!(o, "osh: [-3]=Z: bad array subscript\ndeclare -a c=([0]=\"p\" [1]=\"q\")\n");
+        assert_eq!(
+            o,
+            "osh: [-3]=Z: bad array subscript\ndeclare -a c=([0]=\"p\" [1]=\"q\")\n"
+        );
         let (o, _) = run("declare -a g=()\n{ g+=([-1]=Z); } 2>&1\ndeclare -p g");
         assert_eq!(o, "osh: [-1]=Z: bad array subscript\ndeclare -a g=()\n");
     }
@@ -92076,9 +96618,15 @@ st=1
         // A bare assignment and a `for` loop's control variable are nobody's
         // operand, so they are unsigned.
         let (o, _) = run("declare -i n; { n=3+; } 2>&1");
-        assert_eq!(o, "osh: 3+: syntax error: operand expected (error token is \"+\")\n");
+        assert_eq!(
+            o,
+            "osh: 3+: syntax error: operand expected (error token is \"+\")\n"
+        );
         let (o, _) = run("declare -i n; { for n in 3+; do :; done; } 2>&1");
-        assert_eq!(o, "osh: 3+: syntax error: operand expected (error token is \"+\")\n");
+        assert_eq!(
+            o,
+            "osh: 3+: syntax error: operand expected (error token is \"+\")\n"
+        );
         // The same signature goes on the other complaint the store makes.
         for (b, tag) in [
             ("read -r 'r[0]' <<< v", "read"),
@@ -92086,10 +96634,12 @@ st=1
             ("readarray -t r <<< v", "readarray"),
             ("let 'r[0] = 5'", "let"),
         ] {
-            let (o, _) = run(&format!(
-                "q=(x y); declare -n r='q[1]'; {{ {b}; }} 2>&1"
-            ));
-            assert_eq!(o, format!("osh: {tag}: `q[1]': not a valid identifier\n"), "{b}");
+            let (o, _) = run(&format!("q=(x y); declare -n r='q[1]'; {{ {b}; }} 2>&1"));
+            assert_eq!(
+                o,
+                format!("osh: {tag}: `q[1]': not a valid identifier\n"),
+                "{b}"
+            );
         }
         // `getopts` names a variable too: with nothing left to scan it binds
         // `?`, which an `-i` name cannot hold.
@@ -92115,9 +96665,7 @@ st=1
         // The callback runs a simple command, so the store that follows it is
         // unsigned — where the very same store one line earlier, before any
         // callback has run, still carries `mapfile`.
-        let (o, _) = run(
-            "declare -ai q; { mapfile -t -C 'echo cb' -c 1 q <<< $'1+1\\nq+'; } 2>&1"
-        );
+        let (o, _) = run("declare -ai q; { mapfile -t -C 'echo cb' -c 1 q <<< $'1+1\\nq+'; } 2>&1");
         assert_eq!(
             o,
             "cb 0 1+1\ncb 1 q+\n\
@@ -92131,16 +96679,13 @@ st=1
                 "f() {{ :; }}\ndeclare -ai q\n{{ mapfile -t -C '{cb} >/dev/null 2>&1' -c 1 q <<< 'q+'; }} 2>&1"
             ));
             assert_eq!(
-                o,
-                "osh: q+: syntax error: operand expected (error token is \"+\")\n",
+                o, "osh: q+: syntax error: operand expected (error token is \"+\")\n",
                 "{cb}"
             );
         }
         // A *pipeline* does not, because bash forks for every element of one and
         // the child's blanking never reaches the parent.
-        let (o, _) = run(
-            "declare -ai q; { mapfile -t -C 'true | true' -c 1 q <<< 'q+'; } 2>&1"
-        );
+        let (o, _) = run("declare -ai q; { mapfile -t -C 'true | true' -c 1 q <<< 'q+'; } 2>&1");
         assert_eq!(
             o,
             "osh: mapfile: q+: syntax error: operand expected (error token is \"+\")\n"
@@ -92223,11 +96768,15 @@ st=1
         assert_eq!(o, "rc=0\nafter\n");
         // The subject named is the whole word with its quotes removed, as for
         // every other bad substitution.
-        let (o2, _) = run("a=(one two)\n{ echo \"X${a[]}Y\"; echo unreachable; } 2>&1\necho \"rc=$?\"\necho after");
+        let (o2, _) = run(
+            "a=(one two)\n{ echo \"X${a[]}Y\"; echo unreachable; } 2>&1\necho \"rc=$?\"\necho after",
+        );
         assert_eq!(o2, "osh: X${a[]}Y: bad substitution\nrc=1\nafter\n");
         // Every brace form that can carry a subscript defers the same way.
         for form in ["${#a[]}", "${!a[]}", "${a[]:-def}", "${a[]#o}"] {
-            let (o3, _) = run(&format!("a=(one two)\n{{ echo \"{form}\"; }} 2>&1\necho after"));
+            let (o3, _) = run(&format!(
+                "a=(one two)\n{{ echo \"{form}\"; }} 2>&1\necho after"
+            ));
             assert_eq!(o3, format!("osh: {form}: bad substitution\nafter\n"));
         }
     }
@@ -92241,7 +96790,9 @@ st=1
         // (`valid_brace_expansion_word`, subst.c); a lone `.` or a space is none
         // of the four. osh used to read the character as the name and expand it
         // to the empty string, silently and with status 0.
-        for body in [".", " ", "\t", "+", "=", ":", "/", "^", ",", "~", "%", "<", "{"] {
+        for body in [
+            ".", " ", "\t", "+", "=", ":", "/", "^", ",", "~", "%", "<", "{",
+        ] {
             let (o, _) = run(&format!("{{ echo \"${{{body}}}\"; }} 2>&1\necho after"));
             assert_eq!(o, format!("osh: ${{{body}}}: bad substitution\nafter\n"));
         }
@@ -92272,9 +96823,8 @@ st=1
         // the outermost enclosing loop and carry on — they do not keep
         // unwinding out of the script. (bash: same.) Before the clamp the
         // surplus levels escaped every loop and silently truncated the run.
-        let (o, _) = run(
-            "for a in 1 2; do for b in x y; do break 9; done; done; echo \"s=$?\"; echo after",
-        );
+        let (o, _) =
+            run("for a in 1 2; do for b in x y; do break 9; done; done; echo \"s=$?\"; echo after");
         assert_eq!(o, "s=0\nafter\n");
         // `continue 9` two deep restarts the *outer* loop, so the inner loop
         // never reaches its second item and the outer body never finishes.
@@ -92297,16 +96847,28 @@ st=1
         // (0) is the loop's. Before the fix the loop restored the status saved
         // at the *end of the previous iteration*, so a failure two iterations
         // back leaked out. (bash: all of these are 0.)
-        assert_eq!(run("for i in 1 2 3; do (exit 4); [ $i = 3 ] && break; done; echo $?").0, "0\n");
-        assert_eq!(run("for i in 1 2; do (exit 5); break; done; echo $?").0, "0\n");
-        assert_eq!(run("for i in 1 2; do break; (exit 5); done; echo $?").0, "0\n");
+        assert_eq!(
+            run("for i in 1 2 3; do (exit 4); [ $i = 3 ] && break; done; echo $?").0,
+            "0\n"
+        );
+        assert_eq!(
+            run("for i in 1 2; do (exit 5); break; done; echo $?").0,
+            "0\n"
+        );
+        assert_eq!(
+            run("for i in 1 2; do break; (exit 5); done; echo $?").0,
+            "0\n"
+        );
         assert_eq!(
             run("i=0; while [ $i -lt 3 ]; do i=$((i+1)); (exit 6); [ $i = 2 ] && break; done; echo $?").0,
             "0\n"
         );
         // `continue` already fell through to the per-iteration bookkeeping, and
         // an inner `break N` must not leak either.
-        assert_eq!(run("for i in 1 2; do (exit 7); continue; done; echo $?").0, "0\n");
+        assert_eq!(
+            run("for i in 1 2; do (exit 7); continue; done; echo $?").0,
+            "0\n"
+        );
         assert_eq!(
             run("for a in 1 2; do for b in x y; do (exit 8); break 2; done; done; echo $?").0,
             "0\n"
@@ -92323,12 +96885,21 @@ st=1
         assert_eq!(o, "osh: break: abc: numeric argument required\n");
         assert_eq!(s, 128);
         // The OR keeps a status that already carries the 128 bit …
-        assert_eq!(run("(exit 130); for i in 1; do break xyz; done 2>/dev/null").1, 130);
+        assert_eq!(
+            run("(exit 130); for i in 1; do break xyz; done 2>/dev/null").1,
+            130
+        );
         // … and adds to one that does not.
-        assert_eq!(run("(exit 3); for i in 1; do continue 2abc; done 2>/dev/null").1, 131);
+        assert_eq!(
+            run("(exit 3); for i in 1; do continue 2abc; done 2>/dev/null").1,
+            131
+        );
         // Hex and overflowing literals are not numbers to bash either.
         assert_eq!(run("for i in 1; do break 0x10; done 2>/dev/null").1, 128);
-        assert_eq!(run("for i in 1; do break 99999999999999999999999; done 2>/dev/null").1, 128);
+        assert_eq!(
+            run("for i in 1; do break 99999999999999999999999; done 2>/dev/null").1,
+            128
+        );
         // A second operand is "too many arguments" — status 1, the rest of the
         // current top-level unit discarded — and it is diagnosed *before* the
         // range check, so `break 0 2` reports this rather than the range error.
@@ -92350,10 +96921,14 @@ st=1
         assert_eq!(o5, "osh: continue: -1: loop count out of range\nouter=1\n");
         // `--` ends option processing; the count may carry a sign and padding.
         assert_eq!(
-            run("for a in 1 2; do for b in x y; do break -- 2; done; echo inner=$?; done; echo $?").0,
+            run("for a in 1 2; do for b in x y; do break -- 2; done; echo inner=$?; done; echo $?")
+                .0,
             "0\n"
         );
-        assert_eq!(run("for i in 1 2; do break --; echo no; done; echo $?").0, "0\n");
+        assert_eq!(
+            run("for i in 1 2; do break --; echo no; done; echo $?").0,
+            "0\n"
+        );
         assert_eq!(
             run("for a in 1 2; do for b in x y; do break \" +2 \"; done; echo inner=$?; done; echo $?").0,
             "0\n"
@@ -92393,13 +96968,19 @@ st=1
         ] {
             assert_eq!(run(src).0, "s=0\n", "{src:?}");
         }
-        assert_eq!(run("set -o posix; echo before; break; echo after").0, "before\nafter\n");
+        assert_eq!(
+            run("set -o posix; echo before; break; echo after").0,
+            "before\nafter\n"
+        );
         // Inside a loop posix mode changes nothing: an out-of-range count is
         // still reported and still fails.
         let (o5, _) = run("set -o posix; for i in 1; do { break 0; } 2>&1; done; echo s=$?");
         assert_eq!(o5, "osh: break: 0: loop count out of range\ns=1\n");
         // Inside a loop, `break` still works normally.
-        assert_eq!(run("for i in 1 2 3; do echo $i; break; done; echo done").0, "1\ndone\n");
+        assert_eq!(
+            run("for i in 1 2 3; do echo $i; break; done; echo done").0,
+            "1\ndone\n"
+        );
         // A `break` inside a function called from a loop must NOT break the
         // enclosing loop: bash resets loop nesting on function entry, so the
         // break is an error inside the function and the loop keeps iterating.
@@ -92572,7 +97153,10 @@ st=1
         // named and it is the store that refused it. See
         // [`an_assign_default_that_cannot_store_refuses_and_abandons_with_status_2`].
         let (o, s) = run("a=(x); { echo [${a[-5]:=v}]; } 2>&1; echo AFTER");
-        assert_eq!(o, "osh: a: bad array subscript\nosh: a[-5]: bad array subscript\n");
+        assert_eq!(
+            o,
+            "osh: a: bad array subscript\nosh: a[-5]: bad array subscript\n"
+        );
         assert_eq!(s, 2);
     }
 
@@ -92608,7 +97192,10 @@ st=1
         // Pattern replacement on an element.
         assert_eq!(run("a=(a-b-c); echo ${a[0]//-/_}").0, "a_b_c\n");
         // `:=` assign-default writes the element back.
-        assert_eq!(run("a=(x); echo ${a[2]:=new}; echo ${a[2]}").0, "new\nnew\n");
+        assert_eq!(
+            run("a=(x); echo ${a[2]:=new}; echo ${a[2]}").0,
+            "new\nnew\n"
+        );
         // Associative element with an operator (string key).
         assert_eq!(
             run("declare -A m; m[k]=v; echo ${m[k]:-def} ${m[nope]:-def}").0,
@@ -92654,11 +97241,17 @@ st=1
         // arithmetic subscript evaluates normally; an invalid one is fatal with
         // bash's exact arith diagnostic; an associative key keeps its literal
         // spaces. All three verified byte-for-byte against bash 5.2.
-        assert_eq!(run("a=([1 + 2]=99); declare -p a").0, "declare -a a=([3]=\"99\")\n");
+        assert_eq!(
+            run("a=([1 + 2]=99); declare -p a").0,
+            "declare -a a=([3]=\"99\")\n"
+        );
         // The invalid arith subscript is fatal; route its stderr into the capture
         // via a redirected group so the diagnostic text can be asserted.
         let (o, s) = run("{ a=([3 x]=99); } 2>&1");
-        assert_eq!(o, "osh: 3 x: syntax error in expression (error token is \"x\")\n");
+        assert_eq!(
+            o,
+            "osh: 3 x: syntax error in expression (error token is \"x\")\n"
+        );
         assert_eq!(s, 1);
         assert_eq!(
             run("declare -A m; m=([a b]=v); declare -p m").0,
@@ -92710,7 +97303,10 @@ st=1
         // Values and keys come back in bash's hash order, which for `a` and `b`
         // puts `b` first — see [`crate::assoc`].
         assert_eq!(run("declare -A m; m[a]=x; m[b]=y; echo ${m[@]}").0, "y x\n");
-        assert_eq!(run("declare -A m; m[a]=x; m[b]=y; echo ${!m[@]}").0, "b a\n");
+        assert_eq!(
+            run("declare -A m; m[a]=x; m[b]=y; echo ${!m[@]}").0,
+            "b a\n"
+        );
     }
 
     #[test]
@@ -92730,7 +97326,10 @@ st=1
     #[test]
     fn assoc_expanded_key() {
         // The subscript on assignment/read is a string key, expanded not arith'd.
-        assert_eq!(run("declare -A m; k=foo; m[$k]=bar; echo ${m[foo]}").0, "bar\n");
+        assert_eq!(
+            run("declare -A m; k=foo; m[$k]=bar; echo ${m[foo]}").0,
+            "bar\n"
+        );
     }
 
     #[test]
@@ -92772,7 +97371,8 @@ st=1
         );
         // Mixed bare and quoted keys in one literal, plus an expansion key.
         assert_eq!(
-            run("k=dk; declare -A h=([p]=1 [\"q u\"]=2 [$k]=3); echo \"${h[p]}${h[q u]}${h[dk]}\"").0,
+            run("k=dk; declare -A h=([p]=1 [\"q u\"]=2 [$k]=3); echo \"${h[p]}${h[q u]}${h[dk]}\"")
+                .0,
             "123\n"
         );
     }
@@ -92803,7 +97403,10 @@ st=1
         );
         // Regression guard: a plain quoted key without `]` and an ordinary
         // indexed read still resolve correctly.
-        assert_eq!(run("declare -A h=([\"k\"]=4); echo \"${h[\"k\"]}\"").0, "4\n");
+        assert_eq!(
+            run("declare -A h=([\"k\"]=4); echo \"${h[\"k\"]}\"").0,
+            "4\n"
+        );
         assert_eq!(run("a=(7 8 9); echo \"${a[2]}\"").0, "9\n");
     }
 
@@ -92813,8 +97416,14 @@ st=1
         // literal " x " (with surrounding spaces), on both the store and the read
         // path. A no-space read `${h[x]}` therefore does NOT match. (Regression
         // for TD-OILS-ASSOC-KEY-TRIM.)
-        assert_eq!(run("declare -A h; h[ x ]=v; echo \"[${!h[@]}]\"").0, "[ x ]\n");
-        assert_eq!(run("declare -A h; h[ x ]=v; echo \"[${h[ x ]}]\"").0, "[v]\n");
+        assert_eq!(
+            run("declare -A h; h[ x ]=v; echo \"[${!h[@]}]\"").0,
+            "[ x ]\n"
+        );
+        assert_eq!(
+            run("declare -A h; h[ x ]=v; echo \"[${h[ x ]}]\"").0,
+            "[v]\n"
+        );
         assert_eq!(run("declare -A h; h[ x ]=v; echo \"[${h[x]}]\"").0, "[]\n");
         // Same for a keyed array-literal element `([ x ]=v)`.
         assert_eq!(
@@ -92851,9 +97460,15 @@ st=1
         // to key "0" (bash: `declare -A b; b=a` yields `b[0]=a`). Same for the
         // `+=` append and the `-i` integer forms, and it coexists with other keys.
         assert_eq!(run("declare -A b; b=a; echo \"[${b[0]}]\"").0, "[a]\n");
-        assert_eq!(run("declare -A b; b=x; b+=y; echo \"[${b[0]}]\"").0, "[xy]\n");
+        assert_eq!(
+            run("declare -A b; b=x; b+=y; echo \"[${b[0]}]\"").0,
+            "[xy]\n"
+        );
         assert_eq!(run("declare -A b; b+=y; echo \"[${b[0]}]\"").0, "[y]\n");
-        assert_eq!(run("declare -Ai b; b=5; b+=3; echo \"[${b[0]}]\"").0, "[8]\n");
+        assert_eq!(
+            run("declare -Ai b; b=5; b+=3; echo \"[${b[0]}]\"").0,
+            "[8]\n"
+        );
         assert_eq!(
             run("declare -A b=([k]=v); b=scalar; echo \"${b[0]}-${b[k]}\"").0,
             "scalar-v\n"
@@ -92882,7 +97497,10 @@ st=1
         // `+=` on an empty array is still an assignment.
         assert_eq!(run("a=(); a+=(); declare -p a").0, "declare -a a=()\n");
         // Combined attribute + empty literal.
-        assert_eq!(run("declare -ai a=(); declare -p a").0, "declare -ai a=()\n");
+        assert_eq!(
+            run("declare -ai a=(); declare -p a").0,
+            "declare -ai a=()\n"
+        );
         // Unsetting the whole variable clears the flag.
         assert_eq!(
             run("a=(); unset a; declare -a a; declare -p a").0,
@@ -93032,8 +97650,10 @@ st=1
             "rc=1\n"
         );
         assert_eq!(
-            run("x=$( eval 'declare -i v=2+' 2>/dev/null; echo NOT-REACHED )\necho \"rc=$? x=[$x]\"")
-                .0,
+            run(
+                "x=$( eval 'declare -i v=2+' 2>/dev/null; echo NOT-REACHED )\necho \"rc=$? x=[$x]\""
+            )
+            .0,
             "rc=1 x=[]\n"
         );
         // …and under `-c` there is no outer level left to resume at, so the
@@ -93245,7 +97865,10 @@ st=1
         // each time, and `i` counts the readings in the shell itself.
         let count = "i=$i other=${other-U} nosuch=${nosuch-U}";
         assert_eq!(
-            run(&format!("i=0; e=(nosuch other); echo \"[${{!e[i++]:=D}}] {count}\"")).0,
+            run(&format!(
+                "i=0; e=(nosuch other); echo \"[${{!e[i++]:=D}}] {count}\""
+            ))
+            .0,
             "[D] i=2 other=D nosuch=U\n"
         );
         // Reaching nothing on the second reading is the one complaint here that
@@ -93372,7 +97995,10 @@ st=1
         );
         // The subscript is evaluated as arithmetic on an indexed array, and
         // taken as a literal key on an associative one.
-        assert_eq!(run("v=5; read 'a[v]' <<< NEW; declare -p a").0, "declare -a a=([5]=\"NEW\")\n");
+        assert_eq!(
+            run("v=5; read 'a[v]' <<< NEW; declare -p a").0,
+            "declare -a a=([5]=\"NEW\")\n"
+        );
         assert_eq!(
             run("a=(x y); read 'a[1+1]' <<< NEW; declare -p a").0,
             "declare -a a=([0]=\"x\" [1]=\"y\" [2]=\"NEW\")\n"
@@ -93449,14 +98075,20 @@ st=1
         // The *first* name is checked before anything is read, so that refusal
         // costs the input nothing and a following read still sees all of it…
         assert_eq!(
-            run("{ read 1bad ok; read r; } <<< 'p q' 2>/dev/null; echo \"r=[$r] ok=[${ok-unset}]\"").0,
+            run(
+                "{ read 1bad ok; read r; } <<< 'p q' 2>/dev/null; echo \"r=[$r] ok=[${ok-unset}]\""
+            )
+            .0,
             "r=[p q] ok=[unset]\n"
         );
         // …while a later one is only reached once the record has been read and
         // handed out, so the input is gone and the earlier names keep what they
         // were given.
         assert_eq!(
-            run("{ read x y 1bad; read r; } <<< 'p q z' 2>/dev/null; echo \"r=[$r] x=[$x] y=[$y]\"").0,
+            run(
+                "{ read x y 1bad; read r; } <<< 'p q z' 2>/dev/null; echo \"r=[$r] x=[$x] y=[$y]\""
+            )
+            .0,
             "r=[] x=[p] y=[q]\n"
         );
         // `-a` names an array to fill, so a subscript is not a name it takes —
@@ -93495,7 +98127,10 @@ st=1
         );
         // `--` ends the options without becoming a name — but only while they
         // are still being scanned. After a name it is a name, and a bad one.
-        assert_eq!(run("read -- a <<< 'one two'; echo \"a=[$a]\"").0, "a=[one two]\n");
+        assert_eq!(
+            run("read -- a <<< 'one two'; echo \"a=[$a]\"").0,
+            "a=[one two]\n"
+        );
         assert_eq!(
             run("read a -- b <<< 'one two' 2>&1; echo rc=$?").0,
             "osh: read: `--': not a valid identifier\nrc=1\n"
@@ -93542,7 +98177,10 @@ st=1
             "osh: printf: `m[]': not a valid identifier\nrc=2\ndeclare -A m\n"
         );
         // The shapes that do name somewhere are untouched.
-        assert_eq!(run("printf -v 'a[0]' x; declare -p a").0, "declare -a a=([0]=\"x\")\n");
+        assert_eq!(
+            run("printf -v 'a[0]' x; declare -p a").0,
+            "declare -a a=([0]=\"x\")\n"
+        );
         assert_eq!(
             run("declare -A m; printf -v 'm[k v]' x; declare -p m").0,
             "declare -A m=([\"k v\"]=\"x\" )\n"
@@ -93572,7 +98210,10 @@ st=1
         );
         // An option word is still an option word after one has been seen, so
         // `--` ends the scan wherever it falls and a bad option is still bad.
-        assert_eq!(run("printf -v c1 -- '%s' q; echo \"c1=[$c1]\"").0, "c1=[q]\n");
+        assert_eq!(
+            run("printf -v c1 -- '%s' q; echo \"c1=[$c1]\"").0,
+            "c1=[q]\n"
+        );
         assert_eq!(
             run("printf -v c2 -z '%s' q 2>&1; echo rc=$?").0,
             "osh: printf: -z: invalid option\nprintf: usage: printf [-v var] format [arguments]\nrc=2\n"
@@ -93630,7 +98271,10 @@ st=1
         // The record readers report the same way.
         for opt in ["-d ,", "-d ''", "-n 3", "-N 3"] {
             assert_eq!(
-                run(&format!("r=stale; read {opt} r < /dev/null; echo \"rc=$? r=[$r]\"")).0,
+                run(&format!(
+                    "r=stale; read {opt} r < /dev/null; echo \"rc=$? r=[$r]\""
+                ))
+                .0,
                 "rc=1 r=[]\n",
                 "read {opt} at EOF"
             );
@@ -93644,12 +98288,18 @@ st=1
         // the input, so the next read still sees all of it.
         for opt in ["-n 0", "-N 0"] {
             assert_eq!(
-                run(&format!("r=stale; read {opt} r <<< abc; echo \"rc=$? r=[$r]\"")).0,
+                run(&format!(
+                    "r=stale; read {opt} r <<< abc; echo \"rc=$? r=[$r]\""
+                ))
+                .0,
                 "rc=0 r=[]\n",
                 "read {opt}"
             );
             assert_eq!(
-                run(&format!("{{ read {opt} a; read b; }} <<< abc; echo \"[$a][$b]\"")).0,
+                run(&format!(
+                    "{{ read {opt} a; read b; }} <<< abc; echo \"[$a][$b]\""
+                ))
+                .0,
                 "[][abc]\n",
                 "read {opt} consumed input"
             );
@@ -93727,8 +98377,14 @@ st=1
             "braceexpand:hashall:histexpand:history:interactive-comments\n"
         );
         // `[[ -o NAME ]]` agrees with the listing, both ways round.
-        assert_eq!(run("[[ -o histexpand ]] && [[ -o history ]]; echo $?").0, "0\n");
-        assert_eq!(run_script("[[ -o histexpand ]] || [[ -o history ]]; echo $?").0, "1\n");
+        assert_eq!(
+            run("[[ -o histexpand ]] && [[ -o history ]]; echo $?").0,
+            "0\n"
+        );
+        assert_eq!(
+            run_script("[[ -o histexpand ]] || [[ -o history ]]; echo $?").0,
+            "1\n"
+        );
     }
 
     #[test]
@@ -93810,7 +98466,10 @@ st=1
     fn declare_indexed_oneliner() {
         // `declare -a a=(x y z)` (and the flagless `declare a=(…)`) make an
         // indexed array in one statement.
-        assert_eq!(run("declare -a a=(x y z); echo ${a[1]} ${#a[@]}").0, "y 3\n");
+        assert_eq!(
+            run("declare -a a=(x y z); echo ${a[1]} ${#a[@]}").0,
+            "y 3\n"
+        );
         assert_eq!(run("declare a=(p q); echo ${a[@]}").0, "p q\n");
     }
 
@@ -93818,7 +98477,10 @@ st=1
     fn declare_array_string_value_is_reparsed_literal() {
         // A quoted parenthesized string assigned to a declared array is a
         // compound array literal that bash re-parses and re-expands.
-        assert_eq!(run("declare -a a=\"(1 2 3)\"; echo ${#a[@]} ${a[2]}").0, "3 3\n");
+        assert_eq!(
+            run("declare -a a=\"(1 2 3)\"; echo ${#a[@]} ${a[2]}").0,
+            "3 3\n"
+        );
         // Sparse indices survive the round-trip.
         assert_eq!(
             run("declare -a a=\"([2]=x [5]=y)\"; echo ${!a[@]}").0,
@@ -93900,8 +98562,14 @@ st=1
         for op in ["-e", "-a", "-c", "-r", "-w"] {
             assert_eq!(run(&format!("[ {op} /dev/null ]")).1, 0, "{op} should hold");
         }
-        for op in ["-f", "-d", "-b", "-p", "-S", "-s", "-u", "-g", "-k", "-L", "-h", "-x"] {
-            assert_eq!(run(&format!("[ {op} /dev/null ]")).1, 1, "{op} should not hold");
+        for op in [
+            "-f", "-d", "-b", "-p", "-S", "-s", "-u", "-g", "-k", "-L", "-h", "-x",
+        ] {
+            assert_eq!(
+                run(&format!("[ {op} /dev/null ]")).1,
+                1,
+                "{op} should not hold"
+            );
         }
         // Ownership and freshness are asserted only where the answers are the
         // shell's own: a real `/dev/null` belongs to root and carries whatever
@@ -93936,11 +98604,20 @@ st=1
         // mirroring the compound path. Captured through command substitution
         // (fd 1 is a pipe), so the dup aliases onto that pipe.
         // Builtin `echo`:
-        assert_eq!(run("r=$(echo hi 3>&1 2>&3); echo \"[$r]\""), ("[hi]\n".into(), 0));
+        assert_eq!(
+            run("r=$(echo hi 3>&1 2>&3); echo \"[$r]\""),
+            ("[hi]\n".into(), 0)
+        );
         // A different scratch fd number works the same way.
-        assert_eq!(run("r=$(echo hi 4>&1 2>&4); echo \"[$r]\""), ("[hi]\n".into(), 0));
+        assert_eq!(
+            run("r=$(echo hi 4>&1 2>&4); echo \"[$r]\""),
+            ("[hi]\n".into(), 0)
+        );
         // External command (`env echo`): the child inherits the resolved fds.
-        assert_eq!(run("r=$(env echo hi 3>&1 2>&3); echo \"[$r]\""), ("[hi]\n".into(), 0));
+        assert_eq!(
+            run("r=$(env echo hi 3>&1 2>&3); echo \"[$r]\""),
+            ("[hi]\n".into(), 0)
+        );
     }
 
     #[test]
@@ -94001,7 +98678,10 @@ st=1
         // /dev/null (immediate EOF) counts as ready:
         assert_eq!(run("read -t 0 </dev/null; echo $?"), ("0\n".into(), 0));
         // It must NOT consume: a following `read` still sees the first line.
-        assert_eq!(run("{ read -t 0; read x; echo \"[$x]\"; } <<< \"keep\""), ("[keep]\n".into(), 0));
+        assert_eq!(
+            run("{ read -t 0; read x; echo \"[$x]\"; } <<< \"keep\""),
+            ("[keep]\n".into(), 0)
+        );
     }
 
     #[test]
@@ -94013,7 +98693,10 @@ st=1
         // Setting a soft limit is honoured by a subsequent query.
         assert_eq!(run("ulimit -n 512; ulimit -n"), ("512\n".into(), 0));
         // `unlimited` operand round-trips.
-        assert_eq!(run("ulimit -c unlimited; ulimit -c"), ("unlimited\n".into(), 0));
+        assert_eq!(
+            run("ulimit -c unlimited; ulimit -c"),
+            ("unlimited\n".into(), 0)
+        );
         // Setting without -H/-S touches both; -H then reads the hard value.
         assert_eq!(run("ulimit -n 256; ulimit -Hn"), ("256\n".into(), 0));
         // -S alone leaves the hard limit unchanged (still unlimited by default).
@@ -94036,7 +98719,10 @@ st=1
         // Multiple resource letters print one labelled line each.
         let (out, code) = run("ulimit -c -n");
         assert_eq!(code, 0);
-        assert!(out.contains("core file size") && out.contains("open files"), "got {out:?}");
+        assert!(
+            out.contains("core file size") && out.contains("open files"),
+            "got {out:?}"
+        );
     }
 
     #[test]
@@ -94058,34 +98744,73 @@ st=1
         let (out, code) = run("ulimit -a");
         assert_eq!(code, 0);
         for line in out.lines() {
-            let close = line.find(')').unwrap_or_else(|| panic!("no `)` in {line:?}"));
+            let close = line
+                .find(')')
+                .unwrap_or_else(|| panic!("no `)` in {line:?}"));
             assert_eq!(close + 1, 40, "closing paren off column: {line:?}");
-            assert_eq!(line.as_bytes().get(40), Some(&b' '), "no gap before value: {line:?}");
+            assert_eq!(
+                line.as_bytes().get(40),
+                Some(&b' '),
+                "no gap before value: {line:?}"
+            );
         }
         // Spot-check the three unit widths against bash 5.2.37's own output.
-        assert!(out.contains("core file size              (blocks, -c) 0\n"), "got {out:?}");
-        assert!(out.contains("open files                          (-n) 1024\n"), "got {out:?}");
-        assert!(out.contains("pipe size                (512 bytes, -p) 8\n"), "got {out:?}");
+        assert!(
+            out.contains("core file size              (blocks, -c) 0\n"),
+            "got {out:?}"
+        );
+        assert!(
+            out.contains("open files                          (-n) 1024\n"),
+            "got {out:?}"
+        );
+        assert!(
+            out.contains("pipe size                (512 bytes, -p) 8\n"),
+            "got {out:?}"
+        );
     }
 
     #[test]
     fn ulimit_wants_digits_and_names_the_base_it_refused() {
         // `ulimit` reads its operand with `all_digits`, not with the `strtol`
         // leniency `shift` and `read` get: no sign, no blank on either side.
-        assert_eq!(run("ulimit -n +5 2>&1").0, "osh: ulimit: +5: invalid number\n");
-        assert_eq!(run("ulimit -n ' 5' 2>&1").0, "osh: ulimit:  5: invalid number\n");
-        assert_eq!(run("ulimit -n '5 ' 2>&1").0, "osh: ulimit: 5 : invalid number\n");
+        assert_eq!(
+            run("ulimit -n +5 2>&1").0,
+            "osh: ulimit: +5: invalid number\n"
+        );
+        assert_eq!(
+            run("ulimit -n ' 5' 2>&1").0,
+            "osh: ulimit:  5: invalid number\n"
+        );
+        assert_eq!(
+            run("ulimit -n '5 ' 2>&1").0,
+            "osh: ulimit: 5 : invalid number\n"
+        );
         // The complaint names the base the word reached for — octal before a
         // digit, hex before a lowercase `x` alone.
-        assert_eq!(run("ulimit -n 012x 2>&1").0, "osh: ulimit: 012x: invalid octal number\n");
-        assert_eq!(run("ulimit -n 0x10 2>&1").0, "osh: ulimit: 0x10: invalid hex number\n");
-        assert_eq!(run("ulimit -n 0X10 2>&1").0, "osh: ulimit: 0X10: invalid number\n");
-        assert_eq!(run("ulimit -n 1e3 2>&1").0, "osh: ulimit: 1e3: invalid number\n");
+        assert_eq!(
+            run("ulimit -n 012x 2>&1").0,
+            "osh: ulimit: 012x: invalid octal number\n"
+        );
+        assert_eq!(
+            run("ulimit -n 0x10 2>&1").0,
+            "osh: ulimit: 0x10: invalid hex number\n"
+        );
+        assert_eq!(
+            run("ulimit -n 0X10 2>&1").0,
+            "osh: ulimit: 0X10: invalid number\n"
+        );
+        assert_eq!(
+            run("ulimit -n 1e3 2>&1").0,
+            "osh: ulimit: 1e3: invalid number\n"
+        );
         // A leading `-` never reaches the operand at all: it is an option word,
         // and an unknown one, which is the usage error rather than this.
         let (out, code) = run("ulimit -n -5 2>&1");
         assert_eq!(code, 2);
-        assert!(out.starts_with("osh: ulimit: -5: invalid option\n"), "got {out:?}");
+        assert!(
+            out.starts_with("osh: ulimit: -5: invalid option\n"),
+            "got {out:?}"
+        );
         // A word of no bytes passes `all_digits` vacuously and is zero; a `0`
         // before a digit is read in base ten, not as octal.
         assert_eq!(run("ulimit -c ''; ulimit -c").0, "0\n");
@@ -94101,12 +98826,18 @@ st=1
         // limit and report another. The report is labelled because more than
         // one letter was asked for — not because more than one printed.
         assert_eq!(run("ulimit -c 7 -n"), (format!("{FILES}1024\n"), 0));
-        assert_eq!(run("ulimit -c 7 -n; ulimit -c").0, format!("{FILES}1024\n7\n"));
+        assert_eq!(
+            run("ulimit -c 7 -n; ulimit -c").0,
+            format!("{FILES}1024\n7\n")
+        );
         // The value may also be the rest of the letter's own word.
         assert_eq!(run("ulimit -c7; ulimit -c").0, "7\n");
         // Which is why combined letters are not split: the `f` of `-cf` is the
         // core limit's value, and the `-n` after it is never reached.
-        assert_eq!(run("ulimit -cf -n 2>&1"), ("osh: ulimit: f: invalid number\n".into(), 1));
+        assert_eq!(
+            run("ulimit -cf -n 2>&1"),
+            ("osh: ulimit: f: invalid number\n".into(), 1)
+        );
         // A word starting with `-` is an option, not a value.
         assert_eq!(run("ulimit -c -n").0, format!("{CORE}0\n{FILES}1024\n"));
 
@@ -94119,8 +98850,14 @@ st=1
         assert_eq!(run("ulimit -- 5; ulimit -f").0, "5\n");
         // A bare `-` is a leftover word, not an option — so it is read as a
         // value, and refused as the number it is not.
-        assert_eq!(run("ulimit -c - 2>&1"), ("osh: ulimit: -: invalid number\n".into(), 1));
-        assert_eq!(run("ulimit - 2>&1"), ("osh: ulimit: -: invalid number\n".into(), 1));
+        assert_eq!(
+            run("ulimit -c - 2>&1"),
+            ("osh: ulimit: -: invalid number\n".into(), 1)
+        );
+        assert_eq!(
+            run("ulimit - 2>&1"),
+            ("osh: ulimit: -: invalid number\n".into(), 1)
+        );
 
         // The pending letter is settled only when the next one arrives, so a
         // later `-a` or a later bad option abandons it unset.
@@ -94130,7 +98867,10 @@ st=1
         assert!(o.starts_with("osh: ulimit: -z: invalid option\n"), "{o:?}");
         assert!(o.ends_with("\n0\n"), "the abandoned set took effect: {o:?}");
         // A pair that fails ends the call where it stands.
-        assert_eq!(run("ulimit -c abc -n 2>&1"), ("osh: ulimit: abc: invalid number\n".into(), 1));
+        assert_eq!(
+            run("ulimit -c abc -n 2>&1"),
+            ("osh: ulimit: abc: invalid number\n".into(), 1)
+        );
 
         // Repeats are applied in order, and the last one wins.
         assert_eq!(run("ulimit -c 2 -c 3; ulimit -c").0, "3\n");
@@ -94189,9 +98929,7 @@ st=1
         // `2> file` on a brace group must capture the group's stderr (including
         // an inner `>&2`) to the file while stdout still reaches the outer sink.
         let path = uniq_path("stderrfile");
-        let (o, _) = run(&format!(
-            "{{ echo out; echo err >&2; }} 2> {path}"
-        ));
+        let (o, _) = run(&format!("{{ echo out; echo err >&2; }} 2> {path}"));
         let contents = std::fs::read_to_string(&path).expect("read");
         std::fs::remove_file(&path).ok();
         assert_eq!(o, "out\n");
@@ -94256,9 +98994,7 @@ st=1
     #[test]
     fn compound_for_loop_stderr_redirect() {
         let path = uniq_path("forstderr");
-        run(&format!(
-            "for x in 1 2; do echo e$x >&2; done 2> {path}"
-        ));
+        run(&format!("for x in 1 2; do echo e$x >&2; done 2> {path}"));
         let contents = std::fs::read_to_string(&path).expect("read");
         std::fs::remove_file(&path).ok();
         assert_eq!(contents, "e1\ne2\n");
@@ -94305,7 +99041,8 @@ st=1
     #[test]
     fn pipeline_classifier_routes_external_vs_builtin() {
         let mut sh = new_shell();
-        sh.funcs.insert(b"myfn".to_vec(), parse("echo hi".as_bytes()).unwrap());
+        sh.funcs
+            .insert(b"myfn".to_vec(), parse("echo hi".as_bytes()).unwrap());
         let classify = |sh: &Shell, src: &str| -> bool {
             let prog = parse(src.as_bytes()).unwrap();
             let cmds = &prog.items[0].list.first.commands;
@@ -94342,7 +99079,8 @@ st=1
         use std::sync::mpsc;
         let (tx, rx) = mpsc::channel();
         let h = std::thread::spawn(move || {
-            let (o, _) = run("while true; do echo x; done | while read v; do echo got; break; done");
+            let (o, _) =
+                run("while true; do echo x; done | while read v; do echo got; break; done");
             let _ = tx.send(o);
         });
         let out = rx
@@ -94464,14 +99202,22 @@ st=1
         // osh previously treated the clustered `o` as an ignored flag and left
         // `pipefail` to become a positional, so pipefail stayed off.
         let mut sh = new_shell();
-        assert_eq!(sh.run_source("set -eo pipefail; shopt -oq pipefail && shopt -oq errexit".as_bytes()), 0);
+        assert_eq!(
+            sh.run_source("set -eo pipefail; shopt -oq pipefail && shopt -oq errexit".as_bytes()),
+            0
+        );
         // The `o` may appear anywhere in the cluster; remaining letters stay
         // flags, and successive `o`s consume successive following words.
         let mut sh = new_shell();
-        assert_eq!(sh.run_source("set -oe pipefail; shopt -oq pipefail && shopt -oq errexit".as_bytes()), 0);
+        assert_eq!(
+            sh.run_source("set -oe pipefail; shopt -oq pipefail && shopt -oq errexit".as_bytes()),
+            0
+        );
         let mut sh = new_shell();
         assert_eq!(
-            sh.run_source("set -oo pipefail xtrace; shopt -oq pipefail && shopt -oq xtrace".as_bytes()),
+            sh.run_source(
+                "set -oo pipefail xtrace; shopt -oq pipefail && shopt -oq xtrace".as_bytes()
+            ),
             0
         );
         // Words left after the consumed option name become positionals.
@@ -94480,9 +99226,15 @@ st=1
         let mut sh = new_shell();
         sh.run_source("set -e -o pipefail".as_bytes());
         sh.run_source("set +eo pipefail".as_bytes());
-        assert_eq!(sh.run_source("shopt -oq pipefail || shopt -oq errexit".as_bytes()), 1);
+        assert_eq!(
+            sh.run_source("shopt -oq pipefail || shopt -oq errexit".as_bytes()),
+            1
+        );
         // The end-to-end effect: errexit fires on a pipefail-surfaced failure.
-        assert_eq!(run("set -eo pipefail; false | true; echo reached"), (String::new(), 1));
+        assert_eq!(
+            run("set -eo pipefail; false | true; echo reached"),
+            (String::new(), 1)
+        );
     }
 
     #[cfg(windows)]
@@ -94513,26 +99265,45 @@ st=1
         // status — matching bash's "run `&` in a subshell". (Pre-fix, these fell
         // back to synchronous execution and never set `$!`; see TD-OILS13.)
         for (src, want) in [
-            ("true &", 0),          // builtin
-            ("false &", 1),         // builtin, nonzero status
-            ("{ exit 5; } &", 5),   // compound (brace group)
-            ("( exit 9 ) &", 9),    // subshell
+            ("true &", 0),        // builtin
+            ("false &", 1),       // builtin, nonzero status
+            ("{ exit 5; } &", 5), // compound (brace group)
+            ("( exit 9 ) &", 9),  // subshell
         ] {
             let mut sh = new_shell();
-            assert_eq!(sh.run_source(src.as_bytes()), 0, "backgrounding {src:?} succeeds");
+            assert_eq!(
+                sh.run_source(src.as_bytes()),
+                0,
+                "backgrounding {src:?} succeeds"
+            );
             assert!(sh.last_bg_pid.is_some(), "$! set for {src:?}");
             assert_eq!(sh.jobs.len(), 1, "one job registered for {src:?}");
             // `wait $!` returns the job's exit status. Its row survives that
             // one `wait` and is dropped by the next sweep of the table.
-            assert_eq!(sh.run_source("wait $!".as_bytes()), want, "wait status for {src:?}");
-            assert_eq!(sh.jobs.len(), 1, "job reported but not yet swept for {src:?}");
-            assert_eq!(sh.run_source("wait $!".as_bytes()), want, "status answered again for {src:?}");
+            assert_eq!(
+                sh.run_source("wait $!".as_bytes()),
+                want,
+                "wait status for {src:?}"
+            );
+            assert_eq!(
+                sh.jobs.len(),
+                1,
+                "job reported but not yet swept for {src:?}"
+            );
+            assert_eq!(
+                sh.run_source("wait $!".as_bytes()),
+                want,
+                "status answered again for {src:?}"
+            );
             assert!(sh.jobs.is_empty(), "job swept for {src:?}");
         }
 
         // `$!` survives after a fast job finishes (bash keeps the last bg pid).
         let mut sh = new_shell();
-        assert_eq!(sh.run_source("true &\np=$!\nwait\n[ -n \"$p\" ] && echo saved".as_bytes()), 0);
+        assert_eq!(
+            sh.run_source("true &\np=$!\nwait\n[ -n \"$p\" ] && echo saved".as_bytes()),
+            0
+        );
     }
 
     #[test]
@@ -94549,18 +99320,36 @@ st=1
         assert_eq!(sh.run_source(format!("cd '{cd}'").as_bytes()), 0);
 
         // A redirection applies to the job, rather than being dropped.
-        assert_eq!(sh.run_source("printf 'redirected\\n' > bg.out & wait".as_bytes()), 0);
-        assert_eq!(std::fs::read_to_string(dir.join("bg.out")).expect("bg.out"), "redirected\n");
+        assert_eq!(
+            sh.run_source("printf 'redirected\\n' > bg.out & wait".as_bytes()),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("bg.out")).expect("bg.out"),
+            "redirected\n"
+        );
 
         // An assignment prefix reaches the job's environment.
-        assert_eq!(sh.run_source("V=zz sh -c 'printf v=$V' > bg.env & wait".as_bytes()), 0);
-        assert_eq!(std::fs::read_to_string(dir.join("bg.env")).expect("bg.env"), "v=zz");
+        assert_eq!(
+            sh.run_source("V=zz sh -c 'printf v=$V' > bg.env & wait".as_bytes()),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("bg.env")).expect("bg.env"),
+            "v=zz"
+        );
 
         // The words are expanded once. `true` is a builtin, so a shortcut that
         // expanded them to discover that and then let the general path expand
         // them again would run the substitution twice.
-        assert_eq!(sh.run_source(": > bg.cnt\ntrue $(printf x >> bg.cnt; echo y) &\nwait".as_bytes()), 0);
-        assert_eq!(std::fs::read_to_string(dir.join("bg.cnt")).expect("bg.cnt"), "x");
+        assert_eq!(
+            sh.run_source(": > bg.cnt\ntrue $(printf x >> bg.cnt; echo y) &\nwait".as_bytes()),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("bg.cnt")).expect("bg.cnt"),
+            "x"
+        );
 
         // A name that resolves nowhere is reported by the job, not by the shell:
         // the shell's own status is 0 and the 127 belongs to the job.
@@ -94569,7 +99358,9 @@ st=1
         // …which is also why `command_not_found_handle` gets a chance to run and
         // to supply the job's status.
         assert_eq!(
-            sh.run_source("command_not_found_handle() { return 9; }\nnosuch_cmd_bg_xyz &".as_bytes()),
+            sh.run_source(
+                "command_not_found_handle() { return 9; }\nnosuch_cmd_bg_xyz &".as_bytes()
+            ),
             0
         );
         assert_eq!(sh.run_source("wait $!".as_bytes()), 9);
@@ -94582,7 +99373,11 @@ st=1
         // on the backgrounded pipeline itself is simply not applied, and `! X &`
         // comes out the opposite way round from a foreground `! X`.
         let mut sh = new_shell();
-        assert_eq!(sh.run_source("! true".as_bytes()), 1, "foreground negation still applies");
+        assert_eq!(
+            sh.run_source("! true".as_bytes()),
+            1,
+            "foreground negation still applies"
+        );
         for (src, want) in [
             ("! true &", 0),
             ("! false &", 1),
@@ -94596,8 +99391,16 @@ st=1
             ("( ! true ) &", 1),
             ("{ ! true; } &", 1),
         ] {
-            assert_eq!(sh.run_source(src.as_bytes()), 0, "backgrounding {src:?} succeeds");
-            assert_eq!(sh.run_source("wait $!".as_bytes()), want, "job status for {src:?}");
+            assert_eq!(
+                sh.run_source(src.as_bytes()),
+                0,
+                "backgrounding {src:?} succeeds"
+            );
+            assert_eq!(
+                sh.run_source("wait $!".as_bytes()),
+                want,
+                "job status for {src:?}"
+            );
         }
     }
 
@@ -94610,9 +99413,15 @@ st=1
         assert_eq!(run("x=$(echo hi &); echo \"[$x]\"").0, "[hi]\n");
         assert_eq!(run("x=$(echo hi & wait); echo \"[$x]\"").0, "[hi]\n");
         // Its writes interleave with the substitution's own in write order…
-        assert_eq!(run("x=$(printf a; printf b & wait); echo \"[$x]\"").0, "[ab]\n");
+        assert_eq!(
+            run("x=$(printf a; printf b & wait); echo \"[$x]\"").0,
+            "[ab]\n"
+        );
         // …and so do a compound job's.
-        assert_eq!(run("x=$( { echo g1; echo g2; } & wait ); echo \"[$x]\"").0, "[g1\ng2]\n");
+        assert_eq!(
+            run("x=$( { echo g1; echo g2; } & wait ); echo \"[$x]\"").0,
+            "[g1\ng2]\n"
+        );
         assert_eq!(run("f() { echo fn; }; x=$(f &); echo \"[$x]\"").0, "[fn]\n");
         // The job's status is not the substitution's: the substitution ends when
         // the pipe closes, and never consults it.
@@ -94703,7 +99512,11 @@ st=1
     fn wait_options_cluster_and_p_names_a_variable() {
         // bash reads `wait`'s options with getopt, so the letters cluster and an
         // unknown one is named wherever in the cluster it appears.
-        for (src, want) in [("wait -nx 2>&1", 'x'), ("wait -fx 2>&1", 'x'), ("wait -x 2>&1", 'x')] {
+        for (src, want) in [
+            ("wait -nx 2>&1", 'x'),
+            ("wait -fx 2>&1", 'x'),
+            ("wait -x 2>&1", 'x'),
+        ] {
             let (o, s) = run(src);
             assert_eq!(
                 o,
@@ -94747,7 +99560,11 @@ st=1
         let mut sh = new_shell();
         for src in ["( exit 3 ) &", "( exit 3 ) & ( exit 0 ) &", "false &"] {
             assert_eq!(sh.run_source(src.as_bytes()), 0);
-            assert_eq!(sh.run_source("wait".as_bytes()), 0, "operand-less wait after {src:?}");
+            assert_eq!(
+                sh.run_source("wait".as_bytes()),
+                0,
+                "operand-less wait after {src:?}"
+            );
         }
         // Only a named job answers with its own status.
         sh.run_source("( exit 3 ) &".as_bytes());
@@ -94761,11 +99578,17 @@ st=1
         // parallel test load.
         sh.run_source("VAR=stale; ( sleep 0.1; exit 3 ) &".as_bytes());
         assert_eq!(sh.run_source("wait -p VAR".as_bytes()), 0);
-        assert!(!sh.vars.contains_key("VAR"), "operand-less wait leaves -p VAR unset");
+        assert!(
+            !sh.vars.contains_key("VAR"),
+            "operand-less wait leaves -p VAR unset"
+        );
         // …and so does a `-n` with nothing left to wait for.
         sh.run_source("VAR=stale".as_bytes());
         assert_eq!(sh.run_source("wait -n -p VAR 2>/dev/null".as_bytes()), 127);
-        assert!(!sh.vars.contains_key("VAR"), "`wait -n` with no jobs leaves -p VAR unset");
+        assert!(
+            !sh.vars.contains_key("VAR"),
+            "`wait -n` with no jobs leaves -p VAR unset"
+        );
     }
 
     #[test]
@@ -94780,7 +99603,11 @@ st=1
         sh.run_source("( exit 3 ) &".as_bytes());
         settle_jobs(&mut sh);
         assert_eq!(sh.run_source("wait".as_bytes()), 0);
-        assert_eq!(sh.run_source("wait -n".as_bytes()), 3, "spared job is still answerable");
+        assert_eq!(
+            sh.run_source("wait -n".as_bytes()),
+            3,
+            "spared job is still answerable"
+        );
         // …until a `jobs` listing announces it, after which bash denies the job
         // exists at all: 127 from a bare `-n`, and `no such job` for one named by
         // pid — while a *targeted* `wait PID` still replays the status.
@@ -94793,7 +99620,11 @@ st=1
             "a pid naming a reported job is unknown to `wait -n`"
         );
         assert_eq!(sh.run_source("wait -n".as_bytes()), 127);
-        assert_eq!(sh.run_source("wait $p".as_bytes()), 5, "a targeted wait still answers");
+        assert_eq!(
+            sh.run_source("wait $p".as_bytes()),
+            5,
+            "a targeted wait still answers"
+        );
         // A reported job does not shadow a live one: `-n` waits for the live one.
         sh.run_source("( exit 7 ) & sleep 0.2".as_bytes());
         assert_eq!(sh.run_source("wait".as_bytes()), 0);
@@ -94915,10 +99746,25 @@ st=1
         let mut sh = new_shell();
         sh.run_source("sleep 0.2 &".as_bytes());
         wait_for_bg(&mut sh);
-        assert_eq!(listing(&mut sh, "jobs -r"), "", "-r filters the finished job out");
-        assert_eq!(listing(&mut sh, "jobs -s"), "", "no stopped jobs in a script shell");
-        assert_eq!(listing(&mut sh, "jobs"), "[1]+  Done                    sleep 0.2\n");
-        assert_eq!(listing(&mut sh, "jobs"), "", "reported once, then forgotten");
+        assert_eq!(
+            listing(&mut sh, "jobs -r"),
+            "",
+            "-r filters the finished job out"
+        );
+        assert_eq!(
+            listing(&mut sh, "jobs -s"),
+            "",
+            "no stopped jobs in a script shell"
+        );
+        assert_eq!(
+            listing(&mut sh, "jobs"),
+            "[1]+  Done                    sleep 0.2\n"
+        );
+        assert_eq!(
+            listing(&mut sh, "jobs"),
+            "",
+            "reported once, then forgotten"
+        );
         // Numbering restarts at 1 once the table has drained, and `-l` inserts
         // the pid between the marker and the state column.
         sh.run_source("sleep 0.2 &".as_bytes());
@@ -95002,7 +99848,10 @@ st=1
             sh.run_source("sleep 5 &".as_bytes());
             let (o, _) = run_in(&mut sh, &format!("{{ kill -{sig} %1; :; }} 2>&1"));
             assert_eq!(o, "", "kill -{sig} says nothing");
-            assert_eq!(listing(&mut sh, "jobs"), format!("[1]+  {want:<24}sleep 5\n"));
+            assert_eq!(
+                listing(&mut sh, "jobs"),
+                format!("[1]+  {want:<24}sleep 5\n")
+            );
             sh.run_source("disown -a".as_bytes());
         }
     }
@@ -95014,14 +99863,24 @@ st=1
         // job stays in the substitution's own table instead. A `( … )` group
         // *inside* the substitution is a fresh subshell and announces again.
         let mut sh = new_shell();
-        let (o, _) = run_in(&mut sh, "x=$( sleep 5 & kill -HUP %1; jobs ); echo \"[$x]\"");
+        let (o, _) = run_in(
+            &mut sh,
+            "x=$( sleep 5 & kill -HUP %1; jobs ); echo \"[$x]\"",
+        );
         assert_eq!(o, "[[1]+  Hangup                  sleep 5]\n");
-        let (o, _) =
-            run_in(&mut sh, "x=$( ( sleep 5 & kill -HUP %1; jobs ) 2>&1 ); echo \"[$x]\"");
+        let (o, _) = run_in(
+            &mut sh,
+            "x=$( ( sleep 5 & kill -HUP %1; jobs ) 2>&1 ); echo \"[$x]\"",
+        );
         // The group's own `2>&1` catches the announcement, so it is captured as
         // part of the value — and the group's `jobs` then has nothing to add.
-        let head = o.strip_prefix("[osh: ").expect("the group announced the death");
-        assert!(head.ends_with(" Hangup                  sleep 5]\n"), "{o:?}");
+        let head = o
+            .strip_prefix("[osh: ")
+            .expect("the group announced the death");
+        assert!(
+            head.ends_with(" Hangup                  sleep 5]\n"),
+            "{o:?}"
+        );
     }
 
     #[test]
@@ -95056,7 +99915,10 @@ st=1
         let buf = capture_sink();
         let mut out = Out::Capture(buf.clone());
         let status = sh.run_source_out(src.as_bytes(), &mut out, 0);
-        (String::from_utf8_lossy(&take_capture(&buf)).into_owned(), status)
+        (
+            String::from_utf8_lossy(&take_capture(&buf)).into_owned(),
+            status,
+        )
     }
 
     #[test]
@@ -95134,10 +99996,22 @@ st=1
         // `jobs`/`fg`/`bg` the other. So job 2's pid resolves only as a pid, and
         // the number 2 only as a job.
         let pid = sh.jobs[1].pid.to_string();
-        assert!(matches!(sh.lookup_job(pid.as_bytes(), BareNumber::Pid), JobLookup::Found(1)));
-        assert!(matches!(sh.lookup_job(pid.as_bytes(), BareNumber::JobId), JobLookup::NotFound));
-        assert!(matches!(sh.lookup_job(b"2", BareNumber::JobId), JobLookup::Found(1)));
-        assert!(matches!(sh.lookup_job(b"2", BareNumber::Pid), JobLookup::NotFound));
+        assert!(matches!(
+            sh.lookup_job(pid.as_bytes(), BareNumber::Pid),
+            JobLookup::Found(1)
+        ));
+        assert!(matches!(
+            sh.lookup_job(pid.as_bytes(), BareNumber::JobId),
+            JobLookup::NotFound
+        ));
+        assert!(matches!(
+            sh.lookup_job(b"2", BareNumber::JobId),
+            JobLookup::Found(1)
+        ));
+        assert!(matches!(
+            sh.lookup_job(b"2", BareNumber::Pid),
+            JobLookup::NotFound
+        ));
         sh.run_source("kill %1; kill %2".as_bytes());
     }
 
@@ -95207,7 +100081,10 @@ st=1
         let (o, s) = run_in(&mut sh, "jobs %1");
         assert!(o.starts_with("[1]+  Done"), "{o}");
         assert_eq!(s, 0);
-        assert!(sh.jobs.is_empty(), "a jobspec listing sweeps after it prints");
+        assert!(
+            sh.jobs.is_empty(),
+            "a jobspec listing sweeps after it prints"
+        );
 
         // Naming a job in `kill` puts its fate back on the books, so a listing
         // that already announced it announces it again — but only while the row
@@ -95216,7 +100093,11 @@ st=1
         sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         let (o, _) = run_in(&mut sh, "jobs; kill -0 %1; jobs");
-        assert_eq!(o.lines().filter(|l| l.starts_with("[1]+  Done")).count(), 2, "{o}");
+        assert_eq!(
+            o.lines().filter(|l| l.starts_with("[1]+  Done")).count(),
+            2,
+            "{o}"
+        );
         // On the next line the row is gone, so `%1` names nothing.
         let mut sh = new_shell();
         sh.run_source("true &".as_bytes());
@@ -95238,7 +100119,10 @@ st=1
             settle_job(&mut sh, 1);
             run_in(&mut sh, src).0
         };
-        assert_eq!(one("jobs >/dev/null; jobs %1 >/dev/null 2>&1; echo \"rc=$?\""), "rc=0\n");
+        assert_eq!(
+            one("jobs >/dev/null; jobs %1 >/dev/null 2>&1; echo \"rc=$?\""),
+            "rc=0\n"
+        );
         assert_eq!(
             one("eval 'jobs >/dev/null\njobs %1 >/dev/null 2>&1; echo \"rc=$?\"'"),
             "rc=1\n",
@@ -95268,8 +100152,15 @@ st=1
         settle_job(&mut sh, 1);
         run_in(&mut sh, "jobs");
         assert_eq!(run_in(&mut sh, "wait $p").1, 5);
-        assert!(sh.jobs.is_empty(), "the row is gone; only the memory answered");
-        assert_eq!(run_in(&mut sh, "wait $p").1, 5, "and it answers as often as asked");
+        assert!(
+            sh.jobs.is_empty(),
+            "the row is gone; only the memory answered"
+        );
+        assert_eq!(
+            run_in(&mut sh, "wait $p").1,
+            5,
+            "and it answers as often as asked"
+        );
         // A pid that was never a child is still an error, memory or no.
         let (o, s) = run_in(&mut sh, "wait 99999 2>&1");
         assert_eq!(o, "osh: wait: pid 99999 is not a child of this shell\n");
@@ -95296,7 +100187,10 @@ st=1
         run_in(&mut sh, "disown %1");
         let t = std::time::Instant::now();
         assert_eq!(run_in(&mut sh, "wait $q").1, 0);
-        assert!(t.elapsed() < std::time::Duration::from_secs(3), "it did not wait");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(3),
+            "it did not wait"
+        );
 
         // `-h` keeps the row, so the job is waited on for real.
         let mut sh = new_shell();
@@ -95325,7 +100219,11 @@ st=1
         let mut sh = new_shell();
         sh.run_source("( exit 7 ) &".as_bytes());
         assert_eq!(run_in(&mut sh, "wait %1").1, 7);
-        assert_eq!(sh.jobs.len(), 1, "the reporting line does not sweep on its way out");
+        assert_eq!(
+            sh.jobs.len(),
+            1,
+            "the reporting line does not sweep on its way out"
+        );
         let (o, s) = run_in(&mut sh, "wait %1 2>&1");
         assert_eq!(o, "osh: wait: %1: no such job\n");
         assert_eq!(s, 127);
@@ -95422,7 +100320,10 @@ st=1
         assert_eq!(run_in(&mut sh, r#"( echo "[$( jobs )]" )"#).0, "[]\n");
 
         let (o, _) = run_in(&mut sh, "jobs | cat");
-        assert!(o.contains("[1]"), "a plain stage is a fork and nothing more: {o:?}");
+        assert!(
+            o.contains("[1]"),
+            "a plain stage is a fork and nothing more: {o:?}"
+        );
         assert_eq!(run_in(&mut sh, "{ jobs; } | cat").0, "");
         assert_eq!(run_in(&mut sh, "f() { jobs; }; f | cat").0, "");
         assert_eq!(run_in(&mut sh, "{ jobs; } & wait $!").0, "");
@@ -95436,20 +100337,36 @@ st=1
         let mut sh = new_shell();
         sh.run_source("sleep 5 &".as_bytes());
         sh.run_source("sleep 6 &".as_bytes());
-        assert_eq!(run_in(&mut sh, r#"echo "$( wait; echo rc=$? )""#).0, "rc=0\n");
-        assert_eq!(run_in(&mut sh, r#"echo "$( wait -n; echo rc=$? )""#).0, "rc=0\n");
+        assert_eq!(
+            run_in(&mut sh, r#"echo "$( wait; echo rc=$? )""#).0,
+            "rc=0\n"
+        );
+        assert_eq!(
+            run_in(&mut sh, r#"echo "$( wait -n; echo rc=$? )""#).0,
+            "rc=0\n"
+        );
         // A targeted `wait` hands back the -1 its failure returned, and `$?` is
         // signed, so it prints as written.
-        assert_eq!(run_in(&mut sh, r#"echo "$( wait %1; echo rc=$? )""#).0, "rc=-1\n");
+        assert_eq!(
+            run_in(&mut sh, r#"echo "$( wait %1; echo rc=$? )""#).0,
+            "rc=-1\n"
+        );
         // Reporting a row is not sweeping it — the sweep belongs to a reap that
         // never happened — so three `wait`s in a row all answer.
         assert_eq!(
-            run_in(&mut sh, r#"echo "$( wait %2; wait %2; wait %2; echo rc=$? )""#).0,
+            run_in(
+                &mut sh,
+                r#"echo "$( wait %2; wait %2; wait %2; echo rc=$? )""#
+            )
+            .0,
             "rc=-1\n"
         );
         // The substitution's own status is that same -1 as an *exit* status,
         // which is eight bits wide.
-        assert_eq!(run_in(&mut sh, r#"x=$( wait %1 ); echo "sub=$?""#).0, "sub=255\n");
+        assert_eq!(
+            run_in(&mut sh, r#"x=$( wait %1 ); echo "sub=$?""#).0,
+            "sub=255\n"
+        );
 
         // Asking once writes the whole inherited table off, so a later listing
         // in that same child shows `Done` for jobs that are running perfectly
@@ -95606,7 +100523,10 @@ st=1
     fn suspend_refuses_before_it_can_stop_anything() {
         let (out, code) = run("suspend 2>&1");
         assert_eq!(code, 1);
-        assert!(out.contains("suspend: cannot suspend: no job control"), "got {out:?}");
+        assert!(
+            out.contains("suspend: cannot suspend: no job control"),
+            "got {out:?}"
+        );
         // `-f` forces past that check in bash and stops the shell; osh has no
         // way to stop, so the refusal stands (see `builtin_suspend`).
         let (out, code) = run("suspend -f 2>&1");
@@ -95626,7 +100546,10 @@ st=1
         let (out, code) = run("suspend extra 2>&1; echo after");
         assert_eq!(code, 1);
         assert!(out.contains("suspend: too many arguments"), "got {out:?}");
-        assert!(!out.contains("after"), "the rest of the line should be gone: {out:?}");
+        assert!(
+            !out.contains("after"),
+            "the rest of the line should be gone: {out:?}"
+        );
         // A lone `-` is an operand, not an empty option bundle.
         let (out, _) = run("suspend - 2>&1");
         assert!(out.contains("too many arguments"), "got {out:?}");
@@ -95658,7 +100581,10 @@ st=1
         let (out, code) = run("bind -z 2>&1 >/dev/null");
         assert_eq!(code, 2);
         assert!(out.contains("osh: bind: -z: invalid option"), "got {out:?}");
-        assert!(out.contains("\nbind: usage: bind [-lpsvPSVX]"), "got {out:?}");
+        assert!(
+            out.contains("\nbind: usage: bind [-lpsvPSVX]"),
+            "got {out:?}"
+        );
         // Letters are read as a bundle, so `-lz` never reaches the listing.
         let (out, code) = run("bind -lz 2>/dev/null");
         assert_eq!(code, 2);
@@ -95666,13 +100592,19 @@ st=1
         // A missing argument is the ordinary usage error, with the synopsis.
         let (out, code) = run("bind -m 2>&1 >/dev/null");
         assert_eq!(code, 2);
-        assert!(out.contains("bind: -m: option requires an argument"), "got {out:?}");
+        assert!(
+            out.contains("bind: -m: option requires an argument"),
+            "got {out:?}"
+        );
         // The keymap is checked before anything is listed.
         let (out, code) = run("bind -l -m nosuchmap 2>/dev/null");
         assert_eq!(code, 1);
         assert_eq!(out, "", "the listing must not run: {out:?}");
         let (out, _) = run("bind -m nosuchmap 2>&1 >/dev/null");
-        assert!(out.contains("bind: `nosuchmap': invalid keymap name"), "got {out:?}");
+        assert!(
+            out.contains("bind: `nosuchmap': invalid keymap name"),
+            "got {out:?}"
+        );
         // A known keymap is accepted, attached to the letter or not.
         assert_eq!(run("bind -m vi -l 2>/dev/null").0.lines().count(), 174);
         assert_eq!(run("bind -mvi -l 2>/dev/null").0.lines().count(), 174);
@@ -95681,17 +100613,32 @@ st=1
         assert_eq!(code, 1);
         assert_eq!(out.lines().count(), 174);
         let (out, _) = run("bind -f /nosuch/file 2>&1 >/dev/null");
-        assert!(out.contains("bind: /nosuch/file: cannot read: No such file"), "got {out:?}");
+        assert!(
+            out.contains("bind: /nosuch/file: cannot read: No such file"),
+            "got {out:?}"
+        );
         // `-u` and `-q` reject an unknown name identically, `-u` first, and
         // each option keeps only its *last* argument.
-        for cmd in ["bind -u nosuchfn", "bind -q nosuchfn", "bind -q other -q nosuchfn"] {
+        for cmd in [
+            "bind -u nosuchfn",
+            "bind -q nosuchfn",
+            "bind -q other -q nosuchfn",
+        ] {
             let (out, code) = run(&format!("{cmd} 2>&1 >/dev/null"));
             assert_eq!(code, 1, "{cmd}: got {out:?}");
-            assert!(out.contains("bind: `nosuchfn': unknown function name"), "{cmd}: {out:?}");
+            assert!(
+                out.contains("bind: `nosuchfn': unknown function name"),
+                "{cmd}: {out:?}"
+            );
         }
         // `-r`, a well-formed `-x`, `-X` and `--` have nothing to change or
         // show in a pristine readline, and say nothing.
-        for cmd in ["bind -r '\\C-t'", "bind -x '\"x\": echo hi'", "bind -X", "bind --"] {
+        for cmd in [
+            "bind -r '\\C-t'",
+            "bind -x '\"x\": echo hi'",
+            "bind -X",
+            "bind --",
+        ] {
             let (out, code) = run(&format!("{cmd} 2>/dev/null"));
             assert_eq!(code, 0, "{cmd}");
             assert_eq!(out, "", "{cmd}");
@@ -95701,10 +100648,16 @@ st=1
         // last. A backslash inside the quotes escapes the next byte.
         assert_eq!(run("bind -x '\"a\\\"b\": echo' 2>/dev/null").1, 0);
         for (spec, want) in [
-            ("x:echo hi", "bind: x:echo hi: first non-whitespace character is not `\"'"),
+            (
+                "x:echo hi",
+                "bind: x:echo hi: first non-whitespace character is not `\"'",
+            ),
             ("\"x\"", "bind: \"x\": missing colon separator"),
             ("\"x\" echo", "bind: \"x\" echo: missing colon separator"),
-            ("\"unterminated: echo", "bind: no closing `\"' in \"unterminated: echo"),
+            (
+                "\"unterminated: echo",
+                "bind: no closing `\"' in \"unterminated: echo",
+            ),
         ] {
             let (out, code) = run(&format!("bind -x '{spec}' 2>&1 >/dev/null"));
             assert_eq!(code, 1, "{spec}: {out:?}");
@@ -95721,11 +100674,20 @@ st=1
         // prefix, one line each, and the status stays 0.
         let (out, code) = run("bind aaa bbb 2>&1 >/dev/null");
         assert_eq!(code, 0);
-        assert!(out.contains("\nreadline: aaa: no key sequence terminator\n"), "got {out:?}");
-        assert!(out.contains("\nreadline: bbb: no key sequence terminator\n"), "got {out:?}");
+        assert!(
+            out.contains("\nreadline: aaa: no key sequence terminator\n"),
+            "got {out:?}"
+        );
+        assert!(
+            out.contains("\nreadline: bbb: no key sequence terminator\n"),
+            "got {out:?}"
+        );
         // A lone `-` is an operand too, not an empty option bundle.
         let (out, _) = run("bind - 2>&1 >/dev/null");
-        assert!(out.contains("readline: -: no key sequence terminator"), "got {out:?}");
+        assert!(
+            out.contains("readline: -: no key sequence terminator"),
+            "got {out:?}"
+        );
         // One with a terminator is accepted silently.
         assert_eq!(run("bind '\"\\C-t\": yank' 2>/dev/null").0, "");
         // It is a builtin like any other, so the describing builtins know it.
@@ -95777,26 +100739,50 @@ st=1
         ] {
             let (out, code) = run(&format!("bind -m {map} -p 2>/dev/null"));
             assert_eq!(code, 0, "{map}");
-            assert_eq!(out.lines().count(), want, "{map}: got {} lines", out.lines().count());
-            assert_eq!(run(&format!("bind -m {map} -P 2>/dev/null")).0.lines().count(), 175, "{map}");
+            assert_eq!(
+                out.lines().count(),
+                want,
+                "{map}: got {} lines",
+                out.lines().count()
+            );
+            assert_eq!(
+                run(&format!("bind -m {map} -P 2>/dev/null"))
+                    .0
+                    .lines()
+                    .count(),
+                175,
+                "{map}"
+            );
         }
         // `-m` shows through in the `keymap` variable the other listings print,
         // and always under the map's *canonical* name.
-        for (map, canonical) in
-            [("emacs-standard", "emacs"), ("vi-command", "vi"), ("vi-move", "vi"), ("vi-insert", "vi-insert")]
-        {
+        for (map, canonical) in [
+            ("emacs-standard", "emacs"),
+            ("vi-command", "vi"),
+            ("vi-move", "vi"),
+            ("vi-insert", "vi-insert"),
+        ] {
             let (out, _) = run(&format!("bind -m {map} -v 2>/dev/null"));
-            assert!(out.contains(&format!("set keymap {canonical}\n")), "{map}: got {out:?}");
+            assert!(
+                out.contains(&format!("set keymap {canonical}\n")),
+                "{map}: got {out:?}"
+            );
         }
         // `-q` answers a name readline knows on *stdout*, in different words
         // from `-P`'s — and readline gives up after five sequences, dropping
         // the full stop for an ellipsis when it does.
         let (out, code) = run("bind -q accept-line 2>/dev/null");
         assert_eq!(code, 0);
-        assert_eq!(out, "accept-line can be invoked via \"\\C-j\", \"\\C-m\".\n");
+        assert_eq!(
+            out,
+            "accept-line can be invoked via \"\\C-j\", \"\\C-m\".\n"
+        );
         let (out, code) = run("bind -q self-insert 2>/dev/null");
         assert_eq!(code, 0);
-        assert_eq!(out, "self-insert can be invoked via \" \", \"!\", \"\\\"\", \"#\", \"$\", ...\n");
+        assert_eq!(
+            out,
+            "self-insert can be invoked via \" \", \"!\", \"\\\"\", \"#\", \"$\", ...\n"
+        );
         // A name that exists but is bound nowhere is still a failure, and is
         // the one place a listing sentence ends in a full stop where `-P`'s
         // does not.
@@ -95804,8 +100790,14 @@ st=1
         assert_eq!(code, 1);
         assert_eq!(out, "alias-expand-line is not bound to any keys.\n");
         let (pp, _) = run("bind -P 2>/dev/null");
-        assert!(pp.contains("alias-expand-line is not bound to any keys\n"), "got {pp:?}");
-        assert!(pp.contains("accept-line can be found on \"\\C-j\", \"\\C-m\".\n"), "got {pp:?}");
+        assert!(
+            pp.contains("alias-expand-line is not bound to any keys\n"),
+            "got {pp:?}"
+        );
+        assert!(
+            pp.contains("accept-line can be found on \"\\C-j\", \"\\C-m\".\n"),
+            "got {pp:?}"
+        );
         // `-q` answers for the keymap `-m` chose, not always the default one:
         // `yank` is on `\C-y` in emacs and in vi, but nowhere in emacs-ctlx.
         let (out, code) = run("bind -m vi -q yank 2>/dev/null");
@@ -95886,7 +100878,10 @@ st=1
     #[test]
     fn enable_reenable_removes_from_disabled() {
         let (o, _) = run("enable -n cd; enable cd; enable -n");
-        assert!(!o.contains("enable -n cd\n"), "cd should be re-enabled: {o:?}");
+        assert!(
+            !o.contains("enable -n cd\n"),
+            "cd should be re-enabled: {o:?}"
+        );
     }
 
     #[test]
@@ -95916,14 +100911,23 @@ st=1
         // loading: the usage line alone, not the `invalid option` an unlisted
         // letter gets.
         let (o, s) = run("enable -d echo 2>&1");
-        assert_eq!(o, "enable: usage: enable [-a] [-dnps] [-f filename] [name ...]\n");
+        assert_eq!(
+            o,
+            "enable: usage: enable [-a] [-dnps] [-f filename] [name ...]\n"
+        );
         assert_eq!(s, 2);
         // Both are found inside a bundle, and the letters before them still run.
         assert_eq!(run("enable -nd echo 2>&1").1, 2);
-        assert_eq!(run("enable -nf /x 2>&1").0, "osh: enable: dynamic loading not available\n");
+        assert_eq!(
+            run("enable -nf /x 2>&1").0,
+            "osh: enable: dynamic loading not available\n"
+        );
         // An unlisted letter is unaffected, and wins when it comes first.
         let (o, s) = run("enable -Z echo 2>&1");
-        assert!(o.starts_with("osh: enable: -Z: invalid option\n"), "got {o:?}");
+        assert!(
+            o.starts_with("osh: enable: -Z: invalid option\n"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
         assert_eq!(run("enable -Zd 2>&1").0.lines().count(), 2);
     }
@@ -95987,7 +100991,13 @@ st=1
         // the listings below are compared literally.
         let hide_ppid = |o: String| {
             o.lines()
-                .map(|l| if l.starts_with("declare -ir PPID=") { "declare -ir PPID" } else { l })
+                .map(|l| {
+                    if l.starts_with("declare -ir PPID=") {
+                        "declare -ir PPID"
+                    } else {
+                        l
+                    }
+                })
                 .collect::<Vec<&str>>()
                 .join("\n")
         };
@@ -96072,7 +101082,8 @@ st=1
         // nested `else { if … fi; }`, one indent level deeper, terminating the
         // inner `fi`s with `;`. Match that byte-for-byte (TD-OILS-DECLAREF-QUIRKS
         // item 1) so `declare -f` output compares equal to bash's.
-        let (o, s) = run("f() { if a; then echo x; elif c; then echo y; else echo w; fi; }; declare -f f");
+        let (o, s) =
+            run("f() { if a; then echo x; elif c; then echo y; else echo w; fi; }; declare -f f");
         assert_eq!(s, 0);
         let expected = "f () \n{ \n    if a; then\n        echo x;\n    else\n        if c; then\n            echo y;\n        else\n            echo w;\n        fi;\n    fi\n}\n";
         assert_eq!(o, expected, "declare -f elif deparse mismatch");
@@ -96093,8 +101104,7 @@ st=1
         // definitions omit it (TD-OILS-DECLAREF-QUIRKS item 4).
         let (o, s) = run("f() { g() { echo inner; }; echo outer; }; declare -f f");
         assert_eq!(s, 0);
-        let expected =
-            "f () \n{ \n    function g () \n    { \n        echo inner\n    };\n    echo outer\n}\n";
+        let expected = "f () \n{ \n    function g () \n    { \n        echo inner\n    };\n    echo outer\n}\n";
         assert_eq!(o, expected, "nested function deparse mismatch");
         // Top-level definition must NOT gain a `function` prefix.
         let (o2, _) = run("top() { echo t; }; declare -f top");
@@ -96109,13 +101119,22 @@ st=1
         // breaking each onto its own line (TD-OILS-DECLAREF-QUIRKS item 3).
         let (o, s) = run("f() { a & b & c; }; declare -f f");
         assert_eq!(s, 0);
-        assert_eq!(o, "f () \n{ \n    a & b & c\n}\n", "inline background mismatch");
+        assert_eq!(
+            o, "f () \n{ \n    a & b & c\n}\n",
+            "inline background mismatch"
+        );
         // A `;`-separated tail after a background item still breaks the line.
         let (o2, _) = run("f() { a & b; c; }; declare -f f");
-        assert_eq!(o2, "f () \n{ \n    a & b;\n    c\n}\n", "mixed &/; mismatch");
+        assert_eq!(
+            o2, "f () \n{ \n    a & b;\n    c\n}\n",
+            "mixed &/; mismatch"
+        );
         // A backgrounded final statement in a group body ends with ` &`, no `;`.
         let (o3, _) = run("f() { echo a; b & }; declare -f f");
-        assert_eq!(o3, "f () \n{ \n    echo a;\n    b &\n}\n", "trailing-& mismatch");
+        assert_eq!(
+            o3, "f () \n{ \n    echo a;\n    b &\n}\n",
+            "trailing-& mismatch"
+        );
     }
 
     #[test]
@@ -96130,24 +101149,36 @@ st=1
         );
         // Single-statement subshell stays on one line.
         let (o2, _) = run("f() { ( echo a ); echo c; }; declare -f f");
-        assert_eq!(o2, "f () \n{ \n    ( echo a );\n    echo c\n}\n", "single subshell mismatch");
+        assert_eq!(
+            o2, "f () \n{ \n    ( echo a );\n    echo c\n}\n",
+            "single subshell mismatch"
+        );
     }
 
     #[test]
     fn declare_f_prints_backticks_from_the_source() {
         // bash re-prints a `$( … )` body from the parse, normalising its spacing.
         let (o, _) = run("f() { echo $(echo    a   ;   echo b); }; declare -f f");
-        assert_eq!(o, "f () \n{ \n    echo $(echo a; echo b)\n}\n", "$( ) not re-printed");
+        assert_eq!(
+            o, "f () \n{ \n    echo $(echo a; echo b)\n}\n",
+            "$( ) not re-printed"
+        );
 
         // A backtick body is echoed from the source instead, spacing and all.
         let (o, _) = run("f() { echo `echo    a   ;   echo b`; }; declare -f f");
-        assert_eq!(o, "f () \n{ \n    echo `echo    a   ;   echo b`\n}\n", "backtick reprinted");
+        assert_eq!(
+            o, "f () \n{ \n    echo `echo    a   ;   echo b`\n}\n",
+            "backtick reprinted"
+        );
 
         // Which matters: the parsed body has lost the escapes a nested
         // substitution needs, so re-printing it would not parse back.
         let src = "f() { echo `echo \\`echo n\\``; }";
         let (o, _) = run(&format!("{src}; declare -f f"));
-        assert_eq!(o, "f () \n{ \n    echo `echo \\`echo n\\``\n}\n", "escapes lost");
+        assert_eq!(
+            o, "f () \n{ \n    echo `echo \\`echo n\\``\n}\n",
+            "escapes lost"
+        );
         let (o, s) = run(&format!("{src}; eval \"$(declare -f f)\"; f"));
         assert_eq!((o.as_str(), s), ("n\n", 0), "round-tripped backtick output");
     }
@@ -96198,11 +101229,19 @@ st=1
         let (o, s) = run("x=`if`; echo \"st=$? x=[$x]\"");
         assert_eq!((o.as_str(), s), ("st=2 x=[]\n", 0), "ordinary body error");
         let (o, s) = run("x=`echo $( ! )`; echo \"st=$? x=[$x]\"");
-        assert_eq!((o.as_str(), s), ("st=1 x=[]\n", 0), "nested paren body error");
+        assert_eq!(
+            (o.as_str(), s),
+            ("st=1 x=[]\n", 0),
+            "nested paren body error"
+        );
 
         // Never expanded, never parsed: a body that could not parse is silent.
         let (o, s) = run("if false; then echo `for`; fi; echo \"ok=$?\"");
-        assert_eq!((o.as_str(), s), ("ok=0\n", 0), "unexpanded body parsed anyway");
+        assert_eq!(
+            (o.as_str(), s),
+            ("ok=0\n", 0),
+            "unexpanded body parsed anyway"
+        );
     }
 
     #[test]
@@ -96210,20 +101249,33 @@ st=1
         // Dropping the parentheses changes what the test means: `( a || b ) && c`
         // reprinted bare is `a || (b && c)`.
         let (o, _) = run("f() { [[ ( -n a || -n b ) && -z '' ]]; }; declare -f f");
-        assert_eq!(o, "f () \n{ \n    [[ ( -n a || -n b ) && -z '' ]]\n}\n", "grouping lost");
+        assert_eq!(
+            o, "f () \n{ \n    [[ ( -n a || -n b ) && -z '' ]]\n}\n",
+            "grouping lost"
+        );
 
         // bash echoes redundant groups too, rather than printing a minimal form.
         let (o, _) = run("f() { [[ ! ( ! ( -n a ) ) ]]; }; declare -f f");
-        assert_eq!(o, "f () \n{ \n    [[ ! ( ! ( -n a ) ) ]]\n}\n", "redundant group lost");
+        assert_eq!(
+            o, "f () \n{ \n    [[ ! ( ! ( -n a ) ) ]]\n}\n",
+            "redundant group lost"
+        );
 
         // A bare word is one of the few things bash's printer *does* normalise:
         // it prints the `-n` test the word stands for.
         let (o, _) = run("f() { [[ a$x ]] && [[ ! b ]]; }; declare -f f");
-        assert_eq!(o, "f () \n{ \n    [[ -n a$x ]] && [[ ! -n b ]]\n}\n", "bare word not -n");
+        assert_eq!(
+            o, "f () \n{ \n    [[ -n a$x ]] && [[ ! -n b ]]\n}\n",
+            "bare word not -n"
+        );
 
         // The group is inert at run time — the tree it wraps is already shaped.
         let (o, s) = run("[[ ( -z '' || -n '' ) && -n x ]] && echo yes");
-        assert_eq!((o.as_str(), s), ("yes\n", 0), "grouped test evaluated wrong");
+        assert_eq!(
+            (o.as_str(), s),
+            ("yes\n", 0),
+            "grouped test evaluated wrong"
+        );
     }
 
     #[test]
@@ -96232,20 +101284,32 @@ st=1
         // re-emitting it as a here-string silently broke every multi-line body.
         let (o, s) = run("f() {\ncat <<EOF\none\ntwo\nEOF\n}\ndeclare -f f");
         assert_eq!(s, 0);
-        assert_eq!(o, "f () \n{ \n    cat <<EOF\none\ntwo\nEOF\n\n}\n", "here-doc layout");
+        assert_eq!(
+            o, "f () \n{ \n    cat <<EOF\none\ntwo\nEOF\n\n}\n",
+            "here-doc layout"
+        );
 
         // A quoted delimiter prints back in bash's normalised `'…'` spelling,
         // whichever of the three quoting forms the source used, and `<<-` keeps
         // its dash (its body was already stripped when it was read).
         let (o, _) = run("f() {\ncat <<'Q'\n$x\nQ\n}\ndeclare -f f");
-        assert_eq!(o, "f () \n{ \n    cat <<'Q'\n$x\nQ\n\n}\n", "quoted delimiter");
+        assert_eq!(
+            o, "f () \n{ \n    cat <<'Q'\n$x\nQ\n\n}\n",
+            "quoted delimiter"
+        );
         let (o, _) = run("f() {\ncat <<-T\n\tbody\n\tT\n}\ndeclare -f f");
-        assert_eq!(o, "f () \n{ \n    cat <<-T\nbody\nT\n\n}\n", "<<- delimiter");
+        assert_eq!(
+            o, "f () \n{ \n    cat <<-T\nbody\nT\n\n}\n",
+            "<<- delimiter"
+        );
 
         // Inside a substitution the body has to be flushed before the closing
         // paren — carrying it out to the enclosing line would strand it.
         let (o, _) = run("f() {\nx=$(cat <<EOF\nsub\nEOF\n)\n}\ndeclare -f f");
-        assert_eq!(o, "f () \n{ \n    x=$(cat <<EOF\nsub\nEOF\n)\n}\n", "here-doc in $( )");
+        assert_eq!(
+            o, "f () \n{ \n    x=$(cat <<EOF\nsub\nEOF\n)\n}\n",
+            "here-doc in $( )"
+        );
 
         // And the printed form has to re-parse to the same function.
         let (o, s) = run("f() {\ncat <<EOF\none\ntwo\nEOF\n}\neval \"$(declare -f f)\"\nf");
@@ -96295,7 +101359,10 @@ st=1
         // `-n` removes the export attribute (variable value is kept).
         let (o3, _) = run("export FOO=bar; export -n FOO; export -p");
         assert!(!o3.contains("declare -x FOO"), "got {o3:?}");
-        assert_eq!(run("export FOO=bar; export -n FOO; echo \"$FOO\"").0, "bar\n");
+        assert_eq!(
+            run("export FOO=bar; export -n FOO; echo \"$FOO\"").0,
+            "bar\n"
+        );
         // Bare `export` (no flags/operands) lists too.
         let (o4, _) = run("export ZZ=1; export");
         assert!(o4.contains("declare -x ZZ=\"1\"\n"), "got {o4:?}");
@@ -96318,7 +101385,10 @@ st=1
         assert_eq!(run("set +B; set -B; echo {a,b}").0, "a b\n");
         // The option is reflected in `$-`, `set -o braceexpand` query, and
         // `[ -o braceexpand ]`.
-        assert_eq!(run("set +B; case $- in *B*) echo has;; *) echo no;; esac").0, "no\n");
+        assert_eq!(
+            run("set +B; case $- in *B*) echo has;; *) echo no;; esac").0,
+            "no\n"
+        );
         assert_eq!(run("[ -o braceexpand ]; echo $?").0, "0\n");
         assert_eq!(run("set +B; [ -o braceexpand ]; echo $?").0, "1\n");
     }
@@ -96329,14 +101399,33 @@ st=1
         // Linux-like target, i.e. excluding Cygwin's `igncr`), with the
         // always-on non-interactive defaults reported on.
         let (o, _) = run("set -o");
-        let names: Vec<&str> = o.lines().map(|l| l.split('\t').next().unwrap_or("").trim()).collect();
+        let names: Vec<&str> = o
+            .lines()
+            .map(|l| l.split('\t').next().unwrap_or("").trim())
+            .collect();
         assert_eq!(names.len(), 27, "listing: {o:?}");
-        for expected in ["braceexpand", "hashall", "interactive-comments", "posix", "vi", "emacs"] {
+        for expected in [
+            "braceexpand",
+            "hashall",
+            "interactive-comments",
+            "posix",
+            "vi",
+            "emacs",
+        ] {
             assert!(names.contains(&expected), "missing {expected}: {o:?}");
         }
-        assert!(o.contains("hashall        \ton"), "hashall should be on: {o:?}");
-        assert!(o.contains("interactive-comments\ton"), "ic should be on: {o:?}");
-        assert!(o.contains("posix          \toff"), "posix should be off: {o:?}");
+        assert!(
+            o.contains("hashall        \ton"),
+            "hashall should be on: {o:?}"
+        );
+        assert!(
+            o.contains("interactive-comments\ton"),
+            "ic should be on: {o:?}"
+        );
+        assert!(
+            o.contains("posix          \toff"),
+            "posix should be off: {o:?}"
+        );
     }
 
     #[test]
@@ -96398,7 +101487,10 @@ st=1
         // Array and indexed-element assignments trace in source form (bash does
         // not expand them for the trace).
         assert_eq!(run("{ set -x; a=(1 2 3); } 2>&1").0, "+ a=(1 2 3)\n");
-        assert_eq!(run("{ declare -a x; set -x; x[1+1]=v; } 2>&1").0, "+ x[1+1]=v\n");
+        assert_eq!(
+            run("{ declare -a x; set -x; x[1+1]=v; } 2>&1").0,
+            "+ x[1+1]=v\n"
+        );
         // Command arguments are minimally quoted behind the default `+ ` prefix.
         // (`true` is used so the trace is the only output — the harness buffers
         // stdout and the redirected stderr separately, so mixing them would make
@@ -96481,7 +101573,10 @@ st=1
         assert_eq!(trace("true $'a\\033b'"), "+ true $'a\\Eb'\n");
         assert_eq!(trace("true $'a\\001\\002b'"), "+ true $'a\\001\\002b'\n");
         assert_eq!(trace("true $'a\\177b'"), "+ true $'a\\177b'\n");
-        assert_eq!(trace("true $'a\\ab\\bc\\fd\\re'"), "+ true $'a\\ab\\bc\\fd\\re'\n");
+        assert_eq!(
+            trace("true $'a\\ab\\bc\\fd\\re'"),
+            "+ true $'a\\ab\\bc\\fd\\re'\n"
+        );
         // The order of the two branches is observable: a word holding *both* a
         // space and a control character takes the metacharacter branch, so the
         // control character is emitted raw inside single quotes rather than
@@ -96503,7 +101598,10 @@ st=1
         // The operand's line comes first, then the builtin's with a bare name.
         assert_eq!(trace("declare -a b=(x)"), "+ b=('x')\n+ declare -a b\n");
         // Unlike a command word, every element is quoted unconditionally.
-        assert_eq!(trace("declare -a b=(x '')"), "+ b=('x' '')\n+ declare -a b\n");
+        assert_eq!(
+            trace("declare -a b=(x '')"),
+            "+ b=('x' '')\n+ declare -a b\n"
+        );
         assert_eq!(trace("declare -a e=()"), "+ e=()\n+ declare -a e\n");
         assert_eq!(
             trace("declare -a q=(\"it's\")"),
@@ -96766,7 +101864,11 @@ st=1
         std::fs::write(&p_colon, b"abc").unwrap();
         let ps = p_colon.to_string_lossy().replace('\\', "/");
         run(&format!(": > \"{ps}\""));
-        assert_eq!(std::fs::read(&p_colon).unwrap(), b"", "colon should truncate");
+        assert_eq!(
+            std::fs::read(&p_colon).unwrap(),
+            b"",
+            "colon should truncate"
+        );
         let _ = std::fs::remove_file(&p_colon);
 
         // `true` likewise truncates.
@@ -96805,7 +101907,10 @@ st=1
         // A null command's assignment still applies even when a `<` input
         // redirect fails; the failed redirect yields status 1.
         let (o, _) = run("x=7 < /nonexistent_osh_probe_path; echo \"st=$? x=$x\"");
-        assert!(o.contains("st=1"), "input-redirect failure should be status 1: {o:?}");
+        assert!(
+            o.contains("st=1"),
+            "input-redirect failure should be status 1: {o:?}"
+        );
         assert!(o.contains("x=7"), "assignment should still apply: {o:?}");
     }
 
@@ -96867,7 +101972,10 @@ st=1
         let lp = left.to_string_lossy().replace('\\', "/");
         let (o, _) = run(&format!("echo x 3> \"{lp}\" > \"{bad}\"; echo \"s=$?\""));
         assert_eq!(o, "s=1\n");
-        assert!(left.exists(), "a redirect before the failing one is applied");
+        assert!(
+            left.exists(),
+            "a redirect before the failing one is applied"
+        );
         let _ = std::fs::remove_file(&left);
     }
 
@@ -96909,7 +102017,9 @@ st=1
         // persistent close of fd 3.
         let f = base.join(format!("{uniq}_c"));
         let fp = f.to_string_lossy().replace('\\', "/");
-        let (_, s) = run(&format!("exec 3> \"{fp}\"; echo before >&3 3>&-; echo x >&3"));
+        let (_, s) = run(&format!(
+            "exec 3> \"{fp}\"; echo before >&3 3>&-; echo x >&3"
+        ));
         assert_eq!(s, 0);
         assert_eq!(
             std::fs::read_to_string(&f).unwrap(),
@@ -96929,20 +102039,29 @@ st=1
         // declare / typeset: sign-aware (`+Z` reported with a `+`).
         let (o, s) = run("declare -Z x 2>&1");
         assert!(o.contains("declare: -Z: invalid option"), "got {o:?}");
-        assert!(o.contains("declare: usage: declare [-aAfFgiIlnrtux]"), "got {o:?}");
+        assert!(
+            o.contains("declare: usage: declare [-aAfFgiIlnrtux]"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
         let (o, s) = run("declare +Z x 2>&1");
         assert!(o.contains("declare: +Z: invalid option"), "got {o:?}");
         assert_eq!(s, 2);
         let (o, s) = run("typeset -Z x 2>&1");
         assert!(o.contains("typeset: -Z: invalid option"), "got {o:?}");
-        assert!(o.contains("typeset: usage: typeset [-aAfFgiIlnrtux]"), "got {o:?}");
+        assert!(
+            o.contains("typeset: usage: typeset [-aAfFgiIlnrtux]"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
 
         // local (inside a function) uses its own shorter usage line.
         let (o, s) = run("f(){ local -Z x; }; f 2>&1");
         assert!(o.contains("local: -Z: invalid option"), "got {o:?}");
-        assert!(o.contains("local: usage: local [option] name[=value] ..."), "got {o:?}");
+        assert!(
+            o.contains("local: usage: local [option] name[=value] ..."),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
 
         // read: unknown short option.
@@ -96959,14 +102078,23 @@ st=1
 
         // printf with no format operand prints its usage and fails with 2.
         let (o, s) = run("printf 2>&1");
-        assert!(o.contains("printf: usage: printf [-v var] format [arguments]"), "got {o:?}");
+        assert!(
+            o.contains("printf: usage: printf [-v var] format [arguments]"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
 
         // printf -v with no variable name: the diagnostic is followed by the
         // usage synopsis (bash), and it fails with 2.
         let (o, s) = run("printf -v 2>&1");
-        assert!(o.contains("printf: -v: option requires an argument"), "got {o:?}");
-        assert!(o.contains("printf: usage: printf [-v var] format [arguments]"), "got {o:?}");
+        assert!(
+            o.contains("printf: -v: option requires an argument"),
+            "got {o:?}"
+        );
+        assert!(
+            o.contains("printf: usage: printf [-v var] format [arguments]"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
 
         // Valid options are still accepted (no false positives): -ir, -aA, -n
@@ -96986,24 +102114,96 @@ st=1
         // bash `<builtin>: -<opt>: invalid option` line, its usage synopsis, and
         // exits 2. Verified against bash 5.x.
         let cases: &[(&str, &str, &str)] = &[
-            ("unset -x v", "unset: -x: invalid option", "unset: usage: unset [-f] [-v] [-n]"),
-            ("mapfile -Z arr", "mapfile: -Z: invalid option", "mapfile: usage: mapfile [-d delim]"),
-            ("type -Z ls", "type: -Z: invalid option", "type: usage: type [-afptP]"),
-            ("hash -Z", "hash: -Z: invalid option", "hash: usage: hash [-lr]"),
-            ("cd -Z", "cd: -Z: invalid option", "cd: usage: cd [-L|[-P [-e]] [-@]]"),
-            ("pwd -Z", "pwd: -Z: invalid option", "pwd: usage: pwd [-LPW]"),
-            ("alias -Z", "alias: -Z: invalid option", "alias: usage: alias [-p]"),
-            ("unalias -Z", "unalias: -Z: invalid option", "unalias: usage: unalias [-a]"),
-            ("jobs -Z", "jobs: -Z: invalid option", "jobs: usage: jobs [-lnprs]"),
-            ("trap -Z", "trap: -Z: invalid option", "trap: usage: trap [-lp]"),
-            ("command -Z ls", "command: -Z: invalid option", "command: usage: command [-pVv]"),
-            ("builtin -Z", "builtin: -Z: invalid option", "builtin: usage: builtin [shell-builtin"),
-            ("compgen -Z", "compgen: -Z: invalid option", "compgen: usage: compgen [-abcdefgjksuv]"),
-            ("disown -Z", "disown: -Z: invalid option", "disown: usage: disown [-h] [-ar]"),
-            ("ulimit -Z", "ulimit: -Z: invalid option", "ulimit: usage: ulimit [-SHabcdefiklmnpqrstuvxPRT]"),
-            ("enable -Z", "enable: -Z: invalid option", "enable: usage: enable [-a] [-dnps]"),
-            ("shopt -Z", "shopt: -Z: invalid option", "shopt: usage: shopt [-pqsu]"),
-            ("printf -Z", "printf: -Z: invalid option", "printf: usage: printf [-v var]"),
+            (
+                "unset -x v",
+                "unset: -x: invalid option",
+                "unset: usage: unset [-f] [-v] [-n]",
+            ),
+            (
+                "mapfile -Z arr",
+                "mapfile: -Z: invalid option",
+                "mapfile: usage: mapfile [-d delim]",
+            ),
+            (
+                "type -Z ls",
+                "type: -Z: invalid option",
+                "type: usage: type [-afptP]",
+            ),
+            (
+                "hash -Z",
+                "hash: -Z: invalid option",
+                "hash: usage: hash [-lr]",
+            ),
+            (
+                "cd -Z",
+                "cd: -Z: invalid option",
+                "cd: usage: cd [-L|[-P [-e]] [-@]]",
+            ),
+            (
+                "pwd -Z",
+                "pwd: -Z: invalid option",
+                "pwd: usage: pwd [-LPW]",
+            ),
+            (
+                "alias -Z",
+                "alias: -Z: invalid option",
+                "alias: usage: alias [-p]",
+            ),
+            (
+                "unalias -Z",
+                "unalias: -Z: invalid option",
+                "unalias: usage: unalias [-a]",
+            ),
+            (
+                "jobs -Z",
+                "jobs: -Z: invalid option",
+                "jobs: usage: jobs [-lnprs]",
+            ),
+            (
+                "trap -Z",
+                "trap: -Z: invalid option",
+                "trap: usage: trap [-lp]",
+            ),
+            (
+                "command -Z ls",
+                "command: -Z: invalid option",
+                "command: usage: command [-pVv]",
+            ),
+            (
+                "builtin -Z",
+                "builtin: -Z: invalid option",
+                "builtin: usage: builtin [shell-builtin",
+            ),
+            (
+                "compgen -Z",
+                "compgen: -Z: invalid option",
+                "compgen: usage: compgen [-abcdefgjksuv]",
+            ),
+            (
+                "disown -Z",
+                "disown: -Z: invalid option",
+                "disown: usage: disown [-h] [-ar]",
+            ),
+            (
+                "ulimit -Z",
+                "ulimit: -Z: invalid option",
+                "ulimit: usage: ulimit [-SHabcdefiklmnpqrstuvxPRT]",
+            ),
+            (
+                "enable -Z",
+                "enable: -Z: invalid option",
+                "enable: usage: enable [-a] [-dnps]",
+            ),
+            (
+                "shopt -Z",
+                "shopt: -Z: invalid option",
+                "shopt: usage: shopt [-pqsu]",
+            ),
+            (
+                "printf -Z",
+                "printf: -Z: invalid option",
+                "printf: usage: printf [-v var]",
+            ),
         ];
         for (src, diag, usage) in cases {
             let (o, s) = run(&format!("{src} 2>&1"));
@@ -97014,8 +102214,16 @@ st=1
 
         // No false positives: valid options on each of these still succeed.
         for src in [
-            "unset -v x", "cd -P .", "pwd -L", "hash -r", "alias -p", "type -t echo", "jobs -l",
-            "builtin echo hi", "compgen -W 'aa ab' a", "printf -vx '%d' 5",
+            "unset -v x",
+            "cd -P .",
+            "pwd -L",
+            "hash -r",
+            "alias -p",
+            "type -t echo",
+            "jobs -l",
+            "builtin echo hi",
+            "compgen -W 'aa ab' a",
+            "printf -vx '%d' 5",
         ] {
             let (o, s) = run(src);
             assert_eq!(s, 0, "{src}: expected success, got {s} ({o:?})");
@@ -97024,8 +102232,14 @@ st=1
         // source/. : missing filename and a bogus option both print the usage
         // synopsis tagged with the *invoking* name (`.` vs `source`), exit 2.
         let (o, s) = run("source 2>&1");
-        assert!(o.contains("source: filename argument required"), "got {o:?}");
-        assert!(o.contains("source: usage: source filename [arguments]"), "got {o:?}");
+        assert!(
+            o.contains("source: filename argument required"),
+            "got {o:?}"
+        );
+        assert!(
+            o.contains("source: usage: source filename [arguments]"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
         let (o, s) = run(". 2>&1");
         assert!(o.contains(".: filename argument required"), "got {o:?}");
@@ -97033,7 +102247,10 @@ st=1
         assert_eq!(s, 2);
         let (o, s) = run("source -x 2>&1");
         assert!(o.contains("source: -x: invalid option"), "got {o:?}");
-        assert!(o.contains("source: usage: source filename [arguments]"), "got {o:?}");
+        assert!(
+            o.contains("source: usage: source filename [arguments]"),
+            "got {o:?}"
+        );
         assert_eq!(s, 2);
     }
 
@@ -97236,7 +102453,10 @@ st=1
         assert_eq!(run("set -o pipefail; [ -o pipefail ] && echo p").0, "p\n");
         assert_eq!(run("set -u; [[ -o nounset ]] && echo u").0, "u\n");
         // Turning an option back off is reflected.
-        assert_eq!(run("set -x; set +x; [[ -o xtrace ]] && echo x || echo off").0, "off\n");
+        assert_eq!(
+            run("set -x; set +x; [[ -o xtrace ]] && echo x || echo off").0,
+            "off\n"
+        );
         // Unknown option names are reported disabled (bash returns false).
         assert_eq!(run("[[ -o bogus ]] && echo on || echo off").0, "off\n");
     }
@@ -97264,7 +102484,10 @@ st=1
         // `-r` forgets everything; `-t` then fails.
         assert_eq!(run("hash -p /x foo; hash -r; hash -t foo").1, 1);
         // An empty table reports `hash: hash table empty` (bash), exit 0.
-        assert_eq!(run("hash -r; hash"), ("hash: hash table empty\n".to_string(), 0));
+        assert_eq!(
+            run("hash -r; hash"),
+            ("hash: hash table empty\n".to_string(), 0)
+        );
     }
 
     #[test]
@@ -97295,7 +102518,10 @@ st=1
         assert_eq!(run("hash -t /a/b").1, 1);
         // `-l` selects nothing: with names it is the plain search, and with
         // `-t` it only reshapes the output.
-        assert_eq!(run("hash -p /a yy; hash -l yy 2>&1").0, "osh: hash: yy: not found\n");
+        assert_eq!(
+            run("hash -p /a yy; hash -l yy 2>&1").0,
+            "osh: hash: yy: not found\n"
+        );
         assert_eq!(
             run("hash -p /a yy; hash -lt yy").0,
             "builtin hash -p /a yy\n"
@@ -97305,13 +102531,19 @@ st=1
         let (o, s) = run("hash -rd 2>&1");
         assert_eq!(o, "osh: hash: -d: option requires an argument\n");
         assert_eq!(s, 1);
-        assert_eq!(run("hash -rt 2>&1").0, "osh: hash: -t: option requires an argument\n");
+        assert_eq!(
+            run("hash -rt 2>&1").0,
+            "osh: hash: -t: option requires an argument\n"
+        );
         // `-p` takes its argument attached or as the next word.
         assert_eq!(run("hash -p/x y; hash -lt y").0, "builtin hash -p /x y\n");
         assert_eq!(run("hash -rp /x y; hash -lt y").0, "builtin hash -p /x y\n");
         // …and complains at the getopt level (status 2, with the usage line).
         let (o, s) = run("hash -rp 2>&1");
-        assert!(o.contains("hash: -p: option requires an argument"), "got {o:?}");
+        assert!(
+            o.contains("hash: -p: option requires an argument"),
+            "got {o:?}"
+        );
         assert!(o.contains("hash: usage: hash [-lr]"), "got {o:?}");
         assert_eq!(s, 2);
     }
@@ -97341,7 +102573,11 @@ st=1
         );
         assert_eq!(run_script("set -o history\necho $HISTCMD").0, "1\n");
         // The option shows up in `SHELLOPTS` and in `set -o`.
-        assert!(run_script("set -o history\necho $SHELLOPTS").0.contains("history"));
+        assert!(
+            run_script("set -o history\necho $SHELLOPTS")
+                .0
+                .contains("history")
+        );
     }
 
     #[test]
@@ -97350,7 +102586,10 @@ st=1
         // what makes `history` list anything at a prompt without the user ever
         // running `set -o history`. So an interactive shell records from its very
         // first line, and `$HISTCMD` counts the line it appears on.
-        assert_eq!(run("echo a\nhistory").0, "a\n    1  echo a\n    2  history\n");
+        assert_eq!(
+            run("echo a\nhistory").0,
+            "a\n    1  echo a\n    2  history\n"
+        );
         assert_eq!(run("echo $HISTCMD").0, "1\n");
         // `set +o history` turns it back off, and (because a line is recorded when
         // it is *read*) the `set +o` line itself is the last entry recorded.
@@ -97385,7 +102624,13 @@ st=1
             "body\n    1  cat <<E\nbody\nE\n\n    2  history\n"
         );
         // Blank lines are dropped entirely.
-        assert_eq!(run_script("set -o history\n\n\n: x\nhistory").0.lines().count(), 2);
+        assert_eq!(
+            run_script("set -o history\n\n\n: x\nhistory")
+                .0
+                .lines()
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -97428,20 +102673,29 @@ st=1
         assert_eq!(run_script(&format!("{list}history -d 99")).1, 1);
         assert_eq!(run_script(&format!("{list}history -d foo")).1, 1);
         assert_eq!(run_script(&format!("{list}history -d 3-")).1, 1);
-        assert_eq!(run_script(&format!("{list}history -d 9-8")), (String::new(), 1));
+        assert_eq!(
+            run_script(&format!("{list}history -d 9-8")),
+            (String::new(), 1)
+        );
     }
 
     #[test]
     fn history_clear_store_and_print() {
         // `-c` empties the list and restarts the numbering.
-        assert_eq!(run_script("set -o history\n: a\nhistory -c\n: b\nhistory").0, "    1  : b\n    2  history\n");
+        assert_eq!(
+            run_script("set -o history\n: a\nhistory -c\n: b\nhistory").0,
+            "    1  : b\n    2  history\n"
+        );
         // `-s` replaces the entry its own line made.
         assert_eq!(
             run_script("set -o history\n: a\nhistory -s new text\nhistory").0,
             "    1  : a\n    2  new text\n    3  history\n"
         );
         // `-p` prints its arguments and records nothing.
-        assert_eq!(run_script("set -o history\nhistory -p one two").0, "one\ntwo\n");
+        assert_eq!(
+            run_script("set -o history\nhistory -p one two").0,
+            "one\ntwo\n"
+        );
         // Bad usage is a usage error; a bad count operand is not.
         assert_eq!(run("history -z").1, 2);
         assert_eq!(run("history -d").1, 2);
@@ -97462,14 +102716,23 @@ st=1
             "    3  HISTSIZE=2\n    4  history\n"
         );
         // `HISTSIZE=0` stores nothing and leaves `$HISTCMD` one below the count.
-        assert_eq!(run_script("set -o history\n: a\nHISTSIZE=0\n: b\necho $HISTCMD\nhistory").0, "1\n");
+        assert_eq!(
+            run_script("set -o history\n: a\nHISTSIZE=0\n: b\necho $HISTCMD\nhistory").0,
+            "1\n"
+        );
         // Unset, empty and negative all unstifle; a non-number is ignored.
         assert_eq!(
-            run_script("HISTSIZE=2\nset -o history\n: a\n: b\nHISTSIZE=abc\n: c\nhistory").0.lines().count(),
+            run_script("HISTSIZE=2\nset -o history\n: a\n: b\nHISTSIZE=abc\n: c\nhistory")
+                .0
+                .lines()
+                .count(),
             2
         );
         assert_eq!(
-            run_script("HISTSIZE=2\nset -o history\n: a\n: b\nHISTSIZE=\n: c\nhistory").0.lines().count(),
+            run_script("HISTSIZE=2\nset -o history\n: a\n: b\nHISTSIZE=\n: c\nhistory")
+                .0
+                .lines()
+                .count(),
             4
         );
     }
@@ -97498,7 +102761,10 @@ st=1
         // A wholly empty line is not an entry; a blank one is.
         std::fs::write(dir.join("b"), "x1\n\n  \nx2\n").expect("write");
         assert_eq!(
-            run_script(&format!("set -o history\nhistory -c\nhistory -r {d}/b\nhistory")).0,
+            run_script(&format!(
+                "set -o history\nhistory -c\nhistory -r {d}/b\nhistory"
+            ))
+            .0,
             format!("    1  history -r {d}/b\n    2  x1\n    3    \n    4  x2\n    5  history\n")
         );
         // With no operand the file is `$HISTFILE`.
@@ -97510,8 +102776,14 @@ st=1
             format!("    1  history -r\n    2  HISTFILE={d}/h\n    3  : kept\n    4  history -w\n    5  history\n")
         );
         // A file that cannot be read or written fails quietly, status 1.
-        assert_eq!(run_script(&format!("history -r {d}/nope")), (String::new(), 1));
-        assert_eq!(run_script(&format!("history -w {d}/no/dir")), (String::new(), 1));
+        assert_eq!(
+            run_script(&format!("history -r {d}/nope")),
+            (String::new(), 1)
+        );
+        assert_eq!(
+            run_script(&format!("history -w {d}/no/dir")),
+            (String::new(), 1)
+        );
     }
 
     #[test]
@@ -97546,7 +102818,10 @@ st=1
         // `-c` returns immediately unless one of `-anrw` came with it, so `-c -w`
         // is how the file is emptied.
         std::fs::write(dir.join("f"), "old\n").expect("write");
-        assert_eq!(run(&format!("set -o history\nhistory -c -w {d}/f")), (String::new(), 0));
+        assert_eq!(
+            run(&format!("set -o history\nhistory -c -w {d}/f")),
+            (String::new(), 0)
+        );
         assert_eq!(std::fs::read_to_string(dir.join("f")).expect("read"), "");
         // Two *different* file options are an error (on stderr, which `run` does
         // not capture); the same one twice is not.
@@ -97563,7 +102838,10 @@ st=1
         // and there — the effect lands on the filesystem, not on the list.
         five();
         assert_eq!(run(&format!("{body}HISTFILESIZE=2")).1, 0);
-        assert_eq!(std::fs::read_to_string(dir.join("h")).expect("read"), "l4\nl5\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("h")).expect("read"),
+            "l4\nl5\n"
+        );
         // 0 empties it.
         five();
         assert_eq!(run(&format!("{body}HISTFILESIZE=0")).1, 0);
@@ -97573,24 +102851,51 @@ st=1
             five();
             assert_eq!(run(&format!("{body}HISTFILESIZE={v}")).1, 0);
             assert_eq!(
-                std::fs::read_to_string(dir.join("h")).expect("read").lines().count(),
+                std::fs::read_to_string(dir.join("h"))
+                    .expect("read")
+                    .lines()
+                    .count(),
                 5,
                 "HISTFILESIZE={v} should not truncate"
             );
         }
         // Assigning `HISTFILE` truncates nothing, and `-w` ignores the limit.
         five();
-        assert_eq!(run(&format!("set -o history\nHISTFILESIZE=1\nHISTFILE={d}/h")).1, 0);
-        assert_eq!(std::fs::read_to_string(dir.join("h")).expect("read").lines().count(), 5);
-        assert_eq!(run(&format!("{body}HISTFILESIZE=1\nhistory -c\n: p\n: q\nhistory -w")).1, 0);
-        assert_eq!(std::fs::read_to_string(dir.join("h")).expect("read").lines().count(), 3);
+        assert_eq!(
+            run(&format!("set -o history\nHISTFILESIZE=1\nHISTFILE={d}/h")).1,
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("h"))
+                .expect("read")
+                .lines()
+                .count(),
+            5
+        );
+        assert_eq!(
+            run(&format!(
+                "{body}HISTFILESIZE=1\nhistory -c\n: p\n: q\nhistory -w"
+            ))
+            .1,
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("h"))
+                .expect("read")
+                .lines()
+                .count(),
+            3
+        );
     }
 
     #[test]
     fn history_store_and_print_drop_their_own_line() {
         // `-s` and `-p` each un-record the line they were written on, and `-s`
         // wins over both `-p` and `-d`.
-        assert_eq!(run_script("set -o history\n: a\nhistory -p one\nhistory").0, "one\n    1  : a\n    2  history\n");
+        assert_eq!(
+            run_script("set -o history\n: a\nhistory -p one\nhistory").0,
+            "one\n    1  : a\n    2  history\n"
+        );
         assert_eq!(
             run_script("set -o history\n: a\nhistory -s -p one\nhistory").0,
             "    1  : a\n    2  one\n    3  history\n"
@@ -97600,12 +102905,24 @@ st=1
             "    1  : a\n    2  foo\n    3  history\n"
         );
         // With no arguments at all they keep their own line.
-        assert_eq!(run_script("set -o history\nhistory -p\nhistory -s\nhistory").0.lines().count(), 3);
+        assert_eq!(
+            run_script("set -o history\nhistory -p\nhistory -s\nhistory")
+                .0
+                .lines()
+                .count(),
+            3
+        );
         // Options cluster getopt-style, and `-d` takes an attached offset.
-        assert_eq!(run_script("set -o history\n: a\n: b\nhistory -d1\nhistory").0, "    1  : b\n    2  history -d1\n    3  history\n");
+        assert_eq!(
+            run_script("set -o history\n: a\n: b\nhistory -d1\nhistory").0,
+            "    1  : b\n    2  history -d1\n    3  history\n"
+        );
         // `-c` returns before `-s` is looked at, so a clustered `-cs` clears and
         // stores nothing — but the `-cs` line's own entry went with the clear.
-        assert_eq!(run_script("set -o history\n: a\nhistory -cs stored\nhistory").0, "    1  history\n");
+        assert_eq!(
+            run_script("set -o history\n: a\nhistory -cs stored\nhistory").0,
+            "    1  history\n"
+        );
     }
 
     #[test]
@@ -97645,13 +102962,25 @@ st=1
     #[test]
     fn array_slice_expansion() {
         // `${a[@]:off:len}` selects a run of elements by position.
-        assert_eq!(run("a=(zero one two three four); echo ${a[@]:1:2}").0, "one two\n");
-        assert_eq!(run("a=(zero one two three four); echo ${a[@]:2}").0, "two three four\n");
+        assert_eq!(
+            run("a=(zero one two three four); echo ${a[@]:1:2}").0,
+            "one two\n"
+        );
+        assert_eq!(
+            run("a=(zero one two three four); echo ${a[@]:2}").0,
+            "two three four\n"
+        );
         // Negative offset counts from the end. A negative *length*, unlike a
         // string substring, is a fatal error for an array slice (bash: "N:
         // substring expression < 0") — see `array_slice_negative_length_is_fatal`.
-        assert_eq!(run("a=(zero one two three four); echo \"${a[@]: -2}\"").0, "three four\n");
-        assert_eq!(run("a=(zero one two three four); echo ${a[@]:1:-1}"), (String::new(), 1));
+        assert_eq!(
+            run("a=(zero one two three four); echo \"${a[@]: -2}\"").0,
+            "three four\n"
+        );
+        assert_eq!(
+            run("a=(zero one two three four); echo ${a[@]:1:-1}"),
+            (String::new(), 1)
+        );
         // Quoted slice preserves one field per element (spaces inside survive).
         assert_eq!(
             run("a=('a b' 'c d' e); for x in \"${a[@]:0:2}\"; do echo \"[$x]\"; done").0,
@@ -97747,7 +103076,10 @@ st=1
         // Empty IFS joins with no separator.
         assert_eq!(run(r#"a=(x y z); IFS=; echo "${a[*]}""#).0, "xyz\n");
         // Assigned to a scalar then read back.
-        assert_eq!(run(r#"a=(1 2 3); IFS=:; s="${a[*]}"; echo "$s""#).0, "1:2:3\n");
+        assert_eq!(
+            run(r#"a=(1 2 3); IFS=:; s="${a[*]}"; echo "$s""#).0,
+            "1:2:3\n"
+        );
     }
 
     #[test]
@@ -97765,29 +103097,14 @@ st=1
             run("a=(foo.txt bar.txt baz.txt); echo ${a[@]%.txt}").0,
             "foo bar baz\n"
         );
-        assert_eq!(
-            run("a=(x_1 x_2 x_3); echo ${a[@]#x_}").0,
-            "1 2 3\n"
-        );
+        assert_eq!(run("a=(x_1 x_2 x_3); echo ${a[@]#x_}").0, "1 2 3\n");
         // Substitution applied per element.
-        assert_eq!(
-            run("a=(a.b c.d e.f); echo ${a[@]/./_}").0,
-            "a_b c_d e_f\n"
-        );
+        assert_eq!(run("a=(a.b c.d e.f); echo ${a[@]/./_}").0, "a_b c_d e_f\n");
         // Global substitution per element.
-        assert_eq!(
-            run("a=(aa bb); echo ${a[@]//a/X}").0,
-            "XX bb\n"
-        );
+        assert_eq!(run("a=(aa bb); echo ${a[@]//a/X}").0, "XX bb\n");
         // Case modification per element.
-        assert_eq!(
-            run("a=(foo bar); echo ${a[@]^^}").0,
-            "FOO BAR\n"
-        );
-        assert_eq!(
-            run("a=(Foo Bar); echo ${a[@]^}").0,
-            "Foo Bar\n"
-        );
+        assert_eq!(run("a=(foo bar); echo ${a[@]^^}").0, "FOO BAR\n");
+        assert_eq!(run("a=(Foo Bar); echo ${a[@]^}").0, "Foo Bar\n");
         // `@`-transform (`@Q`) quotes each element; quoted keeps per-element fields.
         assert_eq!(
             run("a=('a b' c); for x in \"${a[@]@Q}\"; do echo \"[$x]\"; done").0,
@@ -97811,10 +103128,7 @@ st=1
     #[test]
     fn unset_v_and_f_flags() {
         // `-v` unsets only the variable, leaving a same-named function intact.
-        assert_eq!(
-            run("f() { echo fn; }; f=1; unset -v f; f").0,
-            "fn\n"
-        );
+        assert_eq!(run("f() { echo fn; }; f=1; unset -v f; f").0, "fn\n");
         // `-f` unsets only the function, leaving the variable intact.
         assert_eq!(
             run("g() { echo fn; }; g=val; unset -f g; echo $g").0,
@@ -97835,7 +103149,10 @@ st=1
         // The error discards the rest of its *parse unit*, so the probe of `$?`
         // has to live on the following line.
         let (o, _) = run("a=(0 1 2)\n{ a['1']=x; } 2>&1\necho \"st=$? vals=${a[*]}\"");
-        assert_eq!(o, "osh: '1': syntax error: operand expected (error token is \"'1'\")\nst=1 vals=0 1 2\n");
+        assert_eq!(
+            o,
+            "osh: '1': syntax error: operand expected (error token is \"'1'\")\nst=1 vals=0 1 2\n"
+        );
         assert_eq!(run("b=(0 1 2); b[\"1\"]=y; echo \"${b[1]}\"").0, "y\n");
         // The empty case is the dangerous one: `''` must be a syntax error, not
         // index 0, or the assignment silently overwrites the first element.
@@ -97847,7 +103164,10 @@ st=1
         // …while a double-quoted empty subscript really is index 0.
         assert_eq!(run("d=(0 1 2); d[\"\"]=z; echo \"${d[0]}\"").0, "z\n");
         // The read and length forms follow the same rule.
-        assert_eq!(run("e=(0 1 2); echo \"${e[\"1\"]} ${#e[\"1\"]}\"").0, "1 1\n");
+        assert_eq!(
+            run("e=(0 1 2); echo \"${e[\"1\"]} ${#e[\"1\"]}\"").0,
+            "1 1\n"
+        );
         // Substring and slice bounds are arithmetic too.
         let (o3, _) = run("s=abcdef\n{ echo \"${s:'1'}\"; } 2>&1\necho \"st=$?\"");
         assert_eq!(
@@ -97868,7 +103188,10 @@ st=1
         // evaluator's — the same split as BUG-OILS-ARITH-WHO-EXPANDS. So a
         // `(( … ))` section, whose text the shell expands itself, loses its
         // quotes…
-        assert_eq!(run("echo \"[$(( \"3\" + \"4\" ))] [$(( 1\"2\"3 ))]\"").0, "[7] [123]\n");
+        assert_eq!(
+            run("echo \"[$(( \"3\" + \"4\" ))] [$(( 1\"2\"3 ))]\"").0,
+            "[7] [123]\n"
+        );
         assert_eq!(run("q=7; (( \"q\" )); echo \"rc=$?\"").0, "rc=0\n");
         // …while text the evaluator reads for *itself* keeps them and is
         // rejected. osh used to filter quotes out inside the evaluator, so all
@@ -97973,7 +103296,10 @@ st=1
         assert_eq!(s, 0);
         assert_eq!(o, "0 1 3 4\n");
         // Removing an element leaves a gap — higher elements keep their index.
-        assert_eq!(run("b=(a b c); unset 'b[1]'; echo \"${!b[*]} n=${#b[@]}\"").0, "0 2 n=2\n");
+        assert_eq!(
+            run("b=(a b c); unset 'b[1]'; echo \"${!b[*]} n=${#b[@]}\"").0,
+            "0 2 n=2\n"
+        );
         // A negative index counts back from the *highest index* + 1, so a
         // sparse array counts from its top index rather than its length.
         assert_eq!(
@@ -97993,7 +103319,11 @@ st=1
         src.push(0xff);
         src.extend_from_slice(b"]=gone\nm[keep]=kept\n");
         assert_eq!(sh.run_source(&src), 0);
-        assert_eq!(sh.assoc.get("m").map(AssocArray::len), Some(2), "both keys stored");
+        assert_eq!(
+            sh.assoc.get("m").map(AssocArray::len),
+            Some(2),
+            "both keys stored"
+        );
         let mut unset: Str = b"unset 'm[".to_vec();
         unset.push(0xff);
         unset.extend_from_slice(b"]'\n");
@@ -98017,9 +103347,7 @@ st=1
         let mut sh = new_shell();
         let mut src: Str = b"declare -A m\nk='".to_vec();
         src.push(0xff);
-        src.extend_from_slice(
-            b"'\nprintf -v \"m[p$k]\" %s.%s pr intf\nread \"m[r$k]\" <<< rd\n",
-        );
+        src.extend_from_slice(b"'\nprintf -v \"m[p$k]\" %s.%s pr intf\nread \"m[r$k]\" <<< rd\n");
         assert_eq!(sh.run_source(&src), 0, "no operand was refused");
         let m = sh.assoc.get("m").expect("m is declared");
         assert_eq!(m.len(), 2, "both keys stored: {m:?}");
@@ -98130,11 +103458,7 @@ st=1
             .get_envs()
             .map(|(k, v)| (k.to_os_string(), v.map(std::ffi::OsStr::to_os_string)))
             .collect();
-        let at = |want: &OsString| {
-            envs.iter()
-                .find(|(k, _)| k == want)
-                .map(|(_, v)| v.clone())
-        };
+        let at = |want: &OsString| envs.iter().find(|(k, _)| k == want).map(|(_, v)| v.clone());
         // Verbatim: the same `OsString` that arrived, not a re-encoding of it.
         assert_eq!(at(&k), Some(Some(v)), "opaque entry dropped: {envs:?}");
         assert_eq!(
@@ -98182,15 +103506,28 @@ st=1
         // A bare name the `$PATH` search cannot place names itself: the OS is
         // about to be asked to find it, and bash reports failure the same way.
         let mut pc = PCommand::new("true");
-        let prog = ChildProgram { word: b"no-such-program-anywhere", resolved: None };
+        let prog = ChildProgram {
+            word: b"no-such-program-anywhere",
+            resolved: None,
+        };
         sh.apply_child_env(&mut pc, &[], Some(prog));
-        assert_eq!(underscore(&pc), Some(OsString::from("no-such-program-anywhere")));
+        assert_eq!(
+            underscore(&pc),
+            Some(OsString::from("no-such-program-anywhere"))
+        );
         // The entry is the child's alone, and beats anything the shell might
         // have put under that name — an exported `_` is impossible, but an
         // `_=…` written as a prefix is not.
         let mut pc = PCommand::new("true");
-        let prog = ChildProgram { word: b"./env", resolved: None };
-        sh.apply_child_env(&mut pc, &[("_".to_string(), b"custom".to_vec())], Some(prog));
+        let prog = ChildProgram {
+            word: b"./env",
+            resolved: None,
+        };
+        sh.apply_child_env(
+            &mut pc,
+            &[("_".to_string(), b"custom".to_vec())],
+            Some(prog),
+        );
         let unders: Vec<Option<OsString>> = pc
             .get_envs()
             .filter(|(k, _)| *k == OsStr::new("_"))
@@ -98243,7 +103580,9 @@ st=1
         assert!(has_f("f() { echo hi; }; export -f f"));
         assert!(!has_f("f() { echo hi; }; export -f f; export -nf f"));
         assert!(!has_f("f() { echo hi; }; export -f f; declare +x -f f"));
-        assert!(!has_f("f() { echo hi; }; export -f f; unset -f f; f() { echo hi; }"));
+        assert!(!has_f(
+            "f() { echo hi; }; export -f f; unset -f f; f() { echo hi; }"
+        ));
     }
 
     /// The `BASH_FUNC_<name>%%` shape is recognised on the way *in*, so a
@@ -98254,9 +103593,15 @@ st=1
         let mut sh = new_shell();
         sh.import_env_function(b"f", b"() {  echo hi\n}");
         assert!(sh.funcs.contains_key(b"f".as_slice()), "function not bound");
-        assert_eq!(sh.func_sources.get(b"f".as_slice()).map(Vec::as_slice), Some(&b"environment"[..]));
+        assert_eq!(
+            sh.func_sources.get(b"f".as_slice()).map(Vec::as_slice),
+            Some(&b"environment"[..])
+        );
         assert_eq!(sh.func_lines.get(b"f".as_slice()).copied(), Some(0));
-        assert!(sh.exported_funcs.contains(b"f".as_slice()), "import dropped the export mark");
+        assert!(
+            sh.exported_funcs.contains(b"f".as_slice()),
+            "import dropped the export mark"
+        );
 
         // Still exported means a *grandchild* gets it too, re-encoded from the
         // parsed body rather than passed through as inherited text.
@@ -98274,11 +103619,14 @@ st=1
     #[test]
     fn env_function_name_needs_both_fixtures() {
         assert_eq!(Shell::env_function_name(b"BASH_FUNC_f%%"), Some(&b"f"[..]));
-        assert_eq!(Shell::env_function_name(b"BASH_FUNC_f-1%%"), Some(&b"f-1"[..]));
+        assert_eq!(
+            Shell::env_function_name(b"BASH_FUNC_f-1%%"),
+            Some(&b"f-1"[..])
+        );
         for key in [
-            &b"BASH_FUNC_f"[..],     // no suffix
-            &b"f%%"[..],             // no prefix
-            &b"BASH_FUNC_%%"[..],    // empty name
+            &b"BASH_FUNC_f"[..],  // no suffix
+            &b"f%%"[..],          // no prefix
+            &b"BASH_FUNC_%%"[..], // empty name
             &b"PATH"[..],
             &b"BASH_FUNCX_f%%"[..],
         ] {
@@ -98316,7 +103664,10 @@ st=1
         let mut sh = new_shell();
         sh.import_env_function(b"r", b"() {  echo z\n} > /dev/null");
         assert!(sh.funcs.contains_key(b"r".as_slice()));
-        assert_eq!(sh.func_redirects.get(b"r".as_slice()).map(Vec::len), Some(1));
+        assert_eq!(
+            sh.func_redirects.get(b"r".as_slice()).map(Vec::len),
+            Some(1)
+        );
     }
 
     /// `declare -F` spells a function's attributes in bash's fixed letter
@@ -98354,7 +103705,10 @@ st=1
     fn export_f_rejects_a_non_function() {
         let (o, s) = run("f() { :; }; export -f nosuch f 2>&1; echo rc=$?; declare -Fx");
         assert_eq!(s, 0);
-        assert_eq!(o, "osh: export: nosuch: not a function\nrc=1\ndeclare -fx f\n");
+        assert_eq!(
+            o,
+            "osh: export: nosuch: not a function\nrc=1\ndeclare -fx f\n"
+        );
 
         let (o, _) = run("export -f h=1 2>&1; echo rc=$?");
         assert_eq!(o, "osh: export: h=1: not a function\nrc=1\n");
@@ -98394,7 +103748,10 @@ st=1
              echo \"st=$? d=${#d[@]} e=${!e[*]} f=${f-gone}\"",
         );
         assert_eq!(s, 0);
-        assert_eq!(o, "osh: unset: [-9]: bad array subscript\nst=1 d=3 e=1 2 f=gone\n");
+        assert_eq!(
+            o,
+            "osh: unset: [-9]: bad array subscript\nst=1 d=3 e=1 2 f=gone\n"
+        );
         // An associative key that expands to empty is reported the same way,
         // naming the source rather than the empty expansion.
         assert_eq!(
@@ -98421,8 +103778,14 @@ st=1
         // An empty subscript, trailing junk after the `]`, and a base that is
         // not an identifier are not array references at all: bash unsets a
         // (necessarily absent) variable of that literal name and succeeds.
-        assert_eq!(run("n=(1 2); unset 'n[]'; echo \"st=$? n=${#n[@]}\"").0, "st=0 n=2\n");
-        assert_eq!(run("n=(1 2); unset 'n[0]junk'; echo \"st=$? n=${#n[@]}\"").0, "st=0 n=2\n");
+        assert_eq!(
+            run("n=(1 2); unset 'n[]'; echo \"st=$? n=${#n[@]}\"").0,
+            "st=0 n=2\n"
+        );
+        assert_eq!(
+            run("n=(1 2); unset 'n[0]junk'; echo \"st=$? n=${#n[@]}\"").0,
+            "st=0 n=2\n"
+        );
         assert_eq!(run("unset '1abc[0]'; echo \"st=$?\"").0, "st=0\n");
         // An *unset* variable is never probed, so a subscript that would be a
         // hard error on a real array is silently accepted.
@@ -98441,13 +103804,31 @@ st=1
         assert_eq!(run("{ unset -- 1x; } 2>&1; echo st=$?").0, "st=0\n");
         // An explicit `-v` reports and fails — wherever the `v` appears, and
         // whether or not a `--` or another flag comes with it.
-        assert_eq!(run("{ unset -v 1x; } 2>&1; echo st=$?").0, format!("{bad}st=1\n"));
-        assert_eq!(run("{ unset -nv 1x; } 2>&1; echo st=$?").0, format!("{bad}st=1\n"));
-        assert_eq!(run("{ unset -vn 1x; } 2>&1; echo st=$?").0, format!("{bad}st=1\n"));
-        assert_eq!(run("{ unset -v -n 1x; } 2>&1; echo st=$?").0, format!("{bad}st=1\n"));
-        assert_eq!(run("{ unset -v -- 1x; } 2>&1; echo st=$?").0, format!("{bad}st=1\n"));
+        assert_eq!(
+            run("{ unset -v 1x; } 2>&1; echo st=$?").0,
+            format!("{bad}st=1\n")
+        );
+        assert_eq!(
+            run("{ unset -nv 1x; } 2>&1; echo st=$?").0,
+            format!("{bad}st=1\n")
+        );
+        assert_eq!(
+            run("{ unset -vn 1x; } 2>&1; echo st=$?").0,
+            format!("{bad}st=1\n")
+        );
+        assert_eq!(
+            run("{ unset -v -n 1x; } 2>&1; echo st=$?").0,
+            format!("{bad}st=1\n")
+        );
+        assert_eq!(
+            run("{ unset -v -- 1x; } 2>&1; echo st=$?").0,
+            format!("{bad}st=1\n")
+        );
         // An element reference passes, since that is how one element is unset.
-        assert_eq!(run("n=(1 2); unset -v 'n[0]'; echo \"st=$? n=${#n[@]}\"").0, "st=0 n=1\n");
+        assert_eq!(
+            run("n=(1 2); unset -v 'n[0]'; echo \"st=$? n=${#n[@]}\"").0,
+            "st=0 n=1\n"
+        );
         assert_eq!(
             run("declare -A m=([k v]=1); unset -v 'm[k v]'; echo \"st=$? m=${#m[@]}\"").0,
             "st=0 m=0\n"
@@ -98510,11 +103891,23 @@ st=1
         // `harness_path`), so the assignment here is no longer load-bearing;
         // it stays because the test is about the flush, and a `$PATH` whose
         // value the test names is one whose flush the test can attribute.
-        assert_eq!(run("PATH=/x; hash -p /bin/foo foo; unset PATH; hash").0, empty);
-        assert_eq!(run("hash -p /bin/foo foo; declare PATH=/nowhere; hash").0, empty);
+        assert_eq!(
+            run("PATH=/x; hash -p /bin/foo foo; unset PATH; hash").0,
+            empty
+        );
+        assert_eq!(
+            run("hash -p /bin/foo foo; declare PATH=/nowhere; hash").0,
+            empty
+        );
         // So does an assignment made as a command prefix, or inside a function.
-        assert_eq!(run("hash -p /bin/foo foo; PATH=/nowhere true; hash").0, empty);
-        assert_eq!(run("hash -p /bin/foo foo; f() { PATH=/nowhere; }; f; hash").0, empty);
+        assert_eq!(
+            run("hash -p /bin/foo foo; PATH=/nowhere true; hash").0,
+            empty
+        );
+        assert_eq!(
+            run("hash -p /bin/foo foo; f() { PATH=/nowhere; }; f; hash").0,
+            empty
+        );
         // Declaring the name is itself a change to it, so `declare` and its
         // spellings flush even when they bind no value at all — with or
         // without attribute letters, and whether or not the attribute is
@@ -98523,7 +103916,10 @@ st=1
         assert_eq!(run("hash -p /bin/foo foo; typeset PATH; hash").0, empty);
         assert_eq!(run("hash -p /bin/foo foo; declare -x PATH; hash").0, empty);
         assert_eq!(run("hash -p /bin/foo foo; declare -r PATH; hash").0, empty);
-        assert_eq!(run("hash -p /bin/foo foo; f() { local PATH; }; f; hash").0, empty);
+        assert_eq!(
+            run("hash -p /bin/foo foo; f() { local PATH; }; f; hash").0,
+            empty
+        );
         // `export` and `readonly` name no value, so they are not assignments;
         // nor is assigning some other variable, nor *listing* `$PATH` with
         // `declare -p`, which declares nothing.
@@ -98609,11 +104005,8 @@ st=1
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "osh_exec_{}_{}.txt",
-            std::process::id(),
-            uniq
-        ));
+        let path =
+            std::env::temp_dir().join(format!("osh_exec_{}_{}.txt", std::process::id(), uniq));
         let p = path.to_string_lossy().replace('\\', "/");
         let src = src_tmpl.replace("{FILE}", &p);
         let mut sh = new_shell();
@@ -98684,7 +104077,10 @@ st=1
             "hi\n"
         );
         // A dup is not an open, so noclobber has no file to protect.
-        assert_eq!(run("set -C; echo hi > /dev/stdout; echo rc=$?").0, "hi\nrc=0\n");
+        assert_eq!(
+            run("set -C; echo hi > /dev/stdout; echo rc=$?").0,
+            "hi\nrc=0\n"
+        );
     }
 
     #[test]
@@ -98847,7 +104243,10 @@ st=1
         assert_eq!(s, 1, "`declare -p` of a name that does not exist fails");
         // The prefix assignment beside it is still performed, so this is not a
         // subshell — only the varfd's two effects are undone.
-        assert_eq!(run("x=1 {v}>/dev/null; echo \"x=$x v=[$v]\"").0, "x=1 v=[]\n");
+        assert_eq!(
+            run("x=1 {v}>/dev/null; echo \"x=$x v=[$v]\"").0,
+            "x=1 v=[]\n"
+        );
         // …and the descriptor goes with the number, so the next one gets 10.
         let (o, s) = run("{v}>/dev/null; {u}>/dev/null; { :; } {w}>/dev/null; echo \"w=$w\"");
         assert_eq!(o, "w=10\n");
@@ -98868,12 +104267,21 @@ st=1
         assert_eq!(o, "inner=[10]\nouter=[pre]\n");
         assert_eq!(s, 0);
         // An unset variable is left unset rather than becoming an empty one.
-        assert_eq!(run("( : ) {v}>/dev/null; echo \"[${v-UNSET}]\"").0, "[UNSET]\n");
+        assert_eq!(
+            run("( : ) {v}>/dev/null; echo \"[${v-UNSET}]\"").0,
+            "[UNSET]\n"
+        );
         // The descriptor goes back with the number, so the next varfd gets 10
         // rather than 11 — which is how the release is visible from outside.
-        assert_eq!(run("( : ) {v}>/dev/null; { :; } {w}>/dev/null; echo \"w=$w\"").0, "w=10\n");
+        assert_eq!(
+            run("( : ) {v}>/dev/null; { :; } {w}>/dev/null; echo \"w=$w\"").0,
+            "w=10\n"
+        );
         // A brace group is *not* a subshell, so its varfd is the parent's.
-        assert_eq!(run("v=pre; { :; } {v}>/dev/null; echo \"v=[$v]\"").0, "v=[10]\n");
+        assert_eq!(
+            run("v=pre; { :; } {v}>/dev/null; echo \"v=[$v]\"").0,
+            "v=[10]\n"
+        );
         // A failing open reports and assigns nothing, here as anywhere.
         let (o, s) = run("v=pre; ( : ) {v}>/nosuch/dir/f 2>/dev/null; echo \"rc=$? v=[$v]\"");
         assert_eq!(o, "rc=1 v=[pre]\n");
@@ -98889,27 +104297,26 @@ st=1
         let keep =
             "{ :; } {v}>/dev/null; echo \"v=$v\"; { echo X >&$v; } 2>/dev/null; echo \"rc=$?\"";
         assert_eq!(run(keep).0, "v=10\nrc=0\n");
-        assert_eq!(run(&format!("shopt -s varredir_close; {keep}")).0, "v=10\nrc=1\n");
+        assert_eq!(
+            run(&format!("shopt -s varredir_close; {keep}")).0,
+            "v=10\nrc=1\n"
+        );
         // With the number free again, the next redirect gets 10 back.
         let two = "{ :; } {a}>/dev/null; { :; } {b}>/dev/null; echo \"$a $b\"";
         assert_eq!(run(two).0, "10 11\n");
         assert_eq!(run(&format!("shopt -s varredir_close; {two}")).0, "10 10\n");
         // `exec` is not a command whose end could close anything, so its
         // descriptor persists with the option on.
-        let (o, s) = run(
-            "shopt -s varredir_close; exec {v}>/dev/null; \
-             { echo X >&$v; } 2>/dev/null; echo \"rc=$?\"",
-        );
+        let (o, s) = run("shopt -s varredir_close; exec {v}>/dev/null; \
+             { echo X >&$v; } 2>/dev/null; echo \"rc=$?\"");
         assert_eq!(o, "rc=0\n");
         assert_eq!(s, 0);
         // Nested: the inner command's descriptor goes when *it* ends, the
         // outer's only when the outer does.
-        let (o, s) = run(
-            "shopt -s varredir_close\n\
+        let (o, s) = run("shopt -s varredir_close\n\
              { { :; } {p}>/dev/null; { echo X >&$p; } 2>/dev/null; echo \"inner=$?\"\n\
                { echo Y >&$q; } 2>/dev/null; echo \"outer=$?\"; } {q}>/dev/null\n\
-             { echo Z >&$q; } 2>/dev/null; echo \"after=$?\"",
-        );
+             { echo Z >&$q; } 2>/dev/null; echo \"after=$?\"");
         assert_eq!(o, "inner=1\nouter=0\nafter=1\n");
         assert_eq!(s, 0);
     }
@@ -98932,10 +104339,8 @@ st=1
         assert_eq!(o, "w=10\n");
         assert_eq!(s, 0);
         // …and so is the one a *refused assignment* opened, which is undone.
-        let (o, s) = run(
-            "readonly v=x; { { echo W; } {v}>/dev/null; } 2>/dev/null; \
-             exec {w}>/dev/null; echo \"w=$w\"",
-        );
+        let (o, s) = run("readonly v=x; { { echo W; } {v}>/dev/null; } 2>/dev/null; \
+             exec {w}>/dev/null; echo \"w=$w\"");
         assert_eq!(o, "w=10\n");
         assert_eq!(s, 0);
     }
@@ -99041,11 +104446,7 @@ st=1
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "osh_in_{}_{}.txt",
-            std::process::id(),
-            uniq
-        ));
+        let path = std::env::temp_dir().join(format!("osh_in_{}_{}.txt", std::process::id(), uniq));
         std::fs::write(&path, input).expect("write input");
         let p = path.to_string_lossy().replace('\\', "/");
         let src = src_tmpl.replace("{FILE}", &p);
@@ -99067,8 +104468,8 @@ st=1
         // even for builtins that never read stdin — the command does not run and
         // status is 1. Regression: osh used to set `plan.stdin` without opening,
         // so `echo hi < /nonexistent` printed "hi" (rc 0) instead of failing.
-        let missing = std::env::temp_dir()
-            .join(format!("osh_absent_{}_zzz.txt", std::process::id()));
+        let missing =
+            std::env::temp_dir().join(format!("osh_absent_{}_zzz.txt", std::process::id()));
         let p = missing.to_string_lossy().replace('\\', "/");
         let _ = std::fs::remove_file(&missing);
         // `echo` never reads stdin, yet the missing redirect must abort it.
@@ -99085,8 +104486,10 @@ st=1
         // `read a <&3; read b <&3`: the input dup shares fd 3's offset, so the
         // two reads yield successive lines (regression: `<&3` used to be routed
         // as an *output* dup, mis-handling — and hanging — the input case).
-        let (o, s) =
-            run_input_redirect("L1\nL2\nL3\n", "exec 3<\"{FILE}\"\nread a <&3\nread b <&3\necho \"$a-$b\"");
+        let (o, s) = run_input_redirect(
+            "L1\nL2\nL3\n",
+            "exec 3<\"{FILE}\"\nread a <&3\nread b <&3\necho \"$a-$b\"",
+        );
         assert_eq!(s, 0);
         assert_eq!(o, "L1-L2\n");
     }
@@ -99161,9 +104564,7 @@ st=1
         // `echo b >&2` does not. This exercises strict left-to-right ordering of
         // exec redirects (the collapsed RedirPlan could not express it).
         assert_eq!(
-            run_exec_redirect(
-                "exec 2> \"{FILE}\"\nexec 3>&1 1>&2 2>&3 3>&-\necho a\necho b >&2"
-            ),
+            run_exec_redirect("exec 2> \"{FILE}\"\nexec 3>&1 1>&2 2>&3 3>&-\necho a\necho b >&2"),
             "a\n"
         );
     }
@@ -99175,16 +104576,12 @@ st=1
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "osh_exec_in_{}_{}.txt",
-            std::process::id(),
-            uniq
-        ));
+        let path =
+            std::env::temp_dir().join(format!("osh_exec_in_{}_{}.txt", std::process::id(), uniq));
         std::fs::write(&path, b"line1\nline2\nline3\n").expect("write input");
         let p = path.to_string_lossy().replace('\\', "/");
-        let src = format!(
-            "exec < \"{p}\"\nread a\nread b\necho \"$a=$b\"\nread rest\necho \"$rest\""
-        );
+        let src =
+            format!("exec < \"{p}\"\nread a\nread b\necho \"$a=$b\"\nread rest\necho \"$rest\"");
         let (out, status) = run(&src);
         let _ = std::fs::remove_file(&path);
         assert_eq!(status, 0);
@@ -99198,16 +104595,11 @@ st=1
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "osh_exec_fd3_{}_{}.txt",
-            std::process::id(),
-            uniq
-        ));
+        let path =
+            std::env::temp_dir().join(format!("osh_exec_fd3_{}_{}.txt", std::process::id(), uniq));
         std::fs::write(&path, b"alpha\nbeta\ngamma\n").expect("write input");
         let p = path.to_string_lossy().replace('\\', "/");
-        let src = format!(
-            "exec 3< \"{p}\"\nread -u 3 a\nread -u 3 b\necho \"$a-$b\"\nexec 3<&-"
-        );
+        let src = format!("exec 3< \"{p}\"\nread -u 3 a\nread -u 3 b\necho \"$a-$b\"\nexec 3<&-");
         let (out, status) = run(&src);
         let _ = std::fs::remove_file(&path);
         assert_eq!(status, 0);
@@ -99227,9 +104619,7 @@ st=1
         // `exec 3> file` opens a user-space write descriptor; `echo … >&3`
         // routes builtin stdout there, and successive writes accumulate.
         assert_eq!(
-            run_exec_redirect(
-                "exec 3> \"{FILE}\"\necho hi >&3\necho bye >&3\nexec 3>&-"
-            ),
+            run_exec_redirect("exec 3> \"{FILE}\"\necho hi >&3\necho bye >&3\nexec 3>&-"),
             "hi\nbye\n"
         );
         // `exec 3>> file` appends rather than truncating.
@@ -99256,9 +104646,7 @@ st=1
         // never truncated). Successive `>&N` writes land in the file at a
         // shared, advancing offset — matching bash.
         assert_eq!(
-            run_exec_redirect(
-                "exec 3<> \"{FILE}\"\necho hi >&3\necho bye >&3\nexec 3>&-"
-            ),
+            run_exec_redirect("exec 3<> \"{FILE}\"\necho hi >&3\necho bye >&3\nexec 3>&-"),
             "hi\nbye\n"
         );
     }
@@ -99283,11 +104671,8 @@ st=1
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "osh_rw_read_{}_{}.txt",
-            std::process::id(),
-            uniq
-        ));
+        let path =
+            std::env::temp_dir().join(format!("osh_rw_read_{}_{}.txt", std::process::id(), uniq));
         std::fs::write(&path, b"one\ntwo\n").expect("write input");
         let p = path.to_string_lossy().replace('\\', "/");
         let src = format!("exec 4<> \"{p}\"\nread -u 4 a\nread -u 4 b\necho \"$a+$b\"\nexec 4<&-");
@@ -99305,11 +104690,8 @@ st=1
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "osh_rw_create_{}_{}.txt",
-            std::process::id(),
-            uniq
-        ));
+        let path =
+            std::env::temp_dir().join(format!("osh_rw_create_{}_{}.txt", std::process::id(), uniq));
         let _ = std::fs::remove_file(&path); // ensure absent
         let p = path.to_string_lossy().replace('\\', "/");
         let (_out, status) = run(&format!(": <> \"{p}\""));
@@ -99324,17 +104706,21 @@ st=1
         // A simple-command builtin honors its own `2> file`: the `read` bad-fd
         // diagnostic lands in the file, not on the real stderr.
         let contents = run_exec_redirect("read -u 88 v 2> \"{FILE}\"");
-        assert_eq!(contents, "osh: read: 88: invalid file descriptor: Bad file descriptor\n");
+        assert_eq!(
+            contents,
+            "osh: read: 88: invalid file descriptor: Bad file descriptor\n"
+        );
     }
 
     #[test]
     fn builtin_stderr_to_write_fd() {
         // `2>&3` on a builtin routes its stderr to a user-space write descriptor
         // opened by `exec 3> file` (TD-OILS14 builtin-stderr item).
-        let contents = run_exec_redirect(
-            "exec 3> \"{FILE}\"\nread -u 88 v 2>&3\nexec 3>&-",
+        let contents = run_exec_redirect("exec 3> \"{FILE}\"\nread -u 88 v 2>&3\nexec 3>&-");
+        assert_eq!(
+            contents,
+            "osh: read: 88: invalid file descriptor: Bad file descriptor\n"
         );
-        assert_eq!(contents, "osh: read: 88: invalid file descriptor: Bad file descriptor\n");
     }
 
     #[test]
@@ -99342,16 +104728,17 @@ st=1
         // `2>&1` on a builtin folds its stderr into the (captured) stdout sink,
         // so a command substitution sees the diagnostic as stdout.
         let (out, _) = run("v=$(read -u 88 x 2>&1); echo \"[$v]\"");
-        assert_eq!(out, "[osh: read: 88: invalid file descriptor: Bad file descriptor]\n");
+        assert_eq!(
+            out,
+            "[osh: read: 88: invalid file descriptor: Bad file descriptor]\n"
+        );
     }
 
     #[test]
     fn function_invocation_stdout_redirect() {
         // `myfunc > file` applies the redirect to the whole function body: both
         // echoes land in the file, nothing on the caller's stdout.
-        let contents = run_exec_redirect(
-            "greet() { echo hello; echo world; }\ngreet > \"{FILE}\"",
-        );
+        let contents = run_exec_redirect("greet() { echo hello; echo world; }\ngreet > \"{FILE}\"");
         assert_eq!(contents, "hello\nworld\n");
     }
 
@@ -99359,13 +104746,14 @@ st=1
     fn function_invocation_stderr_redirect() {
         // `myfunc 2> file` routes the body's diagnostics (a bad-fd `read`) to the
         // file, leaving the caller's stderr untouched.
-        let contents = run_exec_redirect(
-            "boom() { read -u 88 v; echo done; }\nboom 2> \"{FILE}\"",
-        );
+        let contents = run_exec_redirect("boom() { read -u 88 v; echo done; }\nboom 2> \"{FILE}\"");
         // Inside a function bash labels the error with the frame's source
         // (`get_name_for_error`): in the test harness's stdin-like mode that is
         // `main` (as bash prints for a function run from a piped script).
-        assert_eq!(contents, "main: read: 88: invalid file descriptor: Bad file descriptor\n");
+        assert_eq!(
+            contents,
+            "main: read: 88: invalid file descriptor: Bad file descriptor\n"
+        );
     }
 
     #[test]
@@ -99375,11 +104763,8 @@ st=1
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "osh_fn_stdin_{}_{}.txt",
-            std::process::id(),
-            uniq
-        ));
+        let path =
+            std::env::temp_dir().join(format!("osh_fn_stdin_{}_{}.txt", std::process::id(), uniq));
         std::fs::write(&path, b"redirected-line\n").expect("write input");
         let p = path.to_string_lossy().replace('\\', "/");
         let src = format!("f() {{ read x; echo \"got:$x\"; }}\nf < \"{p}\"");
@@ -99419,8 +104804,7 @@ st=1
         // `echo hello > >(read line; …)`: hello is written to the output process
         // substitution's temp file; after the command, its body runs with that
         // file as stdin, so `read line` sees "hello" and writes it to {FILE}.
-        let contents =
-            run_exec_redirect("echo hello > >(read line; echo \"$line\" > \"{FILE}\")");
+        let contents = run_exec_redirect("echo hello > >(read line; echo \"$line\" > \"{FILE}\")");
         assert_eq!(contents, "hello\n");
     }
 
@@ -99429,14 +104813,10 @@ st=1
         // A process substitution in a *compound* command's redirect target
         // (`{ …; } > >(…)`) must also run its deferred body — the bug fix in
         // `exec_redirected`. Both lines of the group's output reach the body.
-        let contents = run_exec_redirect(
-            "{ echo one; echo two; } > >(cat > \"{FILE}\")",
-        );
+        let contents = run_exec_redirect("{ echo one; echo two; } > >(cat > \"{FILE}\")");
         assert_eq!(contents, "one\ntwo\n");
         // Same for a loop's redirect target.
-        let looped = run_exec_redirect(
-            "for i in a b; do echo $i; done > >(cat > \"{FILE}\")",
-        );
+        let looped = run_exec_redirect("for i in a b; do echo $i; done > >(cat > \"{FILE}\")");
         assert_eq!(looped, "a\nb\n");
     }
 
@@ -99455,9 +104835,8 @@ st=1
         assert_eq!(run("false; true < <(exit 5); echo $?").0, "0\n");
         // The body inherits the status of the command *before* the enclosing one
         // (here `true`), not the enclosing command's own failure.
-        let seen = run_exec_redirect(
-            "true\nfalse > >(echo \"body=$?\" > \"{FILE}\"; cat > /dev/null)",
-        );
+        let seen =
+            run_exec_redirect("true\nfalse > >(echo \"body=$?\" > \"{FILE}\"; cat > /dev/null)");
         assert_eq!(seen, "body=0\n");
     }
 
@@ -99478,9 +104857,8 @@ st=1
         // The loop prints each line; then fd 3 is closed, so a trailing
         // `read -u 3` fails (scoped, diagnostic to real stderr) — its non-zero
         // status is swallowed by the final `echo end`.
-        let src = format!(
-            "while read -u 3 x; do echo \"L:$x\"; done 3< \"{p}\"\nread -u 3 y; echo end"
-        );
+        let src =
+            format!("while read -u 3 x; do echo \"L:$x\"; done 3< \"{p}\"\nread -u 3 y; echo end");
         let (out, status) = run(&src);
         let _ = std::fs::remove_file(&path);
         assert_eq!(status, 0);
@@ -99506,9 +104884,7 @@ st=1
     #[test]
     fn read_array_readonly_fails() {
         // `read -a arr` with arr readonly rejects the whole read (no mutation).
-        let (out, _) = run(
-            "readonly arr; read -a arr <<< 'p q'; s=$?; echo \"[${arr[*]}]|$s\"",
-        );
+        let (out, _) = run("readonly arr; read -a arr <<< 'p q'; s=$?; echo \"[${arr[*]}]|$s\"");
         assert_eq!(out, "[]|1\n");
     }
 
@@ -99575,7 +104951,8 @@ st=1
         // With `-O` the array is *not* emptied first, so the survivors outside
         // the written range are still there when the write stops early.
         assert_eq!(
-            run("declare -ai p=(9 9 9 9)\nmapfile -t -O 1 p <<< $'1\\nq+\\n3' 2>&1\ndeclare -p p").0,
+            run("declare -ai p=(9 9 9 9)\nmapfile -t -O 1 p <<< $'1\\nq+\\n3' 2>&1\ndeclare -p p")
+                .0,
             "osh: mapfile: q+: syntax error: operand expected (error token is \"+\")\n\
              declare -ai p=([0]=\"9\" [1]=\"1\" [2]=\"9\" [3]=\"9\")\n"
         );
@@ -99626,7 +105003,10 @@ st=1
             "osh: m: readonly variable\nrc=1\n"
         );
         // A name the shell maintains refuses silently, reference or not.
-        assert_eq!(run("{ read -a GROUPS <<< x; } 2>&1; echo rc=$?").0, "rc=1\n");
+        assert_eq!(
+            run("{ read -a GROUPS <<< x; } 2>&1; echo rc=$?").0,
+            "rc=1\n"
+        );
         assert_eq!(
             run("declare -n r=GROUPS; { read -a r <<< x; } 2>&1; echo rc=$?").0,
             "rc=1\n"
@@ -99639,8 +105019,10 @@ st=1
             "y=[q]\n"
         );
         assert_eq!(
-            run("declare -A m; { mapfile -t m; read y; } <<< $'p\\nq' 2>/dev/null; echo \"y=[$y]\"")
-                .0,
+            run(
+                "declare -A m; { mapfile -t m; read y; } <<< $'p\\nq' 2>/dev/null; echo \"y=[$y]\""
+            )
+            .0,
             "y=[p]\n"
         );
     }
@@ -99829,17 +105211,18 @@ st=1
         let (o, _) = run("{ x=a; set -x; x=b x=c true; } 2>&1");
         assert!(o.ends_with("+ x=b\n+ x=c\n+ true\n"), "got: {o:?}");
         let (o, _) = run("{ readonly ro=f; ro=1 ro=2 true; } 2>&1");
-        assert_eq!(o, "osh: ro: readonly variable\nosh: ro: readonly variable\n");
+        assert_eq!(
+            o,
+            "osh: ro: readonly variable\nosh: ro: readonly variable\n"
+        );
     }
 
     /// A prefix binds the name its nameref *resolves to*, under that name and
     /// only that one, leaving the reference itself a nameref.
     #[test]
     fn a_prefix_assignment_binds_what_its_nameref_resolves_to() {
-        let (o, _) = run(
-            "t=orig; declare -n r=t; \
-             r=V eval 'declare -p r t'; declare -p r t",
-        );
+        let (o, _) = run("t=orig; declare -n r=t; \
+             r=V eval 'declare -p r t'; declare -p r t");
         assert_eq!(
             o,
             "declare -n r=\"t\"\ndeclare -x t=\"V\"\n\
@@ -99848,50 +105231,40 @@ st=1
 
         // A chain is followed to its end; a target nothing has bound is created
         // for the duration and gone afterwards.
-        let (o, _) = run(
-            "u=orig; declare -n m=u; declare -n n=m; \
-             n=V eval 'echo \"$u $m $n\"'; echo \"$u\"",
-        );
+        let (o, _) = run("u=orig; declare -n m=u; declare -n n=m; \
+             n=V eval 'echo \"$u $m $n\"'; echo \"$u\"");
         assert_eq!(o, "V V V\norig\n");
-        let (o, _) = run("declare -n r=fresh; r=V eval 'echo \"[${fresh-U}]\"'; echo \"[${fresh-U}]\"");
+        let (o, _) =
+            run("declare -n r=fresh; r=V eval 'echo \"[${fresh-U}]\"'; echo \"[${fresh-U}]\"");
         assert_eq!(o, "[V]\n[U]\n");
 
         // A chain ending in an *element* names no variable a scope could bind,
         // so the name as written is bound instead and the array is untouched.
-        let (o, _) = run(
-            "declare -a a=(p q); declare -n r='a[1]'; \
-             r=V eval 'declare -p r; echo \"[${a[1]}]\"'",
-        );
+        let (o, _) = run("declare -a a=(p q); declare -n r='a[1]'; \
+             r=V eval 'declare -p r; echo \"[${a[1]}]\"'");
         assert_eq!(o, "declare -x r=\"V\"\n[q]\n");
         // …which is also why a readonly array behind one does not refuse.
-        let (o, st) = run(
-            "{ declare -a a=(p q); readonly a; declare -n r='a[1]'; \
-             r=V eval 'echo \"[${r-U}]\"'; } 2>&1",
-        );
+        let (o, st) = run("{ declare -a a=(p q); readonly a; declare -n r='a[1]'; \
+             r=V eval 'echo \"[${r-U}]\"'; } 2>&1");
         assert_eq!(o, "[V]\n");
         assert_eq!(st, 0);
 
         // A circular chain warns — naming the variable written, not a member of
         // the cycle — then binds that name, and the command's own status stands.
-        let (o, st) = run(
-            "{ declare -n c=d; declare -n d=c; c=V eval 'echo \"[${c-U}]\"'; } 2>&1",
-        );
+        let (o, st) = run("{ declare -n c=d; declare -n d=c; c=V eval 'echo \"[${c-U}]\"'; } 2>&1");
         assert_eq!(o, "osh: warning: c: circular name reference\n[V]\n");
         assert_eq!(st, 0);
 
         // The readonly attribute is tested on the name the binding would land
         // on, but reported by the name as written.
-        let (o, st) = run(
-            "{ readonly ro=frozen; declare -n n=ro; n=V eval 'echo \"[$ro]\"'; } 2>&1",
-        );
+        let (o, st) =
+            run("{ readonly ro=frozen; declare -n n=ro; n=V eval 'echo \"[$ro]\"'; } 2>&1");
         assert_eq!(o, "osh: n: readonly variable\n[frozen]\n");
         assert_eq!(st, 0);
 
         // The binding inherits none of the target's attributes, and the trace
         // is the one place the written name survives.
-        let (o, _) = run(
-            "declare -i t=1; declare -n r=t; r=3*4 eval 'declare -p t'; declare -p t",
-        );
+        let (o, _) = run("declare -i t=1; declare -n r=t; r=3*4 eval 'declare -p t'; declare -p t");
         assert_eq!(o, "declare -x t=\"3*4\"\ndeclare -i t=\"1\"\n");
         let (o, _) = run("{ t=o; declare -n r=t; set -x; r=V true; } 2>&1");
         assert!(o.ends_with("+ r=V\n+ true\n"), "got: {o:?}");
@@ -99949,7 +105322,10 @@ st=1
         // The trace shows the compound where it was written, and the builtin's
         // own line a bare name in its place.
         let (o, _) = run("{ set -x; declare -a t=(m n) s=${t[0]}; } 2>&1");
-        assert!(o.ends_with("+ t=('m' 'n')\n+ declare -a t s=m\n"), "got: {o:?}");
+        assert!(
+            o.ends_with("+ t=('m' 'n')\n+ declare -a t s=m\n"),
+            "got: {o:?}"
+        );
     }
 
     /// Re-reading a string or a file is a level of expansion indirection to
@@ -99959,7 +105335,10 @@ st=1
     fn xtrace_counts_eval_and_source_as_indirection() {
         let trace = |src: &str| run(&format!("{{ set -x; {src}; }} 2>&1")).0;
         assert_eq!(trace("eval :"), "+ eval :\n++ :\n");
-        assert_eq!(trace("eval 'eval :'"), "+ eval 'eval :'\n++ eval :\n+++ :\n");
+        assert_eq!(
+            trace("eval 'eval :'"),
+            "+ eval 'eval :'\n++ eval :\n+++ :\n"
+        );
         // …and it composes with the substitution level.
         assert_eq!(
             trace("eval 'v=$(echo q)'"),
@@ -100010,10 +105389,7 @@ st=1
             "x\ny\n"
         );
         // A numeric `>&N` stays an fd duplication, not a file redirect.
-        assert_eq!(
-            run_exec_redirect("exec > \"{FILE}\"\necho hi >&1"),
-            "hi\n"
-        );
+        assert_eq!(run_exec_redirect("exec > \"{FILE}\"\necho hi >&1"), "hi\n");
     }
 
     #[test]
@@ -100032,9 +105408,7 @@ st=1
     fn for_loop_redirect_stdout_stderr_interleave() {
         // The same live-interleave holds across a loop body's iterations.
         assert_eq!(
-            run_exec_redirect(
-                "for i in 1 2; do echo o$i; echo e$i >&2; done > \"{FILE}\" 2>&1"
-            ),
+            run_exec_redirect("for i in 1 2; do echo o$i; echo e$i >&2; done > \"{FILE}\" 2>&1"),
             "o1\ne1\no2\ne2\n"
         );
     }
@@ -100241,11 +105615,8 @@ st=1
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "osh_six_{}_{}.txt",
-            std::process::id(),
-            uniq
-        ));
+        let path =
+            std::env::temp_dir().join(format!("osh_six_{}_{}.txt", std::process::id(), uniq));
         std::fs::write(&path, b"r1\nr2\nr3\nr4\nr5\nr6\n").expect("seed temp file");
         let p = path.to_string_lossy().replace('\\', "/");
         let (out, _) = run(&src_tmpl.replace("{FILE}", &p));
@@ -100260,9 +105631,8 @@ st=1
         // consumption for both. Regression: fd 0 used to be a byte snapshot
         // with a per-holder offset, so the external's reads were invisible to
         // the shell and `b` came back as `r2` (TD-OILS-PIPE-HEAD-CURSOR-DRAIN).
-        let o = run_over_six_lines(
-            "{ read a; head -n 1; read b; } < {FILE}; echo \"a=[$a] b=[$b]\"",
-        );
+        let o =
+            run_over_six_lines("{ read a; head -n 1; read b; } < {FILE}; echo \"a=[$a] b=[$b]\"");
         assert_eq!(o, "r2\na=[r1] b=[r3]\n");
     }
 
@@ -100270,9 +105640,7 @@ st=1
     fn shared_input_offset_subshell_and_cmdsub_consume_for_the_parent() {
         // A subshell is a `fork`, not a copy of the bytes: what it reads is
         // gone for the parent too, even though its *variables* are not.
-        let o = run_over_six_lines(
-            "{ ( read a; ); read b; echo \"b=[$b]\"; } < {FILE}",
-        );
+        let o = run_over_six_lines("{ ( read a; ); read b; echo \"b=[$b]\"; } < {FILE}");
         assert_eq!(o, "b=[r2]\n");
         // A command substitution is a subshell as well — and it only ever sees
         // fd 0 through `Shell::exec_stdin`, so this is the path that requires
@@ -100321,15 +105689,12 @@ st=1
         // the same descriptor — otherwise an `exec` inside the group cannot
         // rebind fd 0, the way it can rebind fd 1 and fd 2. Regression: the
         // `exec` was silently ignored and the group's file went on being read.
-        let o = run_over_six_lines(
-            "{ exec < {FILE}; read a; } < /dev/null; echo \"a=[$a]\"",
-        );
+        let o = run_over_six_lines("{ exec < {FILE}; read a; } < /dev/null; echo \"a=[$a]\"");
         assert_eq!(o, "a=[r1]\n");
         // …and the close form, which leaves fd 0 unreadable rather than empty:
         // a read *error*, which assigns nothing, not an end of input.
-        let o = run_over_six_lines(
-            "{ exec <&-; read a; echo \"rc=$? a=[$a]\"; } < {FILE} 2>/dev/null",
-        );
+        let o =
+            run_over_six_lines("{ exec <&-; read a; echo \"rc=$? a=[$a]\"; } < {FILE} 2>/dev/null");
         assert_eq!(o, "rc=1 a=[]\n");
     }
 
@@ -100337,9 +105702,7 @@ st=1
     fn simple_command_input_redirects_are_separate_opens() {
         // The counterpart to all of the above: a `< file` on a *simple*
         // command is its own open, so two of them each start at the beginning.
-        let o = run_over_six_lines(
-            "read p < {FILE}; read q < {FILE}; echo \"p=[$p] q=[$q]\"",
-        );
+        let o = run_over_six_lines("read p < {FILE}; read q < {FILE}; echo \"p=[$p] q=[$q]\"");
         assert_eq!(o, "p=[r1] q=[r1]\n");
     }
 
@@ -100351,11 +105714,7 @@ st=1
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "osh_rw_{}_{}.txt",
-            std::process::id(),
-            uniq
-        ));
+        let path = std::env::temp_dir().join(format!("osh_rw_{}_{}.txt", std::process::id(), uniq));
         std::fs::write(&path, seed.as_bytes()).expect("seed temp file");
         let p = path.to_string_lossy().replace('\\', "/");
         let (out, _) = run(&src_tmpl.replace("{FILE}", &p));
@@ -100588,7 +105947,10 @@ st=1
             "one\ntwo\n",
             "exec 0< {FILE}; read -r a <&-; s=$?; read -r b; echo \"a=[$a] s=$s b=[$b]\"",
         );
-        assert_eq!(out, "a=[] s=1 b=[one]\n", "the close should have bitten: {out:?}");
+        assert_eq!(
+            out, "a=[] s=1 b=[one]\n",
+            "the close should have bitten: {out:?}"
+        );
         // Which side of the `&` the `-` is written on says nothing about which
         // descriptor is meant, so all three spellings close fd 0.
         for form in ["<&-", "0<&-", "0>&-"] {
@@ -100603,7 +105965,10 @@ st=1
             "one\n",
             "exec 0< {FILE}; { read -r a; } <&-; echo \"s=$? a=[$a]\"",
         );
-        assert_eq!(out, "s=1 a=[]\n", "a group's close should reach its body: {out:?}");
+        assert_eq!(
+            out, "s=1 a=[]\n",
+            "a group's close should reach its body: {out:?}"
+        );
         // `mapfile` is the exception bash makes: no fd 0 is an empty array and
         // status 0, not an error.
         let (out, _) = run("mapfile -t a <&-; echo \"s=$? n=${#a[@]}\"");
@@ -100630,7 +105995,10 @@ st=1
             "one\n",
             "exec 0<&-; exec 0< {FILE}; read -r a; echo \"s=$? a=[$a]\"",
         );
-        assert_eq!(out, "s=0 a=[one]\n", "the reopened fd 0 should read: {out:?}");
+        assert_eq!(
+            out, "s=0 a=[one]\n",
+            "the reopened fd 0 should read: {out:?}"
+        );
     }
 
     #[test]
@@ -100659,7 +106027,10 @@ st=1
         // them exactly as they were — and says so, where EOF is silent.
         let (out, _) =
             run_over_seeded_file("", "l=keep; read -r l < {FILE} 2>&1; echo \"s=$? l=[$l]\"");
-        assert_eq!(out, "s=1 l=[]\n", "EOF should have emptied the name: {out:?}");
+        assert_eq!(
+            out, "s=1 l=[]\n",
+            "EOF should have emptied the name: {out:?}"
+        );
         let (out, _) = run("l=keep; read -r l <&- 2>&1; echo \"s=$? l=[$l]\"");
         assert_eq!(
             out, "osh: read: read error: 0: Bad file descriptor\ns=1 l=[keep]\n",
@@ -100678,7 +106049,10 @@ st=1
             out.contains("osh: read error: 0: Bad file descriptor"),
             "`select` should report the read error, got {out:?}"
         );
-        assert!(out.ends_with("REPLY=[keep]\n"), "REPLY should be untouched, got {out:?}");
+        assert!(
+            out.ends_with("REPLY=[keep]\n"),
+            "REPLY should be untouched, got {out:?}"
+        );
     }
 
     #[test]
@@ -100692,12 +106066,18 @@ st=1
             "one\ntwo\n",
             "exec 0< {FILE}; { read -r a <&3; read -r b; } 3<&0; echo \"a=[$a] b=[$b]\"",
         );
-        assert_eq!(out, "a=[one] b=[two]\n", "the dup should share fd 0's cursor: {out:?}");
+        assert_eq!(
+            out, "a=[one] b=[two]\n",
+            "the dup should share fd 0's cursor: {out:?}"
+        );
         // A here-document is a source like any other, and copying it shares its
         // position too.
         let (out, _) =
             run("{ read -r a <&3; read -r b; } <<< $'x\\ny' 3<&0; echo \"a=[$a] b=[$b]\"");
-        assert_eq!(out, "a=[x] b=[y]\n", "the here-string's position should be shared: {out:?}");
+        assert_eq!(
+            out, "a=[x] b=[y]\n",
+            "the here-string's position should be shared: {out:?}"
+        );
     }
 
     #[test]
@@ -100710,12 +106090,18 @@ st=1
             "file\n",
             "{ read -r l <&3; } 3<&0 < {FILE}; echo \"s=$? l=[$l]\"",
         );
-        assert_eq!(out, "s=1 l=[]\n", "the dup should have copied the ambient fd 0: {out:?}");
+        assert_eq!(
+            out, "s=1 l=[]\n",
+            "the dup should have copied the ambient fd 0: {out:?}"
+        );
         let (out, _) = run_over_seeded_file(
             "file\n",
             "{ read -r l <&3; } < {FILE} 3<&0; echo \"s=$? l=[$l]\"",
         );
-        assert_eq!(out, "s=0 l=[file]\n", "the dup should have copied the file: {out:?}");
+        assert_eq!(
+            out, "s=0 l=[file]\n",
+            "the dup should have copied the file: {out:?}"
+        );
         // And a closed fd 0 is no descriptor to copy: the complaint names the
         // *source*, not the fd 3 that was being made.
         let (out, _) = run_over_seeded_file(
@@ -100730,7 +106116,10 @@ st=1
             "file\n",
             "exec 0< {FILE}; { read -r l <&3; } 3<&0 0<&-; echo \"s=$? l=[$l]\"",
         );
-        assert_eq!(out, "s=0 l=[file]\n", "the earlier dup should still hold: {out:?}");
+        assert_eq!(
+            out, "s=0 l=[file]\n",
+            "the earlier dup should still hold: {out:?}"
+        );
     }
 
     #[test]
@@ -100743,12 +106132,18 @@ st=1
             "one\ntwo\n",
             "{ read -r a <&3; read -r b <&4; } 3< {FILE} 4<&3; echo \"a=[$a] b=[$b]\"",
         );
-        assert_eq!(out, "a=[one] b=[two]\n", "the chained dup should share one cursor: {out:?}");
+        assert_eq!(
+            out, "a=[one] b=[two]\n",
+            "the chained dup should share one cursor: {out:?}"
+        );
         let (out, _) = run_over_seeded_file(
             "one\n",
             "exec 0< {FILE}; { read -r l <&4; } 3<&0 4<&3; echo \"s=$? l=[$l]\"",
         );
-        assert_eq!(out, "s=0 l=[one]\n", "fd 4 should reach fd 0's description: {out:?}");
+        assert_eq!(
+            out, "s=0 l=[one]\n",
+            "fd 4 should reach fd 0's description: {out:?}"
+        );
         // A close in the list is a mention like any other, and the last one
         // wins: fd 3 is gone by the time the `4<&3` asks for it.
         let (out, _) = run_over_seeded_file(
@@ -100771,7 +106166,10 @@ st=1
         //
         // A write-only source: the dup is made, and it is a *write* descriptor.
         let (out, _) = run("{ { echo W >&3; } 3<&1; } 2>&1; echo \"s=$?\"");
-        assert_eq!(out, "W\ns=0\n", "`3<&1` should give fd 3 stdout's sink: {out:?}");
+        assert_eq!(
+            out, "W\ns=0\n",
+            "`3<&1` should give fd 3 stdout's sink: {out:?}"
+        );
         let (out, _) = run("{ read -r l <&3; } 3<&1 2>&1; echo \"s=$? l=[$l]\"");
         assert_eq!(
             out, "osh: read: read error: 0: Bad file descriptor\ns=1 l=[]\n",
@@ -100779,14 +106177,20 @@ st=1
         );
         // And onward: a descriptor with no read half is still a descriptor.
         let (out, _) = run("{ { echo W >&4; } 3<&1 4<&3; } 2>&1; echo \"s=$?\"");
-        assert_eq!(out, "W\ns=0\n", "a chained dup of it should work too: {out:?}");
+        assert_eq!(
+            out, "W\ns=0\n",
+            "a chained dup of it should work too: {out:?}"
+        );
 
         // A read-only source, the mirror image: `4>&3` copies fd 3's cursor.
         let (out, _) = run_over_seeded_file(
             "one\ntwo\n",
             "{ read -r a <&3; read -r b <&4; } 3< {FILE} 4>&3; echo \"a=[$a] b=[$b]\"",
         );
-        assert_eq!(out, "a=[one] b=[two]\n", "`4>&3` should share fd 3's cursor: {out:?}");
+        assert_eq!(
+            out, "a=[one] b=[two]\n",
+            "`4>&3` should share fd 3's cursor: {out:?}"
+        );
         let (out, _) = run_over_seeded_file(
             "one\n",
             "{ { echo W >&4; } 3< {FILE} 4>&3; } 2>&1; echo \"s=$?\"",
@@ -100802,12 +106206,18 @@ st=1
             "one\n",
             "exec 3< {FILE}; exec 4>&3; exec 5<&4; read -r l <&5; echo \"s=$? l=[$l]\"",
         );
-        assert_eq!(out, "s=0 l=[one]\n", "the chain should reach the file: {out:?}");
+        assert_eq!(
+            out, "s=0 l=[one]\n",
+            "the chain should reach the file: {out:?}"
+        );
         let (out, _) = run_over_seeded_file(
             "one\n",
             "exec 0< {FILE}; exec 3>&0; read -r l <&3; echo \"s=$? l=[$l]\"",
         );
-        assert_eq!(out, "s=0 l=[one]\n", "`exec 3>&0` should leave fd 3 readable: {out:?}");
+        assert_eq!(
+            out, "s=0 l=[one]\n",
+            "`exec 3>&0` should leave fd 3 readable: {out:?}"
+        );
 
         // Open is still not the same as readable *or* writable: a closed fd 3
         // is no descriptor to copy, and the redirect is refused as before.
@@ -100825,7 +106235,9 @@ st=1
         // ambient stdin instead would answer with a silent end of input, which
         // is a different status *and* a different effect on the names.
         for src in ["1", "2"] {
-            let (out, _) = run(&format!("{{ read -r l <&{src}; }} 2>&1; echo \"s=$? l=[$l]\""));
+            let (out, _) = run(&format!(
+                "{{ read -r l <&{src}; }} 2>&1; echo \"s=$? l=[$l]\""
+            ));
             assert_eq!(
                 out, "osh: read: read error: 0: Bad file descriptor\ns=1 l=[]\n",
                 "`<&{src}` should answer with EBADF, got {out:?}"
@@ -100852,12 +106264,19 @@ st=1
         // (TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP).
         for cmd in ["echo hi", "printf 'hi\\n'"] {
             let (out, _) = run(&format!("{{ {cmd} >&-; }} 2>&1; echo \"st=$?\""));
-            let name = if cmd.starts_with("echo") { "echo" } else { "printf" };
+            let name = if cmd.starts_with("echo") {
+                "echo"
+            } else {
+                "printf"
+            };
             assert!(
                 out.contains(&format!("{name}: write error: Bad file descriptor")),
                 "expected an EBADF write error naming `{name}`, got {out:?}"
             );
-            assert!(!out.contains("hi\n"), "the write should not have landed: {out:?}");
+            assert!(
+                !out.contains("hi\n"),
+                "the write should not have landed: {out:?}"
+            );
             assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
         }
         // Which side of the operator the `-` is written on says nothing about
@@ -100959,8 +106378,10 @@ st=1
         // did nothing until the body ended and the diagnostic went exactly
         // where it should not have
         // (TD-OILS-EXEC-STDERR-DOES-NOT-SHADOW-AN-ENCLOSING-REDIRECT).
-        let (out, disk) =
-            run_over_seeded_file("", "v=$( { exec 2> {FILE}; cd /nosuchdir; } 2>&1 ); echo \"v=[$v]\"");
+        let (out, disk) = run_over_seeded_file(
+            "",
+            "v=$( { exec 2> {FILE}; cd /nosuchdir; } 2>&1 ); echo \"v=[$v]\"",
+        );
         assert_eq!(out, "v=[]\n", "the capture should not have seen it");
         assert!(
             disk.contains("No such file or directory"),
@@ -100969,8 +106390,10 @@ st=1
         // Written the other way round the group's redirect is the later word,
         // so it wins instead — which is what makes this a question of *order*
         // rather than a standing precedence of one over the other.
-        let (out, disk) =
-            run_over_seeded_file("", "v=$( exec 2> {FILE}; { cd /nosuchdir; } 2>&1 ); echo \"v=[$v]\"");
+        let (out, disk) = run_over_seeded_file(
+            "",
+            "v=$( exec 2> {FILE}; { cd /nosuchdir; } 2>&1 ); echo \"v=[$v]\"",
+        );
         assert!(
             out.contains("No such file or directory"),
             "the group's `2>&1` should have won, got {out:?}"
@@ -101029,7 +106452,10 @@ st=1
         // `2: Bad file descriptor` itself invisible, for the same reason every
         // other diagnostic is.
         let (out, _) = run("{ { echo A >&2; } 2>&-; } 2>&1; echo \"st=$?\"");
-        assert_eq!(out, "st=1\n", "duplicating a closed fd 2 should fail: {out:?}");
+        assert_eq!(
+            out, "st=1\n",
+            "duplicating a closed fd 2 should fail: {out:?}"
+        );
         // The same holds for the persistent spelling, and for `exec 3>&2`,
         // which likewise cannot copy a descriptor that is not there. Nothing
         // wraps these in `2>&1`: with fd 2 closed the dup's own complaint is
@@ -101202,7 +106628,8 @@ st=1
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("osh_startup_{tag}_{}_{nanos}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("osh_startup_{tag}_{}_{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let home = dir.to_string_lossy().replace('\\', "/");
         let mut sh = new_shell();
@@ -101227,7 +106654,10 @@ st=1
         write_startup(&home, ".bashrc", "SAW=bashrc");
 
         // Interactive non-login: the rc file only.
-        let files = StartupFiles { interactive: true, ..StartupFiles::default() };
+        let files = StartupFiles {
+            interactive: true,
+            ..StartupFiles::default()
+        };
         assert_eq!(sh.run_startup_files(&files), None);
         assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("bashrc"));
 
@@ -101254,7 +106684,11 @@ st=1
         write_startup(&home, ".bashrc", "SAW=bashrc");
         write_startup(&home, ".bash_profile", "SAW=bash_profile");
 
-        let norc = StartupFiles { interactive: true, no_rc: true, ..StartupFiles::default() };
+        let norc = StartupFiles {
+            interactive: true,
+            no_rc: true,
+            ..StartupFiles::default()
+        };
         assert_eq!(sh.run_startup_files(&norc), None);
         assert_eq!(pval(&mut sh, "SAW"), None);
 
@@ -101266,16 +106700,22 @@ st=1
         // `--rcfile` names a different file, and only an interactive shell uses it.
         write_startup(&home, "my.rc", "SAW=my_rc");
         let rcfile = format!("{home}/my.rc");
-        let named =
-            StartupFiles { interactive: true, rc_file: Some(rcfile.as_bytes()), ..StartupFiles::default() };
+        let named = StartupFiles {
+            interactive: true,
+            rc_file: Some(rcfile.as_bytes()),
+            ..StartupFiles::default()
+        };
         assert_eq!(sh.run_startup_files(&named), None);
         assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("my_rc"));
 
         // Login + `--noprofile`: nothing at all, the rc file included.
         sh.run_source("unset SAW".as_bytes());
         sh.set_login_shell();
-        let noprofile =
-            StartupFiles { interactive: true, no_profile: true, ..StartupFiles::default() };
+        let noprofile = StartupFiles {
+            interactive: true,
+            no_profile: true,
+            ..StartupFiles::default()
+        };
         assert_eq!(sh.run_startup_files(&noprofile), None);
         assert_eq!(pval(&mut sh, "SAW"), None);
     }
@@ -101302,8 +106742,12 @@ st=1
 
         // Never for an interactive shell.
         sh.run_source("unset SAW".as_bytes());
-        let inter =
-            StartupFiles { interactive: true, no_profile: true, no_rc: true, rc_file: None };
+        let inter = StartupFiles {
+            interactive: true,
+            no_profile: true,
+            no_rc: true,
+            rc_file: None,
+        };
         assert_eq!(sh.run_startup_files(&inter), None);
         assert_eq!(pval(&mut sh, "SAW"), None);
 
@@ -101339,7 +106783,10 @@ st=1
     fn exit_in_a_startup_file_stops_the_shell_but_return_does_not() {
         let (mut sh, home) = startup_home("exit");
         write_startup(&home, ".bashrc", "SAW=rc\nexit 7\nSAW=not_reached");
-        let files = StartupFiles { interactive: true, ..StartupFiles::default() };
+        let files = StartupFiles {
+            interactive: true,
+            ..StartupFiles::default()
+        };
         assert_eq!(sh.run_startup_files(&files), Some(7));
         assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("rc"));
 
@@ -101397,14 +106844,20 @@ st=1
         let (mut sh, home) = startup_home("dir");
         std::fs::create_dir_all(format!("{home}/dir.rc")).expect("mkdir");
         let rcfile = format!("{home}/dir.rc");
-        let files =
-            StartupFiles { interactive: true, rc_file: Some(rcfile.as_bytes()), ..StartupFiles::default() };
+        let files = StartupFiles {
+            interactive: true,
+            rc_file: Some(rcfile.as_bytes()),
+            ..StartupFiles::default()
+        };
         assert_eq!(sh.run_startup_files(&files), None);
 
         // Nothing planted: no file exists, and that is not an error either.
         let (mut sh, _home) = startup_home("absent");
         sh.set_login_shell();
-        let files = StartupFiles { interactive: true, ..StartupFiles::default() };
+        let files = StartupFiles {
+            interactive: true,
+            ..StartupFiles::default()
+        };
         assert_eq!(sh.run_startup_files(&files), None);
     }
 
@@ -101472,7 +106925,12 @@ st=1
             }
             assert_eq!(
                 names(&sh),
-                vec![b"ddd".to_vec(), b"ccc".to_vec(), b"bbb".to_vec(), b"aaa".to_vec()]
+                vec![
+                    b"ddd".to_vec(),
+                    b"ccc".to_vec(),
+                    b"bbb".to_vec(),
+                    b"aaa".to_vec()
+                ]
             );
         }
     }
@@ -101482,10 +106940,18 @@ st=1
     /// notably it has no ANSI-C fallback — an unprintable byte goes out raw.
     #[test]
     fn a_printed_completion_name_is_quoted_only_for_a_metacharacter() {
-        for plain in ["aa", "a-b", "a_b", "a=b", "a:b", "a,b", "a.b", "a/b", "a+b", "a%b", "a@b"] {
-            assert_eq!(comp_quote_name(plain.as_bytes()), plain.as_bytes(), "{plain}");
+        for plain in [
+            "aa", "a-b", "a_b", "a=b", "a:b", "a,b", "a.b", "a/b", "a+b", "a%b", "a@b",
+        ] {
+            assert_eq!(
+                comp_quote_name(plain.as_bytes()),
+                plain.as_bytes(),
+                "{plain}"
+            );
         }
-        for meta in ["a b", "a|b", "a&b", "a;b", "a(b", "a<b", "a!b", "a*b", "a$b", "a`b"] {
+        for meta in [
+            "a b", "a|b", "a&b", "a;b", "a(b", "a<b", "a!b", "a*b", "a$b", "a`b",
+        ] {
             assert_eq!(
                 comp_quote_name(meta.as_bytes()),
                 sh_single_quote(meta.as_bytes()),
@@ -101588,6 +107054,9 @@ st=1
         assert_eq!(run(r#"echo "p`echo $(fi)`q""#), ("pq\n".into(), 0));
         // A body that parses is read and thrown away, not run — the `SIDE` here
         // is the backquote's own later expansion, printed once.
-        assert_eq!(run(r#"echo "p`echo $(echo SIDE)`q{,}""#), ("pSIDEq{,}\n".into(), 0));
+        assert_eq!(
+            run(r#"echo "p`echo $(echo SIDE)`q{,}""#),
+            ("pSIDEq{,}\n".into(), 0)
+        );
     }
 }

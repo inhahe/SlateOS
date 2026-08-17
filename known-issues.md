@@ -3108,7 +3108,7 @@ caller, filtered by `may_signal`", keeping the same best-effort fanout and
 model landing — this should be done in the same change, since that is the only
 thing blocking it.
 
-### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — 🔶 HALF FIXED 2026-08-15 (`posix` clean; `kernel` still drifted — Lane A)
+### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — 🔶 HALF FIXED 2026-08-15 / 2026-08-17 (all of Lane B clean: `posix`, `oils`, `coreutils`, `ere`; `kernel` still drifted — Lane A)
 
 > **UPDATE 2026-08-15 — the operator answered Q42 with option A, and Lane B's
 > half is done.** `design-decisions.md` **§310**: one-shot repo-wide reformat,
@@ -3131,6 +3131,32 @@ thing blocking it.
 > **The working rule below still applies to `kernel` and only to `kernel`.** In
 > `posix` you may now use `cargo fmt -p posix` normally; that was the point.
 > This entry closes when Lane A's commit lands.
+
+> **UPDATE 2026-08-17 — the rest of Lane B's crates are clean too.** The table
+> below was measured for four crates and `posix` was the only drifted one *of
+> those four*; the userspace crates were never counted. Measured today with
+> `cargo fmt -p <crate> -- --check`:
+>
+> | Crate | Hunks | Status |
+> |---|---|---|
+> | `oils` | 2 016 | ✅ clean since this date (17 files, +11 099/−3 695) |
+> | `coreutils` | 32 | ✅ clean — every hunk was in `head.rs`/`tail.rs`, i.e. this session's own code |
+> | `ere` | 20 | ✅ clean since this date |
+> | `shell`, `term` | 0 | ✅ already clean |
+>
+> Each reformat is a formatting-only commit with the crate's suite re-run after
+> it, and each hash is appended to `.git-blame-ignore-revs` per §310. The
+> `coreutils` row is the one worth noting: a crate can be clean everywhere
+> except the file you just added, and then the *next* author's `cargo fmt`
+> reformats your work in the middle of theirs. Run `cargo fmt -p <crate> --
+> --check` before committing new code in a clean crate — it costs a second and
+> it is the whole mechanism by which a crate stays clean.
+>
+> **And a one-shot reformat does not stay done.** `kernel` was reformatted by
+> Lane A in `c33bfa34f` (733 files) and measures **116 hunks** again today.
+> That is not a criticism of the reformat — it is the point above, at scale:
+> the flush is worth doing once, but only the pre-commit check keeps it. Lane A
+> owns `kernel`; noting the number here rather than acting on it.
 
 **Where:** repo-wide, unevenly. Measured 2026-08-12 with `cargo fmt -p <crate> --
 --check`:

@@ -131,7 +131,11 @@ impl<V: Default> AssocArray<V> {
     /// An empty table of one of bash's other shapes.
     #[must_use]
     pub fn with_shape(shape: TableShape) -> Self {
-        Self { shape, buckets: Vec::new(), nentries: 0 }
+        Self {
+            shape,
+            buckets: Vec::new(),
+            nentries: 0,
+        }
     }
 
     /// How many elements the array holds (`${#m[@]}`).
@@ -159,7 +163,11 @@ impl<V: Default> AssocArray<V> {
     /// The chain `key` belongs in, and its position within it if it is there.
     fn find(&self, key: BStr<'_>) -> Option<(usize, usize)> {
         let b = self.bucket_of(key)?;
-        let i = self.buckets.get(b)?.iter().position(|(k, _)| k.as_slice() == key)?;
+        let i = self
+            .buckets
+            .get(b)?
+            .iter()
+            .position(|(k, _)| k.as_slice() == key)?;
         Some((b, i))
     }
 
@@ -213,7 +221,13 @@ impl<V: Default> AssocArray<V> {
             buckets: self
                 .buckets
                 .iter()
-                .map(|chain| chain.iter().rev().map(|(k, v)| (k.clone(), value(v))).collect())
+                .map(|chain| {
+                    chain
+                        .iter()
+                        .rev()
+                        .map(|(k, v)| (k.clone(), value(v)))
+                        .collect()
+                })
                 .collect(),
             nentries: self.nentries,
         }
@@ -384,19 +398,26 @@ mod tests {
     use super::AssocArray;
 
     fn keys(m: &AssocArray) -> Vec<String> {
-        m.keys().map(|k| String::from_utf8_lossy(k).into_owned()).collect()
+        m.keys()
+            .map(|k| String::from_utf8_lossy(k).into_owned())
+            .collect()
     }
 
     fn pairs(m: &AssocArray) -> Vec<(String, String)> {
         m.iter()
             .map(|(k, v)| {
-                (String::from_utf8_lossy(k).into_owned(), String::from_utf8_lossy(v).into_owned())
+                (
+                    String::from_utf8_lossy(k).into_owned(),
+                    String::from_utf8_lossy(v).into_owned(),
+                )
             })
             .collect()
     }
 
     fn built(ks: &[&str]) -> AssocArray {
-        ks.iter().map(|k| (k.as_bytes().to_vec(), k.to_uppercase().into_bytes())).collect()
+        ks.iter()
+            .map(|k| (k.as_bytes().to_vec(), k.to_uppercase().into_bytes()))
+            .collect()
     }
 
     /// Every expectation below is bash 5.2.37's own output for the same script.
@@ -425,7 +446,10 @@ mod tests {
         m.set(b"x".to_vec(), b"3".to_vec());
         // bash prints `y x` for these three, the write to `x` having changed
         // nothing but its value.
-        assert_eq!(pairs(&m), vec![("y".into(), "2".into()), ("x".into(), "3".into())]);
+        assert_eq!(
+            pairs(&m),
+            vec![("y".into(), "2".into()), ("x".into(), "3".into())]
+        );
         // Appending is the same rule, and starts from empty for a new key.
         m.append(b"y".to_vec(), b"tail");
         m.append(b"z".to_vec(), b"new");
@@ -444,7 +468,10 @@ mod tests {
         let mut m = built(&["a", "b", "c", "d"]);
         assert_eq!(keys(&m), ["d", "c", "b", "a"]);
         assert!(m.remove(b"b"));
-        assert!(!m.remove(b"b"), "removing twice reports the second as absent");
+        assert!(
+            !m.remove(b"b"),
+            "removing twice reports the second as absent"
+        );
         assert_eq!(m.len(), 3);
         assert_eq!(keys(&m), ["d", "c", "a"], "the survivors did not move");
         for k in ["a", "c", "d"] {
@@ -467,16 +494,24 @@ mod tests {
             .into_iter()
             .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
             .collect();
-        assert_eq!(pairs(&m), vec![("k".into(), "3".into()), ("j".into(), "2".into())]);
+        assert_eq!(
+            pairs(&m),
+            vec![("k".into(), "3".into()), ("j".into(), "2".into())]
+        );
     }
 
     /// A high byte is xored in sign-extended, so `\xff` and `A` come out in
     /// this order and not the other. bash agrees.
     #[test]
     fn a_high_byte_key_hashes_as_a_signed_char() {
-        let m: AssocArray =
-            [b"\xff".to_vec(), b"A".to_vec()].into_iter().map(|k| (k, b"v".to_vec())).collect();
-        assert_eq!(m.keys().cloned().collect::<Vec<_>>(), vec![b"A".to_vec(), b"\xff".to_vec()]);
+        let m: AssocArray = [b"\xff".to_vec(), b"A".to_vec()]
+            .into_iter()
+            .map(|k| (k, b"v".to_vec()))
+            .collect();
+        assert_eq!(
+            m.keys().cloned().collect::<Vec<_>>(),
+            vec![b"A".to_vec(), b"\xff".to_vec()]
+        );
     }
 
     /// Forty sequential keys is short of any growth — this is the plain
@@ -484,8 +519,9 @@ mod tests {
     /// pairs that each came out head-first.
     #[test]
     fn forty_sequential_keys_match_bash() {
-        let m: AssocArray =
-            (0..40).map(|i| (format!("key{i}").into_bytes(), b"v".to_vec())).collect();
+        let m: AssocArray = (0..40)
+            .map(|i| (format!("key{i}").into_bytes(), b"v".to_vec()))
+            .collect();
         let want = "key39 key38 key37 key36 key35 key34 key33 key32 key31 key30 key6 key7 key4 \
                     key5 key2 key3 key0 key1 key8 key9 key28 key29 key24 key25 key26 key27 key20 \
                     key21 key22 key23 key15 key14 key17 key16 key11 key10 key13 key12 key19 key18";
@@ -496,8 +532,9 @@ mod tests {
     /// this pins the rehash walk as well as the load factor.
     #[test]
     fn growth_rehashes_the_way_bash_does() {
-        let m: AssocArray =
-            (0..4200).map(|i| (format!("key{i}").into_bytes(), b"v".to_vec())).collect();
+        let m: AssocArray = (0..4200)
+            .map(|i| (format!("key{i}").into_bytes(), b"v".to_vec()))
+            .collect();
         assert_eq!(m.len(), 4200);
         let ks = keys(&m);
         let head = [
@@ -530,21 +567,27 @@ mod tests {
     #[test]
     fn grows_on_the_key_that_reaches_the_load_factor() {
         // 2048 keys: exactly at the load factor, and still not grown.
-        let m: AssocArray =
-            (0..2048).map(|i| (format!("key{i}").into_bytes(), b"v".to_vec())).collect();
+        let m: AssocArray = (0..2048)
+            .map(|i| (format!("key{i}").into_bytes(), b"v".to_vec()))
+            .collect();
         let ks = keys(&m);
-        let head = ["key899", "key898", "key891", "key890", "key893", "key892", "key895", "key894"];
-        let tail =
-            ["key1535", "key640", "key1534", "key641", "key1537", "key642", "key1536", "key643"];
+        let head = [
+            "key899", "key898", "key891", "key890", "key893", "key892", "key895", "key894",
+        ];
+        let tail = [
+            "key1535", "key640", "key1534", "key641", "key1537", "key642", "key1536", "key643",
+        ];
         assert_eq!(ks.get(..8), Some(&head.map(String::from)[..]));
         assert_eq!(ks.get(ks.len() - 8..), Some(&tail.map(String::from)[..]));
 
         // 2049: the one key that grows it. Under `>` this order is wrong.
-        let m: AssocArray =
-            (0..2049).map(|i| (format!("key{i}").into_bytes(), b"v".to_vec())).collect();
+        let m: AssocArray = (0..2049)
+            .map(|i| (format!("key{i}").into_bytes(), b"v".to_vec()))
+            .collect();
         let ks = keys(&m);
-        let head =
-            ["key217", "key1104", "key216", "key1105", "key215", "key1106", "key214", "key1107"];
+        let head = [
+            "key217", "key1104", "key216", "key1105", "key215", "key1106", "key214", "key1107",
+        ];
         let tail = [
             "key1207", "key1206", "key1205", "key1204", "key1203", "key1202", "key1201", "key1200",
         ];

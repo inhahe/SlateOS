@@ -236,9 +236,7 @@ fn ends_here(cs: &[Ch], i: usize) -> bool {
     let next = i.saturating_add(1);
     match (cs.get(next), cs.get(next.saturating_add(1))) {
         (None, _) => true,
-        (Some(a), Some(b)) => {
-            a.as_ascii() == Some('\\') && matches!(b.as_ascii(), Some(')' | '|'))
-        }
+        (Some(a), Some(b)) => a.as_ascii() == Some('\\') && matches!(b.as_ascii(), Some(')' | '|')),
         _ => false,
     }
 }
@@ -257,7 +255,9 @@ fn copy_interval(cs: &[Ch], i: usize, out: &mut Str) -> Result<usize, EreError> 
         let Some(&c) = cs.get(j) else {
             return Err(EreError(br"unmatched \{".to_vec()));
         };
-        if c.as_ascii() == Some('\\') && cs.get(j.saturating_add(1)).and_then(|n| n.as_ascii()) == Some('}') {
+        if c.as_ascii() == Some('\\')
+            && cs.get(j.saturating_add(1)).and_then(|n| n.as_ascii()) == Some('}')
+        {
             out.push(b'{');
             out.extend_from_slice(&body);
             out.push(b'}');
@@ -293,7 +293,9 @@ fn copy_bracket(cs: &[Ch], i: usize, out: &mut Str) -> Result<usize, EreError> {
         j = j.saturating_add(1);
     }
     loop {
-        let Some(&c) = cs.get(j) else { return Err(unmatched()) };
+        let Some(&c) = cs.get(j) else {
+            return Err(unmatched());
+        };
         match c.as_ascii() {
             Some(']') => {
                 out.push(b']');
@@ -329,7 +331,9 @@ fn copy_class(cs: &[Ch], j: usize, delim: char, out: &mut Str) -> Option<usize> 
     let mut body = Str::new();
     loop {
         let &c = cs.get(k)?;
-        if c.as_ascii() == Some(delim) && cs.get(k.saturating_add(1)).and_then(|n| n.as_ascii()) == Some(']') {
+        if c.as_ascii() == Some(delim)
+            && cs.get(k.saturating_add(1)).and_then(|n| n.as_ascii()) == Some(']')
+        {
             out.push(b'[');
             out.push(delim as u8);
             out.extend_from_slice(&body);
@@ -356,7 +360,9 @@ mod tests {
     }
 
     fn m(bre: &str, subject: &str) -> bool {
-        compile(bre.as_bytes(), false).unwrap().is_match(subject.as_bytes())
+        compile(bre.as_bytes(), false)
+            .unwrap()
+            .is_match(subject.as_bytes())
     }
 
     #[test]

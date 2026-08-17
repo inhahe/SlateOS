@@ -3,6 +3,7 @@
 //! Usage: nice [-n ADJUST] COMMAND [ARGS...]
 //!   -n ADJUST   add ADJUST to the niceness (default: 10)
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::process::{self, Command};
 
@@ -72,7 +73,7 @@ fn main() {
             process::exit(status.code().unwrap_or(126));
         }
         Err(e) => {
-            eprintln!("nice: {cmd}: {e}");
+            eprintln!("nice: {}: {e}", quotef_os(cmd));
             process::exit(127);
         }
     }

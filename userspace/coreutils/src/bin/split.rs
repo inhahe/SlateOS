@@ -15,6 +15,7 @@
 //!   0  success
 //!   1  error
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
@@ -133,7 +134,7 @@ fn main() {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("split: {path}: {e}");
+                eprintln!("split: {}: {e}", quotef_os(path));
                 process::exit(1);
             }
         },
@@ -172,7 +173,7 @@ fn split_by_lines(reader: Box<dyn Read>, prefix: &str, lines_per_file: usize, su
             writer = match File::create(&filename) {
                 Ok(f) => Some(BufWriter::new(f)),
                 Err(e) => {
-                    eprintln!("split: {filename}: {e}");
+                    eprintln!("split: {}: {e}", quotef_os(filename));
                     process::exit(1);
                 }
             };
@@ -225,7 +226,7 @@ fn split_by_bytes(reader: Box<dyn Read>, prefix: &str, bytes_per_file: u64, suff
                 writer = match File::create(&filename) {
                     Ok(f) => Some(BufWriter::new(f)),
                     Err(e) => {
-                        eprintln!("split: {filename}: {e}");
+                        eprintln!("split: {}: {e}", quotef_os(filename));
                         process::exit(1);
                     }
                 };

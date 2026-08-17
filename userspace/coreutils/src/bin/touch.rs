@@ -4,6 +4,7 @@
 //!   Creates each FILE if it does not exist.
 //!   Updates the modification timestamp if it does exist.
 
+use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs::OpenOptions;
 use std::io;
@@ -23,7 +24,7 @@ fn main() {
     let mut failed = false;
     for path in &paths {
         if let Err(e) = touch_one(path) {
-            eprintln!("touch: cannot touch '{path}': {e}");
+            eprintln!("touch: cannot touch {}: {e}", quoteaf_os(path));
             failed = true;
         }
     }

@@ -5,6 +5,7 @@
 //!   -d  only print duplicate lines
 //!   -u  only print unique lines
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -41,7 +42,7 @@ fn main() {
         match File::open(&files[0]) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("uniq: {}: {e}", files[0]);
+                eprintln!("uniq: {}: {e}", quotef_os(&files[0]));
                 process::exit(1);
             }
         }
@@ -51,7 +52,7 @@ fn main() {
         match File::create(&files[1]) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("uniq: {}: {e}", files[1]);
+                eprintln!("uniq: {}: {e}", quotef_os(&files[1]));
                 process::exit(1);
             }
         }

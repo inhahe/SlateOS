@@ -6,6 +6,7 @@
 //!   -N COUNT   read only COUNT bytes
 //!   Default: octal dump with octal addresses.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -61,7 +62,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("od: {path}: {e}");
+                    eprintln!("od: {}: {e}", quotef_os(path));
                     continue;
                 }
             }

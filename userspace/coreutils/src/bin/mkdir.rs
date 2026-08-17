@@ -3,6 +3,7 @@
 //! Usage: mkdir [-p] DIRECTORY...
 //!   -p  make parent directories as needed, no error if existing
 
+use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -30,7 +31,7 @@ fn main() {
             fs::create_dir(dir)
         };
         if let Err(e) = result {
-            eprintln!("mkdir: cannot create directory '{dir}': {e}");
+            eprintln!("mkdir: cannot create directory {}: {e}", quoteaf_os(dir));
             failed = true;
         }
     }

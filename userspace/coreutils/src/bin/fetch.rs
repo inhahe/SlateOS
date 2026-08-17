@@ -4,6 +4,7 @@
 //! redirects, chunked transfer-encoding, basic auth, custom headers, and
 //! progress indication.
 
+use coreutils::quote::quote_os;
 use std::env;
 use std::fmt::Write as FmtWrite;
 #[allow(unused_imports)]
@@ -563,7 +564,7 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
     let mut current_url = match ParsedUrl::parse(url_str) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("fetch: invalid URL '{url_str}': {e}");
+            eprintln!("fetch: invalid URL {}: {e}", quote_os(url_str));
             return EXIT_BAD_ARGS;
         }
     };
@@ -664,7 +665,7 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
                         continue;
                     }
                     Err(e) => {
-                        eprintln!("fetch: invalid redirect URL '{location}': {e}");
+                        eprintln!("fetch: invalid redirect URL {}: {e}", quote_os(location));
                         return EXIT_HTTP_ERROR;
                     }
                 }

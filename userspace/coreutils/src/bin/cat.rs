@@ -84,6 +84,7 @@
 //!   files are still copied; the exit status is 1 at the end.
 
 use coreutils::errmsg::strerror;
+use coreutils::quote::quotef_os;
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;
@@ -176,7 +177,7 @@ fn main() -> ExitCode {
                 // A file we cannot open is not a reason to abandon the ones we
                 // can: `cat a b > out` with `a` missing should still contain
                 // `b`. The status carries the failure instead.
-                eprintln!("cat: {}: {}", path.to_string_lossy(), strerror(&e));
+                eprintln!("cat: {}: {}", quotef_os(path), strerror(&e));
                 failed = true;
                 continue;
             }
@@ -239,7 +240,7 @@ impl Failure {
         if self.on_write {
             "write error".to_string()
         } else {
-            path.to_string_lossy().into_owned()
+            quotef_os(path)
         }
     }
 }

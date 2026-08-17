@@ -78,6 +78,7 @@ use std::io::{self, Read, Write};
 use std::process;
 
 use coreutils::errmsg::strerror;
+use coreutils::quote::{quote, quoteaf_os, quotef_os};
 use keydef::{Blanks, KeySpec, Kind, parse_key, parse_obsolete_end, parse_obsolete_start};
 use order::Ignore;
 
@@ -205,7 +206,7 @@ fn main() {
                     ReadFailure::Open(_) => "cannot read",
                     ReadFailure::Read(_) => "read failed",
                 },
-                path.to_string_lossy(),
+                quotef_os(path),
                 strerror(failure.cause())
             )),
         }
@@ -384,10 +385,10 @@ fn read_file(path: &OsString) -> Result<Vec<u8>, ReadFailure> {
 fn read_files0(list: &OsString) -> Result<Vec<OsString>, String> {
     let bytes = read_file(list).map_err(|failure| match failure {
         ReadFailure::Open(e) => {
-            format!("open failed: {}: {}", list.to_string_lossy(), strerror(&e))
+            format!("open failed: {}: {}", quotef_os(list), strerror(&e))
         }
         ReadFailure::Read(_) => {
-            format!("cannot read file names from '{}'", list.to_string_lossy())
+            format!("cannot read file names from {}", quoteaf_os(list))
         }
     })?;
     // A list may or may not end with a separator; both are the same list, so
@@ -435,7 +436,7 @@ fn write_out(cfg: &Config, lines: &[&[u8]]) -> io::Result<()> {
         Some(path) => Box::new(io::BufWriter::new(File::create(path).map_err(|e| {
             io::Error::new(
                 e.kind(),
-                format!("open failed: {}: {}", path.to_string_lossy(), strerror(&e)),
+                format!("open failed: {}: {}", quotef_os(path), strerror(&e)),
             )
         })?)),
         None => Box::new(io::BufWriter::new(io::stdout().lock())),
@@ -581,20 +582,17 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
         // reader cannot guess.
         if let Some(extra) = cfg.files.first() {
             return Err(format!(
-                "extra operand '{}'\nfile operands cannot be combined with --files0-from\n\
+                "extra operand {}\nfile operands cannot be combined with --files0-from\n\
                  Try 'sort --help' for more information.",
-                extra.to_string_lossy()
+                quoteaf_os(extra)
             )
             .into());
         }
         cfg.files = read_files0(&list)?;
     }
     if cfg.check.is_some() && cfg.files.len() > 1 {
-        let extra = cfg
-            .files
-            .get(1)
-            .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
-        return Err(format!("extra operand '{extra}' not allowed with -c").into());
+        let extra = cfg.files.get(1).map_or_else(String::new, quoteaf_os);
+        return Err(format!("extra operand {extra} not allowed with -c").into());
     }
     if cfg.files.is_empty() {
         cfg.files.push(OsString::from("-"));
@@ -812,9 +810,9 @@ fn parse_sort_word(word: &[u8]) -> Result<Kind, Fatal> {
 fn bad_argument(given: &[u8], option: &str, valid: &str) -> Fatal {
     Fatal {
         message: format!(
-            "invalid argument '{}' for '{option}'\nValid arguments are:\n{valid}\n\
+            "invalid argument {} for '{option}'\nValid arguments are:\n{valid}\n\
              Try 'sort --help' for more information.",
-            show(given)
+            quote(given)
         ),
         status: 1,
     }
@@ -837,8 +835,21 @@ fn missing_argument(name: impl std::fmt::Display) -> String {
     format!("option requires an argument -- {name}\nTry 'sort --help' for more information.")
 }
 
-/// A byte string for a diagnostic. Not a substitute for shell quoting — see the
-/// `TD-COREUTILS-DIAGNOSTICS-DO-NOT-QUOTE-FILE-NAMES` entry in `known-issues.md`.
+/// The one diagnostic that renders bytes *without* quoting them: the name of
+/// an option the user typed.
+///
+/// This is a hole, and it is GNU's hole too — measured, not assumed:
+///
+/// ```text
+/// $ sort $'--fo\nsort: /etc/shadow: Permission denied'
+/// sort: unrecognized option '--fo
+/// sort: /etc/shadow: Permission denied'
+/// ```
+///
+/// glibc's getopt wraps the option in literal quotes without escaping what is
+/// inside them, so a file named that way and picked up by `sort *` forges a
+/// line. Closing it means differing from GNU on exactly the inputs where GNU is
+/// wrong — see the `sort` option-diagnostic work that follows this.
 fn show(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -850,10 +861,7 @@ fn parse_tab(value: &[u8], existing: Option<u8>) -> Result<u8, String> {
         [one] => *one,
         b"\\0" => 0,
         other => {
-            return Err(format!(
-                "multi-character tab '{}'",
-                String::from_utf8_lossy(other)
-            ));
+            return Err(format!("multi-character tab {}", quote(other)));
         }
     };
     // Two different `-t`s are a contradiction, not a last-one-wins.

@@ -22,6 +22,8 @@ fn main() {
 }
 
 #[cfg(unix)]
+use coreutils::quote::quotef_os;
+#[cfg(unix)]
 use std::env;
 #[cfg(unix)]
 use std::fs;
@@ -128,11 +130,11 @@ fn main() {
         let path = Path::new(path_str);
         if parsed.recursive && path.is_dir() {
             if let Err(e) = chown_recursive(path, uid, gid) {
-                eprintln!("chown: {path_str}: {e}");
+                eprintln!("chown: {}: {e}", quotef_os(path_str));
                 exit_code = 1;
             }
         } else if let Err(e) = apply_chown(path, uid, gid) {
-            eprintln!("chown: {path_str}: {e}");
+            eprintln!("chown: {}: {e}", quotef_os(path_str));
             exit_code = 1;
         }
     }

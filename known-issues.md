@@ -27640,7 +27640,7 @@ silently breaks `join`, which requires both inputs sorted *the same way*.
 `scripts/sort-diff.sh` pins `LC_ALL=C` so the harness compares like with like;
 when a locale layer lands, that pin is the first thing to revisit.
 
-## TD-COREUTILS-DIAGNOSTICS-DO-NOT-QUOTE-FILE-NAMES (lane B, 2026-08-16) — **open**
+## TD-COREUTILS-DIAGNOSTICS-DO-NOT-QUOTE-FILE-NAMES (lane B, 2026-08-16) — **fixed 2026-08-16**
 
 **In short:** When a coreutil complains about a file, it prints the file's name
 raw. GNU wraps the name in quotes. That sounds cosmetic and mostly is — until
@@ -27688,5 +27688,93 @@ harness (a fixture directory of names holding a space, a quote, a backslash, a
 tab, a newline and a high byte, run through both implementations) — because
 this is exactly the class of defect where reading the code proves nothing.
 
-Until then, `sort`'s `show()` is a plain lossy conversion, marked with a comment
-pointing here so the next reader does not mistake it for a considered choice.
+**Fixed 2026-08-16.** `userspace/coreutils/src/quote.rs` implements all three
+styles — the entry above says two, which was wrong, and the third was found by
+measuring rather than by reading:
+
+| Function | Used when | `abc` |
+|---|---|---|
+| `quotef` | the name **ends** the message (`wc: NAME: No such file`) | `abc` |
+| `quoteaf` | the name sits **inside a sentence** (`rm: cannot remove 'NAME': …`) | `'abc'` |
+| `quote` | option arguments and other non-file text | `'abc'` |
+
+Which one applies is decided by the shape of the sentence, not by the utility.
+
+The rules were not read out of gnulib; `scripts/quote-probe.py` drives GNU
+`sort` and `head` under `LC_ALL=C` over every byte in every position that
+matters plus an adversarial and a random corpus, and
+`userspace/coreutils/tests/quotearg-gnu.txt` records what GNU printed — 8333
+rows, all reproduced. Recall lost to measurement four separate times: the lone
+`{` that is a bash reserved word, the `#` that is special only at the front of
+a word, the `~` that is allowed inside double quotes *only* at the front (the
+opposite rule), and gnulib's stray `''` prefix.
+
+The sweep covers 51 binaries: names that end a message go through `quotef`,
+names inside a sentence through `quoteaf` — including the ~19 sites that
+hand-wrote `'{name}'`, which looked quoted and was not — and option arguments
+through `quote`. `tests/diagnostics_quote_names.rs` reads the source and fails
+on either shape reappearing, since the next unquoted diagnostic will look like
+every other `eprintln!` in the tree.
+
+**What is still open**, found while doing this and tracked separately: an
+option *name* is still printed raw, in GNU as well as here —
+`sort $'--fo\nsort: /etc/shadow: Permission denied'` forges a line out of
+glibc's getopt. See `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`.
+
+## TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE (lane B, 2026-08-16) — **open**
+
+**In short:** When you mistype an option, `sort` tells you so in the wrong
+words. glibc's `getopt_long` — the thing every GNU utility's option errors come
+from — uses one set of sentences for short options (`-x`) and a *different* set
+for long ones (`--foo`). Ours uses the short-option sentences for both, so
+every long-option mistake is reported in a form GNU never prints. Separately,
+and worse, the mistyped option is printed raw, so an option name containing a
+newline forges an extra line of output.
+
+Measured against GNU coreutils 9.4 under `LC_ALL=C`, all eight differ:
+
+| Command | GNU | ours |
+|---|---|---|
+| `sort -x` | `invalid option -- 'x'` | `unknown option -- x` |
+| `sort -k` | `option requires an argument -- 'k'` | `option requires an argument -- k` |
+| `sort --fo` | `unrecognized option '--fo'` | `unknown option -- fo` |
+| `sort --k` | `option '--key' requires an argument` | `option requires an argument -- k` |
+| `sort --s` | `option '--s' is ambiguous; possibilities: '--sort' '--stable'` | `ambiguous option -- s` |
+| `sort --sort` | `option '--sort' requires an argument` | `option requires an argument -- sort` |
+| `sort --stable=x` | `option '--stable' doesn't allow an argument` | `option doesn't take an argument -- stable` |
+| `sort --output` | `option '--output' requires an argument` | `option requires an argument -- output` |
+
+Two details are easy to miss. GNU quotes the offending option even in the short
+forms (`-- 'x'`, not `-- x`). And the long missing-argument message names the
+option **as resolved**, not as typed: `--k` is reported as `'--key'`.
+
+**Where it lives.** `userspace/coreutils/src/bin/sort/main.rs` —
+`unknown_option()`, `missing_argument()`, the ambiguous and
+doesn't-take-an-argument branches, and `show()`. `sort` is where it was found
+because `sort` is the only utility with a real `getopt_long`; the other 84 parse
+argv by hand and will inherit the same shapes as they gain long options, so the
+right fix is a shared option-error helper rather than eight strings in `sort`.
+
+**Why the harness missed it.** `scripts/sort-diff.sh` grew its option section
+in the same session as the option parser, and the cases it compares are the
+ones the parser was written to handle. None of the eight above is among them —
+a differential harness only tests the differences someone thought to try.
+Whatever fixes the wording should add all eight, and the fix is not done until
+the harness fails without it.
+
+**The security half.** The option name is interpolated raw:
+
+```text
+$ sort $'--fo\nsort: /etc/shadow: Permission denied'
+sort: unrecognized option '--fo
+sort: /etc/shadow: Permission denied'
+```
+
+That is GNU's output, verbatim — glibc wraps the option in literal quotes and
+escapes nothing inside them. It is reachable without an attacker controlling
+argv: a file named `--fo⏎…` in a directory, and any script running `sort *`,
+puts it there. The fix is to render it with `coreutils::quote::quote`, which
+produces `'--fo'` for every ordinary option name — byte-identical to GNU — and
+diverges only where GNU would emit a raw control byte. So this costs no
+fidelity on any benign input, which is why it should not need a
+differs-on-purpose entry in the harness.

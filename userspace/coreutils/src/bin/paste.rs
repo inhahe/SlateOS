@@ -4,6 +4,7 @@
 //!   -d DELIM   use DELIM instead of TAB
 //!   -s         paste one file at a time instead of side-by-side
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -45,7 +46,7 @@ fn main() {
                 match File::open(path) {
                     Ok(f) => Box::new(f),
                     Err(e) => {
-                        eprintln!("paste: {path}: {e}");
+                        eprintln!("paste: {}: {e}", quotef_os(path));
                         continue;
                     }
                 }
@@ -66,7 +67,7 @@ fn main() {
                     match File::open(path) {
                         Ok(f) => Box::new(f),
                         Err(e) => {
-                            eprintln!("paste: {path}: {e}");
+                            eprintln!("paste: {}: {e}", quotef_os(path));
                             return None;
                         }
                     }

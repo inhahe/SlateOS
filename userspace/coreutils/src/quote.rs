@@ -335,35 +335,46 @@ pub fn os_bytes(s: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
     }
 }
 
-/// [`quotef`] for a path or any other `OsStr`, which is what almost every call
-/// site actually has.
+/// [`quotef`] for a path, a `String`, or anything else a call site already
+/// holds — which is the form nearly every caller wants.
+///
+/// The bound is `AsRef<OsStr>` rather than `&OsStr` because the call sites are
+/// a mix of `&str`, `String`, `&Path` and `&OsStr`, and requiring each of them
+/// to convert first would put a conversion in front of every diagnostic in the
+/// tree. A quoting call has to be the path of least resistance or it will be
+/// skipped, and a skipped one is the bug this module exists to prevent.
 ///
 /// ```
 /// use coreutils::quote::quotef_os;
-/// use std::ffi::OsStr;
-/// assert_eq!(quotef_os(OsStr::new("a b")), "'a b'");
+/// use std::path::Path;
+/// assert_eq!(quotef_os("a b"), "'a b'");
+/// assert_eq!(quotef_os(Path::new("notes.txt")), "notes.txt");
 /// ```
 #[must_use]
-pub fn quotef_os(s: &std::ffi::OsStr) -> String {
-    quotef(&os_bytes(s))
+pub fn quotef_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
+    quotef(&os_bytes(s.as_ref()))
 }
 
-/// [`quoteaf`] for a path or any other `OsStr`.
+/// [`quoteaf`] for a path, a `String`, or anything else a call site holds.
 ///
 /// ```
 /// use coreutils::quote::quoteaf_os;
-/// use std::ffi::OsStr;
-/// assert_eq!(quoteaf_os(OsStr::new("a.txt")), "'a.txt'");
+/// assert_eq!(quoteaf_os("a.txt"), "'a.txt'");
 /// ```
 #[must_use]
-pub fn quoteaf_os(s: &std::ffi::OsStr) -> String {
-    quoteaf(&os_bytes(s))
+pub fn quoteaf_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
+    quoteaf(&os_bytes(s.as_ref()))
 }
 
-/// [`quote`] for an `OsStr`.
+/// [`quote`] for a path, a `String`, or anything else a call site holds.
+///
+/// ```
+/// use coreutils::quote::quote_os;
+/// assert_eq!(quote_os("--sort"), "'--sort'");
+/// ```
 #[must_use]
-pub fn quote_os(s: &std::ffi::OsStr) -> String {
-    quote(&os_bytes(s))
+pub fn quote_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
+    quote(&os_bytes(s.as_ref()))
 }
 
 #[cfg(test)]

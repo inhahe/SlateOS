@@ -3,6 +3,7 @@
 //! Usage: rmdir [-p] DIRECTORY...
 //!   -p  remove parent directories as well if they become empty
 
+use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -32,7 +33,7 @@ fn main() {
     let mut failed = false;
     for dir in &parsed.dirs {
         if let Err(e) = fs::remove_dir(dir) {
-            eprintln!("rmdir: failed to remove '{dir}': {e}");
+            eprintln!("rmdir: failed to remove {}: {e}", quoteaf_os(dir));
             failed = true;
             continue;
         }

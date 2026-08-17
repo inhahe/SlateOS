@@ -4,6 +4,7 @@
 //!   With no COMMAND, print all environment variables.
 //!   NAME=VALUE pairs are added to the environment before running COMMAND.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::process::{self, Command};
 
@@ -44,7 +45,7 @@ fn main() {
                     process::exit(status.code().unwrap_or(1));
                 }
                 Err(e) => {
-                    eprintln!("env: {program}: {e}");
+                    eprintln!("env: {}: {e}", quotef_os(program));
                     process::exit(127);
                 }
             }

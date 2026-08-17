@@ -6,6 +6,7 @@
 //!   -maxdepth N      descend at most N levels
 //!   -print           print matching paths (default action)
 
+use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -117,7 +118,7 @@ fn find_recursive(
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("find: '{}': {e}", dir.display());
+            eprintln!("find: {}: {e}", quoteaf_os(dir));
             return;
         }
     };

@@ -4,6 +4,7 @@
 //!   -r  remove directories and their contents recursively
 //!   -f  ignore nonexistent files, never prompt
 
+use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -39,7 +40,10 @@ fn main() {
         let path = Path::new(path_str);
         if !path.exists() {
             if !flags.force {
-                eprintln!("rm: cannot remove '{path_str}': No such file or directory");
+                eprintln!(
+                    "rm: cannot remove {}: No such file or directory",
+                    quoteaf_os(path_str)
+                );
                 failed = true;
             }
             continue;
@@ -49,7 +53,7 @@ fn main() {
             if flags.recursive {
                 fs::remove_dir_all(path)
             } else {
-                eprintln!("rm: cannot remove '{path_str}': Is a directory");
+                eprintln!("rm: cannot remove {}: Is a directory", quoteaf_os(path_str));
                 failed = true;
                 continue;
             }
@@ -60,7 +64,7 @@ fn main() {
         if let Err(e) = result
             && !flags.force
         {
-            eprintln!("rm: cannot remove '{path_str}': {e}");
+            eprintln!("rm: cannot remove {}: {e}", quoteaf_os(path_str));
             failed = true;
         }
     }

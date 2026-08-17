@@ -6,6 +6,7 @@
 //!   -I REPL   replace REPL in COMMAND with each input item (one per invocation)
 //!   Default: append all stdin items to COMMAND and run once.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::io::{self, Read};
 use std::process::{self, Command};
@@ -46,7 +47,7 @@ fn main() {
                 match Command::new(cmd).args(args).status() {
                     Ok(s) if !s.success() => exit_code = 1,
                     Err(e) => {
-                        eprintln!("xargs: {cmd}: {e}");
+                        eprintln!("xargs: {}: {e}", quotef_os(cmd));
                         exit_code = 1;
                     }
                     _ => {}
@@ -64,7 +65,7 @@ fn main() {
             match Command::new(cmd).args(&full_args).status() {
                 Ok(s) if !s.success() => exit_code = 1,
                 Err(e) => {
-                    eprintln!("xargs: {cmd}: {e}");
+                    eprintln!("xargs: {}: {e}", quotef_os(cmd));
                     exit_code = 1;
                 }
                 _ => {}
@@ -82,7 +83,7 @@ fn main() {
         match Command::new(cmd).args(&full_args).status() {
             Ok(s) if !s.success() => exit_code = 1,
             Err(e) => {
-                eprintln!("xargs: {cmd}: {e}");
+                eprintln!("xargs: {}: {e}", quotef_os(cmd));
                 exit_code = 1;
             }
             _ => {}

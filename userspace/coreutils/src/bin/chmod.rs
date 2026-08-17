@@ -21,6 +21,8 @@ fn main() {
 }
 
 #[cfg(unix)]
+use coreutils::quote::quotef_os;
+#[cfg(unix)]
 use std::env;
 #[cfg(unix)]
 use std::fs;
@@ -179,11 +181,11 @@ fn main() {
         let path = Path::new(path_str);
         if parsed.recursive && path.is_dir() {
             if let Err(e) = chmod_recursive(path, &parsed.mode) {
-                eprintln!("chmod: {path_str}: {e}");
+                eprintln!("chmod: {}: {e}", quotef_os(path_str));
                 exit_code = 1;
             }
         } else if let Err(e) = apply_chmod(path, &parsed.mode) {
-            eprintln!("chmod: {path_str}: {e}");
+            eprintln!("chmod: {}: {e}", quotef_os(path_str));
             exit_code = 1;
         }
     }

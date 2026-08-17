@@ -76,6 +76,8 @@ fn main() {
 }
 
 #[cfg(unix)]
+use coreutils::quote::quotef_os;
+#[cfg(unix)]
 use std::env;
 #[cfg(unix)]
 use std::fs;
@@ -114,7 +116,7 @@ fn main() {
                 let _ = writeln!(out, "{}", format_line(total, path, flags.human));
             }
             Err(e) => {
-                eprintln!("du: {path}: {e}");
+                eprintln!("du: {}: {e}", quotef_os(path));
                 exit_code = 1;
             }
         }
@@ -144,7 +146,7 @@ fn compute_du(path: &Path, flags: &DuFlags, out: &mut impl Write) -> Result<u64,
         let entry_meta = match fs::symlink_metadata(&entry_path) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("du: {}: {e}", entry_path.display());
+                eprintln!("du: {}: {e}", quotef_os(&entry_path));
                 continue;
             }
         };
@@ -162,7 +164,7 @@ fn compute_du(path: &Path, flags: &DuFlags, out: &mut impl Write) -> Result<u64,
                     total = total.saturating_add(sub_total);
                 }
                 Err(e) => {
-                    eprintln!("du: {}: {e}", entry_path.display());
+                    eprintln!("du: {}: {e}", quotef_os(&entry_path));
                 }
             }
         } else {

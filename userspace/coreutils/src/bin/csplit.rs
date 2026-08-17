@@ -19,6 +19,7 @@
 //!   0  success
 //!   1  error
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -244,7 +245,7 @@ fn main() {
         match File::open(&file_path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("csplit: {file_path}: {e}");
+                eprintln!("csplit: {}: {e}", quotef_os(file_path));
                 process::exit(1);
             }
         }

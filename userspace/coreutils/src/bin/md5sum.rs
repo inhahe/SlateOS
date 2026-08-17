@@ -6,6 +6,7 @@
 //! Note: MD5 is implemented inline since we're in a freestanding
 //! environment without access to external crypto crates.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -32,11 +33,11 @@ fn main() {
                     let hash = md5(&data);
                     let _ = writeln!(out, "{}  {path}", hex(&hash));
                 } else {
-                    eprintln!("md5sum: {path}: read error");
+                    eprintln!("md5sum: {}: read error", quotef_os(path));
                 }
             }
             Err(e) => {
-                eprintln!("md5sum: {path}: {e}");
+                eprintln!("md5sum: {}: {e}", quotef_os(path));
             }
         }
     }

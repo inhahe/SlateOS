@@ -4,6 +4,7 @@
 //!        cp [-r] SOURCE... DIRECTORY
 //!   -r  copy directories recursively
 
+use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -74,7 +75,7 @@ fn main() {
     let dest_is_dir = dest_path.is_dir();
 
     if sources.len() > 1 && !dest_is_dir {
-        eprintln!("cp: target '{dest}' is not a directory");
+        eprintln!("cp: target {} is not a directory", quoteaf_os(dest));
         process::exit(1);
     }
 
@@ -85,12 +86,12 @@ fn main() {
 
         if src.is_dir() {
             if !parsed.recursive {
-                eprintln!("cp: omitting directory '{src_str}'");
+                eprintln!("cp: omitting directory {}", quoteaf_os(src_str));
                 failed = true;
                 continue;
             }
             if let Err(e) = copy_dir_recursive(src, &target) {
-                eprintln!("cp: error copying '{src_str}': {e}");
+                eprintln!("cp: error copying {}: {e}", quoteaf_os(src_str));
                 failed = true;
             }
         } else if let Err(e) = fs::copy(src, &target) {

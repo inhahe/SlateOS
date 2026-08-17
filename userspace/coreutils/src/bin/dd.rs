@@ -8,6 +8,7 @@
 //!   skip=   skip N blocks at start of input
 //!   seek=   skip N blocks at start of output
 
+use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -52,7 +53,7 @@ fn main() {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("dd: failed to open '{path}': {e}");
+                eprintln!("dd: failed to open {}: {e}", quoteaf_os(path));
                 process::exit(1);
             }
         },
@@ -68,7 +69,7 @@ fn main() {
         {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("dd: failed to open '{path}': {e}");
+                eprintln!("dd: failed to open {}: {e}", quoteaf_os(path));
                 process::exit(1);
             }
         },

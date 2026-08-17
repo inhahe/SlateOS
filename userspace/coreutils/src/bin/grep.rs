@@ -45,6 +45,7 @@
 //! system may hold any byte but `/` and NUL, so a grep that insisted on UTF-8
 //! could not search a file listing.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -484,7 +485,7 @@ fn main() {
         match raw {
             Ok(raw) => patterns.extend(split_patterns(&raw)),
             Err(e) => {
-                eprintln!("grep: {pf}: {}", strerror(&e));
+                eprintln!("grep: {}: {}", quotef_os(pf), strerror(&e));
                 process::exit(2);
             }
         }
@@ -527,7 +528,7 @@ fn main() {
             if Path::new(path).is_dir() {
                 if !parsed.opts.recursive {
                     if !parsed.opts.no_messages {
-                        eprintln!("grep: {path}: Is a directory");
+                        eprintln!("grep: {}: Is a directory", quotef_os(path));
                     }
                     // Named but not searched, so the run's answer is about
                     // less than it was asked about — status 2, as for a file
@@ -540,7 +541,7 @@ fn main() {
                 Ok(f) => Box::new(f),
                 Err(e) => {
                     if !parsed.opts.no_messages {
-                        eprintln!("grep: {path}: {}", strerror(&e));
+                        eprintln!("grep: {}: {}", quotef_os(path), strerror(&e));
                     }
                     // A file that could not be read is an error, not an absence
                     // of matches: exiting 1 would tell a script the file has
@@ -571,7 +572,7 @@ fn main() {
             }
             Err(e) => {
                 if !parsed.opts.no_messages {
-                    eprintln!("grep: {path}: {}", strerror(&e));
+                    eprintln!("grep: {}: {}", quotef_os(path), strerror(&e));
                 }
                 had_error = true;
             }
@@ -666,7 +667,7 @@ fn collect_files_recursive(dir: &Path, result: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("grep: {}: {}", dir.display(), strerror(&e));
+            eprintln!("grep: {}: {}", quotef_os(dir), strerror(&e));
             return;
         }
     };

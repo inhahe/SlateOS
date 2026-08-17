@@ -8,6 +8,7 @@
 //!   If no flags, show all of: lines words bytes.
 //!   If no FILE or FILE is "-", read from standard input.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -71,7 +72,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("wc: {path}: {e}");
+                    eprintln!("wc: {}: {e}", quotef_os(path));
                     continue;
                 }
             }
@@ -79,7 +80,7 @@ fn main() {
 
         let mut data = Vec::new();
         if let Err(e) = reader.read_to_end(&mut data) {
-            eprintln!("wc: {path}: {e}");
+            eprintln!("wc: {}: {e}", quotef_os(path));
             continue;
         }
 

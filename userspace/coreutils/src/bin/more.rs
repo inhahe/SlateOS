@@ -5,6 +5,7 @@
 //!   Press Enter for next line, Space for next page, q to quit.
 //!   Without files, reads from stdin.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -35,7 +36,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("more: {path}: {e}");
+                    eprintln!("more: {}: {e}", quotef_os(path));
                     continue;
                 }
             }

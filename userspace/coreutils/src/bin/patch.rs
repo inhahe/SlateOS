@@ -18,6 +18,7 @@
 //!   1  some hunks failed
 //!   2  error (cannot read patch, etc.)
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs;
 use std::io::{self, Read};
@@ -380,7 +381,7 @@ fn main() {
         match fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("patch: {path}: {e}");
+                eprintln!("patch: {}: {e}", quotef_os(path));
                 process::exit(2);
             }
         }

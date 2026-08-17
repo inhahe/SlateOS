@@ -3,6 +3,7 @@
 //! Usage: sha256sum [FILE...]
 //!   Prints the SHA-256 hash of each file (or stdin if no files given).
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -29,11 +30,11 @@ fn main() {
                     let hash = sha256(&data);
                     let _ = writeln!(out, "{}  {path}", hex(&hash));
                 } else {
-                    eprintln!("sha256sum: {path}: read error");
+                    eprintln!("sha256sum: {}: read error", quotef_os(path));
                 }
             }
             Err(e) => {
-                eprintln!("sha256sum: {path}: {e}");
+                eprintln!("sha256sum: {}: {e}", quotef_os(path));
             }
         }
     }

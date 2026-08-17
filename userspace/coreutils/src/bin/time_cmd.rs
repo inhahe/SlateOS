@@ -6,6 +6,7 @@
 //! Note: This is named time_cmd.rs to avoid conflict with Rust's
 //! std::time module. The binary is installed as "time".
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::process::{self, Command};
 use std::time::Instant;
@@ -26,7 +27,7 @@ fn main() {
     let status = match Command::new(cmd).args(cmd_args).status() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("time: {cmd}: {e}");
+            eprintln!("time: {}: {e}", quotef_os(cmd));
             process::exit(127);
         }
     };

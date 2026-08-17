@@ -4,6 +4,7 @@
 //!   -n COUNT  print first COUNT lines (default 10)
 //!   If no FILE or FILE is "-", read from standard input.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -34,7 +35,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("head: {path}: {e}");
+                    eprintln!("head: {}: {e}", quotef_os(path));
                     continue;
                 }
             }
@@ -50,7 +51,7 @@ fn main() {
                     let _ = writeln!(out, "{l}");
                 }
                 Err(e) => {
-                    eprintln!("head: {path}: {e}");
+                    eprintln!("head: {}: {e}", quotef_os(path));
                     break;
                 }
             }

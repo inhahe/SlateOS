@@ -6,6 +6,7 @@
 //!   -b n   no numbering
 //!   -w N   width of line number field (default: 6)
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -56,7 +57,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("nl: {path}: {e}");
+                    eprintln!("nl: {}: {e}", quotef_os(path));
                     continue;
                 }
             }

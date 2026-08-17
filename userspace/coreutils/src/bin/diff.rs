@@ -6,6 +6,7 @@
 //!
 //! Uses a simple longest-common-subsequence algorithm.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -48,7 +49,7 @@ fn main() {
     let content1 = match fs::read_to_string(files[0]) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("diff: {}: {e}", files[0]);
+            eprintln!("diff: {}: {e}", quotef_os(files[0]));
             process::exit(2);
         }
     };
@@ -56,7 +57,7 @@ fn main() {
     let content2 = match fs::read_to_string(files[1]) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("diff: {}: {e}", files[1]);
+            eprintln!("diff: {}: {e}", quotef_os(files[1]));
             process::exit(2);
         }
     };

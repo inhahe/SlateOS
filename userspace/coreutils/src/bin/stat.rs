@@ -123,6 +123,8 @@ fn main() {
 }
 
 #[cfg(unix)]
+use coreutils::quote::quoteaf_os;
+#[cfg(unix)]
 use std::env;
 #[cfg(unix)]
 use std::fs;
@@ -148,7 +150,7 @@ fn main() {
         match show_stat(path_str) {
             Ok(()) => {}
             Err(e) => {
-                eprintln!("stat: cannot stat '{path_str}': {e}");
+                eprintln!("stat: cannot stat {}: {e}", quoteaf_os(path_str));
                 exit_code = 1;
             }
         }

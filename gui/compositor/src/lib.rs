@@ -309,6 +309,31 @@ impl Rect {
         }
     }
 
+    /// Grow by `amount` pixels on every side.
+    ///
+    /// Saturating for the same reason [`Window::outer_rect`] is: a rectangle
+    /// already at the coordinate edge stays pinned there rather than wrapping
+    /// to the opposite extreme.
+    pub fn inflate(&self, amount: u32) -> Rect {
+        let signed = i32::try_from(amount).unwrap_or(i32::MAX);
+        Rect::new(
+            self.x.saturating_sub(signed),
+            self.y.saturating_sub(signed),
+            self.width.saturating_add(amount.saturating_mul(2)),
+            self.height.saturating_add(amount.saturating_mul(2)),
+        )
+    }
+
+    /// The same rectangle moved by `(dx, dy)`.
+    pub fn offset(&self, dx: i32, dy: i32) -> Rect {
+        Rect::new(
+            self.x.saturating_add(dx),
+            self.y.saturating_add(dy),
+            self.width,
+            self.height,
+        )
+    }
+
     /// Check if a point is inside this rectangle.
     pub fn contains(&self, px: i32, py: i32) -> bool {
         px >= self.x
@@ -620,18 +645,26 @@ impl Window {
     /// would teleport it to the opposite extreme and panicking would let one
     /// client's bad request kill the whole display server.
     pub fn outer_rect(&self) -> Rect {
+        self.frame_rect().inflate(self.shadow_extent())
+    }
+
+    /// The decorated box: client area plus title bar and borders, *without* the
+    /// drop shadow. [`outer_rect`](Self::outer_rect) is this inflated by
+    /// [`shadow_extent`](Self::shadow_extent).
+    ///
+    /// Named once because four places used to spell it out from the constants
+    /// and had begun to disagree — `render_shadow` derived it one way,
+    /// `render_border` another, and `window_drawn_extent` carried a fourth copy
+    /// under a comment admitting it "mirrors the geometry in `render_shadow`".
+    /// A box that four functions each recompute is a box that will be drawn in
+    /// one place and hit-tested in another.
+    pub fn frame_rect(&self) -> Rect {
         let (top, side, bottom) = self.frame_insets();
-        let shadow = self.shadow_extent();
         Rect::new(
-            self.x.saturating_sub(shadow as i32).saturating_sub(side as i32),
-            self.y.saturating_sub(shadow as i32).saturating_sub(top as i32),
-            self.width
-                .saturating_add(side.saturating_mul(2))
-                .saturating_add(shadow.saturating_mul(2)),
-            self.height
-                .saturating_add(top)
-                .saturating_add(bottom)
-                .saturating_add(shadow.saturating_mul(2)),
+            self.x.saturating_sub(side as i32),
+            self.y.saturating_sub(top as i32),
+            self.width.saturating_add(side.saturating_mul(2)),
+            self.height.saturating_add(top).saturating_add(bottom),
         )
     }
 
@@ -685,12 +718,20 @@ impl Window {
     /// letting minimize move up into the vacated slot.
     fn title_button_rect(&self, slot: u32) -> Option<Rect> {
         let title_rect = self.title_bar_rect()?;
-        let step = (TITLE_BUTTON_SIZE + TITLE_BUTTON_SPACING) as i32;
-        let btn_x = title_rect.x + title_rect.width as i32
-            - TITLE_BUTTON_SIZE as i32
-            - TITLE_BUTTON_SPACING as i32
-            - (slot as i32 * step);
-        let btn_y = title_rect.y + (title_rect.height as i32 - TITLE_BUTTON_SIZE as i32) / 2;
+        // The bar's width and origin are the client's to influence, so the
+        // whole chain is saturating: a button positioned off the coordinate
+        // space is one the user cannot click, where an overflow here is the
+        // display server dying while drawing a title bar.
+        let step = (TITLE_BUTTON_SIZE.saturating_add(TITLE_BUTTON_SPACING)) as i32;
+        let btn_x = title_rect
+            .x
+            .saturating_add(title_rect.width as i32)
+            .saturating_sub(TITLE_BUTTON_SIZE as i32)
+            .saturating_sub(TITLE_BUTTON_SPACING as i32)
+            .saturating_sub((slot as i32).saturating_mul(step));
+        let btn_y = title_rect
+            .y
+            .saturating_add((title_rect.height as i32).saturating_sub(TITLE_BUTTON_SIZE as i32) / 2);
         Some(Rect::new(
             btn_x,
             btn_y,
@@ -733,6 +774,7 @@ impl Window {
     /// `self.windows`.
     pub fn title_bar_layout(&self) -> Option<TitleBarLayout> {
         Some(TitleBarLayout {
+            frame: self.frame_rect(),
             bar: self.title_bar_rect()?,
             close: self.close_button_rect(),
             maximize: self.maximize_button_rect(),
@@ -768,6 +810,10 @@ impl Window {
 /// window's origin and the button constants.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TitleBarLayout {
+    /// The whole decorated box — [`Window::frame_rect`] — that the bar sits at
+    /// the top of. Carried alongside the bar so the shadow, the border and the
+    /// bar are all drawn from one measurement of the window.
+    pub frame: Rect,
     /// The bar itself, spanning the window's full framed width.
     pub bar: Rect,
     /// The close button. Always present on a title bar.
@@ -781,9 +827,9 @@ pub struct TitleBarLayout {
 impl TitleBarLayout {
     /// How many buttons this bar actually carries.
     pub const fn button_count(&self) -> u32 {
-        self.close.is_some() as u32
-            + self.maximize.is_some() as u32
-            + self.minimize.is_some() as u32
+        (self.close.is_some() as u32)
+            .saturating_add(self.maximize.is_some() as u32)
+            .saturating_add(self.minimize.is_some() as u32)
     }
 }
 
@@ -4139,21 +4185,17 @@ impl Compositor {
     /// Deliberately conservative — it is the *outer* bound of the shadow, so it
     /// over-covers rather than under-covers. Under-covering would clip a
     /// decoration off; over-covering only leaves a few culled pixels on the
-    /// table. Mirrors the geometry in [`render_shadow`](Self::render_shadow),
-    /// which expands by one pixel per shadow layer from a base already inset by
-    /// the border and title bar.
+    /// table.
+    ///
+    /// Derived from [`Window::frame_rect`] rather than re-spelled from the
+    /// constants, which is what it used to do under a comment promising it
+    /// "mirrors the geometry in `render_shadow`" — a promise nothing checked.
+    /// The padding covers the furthest anything reaches: the shadow's last
+    /// layer (`SHADOW_SIZE - 1` out, cast 3 px down-right) and the border
+    /// stroke (one out), with room to spare in every direction.
     fn window_drawn_extent(win: &Window) -> Rect {
-        let pad = BORDER_WIDTH + SHADOW_SIZE + 3;
-        let x = win.x.saturating_sub(pad as i32);
-        let y = win
-            .y
-            .saturating_sub((TITLE_BAR_HEIGHT + BORDER_WIDTH + SHADOW_SIZE + 3) as i32);
-        Rect::new(
-            x,
-            y,
-            win.width + pad * 2,
-            win.height + TITLE_BAR_HEIGHT + BORDER_WIDTH * 2 + SHADOW_SIZE * 2 + 6,
-        )
+        win.frame_rect()
+            .inflate(SHADOW_SIZE.saturating_add(BORDER_WIDTH).saturating_add(3))
     }
 
     /// Benchmark/test hook: perform one full recomposite and buffer swap
@@ -4372,7 +4414,7 @@ impl Compositor {
         // owns the whole display. Both report it by having no title bar.
         if let Some(bar) = title_bar {
             // 1. Draw window shadow.
-            self.render_shadow(win_x, win_y, win_width, win_height, opacity);
+            self.render_shadow(bar.frame, opacity);
 
             // 2. Draw window border.
             let border_color = if focused {
@@ -4380,7 +4422,7 @@ impl Compositor {
             } else {
                 self.theme.border_unfocused
             };
-            self.render_border(win_x, win_y, win_width, win_height, border_color, opacity);
+            self.render_border(bar.frame, border_color, opacity);
 
             // 3. Draw title bar.
             self.render_title_bar(&bar, focused, &title, opacity);
@@ -4502,50 +4544,57 @@ impl Compositor {
         }
     }
 
-    /// Render the window shadow.
-    fn render_shadow(&mut self, x: i32, y: i32, width: u32, height: u32, opacity: f32) {
-        let shadow_offset = 3_i32;
-        let total_width = width + (BORDER_WIDTH * 2);
-        let total_height = height + TITLE_BAR_HEIGHT + BORDER_WIDTH;
+    /// Render the window shadow: concentric outlines around the frame box,
+    /// offset down-right and fading with distance.
+    fn render_shadow(&mut self, frame: Rect, opacity: f32) {
+        /// How far down and right the shadow is cast from the frame.
+        const SHADOW_OFFSET: i32 = 3;
+        /// Alpha of the innermost shadow layer, falling off per layer.
+        const SHADOW_ALPHA: u32 = 40;
+        const SHADOW_FALLOFF: u32 = 5;
 
-        // Draw shadow layers (progressively more transparent).
+        let base = frame.offset(SHADOW_OFFSET, SHADOW_OFFSET);
         for layer in 0..SHADOW_SIZE {
-            let alpha = (40u32.saturating_sub(layer * 5)).min(255);
-            let shadow_color = alpha << 24;
-            let expand = layer as i32;
-
-            let sx = x - BORDER_WIDTH as i32 - expand + shadow_offset;
-            let sy = y - TITLE_BAR_HEIGHT as i32 - expand + shadow_offset;
-            let sw = total_width + (expand as u32 * 2);
-            let sh = total_height + (expand as u32 * 2);
-
-            // Draw only the outline of each shadow layer for performance.
+            let alpha = SHADOW_ALPHA
+                .saturating_sub(layer.saturating_mul(SHADOW_FALLOFF))
+                .min(255);
+            let ring = base.inflate(layer);
+            // Only the outline of each layer: the interior is covered by the
+            // window itself or by the next layer in.
             self.render_engine.stroke_rect(
                 &mut self.framebuffer,
-                sx,
-                sy,
-                sw,
-                sh,
+                ring.x,
+                ring.y,
+                ring.width,
+                ring.height,
                 1,
-                shadow_color,
+                alpha << 24,
                 opacity,
             );
         }
     }
 
-    /// Render the window border.
-    fn render_border(&mut self, x: i32, y: i32, width: u32, height: u32, color: u32, opacity: f32) {
-        let border_x = x - BORDER_WIDTH as i32;
-        let border_y = y - TITLE_BAR_HEIGHT as i32 - BORDER_WIDTH as i32;
-        let border_w = width + (BORDER_WIDTH * 2);
-        let border_h = height + TITLE_BAR_HEIGHT + (BORDER_WIDTH * 2);
-
+    /// Render the window border: a stroke around the frame box.
+    ///
+    /// The stroke sits one border *above* the frame box, because
+    /// [`Window::frame_insets`] reserves no room above the title bar for it —
+    /// so the top edge is drawn into the shadow band rather than into space the
+    /// layout set aside. Harmless (the band is 8 px of shadow) but a real
+    /// inconsistency; see `known-issues.md`
+    /// `TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS`.
+    fn render_border(&mut self, frame: Rect, color: u32, opacity: f32) {
+        let border = Rect::new(
+            frame.x,
+            frame.y.saturating_sub(BORDER_WIDTH as i32),
+            frame.width,
+            frame.height.saturating_add(BORDER_WIDTH),
+        );
         self.render_engine.stroke_rect(
             &mut self.framebuffer,
-            border_x,
-            border_y,
-            border_w,
-            border_h,
+            border.x,
+            border.y,
+            border.width,
+            border.height,
             BORDER_WIDTH,
             color,
             opacity,
@@ -4586,7 +4635,9 @@ impl Compositor {
         } else {
             self.theme.title_text_unfocused
         };
-        let text_x = tb_x + 8;
+        /// Gap between the left edge of the title bar and the title text.
+        const TITLE_TEXT_INSET: u32 = 8;
+        let text_x = tb_x.saturating_add(TITLE_TEXT_INSET as i32);
         // Centred on the font's own line height rather than a hardcoded cell
         // size, so the title stays centred if the title-bar font ever changes.
         let line_height = self
@@ -4594,12 +4645,16 @@ impl Compositor {
             .fonts
             .get(DEFAULT_FONT_SIZE, Weight::Regular, Family::Ui)
             .line_height();
-        let text_y = tb_y + (bar.bar.height as i32 - line_height as i32) / 2;
+        let text_y =
+            tb_y.saturating_add((bar.bar.height as i32).saturating_sub(line_height as i32) / 2);
         // Reserve exactly the buttons this window actually has, so a window
         // with no maximize button gets that space for its title instead of
         // eliding text to make room for nothing.
-        let max_text_width = tb_width
-            .saturating_sub((TITLE_BUTTON_SIZE + TITLE_BUTTON_SPACING) * bar.button_count() + 16);
+        let buttons = TITLE_BUTTON_SIZE
+            .saturating_add(TITLE_BUTTON_SPACING)
+            .saturating_mul(bar.button_count());
+        let max_text_width =
+            tb_width.saturating_sub(buttons.saturating_add(TITLE_TEXT_INSET.saturating_mul(2)));
         self.render_engine.draw_text(
             &mut self.framebuffer,
             text_x,
@@ -5701,6 +5756,57 @@ mod tests {
         let win = comp.window_ref(fixed_id).expect("fixed window").clone();
         let (x, y) = on_left_border(&win);
         assert_eq!(comp.detect_border_drag(&win, x, y), None);
+    }
+
+    #[test]
+    fn nothing_a_window_draws_falls_outside_its_damage_extent() {
+        // `window_drawn_extent` is what damage tracking repaints. A decoration
+        // that paints outside it leaves a smear nothing ever cleans up, and the
+        // old version's only guarantee was a comment saying it "mirrors the
+        // geometry in render_shadow" — which nothing checked, and which had
+        // stopped being true. Render a framed window over a known background
+        // and assert every changed pixel is inside the extent.
+        let mut comp = Compositor::new(400, 300, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Framed", 120, 90);
+        spec.position = Some((140, 120));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        let bg = comp.theme.desktop_background;
+        comp.framebuffer.clear(bg);
+        comp.render_window(id);
+
+        let extent = comp
+            .window_ref(id)
+            .map(Compositor::window_drawn_extent)
+            .expect("window");
+        for y in 0..300u32 {
+            for x in 0..400u32 {
+                if comp.framebuffer.get_pixel(x, y) == Some(bg) {
+                    continue;
+                }
+                assert!(
+                    extent.contains(x as i32, y as i32),
+                    "painted ({x}, {y}), outside the damage extent {extent:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_outer_rect_is_the_frame_rect_plus_the_shadow() {
+        // outer_rect is now defined as frame_rect().inflate(shadow_extent()).
+        // These are the numbers that definition has to keep producing, written
+        // out from the constants so a change to either helper has to be
+        // deliberate rather than merely compile.
+        let win = plain_window(100, 100, 200, 150);
+        assert_eq!(win.frame_rect(), Rect::new(99, 70, 202, 181));
+        assert_eq!(win.outer_rect(), Rect::new(91, 62, 218, 197));
+        assert_eq!(win.frame_rect().inflate(SHADOW_SIZE), win.outer_rect());
+        // The title bar occupies the top inset of the frame box exactly.
+        let bar = win.title_bar_rect().expect("framed");
+        assert_eq!(bar, Rect::new(99, 70, 202, TITLE_BAR_HEIGHT));
+        assert_eq!(bar.x, win.frame_rect().x);
+        assert_eq!(bar.width, win.frame_rect().width);
     }
 
     /// The line rasteriser exactly as it stood before it was clipped and

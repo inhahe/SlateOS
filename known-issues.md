@@ -32133,3 +32133,45 @@ driver printed the capability mask that contradicted its own constants. Reading
 a value into a log message is not the same as checking it; where a device tells
 you what it accepts, check the request against it rather than printing both and
 trusting the constant.
+
+## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17)
+
+**In short:** the 1-pixel line the compositor draws around a window is drawn
+one pixel higher than the space the layout reserved for it. Nobody sees a
+problem, because the row it lands on is part of the window's drop shadow and
+is repainted anyway. But it means the code that *draws* the frame and the code
+that *measures* the frame disagree by one pixel, and the next person to trust
+the measurement will be wrong by one pixel too.
+
+`Window::frame_insets` returns `(top, side, bottom) = (TITLE_BAR_HEIGHT,
+BORDER_WIDTH, BORDER_WIDTH)`: a border down each side and along the bottom,
+and **no border above the title bar**. Every measurement derives from that —
+`frame_rect`, `outer_rect`, `title_bar_rect`, hit testing, damage tracking.
+
+`Compositor::render_border` (gui/compositor/src/lib.rs) does not. It strokes a
+box whose top edge is `BORDER_WIDTH` above `frame_rect`, so the frame is drawn
+one row taller than it is measured. That row falls inside `outer_rect` (which
+adds `SHADOW_SIZE` = 8 px of shadow beyond the frame) and inside
+`window_drawn_extent`, so it is repainted correctly and is inside the resize
+grab band — hence no visible symptom today.
+
+**Where:** `render_border` carries the discrepancy explicitly now, as a
+`Rect::new` that adds the row to `frame_rect` with a comment, rather than as
+open-coded constants that merely happened not to match. `frame_insets` is at
+`gui/compositor/src/lib.rs`; `nothing_a_window_draws_falls_outside_its_damage_extent`
+pins the containment that keeps it harmless.
+
+**Proper fix:** decide which is right and make both agree.
+- If the border above the title bar is wanted (it is what a real window frame
+  looks like), `frame_insets` should return `top = TITLE_BAR_HEIGHT +
+  BORDER_WIDTH` and `title_bar_rect` should start `BORDER_WIDTH` below the top
+  of the frame box. This shifts every framed window's title bar and the resize
+  grab bands by one pixel, and moves the boundary between "title bar" (drag to
+  move) and "top border" (drag to resize) — so it wants a look at the drag
+  tests, whose grab points are chosen relative to `TITLE_BAR_HEIGHT`.
+- If it is not wanted, `render_border` should stroke `frame_rect` unmodified
+  and the extra row disappears.
+
+Not urgent: nothing is visibly wrong and nothing is unsafe. Logged because a
+one-pixel disagreement between drawing and measurement is exactly the kind of
+thing that becomes a real bug the moment either side is touched.

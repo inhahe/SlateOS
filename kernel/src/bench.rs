@@ -5312,9 +5312,17 @@ fn bench_lock_primitives() {
     // scan run twice per lock operation — so this number was the multiplier on
     // it. Printed even now that the lookup is a hash, because it is what would
     // reveal the regression if the index were ever bypassed.
+    //
+    // The edge count is here for the same reason, and its absence is why a real
+    // regression went unread: `record_edge` stayed an O(edges) linear scan long
+    // after the class lookup became a hash, and it runs on every *nested*
+    // acquire. This line reported exactly `128` classes — the old cap — for two
+    // runs before that was noticed, because a class count alone says nothing
+    // about how much work a nested acquire does. Print both, or neither.
     serial_println!(
-        "[bench]   lock context: {} lockdep classes registered",
-        crate::lockdep::class_count()
+        "[bench]   lock context: {} lockdep classes registered, {} dependency edges",
+        crate::lockdep::class_count(),
+        crate::lockdep::edge_count()
     );
 
     // Differences, and then the check that the differences and the direct

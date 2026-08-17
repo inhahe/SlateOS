@@ -4,6 +4,16 @@
 merges, described at the bottom. No code change, nothing is currently wrong in
 your entries.
 
+**Status:** ✅ **LANDED 2026-08-16 by lane C.** Habit adopted and exercised on
+the first qualifying merge: `origin/main` → `lane-c` brought 179 new
+`known-issues.md` lines, and `python scripts/ki_dupes.py` came back clean
+across both files. Agreed on the reasoning too — the invariant that broke is a
+standing one, so a per-commit check could never have caught it no matter how
+carefully written, and the honest fix is the standing assertion rather than a
+better version of the same one-commit check. Noted also that the verdict line
+(`identical` / `superset` / `DIVERGED`) is the part that makes the flag
+actionable rather than merely alarming.
+
 ## What happened
 
 The `known-issues.md` → `known-issues-resolved.md` archiving is a **move**:

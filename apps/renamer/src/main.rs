@@ -39,6 +39,7 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -411,6 +412,122 @@ impl FileEntry {
 /// so no existing rule changes behaviour.
 fn char_offset(s: &str, chars: usize) -> usize {
     s.char_indices().nth(chars).map_or(s.len(), |(i, _)| i)
+}
+
+/// One filesystem rename, in the order it must be performed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenameStep {
+    from: String,
+    to: String,
+}
+
+/// Order a set of renames so that no step overwrites a file a later step still
+/// needs, inserting temporary names where a cycle makes that impossible.
+///
+/// `existing` is every filename present in the directory right now;
+/// `renames` is the `(from, to)` set the user asked for, in any order.
+///
+/// The problem this solves is the ordinary one for a bulk renamer and the
+/// reason the old conflict check refused so much: renaming `1.jpg` → `2.jpg`
+/// and `2.jpg` → `3.jpg` is perfectly valid, but doing them in that order
+/// destroys `2.jpg` before it has been moved to `3.jpg`. Done in the reverse
+/// order it is fine. Swapping two names — `a` → `b`, `b` → `a` — has no valid
+/// order at all, and needs one of them parked under a temporary name first.
+///
+/// The algorithm is the obvious one: repeatedly emit every rename whose
+/// destination is currently free; when a full pass emits nothing, everything
+/// left is part of a cycle, so break one link by renaming its source to an
+/// unused temporary name and re-queue the rest of that rename. Breaking a link
+/// always frees the name some other queued rename wants — that is what being a
+/// cycle means — so each break makes progress and the loop terminates.
+///
+/// Note it is `fs::rename`'s *overwriting* that makes this necessary. Slate OS
+/// paths are case-sensitive, so `a.txt` → `A.txt` is a real rename between two
+/// distinct names and needs no special handling here.
+fn rename_plan(existing: &[String], renames: &[(String, String)]) -> Vec<RenameStep> {
+    let mut occupied: BTreeSet<String> = existing.iter().cloned().collect();
+    let mut pending: Vec<(String, String)> = renames
+        .iter()
+        .filter(|(from, to)| from != to)
+        .cloned()
+        .collect();
+    let mut steps = Vec::new();
+    let mut temp_counter: usize = 0;
+
+    while !pending.is_empty() {
+        let mut blocked = Vec::new();
+        let mut progressed = false;
+        for (from, to) in pending.drain(..) {
+            if occupied.contains(&to) {
+                blocked.push((from, to));
+            } else {
+                occupied.remove(&from);
+                occupied.insert(to.clone());
+                steps.push(RenameStep { from, to });
+                progressed = true;
+            }
+        }
+        pending = blocked;
+
+        if progressed || pending.is_empty() {
+            continue;
+        }
+
+        // Everything left is in a cycle. Park one source under a name nothing
+        // uses, which frees its old name for whichever rename was waiting on
+        // it, and re-queue the second half of the move.
+        let (from, to) = pending.remove(0);
+        let temp = unused_temp_name(&occupied, &mut temp_counter);
+        occupied.remove(&from);
+        occupied.insert(temp.clone());
+        steps.push(RenameStep {
+            from,
+            to: temp.clone(),
+        });
+        pending.push((temp, to));
+    }
+
+    steps
+}
+
+/// A name that no file in `occupied` has, for parking one side of a rename
+/// cycle. The leading dot keeps it out of the way of ordinary names, and the
+/// loop means even a directory that already contains one is handled rather
+/// than trusted.
+fn unused_temp_name(occupied: &BTreeSet<String>, counter: &mut usize) -> String {
+    loop {
+        let name = format!(".renamer-tmp-{counter}");
+        *counter = counter.saturating_add(1);
+        if !occupied.contains(&name) {
+            return name;
+        }
+    }
+}
+
+/// `path` with its last component replaced by `new_name`.
+///
+/// Structural, not textual: the directory part is whatever precedes the final
+/// separator, and only that final component is replaced. A substring
+/// `replace` would rewrite matching *directory* names too, which is how
+/// renaming `photos/photos.jpg` turns into `holiday.jpg/holiday.jpg`.
+///
+/// Slate OS uses `/`; `\` is accepted as well so a path picked up from a host
+/// filesystem during development does not silently become a single filename
+/// with backslashes in it.
+fn replace_file_name(path: &str, new_name: &str) -> String {
+    match path.rfind(['/', '\\']) {
+        // `sep + 1` is a byte index just past an ASCII separator, so it is
+        // always a char boundary.
+        Some(sep) => {
+            let mut out =
+                String::with_capacity(sep.saturating_add(1).saturating_add(new_name.len()));
+            out.push_str(&path[..=sep]);
+            out.push_str(new_name);
+            out
+        }
+        // A bare filename with no directory part is entirely the name.
+        None => new_name.to_string(),
+    }
 }
 
 // ============================================================================
@@ -817,40 +934,54 @@ impl RenamerApp {
         self.detect_conflicts();
     }
 
-    /// Detect naming conflicts (duplicate new names).
+    /// Flag the files whose new name would collide with another file's *final*
+    /// name once the whole batch has been applied.
+    ///
+    /// Two things this deliberately does not do, both of which it used to:
+    ///
+    /// - **It does not compare case-insensitively.** Slate OS has a
+    ///   case-sensitive filesystem (`design.txt`), so `A.txt` and `a.txt` are
+    ///   two different files and renaming one to the other's *case variant* is
+    ///   a legitimate rename, not a collision. The old
+    ///   `to_ascii_lowercase`/`eq_ignore_ascii_case` comparison refused those,
+    ///   and — being ASCII-only — was not even consistently case-insensitive
+    ///   for the names where a user might expect it to be.
+    /// - **It does not treat a name another file is vacating as taken.** The
+    ///   old check compared each new name against every other file's
+    ///   *original* name, so shifting a numbered sequence — `1.jpg` → `2.jpg`,
+    ///   `2.jpg` → `3.jpg`, the single most common bulk rename there is — was
+    ///   flagged as one conflict per file and refused outright. What that
+    ///   really is is an *ordering* constraint, and [`rename_plan`] is what
+    ///   satisfies it.
     fn detect_conflicts(&mut self) {
-        // Clear all conflict flags
-        for file in &mut self.files {
-            file.conflict = false;
-        }
-
-        // Check for duplicates among selected files
-        let names: Vec<String> = self
+        // The name each file ends up with: its new name if it is in the batch,
+        // otherwise the name it already has.
+        let finals: Vec<String> = self
             .files
             .iter()
-            .filter(|f| f.selected)
-            .map(|f| f.new_name.to_ascii_lowercase())
+            .map(|f| {
+                if f.selected {
+                    f.new_name.clone()
+                } else {
+                    f.original_name.clone()
+                }
+            })
             .collect();
 
-        // Collect original names so we can check cross-collisions without borrowing self.files
-        let originals: Vec<String> = self.files.iter().map(|f| f.original_name.clone()).collect();
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for name in &finals {
+            *counts.entry(name.as_str()).or_insert(0) = counts
+                .get(name.as_str())
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
+        }
 
-        for (i, file) in self.files.iter_mut().enumerate() {
-            if !file.selected {
-                continue;
-            }
-            let lower = file.new_name.to_ascii_lowercase();
-            // Count how many times this name appears
-            let count = names.iter().filter(|n| **n == lower).count();
-            if count > 1 {
-                file.conflict = true;
-            }
-            // Also check if new name collides with original name of another file
-            for (j, orig) in originals.iter().enumerate() {
-                if i != j && orig.eq_ignore_ascii_case(&file.new_name) {
-                    file.conflict = true;
-                }
-            }
+        for (file, name) in self.files.iter_mut().zip(finals.iter()) {
+            // Only a file being renamed can be *told* to fix anything, so only
+            // that one is flagged; an unselected file is the victim, not the
+            // cause.
+            file.conflict = file.selected && counts.get(name.as_str()).copied().unwrap_or(0) > 1;
         }
     }
 
@@ -878,15 +1009,12 @@ impl RenamerApp {
 
         let count = record.renames.len();
 
-        // Apply the renames (in real OS, would call filesystem rename)
-        for file in &mut self.files {
-            if file.selected && file.original_name != file.new_name && !file.conflict {
-                file.original_name = file.new_name.clone();
-                file.original_path = file
-                    .original_path
-                    .replace(&file.original_name, &file.new_name);
-            }
-        }
+        // Ordered, so that when this is wired to `fs::rename` the steps can be
+        // performed straight through without one clobbering another. Applying
+        // them here in the same order keeps the preview honest about what the
+        // filesystem will actually do.
+        let plan = rename_plan(&self.current_names(), &record.renames);
+        self.apply_plan(&plan);
 
         self.undo_stack.push(record.clone());
         if self.undo_stack.len() > MAX_UNDO {
@@ -903,17 +1031,23 @@ impl RenamerApp {
     }
 
     /// Undo the last rename operation.
+    ///
+    /// Goes through [`rename_plan`] for the same reason [`Self::execute_rename`]
+    /// does: undoing a batch is itself a batch, and reversing a swap or a
+    /// shifted sequence by walking the pairs in stored order clobbers exactly
+    /// as the forward direction would. The old implementation also never
+    /// touched `original_path`, so an undone rename left the path naming the
+    /// file it had just been renamed *away* from.
     fn undo(&mut self) {
         if let Some(record) = self.undo_stack.pop() {
-            // Reverse the renames
-            for (old_name, new_name) in &record.renames {
-                for file in &mut self.files {
-                    if file.original_name == *new_name {
-                        file.original_name = old_name.clone();
-                        file.new_name = old_name.clone();
-                    }
-                }
-            }
+            let reversed: Vec<(String, String)> = record
+                .renames
+                .iter()
+                .map(|(old, new)| (new.clone(), old.clone()))
+                .collect();
+            let plan = rename_plan(&self.current_names(), &reversed);
+            self.apply_plan(&plan);
+
             let count = record.renames.len();
             self.redo_stack.push(record);
             self.status_message = format!("Undid rename of {count} files");
@@ -924,17 +1058,38 @@ impl RenamerApp {
     /// Redo the last undone rename.
     fn redo(&mut self) {
         if let Some(record) = self.redo_stack.pop() {
-            for (_, new_name) in &record.renames {
-                for file in &mut self.files {
-                    if file.new_name == *new_name || file.original_name == *new_name {
-                        file.original_name = new_name.clone();
-                    }
-                }
-            }
+            let plan = rename_plan(&self.current_names(), &record.renames);
+            self.apply_plan(&plan);
+
             let count = record.renames.len();
             self.undo_stack.push(record);
             self.status_message = format!("Redid rename of {count} files");
             self.apply_operations();
+        }
+    }
+
+    /// The name every file in the list currently has on disk.
+    fn current_names(&self) -> Vec<String> {
+        self.files.iter().map(|f| f.original_name.clone()).collect()
+    }
+
+    /// Perform an ordered plan against the in-memory list.
+    ///
+    /// A step whose `from` names no file is skipped rather than ignored
+    /// silently at a distance: it means the list and the plan have diverged,
+    /// which cannot happen for a plan built from `current_names()` in the same
+    /// call, and is a bug if it ever does.
+    fn apply_plan(&mut self, plan: &[RenameStep]) {
+        for step in plan {
+            if let Some(file) = self.files.iter_mut().find(|f| f.original_name == step.from) {
+                file.original_path = replace_file_name(&file.original_path, &step.to);
+                file.original_name = step.to.clone();
+            }
+        }
+        // Every file's preview should now show the name it actually has, or
+        // the next `detect_conflicts` compares against stale targets.
+        for file in &mut self.files {
+            file.new_name = file.original_name.clone();
         }
     }
 
@@ -2712,5 +2867,371 @@ mod tests {
         );
         let op = RenameOp::Remove { from: 2, count: 3 };
         assert_eq!(RenameEngine::apply(&op, "abcdefg.txt", 0), "abfg.txt");
+    }
+
+    // ------------------------------------------------------------------
+    // Batch ordering, conflict detection and path rewriting
+    // ------------------------------------------------------------------
+
+    /// An app holding `names`, all in `/photos`, all selected.
+    fn app_with(names: &[&str]) -> RenamerApp {
+        let mut app = RenamerApp::new();
+        for name in names {
+            app.add_file(&format!("/photos/{name}"), name, 100, 0);
+        }
+        app
+    }
+
+    /// Set each file's previewed new name directly, bypassing the rule chain,
+    /// and recompute the conflict flags — the same two things
+    /// `apply_operations` does, minus the rules themselves.
+    fn preview(app: &mut RenamerApp, new_names: &[&str]) {
+        for (file, name) in app.files.iter_mut().zip(new_names.iter()) {
+            file.new_name = (*name).to_string();
+        }
+        app.detect_conflicts();
+    }
+
+    fn names_of(app: &RenamerApp) -> Vec<String> {
+        app.files.iter().map(|f| f.original_name.clone()).collect()
+    }
+
+    fn paths_of(app: &RenamerApp) -> Vec<String> {
+        app.files.iter().map(|f| f.original_path.clone()).collect()
+    }
+
+    fn conflicts_of(app: &RenamerApp) -> Vec<bool> {
+        app.files.iter().map(|f| f.conflict).collect()
+    }
+
+    #[test]
+    fn renaming_a_file_updates_the_path_it_is_stored_under() {
+        let mut app = app_with(&["old.txt"]);
+        preview(&mut app, &["new.txt"]);
+        app.execute_rename();
+        assert_eq!(names_of(&app), vec!["new.txt"]);
+        // The path used to be left naming the old file, so a second rename in
+        // the same session would have been performed against a stale path.
+        assert_eq!(paths_of(&app), vec!["/photos/new.txt"]);
+    }
+
+    #[test]
+    fn a_directory_that_shares_the_file_name_is_not_rewritten() {
+        // `path.replace(old, new)` rewrites *every* occurrence, not just the
+        // last component, so a directory whose name contains the file's name
+        // is renamed along with it -- leaving a path under a directory that
+        // does not exist. Two shapes this really takes: a folder named after
+        // the file it holds, and a folder whose name merely *contains* it.
+        assert_eq!(
+            replace_file_name("/music/Nirvana/Nirvana", "Nevermind"),
+            "/music/Nirvana/Nevermind"
+        );
+        assert_eq!(
+            replace_file_name("/report-archive/report", "summary"),
+            "/report-archive/summary"
+        );
+
+        let mut app = RenamerApp::new();
+        app.add_file("/music/Nirvana/Nirvana", "Nirvana", 100, 0);
+        app.add_file("/report-archive/report", "report", 100, 0);
+        preview(&mut app, &["Nevermind", "summary"]);
+        app.execute_rename();
+        assert_eq!(
+            paths_of(&app),
+            vec!["/music/Nirvana/Nevermind", "/report-archive/summary"]
+        );
+    }
+
+    #[test]
+    fn a_bare_name_and_a_backslash_path_both_replace_only_the_last_component() {
+        assert_eq!(replace_file_name("a.txt", "b.txt"), "b.txt");
+        assert_eq!(replace_file_name("d\\a.txt", "b.txt"), "d\\b.txt");
+        assert_eq!(replace_file_name("/", "b.txt"), "/b.txt");
+    }
+
+    #[test]
+    fn a_case_only_rename_is_not_a_conflict() {
+        // Slate OS's filesystem is case-sensitive (`design.txt`), so
+        // `photo.jpg` and `PHOTO.jpg` are two different files. The old
+        // `eq_ignore_ascii_case` comparison refused this rename as a
+        // collision with a file it cannot in fact collide with.
+        let mut app = app_with(&["photo.JPG", "PHOTO.jpg"]);
+        app.files[1].selected = false;
+        preview(&mut app, &["photo.jpg", "PHOTO.jpg"]);
+        assert_eq!(conflicts_of(&app), vec![false, false]);
+    }
+
+    #[test]
+    fn shifting_a_numbered_sequence_is_allowed_and_ordered_safely() {
+        // The single most common bulk rename there is. The old check compared
+        // each new name against every other file's *original* name, so this
+        // was flagged as three conflicts and refused outright.
+        let mut app = app_with(&["1.jpg", "2.jpg", "3.jpg"]);
+        preview(&mut app, &["2.jpg", "3.jpg", "4.jpg"]);
+        assert_eq!(
+            conflicts_of(&app),
+            vec![false, false, false],
+            "a name another file is vacating is an ordering constraint, not a collision"
+        );
+
+        app.execute_rename();
+        assert_eq!(names_of(&app), vec!["2.jpg", "3.jpg", "4.jpg"]);
+        assert_eq!(
+            paths_of(&app),
+            vec!["/photos/2.jpg", "/photos/3.jpg", "/photos/4.jpg"]
+        );
+    }
+
+    #[test]
+    fn a_shifted_sequence_is_planned_from_the_far_end_first() {
+        let plan = rename_plan(
+            &[
+                "1.jpg".to_string(),
+                "2.jpg".to_string(),
+                "3.jpg".to_string(),
+            ],
+            &[
+                ("1.jpg".to_string(), "2.jpg".to_string()),
+                ("2.jpg".to_string(), "3.jpg".to_string()),
+                ("3.jpg".to_string(), "4.jpg".to_string()),
+            ],
+        );
+        assert_eq!(
+            plan,
+            vec![
+                RenameStep {
+                    from: "3.jpg".to_string(),
+                    to: "4.jpg".to_string()
+                },
+                RenameStep {
+                    from: "2.jpg".to_string(),
+                    to: "3.jpg".to_string()
+                },
+                RenameStep {
+                    from: "1.jpg".to_string(),
+                    to: "2.jpg".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn swapping_two_names_parks_one_under_a_temporary_name() {
+        let plan = rename_plan(
+            &["a.txt".to_string(), "b.txt".to_string()],
+            &[
+                ("a.txt".to_string(), "b.txt".to_string()),
+                ("b.txt".to_string(), "a.txt".to_string()),
+            ],
+        );
+        // Three steps, because no two-step order exists: whichever ran first
+        // would overwrite the other file.
+        assert_eq!(plan.len(), 3);
+        assert_eq!(plan[0].from, "a.txt");
+        let temp = plan[0].to.clone();
+        assert!(temp != "a.txt" && temp != "b.txt");
+        assert_eq!(
+            plan[1],
+            RenameStep {
+                from: "b.txt".to_string(),
+                to: "a.txt".to_string()
+            }
+        );
+        assert_eq!(
+            plan[2],
+            RenameStep {
+                from: temp,
+                to: "b.txt".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn executing_a_swap_leaves_both_files_intact() {
+        let mut app = app_with(&["a.txt", "b.txt"]);
+        preview(&mut app, &["b.txt", "a.txt"]);
+        assert_eq!(conflicts_of(&app), vec![false, false]);
+
+        app.execute_rename();
+        assert_eq!(names_of(&app), vec!["b.txt", "a.txt"]);
+        assert_eq!(paths_of(&app), vec!["/photos/b.txt", "/photos/a.txt"]);
+    }
+
+    #[test]
+    fn a_three_way_rotation_is_planned_without_loss() {
+        let mut app = app_with(&["a", "b", "c"]);
+        preview(&mut app, &["b", "c", "a"]);
+        assert_eq!(conflicts_of(&app), vec![false, false, false]);
+
+        app.execute_rename();
+        assert_eq!(names_of(&app), vec!["b", "c", "a"]);
+        let mut sorted = names_of(&app);
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            vec!["a", "b", "c"],
+            "no name may be lost or duplicated by the rotation"
+        );
+    }
+
+    #[test]
+    fn two_files_renamed_to_the_same_name_are_flagged() {
+        let mut app = app_with(&["a.txt", "b.txt"]);
+        preview(&mut app, &["same.txt", "same.txt"]);
+        assert_eq!(conflicts_of(&app), vec![true, true]);
+
+        // A conflicted rename is excluded from the batch, so nothing moves.
+        app.execute_rename();
+        assert_eq!(names_of(&app), vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn colliding_with_a_file_that_is_not_being_renamed_is_flagged() {
+        let mut app = app_with(&["a.txt", "keep.txt"]);
+        app.files[1].selected = false;
+        preview(&mut app, &["keep.txt", "keep.txt"]);
+        // Only the file that can be told to pick another name is flagged; the
+        // bystander is the victim, not the cause.
+        assert_eq!(conflicts_of(&app), vec![true, false]);
+    }
+
+    #[test]
+    fn undoing_a_swap_restores_both_names() {
+        let mut app = app_with(&["a.txt", "b.txt"]);
+        preview(&mut app, &["b.txt", "a.txt"]);
+        app.execute_rename();
+
+        app.undo();
+        assert_eq!(names_of(&app), vec!["a.txt", "b.txt"]);
+        assert_eq!(paths_of(&app), vec!["/photos/a.txt", "/photos/b.txt"]);
+    }
+
+    #[test]
+    fn undoing_and_redoing_a_shifted_sequence_restores_every_name() {
+        let mut app = app_with(&["1.jpg", "2.jpg", "3.jpg"]);
+        preview(&mut app, &["2.jpg", "3.jpg", "4.jpg"]);
+        app.execute_rename();
+
+        app.undo();
+        assert_eq!(names_of(&app), vec!["1.jpg", "2.jpg", "3.jpg"]);
+        assert_eq!(
+            paths_of(&app),
+            vec!["/photos/1.jpg", "/photos/2.jpg", "/photos/3.jpg"]
+        );
+
+        app.redo();
+        assert_eq!(names_of(&app), vec!["2.jpg", "3.jpg", "4.jpg"]);
+    }
+
+    #[test]
+    fn a_file_already_holding_the_temporary_name_is_not_clobbered() {
+        let plan = rename_plan(
+            &[
+                "a.txt".to_string(),
+                "b.txt".to_string(),
+                ".renamer-tmp-0".to_string(),
+            ],
+            &[
+                ("a.txt".to_string(), "b.txt".to_string()),
+                ("b.txt".to_string(), "a.txt".to_string()),
+            ],
+        );
+        // The parking name must be one nothing in the directory holds, or the
+        // cycle-breaker destroys an innocent bystander.
+        assert_eq!(plan[0].to, ".renamer-tmp-1");
+        assert!(
+            plan.iter()
+                .all(|s| s.from != ".renamer-tmp-0" && s.to != ".renamer-tmp-0")
+        );
+    }
+
+    #[test]
+    fn a_name_that_does_not_change_produces_no_step() {
+        // Without this filter an unchanged pair is permanently "blocked" (its
+        // destination is occupied by itself) and gets mistaken for a cycle,
+        // producing a pointless park-and-restore round trip.
+        let plan = rename_plan(
+            &["a.txt".to_string(), "b.txt".to_string()],
+            &[
+                ("a.txt".to_string(), "a.txt".to_string()),
+                ("b.txt".to_string(), "c.txt".to_string()),
+            ],
+        );
+        assert_eq!(
+            plan,
+            vec![RenameStep {
+                from: "b.txt".to_string(),
+                to: "c.txt".to_string()
+            }]
+        );
+    }
+
+    /// Run a plan against a simulated directory, asserting the invariant that
+    /// actually matters at each step: the source exists and the destination is
+    /// free, so no `fs::rename` in the plan can ever overwrite a file.
+    /// Returns the resulting directory.
+    fn simulate(existing: &[&str], renames: &[(&str, &str)]) -> BTreeSet<String> {
+        let existing: Vec<String> = existing.iter().map(|s| (*s).to_string()).collect();
+        let pairs: Vec<(String, String)> = renames
+            .iter()
+            .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+            .collect();
+        let plan = rename_plan(&existing, &pairs);
+
+        let mut disk: BTreeSet<String> = existing.iter().cloned().collect();
+        for step in &plan {
+            assert!(
+                disk.contains(&step.from),
+                "step {step:?} renames a name that is not there"
+            );
+            assert!(
+                !disk.contains(&step.to),
+                "step {step:?} would overwrite an existing file"
+            );
+            disk.remove(&step.from);
+            disk.insert(step.to.clone());
+        }
+        disk
+    }
+
+    fn dir(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn no_step_in_any_plan_overwrites_a_file() {
+        // Forward shift.
+        assert_eq!(
+            simulate(&["1", "2", "3"], &[("1", "2"), ("2", "3"), ("3", "4")]),
+            dir(&["2", "3", "4"])
+        );
+        // Backward shift -- already conflict-free in emission order.
+        assert_eq!(
+            simulate(&["2", "3", "4"], &[("2", "1"), ("3", "2"), ("4", "3")]),
+            dir(&["1", "2", "3"])
+        );
+        // Two-cycle.
+        assert_eq!(
+            simulate(&["a", "b"], &[("a", "b"), ("b", "a")]),
+            dir(&["a", "b"])
+        );
+        // Three-cycle.
+        assert_eq!(
+            simulate(&["a", "b", "c"], &[("a", "b"), ("b", "c"), ("c", "a")]),
+            dir(&["a", "b", "c"])
+        );
+        // Two independent cycles plus a bystander that is never touched.
+        assert_eq!(
+            simulate(
+                &["a", "b", "x", "y", "keep"],
+                &[("a", "b"), ("b", "a"), ("x", "y"), ("y", "x")]
+            ),
+            dir(&["a", "b", "x", "y", "keep"])
+        );
+        // A cycle with a tail hanging off it.
+        assert_eq!(
+            simulate(&["a", "b", "c"], &[("a", "b"), ("b", "a"), ("c", "d")]),
+            dir(&["a", "b", "d"])
+        );
     }
 }

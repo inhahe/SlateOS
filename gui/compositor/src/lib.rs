@@ -624,6 +624,22 @@ impl Window {
         Rect::new(self.x, self.y, self.width, self.height)
     }
 
+    /// A screen point expressed in this window's client coordinates.
+    ///
+    /// One method rather than the ten copies of `x - win.x` this replaces,
+    /// because the subtraction is not as safe as it looks: the window origin is
+    /// the *client's* to choose, so a window near `i32::MAX` and a pointer near
+    /// `i32::MIN` overflow it — and this sits on the input path, where the
+    /// consequence is the display server dying on a mouse move.
+    ///
+    /// Saturating is the right answer rather than merely the safe one: the
+    /// result says "very far outside this window", which is exactly what a
+    /// point that distant is. Every consumer either hit-tests it (and rejects
+    /// it) or forwards it to a client that does.
+    pub fn local_point(&self, x: i32, y: i32) -> (i32, i32) {
+        (x.saturating_sub(self.x), y.saturating_sub(self.y))
+    }
+
     /// Get the title bar rectangle (for drag and button hit testing), or
     /// `None` for a window that has no title bar.
     ///
@@ -1882,6 +1898,81 @@ enum DragMode {
     ResizeBottomLeft,
     /// Resizing from the bottom-right corner.
     ResizeBottomRight,
+}
+
+impl DragMode {
+    /// Which edge this drag moves on each axis, as `(horizontal, vertical)`.
+    ///
+    /// Splitting the nine modes into two independent axes is what lets one
+    /// piece of arithmetic serve all of them. The eight resize arms it replaces
+    /// each spelled the same sum out again, which is why a single overflow
+    /// appeared in eight places at once, and why two of them had drifted into
+    /// using the literals `100`/`50` where `MIN_WINDOW_WIDTH`/`_HEIGHT` were
+    /// meant.
+    const fn resize_edges(self) -> (Edge, Edge) {
+        match self {
+            // Not a resize; the caller handles it before asking.
+            Self::MoveWindow => (Edge::Fixed, Edge::Fixed),
+            Self::ResizeLeft => (Edge::Near, Edge::Fixed),
+            Self::ResizeRight => (Edge::Far, Edge::Fixed),
+            Self::ResizeTop => (Edge::Fixed, Edge::Near),
+            Self::ResizeBottom => (Edge::Fixed, Edge::Far),
+            Self::ResizeTopLeft => (Edge::Near, Edge::Near),
+            Self::ResizeTopRight => (Edge::Far, Edge::Near),
+            Self::ResizeBottomLeft => (Edge::Near, Edge::Far),
+            Self::ResizeBottomRight => (Edge::Far, Edge::Far),
+        }
+    }
+}
+
+/// How one axis of a window responds to a resize drag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edge {
+    /// This axis is not being dragged: extent and origin both stay put.
+    Fixed,
+    /// The far edge follows the pointer, so only the extent changes.
+    Far,
+    /// The near edge follows the pointer, so the origin moves too — by exactly
+    /// the amount the extent changed, which is not the same as the amount the
+    /// pointer moved.
+    Near,
+}
+
+impl Edge {
+    /// The extent this drag asks for, before the window's own limits apply.
+    ///
+    /// Computed in `i64` because that is the only width in which the sum is
+    /// total: a `u32` extent plus an `i32` delta ranges wider than either type
+    /// holds, so every 32-bit spelling of this must either overflow or pre-clamp
+    /// away the very case it is clamping. The pointer position that produces
+    /// `delta` is not the compositor's to bound — it arrives from a device, or
+    /// from a client injecting one.
+    fn extent(self, start: u32, delta: i32) -> u32 {
+        let delta = match self {
+            Self::Fixed => return start,
+            Self::Far => i64::from(delta),
+            Self::Near => i64::from(delta).saturating_neg(),
+        };
+        i64::from(start).saturating_add(delta).clamp(0, i64::from(u32::MAX)) as u32
+    }
+
+    /// Where the origin ends up, given the extent the window *settled* on.
+    ///
+    /// Taking the settled extent rather than the requested one is what keeps a
+    /// window from drifting out from under the pointer: a client with a
+    /// `min_size` larger than the drag asked for gets its minimum, and the near
+    /// edge has to move by that difference, not by the one the drag wanted.
+    /// Only the window knows which it got, so only it can be asked.
+    fn origin(self, start_origin: i32, start_extent: u32, settled: u32) -> i32 {
+        match self {
+            Self::Fixed | Self::Far => start_origin,
+            Self::Near => {
+                let shift = i64::from(start_extent).saturating_sub(i64::from(settled));
+                start_origin
+                    .saturating_add(shift.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+            }
+        }
+    }
 }
 
 /// Active drag state.
@@ -3374,69 +3465,42 @@ impl Compositor {
 
         // Handle active drag.
         if let Some(drag) = self.drag.clone() {
-            let dx = x - drag.start_mouse.x;
-            let dy = y - drag.start_mouse.y;
+            // Saturating: the pointer position arrives from a device or from a
+            // client injecting one, and the drag origin was recorded from an
+            // equally unbounded position, so the difference is not the
+            // compositor's to assume fits.
+            let dx = x.saturating_sub(drag.start_mouse.x);
+            let dy = y.saturating_sub(drag.start_mouse.y);
+            let (start_x, start_y) = (drag.start_window_pos.x, drag.start_window_pos.y);
 
-            match drag.mode {
-                DragMode::MoveWindow => {
-                    let new_x = drag.start_window_pos.x + dx;
-                    let new_y = drag.start_window_pos.y + dy;
-                    let _ = self.move_window(drag.window_id, new_x, new_y);
-                }
-                DragMode::ResizeRight => {
-                    let new_w = (drag.start_window_size.0 as i32 + dx).max(100) as u32;
-                    let _ = self.resize_window(drag.window_id, new_w, drag.start_window_size.1);
-                }
-                DragMode::ResizeBottom => {
-                    let new_h = (drag.start_window_size.1 as i32 + dy).max(50) as u32;
-                    let _ = self.resize_window(drag.window_id, drag.start_window_size.0, new_h);
-                }
-                DragMode::ResizeLeft => {
-                    let new_w = (drag.start_window_size.0 as i32 - dx).max(100) as u32;
-                    let new_x =
-                        drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
-                    let _ = self.move_window(drag.window_id, new_x, drag.start_window_pos.y);
-                    let _ = self.resize_window(drag.window_id, new_w, drag.start_window_size.1);
-                }
-                DragMode::ResizeTop => {
-                    let new_h = (drag.start_window_size.1 as i32 - dy).max(50) as u32;
-                    let new_y =
-                        drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
-                    let _ = self.move_window(drag.window_id, drag.start_window_pos.x, new_y);
-                    let _ = self.resize_window(drag.window_id, drag.start_window_size.0, new_h);
-                }
-                DragMode::ResizeTopLeft => {
-                    let new_w = (drag.start_window_size.0 as i32 - dx).max(100) as u32;
-                    let new_h = (drag.start_window_size.1 as i32 - dy).max(50) as u32;
-                    let new_x =
-                        drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
-                    let new_y =
-                        drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
-                    let _ = self.move_window(drag.window_id, new_x, new_y);
-                    let _ = self.resize_window(drag.window_id, new_w, new_h);
-                }
-                DragMode::ResizeTopRight => {
-                    let new_w = (drag.start_window_size.0 as i32 + dx).max(100) as u32;
-                    let new_h = (drag.start_window_size.1 as i32 - dy).max(50) as u32;
-                    let new_y =
-                        drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
-                    let _ = self.move_window(drag.window_id, drag.start_window_pos.x, new_y);
-                    let _ = self.resize_window(drag.window_id, new_w, new_h);
-                }
-                DragMode::ResizeBottomLeft => {
-                    let new_w = (drag.start_window_size.0 as i32 - dx).max(100) as u32;
-                    let new_h = (drag.start_window_size.1 as i32 + dy).max(50) as u32;
-                    let new_x =
-                        drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
-                    let _ = self.move_window(drag.window_id, new_x, drag.start_window_pos.y);
-                    let _ = self.resize_window(drag.window_id, new_w, new_h);
-                }
-                DragMode::ResizeBottomRight => {
-                    let new_w = (drag.start_window_size.0 as i32 + dx).max(100) as u32;
-                    let new_h = (drag.start_window_size.1 as i32 + dy).max(50) as u32;
-                    let _ = self.resize_window(drag.window_id, new_w, new_h);
-                }
+            if drag.mode == DragMode::MoveWindow {
+                let _ = self.move_window(
+                    drag.window_id,
+                    start_x.saturating_add(dx),
+                    start_y.saturating_add(dy),
+                );
+                return;
             }
+
+            let (h_edge, v_edge) = drag.mode.resize_edges();
+            let (start_w, start_h) = drag.start_window_size;
+            // The window is asked what size it will accept *before* the origin
+            // is derived, so a near-edge drag against a client's `min_size`
+            // moves the origin by the size change that actually happened rather
+            // than the one requested — otherwise the window creeps sideways
+            // while its size stays pinned at the minimum.
+            let Some(win) = self.window_ref(drag.window_id) else {
+                return;
+            };
+            let (new_w, new_h) =
+                win.clamp_size(h_edge.extent(start_w, dx), v_edge.extent(start_h, dy));
+            let new_x = h_edge.origin(start_x, start_w, new_w);
+            let new_y = v_edge.origin(start_y, start_h, new_h);
+
+            if (new_x, new_y) != (start_x, start_y) {
+                let _ = self.move_window(drag.window_id, new_x, new_y);
+            }
+            let _ = self.resize_window(drag.window_id, new_w, new_h);
             return;
         }
 
@@ -3447,8 +3511,7 @@ impl Compositor {
         if let Some(window_id) = self.window_at(x, y)
             && let Some(win) = self.window_ref(window_id)
         {
-            let local_x = x - win.x;
-            let local_y = y - win.y;
+            let (local_x, local_y) = win.local_point(x, y);
             self.pending_notifications
                 .push_back(EventNotification::MouseEvent {
                     window_id,
@@ -3474,8 +3537,7 @@ impl Compositor {
             if let Some(window_id) = self.focused_window
                 && let Some(win) = self.window_ref(window_id)
             {
-                let local_x = x - win.x;
-                let local_y = y - win.y;
+                let (local_x, local_y) = win.local_point(x, y);
                 self.pending_notifications
                     .push_back(EventNotification::MouseEvent {
                         window_id,
@@ -3541,8 +3603,7 @@ impl Compositor {
                         return;
                     }
                     // Client area click.
-                    let local_x = x - win.x;
-                    let local_y = y - win.y;
+                    let (local_x, local_y) = win.local_point(x, y);
                     self.pending_notifications
                         .push_back(EventNotification::MouseEvent {
                             window_id,
@@ -3557,8 +3618,7 @@ impl Compositor {
             if let Some(window_id) = self.window_at(x, y)
                 && let Some(win) = self.window_ref(window_id)
             {
-                let local_x = x - win.x;
-                let local_y = y - win.y;
+                let (local_x, local_y) = win.local_point(x, y);
                 self.pending_notifications
                     .push_back(EventNotification::MouseEvent {
                         window_id,
@@ -3574,8 +3634,7 @@ impl Compositor {
         if let Some(window_id) = self.window_at(x, y)
             && let Some(win) = self.window_ref(window_id)
         {
-            let local_x = x - win.x;
-            let local_y = y - win.y;
+            let (local_x, local_y) = win.local_point(x, y);
             self.pending_notifications
                 .push_back(EventNotification::MouseEvent {
                     window_id,
@@ -5456,6 +5515,113 @@ mod tests {
         let win = comp.window_ref(fixed_id).expect("fixed window").clone();
         let (x, y) = on_left_border(&win);
         assert_eq!(comp.detect_border_drag(&win, x, y), None);
+    }
+
+    /// Start a border drag on `id` at `(x, y)` and move the pointer by
+    /// `(dx, dy)`, as the user would.
+    fn drag_border(comp: &mut Compositor, id: WindowId, x: i32, y: i32, dx: i32, dy: i32) {
+        comp.handle_mouse_button(MouseButton::Left, true, x, y);
+        assert!(comp.drag.is_some(), "no drag started at ({x}, {y})");
+        comp.handle_mouse_move(x.saturating_add(dx), y.saturating_add(dy));
+    }
+
+    #[test]
+    fn every_resize_edge_moves_the_edge_the_user_grabbed() {
+        // One case per resize mode, checking the pair the old nine-arm match
+        // had to get right nine separate times: which extent changes, and
+        // whether the origin follows.
+        //
+        // The three top grabs sit at `-35`, not `-1`: the title bar occupies
+        // `y ∈ [win.y - TITLE_BAR_HEIGHT, win.y)`, and a point in it starts a
+        // *move*, not a resize. The top resize band is the strip above it,
+        // inside the shadow that `outer_rect` covers.
+        let cases = [
+            // (grab point relative to the window, dx, dy, expected rect)
+            ("right", (200, 75), (50, 0), (100, 100, 250, 150)),
+            ("left", (-1, 75), (-50, 0), (50, 100, 250, 150)),
+            ("bottom", (100, 150), (0, 40), (100, 100, 200, 190)),
+            ("top", (100, -35), (0, -40), (100, 60, 200, 190)),
+            ("top-left", (-5, -35), (-50, -40), (50, 60, 250, 190)),
+            ("top-right", (195, -35), (50, -40), (100, 60, 250, 190)),
+            ("bottom-left", (-1, 150), (-50, 40), (50, 100, 250, 190)),
+            ("bottom-right", (200, 150), (50, 40), (100, 100, 250, 190)),
+        ];
+        for (name, (gx, gy), (dx, dy), want) in cases {
+            let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+            let mut spec = WindowSpec::new("Resizable", 200, 150);
+            spec.position = Some((100, 100));
+            let id = comp.create_window_from_spec(&spec, 1);
+            drag_border(&mut comp, id, 100 + gx, 100 + gy, dx, dy);
+            let win = comp.window_ref(id).expect("window");
+            assert_eq!(
+                (win.x, win.y, win.width, win.height),
+                want,
+                "dragging the {name} edge"
+            );
+        }
+    }
+
+    #[test]
+    fn a_near_edge_drag_stopped_by_a_minimum_size_does_not_walk_the_window_away() {
+        // The near edge must move by the size change that actually happened,
+        // not by the one the pointer asked for. Deriving the origin from the
+        // *requested* width let a window whose `min_size` refused the shrink
+        // keep sliding right under a pointer dragging its left border, growing
+        // no smaller and never stopping.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Bounded", 200, 150);
+        spec.position = Some((300, 100));
+        spec.min_size = Some((180, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        // Ask to shrink the width by 100 from the left; only 20 is available.
+        drag_border(&mut comp, id, 299, 175, 100, 0);
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!(win.width, 180, "the minimum holds");
+        assert_eq!(
+            win.x, 320,
+            "the left edge moved by the 20 px the window actually gave up"
+        );
+        // The right edge — the one the user is not touching — must not move.
+        assert_eq!(win.x.saturating_add(win.width as i32), 500);
+    }
+
+    #[test]
+    fn a_resize_drag_from_the_coordinate_edge_does_not_overflow() {
+        // `start_size as i32 + dx` overflowed for a large window and a distant
+        // pointer, and the pointer position is not the compositor's to bound —
+        // it arrives from a device or from a client injecting one.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Wide", 200, 150);
+        spec.position = Some((100, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        comp.handle_mouse_button(MouseButton::Left, true, 300, 175);
+        comp.drag = Some(DragState {
+            window_id: id,
+            mode: DragMode::ResizeBottomRight,
+            start_mouse: Point::new(i32::MIN, i32::MIN),
+            start_window_size: (u32::MAX, u32::MAX),
+            start_window_pos: Point::new(0, 0),
+        });
+        comp.handle_mouse_move(i32::MAX, i32::MAX);
+        let win = comp.window_ref(id).expect("window survived");
+        assert_eq!((win.width, win.height), (u32::MAX, u32::MAX));
+
+        // And the same drag run the other way, which shrinks past zero. A near
+        // edge moves *against* the pointer delta — dragging the left border
+        // rightwards is what makes the window narrower — so the shrinking case
+        // is the one where the pointer travels in the positive direction.
+        comp.drag = Some(DragState {
+            window_id: id,
+            mode: DragMode::ResizeTopLeft,
+            start_mouse: Point::new(i32::MIN, i32::MIN),
+            start_window_size: (10, 10),
+            start_window_pos: Point::new(i32::MIN, i32::MIN),
+        });
+        comp.handle_mouse_move(i32::MAX, i32::MAX);
+        let win = comp.window_ref(id).expect("window survived");
+        assert_eq!((win.width, win.height), (MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT));
     }
 
     #[test]

@@ -174,15 +174,19 @@ impl SharedBuffer {
         for row in 0..height as usize {
             // `row * stride` cannot overflow usize here: required_bytes (which
             // bounds the same product plus a row) already fit in u64 and was
-            // checked against bytes.len(), itself a usize.
-            let row_off = row * stride_us;
+            // checked against bytes.len(), itself a usize. Computed saturating
+            // anyway, so that proof is not load-bearing — every read below is
+            // `.get()`-guarded, so a saturated offset yields the same zero the
+            // out-of-range case already yields, where a wrapped one would name
+            // a real byte at the wrong place and silently transpose the image.
+            let row_off = row.saturating_mul(stride_us);
             for col in 0..width as usize {
-                let off = row_off + col * 4;
+                let off = row_off.saturating_add(col.saturating_mul(4));
                 // Bounds-checked 4-byte little-endian read; never indexes blind.
                 let b0 = *bytes.get(off).unwrap_or(&0);
-                let b1 = *bytes.get(off + 1).unwrap_or(&0);
-                let b2 = *bytes.get(off + 2).unwrap_or(&0);
-                let b3 = *bytes.get(off + 3).unwrap_or(&0);
+                let b1 = *bytes.get(off.saturating_add(1)).unwrap_or(&0);
+                let b2 = *bytes.get(off.saturating_add(2)).unwrap_or(&0);
+                let b3 = *bytes.get(off.saturating_add(3)).unwrap_or(&0);
                 let mut px = u32::from_le_bytes([b0, b1, b2, b3]);
                 if force_opaque {
                     px |= 0xFF00_0000;

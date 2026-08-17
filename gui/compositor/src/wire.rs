@@ -346,15 +346,21 @@ impl Compositor {
         while let Some((frame, used)) =
             try_decode_any(link.inbox.get(consumed..).unwrap_or_default())?
         {
-            consumed += used;
+            // Saturating rather than plain `+`: both counters are bounded by the
+            // inbox this loop is walking, so neither can really overflow, but
+            // the bound is an argument about a decoder that reads bytes a
+            // *client* chose, and a front end facing untrusted input should not
+            // rest on one. Saturating misreports a count that cannot occur;
+            // wrapping would misreport one as zero and re-serve the buffer.
+            consumed = consumed.saturating_add(used);
 
             match frame {
                 Frame::Requests(requests) => {
-                    served += requests.len();
+                    served = served.saturating_add(requests.len());
                     self.answer_requests(link, &requests);
                 }
                 Frame::Submit(submission) => {
-                    served += 1;
+                    served = served.saturating_add(1);
                     self.accept_submission(link, submission);
                 }
                 // These four travel outwards. A client sending one is confused

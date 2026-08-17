@@ -28168,7 +28168,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 11 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 12 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28631,6 +28631,69 @@ filenames. Four things worth carrying forward:
   are neighbours, share a harness shape, and differ here — which is precisely
   why `half1.txt`/`half2.txt` exist in both harnesses with opposite
   expectations.
+
+### Progress (appended 2026-08-17, `paste`)
+
+`paste` is the twelfth (`scripts/paste-diff.sh`: 200 passed, 0 differed, 6
+differ on purpose; 37 differ when pointed at MSYS2's `paste`, which is the
+harness proving it still discriminates). The shipped version recognised only
+`-d` and `-s`, did not cycle the delimiter list, did not collapse its escapes,
+had no `-z`, treated `-` as a file called `-`, split input as UTF-8 text, and
+exited 0 whatever happened. Five things worth carrying forward:
+
+- **A whole gnulib quoting style had to be built first, and it was built by
+  reading the C, not by guessing.** `paste`'s trailing-backslash diagnostic uses
+  `quotearg_n_style_colon (0, c_maybe_quoting_style, …)` — deliberately *not*
+  the usual `quote()`, because that "would double the number of displayed
+  backslashes, making the diagnostic look bogus." Nothing else in our tree had
+  `c_maybe`. It is now `quote_c_maybe`/`quote_c_maybe_colon` in `quote.rs`
+  (`a465d3b29`), settled by reading `lib/quotearg.c` and then *measured* against
+  two independent GNU oracles — `ls --quoting-style=c-maybe` for the plain form
+  and `paste -d 'ARG\'` for the colon one — over every byte in three positions
+  (`scripts/c-maybe-probe.py` → `tests/c-maybe-gnu.txt`, 1590 rows,
+  `tests/c_maybe.rs`). **All 1590 matched on the first run**, which is the value
+  of doing both: source-reading and black-box measurement agreeing is evidence,
+  either one alone is a belief. Three inputs no oracle can express (NUL, the
+  empty string, and `/` for the `ls` oracle) are unit tests marked *unmeasured*
+  rather than quietly folded in with the rest.
+- **The two modes are not two spellings of one algorithm, and the difference is
+  in the *error* rules, not the merge.** Parallel opens every operand up front
+  with `error (EXIT_FAILURE, …)` — fatal, before a byte of stdout, and only the
+  first bad operand is ever named. Serial opens as it goes with `error (0, …)` —
+  names every one and continues. So `paste A nosuch B` and `paste -s A nosuch B`
+  differ in stdout, stderr *and* their interleaving. Every missing-file row in
+  the harness therefore runs both ways; a harness that tested one mode's failure
+  path would have certified the other's as identical.
+- **A read error is reported one output line *after* the read that failed.**
+  Upstream leaves it in the stream's `ferror` flag and only looks when it closes
+  the file, which is the next time round the loop — and in the meantime the
+  failed stream keeps answering "end of file", so the line it was part of still
+  finishes and still gets its delimiter. `Source::failed` exists to reproduce
+  that delay rather than to store an error, and the unit test drives a reader
+  that yields one byte and then fails, because nothing else exhibits it.
+- **`\0` and "no delimiter" are the same value, which is why `-d ''` is not the
+  empty list.** `#define EMPTY_DELIM '\0'`, so a NUL cannot be *used* as a
+  delimiter; `main` rewrites an empty `-d` argument to the two characters `\0`
+  so the list has one position that emits nothing. The position is still spent:
+  `-d 'x\0y'` puts `x` between columns 1|2, nothing between 2|3, and `y`
+  between 3|4 — a list that merely dropped the position would put `y` at 2|3.
+  This is exactly the kind of rule a plausible implementation gets wrong and a
+  whitespace-tolerant harness never catches.
+- **The delimiter diagnostic is raised between the option loop and the opens**,
+  which pins it in a two-sided way no single test states: a later `-d` rescues
+  an earlier bad one and any getopt error preempts it (both are raised inside
+  the loop), yet it preempts a missing file (the opens come after). Three
+  harness rows and one unit test hold that position from both sides.
+
+One asymmetry is deliberately *not* reproduced and is recorded here instead.
+With standard input closed, `paste -s - A 0<&-` prints `paste: -: Bad file
+descriptor` **twice**: once from the per-file read and once from `main`'s
+closing `if (have_read_stdin && fclose (stdin) == EOF)`. Rust has no
+`fclose (stdin)` and surfaces a read error where the read happens, so the second
+line has no analogue. The parallel-mode companion — `opened_stdin &&
+have_read_stdin` → `paste: standard input is closed` — *is* reproduced, guarded
+by a `#[cfg(unix)]` file-descriptor check that can never fire on the Windows
+host this harness runs on.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
@@ -30295,3 +30358,41 @@ resume is observed, the park is declined, and the task is left `Running` and
 **not** queued (checked via `queue_length`, so the dequeue is actually
 verified rather than assumed). Testing it at this level rather than through the
 ring-3 fixture is the point: the fixture found the bug once in fifty boots.
+
+## TD-BACKGROUND-TASK-LOGS-ARE-UNBOUNDED (lane B, 2026-08-17) — **mitigated once; the cause is unfixed**
+
+**In short:** commands we start in the background write everything they print
+to a log file on the C: drive, and nothing ever truncates or deletes those
+files. One of them reached **40 GB** and filled the system disk, at which point
+unrelated things started failing with `could not write to temporary response
+file`. Deleting dead logs got the disk from 11 GB free back to 52 GB, but
+nothing stops it happening again.
+
+**Where it lives.** `%LOCALAPPDATA%\Temp\claude\<project>\<session>\tasks\*.output`
+— one file per backgrounded Bash call, written by the agent harness, never
+rotated. On 2026-08-17 the OS project's directory held 2491 of them totalling
+43 GB across four sessions, of which a single file (`bf8dfbpnv.output`, 6
+Aug, another lane's session) was 40 GB on its own: a command whose output was
+neither bounded nor filtered, left running.
+
+**Reproduce.** Background anything that prints without limit — a `cargo build`
+with a stuck dependency retrying, a QEMU run with `-d int`, a test loop that
+prints per iteration — and leave it. The file grows at the process's write
+rate with no ceiling.
+
+**The proper fix, in order of preference:**
+
+1. **Bound the output at the source.** A backgrounded command should end in a
+   filter that cannot grow without limit — `| tail -c 10M`, `| grep -E …`, or
+   for a known-chatty run `2>&1 | head -5000`. This is the one an agent can
+   apply today and costs nothing.
+2. **Cap the log.** If the harness ever grows a per-task output limit, use it.
+   Not ours to change from here.
+3. **Sweep on a schedule.** `find … -name '*.output' -mtime +7 -delete` is what
+   was run by hand this time. A weekly sweep would have kept the disk from ever
+   reaching 100%, but it treats the symptom.
+
+**Note for whoever reads this next:** the 40 GB file was *another lane's*, and
+deleting an eleven-day-old write-once log is safe, but do not delete a `.output`
+file for a task that may still be running — read the task list first. Files
+under `-mtime +7` are unambiguously dead.

@@ -30305,6 +30305,61 @@ visibly wrong on any proportional face, today, in English.
 `apps/markdowneditor/src/main.rs`: `col_x` (~139), the span draw loop
 (~2881–2898), and the caret at (~2902).
 
+**Status 2026-08-17: the nominal-width half is fixed everywhere; the
+end-to-end/bidi half is untouched.** The two are separable, and only the
+second one is what this entry is really about.
+
+The sweep that closed the first half started from this entry's own sentence
+that `markdowneditor`'s `col_x` "is not low severity", and found the same
+defect in five places, in three generations:
+
+| Generation | Shape | Sites |
+|---|---|---|
+| 1 | a hardcoded pixel constant | `apps/launcher/src/main.rs`, `gui/desktop/src/launcher.rs` (`INPUT_FONT_SIZE * 0.55`) |
+| 2 | `text::digit_advance` — a *digit's* advance in the proportional UI face | `apps/filediff`, `apps/snippets`, `apps/tmux`, `apps/hexeditor`, `SimpleTextView` (each a previous round's "fix" for generation 1; the doc comment at each site records the sequence) |
+| 3 | `chars().count() * text::cell_advance(..)` — a nominal cell count | `apps/markdowneditor`, `apps/snippets`, `apps/filediff`, `SimpleTextView` |
+
+All now call `text::measure_in(text, size, weight, family)` — the renderer's
+own answer, so there is no second number left to keep in step. `grep -rn
+"chars().count() as f32" apps/ gui/` returns nothing that positions text.
+`apps/tmux` and `apps/hexeditor` were examined and correctly left alone: both
+really are grids of known-ASCII content.
+
+**The finding worth keeping is the tab.** Generation 3 looks defensible — a
+mono face *is* a grid — and survived two previous rounds of "fixing" this bug
+for that reason. It is still wrong for a **tab**: one `char`, drawn four cells
+wide. A test written to assert the general claim
+(`the_pen_advances_by_what_is_drawn`, in `apps/snippets`) failed on
+`"\t": drawn 33.6, nominal 8.4`, which
+means every token on a tab-indented line in the snippets viewer had been drawn
+~25 px left of its highlight. The same reasoning covers a CJK ideograph, a
+combining mark, and any `.notdef` substitution. **A nominal cell count is not a
+safe approximation even in a monospace face** — that is the sentence the two
+earlier fixes were missing.
+
+Two adjacent bugs fell out of the same reading:
+
+- `SimpleTextView::line_char_count` returned `s.text.len()` — **bytes** — so
+  every column past a non-ASCII character was wrong independently of the
+  advance question. It counts characters now.
+- Four sites sliced a `str` at a caret byte offset (`self.query[..cursor]`,
+  `line[..col]`), which **aborts the process** off a character boundary. All
+  four now floor to a boundary or use `get(..).unwrap_or("")`. A caret is
+  drawn mid-keystroke; it must draw wrong rather than take the app down.
+
+`SimpleTextView` now derives every position from `column_offsets`, which
+accumulates the renderer's per-character advance (O(n), not the O(n²) of
+measuring a prefix per column — this view holds log output). That substitution
+is only exact if measurement is additive on this font stack, so
+`simple_view_advances_are_additive` asserts it and will fail loudly if a
+kerning face ever arrives.
+
+Commits `8b039f47d` (markdowneditor, snippets, filediff) and `796a5ddd0`
+(`SimpleTextView`, both launchers). What remains open here is unchanged: spans
+are still laid out end to end, which is still the assumption that screen order
+equals byte order, and still needs the widened render primitive described
+above.
+
 ## TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR (lane C, 2026-08-17)
 
 *(Filed 2026-08-17 as `TD-EDITOR-HAS-NO-INPUT-LOOP`, and renamed the same day.

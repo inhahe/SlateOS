@@ -529,7 +529,8 @@ Roadmap:
 - `[A]` TCP/IP stack kernel side + `SYS_NET_RAW_*` shim (line ~1044) — see joint task
 - ~~`[A]` NTFS **read** support~~ — **done 2026-08-16** (`kernel/src/fs/ntfs/`,
   `design-decisions.md` §210). Write support intentionally deferred behind
-  `$LogFile`. Btrfs/ZFS CoW and F2FS remain open (line ~1041, §5.4).
+  `$LogFile`. Btrfs **read** and F2FS **read** have since landed the same way
+  (§215, §216); ZFS and all three write sides remain open (line ~1041, §5.4).
 - `[A]` Port AMDGPU / Intel i915-xe drivers (lines ~4569–4571) — kernel-side DRM
 
 Known-issues (open, kernel-owned):
@@ -2017,7 +2018,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] VM Fragmentation (fs::vmfrag): Memory fragmentation index per zone/order with compaction success tracking, timestamps; `vmfrag`/`vfrag` kshell command; /proc/vmfrag; 8 self-tests
   - [x] Pidfd (fs::pidfd): Process file descriptor monitoring with create/poll/signal/wait/close tracking per PID; `pidfd`/`pfd` kshell command; /proc/pidfd; 8 self-tests
 - [-] `[A]` Later: NTFS read support (**done 2026-08-16**, `fs::ntfs` — see §5.2),
-  Btrfs/ZFS CoW support, F2FS
+  Btrfs read (**done 2026-08-16**, `fs::btrfs`), F2FS read (**done 2026-08-16**,
+  `fs::f2fs`); ZFS and the write sides remain open
 
 ### 2.4 Networking stack (userspace)
 - [-] `[A]` TCP/IP stack (kernel-resident prototype, will move to userspace)
@@ -6205,7 +6207,40 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
   Mountable as `-t btrfs` from kshell, `SYS_FS_MOUNT`, and by `auto` probe.
   Snapshots are readable as ordinary subvolume trees; *creating* them is write
   support. See `design-decisions.md` §215.
-- [ ] `[A]` Port F2FS (SSD optimization)
+- [-] `[A]` Port F2FS (SSD optimization) — **read side done (2026-08-16), write
+  side deliberately not started.** `kernel/src/fs/f2fs/`: the superblock at a
+  fixed byte 1024 with its backup at 5120 and a CRC that is Linux's bare
+  `crc32_le` seeded with the magic (neither initial nor final inversion), the
+  two-pack checkpoint with recovery by *version*, the NAT (node address table)
+  indirection that turns a node id into a block, and the multi-level block
+  path. Three indirections make F2FS reads hard, and each is a place a driver
+  can silently return the wrong bytes rather than fail: (1) which of the two
+  checkpoint packs is current — decided by version, but a pack only counts as
+  valid if the version in its **first and last** block agree, which is what
+  catches a half-written pack that still checksums; (2) which of the two NAT
+  copies the checkpoint's NAT bitmap selects, via the interleaved address
+  `nat_blkaddr + (off << 1) - (off & (blocks_per_seg-1))`; (3) whether the
+  checkpoint's own NAT journal overrides both — it does, unconditionally, and
+  it lives in a different place and format depending on whether the pack is
+  compacted (`CP_COMPACT_SUM_FLAG`) or normal. Also: node footers (the footer
+  nid is the only guard on the NAT indirection, so it is checked, and
+  `read_inode` additionally requires footer `ino == nid`), inline data and
+  inline dentries with their derived geometry, inline xattrs and
+  `i_extra_isize` shifting `addrs_per_inode`, the TEA-with-MD4-IV name hash and
+  the multi-level hashed directory bucket layout, and holes (`NULL_ADDR`) and
+  prealloc (`NEW_ADDR`) both reading as zeroes. `FEATURE_BLKZONED` is refused
+  at mount rather than mis-read. Full `FileSystem` impl (readdir / read_file /
+  read_at / stat / lstat / metadata / lmetadata / readlink / statvfs /
+  debug_stats) reporting `read_only: true` and `0o555`-masked modes. Reads
+  through the shared `fs::blocksrc` sources, so the self-test drives the whole
+  driver over a synthetic in-RAM volume on **every** boot with no device
+  attached (8 test groups). Each of the three indirections above carries a
+  deliberate **decoy** in that volume — NAT copy 0 is all `NULL_ADDR`,
+  `hello.txt`'s NAT-area entry points at a valid-but-stale inode that only the
+  journal supersedes, and the two packs disagree in both version and summary
+  layout — so a driver that gets one wrong fails a named check instead of
+  returning plausible bytes from the wrong block. Mountable as `-t f2fs` from
+  kshell, `SYS_FS_MOUNT`, and by `auto` probe. See `design-decisions.md` §216.
 - [-] `[A]` NTFS read/write support — **read side done (2026-08-16), write side
   deliberately not started.** `kernel/src/fs/ntfs/`: boot sector (incl. the
   signed power-of-two `clusters_per_mft_record`/`clusters_per_index_buffer`

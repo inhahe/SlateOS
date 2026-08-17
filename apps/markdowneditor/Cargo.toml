@@ -6,6 +6,14 @@ description = "SlateOS Markdown Editor — split-view editor with live preview"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
 diffcore = { path = "../diffcore" }
+safeio = { path = "../safeio" }
+
+# The same crate again with its `audit` counters on, so the tests can prove a
+# save really went through `safeio` and did not quietly regress to
+# `std::fs::write`. Cargo unifies this with the dependency above when building
+# tests, so the counters cost nothing in the shipped binary.
+[dev-dependencies]
+safeio = { path = "../safeio", features = ["audit"] }
 
 [lints]
 workspace = true

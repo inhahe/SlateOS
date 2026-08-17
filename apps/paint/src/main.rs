@@ -2025,10 +2025,16 @@ impl PaintApp {
     // ========================================================================
 
     /// Saves the flattened image as a BMP to the given path.
+    ///
+    /// Written through [`safeio::write_atomically`], not `fs::write`, which
+    /// truncates first: a save interrupted part-way used to leave the image on
+    /// disk as a fragment. An image is one blob behind a header, so a partial
+    /// write is not a partially-recovered picture — it is an unopenable file.
     pub fn save_bmp(&self, path: &str) -> Result<(), String> {
         let flat = self.flatten();
         let data = encode_bmp(&flat);
-        std::fs::write(path, &data).map_err(|e| format!("Failed to save BMP: {}", e))
+        safeio::write_atomically(std::path::Path::new(path), &data)
+            .map_err(|e| format!("Failed to save BMP: {e}"))
     }
 
     /// Loads a BMP file into the active layer (replaces its content).
@@ -4080,6 +4086,50 @@ mod tests {
     )]
 
     use super::*;
+
+    // ---- Save routing ----
+
+    /// A save goes through `safeio`, not `std::fs::write`.
+    ///
+    /// A successful atomic write and a successful truncating write leave
+    /// identical bytes at an identical path; they differ only when the write
+    /// is interrupted, which no portable test can stage. So the routing itself
+    /// is asserted, via `safeio`'s `audit` counters.
+    ///
+    /// An image is a single blob behind a header, so a partial write is not a
+    /// partially-recovered picture — it is a file nothing can open. Overwriting
+    /// a drawing with `fs::write` and dying part-way therefore loses the work
+    /// outright, which is what this guards.
+    ///
+    /// `save_bmp` had no test of any kind before this one.
+    ///
+    /// The counters are process-global and tests run in parallel, so this
+    /// compares a before and after reading rather than an absolute.
+    #[test]
+    fn a_save_goes_through_safeio() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = std::env::temp_dir().join(format!("slate_paint_routing_{nanos}.bmp"));
+        let path_str = path.to_string_lossy().to_string();
+
+        let app = PaintApp::new(800.0, 600.0);
+
+        let before = safeio::writes_performed();
+        app.save_bmp(&path_str).expect("save_bmp");
+        let after = safeio::writes_performed();
+
+        assert!(
+            after > before,
+            "the save did not go through safeio (writes_performed stayed at {before}) \
+             -- save_bmp must not use std::fs::write"
+        );
+        // A BMP that a viewer would accept, not merely a file that exists.
+        let written = std::fs::read(&path).expect("read back");
+        assert_eq!(&written[..2], b"BM", "not a BMP: bad magic");
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     // ---- Canvas tests ----
 

@@ -1,0 +1,27 @@
+[package]
+name = "safeio"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS shared crash-safe file writes — write-to-temporary-and-rename so an interrupted save can never truncate the file it was saving."
+
+[dependencies]
+
+[features]
+# Counts the atomic operations this crate performs, so that a caller's tests
+# can prove its saves actually route through here.
+#
+# Off in every real build: the counters are dead weight for a program that is
+# not being tested. A caller turns it on in its own `[dev-dependencies]`,
+# which cargo unifies with the ordinary dependency when building that
+# caller's tests — so the counters exist for `cargo test` and nowhere else.
+#
+# The alternative is to have no seam at all, which is what we had: restoring
+# `std::fs::write` in an adopter left every one of its tests green, because a
+# successful atomic write and a successful truncating write are byte-for-byte
+# indistinguishable from outside. The difference is only visible when the
+# write is interrupted, which a test cannot arrange portably. See
+# known-issues.md "safeio adoption is not enforced by any test".
+audit = []
+
+[lints]
+workspace = true

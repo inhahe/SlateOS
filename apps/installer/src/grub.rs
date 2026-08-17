@@ -582,7 +582,12 @@ impl GrubInstaller {
         }
 
         let script = generate_custom_script(entry)?;
-        fs::write(&path, &script)?;
+        // Crash-safe: `fs::write` truncates first, so an interrupted write
+        // leaves a *partial shell script* in the custom-script directory —
+        // and `grub-mkconfig` executes whatever is there. A half-written
+        // script does not fail loudly; it silently contributes a malformed
+        // `grub.cfg`, which is not discovered until the next boot.
+        safeio::write_str_atomically(&path, &script)?;
 
         // Make the script executable (Unix).
         #[cfg(unix)]
@@ -620,7 +625,11 @@ impl GrubInstaller {
         }
 
         let script = generate_custom_script(entry)?;
-        fs::write(&path, &script)?;
+        // Crash-safe, and more important here than in `install`: this path
+        // overwrites an entry that is *already working*. A truncated write
+        // would replace a boot entry that boots with one that does not, which
+        // is a machine the user cannot start to fix it from.
+        safeio::write_str_atomically(&path, &script)?;
         Ok(())
     }
 
@@ -743,6 +752,16 @@ impl Default for GrubUpdateRunner {
 
 #[cfg(test)]
 mod tests {
+    // A test that unwraps a failure should fail loudly at the line that did
+    // it — that is the diagnosis. The defensive lints exist to keep panics out
+    // of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
+
     use super::*;
     use std::fs;
 
@@ -1194,6 +1213,57 @@ mod tests {
         let contents = fs::read_to_string(installer.script_path()).unwrap();
         assert!(contents.contains(SLATEOS_MARKER));
         assert!(contents.contains("chainloader \"/EFI/slateos/limine.efi\""));
+    }
+
+    /// Both GRUB writes go through `safeio`, not `std::fs::write`.
+    ///
+    /// A successful atomic write and a successful truncating write leave
+    /// identical bytes at an identical path; they differ only when the write
+    /// is interrupted, which no portable test can stage. So the routing itself
+    /// is asserted, via `safeio`'s `audit` counters.
+    ///
+    /// The stakes here are the highest of any adopter. A half-written file in
+    /// the custom-script directory is a *partial shell script*, and
+    /// `grub-mkconfig` executes whatever it finds there — it does not fail
+    /// loudly, it silently contributes a malformed `grub.cfg`. For `update`
+    /// the entry being overwritten is one that already boots, so a truncated
+    /// write replaces a working boot entry with a broken one: a machine the
+    /// user cannot start in order to fix it.
+    ///
+    /// `install` and `update` are asserted separately because they are
+    /// separate call sites; fixing one and missing the other is the likely
+    /// regression.
+    ///
+    /// The counters are process-global and tests run in parallel, so each
+    /// check compares a before and after reading rather than an absolute.
+    #[test]
+    fn both_grub_writes_go_through_safeio() {
+        let tmp = tempdir();
+        fs::create_dir_all(&tmp).unwrap();
+
+        let installer = GrubInstaller::new(&tmp);
+        let entry = sample_entry_chainload();
+
+        let before = safeio::writes_performed();
+        installer.install(&entry).expect("install");
+        assert!(
+            safeio::writes_performed() > before,
+            "install did not go through safeio -- it must not use std::fs::write"
+        );
+
+        let mut updated = sample_entry_chainload();
+        updated.title = "Slate OS 2.0".into();
+        let before = safeio::writes_performed();
+        installer.update(&updated).expect("update");
+        assert!(
+            safeio::writes_performed() > before,
+            "update did not go through safeio -- it must not use std::fs::write"
+        );
+
+        // The script is still the one GRUB should run, not merely present.
+        let contents = fs::read_to_string(installer.script_path()).unwrap();
+        assert!(contents.contains(SLATEOS_MARKER));
+        assert!(contents.contains("Slate OS 2.0"));
     }
 
     #[test]

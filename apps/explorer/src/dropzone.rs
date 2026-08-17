@@ -469,14 +469,26 @@ fn same_device(a: &Path, b: &Path) -> bool {
 ///
 /// Returns `Some(reason)` if the drop is invalid, `None` if it is fine.
 fn check_nested_drop(sources: &[PathBuf], target_dir: &Path) -> Option<String> {
+    // Compared after resolving symlinks and `..`, because `PathBuf::starts_with`
+    // is a *textual* component test: a target that only reaches inside the
+    // source by way of a symlink looks unrelated to it, and letting that drop
+    // through makes `fileops::copy_tree` write into the directory it is still
+    // walking — which does not terminate, and fills the disk trying.
+    //
+    // A path that cannot be canonicalised (it may not exist yet, or be on a
+    // device that refuses) falls back to its literal form: that is exactly the
+    // old behaviour, so the check never becomes weaker than it was.
+    let real_target = canonical_or_literal(target_dir);
     for src in sources {
+        let real_src = canonical_or_literal(src);
+
         // Exact self-drop: can't drop /foo into /foo.
-        if src == target_dir {
+        if real_src == real_target {
             return Some(format!("Cannot drop '{}' into itself", src.display()));
         }
 
         // Ancestor check: can't drop /foo into /foo/bar/baz.
-        if target_dir.starts_with(src) {
+        if real_target.starts_with(&real_src) {
             return Some(format!(
                 "Cannot drop '{}' into its own subdirectory '{}'",
                 src.display(),
@@ -485,6 +497,12 @@ fn check_nested_drop(sources: &[PathBuf], target_dir: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// The path with symlinks and `.`/`..` resolved, or the path itself if the
+/// filesystem cannot answer.
+fn canonical_or_literal(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Check which source file names already exist in `target_dir`.
@@ -907,6 +925,36 @@ mod tests {
         let target = Path::new("/home/user/B");
         let result = check_nested_drop(&sources, target);
         assert!(result.is_none());
+    }
+
+    /// `..` makes a target that is textually unlike the source but is in fact
+    /// inside it. `starts_with` alone said the drop was fine.
+    #[test]
+    fn nested_drop_sees_through_a_parent_component() {
+        let dir = std::env::temp_dir().join(format!(
+            "dropzone_nested_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let project = dir.join("project");
+        std::fs::create_dir_all(project.join("sub")).expect("tree");
+
+        // `<dir>/project/sub/../sub` is `<dir>/project/sub` — inside `project`.
+        let target = project.join("sub").join("..").join("sub");
+        let sources = vec![project.clone()];
+
+        assert!(
+            check_nested_drop(&sources, &target).is_some(),
+            "a target that resolves inside the source must be refused"
+        );
+
+        // And the honest sibling case still passes.
+        let sibling = dir.join("elsewhere");
+        std::fs::create_dir_all(&sibling).expect("sibling");
+        assert!(check_nested_drop(&sources, &sibling).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ------------------------------------------------------------------

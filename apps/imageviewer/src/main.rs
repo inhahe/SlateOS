@@ -23,6 +23,7 @@ use guitk::style::CornerRadii;
 mod video;
 
 use std::path::{Path, PathBuf};
+use std::process;
 
 // ============================================================================
 // Constants
@@ -470,6 +471,11 @@ pub struct ViewerState {
     pub current_image: Option<ImageData>,
     pub image_info: ImageInfo,
     pub transform: Transform,
+    /// Why the last load attempt produced no image, if it produced none.
+    /// Rendered in place of the picture, because a viewer that shows a
+    /// filename with an empty canvas and no explanation looks broken rather
+    /// than informative.
+    pub load_error: Option<String>,
 
     // Directory browsing
     pub directory: Option<PathBuf>,
@@ -505,6 +511,7 @@ impl ViewerState {
             fullscreen: false,
             current_image: None,
             image_info: ImageInfo::default(),
+            load_error: None,
             transform: Transform::default(),
             directory: None,
             entries: Vec::new(),
@@ -523,9 +530,14 @@ impl ViewerState {
         }
     }
 
-    /// Open an image file by path.
-    pub fn open_file(&mut self, path: &Path) {
-        self.display_image(path);
+    /// Open an image file by path, returning whether it could be loaded.
+    ///
+    /// The directory listing is rebuilt either way: a file that will not open
+    /// is still a place in a directory the user can browse away from, and
+    /// leaving them with no next/previous is a second failure on top of the
+    /// first.
+    pub fn open_file(&mut self, path: &Path) -> bool {
+        let loaded = self.display_image(path);
 
         // Update directory listing. This is only done when opening a file
         // directly (e.g. from the file picker), NOT when navigating within an
@@ -540,46 +552,79 @@ impl ViewerState {
                 .position(|e| e.path == path)
                 .unwrap_or(0);
         }
+        loaded
     }
 
     /// Load and display the image at `path` without touching the directory
     /// listing or `current_index`. Used both by `open_file` (which then
     /// (re)builds the listing) and by `load_current_entry` (which navigates
     /// within the existing listing).
-    fn display_image(&mut self, path: &Path) {
+    ///
+    /// Returns whether the image could be loaded.
+    ///
+    /// **Every field is replaced, not updated.** This used to assign into
+    /// `self.image_info` field by field and keep the previously-displayed
+    /// picture when the read failed, so a file the viewer could not open left
+    /// a mixture: the status bar and info panel named the *new* file, while
+    /// the canvas still showed the *old* image and the panel still listed the
+    /// old dimensions, format and EXIF. "This picture is `holiday.jpg`" is the
+    /// one claim an image viewer makes, and it was false in exactly the case
+    /// the user most needed to be told about.
+    fn display_image(&mut self, path: &Path) -> bool {
         let filename = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| String::from("(unknown)"));
 
-        // Populate basic info from path
-        self.image_info.filename = filename;
-        self.image_info.file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        self.image_info.date_modified = std::fs::metadata(path)
+        // Built fresh so nothing can survive from the last image.
+        let mut info = ImageInfo {
+            filename,
+            ..ImageInfo::default()
+        };
+
+        let data = match std::fs::read(path) {
+            Ok(data) => data,
+            Err(e) => {
+                // Committed anyway: the user asked for *this* file, so the UI
+                // must name this file — but with no image and no borrowed
+                // metadata beside it.
+                self.image_info = info;
+                self.current_image = None;
+                self.load_error = Some(format!("{}: {}", path.display(), e));
+                self.transform.reset();
+                return false;
+            }
+        };
+
+        // `read` already succeeded, so a failing `metadata` is a genuine
+        // oddity rather than the ordinary missing-file case; 0 is the honest
+        // answer for "unknown" here and the file itself is still displayable.
+        info.file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        info.date_modified = std::fs::metadata(path)
             .ok()
             .and_then(|m| m.modified().ok())
             .map(|_t| String::from("(available)"));
 
-        // Try to detect format and dimensions from file header
-        if let Ok(header_data) = std::fs::read(path) {
-            let format = ImageFormat::detect(&header_data);
-            self.image_info.format = Some(format);
-
-            if let Some((w, h)) = parse_dimensions(format, &header_data) {
-                self.image_info.width = w;
-                self.image_info.height = h;
-            }
-
-            // In a real implementation, this would decode the image and
-            // register it with the compositor. For now, create placeholder.
-            let image_id = path_to_image_id(path);
-            let img_w = self.image_info.width.max(1);
-            let img_h = self.image_info.height.max(1);
-            self.current_image = Some(ImageData::placeholder(img_w, img_h, image_id));
+        let format = ImageFormat::detect(&data);
+        info.format = Some(format);
+        if let Some((w, h)) = parse_dimensions(format, &data) {
+            info.width = w;
+            info.height = h;
         }
+
+        // In a real implementation, this would decode the image and
+        // register it with the compositor. For now, create placeholder.
+        let image_id = path_to_image_id(path);
+        let img_w = info.width.max(1);
+        let img_h = info.height.max(1);
+
+        self.image_info = info;
+        self.current_image = Some(ImageData::placeholder(img_w, img_h, image_id));
+        self.load_error = None;
 
         // Reset transform for new image
         self.transform.reset();
+        true
     }
 
     /// Load the image file listing for a directory.
@@ -665,7 +710,11 @@ impl ViewerState {
             let path = entry.path.clone();
             // Display only — do NOT reload the directory listing (that would
             // wipe the listing and reset current_index on every navigation).
-            self.display_image(&path);
+            // The result is dropped on purpose: a file that fails to load is
+            // already reported through `load_error`, and navigation must not
+            // stop at it — the user's way out of a broken file is the arrow
+            // key that got them there.
+            let _ = self.display_image(&path);
         }
     }
 
@@ -1110,11 +1159,21 @@ fn render_image(
     area_h: f32,
 ) {
     let Some(img) = &state.current_image else {
-        // No image loaded — show placeholder text
+        // Two different empty states, and they must not be confused: "you
+        // haven't opened anything" versus "the thing you opened would not
+        // open". The second used to render as the first, so a corrupt or
+        // unreadable file looked exactly like a freshly-started viewer.
+        let (headline, detail) = match &state.load_error {
+            Some(err) => (String::from("Cannot display this image"), err.clone()),
+            None => (
+                String::from("No image loaded"),
+                String::from("Open a file or drag an image here"),
+            ),
+        };
         tree.push(RenderCommand::Text {
             x: area_x + area_w / 2.0 - 80.0,
             y: area_y + area_h / 2.0 - 8.0,
-            text: String::from("No image loaded"),
+            text: headline,
             color: TEXT_SECONDARY,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
@@ -1124,12 +1183,14 @@ fn render_image(
         tree.push(RenderCommand::Text {
             x: area_x + area_w / 2.0 - 100.0,
             y: area_y + area_h / 2.0 + 12.0,
-            text: String::from("Open a file or drag an image here"),
+            text: detail,
             color: TEXT_SECONDARY,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            // The reason is the whole point of this state; it is worth the
+            // width, and elided rather than clipped so a cut is visible.
+            max_width: Some(area_w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
         return;
     };
@@ -1658,11 +1719,22 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(file_path) = args.get(1) {
         let path = PathBuf::from(file_path);
-        if path.exists() {
-            state.open_file(&path);
-            // Auto-fit the first image
-            state.fit_to_window();
+        // This used to be `if path.exists() { … }` with no `else`, so
+        // `imageviewer typo.jpg` printed nothing, showed an empty viewer and
+        // exited 0 — indistinguishable from `imageviewer` with no argument.
+        // Existence is not the question anyway; openability is, and only
+        // trying answers it. A file can disappear between the check and the
+        // open, and a file that exists can still be unreadable.
+        if !state.open_file(&path) {
+            let reason = state
+                .load_error
+                .as_deref()
+                .unwrap_or("the file could not be read");
+            eprintln!("imageviewer: {reason}");
+            process::exit(1);
         }
+        // Auto-fit the first image
+        state.fit_to_window();
     }
 
     // In a real windowing environment, this would enter the event loop
@@ -2147,5 +2219,168 @@ mod tests {
         state.current_index = 0;
         state.prev_image();
         assert_eq!(state.current_index, 2); // wraps around
+    }
+
+    // ---- A failed load must not leave the previous image on screen ----
+
+    /// A scratch directory unique to one test, so the suite can run in
+    /// parallel without two tests fighting over the same names.
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("slateos-imageviewer-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// A minimal but genuine PNG header, enough for `ImageFormat::detect` and
+    /// `parse_dimensions` to read a size out of it.
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        v.extend_from_slice(&[0, 0, 0, 13]); // IHDR length
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth, colour type, etc.
+        v
+    }
+
+    /// The bug: `display_image` assigned into `image_info` field by field and
+    /// left `current_image` alone when the read failed, so the viewer showed
+    /// the *new* filename over the *old* picture and the old dimensions.
+    #[test]
+    fn a_file_that_will_not_open_does_not_keep_the_last_image_on_screen() {
+        let dir = scratch("stale-image");
+        let good = dir.join("real.png");
+        std::fs::write(&good, png_bytes(640, 480)).expect("write png");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&good), "the fixture PNG must load");
+        assert!(state.current_image.is_some());
+        assert_eq!(state.image_info.width, 640);
+        assert_eq!(state.image_info.height, 480);
+
+        let missing = dir.join("gone.png");
+        assert!(
+            !state.open_file(&missing),
+            "a missing file must report failure"
+        );
+
+        assert!(
+            state.current_image.is_none(),
+            "the previous picture must not survive a failed load"
+        );
+        assert_eq!(
+            state.image_info.filename, "gone.png",
+            "the UI must name the file the user actually asked for"
+        );
+        assert_eq!(
+            (state.image_info.width, state.image_info.height),
+            (0, 0),
+            "the old image's dimensions must not be shown beside the new name"
+        );
+        assert!(
+            state.image_info.format.is_none(),
+            "the old image's format must not be shown beside the new name"
+        );
+        assert!(state.load_error.is_some(), "the failure must be explained");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two empty states must render differently: "you opened nothing" and
+    /// "what you opened would not open" used to be the same screen.
+    #[test]
+    fn a_failed_load_renders_its_reason_rather_than_the_welcome_text() {
+        let mut state = ViewerState::new(800.0, 600.0);
+
+        let fresh = render(&state);
+        let fresh_text = collect_text(&fresh);
+        assert!(fresh_text.iter().any(|t| t.contains("No image loaded")));
+
+        let dir = scratch("render-error");
+        assert!(!state.open_file(&dir.join("nope.png")));
+
+        let failed = render(&state);
+        let failed_text = collect_text(&failed);
+        assert!(
+            failed_text
+                .iter()
+                .any(|t| t.contains("Cannot display this image")),
+            "the failure state must say so: {failed_text:?}"
+        );
+        assert!(
+            !failed_text.iter().any(|t| t.contains("drag an image here")),
+            "the failure state must not look like a freshly-started viewer"
+        );
+        assert!(
+            failed_text.iter().any(|t| t.contains("nope.png")),
+            "the reason must name the file: {failed_text:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A successful load after a failed one must clear the failure, or the
+    /// viewer keeps apologising for a file the user has moved on from.
+    #[test]
+    fn a_successful_load_clears_the_previous_failure() {
+        let dir = scratch("clears-error");
+        let good = dir.join("real.png");
+        std::fs::write(&good, png_bytes(32, 16)).expect("write png");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(!state.open_file(&dir.join("absent.png")));
+        assert!(state.load_error.is_some());
+
+        assert!(state.open_file(&good));
+        assert!(state.load_error.is_none());
+        assert_eq!(state.image_info.filename, "real.png");
+        assert_eq!((state.image_info.width, state.image_info.height), (32, 16));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Navigating onto a file whose dimensions cannot be read must show *no*
+    /// dimensions, not the previous image's — and must not strand the user
+    /// there: the arrow key that reached it has to carry them off it again.
+    #[test]
+    fn navigation_onto_an_unreadable_file_shows_no_stale_dimensions() {
+        let dir = scratch("nav-broken");
+        std::fs::write(dir.join("a.png"), png_bytes(10, 10)).expect("write a");
+        std::fs::write(dir.join("b.png"), b"not a png at all").expect("write b");
+        std::fs::write(dir.join("c.png"), png_bytes(30, 30)).expect("write c");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&dir.join("a.png")));
+        assert_eq!(state.entries.len(), 3, "all three are listed");
+
+        state.next_image();
+        assert_eq!(state.image_info.filename, "b.png");
+        assert_eq!(
+            (state.image_info.width, state.image_info.height),
+            (0, 0),
+            "a file with no readable dimensions must not borrow a.png's"
+        );
+
+        state.next_image();
+        assert_eq!(
+            state.image_info.filename, "c.png",
+            "navigation must not stop at the file it could not display"
+        );
+        assert_eq!((state.image_info.width, state.image_info.height), (30, 30));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every `Text` command in a render tree, so a test can assert on what the
+    /// user would actually read.
+    fn collect_text(tree: &RenderTree) -> Vec<String> {
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }

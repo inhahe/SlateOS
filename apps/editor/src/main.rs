@@ -334,6 +334,13 @@ impl Document {
     }
 
     /// Save the document to its file path.
+    ///
+    /// Written through [`safeio::write_str_atomically`] rather than
+    /// `fs::write`. `fs::write` truncates the target *before* writing it, so a
+    /// save interrupted part-way — a full disk, a removed drive, a killed
+    /// process, a power loss — left the user's document on disk as a fragment
+    /// or as nothing at all. For a text editor that is the worst possible
+    /// failure, because the file *is* the user's only copy.
     pub fn save(&mut self) -> std::io::Result<()> {
         let path = self
             .path
@@ -341,7 +348,7 @@ impl Document {
             .ok_or_else(|| std::io::Error::other("no file path"))?;
 
         let content: String = self.lines.join(self.line_ending.chars());
-        fs::write(path, &content)?;
+        safeio::write_str_atomically(path, &content)?;
         self.modified = false;
         // Refresh the merge ancestor and mtime so the file we just wrote is not
         // mistaken for an external change on the next check.
@@ -2694,7 +2701,12 @@ mod external_merge_tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
 
     use super::*;
     use std::io::Write;
@@ -2735,6 +2747,43 @@ mod external_merge_tests {
     fn buffer_text_is_lf_joined() {
         let d = loaded_doc("one\ntwo\nthree");
         assert_eq!(d.buffer_text(), "one\ntwo\nthree");
+    }
+
+    /// A save goes through `safeio`, not `std::fs::write`.
+    ///
+    /// The two are indistinguishable in the result — identical bytes at an
+    /// identical path — and differ only when the write is interrupted, which
+    /// no portable test can stage. So the routing itself is asserted, via
+    /// `safeio`'s `audit` counters. Without this, restoring `fs::write` in
+    /// `save` leaves every other test in this file green.
+    ///
+    /// This matters more for an editor than for most adopters: the file being
+    /// overwritten is the user's only copy of their document, so a truncating
+    /// write that dies part-way destroys the very thing the save was meant to
+    /// preserve.
+    ///
+    /// The counters are process-global and tests run in parallel, so this
+    /// compares a before and after reading rather than an absolute.
+    #[test]
+    fn a_save_goes_through_safeio() {
+        let path = temp_path("routing");
+        let mut d = loaded_doc("some text the user would hate to lose");
+        d.path = Some(path.clone());
+
+        let before = safeio::writes_performed();
+        d.save().expect("save");
+        let after = safeio::writes_performed();
+
+        assert!(
+            after > before,
+            "the save did not go through safeio (writes_performed stayed at {before}) \
+             -- Document::save must not use std::fs::write"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            "some text the user would hate to lose"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

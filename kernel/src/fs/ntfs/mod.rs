@@ -298,6 +298,26 @@ impl NtfsFs {
             fs.boot.volume_bytes() / (1024 * 1024),
         );
 
+        // The root directory, record 5. Nothing above reaches it: the
+        // bootstrap reads record 0 at the LCN the boot sector names, which
+        // proves only that the *start* of `$MFT` is where it claims to be, and
+        // the `$Volume` read is deliberately best-effort. Every later record —
+        // including the root — is addressed through `$MFT`'s runlist, so a
+        // volume whose runlist is wrong past its first run mounts cleanly here
+        // and then fails every path lookup. A successful mount is a claim: it
+        // publishes a VFS entry, shadows whatever was at the mount point, and
+        // tells callers the volume is usable. Returning it for a volume with no
+        // reachable root asserts something never checked, and moves the error
+        // to a later call that has nothing obviously to do with the mount. See
+        // `design-decisions.md` §216 Decision 5, which found the identical gap
+        // in F2FS by running its driver against a volume built to be
+        // unreadable.
+        let root = fs.load_file(ROOT_RECORD)?;
+        if !root.is_directory() {
+            serial_println!("[ntfs] Record {ROOT_RECORD} is not a directory.");
+            return Err(KernelError::CorruptedData);
+        }
+
         Ok(fs)
     }
 

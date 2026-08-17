@@ -1585,6 +1585,41 @@ fn test_corruption(c: &mut Checks) -> KernelResult<()> {
         "a corrupt $MFT record fails the mount",
     )?;
 
+    // Damage the *root directory's* record, number 5. Nothing in the bootstrap
+    // reaches it — record 0 is read at the LCN the boot sector names, and the
+    // $Volume read at record 3 is deliberately best-effort — so before the
+    // mount was made to read record 5, this volume mounted cleanly and then
+    // failed every path lookup, with the error surfacing far from the thing
+    // that caused it.
+    let mut image = build_image();
+    let root_rec = (MFT_LCN as usize)
+        .saturating_mul(CLUSTER)
+        .saturating_add((REC_ROOT as usize).saturating_mul(MFT_RECORD));
+    put(&mut image, root_rec, b"BAAD");
+    c.check(
+        NtfsFs::open_source(Box::new(MemorySource::new(image))).is_err(),
+        "an unreadable root record fails the mount, not the first lookup",
+    )?;
+
+    // Record 5 intact, in use, and correctly fixed up — but without the
+    // directory flag. Every structural check passes; only a check on the
+    // root's type catches it. The flags live at 0x16 in the record header,
+    // which is not a sector tail, so patching it does not disturb the update
+    // sequence array the fixups depend on.
+    let mut image = build_image();
+    put(
+        &mut image,
+        root_rec.saturating_add(0x16),
+        &super::record::FLAG_IN_USE.to_le_bytes(),
+    );
+    c.check(
+        matches!(
+            NtfsFs::open_source(Box::new(MemorySource::new(image))),
+            Err(KernelError::CorruptedData)
+        ),
+        "a root record that is not a directory fails the mount",
+    )?;
+
     Ok(())
 }
 

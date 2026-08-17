@@ -27240,7 +27240,7 @@ generating 94 clippy warnings. Now 1 (pre-existing, in the binary).
   disambiguating suffix is doing all the work. Not a data-loss bug any more,
   but the names are useless for finding anything. Needs the clock syscall.
 
-## D-SAFEIO-ADOPTION-IS-NOT-ENFORCED-BY-ANY-TEST (lane C, 2026-08-16) — OPEN (tech debt)
+## D-SAFEIO-ADOPTION-IS-NOT-ENFORCED-BY-ANY-TEST (lane C, 2026-08-16) — RESOLVED 2026-08-16
 
 **In short:** We have a small library, `apps/safeio`, whose whole job is to save
 a file without the risk of destroying the old one if the save fails part-way.
@@ -27292,3 +27292,52 @@ allowlist is a maintenance surface. Logged rather than done because it touches
 the workspace lint configuration, which is shared across all three lanes and is
 not lane C's to change unilaterally. If it is wanted, it should be a request to
 whoever owns the workspace `Cargo.toml` lint table.
+
+### Resolution (2026-08-16)
+
+Closed by a fourth option not listed above: **audit counters in `safeio`**,
+which enforce adoption per-call-site from within lane C and need no shared lint
+configuration.
+
+`safeio` gained an off-by-default `audit` feature exposing `writes_performed()`
+and `copies_performed()`. Each adopter depends on `safeio` twice — normally, and
+again in `[dev-dependencies]` with `features = ["audit"]`. Cargo unifies the two
+when building that crate's tests, so the counters exist for `cargo test` and are
+absent from every shipped binary. A test then asserts the counter *moved* across
+a save, which is exactly the thing `fs::write` cannot fake.
+
+This is a proxy for the guarantee rather than the guarantee itself — it proves
+the call reached `safeio`, not that `safeio` is crash-safe (that remains
+`safeio`'s own 9 tests). But it closes the stated gap, which was that adoption
+rested on convention alone.
+
+**Every assertion was verified by injection**, one call site at a time:
+restoring `fs::write`/`fs::copy` fails the new test *and nothing else*.
+
+| Adopter | Call sites covered | Injection result |
+|---|---|---|
+| `screenshot` | `write_bmp` | 68 passed, 1 failed |
+| `editor` | `Document::save` | 119 passed, 1 failed |
+| `markdowneditor` | `save`, `save_as` (separately) | 205 passed, 1 failed (each) |
+| `paint` | `save_bmp` — previously had **no test at all** | 158 passed, 1 failed |
+| `installer` | `grub::install`, `grub::update` (separately) | 92 passed, 1 failed (each) |
+| `backup` | `store_bytes`, `store_file` (both counters) | 63 passed, 1 failed (each) |
+
+That "and nothing else" is the point: it reconfirms the original finding that
+the rest of each suite stays green through the regression.
+
+**Two notes for whoever picks this up next.**
+
+1. **The adopter list above was incomplete** — this entry originally said "five
+   programs" and omitted `apps/backup`, which is the adopter with the *most* at
+   stake (see the content-addressed-store reasoning in `safeio`'s docs).
+2. **`backup` has four call sites still unenforced**: `manifest.json` and
+   `meta.json` (`create`), the restore write, and the schedule-list write. They
+   were left because each sits inside a large command function rather than a
+   unit-testable seam, not because they matter less — the restore write in
+   particular overwrites a file the user still has. Covering them wants those
+   commands factored so a test can drive them; that is the remaining work.
+
+Option 2 (the workspace `disallowed-methods` lint) is still the stronger,
+build-time enforcement and is still worth filing as a cross-lane request if the
+workspace lint table's owner wants it. The counters do not preclude it.

@@ -28168,7 +28168,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 9 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 10 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28542,6 +28542,44 @@ went wrong. Four traps:
   index into the stop list — so `printf 'abc\b\tx\n' | expand -t 2,4` yields
   two spaces, not one. A unit test asserting the intuitive answer failed; GNU
   was right and the test was wrong.
+
+`unexpand` is the tenth (`scripts/unexpand-diff.sh`: 234 passed, 0 differed, 3
+differ on purpose — the same directory operand, `--help`, `--version`). It is
+the first utility converted that wrote *no* new parsing of its own: the whole
+tab-stop half came from `tabstops.rs`, which `expand` had landed one conversion
+earlier, and the option half from `getopt.rs`. The old parser recognised `-a`,
+`-t N` and nothing else — no `--first-only`, no obsolete digits, no `-t` list,
+and it read the file as UTF-8 lines. Three traps, all of which needed the
+upstream C source rather than a black-box probe:
+
+- **An allocation can be observable through the *order* of two error
+  messages.** Upstream sizes its pending-blank buffer with `xmalloc
+  (max_column_width)`, but only *after* the first operand has been opened
+  (`if (!fp) return;` precedes it). So `unexpand -t 18446744073709551615
+  nosuch` reports the missing file and `unexpand -t 18446744073709551615
+  empty` — a readable, *empty* file — reports `memory exhausted` with status
+  1. Ours had no `memory exhausted` at all until this was measured; the fix
+  was `Vec::try_reserve_exact` plus moving construction of the converter
+  inside the `if input.advance()` arm, which also makes the unit test instant
+  because the reservation fails without ever touching the allocator.
+- **A fixture can agree with the wrong parser.** The obsolete digit form
+  accumulates across the *whole* command line, so `-1 -2` is one stop every
+  **twelve** while `-1,2` is stops at 1 and 2. On the eight-column data every
+  other case used, those two readings produce identical output — a harness of
+  380 cases would have certified a parser that read the digits as `expand`
+  does. `twelve.txt` exists solely to reach columns 12 and 24 and separate
+  them. Generalise: when two candidate readings of an option differ only at
+  certain column/size values, a fixture must be built to *hit* those values,
+  or the harness proves nothing about that option.
+- **Four unit tests failed and GNU was right in all four.** `-a` on eight
+  blanks after `a` gives `a\t b`, not `a\t\tb` (the eighth blank starts a run
+  toward 16 that never arrives, and a lone blank sitting on a stop stays a
+  blank). `\b` is not blank, so by default it ends the leading region and the
+  line is emitted unchanged. `-a -t 2,4` on seven blanks emits two tabs — one
+  flushed from the pending buffer, one for the arriving blank — then leaves
+  everything past column 4 alone. Writing the expectation from intuition and
+  the code from the C source, then reconciling, is what caught these; writing
+  both from intuition would have produced a self-consistent wrong utility.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 

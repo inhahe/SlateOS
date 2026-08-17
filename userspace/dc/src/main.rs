@@ -63,31 +63,49 @@ enum Value {
 }
 
 impl Value {
-    /// Render for output: a number in `obase` and broken at `line_length`, a
-    /// string exactly as the program wrote it.
+    /// Render for output: a number in `obase` and broken every `chunk`
+    /// characters, a string exactly as the program wrote it.
     ///
     /// The asymmetry is deliberate. A number is `dc`'s own rendering of a
     /// value and may be continued across lines with a trailing `\`; a string
     /// is the user's bytes, and inserting a backslash into it would corrupt
-    /// the one thing they asked to be printed verbatim.
-    fn display(&self, obase: u32, line_length: usize) -> Vec<u8> {
+    /// the one thing they asked to be printed verbatim. `dc` itself never
+    /// wraps a string, however long.
+    fn display(&self, obase: u32, chunk: usize) -> Vec<u8> {
         match self {
-            Value::Num(n) => bignum::wrap_number(&n.format(obase), line_length).into_bytes(),
+            Value::Num(n) => bignum::wrap_number(&n.format(obase), chunk).into_bytes(),
             Value::Str(s) => s.clone(),
         }
     }
 }
 
+/// How many digits `dc` puts on a line, given a `DC_LINE_LENGTH` of `n`.
+///
+/// `dc` spends the stated width on the digits *and* the continuation
+/// backslash, so `DC_LINE_LENGTH=10` emits ten columns: nine digits and a `\`.
+/// `bc` — the same program, from the same source tarball — puts eight digits
+/// there instead, which is why each front-end does this arithmetic itself
+/// rather than `bignum` doing it for both (see [`bignum::wrap_number`]).
+///
+/// Below 2 there is no room to make progress, so the wrap is off; so is
+/// `DC_LINE_LENGTH=0`, which is how a script asks for one long number.
+fn wrap_chunk(line_length: usize) -> usize {
+    if line_length < 2 {
+        return 0;
+    }
+    line_length.saturating_sub(1)
+}
+
 /// The output line length, from the environment or the traditional default.
 ///
-/// A value of 0 turns the line break off. A setting that is not a number is
-/// ignored rather than rejected: a malformed environment should not stop a
-/// calculator from calculating.
+/// A setting that is not a number is ignored rather than rejected: a malformed
+/// environment should not stop a calculator from calculating.
 fn line_length_from_env(var: &str) -> usize {
-    std::env::var(var)
+    let stated = std::env::var(var)
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(bignum::DEFAULT_LINE_LENGTH)
+        .unwrap_or(bignum::DEFAULT_LINE_LENGTH);
+    wrap_chunk(stated)
 }
 
 /// Why a command could not be carried out.
@@ -130,7 +148,7 @@ impl std::fmt::Display for DcError {
             }
             DcError::Math(e) => write!(f, "{e}"),
             DcError::BadInputBase => write!(f, "input base must be between 2 and 16 (inclusive)"),
-            DcError::BadOutputBase => write!(f, "output base must be between 2 and 36 (inclusive)"),
+            DcError::BadOutputBase => write!(f, "output base must be a number greater than 1"),
             DcError::NegativeScale => write!(f, "scale must be a non-negative integer"),
             DcError::NegativeExponent => write!(f, "negative exponent in modular exponentiation"),
             DcError::ZeroModulus => write!(f, "remainder by zero in modular exponentiation"),
@@ -177,8 +195,10 @@ struct Dc<'a> {
     /// produce. It is *not* a property of the numbers on the stack, each of
     /// which carries its own scale.
     scale: usize,
-    /// Columns before a printed number is broken with a trailing `\`.
-    line_length: usize,
+    /// Digits per line before a printed number is continued with a `\`, as
+    /// [`wrap_chunk`] derives it from `DC_LINE_LENGTH` — not the stated length
+    /// itself, which is one larger.
+    wrap_chunk: usize,
     depth: usize,
     out: &'a mut dyn Write,
     err: &'a mut dyn Write,
@@ -192,7 +212,7 @@ impl<'a> Dc<'a> {
             ibase: 10,
             obase: 10,
             scale: 0,
-            line_length: line_length_from_env("DC_LINE_LENGTH"),
+            wrap_chunk: line_length_from_env("DC_LINE_LENGTH"),
             depth: 0,
             out,
             err,
@@ -212,24 +232,64 @@ impl<'a> Dc<'a> {
         }
     }
 
-    /// Pop two numbers, returning them in the order they were pushed.
+    /// The number `depth` places below the top, without disturbing the stack.
     ///
-    /// Every binary operator wants `a op b` where `b` was on top, and popping
+    /// `depth` 0 is the top, 1 the one under it, and so on.
+    fn peek_num(&self, depth: usize) -> Result<Decimal, DcError> {
+        let index = self
+            .stack
+            .len()
+            .checked_sub(depth.saturating_add(1))
+            .ok_or(DcError::StackEmpty)?;
+        match self.stack.get(index).ok_or(DcError::StackEmpty)? {
+            Value::Num(n) => Ok(n.clone()),
+            Value::Str(s) => Err(DcError::NotANumber(s.clone())),
+        }
+    }
+
+    /// The top two numbers, in the order they were pushed, left in place.
+    ///
+    /// Every binary operator wants `a op b` where `b` was on top, and taking
     /// them in the wrong order is the classic RPN bug — one place to get it
     /// right is better than eight.
-    fn pop_two(&mut self) -> Result<(Decimal, Decimal), DcError> {
-        let b = self.pop_num()?;
-        let a = match self.pop_num() {
-            Ok(a) => a,
-            Err(e) => {
-                // The first operand is still owed to the stack: a failed
-                // command must not silently eat the value it did manage to
-                // pop, or the stack is left in a state the user cannot explain.
-                self.stack.push(Value::Num(b));
-                return Err(e);
-            }
-        };
+    ///
+    /// They are *peeked*, not popped, because an operator that fails must
+    /// leave the stack exactly as it found it: GNU `dc` answers `1 0 / f`
+    /// with a `divide by zero` diagnostic and a stack that still reads `1 0`.
+    /// A half-consumed stack after a failed command is a state the user
+    /// cannot explain, and `[abc] 2 +` shows why popping first cannot be
+    /// patched up — by the time the second operand is known to be a string,
+    /// the first has already left.
+    fn peek_two(&self) -> Result<(Decimal, Decimal), DcError> {
+        let b = self.peek_num(0)?;
+        let a = self.peek_num(1)?;
         Ok((a, b))
+    }
+
+    /// Drop the `n` operands an arithmetic command consumed, now that it has
+    /// produced a result. Only ever called after [`Self::peek_two`] (or its
+    /// three-operand equivalent) has confirmed they are there.
+    fn drop_operands(&mut self, n: usize) {
+        let keep = self.stack.len().saturating_sub(n);
+        self.stack.truncate(keep);
+    }
+
+    /// Replace the top two values with the result of an operator on them.
+    fn replace_two(&mut self, result: Decimal) {
+        self.drop_operands(2);
+        self.push_num(result);
+    }
+
+    /// Pop an integer count that carries a sign, saturating at the platform's
+    /// range. Only `R` needs one, where the sign chooses a direction.
+    fn pop_signed(&mut self) -> Result<isize, DcError> {
+        let n = self.pop_num()?.rescale(0);
+        let magnitude = isize::try_from(n.digits.to_usize_saturating()).unwrap_or(isize::MAX);
+        Ok(if n.is_negative() {
+            magnitude.saturating_neg()
+        } else {
+            magnitude
+        })
     }
 
     /// Pop a number that must be a non-negative integer index.
@@ -388,44 +448,53 @@ impl<'a> Dc<'a> {
 
             // ── Arithmetic ──
             b'+' => {
-                let (a, b) = self.pop_two()?;
-                self.push_num(a.add(&b));
+                let (a, b) = self.peek_two()?;
+                let sum = a.add(&b);
+                self.replace_two(sum);
             }
             b'-' => {
-                let (a, b) = self.pop_two()?;
-                self.push_num(a.sub(&b));
+                let (a, b) = self.peek_two()?;
+                let difference = a.sub(&b);
+                self.replace_two(difference);
             }
             b'*' => {
-                let (a, b) = self.pop_two()?;
+                let (a, b) = self.peek_two()?;
                 // POSIX's scale for a product, not the `k` register: `k`
                 // governs division, where digits must be invented.
-                self.push_num(a.multiply(&b, self.scale));
+                let product = a.multiply(&b, self.scale);
+                self.replace_two(product);
             }
             b'/' => {
-                let (a, b) = self.pop_two()?;
-                self.push_num(a.div(&b, self.scale)?);
+                let (a, b) = self.peek_two()?;
+                let quotient = a.div(&b, self.scale)?;
+                self.replace_two(quotient);
             }
             b'%' => {
-                let (a, b) = self.pop_two()?;
-                self.push_num(a.modulo(&b, self.scale)?);
+                let (a, b) = self.peek_two()?;
+                let remainder = a.modulo(&b, self.scale)?;
+                self.replace_two(remainder);
             }
             b'~' => {
                 // Quotient and remainder together, quotient pushed first.
-                let (a, b) = self.pop_two()?;
+                let (a, b) = self.peek_two()?;
                 let quotient = a.div(&b, self.scale)?;
                 let remainder = a.modulo(&b, self.scale)?;
+                self.drop_operands(2);
                 self.push_num(quotient);
                 self.push_num(remainder);
             }
             b'^' => {
-                let (base, exp) = self.pop_two()?;
-                self.push_num(base.pow(&exp, self.scale)?);
+                let (base, exp) = self.peek_two()?;
+                let power = base.pow(&exp, self.scale)?;
+                self.replace_two(power);
             }
             b'|' => {
-                let modulus = self.pop_num()?;
-                let exp = self.pop_num()?;
-                let base = self.pop_num()?;
-                self.push_num(modular_power(&base, &exp, &modulus)?);
+                let modulus = self.peek_num(0)?;
+                let exp = self.peek_num(1)?;
+                let base = self.peek_num(2)?;
+                let power = modular_power(&base, &exp, &modulus)?;
+                self.drop_operands(3);
+                self.push_num(power);
             }
             b'v' => {
                 let n = self.pop_num()?;
@@ -439,13 +508,13 @@ impl<'a> Dc<'a> {
             // ── Stack ──
             b'p' => {
                 let val = self.stack.last().ok_or(DcError::StackEmpty)?.clone();
-                let mut line = val.display(self.obase, self.line_length);
+                let mut line = val.display(self.obase, self.wrap_chunk);
                 line.push(b'\n');
                 self.write_out(&line)?;
             }
             b'n' => {
                 let val = self.pop()?;
-                let s = val.display(self.obase, self.line_length);
+                let s = val.display(self.obase, self.wrap_chunk);
                 self.write_out(&s)?;
             }
             b'f' => {
@@ -454,7 +523,7 @@ impl<'a> Dc<'a> {
                     .stack
                     .iter()
                     .rev()
-                    .map(|v| v.display(self.obase, self.line_length))
+                    .map(|v| v.display(self.obase, self.wrap_chunk))
                     .collect();
                 for mut line in lines {
                     line.push(b'\n');
@@ -484,17 +553,19 @@ impl<'a> Dc<'a> {
                         // A negative value contributes the same low byte its
                         // two's-complement representation would.
                         if rem.negative && magnitude != 0 {
-                            Some(0u8.wrapping_sub(magnitude))
+                            0u8.wrapping_sub(magnitude)
                         } else {
-                            Some(magnitude)
+                            magnitude
                         }
                     }
-                    // An empty string has no first byte, and inventing one
-                    // would put a byte on the stack the program never made.
-                    Value::Str(s) => s.first().copied(),
+                    // An empty string has no first byte. GNU dc answers with a
+                    // zero byte rather than with nothing -- checked against
+                    // `[] a Z p`, which says 1 -- and that is the behaviour
+                    // scripts see, so it is the behaviour to match. It also
+                    // keeps `a` total: every input leaves exactly one byte.
+                    Value::Str(s) => s.first().copied().unwrap_or(0),
                 };
-                self.stack
-                    .push(Value::Str(byte.map(|b| vec![b]).unwrap_or_default()));
+                self.stack.push(Value::Str(vec![byte]));
             }
             b'c' => self.stack.clear(),
             b'd' => {
@@ -509,14 +580,23 @@ impl<'a> Dc<'a> {
                 self.stack.swap(x, y);
             }
             b'R' => {
-                let n = self.pop_count()?;
-                let len = self.stack.len();
-                if n > 1 && n <= len {
-                    let top = self.pop()?;
-                    // `len - n` is the position the rotated element moves to;
-                    // `len` has not changed yet at the time it is computed.
-                    let at = len.saturating_sub(n);
-                    self.stack.insert(at, top);
+                // Rotate the top `n` values by one place. A positive `n`
+                // carries the *bottom* of that group to the top — `1 2 3 4 3 R`
+                // leaves `1 3 4 2` — and a negative one rotates the other way.
+                // The direction is easy to get backwards and neither is more
+                // natural than the other, so it is measured: GNU `dc` prints
+                // `2 4 3 1` for `1 2 3 4 3 R f` and `3 2 4 1` for `_3 R`.
+                let n = self.pop_signed()?;
+                // A group larger than the stack is the whole stack, and a group
+                // of one (or none) is already in rotated order.
+                let span = n.unsigned_abs().min(self.stack.len());
+                let at = self.stack.len().saturating_sub(span);
+                if let (true, Some(group)) = (span > 1, self.stack.get_mut(at..)) {
+                    if n > 0 {
+                        group.rotate_left(1);
+                    } else {
+                        group.rotate_right(1);
+                    }
                 }
             }
             b'z' => {
@@ -554,10 +634,18 @@ impl<'a> Dc<'a> {
             b'o' => {
                 let base = self.pop_num()?.rescale(0);
                 let value = base.digits.to_usize_saturating();
-                if base.is_negative() || !(2..=36).contains(&value) {
+                // Unlike the input base there is no upper limit worth
+                // enforcing: above sixteen the digits are written as decimal
+                // groups (` 35 35` for 1295 in base 36), so any base at all
+                // has a notation. GNU `dc` accepts 2^30 and says only
+                // "output base must be a number greater than 1".
+                let Ok(value) = u32::try_from(value) else {
+                    return Err(DcError::BadOutputBase);
+                };
+                if base.is_negative() || value < 2 {
                     return Err(DcError::BadOutputBase);
                 }
-                self.obase = u32::try_from(value).unwrap_or(10);
+                self.obase = value;
             }
             b'k' => {
                 let k = self.pop_num()?.rescale(0);
@@ -694,13 +782,17 @@ impl<'a> Dc<'a> {
     /// `3 5 <a` asks whether 3 is less than 5, reading in source order rather
     /// than stack order.
     fn conditional(&mut self, op: u8, negated: bool, reg: u8, next: usize) -> Step {
-        let (a, b) = match self.pop_two() {
+        // Peeked, then dropped once the comparison is known to be possible: a
+        // comparison that cannot run leaves both operands where they were,
+        // exactly as a failed arithmetic operator does.
+        let (a, b) = match self.peek_two() {
             Ok(pair) => pair,
             Err(e) => {
                 self.report(&e);
                 return Step::Next(next);
             }
         };
+        self.drop_operands(2);
         // The top of the stack is the *left* operand: `5 3 >a` asks whether 3
         // is greater than 5, not the other way round. That reads backwards
         // until you write the two idioms every `dc` program is built from --
@@ -1135,10 +1227,54 @@ mod tests {
         assert_eq!(eval("42 n"), "42");
     }
 
+    // Every expectation below is GNU `dc` 1.4.1's own output. The previous
+    // version of this test asserted the opposite direction, which is what a
+    // test written from the same belief as the code always does.
     #[test]
     fn test_rotate() {
-        // Bring the third element to the top.
-        assert_eq!(eval("1 2 3 3 R f"), "2\n1\n3\n");
+        // The bottom of the rotated group comes to the top: 1 2 3 -> 2 3 1,
+        // which `f` prints top-first.
+        assert_eq!(eval("1 2 3 3 R f"), "1\n3\n2\n");
+    }
+
+    #[test]
+    fn a_negative_count_rotates_the_other_way() {
+        // 1 2 3 -> 1 3 2, the top of the group dropping to its bottom.
+        assert_eq!(eval("1 2 3 _2 R f"), "2\n3\n1\n");
+    }
+
+    #[test]
+    fn a_rotation_wider_than_the_stack_rotates_the_whole_stack() {
+        assert_eq!(eval("1 2 3 4 5 9 R f"), "1\n5\n4\n3\n2\n");
+    }
+
+    #[test]
+    fn a_rotation_of_one_or_none_leaves_the_stack_alone() {
+        assert_eq!(eval("1 2 3 1 R f"), "3\n2\n1\n");
+        assert_eq!(eval("1 2 3 0 R f"), "3\n2\n1\n");
+    }
+
+    #[test]
+    fn a_failed_operator_leaves_its_operands_on_the_stack() {
+        // GNU `dc` reports the error and does not consume the operands, so the
+        // user can see what the command was given. Checked against
+        // `1 0 / f`, `[abc] 2 + f`, `2 [abc] + f` and `1 + f`.
+        assert_eq!(eval("1 0 / f"), "0\n1\n");
+        assert_eq!(eval("1 0 % f"), "0\n1\n");
+        assert_eq!(eval("1 0 ~ f"), "0\n1\n");
+        assert_eq!(eval("[abc] 2 + f"), "2\nabc\n");
+        assert_eq!(eval("2 [abc] + f"), "abc\n2\n");
+        assert_eq!(eval("1 + f"), "1\n");
+        assert_eq!(eval("1 | f"), "1\n");
+        assert_eq!(eval("2 3 0 | f"), "0\n3\n2\n");
+    }
+
+    #[test]
+    fn a_failed_comparison_leaves_its_operands_on_the_stack() {
+        assert_eq!(eval("1 [] sa <a f"), "1\n");
+        assert_eq!(eval("1 [abc] [] sa <a f"), "abc\n1\n");
+        // A comparison that *can* run consumes both, whether or not it holds.
+        assert_eq!(eval("1 2 3 [] sa <a f"), "1\n");
     }
 
     #[test]
@@ -1450,6 +1586,22 @@ mod tests {
     }
 
     #[test]
+    fn the_stated_line_length_includes_the_continuation_backslash() {
+        // Measured against GNU dc 1.4.1: `DC_LINE_LENGTH=10` emits ten
+        // columns, nine digits and a `\`. GNU *bc* puts eight digits there
+        // from the same source tarball, so this conversion cannot live in
+        // `bignum` where both would share it.
+        assert_eq!(wrap_chunk(10), 9);
+        assert_eq!(wrap_chunk(70), 69);
+        assert_eq!(wrap_chunk(3), 2);
+        assert_eq!(wrap_chunk(2), 1);
+        // Below 2 there is no room to make progress, and GNU dc stops
+        // wrapping rather than emitting a backslash per digit.
+        assert_eq!(wrap_chunk(1), 0);
+        assert_eq!(wrap_chunk(0), 0);
+    }
+
+    #[test]
     fn a_number_too_long_for_a_line_is_continued() {
         // End to end, through the real print path rather than the formatter:
         // 2^1000 is 302 digits, so four continued lines of 69 and a last of 26.
@@ -1491,9 +1643,11 @@ mod tests {
         assert_eq!(eval_bytes(b"_256 a P"), vec![0x00]);
         // The result is a string, so `Z` answers one and `x` would run it.
         assert_eq!(eval("65 a Z p"), "1\n");
-        // An empty string has no first byte; inventing one would put a byte on
-        // the stack the program never made.
-        assert_eq!(eval("[] a Z p"), "0\n");
+        // An empty string yields a zero byte, which GNU dc does too: `a` is
+        // total, and always leaves exactly one byte behind.
+        assert_eq!(eval("[] a Z p"), "1\n");
+        assert_eq!(eval_bytes(b"[] a P"), vec![0u8]);
+        assert_eq!(eval_bytes(b"0 a P"), vec![0u8]);
     }
 
     #[test]

@@ -1412,6 +1412,18 @@ if [ ! -f "$SWAP_IMG" ]; then
     dd if=/dev/zero of="$SWAP_IMG" bs=1M count=16 status=none 2>/dev/null
 fi
 
+# Step 3a: Backing store for the NVMe controller (see the device notes above
+# the QEMU invocation).  `-device nvme` requires a drive — a controller with no
+# namespace enumerates zero namespaces, and the driver's identify/namespace path
+# (the part most likely to be wrong) would go untested, which is precisely the
+# "present but inert" trap that `intel-hda` without `hda-duplex` sets.
+NVME_IMG="$PROJECT_ROOT/build/nvme.img"
+NVME_IMG_WIN="$(to_win_path "$NVME_IMG")"
+if [ ! -f "$NVME_IMG" ]; then
+    echo "=== Creating 32 MiB NVMe disk image ==="
+    dd if=/dev/zero of="$NVME_IMG" bs=1M count=32 status=none 2>/dev/null
+fi
+
 # Step 3b: Attach the Path-Z glibc rootfs (rootfs.ext4) as a second virtio-blk
 # disk when present.  It is enumerated AFTER swap-disk, so it becomes vdb: the
 # kernel's swap loop skips it (ext4 superblock detected) and the /mnt ext4 probe
@@ -1877,6 +1889,32 @@ QEMU_START_EPOCH=$(date +%s)
 #
 # Unlike ati-vga these are multimedia-class, not VGA-class, so they suppress
 # nothing and need no counterpart to `-vga std`.
+#
+# `nvme` and `qemu-xhci` close the same gap for the last two whole subsystems
+# that had no hardware here.  Before they were added, every boot printed
+#
+#     [nvme] No NVMe controller found
+#     [xhci] No xHCI controller found (USB not available)
+#
+# so nvme.rs (~950 lines) and xhci.rs (~2400 lines) had never executed past
+# their PCI scan.  Both are found by CLASS, not by vendor/device id, so the
+# choice of model matters less than it does above -- any controller QEMU offers
+# in the right class will bind:
+#
+#   nvme       class 01h/08h (NVM)        -> nvme.rs   find_devices_by_class
+#   qemu-xhci  class 0Ch/03h (USB)        -> xhci.rs   find_devices_by_class
+#
+# `usb-kbd` is to qemu-xhci what `hda-duplex` is to intel-hda: without a device
+# on the bus, the driver enumerates an empty root hub and everything that makes
+# xHCI hard -- slot enable, address-device, the control-transfer TRB rings,
+# descriptor parsing, the HID boot-protocol path -- stays untested.  A keyboard
+# is the right choice because xhci.rs already has a HID boot-protocol driver
+# looking for exactly this (USB_CLASS_HID / USB_HID_SUBCLASS_BOOT).
+#
+# The NVMe drive is `if=none` and named explicitly so it attaches ONLY to the
+# nvme controller.  A bare `-drive` would be auto-assigned to the q35 AHCI bus
+# and change which disk is which, which is the sort of thing that turns a
+# coverage improvement into a mysterious rootfs failure.
 "$QEMU" \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
     -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \
@@ -1893,6 +1931,10 @@ QEMU_START_EPOCH=$(date +%s)
     -device intel-hda \
     -device hda-duplex,audiodev=snd0 \
     -device virtio-sound-pci,audiodev=snd0,streams=2 \
+    -drive "id=nvme-disk,if=none,format=raw,file=$NVME_IMG_WIN" \
+    -device nvme,drive=nvme-disk,serial=SLATE-NVME-1 \
+    -device qemu-xhci,id=xhci0 \
+    -device usb-kbd,bus=xhci0.0 \
     -serial "file:$SERIAL_FILE_WIN" \
     -pidfile "$PIDFILE_WIN" \
     -display none \

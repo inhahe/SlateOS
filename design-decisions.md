@@ -42,6 +42,18 @@ at end-of-file unless your number happens to be the highest.
 | §300–§399 | **lane B** | contiguous, after A's band |
 | §400–§499 | **lane C** | contiguous, to end of file |
 
+**One exception, settled 2026-08-17: §217–§220 are lane C's, permanently.**
+Four lane-C entries about the AMD display engine were numbered in lane A's
+band by mistake. Lane A raised it
+(`requests/a-c-design-decisions-band-collision.md`), took §221 for its own
+next entry, and left the choice of remedy to lane C. Lane C chose to keep the
+numbers rather than renumber, because eight things already cite them —
+including three files under `kernel/src/drm/ati/`, which is **lane A's tree**,
+so renumbering could not be completed from lane C's worktree without editing
+another lane's files. Renumbering would therefore have traded a cosmetic
+inconsistency for either four dangling citations or a lane violation. Lane A
+continues from §221; §217–§220 are never reissued.
+
 The numeric *order* is what makes the bands physically disjoint, and that —
 not the numbering by itself — is what makes this file merge cleanly between
 three lanes: each lane's insertion point is a different line offset, so git

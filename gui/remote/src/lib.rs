@@ -98,11 +98,17 @@ pub use control::{
     try_decode_requests, try_decode_responses,
 };
 
+pub mod submit;
+pub use submit::{
+    SUBMIT_MAGIC, SUBMIT_VERSION, Submission, decode_submit, encode_submit, encode_submit_into,
+    try_decode_submit,
+};
+
 pub mod frame;
 pub use frame::{Frame, decode_any, try_decode_any};
 
 pub mod client;
-pub use client::{App, Client, ClientError, Response, Transport};
+pub use client::{App, Client, ClientError, Connection, Response, Transport};
 
 // ============================================================================
 // Protocol constants

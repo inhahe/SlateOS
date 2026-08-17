@@ -26,6 +26,7 @@ use crate::control::{
 };
 use crate::input::{INPUT_MAGIC, InputEvent, decode_input_frame};
 use crate::scene::{SCENE_MAGIC, SceneFrame, decode_scene_frame};
+use crate::submit::{SUBMIT_MAGIC, Submission, decode_submit};
 use crate::{DecodeError, MAGIC, decode_frame};
 
 /// One decoded frame of any kind this crate defines.
@@ -35,6 +36,8 @@ use crate::{DecodeError, MAGIC, decode_frame};
 pub enum Frame {
     /// Draw commands for one window's client area (`ORDR`).
     Render(RenderTree),
+    /// Draw commands with the window they are for (`SURF`).
+    Submit(Submission),
     /// A stacked-desktop snapshot or delta (`SCEN`).
     Scene(SceneFrame),
     /// Input events addressed to windows (`INPT`).
@@ -51,6 +54,7 @@ impl Frame {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Render(_) => "render",
+            Self::Submit(_) => "submit",
             Self::Scene(_) => "scene",
             Self::Input(_) => "input",
             Self::Requests(_) => "control request",
@@ -79,6 +83,10 @@ pub fn decode_any(input: &[u8]) -> Result<(Frame, usize), DecodeError> {
         MAGIC => {
             let (tree, used) = decode_frame(input)?;
             Ok((Frame::Render(tree), used))
+        }
+        SUBMIT_MAGIC => {
+            let (sub, used) = decode_submit(input)?;
+            Ok((Frame::Submit(sub), used))
         }
         SCENE_MAGIC => {
             let (scene, used) = decode_scene_frame(input)?;
@@ -143,6 +151,10 @@ mod tests {
     fn each_frame_kind_is_recognised_by_its_magic() {
         let cases: Vec<(Vec<u8>, &str)> = vec![
             (render_bytes(), "render"),
+            (
+                crate::submit::encode_submit(3, &RenderTree::new()),
+                "submit",
+            ),
             (
                 encode_scene_frame(&SceneFrame {
                     sequence: 3,
@@ -212,6 +224,7 @@ mod tests {
         // transport delivers on its first read of a large frame.
         for bytes in [
             render_bytes(),
+            crate::submit::encode_submit(1, &RenderTree::new()),
             encode_input_frame(&[crate::InputEvent::new(1, Event::FocusIn)]),
             control::encode_responses(&[control::Response::new(1, ResponseBody::Ok)]),
         ] {

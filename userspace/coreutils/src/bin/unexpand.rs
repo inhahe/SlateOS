@@ -367,48 +367,46 @@ impl<'a> Unexpander<'a> {
                 }
             }
 
-            if self.convert {
-                if blank {
-                    if self.next_tab_column < self.column {
-                        return Err(Trouble::TooLong);
-                    }
-                    if c == b'\t' {
-                        self.column = self.next_tab_column;
-                        // A tab arriving over pending blanks turns them into
-                        // one tab, whatever they were.
-                        if let Some(first) = self.pending.first_mut() {
-                            *first = b'\t';
-                        }
-                    } else {
-                        self.column = self.column.wrapping_add(1);
-                        if !(self.prev_blank && self.column == self.next_tab_column) {
-                            // Undecided: this blank might yet become part of a
-                            // tab, so buffer it and wait for the next byte.
-                            if self.column == self.next_tab_column {
-                                self.one_blank_before_tab_stop = true;
-                            }
-                            self.pending.push(c);
-                            self.prev_blank = true;
-                            return Ok(());
-                        }
-                        // A run of blanks that reached a stop: replace it with a
-                        // tab. Upstream writes `pending_blank[0]` unguarded
-                        // here, into a buffer that may have length 0 — harmless
-                        // there because the truncation below immediately
-                        // discards it, and spelled out here so it stays so.
-                        c = b'\t';
-                        if self.pending.is_empty() {
-                            self.pending.push(b'\t');
-                        } else if let Some(first) = self.pending.first_mut() {
-                            *first = b'\t';
-                        }
-                    }
-                    // Discard the pending blanks — unless it was the single
-                    // blank sitting just before the previous stop, which stays
-                    // because one blank is not worth a tab.
-                    self.pending
-                        .truncate(usize::from(self.one_blank_before_tab_stop));
+            if self.convert && blank {
+                if self.next_tab_column < self.column {
+                    return Err(Trouble::TooLong);
                 }
+                if c == b'\t' {
+                    self.column = self.next_tab_column;
+                    // A tab arriving over pending blanks turns them into one
+                    // tab, whatever they were.
+                    if let Some(first) = self.pending.first_mut() {
+                        *first = b'\t';
+                    }
+                } else {
+                    self.column = self.column.wrapping_add(1);
+                    if !(self.prev_blank && self.column == self.next_tab_column) {
+                        // Undecided: this blank might yet become part of a tab,
+                        // so buffer it and wait for the next byte.
+                        if self.column == self.next_tab_column {
+                            self.one_blank_before_tab_stop = true;
+                        }
+                        self.pending.push(c);
+                        self.prev_blank = true;
+                        return Ok(());
+                    }
+                    // A run of blanks that reached a stop: replace it with a
+                    // tab. Upstream writes `pending_blank[0]` unguarded here,
+                    // into a buffer that may have length 0 — harmless there
+                    // because the truncation below immediately discards it, and
+                    // spelled out here so it stays so.
+                    c = b'\t';
+                    if self.pending.is_empty() {
+                        self.pending.push(b'\t');
+                    } else if let Some(first) = self.pending.first_mut() {
+                        *first = b'\t';
+                    }
+                }
+                // Discard the pending blanks — unless it was the single blank
+                // sitting just before the previous stop, which stays because
+                // one blank is not worth a tab.
+                self.pending
+                    .truncate(usize::from(self.one_blank_before_tab_stop));
             }
 
             if !blank {
@@ -458,10 +456,11 @@ impl<'a> Unexpander<'a> {
         }
         // More than one blank *and* the first one was on a stop: the run really
         // does span a stop, so the leading blank becomes a tab after all.
-        if self.pending.len() > 1 && self.one_blank_before_tab_stop {
-            if let Some(first) = self.pending.first_mut() {
-                *first = b'\t';
-            }
+        if self.pending.len() > 1
+            && self.one_blank_before_tab_stop
+            && let Some(first) = self.pending.first_mut()
+        {
+            *first = b'\t';
         }
         out.write_all(&self.pending).map_err(Trouble::Write)?;
         self.pending.clear();

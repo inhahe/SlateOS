@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are five so far. Three are about the interface these programs share
+//! There are six so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -42,6 +42,18 @@
 //!   of the argument and the errors that don't — that two hand-written parsers
 //!   would certainly disagree somewhere.
 //!
+//! The sixth is that argument again one layer down — not an option's grammar
+//! but its *argument's*:
+//!
+//! - [`xnum`] — the number. `fold -w`, `head -c`, `nl -v`, `split -b` and the
+//!   rest all read one through gnulib's `xstrtoumax`/`xdectoint` pair, and that
+//!   grammar is much larger than "a decimal integer": multiplier suffixes with
+//!   two possible bases, a bare suffix meaning one of it, and a choice between
+//!   two different `strerror` sentences for out-of-range decided by a heuristic
+//!   on the *value* rather than on the bound that was violated. `nl` and `head`
+//!   had each already written a partial copy, disagreeing in exactly the places
+//!   two partial copies would.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -51,3 +63,4 @@ pub mod filekind;
 pub mod getopt;
 pub mod quote;
 pub mod tabstops;
+pub mod xnum;

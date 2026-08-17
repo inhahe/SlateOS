@@ -113,7 +113,7 @@ use super::raw::{
     F2FS_FT_REG_FILE, F2FS_FT_SYMLINK, F2FS_HASH_COL_BIT, F2FS_INLINE_DATA, F2FS_INLINE_DENTRY,
     F2FS_INLINE_XATTR, F2FS_NAME_LEN, I_ADDR_OFF, I_NID_OFF, MAGIC, NAT_ENTRIES_PER_BLOCK,
     NEW_ADDR, NODE_FOOTER_OFF, NULL_ADDR, NULL_NID, SUPER_OFFSET, block_to_offset, bucket_blocks,
-    dentry_hash, dir_block_index, dir_buckets, read_u16, read_u32, read_u64, read_u8,
+    dentry_hash, dir_block_index, dir_buckets, read_u8, read_u16, read_u32, read_u64,
     slots_for_name, test_bit,
 };
 use super::sb::{self, FEATURE_BLKZONED, SuperBlock};
@@ -237,8 +237,7 @@ const SPARSE_SIZE: u64 = 8192;
 const BIG_DIRECT0: u64 = DEF_ADDRS_PER_INODE as u64;
 const BIG_DIRECT1: u64 = BIG_DIRECT0 + ADDRS_PER_BLOCK as u64;
 const BIG_INDIRECT: u64 = BIG_DIRECT1 + ADDRS_PER_BLOCK as u64;
-const BIG_DINDIRECT: u64 =
-    BIG_INDIRECT + 2 * (ADDRS_PER_BLOCK as u64) * (ADDRS_PER_BLOCK as u64);
+const BIG_DINDIRECT: u64 = BIG_INDIRECT + 2 * (ADDRS_PER_BLOCK as u64) * (ADDRS_PER_BLOCK as u64);
 /// `/big.bin`'s size: one byte past its highest backed block.
 const BIG_SIZE: u64 = (BIG_DINDIRECT + 1) * BLOCK_SIZE as u64;
 
@@ -394,11 +393,7 @@ fn put_inode(img: &mut [u8], spec: &InodeSpec) {
     put_u32(img, base.saturating_add(12), spec.links);
     put_u64(img, base.saturating_add(16), spec.size);
     // `i_blocks` is in 512-byte units and is reported verbatim by `metadata`.
-    put_u64(
-        img,
-        base.saturating_add(24),
-        spec.size.div_ceil(512).max(1),
-    );
+    put_u64(img, base.saturating_add(24), spec.size.div_ceil(512).max(1));
     put_u64(img, base.saturating_add(32), 1_700_000_001);
     put_u64(img, base.saturating_add(40), 1_700_000_002);
     put_u64(img, base.saturating_add(48), 1_700_000_003);
@@ -481,9 +476,7 @@ impl DentryGeom {
 /// what makes a long name's continuation slots invisible to a walk that
 /// advances by [`slots_for_name`].
 fn put_dentry(img: &mut [u8], geom: DentryGeom, slot: usize, name: &[u8], ino: u32, ftype: u8) {
-    let eoff = geom
-        .entries
-        .saturating_add(slot.saturating_mul(11));
+    let eoff = geom.entries.saturating_add(slot.saturating_mul(11));
     put_u32(img, eoff, dentry_hash(name));
     put_u32(img, eoff.saturating_add(4), ino);
     put_u16(
@@ -493,11 +486,7 @@ fn put_dentry(img: &mut [u8], geom: DentryGeom, slot: usize, name: &[u8], ino: u
     );
     put_u8(img, eoff.saturating_add(10), ftype);
 
-    put_bytes(
-        img,
-        geom.names.saturating_add(slot.saturating_mul(8)),
-        name,
-    );
+    put_bytes(img, geom.names.saturating_add(slot.saturating_mul(8)), name);
 
     for i in 0..slots_for_name(name.len()).max(1) {
         put_bit(img, geom.bitmap, slot.saturating_add(i));
@@ -552,8 +541,7 @@ fn put_superblock(img: &mut [u8], feature: u32) {
         for (i, unit) in "SLATE\u{2014}F2FS".encode_utf16().enumerate() {
             put_u16(
                 img,
-                base.saturating_add(124)
-                    .saturating_add(i.saturating_mul(2)),
+                base.saturating_add(124).saturating_add(i.saturating_mul(2)),
                 unit,
             );
         }
@@ -601,9 +589,7 @@ fn put_cp_pack(img: &mut [u8], start: u32, version: u64, tail_version: u64, flag
         (start.saturating_add(1), 0usize)
     } else {
         (
-            start
-                .saturating_add(CP_PACK_BLOCKS)
-                .saturating_sub(7),
+            start.saturating_add(CP_PACK_BLOCKS).saturating_sub(7),
             SUM_JOURNAL_OFF,
         )
     };
@@ -1004,7 +990,10 @@ fn test_primitives(c: &mut Checks) -> KernelResult<()> {
     let bm: [u8; 2] = [0b0000_0110, 0b1000_0000];
     c.check(!test_bit(&bm, 0), "bit 0 clear");
     c.check(test_bit(&bm, 1) && test_bit(&bm, 2), "bits 1 and 2 set");
-    c.check(test_bit(&bm, 15), "the high bit of the second byte is bit 15");
+    c.check(
+        test_bit(&bm, 15),
+        "the high bit of the second byte is bit 15",
+    );
     c.check(!test_bit(&bm, 16), "a bit past the end reads as clear");
 
     c.check(block_to_offset(0) == 0, "block 0 is at offset 0");
@@ -1025,9 +1014,18 @@ fn test_primitives(c: &mut Checks) -> KernelResult<()> {
     c.check(bucket_blocks(0) == 2, "a shallow bucket is two blocks");
     c.check(bucket_blocks(31) == 4, "a deep bucket is four blocks");
     c.check(dir_block_index(0, 0, 0) == 0, "the first block of level 0");
-    c.check(dir_block_index(1, 0, 0) == 2, "level 1 starts after level 0");
-    c.check(dir_block_index(1, 0, 1) == 4, "the second bucket of level 1");
-    c.check(dir_block_index(2, 0, 0) == 6, "level 2 starts after level 1");
+    c.check(
+        dir_block_index(1, 0, 0) == 2,
+        "level 1 starts after level 0",
+    );
+    c.check(
+        dir_block_index(1, 0, 1) == 4,
+        "the second bucket of level 1",
+    );
+    c.check(
+        dir_block_index(2, 0, 0) == 6,
+        "level 2 starts after level 1",
+    );
 
     c.check(slots_for_name(0) == 0, "an empty name occupies no slots");
     c.check(slots_for_name(1) == 1, "a one-byte name occupies one slot");
@@ -1111,12 +1109,16 @@ fn test_superblock(c: &mut Checks) -> KernelResult<()> {
     c.check(sb.ssa_blkaddr == SSA_BLKADDR, "ssa_blkaddr");
     c.check(sb.main_blkaddr == MAIN_BLKADDR, "main_blkaddr");
     c.check(sb.root_ino == NID_ROOT, "root_ino");
-    c.check(sb.node_ino == 1 && sb.meta_ino == 2, "node_ino and meta_ino");
+    c.check(
+        sb.node_ino == 1 && sb.meta_ino == 2,
+        "node_ino and meta_ino",
+    );
     c.check(sb.cp_payload == 0, "cp_payload");
     c.check(
-        sb.uuid.iter().enumerate().all(|(i, b)| {
-            usize::from(*b) == i
-        }),
+        sb.uuid
+            .iter()
+            .enumerate()
+            .all(|(i, b)| usize::from(*b) == i),
         "the uuid is copied verbatim",
     );
     // A driver that read the label as bytes would produce "SLATE" and stop, or
@@ -1345,7 +1347,10 @@ fn test_checkpoint(c: &mut Checks) -> KernelResult<()> {
     // The journal was written at the *normal*-summary offset in this pack and
     // at the compacted offset in the other; finding it proves the reader chose
     // its layout from the winning pack's own flags.
-    c.check(checkpoint.nat_journal.len() == 1, "one journalled NAT entry");
+    c.check(
+        checkpoint.nat_journal.len() == 1,
+        "one journalled NAT entry",
+    );
     let j = checkpoint.journal_lookup(NID_HELLO);
     c.check(
         j.map(|e| (e.ino, e.block_addr)) == Some((NID_HELLO, B_HELLO)),
@@ -1376,10 +1381,7 @@ fn test_checkpoint(c: &mut Checks) -> KernelResult<()> {
     // …and the older pack's journal is in the *compacted* layout, so this also
     // proves the second of the two layouts is read correctly.
     c.check(
-        older
-            .journal_lookup(NID_HELLO)
-            .map(|e| e.block_addr)
-            == Some(B_HELLO),
+        older.journal_lookup(NID_HELLO).map(|e| e.block_addr) == Some(B_HELLO),
         "the compacted-summary journal is found in the fallback pack",
     );
     c.check(
@@ -1396,10 +1398,7 @@ fn test_checkpoint(c: &mut Checks) -> KernelResult<()> {
     );
     let src = MemorySource::new(bad_crc);
     let fallback = cp::read_checkpoint(&src, &sb)?;
-    c.check(
-        fallback.version == 3,
-        "a pack failing its CRC is skipped",
-    );
+    c.check(fallback.version == 3, "a pack failing its CRC is skipped");
 
     // A checksum_offset pointing into the header is impossible for any writer
     // to produce, because the CRC would overlap bytes it is computed from.
@@ -1899,7 +1898,10 @@ fn test_volume(c: &mut Checks) -> KernelResult<()> {
     // bit as the start of an entry finds five extra garbage entries after it.
     c.check(has_name(&sub, LONG_NAME), "a six-slot name is listed");
     c.check(
-        sub.iter().filter(|e| e.name.as_bytes() == LONG_NAME).count() == 1,
+        sub.iter()
+            .filter(|e| e.name.as_bytes() == LONG_NAME)
+            .count()
+            == 1,
         "the long name's continuation slots produce no extra entries",
     );
 
@@ -1998,7 +2000,9 @@ fn test_volume(c: &mut Checks) -> KernelResult<()> {
 
     // --- path resolution --------------------------------------------------
 
-    let long = fs.read_file(Path::new("/sub/a-very-long-file-name-that-spans-many-slots.txt"))?;
+    let long = fs.read_file(Path::new(
+        "/sub/a-very-long-file-name-that-spans-many-slots.txt",
+    ))?;
     c.check_bytes(&long, LONG_TEXT, "a six-slot name resolves");
 
     let via_dotdot = fs.read_file(Path::new("/sub/../hello.txt"))?;
@@ -2189,10 +2193,13 @@ fn test_corruption(c: &mut Checks) -> KernelResult<()> {
                     HELLO_TEXT,
                     "the fallback pack's compacted journal still finds hello.txt",
                 ),
-                Err(e) => c.check(false, match e {
-                    KernelError::NotFound => "hello.txt after fallback: not found",
-                    _ => "hello.txt after fallback: read failed",
-                }),
+                Err(e) => c.check(
+                    false,
+                    match e {
+                        KernelError::NotFound => "hello.txt after fallback: not found",
+                        _ => "hello.txt after fallback: read failed",
+                    },
+                ),
             }
             c.check(
                 fs.readdir(Path::new("/")).map(|v| v.len()) == Ok(6),
@@ -2217,7 +2224,10 @@ fn test_corruption(c: &mut Checks) -> KernelResult<()> {
                 "the volume is readable through the backup superblock",
             );
         }
-        Err(_) => c.check(false, "a destroyed primary superblock must not stop a mount"),
+        Err(_) => c.check(
+            false,
+            "a destroyed primary superblock must not stop a mount",
+        ),
     }
 
     // --- damage that must be confined to the object it touches --------------
@@ -2230,7 +2240,11 @@ fn test_corruption(c: &mut Checks) -> KernelResult<()> {
     // A node footer naming the wrong node - the only guard on the NAT
     // indirection, since node blocks carry no checksum.
     let mut img = build_image();
-    put_u32(&mut img, blk(B_SUB).saturating_add(NODE_FOOTER_OFF), NID_BIG);
+    put_u32(
+        &mut img,
+        blk(B_SUB).saturating_add(NODE_FOOTER_OFF),
+        NID_BIG,
+    );
     let mut fs = mount_image(img)?;
     c.check_err(
         fs.readdir(Path::new("/sub")),
@@ -2248,7 +2262,9 @@ fn test_corruption(c: &mut Checks) -> KernelResult<()> {
     let mut img = build_image();
     put_u32(
         &mut img,
-        blk(B_DATA).saturating_add(NODE_FOOTER_OFF).saturating_add(4),
+        blk(B_DATA)
+            .saturating_add(NODE_FOOTER_OFF)
+            .saturating_add(4),
         NID_ROOT,
     );
     let mut fs = mount_image(img)?;
@@ -2335,11 +2351,7 @@ fn test_corruption(c: &mut Checks) -> KernelResult<()> {
     reseal_cp(&mut img, CP_BLKADDR + BLOCKS_PER_SEG);
     // The older pack still points at the live copy, so it has to go too;
     // otherwise the fallback would quietly repair the volume.
-    put_u64(
-        &mut img,
-        blk(CP_BLKADDR + CP_PACK_BLOCKS - 1),
-        555,
-    );
+    put_u64(&mut img, blk(CP_BLKADDR + CP_PACK_BLOCKS - 1), 555);
     c.check(
         mount_image(img).is_err(),
         "a NAT bitmap selecting the decoy copy fails the mount",
@@ -2382,7 +2394,10 @@ fn test_dentries(c: &mut Checks) -> KernelResult<()> {
 
     let root = node::read_inode(&nat, &sb, NID_ROOT)?;
     c.check(root.has_inline_dentry(), "the root's dentries are inline");
-    c.check(!root.has_inline_data(), "an inline dentry is not inline data");
+    c.check(
+        !root.has_inline_data(),
+        "an inline dentry is not inline data",
+    );
     c.check(root.is_dir() && !root.is_file(), "the root is a directory");
 
     // Below the VFS, `.` and `..` are ordinary entries; it is the VFS layer
@@ -2445,7 +2460,10 @@ fn test_dentries(c: &mut Checks) -> KernelResult<()> {
     // --- the block-backed directory ----------------------------------------
 
     let sub = node::read_inode(&nat, &sb, NID_SUB)?;
-    c.check(!sub.has_inline_dentry(), "/sub keeps its dentries in blocks");
+    c.check(
+        !sub.has_inline_dentry(),
+        "/sub keeps its dentries in blocks",
+    );
     let entries = dir::read_dir(&nat, &sb, &sub)?;
     c.check(entries.len() == 4, "/sub holds four entries in all");
     // Its second block is a hole. A directory with an unfilled bucket is

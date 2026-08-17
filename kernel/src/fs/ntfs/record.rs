@@ -148,9 +148,11 @@ pub fn apply_fixups(buf: &mut [u8], magic: &[u8; 4], bytes_per_sector: u32) -> K
         }
 
         let entry_off = usa_offset
-            .checked_add(i.checked_add(1).and_then(|n| n.checked_mul(2)).ok_or(
-                KernelError::CorruptedData,
-            )?)
+            .checked_add(
+                i.checked_add(1)
+                    .and_then(|n| n.checked_mul(2))
+                    .ok_or(KernelError::CorruptedData)?,
+            )
             .ok_or(KernelError::CorruptedData)?;
         let original = u16_at(buf, entry_off).ok_or(KernelError::CorruptedData)?;
 
@@ -215,7 +217,9 @@ impl FileRecord {
             buf.len()
         };
 
-        let region = buf.get(attrs_offset..end).ok_or(KernelError::CorruptedData)?;
+        let region = buf
+            .get(attrs_offset..end)
+            .ok_or(KernelError::CorruptedData)?;
         let attributes = parse_attributes(region)?;
 
         Ok(Self {

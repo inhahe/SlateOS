@@ -138,7 +138,8 @@ impl NodeHeader {
     pub fn parse(buf: &[u8], offset: usize) -> KernelResult<Self> {
         Ok(Self {
             entries_offset: u32_at(buf, offset).ok_or(KernelError::CorruptedData)?,
-            entries_size: u32_at(buf, offset.saturating_add(4)).ok_or(KernelError::CorruptedData)?,
+            entries_size: u32_at(buf, offset.saturating_add(4))
+                .ok_or(KernelError::CorruptedData)?,
             allocated_size: u32_at(buf, offset.saturating_add(8))
                 .ok_or(KernelError::CorruptedData)?,
             flags: u32_at(buf, offset.saturating_add(12)).ok_or(KernelError::CorruptedData)?,
@@ -180,7 +181,9 @@ pub fn parse_node(buf: &[u8], node_offset: usize) -> KernelResult<Vec<IndexEntry
     let header = NodeHeader::parse(buf, node_offset)?;
 
     let first = node_offset
-        .checked_add(usize::try_from(header.entries_offset).map_err(|_| KernelError::CorruptedData)?)
+        .checked_add(
+            usize::try_from(header.entries_offset).map_err(|_| KernelError::CorruptedData)?,
+        )
         .ok_or(KernelError::CorruptedData)?;
     let end = node_offset
         .checked_add(usize::try_from(header.entries_size).map_err(|_| KernelError::CorruptedData)?)
@@ -206,7 +209,9 @@ pub fn parse_node(buf: &[u8], node_offset: usize) -> KernelResult<Vec<IndexEntry
         if entry_end > end {
             return Err(KernelError::CorruptedData);
         }
-        let entry = buf.get(offset..entry_end).ok_or(KernelError::CorruptedData)?;
+        let entry = buf
+            .get(offset..entry_end)
+            .ok_or(KernelError::CorruptedData)?;
 
         let reference = u64_at(entry, 0x00).ok_or(KernelError::CorruptedData)?;
         let key_len = usize::from(u16_at(entry, 0x0A).ok_or(KernelError::CorruptedData)?);

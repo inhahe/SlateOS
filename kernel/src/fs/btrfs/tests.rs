@@ -75,8 +75,8 @@ use crate::serial_println;
 use super::BtrfsFs;
 use super::btree::TreeReader;
 use super::chunk::{
-    BLOCK_GROUP_DATA, BLOCK_GROUP_DUP, BLOCK_GROUP_METADATA, BLOCK_GROUP_RAID0,
-    BLOCK_GROUP_SYSTEM, ChunkEntry, ChunkMap, parse_chunk_item,
+    BLOCK_GROUP_DATA, BLOCK_GROUP_DUP, BLOCK_GROUP_METADATA, BLOCK_GROUP_RAID0, BLOCK_GROUP_SYSTEM,
+    ChunkEntry, ChunkMap, parse_chunk_item,
 };
 use super::items::{
     FILE_EXTENT_INLINE, FILE_EXTENT_PREALLOC, FILE_EXTENT_REG, FT_DIR, FT_REG_FILE, FT_SYMLINK,
@@ -86,7 +86,7 @@ use super::raw::{
     CHUNK_ITEM_KEY, CHUNK_TREE_OBJECTID, DEV_ITEM_KEY, DIR_INDEX_KEY, DIR_ITEM_KEY,
     EXTENT_DATA_KEY, EXTENT_TREE_OBJECTID, FIRST_CHUNK_TREE_OBJECTID, FS_TREE_OBJECTID, HEADER_LEN,
     INODE_ITEM_KEY, INODE_REF_KEY, ITEM_LEN, KEY_LEN, KEY_PTR_LEN, Key, MAGIC, ROOT_ITEM_KEY,
-    ROOT_TREE_OBJECTID, read_u16, read_u32, read_u64, read_u8,
+    ROOT_TREE_OBJECTID, read_u8, read_u16, read_u32, read_u64,
 };
 use super::sb::{
     FEATURE_INCOMPAT_BIG_METADATA, FEATURE_INCOMPAT_COMPRESS_ZSTD, FEATURE_INCOMPAT_EXTENDED_IREF,
@@ -1243,7 +1243,10 @@ fn test_chunk_map(c: &mut Checks) -> KernelResult<()> {
     let key = Key::new(FIRST_CHUNK_TREE_OBJECTID, CHUNK_ITEM_KEY, LOG_META);
     let item = chunk_item(LEN_META, BLOCK_GROUP_METADATA, DEVID, PHYS_META, 1);
     let (entry, consumed) = parse_chunk_item(&key, &item)?;
-    c.check(entry.logical == LOG_META, "chunk logical comes from the key");
+    c.check(
+        entry.logical == LOG_META,
+        "chunk logical comes from the key",
+    );
     c.check(entry.physical == PHYS_META, "chunk physical is stripe 0");
     c.check(entry.length == LEN_META, "chunk length");
     c.check(entry.devid == DEVID, "chunk devid");
@@ -1295,16 +1298,27 @@ fn test_chunk_map(c: &mut Checks) -> KernelResult<()> {
         "a RAID0 chunk is refused",
     );
     c.check(
-        parse_chunk_item(&Key::new(FIRST_CHUNK_TREE_OBJECTID, ROOT_ITEM_KEY, 0), &item).is_err(),
+        parse_chunk_item(
+            &Key::new(FIRST_CHUNK_TREE_OBJECTID, ROOT_ITEM_KEY, 0),
+            &item,
+        )
+        .is_err(),
         "a chunk item under the wrong key type is refused",
     );
     c.check(
-        parse_chunk_item(&key, &chunk_item(0, BLOCK_GROUP_METADATA, DEVID, PHYS_META, 1)).is_err(),
+        parse_chunk_item(
+            &key,
+            &chunk_item(0, BLOCK_GROUP_METADATA, DEVID, PHYS_META, 1),
+        )
+        .is_err(),
         "a zero-length chunk is refused",
     );
     c.check(
-        parse_chunk_item(&key, &chunk_item(LEN_META, BLOCK_GROUP_METADATA, DEVID, PHYS_META, 0))
-            .is_err(),
+        parse_chunk_item(
+            &key,
+            &chunk_item(LEN_META, BLOCK_GROUP_METADATA, DEVID, PHYS_META, 0),
+        )
+        .is_err(),
         "a chunk with no stripes is refused",
     );
     c.check(
@@ -1337,15 +1351,13 @@ fn test_chunk_map(c: &mut Checks) -> KernelResult<()> {
     // logically and generally not physically, so mapping only its first byte
     // would read whatever chunk happens to sit next on the device.
     c.check(
-        map.map_range(LOG_META.saturating_sub(0x800), 0x1000).is_err(),
+        map.map_range(LOG_META.saturating_sub(0x800), 0x1000)
+            .is_err(),
         "a range spanning two chunks is refused",
     );
     c.check(
-        map.map_range(
-            LOG_DATA.saturating_add(LEN_DATA).saturating_sub(16),
-            32,
-        )
-        .is_err(),
+        map.map_range(LOG_DATA.saturating_add(LEN_DATA).saturating_sub(16), 32)
+            .is_err(),
         "a range running off the end of the last chunk is refused",
     );
 
@@ -1525,7 +1537,10 @@ fn test_btree(c: &mut Checks) -> KernelResult<()> {
 
     let leaf = reader.read_node(LOG_FS_LEAF_A, Some(GEN))?;
     c.check(leaf.header.is_leaf(), "leaf A is a leaf");
-    c.check(leaf.header.bytenr == LOG_FS_LEAF_A, "leaf A knows its address");
+    c.check(
+        leaf.header.bytenr == LOG_FS_LEAF_A,
+        "leaf A knows its address",
+    );
     c.check(leaf.header.generation == GEN, "leaf A generation");
     c.check(leaf.header.owner == FS_TREE_OBJECTID, "leaf A owner");
     c.check(leaf.nritems() == 19, "leaf A item count");
@@ -1569,7 +1584,10 @@ fn test_btree(c: &mut Checks) -> KernelResult<()> {
     // A checksum cannot catch a *valid* block that is simply not the one
     // asked for; `bytenr` is what does.
     c.check(
-        reader.read_node(LOG_FS_LEAF_B, Some(GEN)).map(|n| n.header.bytenr) == Ok(LOG_FS_LEAF_B),
+        reader
+            .read_node(LOG_FS_LEAF_B, Some(GEN))
+            .map(|n| n.header.bytenr)
+            == Ok(LOG_FS_LEAF_B),
         "leaf B reads back at its own address",
     );
     c.check(
@@ -1577,7 +1595,9 @@ fn test_btree(c: &mut Checks) -> KernelResult<()> {
         "an address holding no block at all fails the checksum",
     );
     c.check(
-        reader.read_node(LOG_DATA.saturating_add(LEN_DATA), None).is_err(),
+        reader
+            .read_node(LOG_DATA.saturating_add(LEN_DATA), None)
+            .is_err(),
         "an address outside every chunk is refused",
     );
 
@@ -1640,13 +1660,21 @@ fn test_btree(c: &mut Checks) -> KernelResult<()> {
 
     c.check(
         reader
-            .find(LOG_FS_NODE, Some(GEN), &Key::new(INO_HELLO, EXTENT_DATA_KEY, 0))?
+            .find(
+                LOG_FS_NODE,
+                Some(GEN),
+                &Key::new(INO_HELLO, EXTENT_DATA_KEY, 0),
+            )?
             .is_some(),
         "an exact key is found",
     );
     c.check(
         reader
-            .find(LOG_FS_NODE, Some(GEN), &Key::new(INO_HELLO, EXTENT_DATA_KEY, 1))?
+            .find(
+                LOG_FS_NODE,
+                Some(GEN),
+                &Key::new(INO_HELLO, EXTENT_DATA_KEY, 1),
+            )?
             .is_none(),
         "a near-miss key is not",
     );
@@ -1693,7 +1721,11 @@ fn test_volume(c: &mut Checks) -> KernelResult<()> {
             c.check(false, "missing root entry");
             continue;
         };
-        c.check_bytes(entry.name.as_bytes(), name, "root entry name in DIR_INDEX order");
+        c.check_bytes(
+            entry.name.as_bytes(),
+            name,
+            "root entry name in DIR_INDEX order",
+        );
         let want = match *ftype {
             FT_DIR => EntryType::Directory,
             FT_SYMLINK => EntryType::Symlink,
@@ -1815,16 +1847,25 @@ fn test_volume(c: &mut Checks) -> KernelResult<()> {
     c.check(meta.size == u64_len(HELLO_TEXT), "metadata size");
     c.check(meta.nlinks == 1, "metadata link count");
     c.check(
-        meta.modified_ns == MTIME_SEC.saturating_mul(1_000_000_000).saturating_add(u64::from(MTIME_NSEC)),
+        meta.modified_ns
+            == MTIME_SEC
+                .saturating_mul(1_000_000_000)
+                .saturating_add(u64::from(MTIME_NSEC)),
         "metadata mtime",
     );
     c.check(
-        meta.created_ns == OTIME_SEC.saturating_mul(1_000_000_000).saturating_add(u64::from(OTIME_NSEC)),
+        meta.created_ns
+            == OTIME_SEC
+                .saturating_mul(1_000_000_000)
+                .saturating_add(u64::from(OTIME_NSEC)),
         "btrfs records a creation time and it is reported",
     );
     // A read-only mount that advertised write bits would be lying to
     // userspace, which would then act on it.
-    c.check(meta.permissions == 0o444, "0644 is reported without write bits");
+    c.check(
+        meta.permissions == 0o444,
+        "0644 is reported without write bits",
+    );
     c.check(
         fs.metadata(Path::new("/sub"))?.permissions == 0o555,
         "0755 keeps execute but loses write",
@@ -1855,12 +1896,18 @@ fn test_volume(c: &mut Checks) -> KernelResult<()> {
     c.check(info.read_only, "the mount is read-only");
     c.check(info.fs_type == "btrfs", "statvfs fs type");
     c.check(info.volume_label.as_bytes() == LABEL, "statvfs label");
-    c.check(info.block_size == u64::from(SECTORSIZE), "statvfs block size");
+    c.check(
+        info.block_size == u64::from(SECTORSIZE),
+        "statvfs block size",
+    );
     c.check(
         info.total_blocks == TOTAL_BYTES.checked_div(u64::from(SECTORSIZE)).unwrap_or(0),
         "statvfs total blocks",
     );
-    c.check(info.free_blocks == 0, "a read-only mount reports no free space");
+    c.check(
+        info.free_blocks == 0,
+        "a read-only mount reports no free space",
+    );
     c.check(info.max_name_len == 255, "statvfs max name length");
 
     // --- errors ---
@@ -1925,7 +1972,12 @@ fn test_corruption(c: &mut Checks) -> KernelResult<()> {
     // A block that is valid and current but is not the one we followed a
     // pointer to. A checksum cannot see this; `bytenr` can.
     let mut displaced = build_image()?;
-    patch_block(&mut displaced, LOG_FS_LEAF_A, 48, &LOG_FS_LEAF_B.to_le_bytes())?;
+    patch_block(
+        &mut displaced,
+        LOG_FS_LEAF_A,
+        48,
+        &LOG_FS_LEAF_B.to_le_bytes(),
+    )?;
     c.check_err(
         mount_image(displaced),
         KernelError::IoError,
@@ -1993,7 +2045,12 @@ fn test_corruption(c: &mut Checks) -> KernelResult<()> {
     // The copy-on-write hazard: this block is intact and checksums perfectly,
     // it is simply the wrong version. Only the generation catches it.
     let mut stale = build_image()?;
-    patch_block(&mut stale, LOG_FS_LEAF_B, 80, &GEN.saturating_sub(1).to_le_bytes())?;
+    patch_block(
+        &mut stale,
+        LOG_FS_LEAF_B,
+        80,
+        &GEN.saturating_sub(1).to_le_bytes(),
+    )?;
     let mut fs = mount_image(stale)?;
     c.check(
         fs.readdir(Path::new("/")).is_ok(),

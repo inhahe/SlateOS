@@ -79,6 +79,7 @@ use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 use crate::serial_println;
 
+use crate::fs::blocksrc::{DeviceSource, SectorSource, read_bytes};
 use attr::{
     Attribute, AttributeBody, AttributeType, DataRun, FileNameAttr, StandardInformation,
     parse_attribute_list,
@@ -86,7 +87,6 @@ use attr::{
 use boot::BootSector;
 use index::{DIR_INDEX_NAME, INDEX_ROOT_NODE_OFFSET, INDX_NODE_OFFSET, IndexEntry, IndexRoot};
 use record::{FILE_MAGIC, FileRecord, ROOT_RECORD, apply_fixups, mft_ref_record};
-use crate::fs::blocksrc::{DeviceSource, SectorSource, read_bytes};
 
 /// Largest file we will read into memory in one call.
 ///
@@ -491,7 +491,8 @@ impl NtfsFs {
                     data_size = *ds;
                     initialized = *is;
                 }
-                compressed = compressed || attr.header.is_compressed() || attr.header.is_encrypted();
+                compressed =
+                    compressed || attr.header.is_compressed() || attr.header.is_encrypted();
                 runs.extend_from_slice(piece_runs);
             }
         }
@@ -621,7 +622,9 @@ impl NtfsFs {
                 .find(AttributeType::DATA, "")
                 .ok_or(KernelError::NotFound)?;
             let value = attr.resident_value().ok_or(KernelError::InternalError)?;
-            let start = usize::try_from(offset).unwrap_or(usize::MAX).min(value.len());
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(value.len());
             let end = start.saturating_add(len).min(value.len());
             return Ok(value.get(start..end).map_or_else(Vec::new, <[u8]>::to_vec));
         }

@@ -299,7 +299,10 @@ fn read_nat_journal(
     // freshness on recently-written nodes, and refusing the whole volume over
     // it would be a strictly worse outcome than mounting a slightly older view.
     let Ok(buf) = read_bytes(src, block_to_offset(block), BLOCK_SIZE) else {
-        crate::serial_println!("[f2fs] NAT journal unreadable at block {}; ignoring.", block);
+        crate::serial_println!(
+            "[f2fs] NAT journal unreadable at block {}; ignoring.",
+            block
+        );
         return Vec::new();
     };
 

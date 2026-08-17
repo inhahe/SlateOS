@@ -141,8 +141,21 @@ pub fn encode_scene_frame(frame: &SceneFrame) -> Vec<u8> {
 // Decoding
 // ---------------------------------------------------------------------------
 
-/// Decode a scene frame from its wire representation.
-pub fn decode_scene_frame(input: &[u8]) -> Result<SceneFrame, DecodeError> {
+/// Decode a scene frame from its wire representation, returning it and the
+/// number of bytes it occupied.
+///
+/// The byte count is what lets a scene frame share a stream with other frames:
+/// without it a caller can decode one and then has no idea where the next
+/// begins, so a scene frame could only ever be alone in its buffer. Every other
+/// decoder in this crate reports it for the same reason.
+///
+/// # Errors
+///
+/// [`DecodeError::BadMagic`] if the frame is not `SCEN`,
+/// [`DecodeError::UnsupportedVersion`] for a version this build does not know,
+/// [`DecodeError::UnexpectedEof`] for a short buffer, and
+/// [`DecodeError::TooManyWindows`] for a count that would allocate absurdly.
+pub fn decode_scene_frame(input: &[u8]) -> Result<(SceneFrame, usize), DecodeError> {
     let mut r = Reader::new(input);
     r.need(SCENE_HEADER_LEN)?;
     let magic = [r.buf[0], r.buf[1], r.buf[2], r.buf[3]];
@@ -207,13 +220,32 @@ pub fn decode_scene_frame(input: &[u8]) -> Result<SceneFrame, DecodeError> {
         });
     }
 
-    Ok(SceneFrame {
-        sequence,
-        display_width,
-        display_height,
-        windows,
-        removed,
-    })
+    Ok((
+        SceneFrame {
+            sequence,
+            display_width,
+            display_height,
+            windows,
+            removed,
+        },
+        r.pos,
+    ))
+}
+
+/// Streaming form of [`decode_scene_frame`]: `Ok(None)` when the buffer holds
+/// only part of a frame, so a caller reading from a transport can read more
+/// rather than treating a short read as corruption.
+///
+/// # Errors
+///
+/// As [`decode_scene_frame`], except that a short buffer is `Ok(None)` rather
+/// than [`DecodeError::UnexpectedEof`].
+pub fn try_decode_scene_frame(input: &[u8]) -> Result<Option<(SceneFrame, usize)>, DecodeError> {
+    match decode_scene_frame(input) {
+        Ok(v) => Ok(Some(v)),
+        Err(DecodeError::UnexpectedEof) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +450,8 @@ mod tests {
             removed: vec![7, 9],
         };
         let bytes = encode_scene_frame(&frame);
-        let back = decode_scene_frame(&bytes).expect("decode");
+        let (back, used) = decode_scene_frame(&bytes).expect("decode");
+        assert_eq!(used, bytes.len(), "a frame must account for all its bytes");
         assert_eq!(back.sequence, 42);
         assert_eq!(back.display_width, 1920);
         assert_eq!(back.display_height, 1080);
@@ -466,6 +499,65 @@ mod tests {
             removed: vec![],
         });
         assert!(decode_scene_frame(&bytes[..bytes.len() - 3]).is_err());
+    }
+
+    #[test]
+    fn two_frames_back_to_back_are_read_in_order() {
+        // The point of reporting bytes consumed: a scene frame can share a
+        // stream instead of having to be alone in its buffer.
+        let mut buf = Vec::new();
+        for seq in 1..=3u64 {
+            buf.extend_from_slice(&encode_scene_frame(&SceneFrame {
+                sequence: seq,
+                display_width: 800,
+                display_height: 600,
+                windows: vec![SceneWindow {
+                    id: seq,
+                    x: 0,
+                    y: 0,
+                    width: 10,
+                    height: 10,
+                    opacity: 1.0,
+                    commands: Some(sample_tree()),
+                }],
+                removed: vec![],
+            }));
+        }
+        let mut at = 0usize;
+        let mut seen = Vec::new();
+        while at < buf.len() {
+            let (frame, used) = decode_scene_frame(&buf[at..]).expect("decode");
+            seen.push(frame.sequence);
+            at += used;
+        }
+        assert_eq!(seen, vec![1, 2, 3]);
+        assert_eq!(at, buf.len(), "no bytes left over");
+    }
+
+    #[test]
+    fn a_partial_frame_reads_as_incomplete_rather_than_corrupt() {
+        let bytes = encode_scene_frame(&SceneFrame {
+            sequence: 1,
+            display_width: 640,
+            display_height: 480,
+            windows: vec![SceneWindow {
+                id: 1,
+                x: -5,
+                y: 5,
+                width: 100,
+                height: 100,
+                opacity: 0.5,
+                commands: Some(sample_tree()),
+            }],
+            removed: vec![3],
+        });
+        for n in 0..bytes.len() {
+            assert!(
+                matches!(try_decode_scene_frame(&bytes[..n]), Ok(None)),
+                "a {n}-byte prefix must read as incomplete, not as an error"
+            );
+        }
+        assert!(try_decode_scene_frame(&bytes).expect("decodes").is_some());
     }
 
     #[test]

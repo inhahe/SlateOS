@@ -5807,7 +5807,9 @@ mod tests {
             CompositorResponse::StreamFrame { data } => data,
             other => panic!("expected StreamFrame, got {other:?}"),
         };
-        let frame = guiremote::scene::decode_scene_frame(&data).expect("decode captured frame");
+        let (frame, used) =
+            guiremote::scene::decode_scene_frame(&data).expect("decode captured frame");
+        assert_eq!(used, data.len(), "the frame must account for all its bytes");
         assert_eq!(frame.sequence, 0);
         assert_eq!(frame.display_width, 400);
         assert_eq!(frame.display_height, 300);
@@ -5846,7 +5848,7 @@ mod tests {
         let stream_id = comp.start_stream();
 
         // First capture: the window is new to the session → commands present.
-        let f0 =
+        let (f0, _) =
             guiremote::scene::decode_scene_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
         assert_eq!(f0.windows.len(), 1);
         assert_eq!(f0.windows[0].id, id.raw());
@@ -5857,14 +5859,14 @@ mod tests {
         assert_eq!(cmds.commands.len(), 1);
 
         // Second capture with unchanged content: geometry-only delta.
-        let f1 =
+        let (f1, _) =
             guiremote::scene::decode_scene_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
         assert_eq!(f1.sequence, 1);
         assert!(f1.windows[0].commands.is_none());
 
         // Destroying the window makes the next frame report it as removed.
         assert!(comp.destroy_window(id).is_ok());
-        let f2 =
+        let (f2, _) =
             guiremote::scene::decode_scene_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
         assert!(f2.windows.is_empty());
         assert_eq!(f2.removed, vec![id.raw()]);

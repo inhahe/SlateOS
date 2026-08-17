@@ -119,7 +119,12 @@ fn remote_session_reconstructs_full_scene_across_deltas() {
         let snaps = snapshots(order, server);
         let frame = session.build_frame(display.0, display.1, &snaps);
         let bytes = encode_scene_frame(&frame);
-        let decoded = decode_scene_frame(&bytes).expect("viewer decodes the frame");
+        let (decoded, used) = decode_scene_frame(&bytes).expect("viewer decodes the frame");
+        assert_eq!(
+            used,
+            bytes.len(),
+            "the frame must account for all its bytes"
+        );
         // The decoded frame must describe the same window set + geometry.
         assert_eq!(decoded.windows.len(), order.len());
         for (slot, id) in order.iter().enumerate() {
@@ -183,7 +188,7 @@ fn remote_session_reconstructs_full_scene_across_deltas() {
         let frame = session.build_frame(display.0, display.1, &snaps);
         assert_eq!(frame.removed, vec![2], "the closed window must be reported");
         let bytes = encode_scene_frame(&frame);
-        let decoded = decode_scene_frame(&bytes).expect("decode");
+        let (decoded, _) = decode_scene_frame(&bytes).expect("decode");
         assert_eq!(decoded.removed, vec![2]);
         viewer = apply_scene_frame(&viewer, &decoded);
     }
@@ -215,7 +220,7 @@ fn remote_session_reconstructs_full_scene_across_deltas() {
         "after reset every present window must resend full commands"
     );
     let bytes = encode_scene_frame(&frame);
-    let decoded = decode_scene_frame(&bytes).expect("decode");
+    let (decoded, _) = decode_scene_frame(&bytes).expect("decode");
     fresh_viewer = apply_scene_frame(&fresh_viewer, &decoded);
     assert_viewer_matches(&[1, 3], &server, &fresh_viewer);
 }

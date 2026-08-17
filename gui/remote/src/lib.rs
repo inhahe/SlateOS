@@ -82,7 +82,7 @@ use guitk::style::CornerRadii;
 pub mod scene;
 pub use scene::{
     SceneFrame, SceneSession, SceneWindow, WindowSnapshot, apply_scene_frame, decode_scene_frame,
-    encode_scene_frame,
+    encode_scene_frame, try_decode_scene_frame,
 };
 
 pub mod input;
@@ -97,6 +97,9 @@ pub use control::{
     WindowSpec, decode_requests, decode_responses, encode_requests, encode_responses,
     try_decode_requests, try_decode_responses,
 };
+
+pub mod frame;
+pub use frame::{Frame, decode_any, try_decode_any};
 
 pub mod client;
 pub use client::{App, Client, ClientError, Response, Transport};

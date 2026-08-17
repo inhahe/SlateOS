@@ -68,6 +68,7 @@ pub use keymap::{ModifierState, key_for_scancode};
 // Remote draw-command streaming uses the shared `guiremote` crate's scene
 // protocol (multi-window deltas built on its single-window RenderCommand wire
 // codec), rather than a compositor-local duplicate.
+use guiremote::control::WindowSpec;
 use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
 
 // ---------------------------------------------------------------------------
@@ -91,6 +92,18 @@ const TITLE_BUTTON_SPACING: u32 = 4;
 
 /// Default window opacity (fully opaque).
 const DEFAULT_OPACITY: f32 = 1.0;
+
+/// Smallest client-area width the compositor will resize a window to.
+///
+/// A hard floor beneath any client-supplied minimum: a window narrower than
+/// its own title-bar buttons cannot be closed, moved or resized by the user,
+/// so honouring a client's request for one would hand it a way to strand a
+/// window on the desktop.
+const MIN_WINDOW_WIDTH: u32 = 100;
+
+/// Smallest client-area height the compositor will resize a window to. See
+/// [`MIN_WINDOW_WIDTH`].
+const MIN_WINDOW_HEIGHT: u32 = 50;
 
 /// Size, in pixels, for text the compositor draws itself — window titles and
 /// the like. Text inside a window carries its own size in the render command.
@@ -150,6 +163,8 @@ pub enum CompositorError {
     BufferTooLarge { width: u32, height: u32 },
     /// The referenced remote stream session id is not active.
     StreamNotFound(u64),
+    /// A resize was asked of a window the client declared non-resizable.
+    NotResizable(WindowId),
 }
 
 impl std::fmt::Display for CompositorError {
@@ -176,6 +191,7 @@ impl std::fmt::Display for CompositorError {
                 width, height, MAX_FB_WIDTH, MAX_FB_HEIGHT
             ),
             Self::StreamNotFound(id) => write!(f, "stream session not found: {}", id),
+            Self::NotResizable(id) => write!(f, "window is not resizable: {}", id.raw()),
         }
     }
 }
@@ -440,18 +456,43 @@ pub struct Window {
     pub restore_rect: Option<Rect>,
     /// Whether the window needs to be redrawn.
     pub dirty: bool,
+    /// Whether the compositor draws a title bar and borders for this window.
+    ///
+    /// A menu, a tooltip and a splash screen are all windows that must not get
+    /// a title bar; before this field existed the compositor drew one on
+    /// everything, so a client had no way to ask for a bare surface at all.
+    pub decorations: bool,
+    /// Whether the user may resize the window by dragging its border.
+    pub resizable: bool,
+    /// Whether the client draws its own background.
+    ///
+    /// When set, the compositor skips the opaque white client-area fill, so
+    /// whatever the client does not paint shows what is behind it. Distinct
+    /// from [`opacity`](Self::opacity), which fades the *whole* window
+    /// uniformly including its decorations.
+    pub transparent: bool,
+    /// Smallest client area the window may be resized to, if it named one.
+    pub min_size: Option<(u32, u32)>,
+    /// Largest client area the window may be resized to, if it named one.
+    pub max_size: Option<(u32, u32)>,
 }
 
 impl Window {
-    /// Create a new window with the given parameters.
-    fn new(title: String, x: i32, y: i32, width: u32, height: u32, client_pid: u64) -> Self {
+    /// Create a window on the terms a client asked for.
+    ///
+    /// `x`/`y` are passed separately rather than read from `spec.position`
+    /// because placement is the compositor's decision: a spec with no position
+    /// gets one chosen for it, and even one *with* a position may be overridden
+    /// by a tiling policy. By the time this is called the argument has been
+    /// settled either way.
+    fn from_spec(spec: &WindowSpec, x: i32, y: i32, client_pid: u64) -> Self {
         Self {
             id: WindowId::allocate(),
-            title,
+            title: spec.title.clone(),
             x,
             y,
-            width,
-            height,
+            width: spec.width,
+            height: spec.height,
             visible: true,
             minimized: false,
             maximized: false,
@@ -465,18 +506,55 @@ impl Window {
             fs_restore_rect: None,
             restore_rect: None,
             dirty: true,
+            decorations: spec.decorations,
+            resizable: spec.resizable,
+            transparent: spec.transparent,
+            min_size: spec.min_size,
+            max_size: spec.max_size,
         }
+    }
+
+    /// Whether this window is drawn with a frame right now.
+    ///
+    /// Fullscreen suppresses decorations regardless of what the client asked
+    /// for — a fullscreen window owns the entire display, and a title bar
+    /// floating over a game is not a thing anyone wants. The client's
+    /// `decorations` request is remembered, not overwritten, so leaving
+    /// fullscreen restores the frame.
+    pub const fn is_framed(&self) -> bool {
+        self.decorations && !self.fullscreen
+    }
+
+    /// How much space the frame takes on each side of the client area, in
+    /// pixels: `(top, side, bottom)`. All zero for an unframed window.
+    ///
+    /// Every piece of geometry below derives from this rather than reading
+    /// `TITLE_BAR_HEIGHT`/`BORDER_WIDTH` directly, so an undecorated window is
+    /// undecorated everywhere — hit testing, damage and drag detection
+    /// included — instead of only where someone remembered to check.
+    pub const fn frame_insets(&self) -> (u32, u32, u32) {
+        if self.is_framed() {
+            (TITLE_BAR_HEIGHT, BORDER_WIDTH, BORDER_WIDTH)
+        } else {
+            (0, 0, 0)
+        }
+    }
+
+    /// How far the drop shadow extends beyond the frame. Zero when unframed:
+    /// the shadow is part of the decoration, not of the window.
+    pub const fn shadow_extent(&self) -> u32 {
+        if self.is_framed() { SHADOW_SIZE } else { 0 }
     }
 
     /// Get the total bounds including decorations (title bar, borders, shadow).
     pub fn outer_rect(&self) -> Rect {
-        let total_width = self.width + (BORDER_WIDTH * 2) + (SHADOW_SIZE * 2);
-        let total_height = self.height + TITLE_BAR_HEIGHT + BORDER_WIDTH + (SHADOW_SIZE * 2);
+        let (top, side, bottom) = self.frame_insets();
+        let shadow = self.shadow_extent();
         Rect::new(
-            self.x - SHADOW_SIZE as i32 - BORDER_WIDTH as i32,
-            self.y - SHADOW_SIZE as i32 - TITLE_BAR_HEIGHT as i32,
-            total_width,
-            total_height,
+            self.x - shadow as i32 - side as i32,
+            self.y - shadow as i32 - top as i32,
+            self.width + (side * 2) + (shadow * 2),
+            self.height + top + bottom + (shadow * 2),
         )
     }
 
@@ -485,46 +563,134 @@ impl Window {
         Rect::new(self.x, self.y, self.width, self.height)
     }
 
-    /// Get the title bar rectangle (for drag and button hit testing).
-    pub fn title_bar_rect(&self) -> Rect {
-        Rect::new(
-            self.x - BORDER_WIDTH as i32,
-            self.y - TITLE_BAR_HEIGHT as i32,
-            self.width + (BORDER_WIDTH * 2),
-            TITLE_BAR_HEIGHT,
-        )
+    /// Get the title bar rectangle (for drag and button hit testing), or
+    /// `None` for a window that has no title bar.
+    ///
+    /// `Option` rather than an empty rect because every caller hit-tests
+    /// against it, and an empty rect contains no point only by accident of
+    /// arithmetic — the type should force the undecorated case to be
+    /// considered rather than have it fall out right by luck.
+    pub fn title_bar_rect(&self) -> Option<Rect> {
+        if !self.is_framed() {
+            return None;
+        }
+        let (top, side, _) = self.frame_insets();
+        Some(Rect::new(
+            self.x - side as i32,
+            self.y - top as i32,
+            self.width + (side * 2),
+            top,
+        ))
     }
 
-    /// Get the close button rectangle.
-    pub fn close_button_rect(&self) -> Rect {
-        let title_rect = self.title_bar_rect();
+    /// The rectangle of the title-bar button in the given slot, counting from
+    /// the right-hand edge: slot 0 is the rightmost.
+    ///
+    /// Slots rather than a chain (`minimize` positioned off `maximize`, off
+    /// `close`) because a window that cannot be maximised has no maximize
+    /// button, and a chain would leave a hole where it used to be instead of
+    /// letting minimize move up into the vacated slot.
+    fn title_button_rect(&self, slot: u32) -> Option<Rect> {
+        let title_rect = self.title_bar_rect()?;
+        let step = (TITLE_BUTTON_SIZE + TITLE_BUTTON_SPACING) as i32;
         let btn_x = title_rect.x + title_rect.width as i32
             - TITLE_BUTTON_SIZE as i32
-            - TITLE_BUTTON_SPACING as i32;
-        let btn_y = title_rect.y + (TITLE_BAR_HEIGHT as i32 - TITLE_BUTTON_SIZE as i32) / 2;
-        Rect::new(btn_x, btn_y, TITLE_BUTTON_SIZE, TITLE_BUTTON_SIZE)
+            - TITLE_BUTTON_SPACING as i32
+            - (slot as i32 * step);
+        let btn_y = title_rect.y + (title_rect.height as i32 - TITLE_BUTTON_SIZE as i32) / 2;
+        Some(Rect::new(
+            btn_x,
+            btn_y,
+            TITLE_BUTTON_SIZE,
+            TITLE_BUTTON_SIZE,
+        ))
     }
 
-    /// Get the maximize button rectangle.
-    pub fn maximize_button_rect(&self) -> Rect {
-        let close_rect = self.close_button_rect();
-        Rect::new(
-            close_rect.x - TITLE_BUTTON_SIZE as i32 - TITLE_BUTTON_SPACING as i32,
-            close_rect.y,
-            TITLE_BUTTON_SIZE,
-            TITLE_BUTTON_SIZE,
-        )
+    /// Get the close button rectangle, or `None` when there is no title bar.
+    pub fn close_button_rect(&self) -> Option<Rect> {
+        self.title_button_rect(0)
     }
 
-    /// Get the minimize button rectangle.
-    pub fn minimize_button_rect(&self) -> Rect {
-        let max_rect = self.maximize_button_rect();
-        Rect::new(
-            max_rect.x - TITLE_BUTTON_SIZE as i32 - TITLE_BUTTON_SPACING as i32,
-            max_rect.y,
-            TITLE_BUTTON_SIZE,
-            TITLE_BUTTON_SIZE,
+    /// Get the maximize button rectangle, or `None` when there is no title bar
+    /// or the window cannot be resized.
+    ///
+    /// Maximising is a resize, so a window that declared itself non-resizable
+    /// does not get the button at all — drawing one that refuses to work is
+    /// worse than not drawing it.
+    pub fn maximize_button_rect(&self) -> Option<Rect> {
+        if !self.resizable {
+            return None;
+        }
+        self.title_button_rect(1)
+    }
+
+    /// Get the minimize button rectangle, or `None` when there is no title bar.
+    ///
+    /// Minimising is always available: it does not change the window's size,
+    /// only whether it is on screen.
+    pub fn minimize_button_rect(&self) -> Option<Rect> {
+        self.title_button_rect(if self.resizable { 2 } else { 1 })
+    }
+
+    /// The title bar and the buttons on it, as one value.
+    ///
+    /// Gathered up front so the renderer can be handed the same rectangles the
+    /// hit test uses without borrowing the window across the call — the
+    /// compositor's render methods take `&mut self`, and the window lives in
+    /// `self.windows`.
+    pub fn title_bar_layout(&self) -> Option<TitleBarLayout> {
+        Some(TitleBarLayout {
+            bar: self.title_bar_rect()?,
+            close: self.close_button_rect(),
+            maximize: self.maximize_button_rect(),
+            minimize: self.minimize_button_rect(),
+        })
+    }
+
+    /// Clamp a requested client-area size to the window's declared limits.
+    ///
+    /// The floor of `MIN_WINDOW_WIDTH`/`MIN_WINDOW_HEIGHT` applies even to a
+    /// window that asked for something smaller: a window with no title bar
+    /// visible enough to grab is one the user cannot recover.
+    ///
+    /// A `max_size` below the corresponding `min_size` is contradictory; the
+    /// minimum wins, because a window too small to use is worse than one
+    /// larger than it asked to be.
+    pub fn clamp_size(&self, width: u32, height: u32) -> (u32, u32) {
+        let (min_w, min_h) = self.min_size.unwrap_or((0, 0));
+        let min_w = min_w.max(MIN_WINDOW_WIDTH);
+        let min_h = min_h.max(MIN_WINDOW_HEIGHT);
+        let (max_w, max_h) = self.max_size.unwrap_or((u32::MAX, u32::MAX));
+        (
+            width.clamp(min_w, max_w.max(min_w)),
+            height.clamp(min_h, max_h.max(min_h)),
         )
+    }
+}
+
+/// Where a window's title bar and its buttons are on screen.
+///
+/// One value so that drawing and hit testing cannot drift apart: both read
+/// these rectangles, rather than each deriving the same arithmetic from the
+/// window's origin and the button constants.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TitleBarLayout {
+    /// The bar itself, spanning the window's full framed width.
+    pub bar: Rect,
+    /// The close button. Always present on a title bar.
+    pub close: Option<Rect>,
+    /// The maximize button, absent for a non-resizable window.
+    pub maximize: Option<Rect>,
+    /// The minimize button. Always present on a title bar.
+    pub minimize: Option<Rect>,
+}
+
+impl TitleBarLayout {
+    /// How many buttons this bar actually carries.
+    pub const fn button_count(&self) -> u32 {
+        self.close.is_some() as u32
+            + self.maximize.is_some() as u32
+            + self.minimize.is_some() as u32
     }
 }
 
@@ -1397,13 +1563,15 @@ impl FrameStats {
 /// Requests from clients to the compositor.
 #[derive(Clone, Debug)]
 pub enum CompositorRequest {
-    /// Create a new window.
-    CreateWindow {
-        title: String,
-        width: u32,
-        height: u32,
-        client_pid: u64,
-    },
+    /// Create a new window on the terms the client asked for.
+    ///
+    /// Carries the whole [`WindowSpec`] rather than title/width/height,
+    /// because anything it does not carry is something the compositor cannot
+    /// honour: before it did, every window was decorated, resizable and opaque
+    /// no matter what the client wanted. `client_pid` is separate because it is
+    /// not part of the request — the compositor knows which connection the
+    /// request arrived on and the client does not get to claim otherwise.
+    CreateWindow { spec: WindowSpec, client_pid: u64 },
     /// Destroy an existing window.
     DestroyWindow { window_id: WindowId },
     /// Set the window title.
@@ -1429,6 +1597,8 @@ pub enum CompositorRequest {
     SetFullscreen { window_id: WindowId, enable: bool },
     /// Restore a window from minimized/maximized state.
     Restore { window_id: WindowId },
+    /// Show or hide a window without destroying it.
+    SetVisible { window_id: WindowId, visible: bool },
     /// Set the cursor shape for a window.
     SetCursor {
         window_id: WindowId,
@@ -2536,7 +2706,13 @@ impl Compositor {
     // Window management
     // -----------------------------------------------------------------------
 
-    /// Create a new window and return its ID.
+    /// Create a new window with the ordinary defaults and return its ID.
+    ///
+    /// Kept as the short form for the compositor's own windows and for tests;
+    /// a client's window arrives through [`create_window_from_spec`] with the
+    /// terms it asked for.
+    ///
+    /// [`create_window_from_spec`]: Self::create_window_from_spec
     pub fn create_window(
         &mut self,
         title: String,
@@ -2544,12 +2720,26 @@ impl Compositor {
         height: u32,
         client_pid: u64,
     ) -> WindowId {
-        // Place the window at a slightly offset position from existing windows.
-        let offset = (self.windows.len() as i32 * 30) % 300;
-        let x = 100 + offset;
-        let y = 80 + offset;
+        self.create_window_from_spec(&WindowSpec::new(title, width, height), client_pid)
+    }
 
-        let window = Window::new(title, x, y, width, height, client_pid);
+    /// Create a window on the terms a client asked for, and return its ID.
+    ///
+    /// The requested size is clamped to the window's own declared limits
+    /// immediately, so a spec whose `width` is below its `min_size` can never
+    /// produce a window that violates the constraint it shipped with.
+    pub fn create_window_from_spec(&mut self, spec: &WindowSpec, client_pid: u64) -> WindowId {
+        // Honour a requested position; otherwise place the window at a slightly
+        // offset position from existing windows so they don't pile up.
+        let (x, y) = spec.position.unwrap_or_else(|| {
+            let offset = (self.windows.len() as i32 * 30) % 300;
+            (100 + offset, 80 + offset)
+        });
+
+        let mut window = Window::from_spec(spec, x, y, client_pid);
+        let (w, h) = window.clamp_size(window.width, window.height);
+        window.width = w;
+        window.height = h;
         let id = window.id;
 
         self.windows.push(window);
@@ -2622,10 +2812,14 @@ impl Compositor {
             let window = self
                 .window_mut(window_id)
                 .ok_or(CompositorError::WindowNotFound(window_id))?;
-            window.width = width.max(100); // Minimum window size
-            window.height = height.max(50);
+            // The client's own declared limits bound this, not just the global
+            // floor: a window that said it is unusable below 400x300 gets 400x300
+            // however small the drag went.
+            let (w, h) = window.clamp_size(width, height);
+            window.width = w;
+            window.height = h;
             window.dirty = true;
-            (window.width, window.height)
+            (w, h)
         };
 
         // Damage new area.
@@ -2664,7 +2858,18 @@ impl Compositor {
     }
 
     /// Maximize a window to fill the display.
+    ///
+    /// Refused for a window the client declared non-resizable: maximising is a
+    /// resize, and a window that said it only works at one size means it.
     pub fn maximize_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        if !self
+            .window_ref(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?
+            .resizable
+        {
+            return Err(CompositorError::NotResizable(window_id));
+        }
+
         self.damage_window(window_id);
 
         let display_bounds = self.display_manager.virtual_bounds();
@@ -2681,14 +2886,23 @@ impl Compositor {
             }
 
             window.maximized = true;
-            window.x = display_bounds.x + BORDER_WIDTH as i32;
-            window.y = display_bounds.y + TITLE_BAR_HEIGHT as i32;
-            window.width = display_bounds.width.saturating_sub(BORDER_WIDTH * 2);
-            window.height = display_bounds
-                .height
-                .saturating_sub(TITLE_BAR_HEIGHT + BORDER_WIDTH);
+            // Inset by this window's own frame, not by the constants: an
+            // undecorated window has no frame to leave room for and should
+            // fill the display exactly rather than being pushed 30px down.
+            let (top, side, bottom) = window.frame_insets();
+            window.x = display_bounds.x + side as i32;
+            window.y = display_bounds.y + top as i32;
+            // A `max_size` still binds when maximised — a window that cannot
+            // usefully be drawn wider stays at its width and is simply anchored
+            // at the top-left of the work area.
+            let (w, h) = window.clamp_size(
+                display_bounds.width.saturating_sub(side * 2),
+                display_bounds.height.saturating_sub(top + bottom),
+            );
+            window.width = w;
+            window.height = h;
             window.dirty = true;
-            (window.width, window.height)
+            (w, h)
         };
 
         self.damage_window(window_id);
@@ -2898,6 +3112,41 @@ impl Compositor {
         window.title = title;
         window.dirty = true;
         self.damage_window(window_id);
+        Ok(())
+    }
+
+    /// Show or hide a window without destroying it.
+    ///
+    /// Distinct from minimizing: a hidden window is not on the taskbar and is
+    /// not something the user can bring back — it is off screen because the
+    /// application said so. Showing one therefore clears `minimized` as well,
+    /// since a window the client has explicitly asked to be visible should not
+    /// stay collapsed for a reason the client cannot see.
+    pub fn set_visible(&mut self, window_id: WindowId, visible: bool) -> CompositorResult<()> {
+        self.damage_window(window_id);
+
+        let window = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        window.visible = visible;
+        if visible {
+            window.minimized = false;
+        }
+        window.dirty = true;
+
+        // Hiding the focused window leaves focus nowhere; hand it to whatever
+        // is now on top rather than leaving keystrokes going to a window the
+        // user cannot see.
+        if !visible && self.focused_window == Some(window_id) {
+            self.focused_window = None;
+            self.focus_topmost_visible();
+        }
+
+        self.damage_window(window_id);
+        // A window that disappeared exposes whatever was beneath it, which the
+        // per-window damage pass will not redraw because it skips invisible
+        // windows.
+        self.full_recomposite = true;
         Ok(())
     }
 
@@ -3152,13 +3401,13 @@ impl Compositor {
                 // Check if we hit a decoration element.
                 if let Some(win) = self.window_ref(window_id) {
                     // Close button?
-                    if win.close_button_rect().contains(x, y) {
+                    if win.close_button_rect().is_some_and(|r| r.contains(x, y)) {
                         self.pending_notifications
                             .push_back(EventNotification::WindowClose { window_id });
                         return;
                     }
                     // Maximize button?
-                    if win.maximize_button_rect().contains(x, y) {
+                    if win.maximize_button_rect().is_some_and(|r| r.contains(x, y)) {
                         if win.maximized {
                             let _ = self.restore_window(window_id);
                         } else {
@@ -3167,12 +3416,12 @@ impl Compositor {
                         return;
                     }
                     // Minimize button?
-                    if win.minimize_button_rect().contains(x, y) {
+                    if win.minimize_button_rect().is_some_and(|r| r.contains(x, y)) {
                         let _ = self.minimize_window(window_id);
                         return;
                     }
                     // Title bar drag?
-                    if win.title_bar_rect().contains(x, y) {
+                    if win.title_bar_rect().is_some_and(|r| r.contains(x, y)) {
                         self.drag = Some(DragState {
                             window_id,
                             mode: DragMode::MoveWindow,
@@ -3321,12 +3570,22 @@ impl Compositor {
     }
 
     /// Detect which border edge the cursor is on (for resize drag detection).
+    ///
+    /// Returns `None` for a window the client declared non-resizable, and for
+    /// an unframed one — there is no border to grab, and the grab band would
+    /// otherwise sit inside the client area and steal its clicks.
     fn detect_border_drag(&self, win: &Window, x: i32, y: i32) -> Option<DragMode> {
-        let grab_size = BORDER_WIDTH as i32 + SHADOW_SIZE as i32;
+        if !win.resizable || !win.is_framed() {
+            return None;
+        }
+        let (top, side, bottom) = win.frame_insets();
+        let grab_size = side as i32 + win.shadow_extent() as i32;
         let outer = win.outer_rect();
 
         // Don't detect border drag if the point is inside the client area or title bar.
-        if win.client_rect().contains(x, y) || win.title_bar_rect().contains(x, y) {
+        if win.client_rect().contains(x, y)
+            || win.title_bar_rect().is_some_and(|r| r.contains(x, y))
+        {
             return None;
         }
 
@@ -3334,10 +3593,10 @@ impl Compositor {
             return None;
         }
 
-        let at_left = x < win.x - BORDER_WIDTH as i32 + grab_size;
-        let at_right = x >= win.x + win.width as i32 + BORDER_WIDTH as i32 - grab_size;
-        let at_top = y < win.y - TITLE_BAR_HEIGHT as i32 + grab_size;
-        let at_bottom = y >= win.y + win.height as i32 + BORDER_WIDTH as i32 - grab_size;
+        let at_left = x < win.x - side as i32 + grab_size;
+        let at_right = x >= win.x + win.width as i32 + side as i32 - grab_size;
+        let at_top = y < win.y - top as i32 + grab_size;
+        let at_bottom = y >= win.y + win.height as i32 + bottom as i32 - grab_size;
 
         match (at_left, at_right, at_top, at_bottom) {
             (true, false, true, false) => Some(DragMode::ResizeTopLeft),
@@ -3738,7 +3997,8 @@ impl Compositor {
                 win.title.clone(),
                 win.render_tree.commands.clone(),
                 win.buffer.is_some(),
-                win.fullscreen,
+                win.title_bar_layout(),
+                win.transparent,
             ),
             _ => return,
         };
@@ -3753,11 +4013,14 @@ impl Compositor {
             title,
             commands,
             has_buffer,
-            fullscreen,
+            title_bar,
+            transparent,
         ) = win_data;
 
-        // Fullscreen windows have no decorations — they own the whole display.
-        if !fullscreen {
+        // Undecorated and fullscreen windows get no frame: the first asked to
+        // be a bare surface (a menu, a tooltip, a splash screen), the second
+        // owns the whole display. Both report it by having no title bar.
+        if let Some(bar) = title_bar {
             // 1. Draw window shadow.
             self.render_shadow(win_x, win_y, win_width, win_height, opacity);
 
@@ -3770,7 +4033,7 @@ impl Compositor {
             self.render_border(win_x, win_y, win_width, win_height, border_color, opacity);
 
             // 3. Draw title bar.
-            self.render_title_bar(win_x, win_y, win_width, focused, &title, opacity);
+            self.render_title_bar(&bar, focused, &title, opacity);
         }
 
         if has_buffer {
@@ -3801,7 +4064,14 @@ impl Compositor {
             //    (~29% of the 4K-benchmark's opaque stores). Only safe when the
             //    window itself is fully opaque (opacity >= 1.0) — otherwise the
             //    top rect blends and the background would show through.
-            if !Self::first_command_covers_client(&commands, win_width, win_height, opacity) {
+            //
+            //    A transparent window never gets the fill: the whole point of
+            //    asking for one is that what the client does not paint shows
+            //    the desktop through, and an opaque white undercoat is exactly
+            //    what would prevent that.
+            if !transparent
+                && !Self::first_command_covers_client(&commands, win_width, win_height, opacity)
+            {
                 self.render_engine.fill_rect(
                     &mut self.framebuffer,
                     win_x,
@@ -3933,18 +4203,16 @@ impl Compositor {
     }
 
     /// Render the title bar with title text and buttons.
-    fn render_title_bar(
-        &mut self,
-        win_x: i32,
-        win_y: i32,
-        win_width: u32,
-        focused: bool,
-        title: &str,
-        opacity: f32,
-    ) {
-        let tb_x = win_x - BORDER_WIDTH as i32;
-        let tb_y = win_y - TITLE_BAR_HEIGHT as i32;
-        let tb_width = win_width + (BORDER_WIDTH * 2);
+    ///
+    /// The button rectangles are passed in rather than recomputed here: hit
+    /// testing reads them from [`Window::close_button_rect`] and friends, and a
+    /// second copy of the arithmetic is a button that is drawn in one place and
+    /// clicked in another the moment either changes. `None` means the window
+    /// does not have that button — a non-resizable window has no maximize.
+    fn render_title_bar(&mut self, bar: &TitleBarLayout, focused: bool, title: &str, opacity: f32) {
+        let tb_x = bar.bar.x;
+        let tb_y = bar.bar.y;
+        let tb_width = bar.bar.width;
 
         // Title bar background.
         let bg_color = if focused {
@@ -3957,7 +4225,7 @@ impl Compositor {
             tb_x,
             tb_y,
             tb_width,
-            TITLE_BAR_HEIGHT,
+            bar.bar.height,
             bg_color,
             opacity,
         );
@@ -3976,9 +4244,12 @@ impl Compositor {
             .fonts
             .get(DEFAULT_FONT_SIZE, Weight::Regular, Family::Ui)
             .line_height();
-        let text_y = tb_y + (TITLE_BAR_HEIGHT as i32 - line_height as i32) / 2;
-        let max_text_width =
-            tb_width.saturating_sub((TITLE_BUTTON_SIZE + TITLE_BUTTON_SPACING) * 3 + 16);
+        let text_y = tb_y + (bar.bar.height as i32 - line_height as i32) / 2;
+        // Reserve exactly the buttons this window actually has, so a window
+        // with no maximize button gets that space for its title instead of
+        // eliding text to make room for nothing.
+        let max_text_width = tb_width
+            .saturating_sub((TITLE_BUTTON_SIZE + TITLE_BUTTON_SPACING) * bar.button_count() + 16);
         self.render_engine.draw_text(
             &mut self.framebuffer,
             text_x,
@@ -3997,43 +4268,26 @@ impl Compositor {
             TextOverflow::Ellipsis,
         );
 
-        // Close button (red circle/square).
-        let close_x =
-            tb_x + tb_width as i32 - TITLE_BUTTON_SIZE as i32 - TITLE_BUTTON_SPACING as i32;
-        let close_y = tb_y + (TITLE_BAR_HEIGHT as i32 - TITLE_BUTTON_SIZE as i32) / 2;
-        self.render_engine.fill_rect(
-            &mut self.framebuffer,
-            close_x,
-            close_y,
-            TITLE_BUTTON_SIZE,
-            TITLE_BUTTON_SIZE,
-            self.theme.close_button,
-            opacity,
-        );
-
-        // Maximize button (green).
-        let max_x = close_x - TITLE_BUTTON_SIZE as i32 - TITLE_BUTTON_SPACING as i32;
-        self.render_engine.fill_rect(
-            &mut self.framebuffer,
-            max_x,
-            close_y,
-            TITLE_BUTTON_SIZE,
-            TITLE_BUTTON_SIZE,
-            self.theme.maximize_button,
-            opacity,
-        );
-
-        // Minimize button (yellow).
-        let min_x = max_x - TITLE_BUTTON_SIZE as i32 - TITLE_BUTTON_SPACING as i32;
-        self.render_engine.fill_rect(
-            &mut self.framebuffer,
-            min_x,
-            close_y,
-            TITLE_BUTTON_SIZE,
-            TITLE_BUTTON_SIZE,
-            self.theme.minimize_button,
-            opacity,
-        );
+        // Buttons: close (red), maximize (green), minimize (yellow). Each is
+        // drawn exactly where the hit test will look for it, and skipped
+        // entirely when the window does not have it.
+        for (rect, color) in [
+            (bar.close, self.theme.close_button),
+            (bar.maximize, self.theme.maximize_button),
+            (bar.minimize, self.theme.minimize_button),
+        ] {
+            if let Some(r) = rect {
+                self.render_engine.fill_rect(
+                    &mut self.framebuffer,
+                    r.x,
+                    r.y,
+                    r.width,
+                    r.height,
+                    color,
+                    opacity,
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4043,13 +4297,8 @@ impl Compositor {
     /// Handle a compositor request from a client.
     pub fn handle_request(&mut self, request: CompositorRequest) -> CompositorResponse {
         match request {
-            CompositorRequest::CreateWindow {
-                title,
-                width,
-                height,
-                client_pid,
-            } => {
-                let id = self.create_window(title, width, height, client_pid);
+            CompositorRequest::CreateWindow { spec, client_pid } => {
+                let id = self.create_window_from_spec(&spec, client_pid);
                 CompositorResponse::WindowCreated { window_id: id }
             }
             CompositorRequest::DestroyWindow { window_id } => {
@@ -4121,6 +4370,14 @@ impl Compositor {
                     message: e.to_string(),
                 },
             },
+            CompositorRequest::SetVisible { window_id, visible } => {
+                match self.set_visible(window_id, visible) {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
             CompositorRequest::SetCursor { cursor, .. } => {
                 self.cursor_shape = cursor;
                 CompositorResponse::Ok
@@ -4682,9 +4939,7 @@ mod tests {
         let mut comp = Compositor::new(800, 600, 60).unwrap();
 
         let resp = comp.handle_request(CompositorRequest::CreateWindow {
-            title: "Protocol Test".to_string(),
-            width: 320,
-            height: 240,
+            spec: WindowSpec::new("Protocol Test", 320, 240),
             client_pid: 99,
         });
         let window_id = match resp {
@@ -5017,19 +5272,196 @@ mod tests {
         assert_eq!(argb & 0xFF, 64);
     }
 
+    /// A window on the ordinary terms — decorated, resizable, opaque — at the
+    /// given place and size.
+    fn plain_window(x: i32, y: i32, width: u32, height: u32) -> Window {
+        Window::from_spec(&WindowSpec::new("Test", width, height), x, y, 1)
+    }
+
     #[test]
     fn test_window_rects() {
-        let win = Window::new("Test".to_string(), 100, 100, 400, 300, 1);
+        let win = plain_window(100, 100, 400, 300);
         let client = win.client_rect();
         assert_eq!(client, Rect::new(100, 100, 400, 300));
 
-        let title_bar = win.title_bar_rect();
+        let title_bar = win.title_bar_rect().expect("a decorated window has a bar");
         assert_eq!(title_bar.y, 100 - TITLE_BAR_HEIGHT as i32);
         assert_eq!(title_bar.height, TITLE_BAR_HEIGHT);
 
-        let close = win.close_button_rect();
+        let close = win.close_button_rect().expect("a decorated window closes");
         // Close button should be within the title bar.
         assert!(title_bar.contains(close.x, close.y));
+    }
+
+    #[test]
+    fn an_undecorated_window_is_all_client_area() {
+        let mut spec = WindowSpec::new("Menu", 200, 120);
+        spec.decorations = false;
+        let win = Window::from_spec(&spec, 40, 50, 1);
+
+        // No frame anywhere: not in the insets, not in the hit-test rects, and
+        // not in the bounds used for damage. A menu that reserved 30px for a
+        // title bar it never draws would leave a strip of stale desktop.
+        assert_eq!(win.frame_insets(), (0, 0, 0));
+        assert_eq!(win.shadow_extent(), 0);
+        assert_eq!(win.title_bar_rect(), None);
+        assert_eq!(win.close_button_rect(), None);
+        assert_eq!(win.minimize_button_rect(), None);
+        assert_eq!(win.title_bar_layout(), None);
+        assert_eq!(win.outer_rect(), win.client_rect());
+    }
+
+    #[test]
+    fn fullscreen_suppresses_decorations_without_forgetting_them() {
+        let mut win = plain_window(0, 0, 800, 600);
+        win.fullscreen = true;
+        assert!(!win.is_framed());
+        assert_eq!(win.title_bar_rect(), None);
+
+        // The client asked for decorations and never withdrew the request, so
+        // leaving fullscreen must bring the frame back.
+        win.fullscreen = false;
+        assert!(win.is_framed());
+        assert!(win.title_bar_rect().is_some());
+    }
+
+    #[test]
+    fn a_non_resizable_window_has_no_maximize_button_and_minimize_takes_its_place() {
+        let mut spec = WindowSpec::new("Dialog", 300, 200);
+        spec.resizable = false;
+        let win = Window::from_spec(&spec, 10, 10, 1);
+
+        assert_eq!(win.maximize_button_rect(), None);
+        let close = win.close_button_rect().expect("close is always there");
+        let minimize = win
+            .minimize_button_rect()
+            .expect("minimize is always there");
+        // Adjacent to close, not one slot further left: the gap a missing
+        // button leaves would otherwise be a dead patch of title bar.
+        assert_eq!(
+            minimize.x,
+            close.x - (TITLE_BUTTON_SIZE + TITLE_BUTTON_SPACING) as i32
+        );
+
+        let layout = win.title_bar_layout().expect("still decorated");
+        assert_eq!(layout.button_count(), 2);
+    }
+
+    #[test]
+    fn a_border_drag_is_refused_on_a_window_that_cannot_be_resized() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+
+        let mut fixed = WindowSpec::new("Fixed", 200, 150);
+        fixed.resizable = false;
+        fixed.position = Some((100, 100));
+        let fixed_id = comp.create_window_from_spec(&fixed, 1);
+
+        let mut free = WindowSpec::new("Free", 200, 150);
+        free.position = Some((400, 100));
+        let free_id = comp.create_window_from_spec(&free, 1);
+
+        // A point one pixel outside the left client edge is on the border.
+        let on_left_border = |win: &Window| (win.x - 1, win.y + 10);
+
+        let win = comp.window_ref(free_id).expect("free window").clone();
+        let (x, y) = on_left_border(&win);
+        assert!(comp.detect_border_drag(&win, x, y).is_some());
+
+        let win = comp.window_ref(fixed_id).expect("fixed window").clone();
+        let (x, y) = on_left_border(&win);
+        assert_eq!(comp.detect_border_drag(&win, x, y), None);
+    }
+
+    #[test]
+    fn a_declared_minimum_size_survives_a_resize_below_it() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Bounded", 400, 300);
+        spec.min_size = Some((320, 240));
+        spec.max_size = Some((640, 480));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        comp.resize_window(id, 10, 10).expect("resize");
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.width, win.height), (320, 240));
+
+        comp.resize_window(id, 5000, 5000).expect("resize");
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.width, win.height), (640, 480));
+    }
+
+    #[test]
+    fn a_spec_smaller_than_its_own_minimum_is_created_at_the_minimum() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Contradictory", 100, 100);
+        spec.min_size = Some((300, 200));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.width, win.height), (300, 200));
+    }
+
+    #[test]
+    fn a_requested_position_is_honoured_and_an_absent_one_is_chosen() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+
+        let mut placed = WindowSpec::new("Placed", 100, 100);
+        placed.position = Some((-40, 17));
+        let placed_id = comp.create_window_from_spec(&placed, 1);
+        let win = comp.window_ref(placed_id).expect("window");
+        // Negative coordinates are a legitimate request: a window may be
+        // partly off the left edge of the display.
+        assert_eq!((win.x, win.y), (-40, 17));
+
+        let floating = comp.create_window("Floating".to_string(), 100, 100, 1);
+        let win = comp.window_ref(floating).expect("window");
+        assert_ne!((win.x, win.y), (-40, 17));
+    }
+
+    #[test]
+    fn maximizing_is_refused_for_a_non_resizable_window() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Dialog", 300, 200);
+        spec.resizable = false;
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        assert!(matches!(
+            comp.maximize_window(id),
+            Err(CompositorError::NotResizable(_))
+        ));
+        let win = comp.window_ref(id).expect("window");
+        assert!(!win.maximized);
+        assert_eq!((win.width, win.height), (300, 200));
+    }
+
+    #[test]
+    fn an_undecorated_window_maximizes_to_the_whole_display() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Bare", 100, 100);
+        spec.decorations = false;
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        comp.maximize_window(id).expect("maximize");
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.x, win.y), (0, 0));
+        assert_eq!((win.width, win.height), (800, 600));
+    }
+
+    #[test]
+    fn hiding_a_window_moves_focus_off_it() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let under = comp.create_window("Under".to_string(), 100, 100, 1);
+        let over = comp.create_window("Over".to_string(), 100, 100, 1);
+        assert_eq!(comp.focused_window, Some(over));
+
+        comp.set_visible(over, false).expect("hide");
+        assert!(!comp.window_ref(over).expect("window").visible);
+        assert_eq!(comp.focused_window, Some(under));
+
+        // Showing it again un-minimizes: the client asked for it on screen.
+        comp.minimize_window(under).expect("minimize");
+        comp.set_visible(under, true).expect("show");
+        let win = comp.window_ref(under).expect("window");
+        assert!(win.visible && !win.minimized);
     }
 
     #[test]

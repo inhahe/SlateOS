@@ -78,6 +78,7 @@ use std::io::{self, Read, Write};
 use std::process;
 
 use coreutils::errmsg::strerror;
+use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{quote, quoteaf_os, quotef_os};
 use keydef::{Blanks, KeySpec, Kind, parse_key, parse_obsolete_end, parse_obsolete_start};
 use order::Ignore;
@@ -460,22 +461,11 @@ fn write_out(cfg: &Config, lines: &[&[u8]]) -> io::Result<()> {
 
 /// A command line that cannot be run, and the status to exit with.
 ///
-/// Almost every such failure is status 2, but a bad *argument to* an option
-/// (`--sort=bogus`, `--check=bogus`) is 1 in GNU: those go through gnulib's
-/// `argmatch`, which dies with the generic `EXIT_FAILURE` rather than `sort`'s
-/// own `SORT_FAILURE`. It reads like an oversight upstream and it is what a
-/// script testing `$?` will see, so it is reproduced rather than tidied.
-#[cfg_attr(test, derive(Debug))]
-struct Fatal {
-    message: String,
-    status: i32,
-}
-
-impl From<String> for Fatal {
-    fn from(message: String) -> Self {
-        Fatal { message, status: 2 }
-    }
-}
+/// This is [`coreutils::getopt::Error`], under the name the rest of this file
+/// already used for it. The status split it carries — 2 for a bad option, 1 for
+/// a bad argument *to* an option — is documented there, and is why the type is
+/// shared rather than reimplemented per utility.
+type Fatal = getopt::Error;
 
 /// Parse argv. `Ok(None)` means `--help` or `--version` has already answered.
 #[allow(clippy::too_many_lines)]
@@ -538,11 +528,13 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
             rest.remove(0);
             // An option that takes a value takes the rest of this bundle, or
             // the next argument if the bundle is exhausted.
-            let mut take_value = |rest: &mut Vec<u8>| -> Result<Vec<u8>, String> {
+            let mut take_value = |rest: &mut Vec<u8>| -> Result<Vec<u8>, Fatal> {
                 if !rest.is_empty() {
                     return Ok(std::mem::take(rest));
                 }
-                let value = raw.get(i).ok_or_else(|| short_missing_argument(flag))?;
+                let value = raw
+                    .get(i)
+                    .ok_or_else(|| SORT.short_missing_argument(flag))?;
                 i = i.saturating_add(1);
                 Ok(arg_bytes(value))
             };
@@ -574,7 +566,7 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
                 // `other` is a byte, not a `char`: `other as char` would map
                 // 0xC3 to `Ã` and re-encode it as two bytes, so a bundle like
                 // `-é` would be reported as an option nobody typed.
-                other => return Err(invalid_option(other).into()),
+                other => return Err(SORT.invalid_option(other)),
             }
         }
     }
@@ -623,18 +615,8 @@ enum Answered {
     No,
 }
 
-/// Whether a long option takes a value.
-///
-/// `Optional` is `getopt_long`'s `optional_argument`, and the distinction from
-/// `Required` is observable: an optional value must be written `--check=quiet`,
-/// because `--check quiet` leaves `quiet` an operand — which is why GNU answers
-/// that command line with `open failed: quiet`, not with a check.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Takes {
-    Nothing,
-    Required,
-    Optional,
-}
+/// The name every diagnostic below is stamped with, bound once.
+const SORT: Program = Program("sort");
 
 /// Every long option `sort` knows, with what it takes.
 ///
@@ -644,9 +626,8 @@ enum Takes {
 /// `--dictionary-order` instead of being refused, and a user who typed `--d`
 /// meaning `--debug` would silently get a dictionary sort.
 ///
-/// **The order is load-bearing and is GNU's, not alphabetical.** `getopt_long`
-/// lists an ambiguous prefix's candidates in the order they appear in the
-/// caller's `struct option[]`, so the array order is observable output:
+/// **The order is load-bearing and is GNU's, not alphabetical**, because
+/// `getopt_long` lists an ambiguous prefix's candidates in table order:
 ///
 /// ```text
 /// $ sort --r
@@ -656,7 +637,8 @@ enum Takes {
 /// It was measured rather than recalled, because recall got it wrong —
 /// `--random-sort` precedes `--random-source`, which is not the order anyone
 /// would guess. The instrument is one command: an empty prefix matches every
-/// option, so `sort --=x` prints the whole table in declaration order.
+/// option, so `sort --=x` prints the whole table in declaration order. See
+/// [`Program::resolve_long`], which is what makes the order observable.
 const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("ignore-leading-blanks", Takes::Nothing),
     ("check", Takes::Optional),
@@ -690,42 +672,6 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
 ];
 
-/// `getopt_long`'s name resolution: an exact match wins outright, otherwise the
-/// name must be a prefix of exactly one option.
-///
-/// The exact-match rule is not redundant with the prefix rule — `--version` is
-/// a prefix of `--version-sort`, so without it every `sort --version` would be
-/// refused as ambiguous.
-///
-/// `whole` is the argument as typed, `--` and any `=VALUE` included. The two
-/// failures here name *that* rather than the resolved option, because they have
-/// nothing to resolve; the failures further down, which do, name the resolution
-/// instead. `sort --fo=bar` says `unrecognized option '--fo=bar'`.
-fn resolve_long(name: &str, whole: &[u8]) -> Result<(&'static str, Takes), String> {
-    if let Some(hit) = LONG_OPTIONS.iter().find(|(n, _)| *n == name) {
-        return Ok(*hit);
-    }
-    let matches: Vec<_> = LONG_OPTIONS
-        .iter()
-        .filter(|(n, _)| n.starts_with(name))
-        .collect();
-    match matches.as_slice() {
-        [] => Err(unrecognized_option(whole)),
-        [only] => Ok(**only),
-        many => {
-            let list: Vec<String> = many
-                .iter()
-                .map(|(n, _)| quote(format!("--{n}").as_bytes()))
-                .collect();
-            Err(getopt_error(&format!(
-                "option {} is ambiguous; possibilities: {}",
-                quote(whole),
-                list.join(" ")
-            )))
-        }
-    }
-}
-
 fn long_option(
     bytes: &[u8],
     raw: &[OsString],
@@ -743,18 +689,20 @@ fn long_option(
     };
     // A long option's name is ASCII; anything else cannot match one, and
     // reporting it as unrecognized is what GNU's byte comparison amounts to.
-    let typed = std::str::from_utf8(typed).map_err(|_| unrecognized_option(bytes))?;
-    let (name, takes) = resolve_long(typed, bytes)?;
+    let typed = std::str::from_utf8(typed).map_err(|_| SORT.unrecognized_option(bytes))?;
+    let (name, takes) = SORT.resolve_long(typed, bytes, LONG_OPTIONS)?;
 
     if takes == Takes::Nothing && inline.is_some() {
-        return Err(long_unwanted_argument(name).into());
+        return Err(SORT.long_unwanted_argument(name));
     }
     // A required value may be written `--key=2` or `--key 2`; an optional one
     // only ever comes from the `=` form.
     let value: Option<Vec<u8>> = match (takes, inline) {
         (_, Some(v)) => Some(v.to_vec()),
         (Takes::Required, None) => {
-            let next = raw.get(*i).ok_or_else(|| long_missing_argument(name))?;
+            let next = raw
+                .get(*i)
+                .ok_or_else(|| SORT.long_missing_argument(name))?;
             *i = i.saturating_add(1);
             Some(arg_bytes(next))
         }
@@ -793,7 +741,7 @@ fn long_option(
         "check" => {
             cfg.check = Some(match value.as_deref() {
                 None => Check::Diagnose,
-                Some(word) => argmatch(word, "--check", CHECK_WORDS)?,
+                Some(word) => SORT.argmatch(word, "--check", CHECK_WORDS)?,
             });
         }
         "key" => cfg.keys.push(parse_key(&need())?),
@@ -832,82 +780,8 @@ const SORT_WORDS: &[(&str, Option<Kind>)] = &[
 
 /// `--sort=WORD`, the long spelling of the ordering options.
 fn parse_sort_word(word: &[u8]) -> Result<Kind, Fatal> {
-    argmatch(word, "--sort", SORT_WORDS)?.ok_or_else(|| RANDOM_UNIMPLEMENTED.to_string().into())
-}
-
-/// gnulib's `argmatch`: resolve an option's argument against its list of words.
-///
-/// It is a *prefix* match, exactly like `getopt_long`'s treatment of option
-/// names — `--sort=hum` and `--check=q` both work — which this implementation
-/// previously did not do at all, so those two commands were refused.
-///
-/// Ambiguity is judged by value and not by spelling. `--check=` matches all
-/// three words, but if it had matched only `quiet` and `silent` it would have
-/// been accepted, because both mean the same thing and there is nothing for the
-/// user to disambiguate. That is why the table pairs spellings with values
-/// rather than listing spellings alone.
-fn argmatch<T: Copy + PartialEq>(
-    given: &[u8],
-    option: &str,
-    table: &[(&str, T)],
-) -> Result<T, Fatal> {
-    let hits: Vec<&(&str, T)> = match std::str::from_utf8(given) {
-        // A word that is not UTF-8 cannot be a prefix of any of these, which
-        // are all ASCII; it takes the no-match path rather than being an error
-        // of its own.
-        Err(_) => Vec::new(),
-        Ok(text) => table.iter().find(|(w, _)| *w == text).map_or_else(
-            || table.iter().filter(|(w, _)| w.starts_with(text)).collect(),
-            |exact| vec![exact],
-        ),
-    };
-    let Some((_, first)) = hits.first() else {
-        return Err(bad_argument("invalid", given, option, table));
-    };
-    if hits.iter().any(|(_, v)| v != first) {
-        return Err(bad_argument("ambiguous", given, option, table));
-    }
-    Ok(*first)
-}
-
-/// `argmatch`'s two diagnostics, which differ only in that first word, and its
-/// status-1 exit — distinct from the getopt errors above, which exit 2.
-///
-/// The "Valid arguments are" list is generated from the same table the match
-/// used rather than written out beside it, because the two must agree and a
-/// hand-written copy is what drifts. Runs of words sharing a value are joined
-/// onto one line, which is both gnulib's rendering and the reason it is worth
-/// generating: `'quiet', 'silent'` on one line *is* the statement that they
-/// mean the same thing.
-fn bad_argument<T: PartialEq>(
-    what: &str,
-    given: &[u8],
-    option: &str,
-    table: &[(&str, T)],
-) -> Fatal {
-    let mut lines: Vec<String> = Vec::new();
-    let mut prev: Option<&T> = None;
-    for (word, value) in table {
-        let spelled = quote(word.as_bytes());
-        match (prev, lines.last_mut()) {
-            (Some(p), Some(line)) if p == value => {
-                line.push_str(", ");
-                line.push_str(&spelled);
-            }
-            _ => lines.push(format!("  - {spelled}")),
-        }
-        prev = Some(value);
-    }
-    Fatal {
-        message: format!(
-            "{what} argument {} for {}\nValid arguments are:\n{}\n\
-             Try 'sort --help' for more information.",
-            quote(given),
-            quote(option.as_bytes()),
-            lines.join("\n")
-        ),
-        status: 1,
-    }
+    SORT.argmatch(word, "--sort", SORT_WORDS)?
+        .ok_or_else(|| RANDOM_UNIMPLEMENTED.to_string().into())
 }
 
 /// The two options we accept into the parser and then refuse, each with the
@@ -917,95 +791,6 @@ fn bad_argument<T: PartialEq>(
 const RANDOM_UNIMPLEMENTED: &str =
     "random sort is not implemented: it needs a keyed hash this system does not have yet";
 const DEBUG_UNIMPLEMENTED: &str = "--debug is not implemented";
-
-/// The five getopt diagnostics.
-///
-/// They are five and not one because glibc's `getopt_long` uses a *different
-/// sentence for a short option than for a long one*, and this implementation
-/// used to use a single invented shape for all of them. Measured:
-///
-/// | Command | glibc |
-/// |---|---|
-/// | `sort -x` | `invalid option -- 'x'` |
-/// | `sort -k` | `option requires an argument -- 'k'` |
-/// | `sort --fo` | `unrecognized option '--fo'` |
-/// | `sort --k` | `option '--key' requires an argument` |
-/// | `sort --s` | `option '--s' is ambiguous; possibilities: '--sort' '--stable'` |
-/// | `sort --stab=x` | `option '--stable' doesn't allow an argument` |
-///
-/// Note which name each one carries: the two that failed to resolve anything
-/// echo what was typed, the two that resolved something name the *resolution*
-/// — `--k` is reported as `--key`, and `--stab=x` as `--stable`.
-///
-/// Every one of them exits 2 (`argmatch`'s, further up, exit 1); that falls out
-/// of `Fatal`'s `From<String>`.
-fn getopt_error(sentence: &str) -> String {
-    format!("{sentence}\nTry 'sort --help' for more information.")
-}
-
-/// A short option, named by the single byte the user typed.
-///
-/// The byte goes through `quote`, which is where this deliberately parts
-/// company with GNU. glibc writes the byte between two literal `'` and escapes
-/// nothing between them, so `sort -$'\n'` puts a raw newline inside the quotes.
-/// For every byte a person would actually type the two agree exactly — `'x'` is
-/// `'x'` — and they differ only where GNU emits a control byte into a
-/// diagnostic, which is the one place GNU is wrong. See `long_flag_error` for
-/// why that matters more than it sounds.
-fn short_flag_error(sentence: &str, flag: u8) -> String {
-    getopt_error(&format!("{sentence} -- {}", quote(&[flag])))
-}
-
-fn invalid_option(flag: u8) -> String {
-    short_flag_error("invalid option", flag)
-}
-
-fn short_missing_argument(flag: u8) -> String {
-    short_flag_error("option requires an argument", flag)
-}
-
-/// A long option, named by the raw argv bytes the user typed.
-///
-/// Same divergence as `short_flag_error`, and the same reasoning, but the
-/// consequence is larger because a long option's name is arbitrary-length. A
-/// path may hold every byte but `/` and NUL, so `sort *` in a directory
-/// containing
-///
-/// ```text
-/// --fo\nsort: /etc/shadow: Permission denied
-/// ```
-///
-/// makes glibc print a second line that `sort` never wrote:
-///
-/// ```text
-/// sort: unrecognized option '--fo
-/// sort: /etc/shadow: Permission denied'
-/// ```
-///
-/// Routing the name through `quote` closes that: the newline becomes `\n`
-/// inside one line. It is the same fix, and the same argument, as the sweep
-/// that put every *file* name in a diagnostic through `quote`.
-fn unrecognized_option(whole: &[u8]) -> String {
-    getopt_error(&format!("unrecognized option {}", quote(whole)))
-}
-
-/// `--key` given no value. Named by the resolved option, so `--k` reports
-/// `'--key'`; `resolved` is a table entry and so is always plain ASCII, but it
-/// goes through `quote` anyway rather than relying on that staying true.
-fn long_missing_argument(resolved: &str) -> String {
-    getopt_error(&format!(
-        "option {} requires an argument",
-        quote(format!("--{resolved}").as_bytes())
-    ))
-}
-
-/// `--stable=x`. Also named by the resolution, not by what was typed.
-fn long_unwanted_argument(resolved: &str) -> String {
-    getopt_error(&format!(
-        "option {} doesn't allow an argument",
-        quote(format!("--{resolved}").as_bytes())
-    ))
-}
 
 /// `-t`'s argument: one byte, or the two characters `\0` for NUL.
 fn parse_tab(value: &[u8], existing: Option<u8>) -> Result<u8, String> {

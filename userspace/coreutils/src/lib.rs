@@ -7,20 +7,25 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are two so far, and both are about what a diagnostic *says*, because
-//! that is the interface these programs share whether or not anyone designed
-//! it that way: a script that reads `grep`'s diagnostic and a script that
-//! reads `cp`'s are the same script.
+//! There are three so far. All are about the interface these programs share
+//! whether or not anyone designed it that way: a script that reads `grep`'s
+//! diagnostic and a script that reads `cp`'s are the same script, and a person
+//! who learned to type `ls --col` expects `cat --squeeze` to work too.
 //!
 //! - [`errmsg`] — how an I/O failure is worded.
 //! - [`quote`] — how a file name, or any other untrusted text, is rendered
 //!   inside a message. Not a nicety: a path may contain a newline, so a
 //!   utility that prints one raw lets whoever chose the name write extra
 //!   lines into its error stream.
+//! - [`getopt`] — how options are *parsed*, which is the same question one
+//!   layer earlier. GNU's utilities all call one `getopt_long`, so they all
+//!   abbreviate long options and all word a bad one identically; ours parsed
+//!   argv by hand, 85 times, so they did neither.
 //!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
 
 pub mod errmsg;
+pub mod getopt;
 pub mod quote;

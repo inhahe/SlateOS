@@ -30637,12 +30637,78 @@ cost of a mismatch is small.
   buffer reports "No file name — Save As needs a file dialog" and cannot be
   saved.
 
+- **(g) Put a channel between the two ends** — the step (e) named as "the only
+  thing between this tree and a window on a screen". — **DONE 2026-08-17**
+  (commits `675dfc72c`, `4094767c1`, `f81aaec1b`).
+
+  Both halves of the protocol were finished and there was nothing to carry the
+  bytes: the compositor's `main()` had no listener, and no client had an address
+  to dial. Three pieces closed it.
+
+  * **A transport** (`gui/remote/src/socket.rs`). A TCP socket implementing
+    `guiremote::client::Transport`, plus the `Listener` the compositor accepts
+    on. The choice of TCP over a Unix socket or a named pipe is
+    `design-decisions.md` §460; the short version is that this crate's first
+    line calls itself a *remote* display protocol, and a carrier that cannot
+    leave the machine removes a capability on purpose. `SLATE_DISPLAY` names the
+    display and defaults to `127.0.0.1:7373` — loopback, so a default install is
+    not listening to the network. The whole of the awkwardness is in reconciling
+    two contradictory obligations on one socket: `read` **must not** block and
+    `wait` **must**. It is held non-blocking, and `wait` switches to blocking,
+    peeks one byte, and restores the mode *on every path including the failing
+    one* — which has its own test, because forgetting the failing path leaves a
+    socket whose next `read` blocks the whole application. 14 tests.
+  * **A front end** (`gui/compositor/src/server.rs`). `Server` binds the
+    listener, gives each connection its own `ClientLink` and identity, serves,
+    routes input, and paces frames on the display's refresh interval. A departed
+    client's windows are destroyed on reap, so a crash cannot leave a window
+    nobody can close; a client that speaks nonsense is dropped without
+    disturbing the others. Two limits found writing it are logged separately:
+    `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING` (the standard library has no
+    readiness primitive, so the loop polls) and `TD-COMPOSITOR-HAS-NO-SCANOUT`
+    (the composited frame is finished and then dropped, because nothing here
+    owns a framebuffer).
+  * **A dialer** (`oswindow::connect`, `connect_to`, `Link`), and the editor's
+    `connect()` replaced by it. An application still never names TCP.
+
+  **What this step forced, and it is the part worth remembering.**
+  `gui/compositor` was a binary with no library, so *nothing outside its own
+  source file could link it*. Every test that existed put the shipped code on
+  **one** end of the protocol and a stand-in on the other — the editor against
+  `oswindow::testing`, the compositor against a hand-written client in its own
+  test module — and two stand-ins can both be satisfied while the two real
+  halves disagree. That is exactly the class of defect this whole entry is
+  about, reproduced one level up. The compositor is now a library plus a thin
+  binary, and `apps/editor`'s `mod against_the_real_compositor` starts a genuine
+  `Server` on a thread and an ephemeral port and drives the editor into it: a
+  window is created and its id comes back over the socket, the editor's real
+  render tree crosses the wire and is composited, a scancode injected at the
+  compositor arrives as a character in the document, and the window is reclaimed
+  when the client goes away.
+
+  It found something immediately, which is the argument for having written it:
+  `ServerStats::frames` was incremented inline in `run()`, so any *other* driver
+  of the loop reported zero frames composited while the screen was demonstrably
+  being drawn. Composition is now `Server::compose`, counted for every caller.
+
+  **What is left between here and a visible desktop:** scanout
+  (`TD-COMPOSITOR-HAS-NO-SCANOUT`) and an input source. The hosted build has no
+  keyboard or mouse driver feeding `Compositor::handle_input`, so outside a test
+  that injects them, `route_input` has nothing to route.
+
 **Severity.** High as a *blocker* — it is the single gap between "142 app
 crates" and "an OS with any usable application at all". Low as a *defect*:
 nothing that exists is wrong, it is only unreachable, so the fix is additive
 and nothing has to be unwound first — with the one exception found in (d½),
 where `oswindow` is not merely unreachable but actively misleading, and does
 have to be unwound.
+
+**Status 2026-08-17: the transport chain is closed.** (a)–(g) are done, and one
+application really opens a window on a real compositor and receives a keystroke
+from it. This entry stays open for the remaining 137 apps, none of which is
+wired yet, and because a window whose pixels never reach a screen is not yet a
+usable desktop — `TD-COMPOSITOR-HAS-NO-SCANOUT` is now the last link in the
+chain from an app's `RenderTree` to a photon.
 
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
@@ -30914,3 +30980,70 @@ because the screen was never involved.
 `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`: nothing that exists is wrong, and the
 missing piece is additive. It is the last link in the chain from an app's
 `RenderTree` to a photon, and it is the only one still missing.
+
+## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17)
+
+**What.** `CLAUDE.md` requires every crate to enable `clippy::all` +
+`clippy::pedantic` and five defensive lints (`unwrap_used`, `expect_used`,
+`panic`, `indexing_slicing`, `arithmetic_side_effects`). The workspace root
+defines all of them in `[workspace.lints.clippy]`, and a crate opts in with
+`[lints] workspace = true`. **Of the five `gui/` crates, exactly one —
+`gui/font` — opts in.** The other four are in two different states of partial
+compliance:
+
+| Crate | `clippy::all` / `pedantic` | The five defensive lints |
+|---|---|---|
+| `gui/font` | via `[lints] workspace = true` | **yes** |
+| `gui/remote` | inner attributes | **no** |
+| `gui/toolkit` | inner attributes | **no** |
+| `gui/window` | inner attributes | **no** |
+| `gui/compositor` | **neither** | **no** |
+
+So `gui/compositor` — 4900 lines, the display server every application depends
+on — is effectively unlinted: `cargo clippy -p compositor` reports the default
+warn-level `clippy::all` and nothing else, which is why a clean clippy run on
+that crate is a much weaker signal than it looks.
+
+**How big the backlog is.** Measured 2026-08-17 with
+`cargo clippy -p compositor --all-targets -- -W clippy::pedantic`: roughly 1200
+warnings. The large groups, in order: 370 `must_use_candidate` on methods and
+61 on functions and 27 returning `Self`; 162 `doc_markdown` (an identifier in a
+doc comment without backticks); ~250 numeric-cast warnings across
+`cast_precision_loss` (76 `u32`→`f32`, 59 `usize`→`f32`),
+`cast_possible_truncation` (35+35 `f32`→`u8`, 33 `f32`→`i32`, 26+26
+`f32`→`u32`, 20+20 `f32`→`usize`) and `cast_lossless` (41 `u8`→`f32`); 24+24
+`cast_possible_wrap` (`usize`→`i32`); 22 `missing_errors_doc`; 17
+`uninlined_format_args`; plus long-literal and identical-match-arm hits.
+
+**Why it matters unevenly.** Most of that list is cosmetic — backticks and
+`#[must_use]` are style. The numeric casts are not: a `f32`→`u8` truncation in
+a *compositor* is a colour channel, and an out-of-range float becomes a
+saturating or wrapping value depending on the cast, which is a rendering bug
+that shows up as a wrong pixel rather than a panic. The defensive five matter
+more still, and none of the four non-compliant crates has them on: an
+`indexing_slicing` hit in the compositor is a panic in the display server,
+which takes the whole desktop down, and the compositor indexes framebuffers by
+computed offsets constantly.
+
+**The proper fix**, and it should be done crate by crate rather than in one
+sweep:
+
+1. `gui/compositor` first, since it is both the largest exposure and the only
+   one with *no* lint header at all. Add `[lints] workspace = true`, then clear
+   the backlog in themed commits — the numeric casts first (they can hide real
+   bugs), `must_use`/`doc_markdown` last (they cannot).
+2. `gui/remote`, `gui/toolkit`, `gui/window`: replace the inner
+   `#![deny(clippy::all)] #![warn(clippy::pedantic)]` attributes with
+   `[lints] workspace = true`, which adds the defensive five. The inner
+   attributes are then redundant and should go, so there is one place that says
+   what the lints are.
+3. Test modules keep the standard three-line-comment `#![allow(...)]` header
+   the rest of the tree uses — a test that indexes out of range should fail
+   loudly.
+
+**Severity.** Medium. Nothing is known to be broken, and `clippy::all` is clean
+everywhere; what is missing is the enforcement that would *find* the next bug
+of these kinds. The reason it is logged rather than fixed on the spot is that
+clearing 1200 warnings in the middle of the transport work would have buried a
+functional change under a formatting one — but it should not wait long, because
+the backlog grows with the crate.

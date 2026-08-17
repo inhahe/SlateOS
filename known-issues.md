@@ -30930,6 +30930,14 @@ the standard library rather than a preference.
 
 ## TD-COMPOSITOR-HAS-NO-SCANOUT (lane C, 2026-08-17)
 
+> **Read the Status note at the end of this entry first.** The description
+> below is the state *before* the `Present` trait and the Win32 host window
+> landed, and its flat claims — "there is no `present()`", "no window on the
+> host", "the screen was never involved" — are no longer true of the hosted
+> development build. They remain true of SlateOS itself, which is what this
+> entry is actually about, so the description is kept rather than rewritten:
+> it is the statement of the problem that is still open.
+
 **What.** The compositor composes a complete frame and then drops it.
 `Compositor::compose_frame()` blends every visible window, the cursor and the
 desktop furniture into a back buffer, flips it, and `front_buffer()` hands out
@@ -30973,13 +30981,39 @@ because the screen was never involved.
 3. **A useful intermediate that needs nothing:** dump `front_buffer()` to a PPM
    or PNG on a key chord or a signal. It does not make the desktop visible, but
    it makes "did the compositor draw what I think it drew" answerable without a
-   display at all, and it is the only one of these three available to lane C
-   today.
+   display at all.
 
 **Severity.** High as a *blocker*, low as a *defect*, in the same sense as
 `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`: nothing that exists is wrong, and the
 missing piece is additive. It is the last link in the chain from an app's
 `RenderTree` to a photon, and it is the only one still missing.
+
+**Status 2026-08-17: (2) is done; (1), the actual target, is not.**
+`gui/compositor/src/present.rs` defines the `Present` trait — `show(pixels,
+width, height)`, `input()`, `is_open()` — with `Headless`, a `Recording` test
+double, and, under `#[cfg(windows)]`, `present::host::Window`: a raw Win32
+window that blits with `StretchDIBits` and turns `WM_*` messages into
+`InputEvent`s. `Server::run_with` drives any implementor; `server.run()` is
+that same loop over `Headless`. The compositor binary opens one by default on
+Windows, and `--headless` opts out. The paragraph above about the workspace
+dependency turned out to be a non-problem: the whole thing is `extern "system"`
+declarations against `user32`/`gdi32`, so it adds no entry to any
+`Cargo.toml` — see `design-decisions.md` §461.
+
+**What that closed, precisely, and what it did not.** It closed *seeing*: the
+rendering pipeline — text, alpha blending, window decorations, shadows, the
+cursor — had never been looked at by a human eye, and the editor's title bar,
+tab strip, gutter and caret have now been observed drawn by the compositor over
+a real TCP socket. It also closed the input half, which was the same gap wearing
+a different hat: a hosted build has no keyboard driver, so `handle_input` was
+reachable only from tests, and `route_input` had nothing to route. It did
+**not** close scanout. A Win32 window is a *development harness* — it runs on
+the wrong OS, against a window manager we do not own. Item (1) is untouched and
+remains the real fix; when it lands it will be another `impl Present` with
+nothing else in this crate changing, which is the argument for the trait having
+been worth defining before the driver exists. This entry therefore stays open,
+and the sentence in `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` calling this the last
+link to a photon stays true of SlateOS, not of the harness.
 
 ## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17)
 

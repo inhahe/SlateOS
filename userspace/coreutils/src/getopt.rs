@@ -170,15 +170,40 @@ impl Program {
     /// `invalid --parallel argument 'x'` — rather than getopt's.
     ///
     /// They take the same status as a getopt error but, measured, carry **no**
-    /// `Try '… --help'` referral; only getopt's and `argmatch`'s do. This
-    /// exists so that a caller with hand-written usage messages still gets its
-    /// status from one place instead of writing the number out again.
+    /// `Try '… --help'` referral. This exists so that a caller with
+    /// hand-written usage messages still gets its status from one place instead
+    /// of writing the number out again.
+    ///
+    /// Use [`Program::usage_referring`] for the ones that *do* refer; upstream
+    /// has both shapes and the difference is visible output.
     #[must_use]
     pub fn usage(self, message: String) -> Error {
         Error {
             message,
             status: self.usage_status,
         }
+    }
+
+    /// The utility's own usage errors that *do* refer the reader to `--help`.
+    ///
+    /// Which shape a given message takes is not a matter of taste upstream, it
+    /// is which function was called, so it is measured per message rather than
+    /// guessed. `sort -k0` calls `error (SORT_FAILURE, …)`, which prints one
+    /// line and stops. `wc --files0-from=- FILE` calls `error (0, …)` and then
+    /// `usage (EXIT_FAILURE)`, which adds the referral:
+    ///
+    /// ```text
+    /// wc: extra operand 'w1'
+    /// file operands cannot be combined with --files0-from
+    /// Try 'wc --help' for more information.
+    /// ```
+    ///
+    /// `message` may be several lines, as it is there — only the first carries
+    /// the `wc: ` prefix, which is the caller's business because the caller is
+    /// what prints it.
+    #[must_use]
+    pub fn usage_referring(self, message: String) -> Error {
+        sentence(self, &message)
     }
 
     /// `sort -x` → `invalid option -- 'x'`.

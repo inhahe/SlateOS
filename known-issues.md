@@ -23105,6 +23105,37 @@ waved through as "probably noise again".
 
 ## TD-FONT-DOES-NOT-READ-VARIATION-STORES
 
+**Status 2026-08-16: step 1 of 4 landed — `fvar` and `avar`.** The entry stays
+open; the device-table slot is still declined, and correctly so. What exists
+now is `gui/font/src/var.rs`: axes, named instances, and the user →
+normalized-F2Dot14 conversion, reachable as `Face::variation_axes()`. What does
+not: `gvar`, the `ItemVariationStore`, and the `Coords` on `ScaledFont` that
+would make a chosen instance actually draw. A face still renders at its default
+instance, which is what the ordering argument below asks for.
+
+Three things learned doing it, recorded because they change what the remaining
+steps have to handle:
+
+* **This host has 7 variable faces out of 556**, and they use *two* of the five
+  optional variation tables in any quantity: all 7 carry `gvar` + `HVAR` +
+  `STAT`, 6 carry `avar` and a `GDEF` `ItemVariationStore`, 5 carry `MVAR`.
+  **`CFF2` and `VVAR` are on no face here at all**, so those two cannot be
+  checked against a real file and want a synthesized oracle (the Thai
+  private-use precedent, design-decisions §432) rather than a sweep that would
+  report agreement it never tested. Counted by
+  `gui/font/tools/variable_survey.py`.
+* **Two host faces have a degenerate axis** — ReemKufi ships
+  `wght 400..400..700` and bahnschrift `wdth 75..100..100`, so one side has zero
+  width and the normalization formula as written divides by it. Not a fuzzer
+  case; installed on this machine.
+* **Endpoint tests cannot see whether `avar` was read.** The format requires
+  `avar` to fix the three identity points, so min/default/max normalize to
+  -1/0/+1 with or without it and the entire correction is interior. The test
+  that does see it compares all 82 named instances of the 7 faces against
+  `variable_survey.py --normalize`, an independent implementation; verified by
+  deleting the `avar` argument at the call site, which fails that test and
+  nothing else.
+
 **What.** `gui/font/src/device.rs` reads `GPOS` device tables — the per-pixel
 correction a face hangs off a value record's field or an anchor's axis — but
 declines the *other* thing that can occupy that slot. A `Device` whose

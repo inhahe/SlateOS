@@ -17681,6 +17681,99 @@ rationale as `yamldoc`), `no_std` with no `alloc`.
 
 ---
 
+## §448 — A variable font's chosen instance belongs to the scaled font, and the number it is chosen with is HarfBuzz's
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** Some fonts are adjustable — one file can draw at any weight from
+thin to bold, and at any width, rather than shipping one file per weight. The
+file describes the *dials* (weight from 200 to 700, say) and the app turns
+them. Two questions had to be settled before writing any of it: **where the
+turned-dial setting is stored**, and **exactly what number a given dial
+position turns into** — because that number gets used by four other tables, and
+being off by one in the last digit shows up as a glyph that is subtly the wrong
+shape.
+
+Both answers were forced by things already true of this crate, so neither is a
+close call — but both are easy to get wrong later by someone who does not know
+why, which is why they are written down.
+
+### The setting lives on the scaled font, not the parsed face
+
+`Face` is the parsed file. `ScaledFont` is that file at a size, for drawing.
+The instance ("weight 600") goes on `ScaledFont`.
+
+- *What changes:* one loaded file can be drawn at two weights at the same
+  time — a document with bold and regular text loads the font once.
+- **The alternative** — putting it on `Face` — means a bold run and a regular
+  run of the same family are two parsed copies of the same megabyte of data,
+  or one copy mutated between draws, which is a data race waiting to happen in
+  the compositor. Neither is acceptable, and the second is worse than it looks
+  because the mutation is invisible at the call site.
+- **Cost of the choice:** every function that reads a variation-dependent
+  table needs the coordinates passed to it, so signatures downstream get one
+  more argument. That is real but it is the honest shape: those functions
+  genuinely do depend on the instance, and a version that reads it off the
+  face is hiding a dependency rather than removing one.
+
+`Face::variation_axes()` therefore returns the *axis description* — what dials
+exist and their ranges — and never a position along them.
+
+### The dial position is converted with HarfBuzz's arithmetic, bit for bit
+
+Turning "weight 600" into the internal number is two steps: a proportion
+(600 is two-thirds of the way from 400 to 700), then an optional per-font
+correction curve the designer supplies (`avar`, which lets them say "the
+two-thirds point should really be three-fifths"). The curve is stored as fixed
+point — integers over 16384 — and interpolating along it involves a division.
+
+**Decision: divide the way HarfBuzz divides, including truncating toward zero
+rather than rounding to nearest.**
+
+- *What changes:* nothing a user can see directly. On some inputs this crate's
+  number is one 16384th smaller than the mathematically-nearest one.
+- **Why not round to nearest**, which is marginally more accurate: HarfBuzz is
+  this crate's oracle everywhere else — shaping, kerning, mark placement are
+  all checked against it by `gui/font/tools/harfbuzz_sweep.py`. A deliberate
+  one-unit divergence here does not stay here: it feeds `gvar`'s outline
+  deltas and `GPOS`'s positioning deltas, where it becomes a sub-pixel
+  disagreement in a *glyph shape*, at which point no sweep can tell "we round
+  better" from "we have a bug". Agreeing with the oracle is worth more than
+  being right by a sixteen-thousandth.
+- The same reasoning fixes the *other* rounding, in the opposite direction:
+  reaching fixed point from a float uses half-away-from-zero, because that is
+  what HarfBuzz's `roundf` does.
+
+**Consequence for testing.** Because the arithmetic is pinned to another
+implementation, "it matches the spec" is not the property under test —
+"it matches, unit for unit" is. So the host-font test compares all 82 named
+instances of this machine's 7 variable faces against
+`variable_survey.py --normalize`, a second implementation written from the
+specification in a different language, *including* its truncating division. A
+disagreement is then a bug rather than a rounding preference. Verified by
+injection: changing the rounding to truncation is caught at one unit
+(9829 against 9830).
+
+### A malformed variation table costs variability, not drawability
+
+`Variations::parse` returns `Option`, not `Result`, and `Face::parse` drops the
+`None` on the floor.
+
+- *What changes:* a font whose `fvar` is corrupt still opens and still draws,
+  at its default weight, instead of failing to open.
+- The `avar` case is the sharper one: an `avar` that disagrees with `fvar`
+  about how many axes there are is discarded **whole**, not per axis. Pairing
+  correction curve *k* with axis *k* across a count mismatch silently applies
+  the weight correction to the width — a wrong answer that still looks like a
+  font, which is the failure mode this crate spends most of its effort
+  avoiding.
+- An `avar` curve whose points are out of order becomes the identity **for
+  that axis only**, since the identity is exactly what the table's absence
+  would have meant and the other axes' curves are still readable.
+
+---
+
 ## §323 — A calculator's runtime error abandons the top-level statement, and the session lives on
 
 **Date:** 2026-08-16

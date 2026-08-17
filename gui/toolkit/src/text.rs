@@ -1064,6 +1064,10 @@ pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint)
 /// `--release` and `--test-threads=1` are both required for the numbers to
 /// mean anything: a debug build measures the absence of inlining, and two of
 /// these tests in parallel contend on the toolkit's global font-cache mutex.
+///
+/// **Every figure printed here is the fastest of many samples, not the median.**
+/// That is not the conventional choice and it was not the first one — see
+/// `best` and `is_this_instrument_stable` for the measurement that forced it.
 #[cfg(test)]
 mod shaping_cost {
     use super::*;
@@ -1078,10 +1082,9 @@ mod shaping_cost {
         CYCLE.chars().cycle().take(chars).collect()
     }
 
-    /// Median of `runs` shapings, in microseconds.
+    /// Cost of one shaping, in microseconds: the fastest of `runs` of them.
     ///
-    /// Median rather than mean because a scheduler preemption in one iteration
-    /// would otherwise decide the answer.
+    /// See `best` for why the fastest and not the median or the mean.
     ///
     /// The font is fetched **once**, outside the timed loop. `with_font` takes
     /// a global mutex and a cache lookup per call, and measuring that here
@@ -1093,24 +1096,79 @@ mod shaping_cost {
     /// `--test-threads=1` regardless; see the module doc.
     fn shape_us(text: &str, runs: usize) -> f64 {
         with_font(SIZE, FontWeightHint::Regular, FontFamily::Mono, |font| {
-            // One warm-up outside the samples: the first shaping of a size
-            // populates per-glyph caches inside the face, and charging that to
-            // the first sample would overstate every short-line figure.
-            let _ = font.shape(text);
-            let mut samples: Vec<f64> = (0..runs)
-                .map(|_| {
-                    let t = Instant::now();
-                    let run = font.shape(text);
-                    let elapsed = t.elapsed().as_secs_f64() * 1e6;
-                    // Keep the result observable so the shaping cannot be
-                    // optimised away as dead.
-                    assert!(run.width() >= 0.0);
-                    elapsed
-                })
-                .collect();
-            samples.sort_by(f64::total_cmp);
-            samples[samples.len() / 2]
+            best(&samples_us(font, text, runs))
         })
+    }
+
+    /// Timed shapings of `text`, in microseconds, sorted ascending.
+    ///
+    /// One warm-up shaping happens outside the samples: the first shaping of a
+    /// size populates per-glyph caches inside the face, and charging that to
+    /// the first sample would overstate every short-line figure.
+    fn samples_us(font: &osfont::system::SystemFont, text: &str, runs: usize) -> Vec<f64> {
+        let _ = font.shape(text);
+        // The width is returned rather than dropped so the shaping cannot be
+        // optimised away as dead.
+        timed(runs, || font.shape(text).width())
+    }
+
+    /// Times `f` repeatedly, returning the durations in microseconds, sorted.
+    ///
+    /// Sampling continues until *both* `runs` samples have been taken and
+    /// `MIN_SAMPLING_US` of wall time has gone into them. The second condition
+    /// is what makes a cheap workload measurable: this machine stalls every
+    /// process for a millisecond or two at a time, several times a second, and
+    /// a measurement whose whole sample run fits inside one such stall has no
+    /// quiet sample to find — every one of its samples is stalled, so the
+    /// minimum is stalled too. 51 shapings of the built-in face is 0.7ms of
+    /// work and was routinely swallowed whole; 20ms is not.
+    ///
+    /// `f` returns a value only so the compiler cannot delete the work.
+    fn timed(runs: usize, mut f: impl FnMut() -> f32) -> Vec<f64> {
+        /// Enough sampling time to be sure of straddling a stall.
+        const MIN_SAMPLING_US: f64 = 20_000.0;
+        /// A stop for a workload so cheap the time floor would never be met.
+        const MAX_RUNS: usize = 200_000;
+
+        let mut samples: Vec<f64> = Vec::with_capacity(runs);
+        let mut spent = 0.0f64;
+        while samples.len() < runs || (spent < MIN_SAMPLING_US && samples.len() < MAX_RUNS) {
+            let t = Instant::now();
+            let keep = f();
+            let elapsed = t.elapsed().as_secs_f64() * 1e6;
+            assert!(keep >= 0.0);
+            spent += elapsed;
+            samples.push(elapsed);
+        }
+        samples.sort_by(f64::total_cmp);
+        samples
+    }
+
+    /// The fastest sample — the statistic every instrument here reports.
+    ///
+    /// Not the median, which is the obvious choice and the wrong one. Noise on
+    /// this machine is one-sided: nothing can make a shaping finish sooner than
+    /// the code allows, but a scheduler stall, a cache eviction or a clock-speed
+    /// change can make it finish later. So the fastest of many samples estimates
+    /// the quantity actually being asked about — what the code costs when it is
+    /// allowed to run — and everything above it is a measurement of Windows.
+    ///
+    /// This is not a preference, it is measured: `is_this_instrument_stable`
+    /// reports the same workload twelve times over, and across those twelve the
+    /// median moved by 1.89x while the minimum moved by 1.02x. The 1.7x
+    /// disagreement between two runs of `shaping_cost_by_line_length` that
+    /// prompted the check was entirely this.
+    #[allow(clippy::indexing_slicing)]
+    fn best(sorted: &[f64]) -> f64 {
+        sorted[0]
+    }
+
+    /// Middle element of an ascending list. Kept only for
+    /// `is_this_instrument_stable`, which exists to show why nothing else
+    /// should use it.
+    #[allow(clippy::indexing_slicing)]
+    fn median(sorted: &[f64]) -> f64 {
+        sorted[sorted.len() / 2]
     }
 
     /// The same measurement against the built-in bitmap face, which has no
@@ -1120,18 +1178,7 @@ mod shaping_cost {
     /// the layout tables are charging.
     fn shape_builtin_us(text: &str, runs: usize) -> f64 {
         let font = osfont::system::SystemFont::builtin(SIZE);
-        let _ = font.shape(text);
-        let mut samples: Vec<f64> = (0..runs)
-            .map(|_| {
-                let t = Instant::now();
-                let run = font.shape(text);
-                let elapsed = t.elapsed().as_secs_f64() * 1e6;
-                assert!(run.width() >= 0.0);
-                elapsed
-            })
-            .collect();
-        samples.sort_by(f64::total_cmp);
-        samples[samples.len() / 2]
+        best(&samples_us(&font, text, runs))
     }
 
     /// What one `with_font` costs on its own — the mutex plus the cache lookup
@@ -1139,20 +1186,31 @@ mod shaping_cost {
     /// anything. Reported alongside the shaping figures because if it is
     /// comparable to shaping a short line, then *it*, and not shaping, is what
     /// a renderer doing one call per syntax token should worry about.
+    ///
+    /// Timed in **batches** of `BATCH`, unlike everything else here. The
+    /// fastest-sample rule needs the thing being timed to be comfortably larger
+    /// than the clock's resolution, and one cache hit is not: timed singly, the
+    /// minimum of a hundred thousand samples came out as a flat `0.000us`,
+    /// which is the clock reporting that it cannot see this, not the lookup
+    /// being free. A batch of a thousand is microseconds wide and divides back
+    /// down cleanly.
     fn font_lookup_us(runs: usize) -> f64 {
-        let mut samples: Vec<f64> = (0..runs)
-            .map(|_| {
-                let t = Instant::now();
-                let w = with_font(SIZE, FontWeightHint::Regular, FontFamily::Mono, |font| {
+        /// Enough lookups per sample to dwarf the clock's resolution.
+        const BATCH: usize = 1_000;
+
+        let batch = best(&timed(runs, || {
+            let mut total = 0.0f32;
+            for _ in 0..BATCH {
+                total += with_font(SIZE, FontWeightHint::Regular, FontFamily::Mono, |font| {
                     font.metrics().line_height
                 });
-                let elapsed = t.elapsed().as_secs_f64() * 1e6;
-                assert!(w > 0.0);
-                elapsed
-            })
-            .collect();
-        samples.sort_by(f64::total_cmp);
-        samples[samples.len() / 2]
+            }
+            total
+        }));
+        #[allow(clippy::cast_precision_loss)]
+        {
+            batch / BATCH as f64
+        }
     }
 
     /// What it costs to shape one line, from a screenful to absurd.
@@ -1166,7 +1224,8 @@ mod shaping_cost {
         const LINES_ON_SCREEN: f64 = 50.0;
         const FRAME_BUDGET_US: f64 = 16_700.0;
 
-        println!("\none with_font(): {:.3}us", font_lookup_us(2001));
+        // Fewer samples than elsewhere because each is a batch of a thousand.
+        println!("\none with_font(): {:.3}us", font_lookup_us(201));
         println!(
             "\n{:>9}  {:>12}  {:>12}  {:>14}  {:>9}",
             "chars", "shape (us)", "builtin", "50 lines (ms)", "of frame"
@@ -1208,6 +1267,141 @@ mod shaping_cost {
         }
     }
 
+    /// One line shaped once, against the same line shaped a piece at a time.
+    ///
+    /// This is the measurement the editor's `draw_tokens` turns on. It emits
+    /// one run *per syntax token*, measuring each to place the next — so a
+    /// 200-character line of forty tokens is forty shapings of five characters,
+    /// not one shaping of two hundred. If a shaping has a large fixed cost, the
+    /// per-token decomposition is not a small price paid for coloured text: it
+    /// is the dominant cost of drawing the line, and shaping the line whole is
+    /// *cheaper* as well as being what bidi correctness requires.
+    ///
+    /// See `TD-EDITOR-IS-NOT-BIDIRECTIONAL` item 4 and
+    /// `C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE`.
+    #[test]
+    #[ignore = "timing instrument, not an assertion; see the module doc"]
+    fn whole_line_against_one_run_per_token() {
+        println!(
+            "\n{:>9}  {:>7}  {:>10}  {:>12}  {:>10}  {:>8}",
+            "chars", "pieces", "whole (us)", "in pieces", "per piece", "ratio"
+        );
+        for chars in [80usize, 200, 1_000] {
+            let text = pathological(chars);
+            let whole = shape_us(&text, 201);
+            for pieces in [2usize, 5, 10, 20, 40] {
+                // Split on byte boundaries, which `pathological` makes safe:
+                // it is ASCII, so a byte offset is a character offset and no
+                // chunk can land inside a character.
+                let width = chars.div_ceil(pieces);
+                let parts: Vec<String> = text
+                    .as_bytes()
+                    .chunks(width)
+                    .map(|c| String::from_utf8_lossy(c).into_owned())
+                    .collect();
+                let split = shape_each_us(&parts, 201);
+                let n = parts.len();
+                #[allow(clippy::cast_precision_loss)]
+                let each = split / n as f64;
+                println!(
+                    "{chars:>9}  {n:>7}  {whole:>10.1}  {split:>12.1}  {each:>10.1}  {:>7.2}x",
+                    split / whole,
+                );
+            }
+        }
+        println!(
+            "\n(a ratio above 1.0 means shaping the line in pieces costs more \
+             than shaping it whole)"
+        );
+    }
+
+    /// Cost of shaping *every* string in `parts` — the fastest such pass.
+    ///
+    /// The whole list is one sample rather than one sample each, because the
+    /// question is what a renderer pays to draw one line — which is the sum,
+    /// not any single piece.
+    fn shape_each_us(parts: &[String], runs: usize) -> f64 {
+        with_font(SIZE, FontWeightHint::Regular, FontFamily::Mono, |font| {
+            for part in parts {
+                let _ = font.shape(part);
+            }
+            best(&timed(runs, || {
+                let mut total = 0.0f32;
+                for part in parts {
+                    total += font.shape(part).width();
+                }
+                total
+            }))
+        })
+    }
+
+    /// Is this instrument stable enough to draw conclusions from?
+    ///
+    /// It has to be asked, because two runs of the *identical* measurement —
+    /// the median of 201 shapings of a 1000-character line, each the only test
+    /// running — came back 776us and 1313us, a factor of 1.7. A number that
+    /// moves by 1.7x between runs cannot settle a 1.3x question, and the
+    /// tables in `known-issues.md` were full of 1.2-1.4x questions.
+    ///
+    /// So: repeat one workload many times inside a single process, and
+    /// alongside it repeat the *same* workload on the built-in bitmap face,
+    /// which runs the same pipeline with no layout tables. If both columns
+    /// drift together the cause is outside the code being measured — clock
+    /// speed, thermal state, whatever else the machine is doing — and the
+    /// honest way to report a result is the ratio, which divides that out.
+    /// If the system column drifts and the built-in one does not, the drift is
+    /// in the layout tables and is a real finding about them.
+    #[test]
+    #[ignore = "timing instrument, not an assertion; see the module doc"]
+    fn is_this_instrument_stable() {
+        const BLOCKS: usize = 12;
+        const RUNS: usize = 51;
+
+        let text = pathological(1_000);
+        println!(
+            "\n{:>6}  {:>10}  {:>10}  {:>10}  {:>10}",
+            "block", "sys med", "sys best", "bi med", "bi best"
+        );
+        let mut sys_med = Vec::with_capacity(BLOCKS);
+        let mut sys_best = Vec::with_capacity(BLOCKS);
+        let mut bi_med = Vec::with_capacity(BLOCKS);
+        let mut bi_best = Vec::with_capacity(BLOCKS);
+        for block in 0..BLOCKS {
+            let s = with_font(SIZE, FontWeightHint::Regular, FontFamily::Mono, |font| {
+                samples_us(font, &text, RUNS)
+            });
+            let builtin = osfont::system::SystemFont::builtin(SIZE);
+            let b = samples_us(&builtin, &text, RUNS);
+            let (sm, sb) = (median(&s), best(&s));
+            let (bm, bb) = (median(&b), best(&b));
+            println!("{block:>6}  {sm:>10.1}  {sb:>10.1}  {bm:>10.1}  {bb:>10.1}");
+            sys_med.push(sm);
+            sys_best.push(sb);
+            bi_med.push(bm);
+            bi_best.push(bb);
+        }
+
+        // The ratio is formed from the *best* of each block, because that is
+        // the candidate statistic being tested against the median.
+        let ratios: Vec<f64> = sys_best.iter().zip(&bi_best).map(|(s, b)| s / b).collect();
+        println!("\n{:>12}  {:>10}  {:>10}  {:>8}", "column", "min", "max", "spread");
+        for (name, v) in [
+            ("system med", &sys_med),
+            ("system best", &sys_best),
+            ("builtin med", &bi_med),
+            ("builtin best", &bi_best),
+            ("best ratio", &ratios),
+        ] {
+            let lo = v.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            println!("{name:>12}  {lo:>10.2}  {hi:>10.2}  {:>7.2}x", hi / lo);
+        }
+        println!(
+            "\n(whichever column has the smallest spread is the statistic these \
+             instruments should be reporting)"
+        );
+    }
+
     /// The one assertion in this module, and the only one here that runs by
     /// default: shaping a line on the system face must not cost absurdly more
     /// than shaping it on the built-in bitmap face.
@@ -1221,11 +1415,15 @@ mod shaping_cost {
     /// exactly the quantity that regressed.
     ///
     /// The bug this guards against (`C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-
-    /// SHOULD-BE`) sat at 1400-2200x. With the `GSUB` coverage digests in
-    /// place it measures **80x in release and 147x in a debug build** on the
-    /// development host, so 500x leaves better than three times the margin
-    /// against the worse of the two while still failing by a wide margin the
-    /// moment the skip stops working.
+    /// SHOULD-BE`) sat at 1400-2200x. With the `GSUB` and `GPOS` coverage
+    /// digests in place it measures **38x in release and 71x in a debug build**
+    /// on the development host, so 500x sits seven times above the worse of the
+    /// two and still nearly three times *below* the bug — it cannot fire on a
+    /// slow machine and cannot miss the regression.
+    ///
+    /// (Those two figures were 80x and 147x while this module reported medians.
+    /// Nothing about the code changed; the median was measuring Windows on top
+    /// of the shaping, and roughly doubled both. See `best`.)
     #[test]
     fn the_layout_tables_do_not_dominate_shaping() {
         let text = pathological(80);

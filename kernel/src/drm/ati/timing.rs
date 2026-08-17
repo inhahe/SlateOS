@@ -179,12 +179,18 @@ macro_rules! dmt {
 /// "largest mode that fits" search can walk it backwards.
 pub static DMT_MODES: &[DmtMode] = &[
     // 640x480@60 — the universally-supported fallback. Both syncs negative.
-    dmt!(640, 480, 60, 25_175, 656, 752, 800, 490, 492, 525, true, true),
+    dmt!(
+        640, 480, 60, 25_175, 656, 752, 800, 490, 492, 525, true, true
+    ),
     // 800x600@60 — both syncs positive, unlike its 640x480 neighbour.
-    dmt!(800, 600, 60, 40_000, 840, 968, 1056, 601, 605, 628, false, false),
+    dmt!(
+        800, 600, 60, 40_000, 840, 968, 1056, 601, 605, 628, false, false
+    ),
     // 1024x768@60 — both negative again. The polarity alternation across
     // these three is not a pattern with a rule; it is why the table stores it.
-    dmt!(1024, 768, 60, 65_000, 1048, 1184, 1344, 771, 777, 806, true, true),
+    dmt!(
+        1024, 768, 60, 65_000, 1048, 1184, 1344, 771, 777, 806, true, true
+    ),
     // 1280x1024@60
     dmt!(
         1280, 1024, 60, 108_000, 1328, 1440, 1688, 1025, 1028, 1066, false, false

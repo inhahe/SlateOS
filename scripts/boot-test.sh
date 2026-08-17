@@ -1827,6 +1827,28 @@ rm -f "$PIDFILE"
 # iterations plus the loop body's own work, so it drifts upward on exactly the
 # busy hosts whose measurement matters most.
 QEMU_START_EPOCH=$(date +%s)
+#
+# `-device ati-vga,model=rv100` presents a Radeon 7000 (PCI 1002:5159) whose
+# register interface QEMU emulates for real, including the CRTC block.  It is
+# here so the ATI driver's register offsets are checked against a device on
+# every boot instead of being trusted: a transposed offset in
+# kernel/src/drm/ati/regs.rs is otherwise invisible until it drives a monitor.
+# The kernel only *reads* it and registers no backend for it.
+#
+# `-vga std` is REQUIRED here and must not be dropped.  ati-vga is a VGA-class
+# device, so naming it on the command line makes QEMU suppress the machine's
+# default VGA -- and then the only VGA controller is one OVMF has no driver
+# for.  No driver means no GOP, which means limine hands the kernel no
+# framebuffer, which means the console never initialises and console::self_test
+# panics with "console not initialized".  That is not a display-subsystem bug
+# and the backtrace does not mention graphics at all; it took a full boot to
+# diagnose.  With `-vga std` both controllers are present (1234:1111 driving
+# the display, 1002:5159 for the driver to read), QEMU emits no warning, and
+# OVMF still binds GOP to the standard adapter.  Verified on QEMU 11.0.93.
+#
+# (Note that virtio-gpu-pci does NOT have this effect: it is display-class but
+# not VGA-class, so it never suppressed the default.  Testing coexistence with
+# virtio-gpu alone is what missed this.)
 "$QEMU" \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
     -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \
@@ -1836,6 +1858,8 @@ QEMU_START_EPOCH=$(date +%s)
     "${WATCHDOG_ARGS[@]}" \
     "${MONITOR_ARGS[@]}" \
     -device virtio-gpu-pci \
+    -vga std \
+    -device ati-vga,model=rv100 \
     -serial "file:$SERIAL_FILE_WIN" \
     -pidfile "$PIDFILE_WIN" \
     -display none \

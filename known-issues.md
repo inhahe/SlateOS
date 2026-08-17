@@ -28389,3 +28389,104 @@ gated on C-Q2 either way, since the editor is out of that question's scope.
 overwhelmingly one-directional, and on such text every one of these is
 correct. It bites a user editing a document with a quoted Arabic or Hebrew
 phrase in it, which markdown and comment text make entirely plausible.
+
+## C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE (lane C, 2026-08-17)
+
+**Status: OPEN — measured, not yet root-caused. This is the most severe
+performance problem currently known in the GUI, and it is not confined to one
+app: every piece of text the system measures or draws goes through it.**
+
+**What.** `ScaledFont::shape` costs **~64 microseconds per character** on a
+real outline face, and the cost is *linear* in the string — so it is a huge
+per-character constant, not an algorithmic blow-up over the string. For scale,
+HarfBuzz shapes a short Latin run in single-digit microseconds *total*. We are
+roughly three orders of magnitude off.
+
+**Measured** on the dev host, release build, by
+`gui/toolkit/src/text.rs` → `mod shaping_cost` (two `#[ignore]`d timing tests,
+kept in the tree so the numbers can be re-taken elsewhere):
+
+```
+cargo test --release -p guitk --lib shaping_cost -- --ignored --nocapture --test-threads=1
+```
+
+| chars | system face | built-in bitmap face | ratio |
+|---:|---:|---:|---:|
+| 80 | 5,033 us | 3.0 us | 1678x |
+| 200 | 12,365 us | 5.6 us | 2208x |
+| 1,000 | 64,269 us | 31.5 us | 2040x |
+| 5,000 | 323,435 us | 159.7 us | 2025x |
+| 20,000 | 1,289,777 us | 900.1 us | 1433x |
+
+Both columns are linear; the system face's slope is ~64 us/char and the
+built-in face's is ~0.045 us/char. Note the built-in (bitmap) backend
+**bypasses the shaping pipeline entirely** — `SystemFont::shape_lang` builds
+the run straight from `char_indices` — so that column is not "the same work
+without layout tables", it is "no pipeline at all". It is included as a floor,
+not as an apples-to-apples comparison.
+
+**Why this is severe.** A single 200-character line takes **12 ms** to shape.
+A 60 Hz frame is 16.7 ms. So one line of text is 74% of a frame, and a
+50-line screen is roughly **620 ms** — 37 frames' worth — if anything shapes
+per frame. Every `text::measure` call shapes; the toolkit measures constantly
+(button labels, list rows, `draw_tokens` once *per syntax token*). Whatever is
+saving us today is caching further up, not speed here, and any path that
+misses that cache falls off a cliff.
+
+**What has been ruled out.**
+
+* **Not the font-cache mutex.** One `with_font()` — lock plus cache lookup —
+  measures **0.100 us**, i.e. 0.15% of a single character's shaping cost.
+* **Not test-harness contention.** The first run of the instrument reported
+  4.5 ms for 80 characters *with* two tests sharing the global font mutex; with
+  `--test-threads=1` and the font fetched once outside the timed loop, the
+  number barely moved. The instrument now documents both requirements.
+* **Not cold caches.** Every measurement takes a warm-up shaping outside the
+  sample set and reports the **median** of 21-201 runs.
+* **Not per-shape re-parsing of the big OpenType tables.** `GSUB` and `GPOS`
+  both decode through `otl::ByScript`, built once per face — `otl.rs:409`
+  already documents that doing that walk per shape is too slow ("re-reading
+  1874 subtable offsets for every string drawn"). `MarkPositioning::parse` and
+  the kerning tables are likewise parsed once, at `Face` construction
+  (`sfnt.rs:821`).
+
+**Where to look next.** The cost is inside the per-shape passes in
+`ScaledFont::shape_with` (`gui/font/src/scaled.rs:677`). The suspects, in the
+order worth timing:
+
+1. **`cmap` lookups.** `shape_with` calls `self.face.glyph_index(ch)` from
+   `norm::pieces`, then *twice more per character* from `hangul::preprocess`
+   (once for `has_glyph`, once inside the `zero_width` closure, which also
+   calls `advance_at`). `Face::glyph_index` → `lookup` → `cmap_format4`
+   (`sfnt.rs:1295`) re-reads the segment count and walks segments from the raw
+   byte slice on **every call** — nothing is memoised. A large Unicode face has
+   on the order of a thousand segments. That is the leading hypothesis and the
+   cheapest to test.
+2. **`advance_at(gid, &self.coords)`**, if it re-reads `hmtx` (and interpolates
+   variable-font deltas) per call rather than from a decoded table.
+3. The remaining passes — `byte_levels`, `joining::forms`, `script::runs` — are
+   all linear over pieces with no obvious per-character table walk, so they are
+   lower suspects.
+
+**The proper fix**, assuming (1) confirms: give `Face` a decoded `cmap` — a
+sorted segment array, or a direct map for the BMP — built once at parse time
+alongside the other tables, so `glyph_index` is a binary search over decoded
+data instead of a byte-slice walk. If `advance_at` is also implicated, decode
+`hmtx` once the same way. Neither changes any observable behaviour, so both are
+covered by the existing shaping tests; add a regression assertion on the
+*measured* rate (something like "80 characters shape in under 200 us") so this
+cannot silently return.
+
+**How this was found.** Scoping `TD-EDITOR-IS-NOT-BIDIRECTIONAL`, whose item 3
+asks whether shape-whole-line-and-clip is affordable. The measurement that was
+supposed to answer that question instead showed that *nothing* is affordable at
+the current rate, so that entry's tradeoff cannot be settled until this is
+fixed. **This is a prerequisite for that work**, not a side quest — and it is
+almost certainly worth more than the bidi correctness it was gathered for.
+
+**Note on the editor question it was gathered for.** At 64 us/char the answer
+is trivially "cache it" — but that is an artefact of the bug, not a real
+finding. Re-take the ratio after the fix before deciding: the built-in
+column's slope (0.045 us/char) suggests that once shaping is fast, shaping a
+5,000-character line whole may well cost less than a frame, and the whole
+byte-slicing design the editor uses for scrolling may be unnecessary.

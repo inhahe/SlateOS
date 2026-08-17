@@ -1042,6 +1042,173 @@ pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint)
         .map_or_else(|| text.chars().count(), |prefix| prefix.chars().count())
 }
 
+/// Cost of shaping, measured rather than guessed.
+///
+/// `apps/editor` scrolls sideways by slicing each line at a byte offset and
+/// shaping only the tail. That is incompatible with bidirectional text — the
+/// visible part of a mixed-direction line is not the shaping of a substring of
+/// it — and the replacement is to shape the whole line and clip. Whether that
+/// is affordable is a question about *this* function's cost as a function of
+/// line length, and `known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL` asked
+/// for a measurement before the choice was made. This module is that
+/// measurement, kept in the tree so the number can be re-taken on other
+/// hardware rather than believed on this one.
+///
+/// The tests are `#[ignore]`d: they are instruments, not assertions, and
+/// timings on a loaded CI box would be noise. Run them deliberately:
+///
+/// ```text
+/// cargo test --release -p guitk --lib shaping_cost -- --ignored --nocapture --test-threads=1
+/// ```
+///
+/// `--release` and `--test-threads=1` are both required for the numbers to
+/// mean anything: a debug build measures the absence of inlining, and two of
+/// these tests in parallel contend on the toolkit's global font-cache mutex.
+#[cfg(test)]
+mod shaping_cost {
+    use super::*;
+    use std::time::Instant;
+
+    const SIZE: f32 = 14.0;
+
+    /// A minified-JavaScript-ish line: no spaces to break on, mixed character
+    /// classes, the shape of the worst line a code editor actually meets.
+    fn pathological(chars: usize) -> String {
+        const CYCLE: &str = "a1(){};=>[]\"x\",";
+        CYCLE.chars().cycle().take(chars).collect()
+    }
+
+    /// Median of `runs` shapings, in microseconds.
+    ///
+    /// Median rather than mean because a scheduler preemption in one iteration
+    /// would otherwise decide the answer.
+    ///
+    /// The font is fetched **once**, outside the timed loop. `with_font` takes
+    /// a global mutex and a cache lookup per call, and measuring that here
+    /// would answer a different question than the one asked — and, because the
+    /// mutex is shared, would let two tests running concurrently contend and
+    /// inflate each other. (That is not hypothetical: the first run of this
+    /// instrument reported 4.5ms to shape 80 characters, which was two tests
+    /// fighting over the lock, not shaping.) These tests must run with
+    /// `--test-threads=1` regardless; see the module doc.
+    fn shape_us(text: &str, runs: usize) -> f64 {
+        with_font(SIZE, FontWeightHint::Regular, FontFamily::Mono, |font| {
+            // One warm-up outside the samples: the first shaping of a size
+            // populates per-glyph caches inside the face, and charging that to
+            // the first sample would overstate every short-line figure.
+            let _ = font.shape(text);
+            let mut samples: Vec<f64> = (0..runs)
+                .map(|_| {
+                    let t = Instant::now();
+                    let run = font.shape(text);
+                    let elapsed = t.elapsed().as_secs_f64() * 1e6;
+                    // Keep the result observable so the shaping cannot be
+                    // optimised away as dead.
+                    assert!(run.width() >= 0.0);
+                    elapsed
+                })
+                .collect();
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        })
+    }
+
+    /// The same measurement against the built-in bitmap face, which has no
+    /// layout tables at all — one glyph per character, no `GSUB`, no kerning.
+    /// It is the floor: whatever it costs is the cost of the shaping pipeline's
+    /// bookkeeping alone, and the gap between it and the system face is what
+    /// the layout tables are charging.
+    fn shape_builtin_us(text: &str, runs: usize) -> f64 {
+        let font = osfont::system::SystemFont::builtin(SIZE);
+        let _ = font.shape(text);
+        let mut samples: Vec<f64> = (0..runs)
+            .map(|_| {
+                let t = Instant::now();
+                let run = font.shape(text);
+                let elapsed = t.elapsed().as_secs_f64() * 1e6;
+                assert!(run.width() >= 0.0);
+                elapsed
+            })
+            .collect();
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    }
+
+    /// What one `with_font` costs on its own — the mutex plus the cache lookup
+    /// that every `measure`/`shape` call in the toolkit pays before it shapes
+    /// anything. Reported alongside the shaping figures because if it is
+    /// comparable to shaping a short line, then *it*, and not shaping, is what
+    /// a renderer doing one call per syntax token should worry about.
+    fn font_lookup_us(runs: usize) -> f64 {
+        let mut samples: Vec<f64> = (0..runs)
+            .map(|_| {
+                let t = Instant::now();
+                let w = with_font(SIZE, FontWeightHint::Regular, FontFamily::Mono, |font| {
+                    font.metrics().line_height
+                });
+                let elapsed = t.elapsed().as_secs_f64() * 1e6;
+                assert!(w > 0.0);
+                elapsed
+            })
+            .collect();
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    }
+
+    /// What it costs to shape one line, from a screenful to absurd.
+    ///
+    /// The editor's question is not "what does one line cost" but "what does a
+    /// *screen* cost", so the report converts: a full-height window shows
+    /// roughly 50 lines, and a 60Hz frame is 16.7ms.
+    #[test]
+    #[ignore = "timing instrument, not an assertion; see the module doc"]
+    fn shaping_cost_by_line_length() {
+        const LINES_ON_SCREEN: f64 = 50.0;
+        const FRAME_BUDGET_US: f64 = 16_700.0;
+
+        println!("\none with_font(): {:.3}us", font_lookup_us(2001));
+        println!(
+            "\n{:>9}  {:>12}  {:>12}  {:>14}  {:>9}",
+            "chars", "shape (us)", "builtin", "50 lines (ms)", "of frame"
+        );
+        for chars in [80usize, 200, 1_000, 5_000, 20_000] {
+            let text = pathological(chars);
+            // Fewer runs at the big sizes: the point is the shape of the curve,
+            // and a 20k-char shaping repeated 200 times is minutes of nothing.
+            let runs = if chars <= 1_000 { 201 } else { 21 };
+            let us = shape_us(&text, runs);
+            let builtin = shape_builtin_us(&text, runs);
+            let screen_ms = us * LINES_ON_SCREEN / 1000.0;
+            println!(
+                "{chars:>9}  {us:>12.1}  {builtin:>12.1}  {screen_ms:>14.2}  {:>8.1}%",
+                us * LINES_ON_SCREEN / FRAME_BUDGET_US * 100.0
+            );
+        }
+        println!(
+            "\n(a frame is {FRAME_BUDGET_US:.0}us at 60Hz; {LINES_ON_SCREEN:.0} lines assumed \
+             visible)"
+        );
+    }
+
+    /// The comparison that actually decides the design: shaping the whole line
+    /// every frame, against shaping only the ~200 characters that fit on
+    /// screen — which is what the byte-slicing buys today.
+    #[test]
+    #[ignore = "timing instrument, not an assertion; see the module doc"]
+    fn whole_line_against_visible_window() {
+        const VISIBLE: usize = 200;
+        println!("\n{:>9}  {:>12}  {:>12}  {:>8}", "chars", "whole", "visible", "ratio");
+        for chars in [200usize, 1_000, 5_000, 20_000] {
+            let whole = pathological(chars);
+            let window = pathological(VISIBLE.min(chars));
+            let runs = if chars <= 1_000 { 201 } else { 21 };
+            let w = shape_us(&whole, runs);
+            let v = shape_us(&window, runs);
+            println!("{chars:>9}  {w:>12.1}  {v:>12.1}  {:>7.1}x", w / v);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

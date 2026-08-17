@@ -258,6 +258,31 @@ pub struct Rect {
     pub height: u32,
 }
 
+/// The distance from `lo` to `hi` as an extent, zero when `hi` is not past `lo`.
+///
+/// `(hi - lo) as u32` is the obvious spelling and it is wrong twice over. Screen
+/// coordinates are `i32` and a client picks them — `CreateWindow` and
+/// `SetPosition` both carry a position straight off the wire — so `hi - lo`
+/// overflows for a pair as far apart as `i32::MIN` and `i32::MAX`, which is a
+/// panic *in the display server*, i.e. every application on the desktop dies
+/// because one of them asked for a silly window position. And the true distance
+/// between those two does not fit in an `i32` at all, so even a checked
+/// subtraction could only fail, never answer.
+///
+/// `wrapping_sub` answers exactly. For `hi > lo` the mathematical difference is
+/// always in `0..=u32::MAX`, and two's-complement subtraction reproduces its low
+/// 32 bits — which, given the value fits, *is* the value. The `hi <= lo` case is
+/// separated out because an empty span is a legitimate result (two rectangles
+/// that merely touch), not an error.
+#[allow(clippy::cast_sign_loss)] // The bit pattern is the answer; see above.
+const fn span(lo: i32, hi: i32) -> u32 {
+    if hi <= lo {
+        0
+    } else {
+        hi.wrapping_sub(lo) as u32
+    }
+}
+
 impl Rect {
     pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
         Self {
@@ -290,7 +315,7 @@ impl Rect {
             .min(other.y.saturating_add(other.height as i32));
 
         if x2 > x1 && y2 > y1 {
-            Some(Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32))
+            Some(Rect::new(x1, y1, span(x1, x2), span(y1, y2)))
         } else {
             None
         }
@@ -309,7 +334,7 @@ impl Rect {
             .saturating_add(self.height as i32)
             .max(other.y.saturating_add(other.height as i32));
 
-        Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32)
+        Rect::new(x1, y1, span(x1, x2), span(y1, y2))
     }
 
     /// The part of `self` not covered by `other`, as up to four **disjoint**
@@ -337,18 +362,18 @@ impl Rect {
         let iy1 = i.y.saturating_add(i.height as i32);
 
         if iy0 > sy0 {
-            out.push(Rect::new(sx0, sy0, self.width, (iy0 - sy0) as u32));
+            out.push(Rect::new(sx0, sy0, self.width, span(sy0, iy0)));
         }
         if sy1 > iy1 {
-            out.push(Rect::new(sx0, iy1, self.width, (sy1 - iy1) as u32));
+            out.push(Rect::new(sx0, iy1, self.width, span(iy1, sy1)));
         }
-        let mid_h = (iy1 - iy0) as u32;
+        let mid_h = span(iy0, iy1);
         if mid_h > 0 {
             if ix0 > sx0 {
-                out.push(Rect::new(sx0, iy0, (ix0 - sx0) as u32, mid_h));
+                out.push(Rect::new(sx0, iy0, span(sx0, ix0), mid_h));
             }
             if sx1 > ix1 {
-                out.push(Rect::new(ix1, iy0, (sx1 - ix1) as u32, mid_h));
+                out.push(Rect::new(ix1, iy0, span(ix1, sx1), mid_h));
             }
         }
         out
@@ -572,14 +597,25 @@ impl Window {
     }
 
     /// Get the total bounds including decorations (title bar, borders, shadow).
+    ///
+    /// Saturating throughout, because the position and size are the client's to
+    /// choose and the frame is added to them: a window at `i32::MIN` grown by a
+    /// border must stay pinned at the edge of the coordinate space. Wrapping
+    /// would teleport it to the opposite extreme and panicking would let one
+    /// client's bad request kill the whole display server.
     pub fn outer_rect(&self) -> Rect {
         let (top, side, bottom) = self.frame_insets();
         let shadow = self.shadow_extent();
         Rect::new(
-            self.x - shadow as i32 - side as i32,
-            self.y - shadow as i32 - top as i32,
-            self.width + (side * 2) + (shadow * 2),
-            self.height + top + bottom + (shadow * 2),
+            self.x.saturating_sub(shadow as i32).saturating_sub(side as i32),
+            self.y.saturating_sub(shadow as i32).saturating_sub(top as i32),
+            self.width
+                .saturating_add(side.saturating_mul(2))
+                .saturating_add(shadow.saturating_mul(2)),
+            self.height
+                .saturating_add(top)
+                .saturating_add(bottom)
+                .saturating_add(shadow.saturating_mul(2)),
         )
     }
 
@@ -601,9 +637,9 @@ impl Window {
         }
         let (top, side, _) = self.frame_insets();
         Some(Rect::new(
-            self.x - side as i32,
-            self.y - top as i32,
-            self.width + (side * 2),
+            self.x.saturating_sub(side as i32),
+            self.y.saturating_sub(top as i32),
+            self.width.saturating_add(side.saturating_mul(2)),
             top,
         ))
     }
@@ -1494,14 +1530,14 @@ impl DisplayManager {
 
     /// Get the total virtual desktop bounds (union of all displays).
     pub fn virtual_bounds(&self) -> Rect {
-        if self.displays.is_empty() {
+        // Taken from the iterator rather than by `[0]` after an `is_empty()`
+        // guard: the guard and the index are two statements that have to agree
+        // about the same fact, and only one of them is checked by the compiler.
+        let mut rest = self.displays.iter();
+        let Some(first) = rest.next() else {
             return Rect::new(0, 0, 0, 0);
-        }
-        let mut bounds = self.displays[0].bounds();
-        for display in self.displays.iter().skip(1) {
-            bounds = bounds.union(&display.bounds());
-        }
-        bounds
+        };
+        rest.fold(first.bounds(), |bounds, display| bounds.union(&display.bounds()))
     }
 
     /// Get all displays.
@@ -5966,6 +6002,66 @@ mod tests {
                 "area after subtracting {occ:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_union_across_the_whole_coordinate_space_does_not_overflow() {
+        // `(x2 - x1) as u32` used to compute the width here. Both coordinates
+        // come off the wire — `CreateWindow` and `SetPosition` carry a client's
+        // chosen `i32` position — so a client could place one window at each end
+        // of the coordinate space and panic the display server with the damage
+        // union of the two. The distance does not fit in an `i32` at all, which
+        // is why the fix computes the extent directly rather than subtracting.
+        let far_left = Rect::new(i32::MIN, i32::MIN, 10, 10);
+        let far_right = Rect::new(i32::MAX - 10, i32::MAX - 10, 10, 10);
+        let both = far_left.union(&far_right);
+        assert_eq!(both.x, i32::MIN);
+        assert_eq!(both.y, i32::MIN);
+        assert_eq!(both.width, u32::MAX);
+        assert_eq!(both.height, u32::MAX);
+
+        // And the ordinary case still gives the ordinary answer.
+        let a = Rect::new(-3, -2, 20, 14);
+        let b = Rect::new(5, 5, 4, 4);
+        assert_eq!(a.union(&b), Rect::new(-3, -2, 20, 14));
+        assert_eq!(
+            Rect::new(0, 0, 5, 5).union(&Rect::new(10, 10, 5, 5)),
+            Rect::new(0, 0, 15, 15)
+        );
+    }
+
+    #[test]
+    fn span_is_exact_at_the_edges_of_the_coordinate_space() {
+        // The whole coordinate space is `u32::MAX` wide, exactly — which is the
+        // reason the answer cannot be computed by subtracting in `i32`.
+        assert_eq!(span(i32::MIN, i32::MAX), u32::MAX);
+        assert_eq!(span(i32::MIN, 0), 1 << 31);
+        assert_eq!(span(0, i32::MAX), i32::MAX as u32);
+        // Not past `lo` is an empty span, not an error: two rectangles that
+        // merely touch produce one.
+        assert_eq!(span(5, 5), 0);
+        assert_eq!(span(5, 4), 0);
+        assert_eq!(span(i32::MAX, i32::MIN), 0);
+        assert_eq!(span(-7, 3), 10);
+    }
+
+    #[test]
+    fn a_window_at_the_coordinate_edge_keeps_its_frame_on_the_screen() {
+        // The frame is *added* to a client-chosen position and size, so both
+        // ends can overflow. Saturating pins the window at the extreme; the bug
+        // it replaces would have wrapped it to the far side of the desktop.
+        let w = plain_window(i32::MIN, i32::MIN, 100, 100);
+        assert!(w.is_framed(), "the case only arises for a framed window");
+        let outer = w.outer_rect();
+        assert_eq!(outer.x, i32::MIN);
+        assert_eq!(outer.y, i32::MIN);
+
+        let huge = plain_window(0, 0, u32::MAX, u32::MAX);
+        let outer = huge.outer_rect();
+        assert_eq!(outer.width, u32::MAX);
+        assert_eq!(outer.height, u32::MAX);
+        let title = huge.title_bar_rect().expect("a decorated window has one");
+        assert_eq!(title.width, u32::MAX);
     }
 
     #[test]

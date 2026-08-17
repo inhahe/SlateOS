@@ -74,7 +74,9 @@ fn read_after_exit(which: Piped, script: &str) -> Result<String, ()> {
     // The host's `sleep`, not whichever one cargo staged on the search path:
     // these tests are timed against [`JOB_SECS`], so a `sleep` that ignored its
     // argument would make a leak look like correct behaviour (`hostpath`).
-    hostpath::scrub(&mut cmd).args(["-c", script]).stdin(Stdio::null());
+    hostpath::scrub(&mut cmd)
+        .args(["-c", script])
+        .stdin(Stdio::null());
     match which {
         Piped::Stdout => {
             cmd.stdout(Stdio::from(writer)).stderr(Stdio::null());
@@ -141,7 +143,10 @@ fn a_child_that_should_inherit_stdout_still_does() {
     // *meant* to write to it. `Stdio::inherit` duplicates the descriptor for the
     // one spawn that asked for it, which is exactly the distinction — this
     // child's stdout, rather than every child's from now on.
-    let out = read_after_exit(Piped::Stdout, r#"echo shell; "$BASH" -c 'echo child' </dev/null"#)
-        .expect("the shell's stdout pipe outlived the shell");
+    let out = read_after_exit(
+        Piped::Stdout,
+        r#"echo shell; "$BASH" -c 'echo child' </dev/null"#,
+    )
+    .expect("the shell's stdout pipe outlived the shell");
     assert_eq!(out, "shell\nchild\n");
 }

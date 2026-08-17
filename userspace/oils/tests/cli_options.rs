@@ -31,8 +31,7 @@ impl TempHome {
         // let two of them share (and delete) one directory.
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("osh-cli-{tag}-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("osh-cli-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp home");
         Self(dir)
@@ -210,7 +209,10 @@ fn plus_sign_unknown_option_keeps_its_sign() {
 fn unknown_long_option_reports_invalid_option() {
     let (_out, err, code) = run_osh(&["--nope"], "");
     assert_eq!(code, 2);
-    assert_eq!(err.lines().next().unwrap_or(""), "osh: --nope: invalid option");
+    assert_eq!(
+        err.lines().next().unwrap_or(""),
+        "osh: --nope: invalid option"
+    );
 }
 
 /// A bare `-` is *only* end-of-options — it is not a spelling of `-s`. bash's
@@ -229,7 +231,10 @@ fn bare_dash_is_end_of_options_not_dash_s() {
     // bash: `bash - aa bb` fails to open `aa` (127), having set $1=bb.
     let (_out, err, code) = run_osh(&["-", "nosuch_script_xyz", "bb"], "");
     assert_eq!(code, 127, "the operand must be opened as a script: {err:?}");
-    assert!(err.contains("nosuch_script_xyz"), "error should name it: {err:?}");
+    assert!(
+        err.contains("nosuch_script_xyz"),
+        "error should name it: {err:?}"
+    );
 
     // Same word after `--`, same outcome: the two are interchangeable here.
     let (_out, _err, code) = run_osh(&["--", "nosuch_script_xyz"], "");
@@ -292,13 +297,14 @@ fn stdin_repl_numbers_lines_across_the_whole_stream() {
 
     // A compound command spans several physical lines; the next command
     // resumes after all of them.
-    let (out, _err, _code) =
-        run_osh(&["-s"], "echo A$LINENO\nif true\nthen\necho B$LINENO\nfi\necho C$LINENO\n");
+    let (out, _err, _code) = run_osh(
+        &["-s"],
+        "echo A$LINENO\nif true\nthen\necho B$LINENO\nfi\necho C$LINENO\n",
+    );
     assert_eq!(out, "A1\nB4\nC6\n");
 
     // A function body reports the line it was defined on, wherever it is run.
-    let (out, _err, _code) =
-        run_osh(&["-s"], "f() {\necho B$LINENO\n}\necho C$LINENO\nf\n");
+    let (out, _err, _code) = run_osh(&["-s"], "f() {\necho B$LINENO\n}\necho C$LINENO\nf\n");
     assert_eq!(out, "C4\nB2\n");
 
     // Runtime diagnostics carry the same number.
@@ -313,14 +319,19 @@ fn stdin_repl_numbers_lines_across_the_whole_stream() {
     let (_out, err, _code) = run_osh(&["-s"], "echo one\necho two )\n");
     assert_eq!(
         err,
-        format!("{sh}: line 2: syntax error near unexpected token `)'\n{sh}: line 2: `echo two )'\n")
+        format!(
+            "{sh}: line 2: syntax error near unexpected token `)'\n{sh}: line 2: `echo two )'\n"
+        )
     );
 
     // An unterminated quote is reported on the stream line it opened on, after
     // the complete lines before it have run.
     let (out, err, _code) = run_osh(&["-s"], "echo one\necho two\nv='abc\n");
     assert_eq!(out, "one\ntwo\n");
-    assert_eq!(err, format!("{sh}: line 3: unexpected EOF while looking for matching `''\n"));
+    assert_eq!(
+        err,
+        format!("{sh}: line 3: unexpected EOF while looking for matching `''\n")
+    );
 }
 
 /// A `\<newline>` typed at a REPL prompt must reach the *lexer* intact. The
@@ -396,8 +407,10 @@ fn named_option_letters_bundle_and_take_the_next_word() {
     assert_eq!(out, "set -o pipefail\n");
 
     // Two in one cluster consume two following words, in order.
-    let (out, err, code) =
-        run_osh(&["-oo", "pipefail", "xtrace", "-c", "shopt -op pipefail"], "");
+    let (out, err, code) = run_osh(
+        &["-oo", "pipefail", "xtrace", "-c", "shopt -op pipefail"],
+        "",
+    );
     assert_eq!(code, 0, "stderr: {err:?}");
     assert_eq!(out, "set -o pipefail\n");
 
@@ -407,8 +420,10 @@ fn named_option_letters_bundle_and_take_the_next_word() {
     assert_eq!(out, "shopt -s extglob\n");
     // `shopt -p` reports a *disabled* option with status 1, so only the text is
     // interesting here — bash does the same.
-    let (out, err, _code) =
-        run_osh(&["+O", "expand_aliases", "-c", "shopt -p expand_aliases"], "");
+    let (out, err, _code) = run_osh(
+        &["+O", "expand_aliases", "-c", "shopt -p expand_aliases"],
+        "",
+    );
     assert_eq!(out, "shopt -u expand_aliases\n", "stderr: {err:?}");
 }
 
@@ -433,7 +448,10 @@ fn a_trailing_option_letter_lists_instead_of_failing() {
     // `+o` gives the re-inputtable form; `-O`/`+O` the shopt equivalents.
     let (out, _err, code) = run_osh(&["-s", "+o"], "");
     assert_eq!(code, 0);
-    assert!(out.contains("set -o braceexpand"), "not re-inputtable: {out:?}");
+    assert!(
+        out.contains("set -o braceexpand"),
+        "not re-inputtable: {out:?}"
+    );
     let (out, _err, code) = run_osh(&["-s", "-O"], "");
     assert_eq!(code, 0);
     assert!(out.contains("expand_aliases"), "no shopt listing: {out:?}");
@@ -595,14 +613,17 @@ fn bash_env_is_read_by_non_interactive_shells_only() {
     home.write("env.sh", "echo from-env\n");
     home.write(".bashrc", "echo from-bashrc\n");
 
-    let (out, err, code) =
-        run_osh_env(&home, &[("BASH_ENV", "./env.sh")], &["-c", "echo cmd"], "");
+    let (out, err, code) = run_osh_env(&home, &[("BASH_ENV", "./env.sh")], &["-c", "echo cmd"], "");
     assert_eq!(code, 0, "stderr: {err:?}");
     assert_eq!(out, "from-env\ncmd\n");
 
     // Interactive: the rc file instead, never $BASH_ENV.
-    let (out, _err, _code) =
-        run_osh_env(&home, &[("BASH_ENV", "./env.sh")], &["-i", "-c", "echo cmd"], "");
+    let (out, _err, _code) = run_osh_env(
+        &home,
+        &[("BASH_ENV", "./env.sh")],
+        &["-i", "-c", "echo cmd"],
+        "",
+    );
     assert_eq!(out, "from-bashrc\ncmd\n");
 
     // A parameter expansion in the value is performed; the word is not split.
@@ -614,13 +635,16 @@ fn bash_env_is_read_by_non_interactive_shells_only() {
         "",
     );
     assert_eq!(out, "from-env\n");
-    let (out, _err, _code) =
-        run_osh_env(&home, &[("BASH_ENV", "./e nv.sh")], &["-c", "true"], "");
+    let (out, _err, _code) = run_osh_env(&home, &[("BASH_ENV", "./e nv.sh")], &["-c", "true"], "");
     assert_eq!(out, "from-spaced\n");
 
     // A missing file is silent, and so is an empty value.
-    let (out, err, code) =
-        run_osh_env(&home, &[("BASH_ENV", "./nosuch.sh")], &["-c", "echo cmd"], "");
+    let (out, err, code) = run_osh_env(
+        &home,
+        &[("BASH_ENV", "./nosuch.sh")],
+        &["-c", "echo cmd"],
+        "",
+    );
     assert_eq!((out.as_str(), code), ("cmd\n", 0), "stderr: {err:?}");
     let (out, _err, _code) = run_osh_env(&home, &[("BASH_ENV", "")], &["-c", "echo cmd"], "");
     assert_eq!(out, "cmd\n");
@@ -673,23 +697,30 @@ fn bash_logout_is_read_only_by_a_login_shells_exit_builtin() {
 
     let (out, err, code) = run_osh_in(
         &home,
-        &["--noprofile", "-l", "-c", "trap 'echo trap' EXIT; false; exit 5"],
+        &[
+            "--noprofile",
+            "-l",
+            "-c",
+            "trap 'echo trap' EXIT; false; exit 5",
+        ],
         "",
     );
     assert_eq!(code, 5, "stderr: {err:?}");
     assert_eq!(out, "logout rc=1\ntrap\n");
 
     // The `logout` builtin is the same path.
-    let (out, _err, code) =
-        run_osh_in(&home, &["--noprofile", "-l", "-c", "true; logout 6"], "");
+    let (out, _err, code) = run_osh_in(&home, &["--noprofile", "-l", "-c", "true; logout 6"], "");
     assert_eq!(out, "logout rc=0\n");
     assert_eq!(code, 6);
 
     // Falling off the end is not an exit; nor is a subshell's.
     let (out, _err, _code) = run_osh_in(&home, &["--noprofile", "-l", "-c", "echo end"], "");
     assert_eq!(out, "end\n");
-    let (out, _err, _code) =
-        run_osh_in(&home, &["--noprofile", "-l", "-c", "(exit 3); echo after"], "");
+    let (out, _err, _code) = run_osh_in(
+        &home,
+        &["--noprofile", "-l", "-c", "(exit 3); echo after"],
+        "",
+    );
     assert_eq!(out, "after\n");
 
     // And a non-login shell never reads it.
@@ -711,8 +742,7 @@ fn bash_logout_is_read_only_by_a_login_shells_exit_builtin() {
 fn a_directory_rc_file_is_reported_and_survived() {
     let home = TempHome::new("dirrc");
     std::fs::create_dir_all(home.path().join("dir.rc")).expect("mkdir");
-    let (out, err, code) =
-        run_osh_in(&home, &["--rcfile", "dir.rc", "-i", "-c", "echo cmd"], "");
+    let (out, err, code) = run_osh_in(&home, &["--rcfile", "dir.rc", "-i", "-c", "echo cmd"], "");
     assert_eq!(code, 0, "the shell must carry on: {err:?}");
     assert_eq!(out, "cmd\n");
     assert!(err.contains("is a directory"), "not reported: {err:?}");
@@ -800,7 +830,12 @@ fn interactivity_reaches_aliases_and_diagnostics() {
     // lists `emacs`; osh has no line editor, so it truthfully does not.)
     let (out, err, code) = run_osh_in(
         &home,
-        &["--norc", "-i", "-c", "shopt -p expand_aliases; echo \"$SHELLOPTS\""],
+        &[
+            "--norc",
+            "-i",
+            "-c",
+            "shopt -p expand_aliases; echo \"$SHELLOPTS\"",
+        ],
         "",
     );
     assert_eq!(code, 0, "stderr: {err:?}");

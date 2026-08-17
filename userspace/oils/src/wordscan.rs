@@ -213,7 +213,9 @@ fn scan(s: BStr<'_>, quoted: bool, d: u32) -> Result<(), WordFault> {
                 // scan, so it is emitted as an ordinary character.
                 Err(stop) if stop == i + 1 => i += 1,
                 Err(_) => {
-                    return Err(WordFault::Backquote(s.get(i..).unwrap_or_default().to_vec()));
+                    return Err(WordFault::Backquote(
+                        s.get(i..).unwrap_or_default().to_vec(),
+                    ));
                 }
             },
             b'"' => {
@@ -325,7 +327,10 @@ fn dquote_run(s: BStr<'_>, start: usize, d: u32) -> Result<(Str, usize), ()> {
         }
     }
     // `if (c) i++;` — step past the closing quote, but not past the end.
-    Ok((temp, i.saturating_add(usize::from(i < s.len())).min(s.len())))
+    Ok((
+        temp,
+        i.saturating_add(usize::from(i < s.len())).min(s.len()),
+    ))
 }
 
 /// `parameter_brace_expand`'s *scan* (subst.c:9539–9915), which is all of it
@@ -350,7 +355,8 @@ fn brace(s: BStr<'_>, dollar: usize, quoted: bool, d: u32) -> Result<usize, ()> 
     // `${#var}` takes no operator at all: its name runs to the `}`
     // (subst.c:9560), which is why `${#a[}` is a plain bad substitution.
     let stops: BStr<'_> = if s.get(name) == Some(&b'#')
-        && s.get(name + 1).is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_')
+        && s.get(name + 1)
+            .is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_')
     {
         b"}"
     } else {
@@ -366,7 +372,11 @@ fn brace(s: BStr<'_>, dollar: usize, quoted: bool, d: u32) -> Result<usize, ()> 
         return Ok(end + 1);
     }
     let posixexp = matches!(c, b'%' | b'#' | b'/' | b'^' | b',' | b':');
-    let state = if quoted && posixexp { DolBrace::Quote } else { DolBrace::Word };
+    let state = if quoted && posixexp {
+        DolBrace::Quote
+    } else {
+        DolBrace::Word
+    };
     edbs(s, end, state, d + 1).map(|close| past(close, s))
 }
 
@@ -833,8 +843,8 @@ fn skip_matched(s: BStr<'_>, start: usize, open: u8, close: u8, d: u32) -> usize
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
-        BraceEnd, WordFault, expansion_body_len, gobbler_procsubs, gobbler_readable, skip_subscript,
-        word_fault,
+        BraceEnd, WordFault, expansion_body_len, gobbler_procsubs, gobbler_readable,
+        skip_subscript, word_fault,
     };
 
     /// The stretches [`gobbler_readable`] answers with, as the text in them.
@@ -884,7 +894,10 @@ mod tests {
     /// The process substitutions the gobbler reads in `src`, as the text of each
     /// from its `<`/`>` to the end of the string.
     fn procsubs(src: &str, dquoted: bool) -> Vec<&str> {
-        gobbler_procsubs(src.as_bytes(), dquoted).into_iter().filter_map(|i| src.get(i..)).collect()
+        gobbler_procsubs(src.as_bytes(), dquoted)
+            .into_iter()
+            .filter_map(|i| src.get(i..))
+            .collect()
     }
 
     #[test]
@@ -908,9 +921,15 @@ mod tests {
         // An extent is stepped over whole, whichever spelling opened it, so one
         // written inside another is the outer one's business and not read here.
         assert_eq!(procsubs("$(x <(fi))<(y)", false), ["<(y)"]);
-        assert_eq!(procsubs("<(x <(fi))<(y)", false), ["<(x <(fi))<(y)", "<(y)"]);
+        assert_eq!(
+            procsubs("<(x <(fi))<(y)", false),
+            ["<(x <(fi))<(y)", "<(y)"]
+        );
         // Two in a row, in the order the scan meets them.
-        assert_eq!(procsubs(r#"${z:-"<(a)""<(b)"}"#, true), [r#"<(a)""<(b)"}"#, r#"<(b)"}"#]);
+        assert_eq!(
+            procsubs(r#"${z:-"<(a)""<(b)"}"#, true),
+            [r#"<(a)""<(b)"}"#, r#"<(b)"}"#]
+        );
         // One that never closes is still read; where its body ends is the
         // reader's question, not the scan's.
         assert_eq!(procsubs(r#"${z:-"<(fi"}"#, true), [r#"<(fi"}"#]);
@@ -951,7 +970,10 @@ mod tests {
         match word_fault(src.as_bytes()) {
             Some(WordFault::Brace(s)) => Some(String::from_utf8(s).unwrap()),
             Some(WordFault::Backquote(s)) => {
-                panic!("expected a brace fault, got a backquote one naming {:?}", s.as_slice())
+                panic!(
+                    "expected a brace fault, got a backquote one naming {:?}",
+                    s.as_slice()
+                )
             }
             None => None,
         }
@@ -1012,7 +1034,10 @@ mod tests {
         // before — so the `${` is never closed and the *word* is named.
         assert_eq!(named(r#""${a[}""#).as_deref(), Some(r#""${a[}""#));
         assert_eq!(named(r#""${a[}"tail"#).as_deref(), Some(r#""${a[}"tail"#));
-        assert_eq!(named(r#""pre${a[}post""#).as_deref(), Some(r#""pre${a[}post""#));
+        assert_eq!(
+            named(r#""pre${a[}post""#).as_deref(),
+            Some(r#""pre${a[}post""#)
+        );
         assert_eq!(named(r#""${a[0}""#).as_deref(), Some(r#""${a[0}""#));
         assert_eq!(named(r#""${a[ }""#).as_deref(), Some(r#""${a[ }""#));
         // A backslash hides the `]` from `skipsubscript` too.
@@ -1056,7 +1081,10 @@ mod tests {
         // the quotes, because that is what `expand_word_internal` was handed.
         assert_eq!(named(r#""${x:-${a[}}""#).as_deref(), Some("${x:-${a[}}"));
         // Found by the `${x:- … }` body scan over the unquoted word.
-        assert_eq!(named(r#"${x:-"${a[}"}"#).as_deref(), Some(r#"${x:-"${a[}"}"#));
+        assert_eq!(
+            named(r#"${x:-"${a[}"}"#).as_deref(),
+            Some(r#"${x:-"${a[}"}"#)
+        );
     }
 
     #[test]
@@ -1064,7 +1092,10 @@ mod tests {
         // `string_extract_double_quoted` knows `${`, `$(` and a backtick — not
         // `$[` — so the `${` inside the arithmetic is met and never closed.
         assert_eq!(named(r#""$[ ${ ]""#).as_deref(), Some(r#""$[ ${ ]""#));
-        assert_eq!(named(r#""x$[ ${x:- ]y""#).as_deref(), Some(r#""x$[ ${x:- ]y""#));
+        assert_eq!(
+            named(r#""x$[ ${x:- ]y""#).as_deref(),
+            Some(r#""x$[ ${x:- ]y""#)
+        );
         // With the brace closed the scan steps over it, and the arithmetic is
         // the expander's business again.
         assert_eq!(named(r#""$[ ${x!} ]""#), None);
@@ -1127,7 +1158,10 @@ mod tests {
         // the backquote is the word's last character.
         assert_eq!(backquote_named("\"${x:-a}\"`"), None);
         // A `\`` does not close it.
-        assert_eq!(backquote_named(r#""${x:-a}"`echo \`z"#), Some("`echo \\`z".to_string()));
+        assert_eq!(
+            backquote_named(r#""${x:-a}"`echo \`z"#),
+            Some("`echo \\`z".to_string())
+        );
         // The brace fault comes first in the walk, so it is the one reported.
         assert_eq!(named("\"${a[}\"`echo"), Some("\"${a[}\"`echo".to_string()));
     }
@@ -1156,6 +1190,9 @@ mod tests {
         }
         // And the flag is still a flag: an *unescaped* backtick inside the run
         // does close it, so this word's `${` is the one left open.
-        assert_eq!(named(r#""${z:-A`echo m`${a[}""#).as_deref(), Some(r#""${z:-A`echo m`${a[}""#));
+        assert_eq!(
+            named(r#""${z:-A`echo m`${a[}""#).as_deref(),
+            Some(r#""${z:-A`echo m`${a[}""#)
+        );
     }
 }

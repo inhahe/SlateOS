@@ -56,13 +56,19 @@ pub struct HistCtx<'a> {
 impl HistCtx<'_> {
     /// The entry numbered `n`, or `None` if `n` is outside the retained range.
     fn by_number(&self, n: usize) -> Option<BStr<'_>> {
-        n.checked_sub(self.base).and_then(|i| self.entries.get(i)).map(Vec::as_slice)
+        n.checked_sub(self.base)
+            .and_then(|i| self.entries.get(i))
+            .map(Vec::as_slice)
     }
 
     /// The `n`th entry counting back from the most recent, where 1 is the most
     /// recent (`!-1`, equivalently `!!`).
     fn back(&self, n: usize) -> Option<BStr<'_>> {
-        self.entries.len().checked_sub(n).and_then(|i| self.entries.get(i)).map(Vec::as_slice)
+        self.entries
+            .len()
+            .checked_sub(n)
+            .and_then(|i| self.entries.get(i))
+            .map(Vec::as_slice)
     }
 
     /// The most recent entry starting with `prefix`.
@@ -70,12 +76,20 @@ impl HistCtx<'_> {
     /// Byte-wise, as bash's `strncmp` is: a prefix search finds the entry whose
     /// leading bytes are the ones written, whatever they encode.
     fn by_prefix(&self, prefix: BStr<'_>) -> Option<BStr<'_>> {
-        self.entries.iter().rev().map(Vec::as_slice).find(|e| e.starts_with(prefix))
+        self.entries
+            .iter()
+            .rev()
+            .map(Vec::as_slice)
+            .find(|e| e.starts_with(prefix))
     }
 
     /// The most recent entry containing `needle`.
     fn by_substring(&self, needle: BStr<'_>) -> Option<BStr<'_>> {
-        self.entries.iter().rev().map(Vec::as_slice).find(|e| bytes::contains(e, needle))
+        self.entries
+            .iter()
+            .rev()
+            .map(Vec::as_slice)
+            .find(|e| bytes::contains(e, needle))
     }
 }
 
@@ -152,7 +166,10 @@ fn byte_at(s: &[u8], i: usize) -> Option<u8> {
 ///   `${ … }` does *not* protect, so `${a;b}` is `${a`, `;`, `b}`.
 /// * A `#` that starts a word ends the line: `echo a # b c` has two words.
 fn words(s: BStr<'_>) -> Vec<BStr<'_>> {
-    word_spans(s).into_iter().filter_map(|(a, b)| s.get(a..b)).collect()
+    word_spans(s)
+        .into_iter()
+        .filter_map(|(a, b)| s.get(a..b))
+        .collect()
 }
 
 /// The byte ranges of the words of `s`, which is [`words`] before the slicing.
@@ -257,7 +274,10 @@ fn tokenize_word(s: &[u8], start: usize) -> usize {
             return i.saturating_add(2);
         }
         // The pairs that name a file descriptor, and so absorb one.
-        if matches!((c, peek), (b'&', Some(b'>')) | (b'>', Some(b'&' | b'|')) | (b'<', Some(b'&'))) {
+        if matches!(
+            (c, peek),
+            (b'&', Some(b'>')) | (b'>', Some(b'&' | b'|')) | (b'<', Some(b'&'))
+        ) {
             i = i.saturating_add(2);
             while byte_at(s, i).is_some_and(|c| c.is_ascii_digit() || c == b'-') {
                 i = i.saturating_add(1);
@@ -657,7 +677,8 @@ fn apply_word_designator(
 /// digits to readline's scanner — a decimal digit of some other script is text
 /// that happens to look numeric, and bash counts none of it.
 fn digit(c: u8) -> Option<usize> {
-    c.is_ascii_digit().then(|| usize::from(c.wrapping_sub(b'0')))
+    c.is_ascii_digit()
+        .then(|| usize::from(c.wrapping_sub(b'0')))
 }
 
 /// Apply any trailing `:h`/`:t`/`:r`/`:e`/`:s`/`:&`/`:p`/`:q`/`:x` modifiers,
@@ -755,7 +776,6 @@ fn apply_modifiers(
     Ok((text, i, print_only))
 }
 
-
 /// Quote `s` the way `:x` does — readline's `quote_breaks`.
 ///
 /// This looks like "quote each word" and is not: the *whole* string gets one
@@ -818,7 +838,10 @@ fn inhibited(src: BStr<'_>, i: usize, extglob: bool, dquote: bool) -> bool {
     if extglob
         && i >= 2
         && next == Some(b'(')
-        && src.get(i.saturating_add(2)..).unwrap_or_default().contains(&b')')
+        && src
+            .get(i.saturating_add(2)..)
+            .unwrap_or_default()
+            .contains(&b')')
     {
         return true;
     }
@@ -939,7 +962,9 @@ pub fn expand(line: BStr<'_>, ctx: &HistCtx, state: &mut HistState) -> Expansion
         if c == b'#'
             && !in_single
             && !in_double
-            && i.checked_sub(1).and_then(|p| src.get(p)).is_none_or(|&p| is_word_delimiter(p))
+            && i.checked_sub(1)
+                .and_then(|p| src.get(p))
+                .is_none_or(|&p| is_word_delimiter(p))
         {
             out.extend_from_slice(src.get(i..).unwrap_or_default());
             break;
@@ -982,7 +1007,10 @@ pub fn expand(line: BStr<'_>, ctx: &HistCtx, state: &mut HistState) -> Expansion
 /// readline's `history_word_delimiters`, `" \t\n;&()|<>"`. It ends an event
 /// search string and marks where a `#` may start a comment.
 fn is_word_delimiter(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b';' | b'&' | b'(' | b')' | b'|' | b'<' | b'>')
+    matches!(
+        c,
+        b' ' | b'\t' | b'\n' | b';' | b'&' | b'(' | b')' | b'|' | b'<' | b'>'
+    )
 }
 
 /// Expand the single designator starting at `src[start]` (which is the `!`).
@@ -1004,7 +1032,9 @@ fn expand_one(
         // `!!` — the previous command.
         Some(b'!') => {
             i = i.saturating_add(1);
-            ctx.back(1).map(<[u8]>::to_vec).ok_or_else(|| missing(b"!!"))?
+            ctx.back(1)
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| missing(b"!!"))?
         }
         // `!#` — the current line so far. Handled by the caller having already
         // accumulated it; we approximate with the text before this designator.
@@ -1056,7 +1086,11 @@ fn expand_one(
             // `bet` again. With no previous search there is nothing to reuse, and
             // readline will not search for nothing even though every event
             // contains the empty string: `!??` and `!?` both fail outright.
-            let needle = if written.is_empty() { state.search_string.clone() } else { written };
+            let needle = if written.is_empty() {
+                state.search_string.clone()
+            } else {
+                written
+            };
             // The diagnostic quotes back exactly what was written: `!??` rather
             // than the string it stood for, and `!?zzz` without a `?` that the
             // designator never had.
@@ -1064,8 +1098,10 @@ fn expand_one(
             if needle.is_empty() {
                 return Err(missing(&spec));
             }
-            let found =
-                ctx.by_substring(&needle).map(<[u8]>::to_vec).ok_or_else(|| missing(&spec))?;
+            let found = ctx
+                .by_substring(&needle)
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| missing(&spec))?;
             // bash records the match here, at search time, and a `%` later in
             // *this* line already sees it (`!?gam?:%`). Note that it is a plain
             // string: it survives into lines whose own event has no such word.
@@ -1074,9 +1110,10 @@ fn expand_one(
             found
         }
         // `!$`, `!^`, `!*` — word designators against the previous command.
-        Some(b'$' | b'^' | b'*') => {
-            ctx.back(1).map(<[u8]>::to_vec).ok_or_else(|| missing(b"!!"))?
-        }
+        Some(b'$' | b'^' | b'*') => ctx
+            .back(1)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| missing(b"!!"))?,
         // `!string` — the most recent event starting with string.
         Some(_) => {
             let mut prefix = Str::new();
@@ -1128,7 +1165,12 @@ mod tests {
     use super::*;
 
     fn ctx(entries: &[crate::bytes::Str]) -> HistCtx<'_> {
-        HistCtx { entries, base: 1, extglob: false, open_quote: None }
+        HistCtx {
+            entries,
+            base: 1,
+            extglob: false,
+            open_quote: None,
+        }
     }
 
     /// The tests spell their history as Rust source, which is UTF-8 by
@@ -1257,13 +1299,25 @@ mod tests {
         // process-substitution ones — even though `<` and `>` would otherwise
         // have been claimed as operators.
         for open in ["@", "!", "?", "+", "*", "<", ">"] {
-            assert_eq!(words(&format!("x {open}(a;b) y")), vec!["x", &format!("{open}(a;b)"), "y"]);
+            assert_eq!(
+                words(&format!("x {open}(a;b) y")),
+                vec!["x", &format!("{open}(a;b)"), "y"]
+            );
         }
         // Only a *lone* `<`/`>` yields to it: doubled or paired forms keep the
         // operator reading and leave the `(` behind as a word of its own.
-        assert_eq!(words("x >>(a;b) y"), vec!["x", ">>", "(", "a", ";", "b", ")", "y"]);
-        assert_eq!(words("x <<(a;b) y"), vec!["x", "<<", "(", "a", ";", "b", ")", "y"]);
-        assert_eq!(words("x >&(a;b) y"), vec!["x", ">&", "(", "a", ";", "b", ")", "y"]);
+        assert_eq!(
+            words("x >>(a;b) y"),
+            vec!["x", ">>", "(", "a", ";", "b", ")", "y"]
+        );
+        assert_eq!(
+            words("x <<(a;b) y"),
+            vec!["x", "<<", "(", "a", ";", "b", ")", "y"]
+        );
+        assert_eq!(
+            words("x >&(a;b) y"),
+            vec!["x", ">&", "(", "a", ";", "b", ")", "y"]
+        );
         // …and the operators that are not substitution openers never yield.
         for open in ["&", ";", "|"] {
             assert_eq!(
@@ -1275,7 +1329,10 @@ mod tests {
         assert_eq!(words("x 2<(a;b) y"), vec!["x", "2<(a;b)", "y"]);
         assert_eq!(words("x 2>(a;b) y"), vec!["x", "2>(a;b)", "y"]);
         // But a digit run before a bare `(` is just a word.
-        assert_eq!(words("x 2(a;b) y"), vec!["x", "2", "(", "a", ";", "b", ")", "y"]);
+        assert_eq!(
+            words("x 2(a;b) y"),
+            vec!["x", "2", "(", "a", ";", "b", ")", "y"]
+        );
         assert_eq!(words("x a<(b;c) y"), vec!["x", "a<(b;c)", "y"]);
         // A quote outranks it, so `$(` inside one is inert.
         assert_eq!(words("x '$(a;b)' y"), vec!["x", "'$(a;b)'", "y"]);
@@ -1293,7 +1350,10 @@ mod tests {
         assert_eq!(words("a\nb"), vec!["a", "\n", "b"]);
 
         // Multi-byte text is never split inside a character.
-        assert_eq!(words("echo héllo;wörld"), vec!["echo", "héllo", ";", "wörld"]);
+        assert_eq!(
+            words("echo héllo;wörld"),
+            vec!["echo", "héllo", ";", "wörld"]
+        );
 
         // A line that stops part-way through a construct keeps the truncated
         // word rather than losing it — the scan must not run off the end.
@@ -1345,13 +1405,21 @@ mod tests {
     fn a_carried_quote_state_is_honoured() {
         let h = hist(&["echo one"]);
         let with = |q: Option<char>, line: &str| {
-            let c = HistCtx { entries: &h, base: 1, extglob: false, open_quote: q };
+            let c = HistCtx {
+                entries: &h,
+                base: 1,
+                extglob: false,
+                open_quote: q,
+            };
             expand1(line, &c)
         };
         // Inside a carried single quote the whole line is inert, so even an
         // event that does not exist is not an error…
         for line in ["!!'", "!! z'", "!zz'"] {
-            assert!(matches!(with(Some('\''), line), Expansion::Unchanged), "{line}");
+            assert!(
+                matches!(with(Some('\''), line), Expansion::Unchanged),
+                "{line}"
+            );
         }
         // …but only up to the quote's close: what follows expands normally.
         match with(Some('\''), "y' !!") {
@@ -1521,25 +1589,52 @@ mod tests {
     fn shell_syntax_inhibits_expansion() {
         let h = hist(&["one"]);
         let unchanged = |line: &str, extglob: bool| {
-            let c = HistCtx { entries: &h, base: 1, extglob, open_quote: None };
+            let c = HistCtx {
+                entries: &h,
+                base: 1,
+                extglob,
+                open_quote: None,
+            };
             matches!(expand1(line, &c), Expansion::Unchanged)
         };
         // `$!` is the last background pid — including after a `$$`.
-        for line in ["echo $!", "echo a$!b", "echo \"$!\"", "echo $$!q", "echo ${a[$!]-n}"] {
+        for line in [
+            "echo $!",
+            "echo a$!b",
+            "echo \"$!\"",
+            "echo $$!q",
+            "echo ${a[$!]-n}",
+        ] {
             assert!(unchanged(line, false), "{line} should not expand");
         }
         // `${!name}` indirect expansion, in all its spellings.
-        for line in ["echo ${!ref}", "echo ${!pre_*}", "echo ${!pre_@}", "echo ${!a[@]}"] {
+        for line in [
+            "echo ${!ref}",
+            "echo ${!pre_*}",
+            "echo ${!pre_@}",
+            "echo ${!a[@]}",
+        ] {
             assert!(unchanged(line, false), "{line} should not expand");
         }
         // …but only directly after the `${`, and only when the `}` is on the line.
-        for line in ["echo ${!q", "echo ${a!b}", "echo ${ !q}", "echo ${x:-!q}", "echo ${x#!}"] {
+        for line in [
+            "echo ${!q",
+            "echo ${a!b}",
+            "echo ${ !q}",
+            "echo ${x:-!q}",
+            "echo ${x#!}",
+        ] {
             assert!(!unchanged(line, false), "{line} should expand");
         }
         // `[!…]` is a negated glob bracket — closing `]` required, and the `!`
         // must be the first thing in the bracket. Double quotes do not matter,
         // because history expansion runs before quote removal.
-        for line in ["echo [!q]", "echo x[!a]y", "echo \"x[!a]\"", "echo ${a[!1]-n}"] {
+        for line in [
+            "echo [!q]",
+            "echo x[!a]y",
+            "echo \"x[!a]\"",
+            "echo ${a[!1]-n}",
+        ] {
             assert!(unchanged(line, false), "{line} should not expand");
         }
         for line in ["echo [!q", "echo a[b!c]"] {
@@ -1548,10 +1643,22 @@ mod tests {
         // The one character that overrides the negation reading is the history
         // character itself, so `[!!…]` expands where every other designator in
         // the same position does not.
-        for line in ["echo [!!]", "echo [!!:1]", "echo x[!!]y", "echo [[!!]]", "echo [!!$]"] {
+        for line in [
+            "echo [!!]",
+            "echo [!!:1]",
+            "echo x[!!]y",
+            "echo [[!!]]",
+            "echo [!!$]",
+        ] {
             assert!(!unchanged(line, false), "{line} should expand");
         }
-        for line in ["echo [!^]", "echo [!$]", "echo [!:0]", "echo [!-1]", "echo [!*]"] {
+        for line in [
+            "echo [!^]",
+            "echo [!$]",
+            "echo [!:0]",
+            "echo [!-1]",
+            "echo [!*]",
+        ] {
             assert!(unchanged(line, false), "{line} should not expand");
         }
         // …and only the first `!` of `[!!!]` is exempt: the `!!` expands, leaving
@@ -1565,8 +1672,14 @@ mod tests {
         // !(y) ]]` and `case x in !(y))` are event references that fail. An
         // empty `!()` is inhibited too.
         for line in ["echo !(zzz)", "echo x!(y)", "echo !()", "[[ x == !(y) ]]"] {
-            assert!(unchanged(line, true), "{line} should not expand with extglob");
-            assert!(!unchanged(line, false), "{line} should expand without extglob");
+            assert!(
+                unchanged(line, true),
+                "{line} should not expand with extglob"
+            );
+            assert!(
+                !unchanged(line, false),
+                "{line} should expand without extglob"
+            );
         }
         // An assignment does not inhibit anything.
         assert!(!unchanged("x=!q", false), "x=!q should expand");
@@ -1622,7 +1735,11 @@ mod tests {
             ("echo !|x", "!"),
             ("echo !)", "!"),
         ] {
-            assert_eq!(failure(line), format!("{spec}: event not found"), "for {line}");
+            assert_eq!(
+                failure(line),
+                format!("{spec}: event not found"),
+                "for {line}"
+            );
         }
         // Before a designator, though, an empty search string means the previous
         // event — that is what makes `!:0` and `!$` work.
@@ -1735,7 +1852,9 @@ mod tests {
         // Out of range: a start past the last word, an end past the last word,
         // or a written-out end before the start. The message quotes back the
         // designator only — `!!:4:h` reports `:4`, not `:4:h`.
-        for spec in ["!!:4", "!!:9", "!!:1-9", "!!:0-9", "!!:3-1", "!!:4-", "!!:9*", "!!:4*"] {
+        for spec in [
+            "!!:4", "!!:9", "!!:1-9", "!!:0-9", "!!:3-1", "!!:4-", "!!:9*", "!!:4*",
+        ] {
             let body = spec.strip_prefix("!!").unwrap_or(spec);
             assert_eq!(
                 sel(&four, spec),
@@ -1743,23 +1862,37 @@ mod tests {
                 "for {spec}"
             );
         }
-        assert_eq!(sel(&four, "!!:4:h"), Err(":4: bad word specifier".to_string()));
-        assert_eq!(sel(&four, "!!:-9"), Err(":-9: bad word specifier".to_string()));
+        assert_eq!(
+            sel(&four, "!!:4:h"),
+            Err(":4: bad word specifier".to_string())
+        );
+        assert_eq!(
+            sel(&four, "!!:-9"),
+            Err(":-9: bad word specifier".to_string())
+        );
         // The same edges on a one-word event, where word 1 does not exist. `*`
         // is the exception: it names words 1 through the last and is simply
         // empty here rather than an error — and so is a defaulted range end.
-        for (spec, want) in
-            [("!!:0", "onlyone"), ("!!:$", "onlyone"), ("!$", "onlyone"), ("!!:*", ""), ("!*", "")]
-        {
+        for (spec, want) in [
+            ("!!:0", "onlyone"),
+            ("!!:$", "onlyone"),
+            ("!$", "onlyone"),
+            ("!!:*", ""),
+            ("!*", ""),
+        ] {
             assert_eq!(sel(&one, spec).as_deref(), Ok(want), "for {spec}");
         }
-        for (spec, want) in
-            [("!!:-", ""), ("!!:-0", "onlyone"), ("!!:0-0", "onlyone"), ("!!:0*", "onlyone")]
-        {
+        for (spec, want) in [
+            ("!!:-", ""),
+            ("!!:-0", "onlyone"),
+            ("!!:0-0", "onlyone"),
+            ("!!:0*", "onlyone"),
+        ] {
             assert_eq!(sel(&one, spec).as_deref(), Ok(want), "for {spec}");
         }
-        for spec in ["!!:^", "!^", "!!:2-", "!!:3-", "!!:3*", "!!:-2", "!!:1-2", "!!:^-$", "!!:^-^"]
-        {
+        for spec in [
+            "!!:^", "!^", "!!:2-", "!!:3-", "!!:3*", "!!:-2", "!!:1-2", "!!:^-$", "!!:^-^",
+        ] {
             assert!(sel(&one, spec).is_err(), "{spec} should be out of range");
         }
         // `$` still ends the designator on a one-word event.
@@ -1803,7 +1936,9 @@ mod tests {
                 .collect()
         };
         let one = |line: &str| -> Result<String, String> {
-            run(&[line]).pop().unwrap_or_else(|| panic!("no result for {line}"))
+            run(&[line])
+                .pop()
+                .unwrap_or_else(|| panic!("no result for {line}"))
         };
 
         // With no search yet it is empty — and empty is not a failure, on any
@@ -1839,7 +1974,10 @@ mod tests {
             ("!!:%:q", "'gamma'"),
         ] {
             let got = run(&["echo !?gam?:%", &format!("echo X{spec}X")]).pop();
-            assert_eq!(got.as_ref().map(|r| r.as_deref()), Some(Ok(&*format!("echo X{want}X"))));
+            assert_eq!(
+                got.as_ref().map(|r| r.as_deref()),
+                Some(Ok(&*format!("echo X{want}X")))
+            );
         }
 
         // A prefix search does not record one, and neither does a quick
@@ -1854,12 +1992,24 @@ mod tests {
         );
         // A failed search leaves it alone too…
         let after_failure = run(&["echo !?gam?:%", "echo !?zzz?", "echo X!%X"]);
-        assert_eq!(after_failure.get(1), Some(&Err("!?zzz?: event not found".to_string())));
-        assert_eq!(after_failure.get(2).map(|r| r.as_deref()), Some(Ok("echo XgammaX")));
+        assert_eq!(
+            after_failure.get(1),
+            Some(&Err("!?zzz?: event not found".to_string()))
+        );
+        assert_eq!(
+            after_failure.get(2).map(|r| r.as_deref()),
+            Some(Ok("echo XgammaX"))
+        );
         // …while a search that succeeds and only then fails still records it.
         let then_bad = run(&["echo !?gam?:9", "echo X!%X"]);
-        assert_eq!(then_bad.first(), Some(&Err(":9: bad word specifier".to_string())));
-        assert_eq!(then_bad.get(1).map(|r| r.as_deref()), Some(Ok("echo XgammaX")));
+        assert_eq!(
+            then_bad.first(),
+            Some(&Err(":9: bad word specifier".to_string()))
+        );
+        assert_eq!(
+            then_bad.get(1).map(|r| r.as_deref()),
+            Some(Ok("echo XgammaX"))
+        );
 
         // An empty search string means the previous one, so `!??` finds the
         // older event rather than the most recent — and a `!??` that finds
@@ -1872,7 +2022,10 @@ mod tests {
         assert_eq!(one("echo !?"), Err("!?: event not found".to_string()));
         // Whatever the failure, the body is the designator as written.
         assert_eq!(one("echo !?zzz"), Err("!?zzz: event not found".to_string()));
-        assert_eq!(one("echo x !?zzz?y"), Err("!?zzz?: event not found".to_string()));
+        assert_eq!(
+            one("echo x !?zzz?y"),
+            Err("!?zzz?: event not found".to_string())
+        );
         assert_eq!(
             run(&["echo !?zzz?:%", "echo !??"]).pop(),
             Some(Err("!??: event not found".to_string()))
@@ -1886,7 +2039,12 @@ mod tests {
     fn a_comment_makes_the_rest_of_the_line_literal() {
         let h = hist(&["one"]);
         let unchanged = |line: &str| {
-            let c = HistCtx { entries: &h, base: 1, extglob: false, open_quote: None };
+            let c = HistCtx {
+                entries: &h,
+                base: 1,
+                extglob: false,
+                open_quote: None,
+            };
             matches!(expand1(line, &c), Expansion::Unchanged)
         };
         // At index 0, and after each of readline's `history_word_delimiters`.
@@ -1909,10 +2067,18 @@ mod tests {
         assert!(!unchanged("echo a#!q"), "echo a#!q should expand");
         // …and quoting the `#` takes its comment power away, in either quote,
         // even though double quotes do not protect the `!` itself.
-        assert!(!unchanged("echo \"text # !q\""), "a quoted # should not comment");
+        assert!(
+            !unchanged("echo \"text # !q\""),
+            "a quoted # should not comment"
+        );
         assert!(!unchanged(": '#' !q"), "a quoted # should not comment");
         // A comment only shields what follows it: an earlier `!` still expands.
-        let c = HistCtx { entries: &h, base: 1, extglob: false, open_quote: None };
+        let c = HistCtx {
+            entries: &h,
+            base: 1,
+            extglob: false,
+            open_quote: None,
+        };
         match expand1("echo !! # !q", &c) {
             Expansion::Changed(s) => assert_eq!(s, "echo one # !q"),
             _ => panic!("expected the leading !! to expand"),
@@ -1986,7 +2152,11 @@ mod tests {
         ] {
             match expand1(line, &ctx(&h)) {
                 Expansion::NotFound(msg) => {
-                    assert_eq!(msg, format!("{name}: unrecognized history modifier"), "{line}");
+                    assert_eq!(
+                        msg,
+                        format!("{name}: unrecognized history modifier"),
+                        "{line}"
+                    );
                 }
                 other => panic!("expected {line} to fail, got {other:?}"),
             }
@@ -2003,17 +2173,20 @@ mod tests {
             expanded("!!:s/two/TWO/", &["echo one two three"]),
             "echo one TWO three"
         );
-        assert_eq!(
-            expanded("!!:gs/a/A/", &["echo banana"]),
-            "echo bAnAnA"
-        );
+        assert_eq!(expanded("!!:gs/a/A/", &["echo banana"]), "echo bAnAnA");
     }
 
     #[test]
     fn quick_substitution_rewrites_previous() {
-        assert_eq!(expanded("^world^planet^", &["echo hello world"]), "echo hello planet");
+        assert_eq!(
+            expanded("^world^planet^", &["echo hello world"]),
+            "echo hello planet"
+        );
         // The trailing delimiter may be omitted.
-        assert_eq!(expanded("^world^planet", &["echo hello world"]), "echo hello planet");
+        assert_eq!(
+            expanded("^world^planet", &["echo hello world"]),
+            "echo hello planet"
+        );
     }
 
     /// `^old^new^` is `!!:s` prefixed to the line, so text after the closing
@@ -2111,9 +2284,17 @@ mod tests {
     /// recalling none, so every case here compares bytes.
     #[test]
     fn history_holds_bytes_that_are_not_text() {
-        let entries =
-            vec![b"cat a\xffb".to_vec(), b"\xe9cho hi".to_vec(), b"grep \xa9 log".to_vec()];
-        let c = HistCtx { entries: &entries, base: 1, extglob: false, open_quote: None };
+        let entries = vec![
+            b"cat a\xffb".to_vec(),
+            b"\xe9cho hi".to_vec(),
+            b"grep \xa9 log".to_vec(),
+        ];
+        let c = HistCtx {
+            entries: &entries,
+            base: 1,
+            extglob: false,
+            open_quote: None,
+        };
         let got = |line: &[u8]| -> Str {
             match super::expand(line, &c, &mut HistState::default()) {
                 super::Expansion::Changed(s) | super::Expansion::ChangedQuietly(s) => s,

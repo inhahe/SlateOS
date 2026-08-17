@@ -21,10 +21,8 @@
 
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseMode, CmdSubBody,
-    Command, DupSpelling, dup_spelling,
-    CondExpr, Item, ItemSep, ParamOp, Pipeline, ProcSubBody, Program, Redirect, RedirectOp,
-    ReplaceAnchor,
-    SimpleCommand, Word, WordPart,
+    Command, CondExpr, DupSpelling, Item, ItemSep, ParamOp, Pipeline, ProcSubBody, Program,
+    Redirect, RedirectOp, ReplaceAnchor, SimpleCommand, Word, WordPart, dup_spelling,
 };
 use crate::bfmt;
 use crate::bytes::{self, BStr, Str, StrBuf as _};
@@ -65,13 +63,24 @@ struct Indent {
 
 impl Indent {
     /// `declare -f` / `type` / `set` output: four spaces per nesting level.
-    const DECLARE: Self = Self { base: 0, step: 4, level: 0 };
+    const DECLARE: Self = Self {
+        base: 0,
+        step: 4,
+        level: 0,
+    };
     /// The exported-function encoding: one space at every depth.
-    const EXPORTED: Self = Self { base: 1, step: 0, level: 0 };
+    const EXPORTED: Self = Self {
+        base: 1,
+        step: 0,
+        level: 0,
+    };
 
     /// The leading whitespace a line at this depth carries.
     fn spaces(self) -> Str {
-        b" ".repeat(self.base.saturating_add(self.step.saturating_mul(self.level)))
+        b" ".repeat(
+            self.base
+                .saturating_add(self.step.saturating_mul(self.level)),
+        )
     }
 }
 
@@ -81,7 +90,10 @@ impl std::ops::Add<usize> for Indent {
     type Output = Self;
 
     fn add(self, n: usize) -> Self {
-        Self { level: self.level.saturating_add(n), ..self }
+        Self {
+            level: self.level.saturating_add(n),
+            ..self
+        }
     }
 }
 
@@ -119,29 +131,51 @@ struct Fmt {
 impl Fmt {
     /// `declare -f` / `type`: four spaces per level, inside a function
     /// definition.
-    const DECLARE: Self = Self { level: Indent::DECLARE, in_func_def: true, comsub: false };
+    const DECLARE: Self = Self {
+        level: Indent::DECLARE,
+        in_func_def: true,
+        comsub: false,
+    };
     /// The exported-function encoding: one space at every depth.
-    const EXPORTED: Self = Self { level: Indent::EXPORTED, in_func_def: true, comsub: false };
+    const EXPORTED: Self = Self {
+        level: Indent::EXPORTED,
+        in_func_def: true,
+        comsub: false,
+    };
     /// `print_comsub`: the body of `$( … )`, `<( … )` or `>( … )`.
     ///
     /// bash computes this at *parse* time, when `indentation` is still 0 and
     /// `indentation_amount` still its default 4 (print_cmd.c:56–57) — so a
     /// substitution's body is laid out from column 0 however deep the text that
     /// ends up carrying it.
-    const COMSUB: Self = Self { level: Indent::DECLARE, in_func_def: false, comsub: true };
+    const COMSUB: Self = Self {
+        level: Indent::DECLARE,
+        in_func_def: false,
+        comsub: true,
+    };
     /// `make_command_string` with both flags clear — the form `jobs` prints.
-    const PLAIN: Self = Self { level: Indent::DECLARE, in_func_def: false, comsub: false };
+    const PLAIN: Self = Self {
+        level: Indent::DECLARE,
+        in_func_def: false,
+        comsub: false,
+    };
 
     /// One nesting level deeper, keeping the flags — bash's
     /// `indentation += indentation_amount`.
     fn deeper(self) -> Self {
-        Self { level: self.level + 1, ..self }
+        Self {
+            level: self.level + 1,
+            ..self
+        }
     }
 
     /// The same shape, now printing a function body — bash's
     /// `inside_function_def++`.
     fn in_function(self) -> Self {
-        Self { in_func_def: true, ..self }
+        Self {
+            in_func_def: true,
+            ..self
+        }
     }
 
     /// The leading whitespace a line at this depth carries.
@@ -321,7 +355,11 @@ fn program_block(prog: &Program, fmt: Fmt, indent_first: bool) -> Str {
                         stmt.push(b'\n');
                     }
                     // `s[0] = printing_comsub ? c : ';'`.
-                    let c = if fmt.comsub && item.sep == ItemSep::Newline { b'\n' } else { b';' };
+                    let c = if fmt.comsub && item.sep == ItemSep::Newline {
+                        b'\n'
+                    } else {
+                        b';'
+                    };
                     // `was_newline` records that `s` *was* the line break, so
                     // the branch below must not add a second one.
                     let was_newline = !was_heredoc && c == b'\n';
@@ -476,7 +514,11 @@ fn command_block(cmd: &Command, fmt: Fmt) -> Str {
             // `while`/`until` keep `do` on the same line as the condition
             // (`cprintf (" do\n")`, print_cmd.c:809 — the comment there notes it
             // "was `newline ("do\n")`"), unlike `for`/`select` below.
-            let mut s = if c.until { b"until ".to_vec() } else { b"while ".to_vec() };
+            let mut s = if c.until {
+                b"until ".to_vec()
+            } else {
+                b"while ".to_vec()
+            };
             s.push_str(&program_block(&c.cond, fmt, false));
             semicolon(&mut s);
             s.push_str(" do\n");
@@ -508,7 +550,12 @@ fn command_block(cmd: &Command, fmt: Fmt) -> Str {
             s
         }
         Command::Select(c) => {
-            let mut s = bfmt![b"select ", &c.var, b" in ", &in_list_src(c.words.as_deref())];
+            let mut s = bfmt![
+                b"select ",
+                &c.var,
+                b" in ",
+                &in_list_src(c.words.as_deref())
+            ];
             s.push(b';');
             newline(&mut s, fmt.level, b"do\n");
             s.push_str(&program_block(&c.body, fmt.deeper(), true));
@@ -681,10 +728,18 @@ pub(crate) fn assignment_src(a: &Assignment) -> Str {
                 .iter()
                 .map(|e| match e {
                     ArrayElem::Positional(w) => word_src(w),
-                    ArrayElem::Keyed { index, value, append } => bfmt![
+                    ArrayElem::Keyed {
+                        index,
+                        value,
+                        append,
+                    } => bfmt![
                         b"[",
                         &word_src(index),
-                        if *append { b"]+=".as_slice() } else { b"]=".as_slice() },
+                        if *append {
+                            b"]+=".as_slice()
+                        } else {
+                            b"]=".as_slice()
+                        },
                         &word_src(value)
                     ],
                 })
@@ -1004,10 +1059,18 @@ pub fn parts_src(parts: &[WordPart]) -> Str {
 pub(crate) fn elem_src(e: &ArrayElem) -> Str {
     match e {
         ArrayElem::Positional(w) => word_src(w),
-        ArrayElem::Keyed { index, value, append } => bfmt![
+        ArrayElem::Keyed {
+            index,
+            value,
+            append,
+        } => bfmt![
             b"[",
             &word_src(index),
-            if *append { b"]+=".as_slice() } else { b"]=".as_slice() },
+            if *append {
+                b"]+=".as_slice()
+            } else {
+                b"]=".as_slice()
+            },
             &word_src(value)
         ],
     }
@@ -1051,8 +1114,14 @@ pub(crate) fn array_listing(items: &[ArrayElem]) -> Str {
 /// and `'$(! )'` renders a literal that looks like one, so searching for the
 /// rendered text would be ambiguous twice over.
 pub(crate) fn array_listing_split(items: &[ArrayElem], k: usize) -> Option<(Str, Str)> {
-    let is_comsub =
-        |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Parsed { .. } });
+    let is_comsub = |p: &WordPart| {
+        matches!(
+            p,
+            WordPart::CommandSub {
+                body: CmdSubBody::Parsed { .. }
+            }
+        )
+    };
     let mut items: Vec<ArrayElem> = items.to_vec();
     let mut sent = vec![0u8];
     while contains(&array_listing(&items), &sent) {
@@ -1099,8 +1168,14 @@ pub(crate) fn array_listing_split(items: &[ArrayElem], k: usize) -> Option<(Str,
 /// whole list is re-parsed first, under its own name; see
 /// [`crate::interp::Shell::array_assign_reparse_error`].
 pub(crate) fn attach_compound_comsub_tails(items: &mut [ArrayElem]) {
-    let is_comsub =
-        |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Parsed { .. } });
+    let is_comsub = |p: &WordPart| {
+        matches!(
+            p,
+            WordPart::CommandSub {
+                body: CmdSubBody::Parsed { .. }
+            }
+        )
+    };
     let total = walk_elems(items, &is_comsub, usize::MAX, &mut |_| {});
     if total == 0 {
         return;
@@ -1125,7 +1200,10 @@ pub(crate) fn attach_compound_comsub_tails(items: &mut [ArrayElem]) {
         tail.push(b')');
         walk_elems(items, &is_marker, 0, &mut |p| {
             *p = std::mem::replace(&mut saved, WordPart::Literal(Str::new()));
-            if let WordPart::CommandSub { body: CmdSubBody::Parsed { tail: t, .. } } = p {
+            if let WordPart::CommandSub {
+                body: CmdSubBody::Parsed { tail: t, .. },
+            } = p
+            {
                 *t = Some(std::mem::take(&mut tail));
             }
         });
@@ -1137,11 +1215,21 @@ pub(crate) fn attach_compound_comsub_tails(items: &mut [ArrayElem]) {
 pub(crate) fn array_listing_comsubs(items: &[ArrayElem]) -> Vec<Str> {
     let mut out = Vec::new();
     let mut items: Vec<ArrayElem> = items.to_vec();
-    let want = |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Parsed { .. } });
+    let want = |p: &WordPart| {
+        matches!(
+            p,
+            WordPart::CommandSub {
+                body: CmdSubBody::Parsed { .. }
+            }
+        )
+    };
     let total = walk_elems(&mut items, &want, usize::MAX, &mut |_| {});
     for k in 0..total {
         walk_elems(&mut items, &want, k, &mut |p| {
-            if let WordPart::CommandSub { body: CmdSubBody::Parsed { src, .. } } = p {
+            if let WordPart::CommandSub {
+                body: CmdSubBody::Parsed { src, .. },
+            } = p
+            {
                 out.push(src.clone());
             }
         });
@@ -1177,7 +1265,10 @@ fn walk_elems(
 /// otherwise the braced `${name}` form (always valid).
 fn dollar_name(name: &str) -> Str {
     let simple = !name.is_empty()
-        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     let special = name.len() == 1
         && matches!(
@@ -1365,9 +1456,16 @@ fn attach_tails_scoped(parts: &mut [WordPart], index: bool) {
         )
     };
     attach_tails_by(parts, &is_comsub, index, &mut |p, tail| match p {
-        WordPart::CommandSub { body: CmdSubBody::Parsed { tail: t, .. } } => *t = Some(tail),
-        WordPart::CommandSub { body: CmdSubBody::Unread { tail: t, .. } } => *t = tail,
-        WordPart::ProcSub { body: ProcSubBody::Unread { tail: t, .. }, .. } => *t = tail,
+        WordPart::CommandSub {
+            body: CmdSubBody::Parsed { tail: t, .. },
+        } => *t = Some(tail),
+        WordPart::CommandSub {
+            body: CmdSubBody::Unread { tail: t, .. },
+        } => *t = tail,
+        WordPart::ProcSub {
+            body: ProcSubBody::Unread { tail: t, .. },
+            ..
+        } => *t = tail,
         _ => {}
     });
     // A `$(( … ))` wants the same remainder, and for a stronger reason: its
@@ -1394,10 +1492,18 @@ fn attach_tails_scoped(parts: &mut [WordPart], index: bool) {
     // arithmetic can hold one of these, and [`walk_parts`] stops at the part it
     // matched.
     let is_fallback = |p: &WordPart| {
-        matches!(p, WordPart::CommandSub { body: CmdSubBody::ArithFallback { .. } })
+        matches!(
+            p,
+            WordPart::CommandSub {
+                body: CmdSubBody::ArithFallback { .. }
+            }
+        )
     };
     attach_tails_by(parts, &is_fallback, index, &mut |p, tail| {
-        if let WordPart::CommandSub { body: CmdSubBody::ArithFallback { tail: t, .. } } = p {
+        if let WordPart::CommandSub {
+            body: CmdSubBody::ArithFallback { tail: t, .. },
+        } = p
+        {
             *t = tail;
         }
     });
@@ -1425,10 +1531,19 @@ pub(crate) fn gobbler_word(word: &Word, opts: crate::lexer::ParseOpts) -> Word {
     // inside `" … "` the gobbler never treated the opening one as a quote, so
     // it reads on into the body and a `$( … )` there takes the rest of the
     // *word*. See [`crate::ast::CmdSubBody::Backtick::tail`].
-    let is_backtick =
-        |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Backtick { .. } });
+    let is_backtick = |p: &WordPart| {
+        matches!(
+            p,
+            WordPart::CommandSub {
+                body: CmdSubBody::Backtick { .. }
+            }
+        )
+    };
     attach_tails_by(&mut w.parts, &is_backtick, true, &mut |p, tail| {
-        if let WordPart::CommandSub { body: CmdSubBody::Backtick { tail: t, .. } } = p {
+        if let WordPart::CommandSub {
+            body: CmdSubBody::Backtick { tail: t, .. },
+        } = p
+        {
             *t = tail;
         }
     });
@@ -1467,7 +1582,13 @@ pub(crate) fn gobbler_word(word: &Word, opts: crate::lexer::ParseOpts) -> Word {
 /// move every tail after it, so it is dropped rather than trusted.
 fn fill_quoted_runs(parts: &mut [WordPart], dquoted: bool, opts: crate::lexer::ParseOpts) {
     for p in parts.iter_mut() {
-        if let WordPart::SingleQuoted { text, escaped, parts: sub, .. } = p {
+        if let WordPart::SingleQuoted {
+            text,
+            escaped,
+            parts: sub,
+            ..
+        } = p
+        {
             if dquoted
                 && sub.is_none()
                 && !*escaped
@@ -1607,13 +1728,20 @@ pub(crate) fn rescoped_parts(parts: &[WordPart]) -> Option<Vec<WordPart>> {
     if !parts.iter().any(operand_holds_sub) {
         return None;
     }
-    Some(parts.iter().map(|p| rescoped_part(p).unwrap_or_else(|| p.clone())).collect())
+    Some(
+        parts
+            .iter()
+            .map(|p| rescoped_part(p).unwrap_or_else(|| p.clone()))
+            .collect(),
+    )
 }
 
 /// Whether any `${ … }` sub-word of `part` holds a construct that carries a
 /// tail, which is the only thing [`rescoped_part`] would change.
 fn operand_holds_sub(part: &WordPart) -> bool {
-    nested_parts(part).into_iter().any(|(kind, w)| kind == Nested::Operand && holds_sub(w))
+    nested_parts(part)
+        .into_iter()
+        .any(|(kind, w)| kind == Nested::Operand && holds_sub(w))
 }
 
 /// Whether `parts` holds a `$( … )` or a `$(( … ))` anywhere in this string
@@ -1622,7 +1750,9 @@ fn operand_holds_sub(part: &WordPart) -> bool {
 fn holds_sub(parts: &[WordPart]) -> bool {
     parts.iter().any(|p| {
         matches!(p, WordPart::CommandSub { .. } | WordPart::ArithSub { .. })
-            || nested_parts(p).into_iter().any(|(k, w)| k != Nested::Index && holds_sub(w))
+            || nested_parts(p)
+                .into_iter()
+                .any(|(k, w)| k != Nested::Index && holds_sub(w))
     })
 }
 
@@ -1708,7 +1838,10 @@ fn walk_parts_in(
         // must not follow it: `extract_dollar_brace_string` steps over the whole
         // subscript, and the gobbler follows only under `" … "`
         // ([`crate::interp::Shell::gobbled_subs`]).
-        if let WordPart::SingleQuoted { parts: Some(ps), .. } = p {
+        if let WordPart::SingleQuoted {
+            parts: Some(ps), ..
+        } = p
+        {
             walk_parts_in(ps, want, index, n, i, act);
             continue;
         }
@@ -1863,7 +1996,14 @@ macro_rules! nested_parts_fn {
 }
 
 nested_parts_fn!(nested_parts, as_slice, as_deref, as_ref, from_ref,);
-nested_parts_fn!(nested_parts_mut, as_mut_slice, as_deref_mut, as_mut, from_mut, mut);
+nested_parts_fn!(
+    nested_parts_mut,
+    as_mut_slice,
+    as_deref_mut,
+    as_mut,
+    from_mut,
+    mut
+);
 
 pub(crate) fn part_src(p: &WordPart) -> Str {
     match p {
@@ -1874,7 +2014,12 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
         // expanded at parse time), and it is the only spelling a sentinel swapped
         // *inside* the quotes can show through. See [`attach_tails_by`] and
         // [`crate::ast::WordPart::SingleQuoted`].
-        WordPart::SingleQuoted { text, escaped, closed, parts } => match parts {
+        WordPart::SingleQuoted {
+            text,
+            escaped,
+            closed,
+            parts,
+        } => match parts {
             Some(ps) => {
                 let mut s = b"'".to_vec();
                 s.push_str(&parts_src(ps));
@@ -1920,7 +2065,14 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
         // `label` is not rendered: it only ever holds the reference an indirect
         // expansion goes by, and the `IndirectOp` arm splices that back in
         // itself, from the reference it kept.
-        WordPart::ParamOp { name, index, op, colon, arg, label: _ } => {
+        WordPart::ParamOp {
+            name,
+            index,
+            op,
+            colon,
+            arg,
+            label: _,
+        } => {
             let sym = match op {
                 ParamOp::UseDefault => "-",
                 ParamOp::AssignDefault => "=",
@@ -1928,9 +2080,22 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
                 ParamOp::ErrorIfUnset => "?",
             };
             let colon = if *colon { ":" } else { "" };
-            bfmt![b"${", &name_sub(name, index), colon, sym, &word_src(arg), b"}"]
+            bfmt![
+                b"${",
+                &name_sub(name, index),
+                colon,
+                sym,
+                &word_src(arg),
+                b"}"
+            ]
         }
-        WordPart::ParamTrim { name, index, suffix, longest, pattern } => {
+        WordPart::ParamTrim {
+            name,
+            index,
+            suffix,
+            longest,
+            pattern,
+        } => {
             let op = match (suffix, longest) {
                 (true, true) => "%%",
                 (true, false) => "%",
@@ -1941,7 +2106,13 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
         }
         // An `unclosed` needs nothing here: the walk that set it consumed the
         // whole bounds text, so `offset` already holds every character of it.
-        WordPart::ParamSubstr { name, index, offset, length, .. } => {
+        WordPart::ParamSubstr {
+            name,
+            index,
+            offset,
+            length,
+            ..
+        } => {
             let mut s = bfmt![b"${", &name_sub(name, index), b":", &word_src(offset)];
             if let Some(len) = length {
                 s.push(b':');
@@ -1950,7 +2121,14 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
             s.push(b'}');
             s
         }
-        WordPart::ParamReplace { name, index, all, anchor, pattern, replacement } => {
+        WordPart::ParamReplace {
+            name,
+            index,
+            all,
+            anchor,
+            pattern,
+            replacement,
+        } => {
             let op = match anchor {
                 ReplaceAnchor::Start => "/#",
                 ReplaceAnchor::End => "/%",
@@ -1974,14 +2152,24 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
                 b"}"
             ]
         }
-        WordPart::ParamCase { name, index, mode, all, pattern } => {
+        WordPart::ParamCase {
+            name,
+            index,
+            mode,
+            all,
+            pattern,
+        } => {
             let op = case_op_src(*mode, *all);
             bfmt![b"${", &name_sub(name, index), op, &word_src(pattern), b"}"]
         }
         WordPart::Indirect { refname, index } => {
             bfmt![b"${!", &name_index(refname, index), b"}"]
         }
-        WordPart::IndirectOp { refname, index, target } => {
+        WordPart::IndirectOp {
+            refname,
+            index,
+            target,
+        } => {
             // The `target` carries the referent name as a bare placeholder, so
             // rendering it yields `${ref<op>}`. Recovering `${!ref[i]<op>}` means
             // splicing in both the indirection `!` and the pointer's own
@@ -2020,8 +2208,14 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
             // The spelling is the one the source wrote: a body no parser read
             // can be any of the three, because the scan that read its extent
             // names them in one row (see [`SubDelim`]).
-            CmdSubBody::Unread { delim, src, closed, .. } => {
-                bfmt![delim.bytes(), src, if *closed { b")".as_slice() } else { b"" }]
+            CmdSubBody::Unread {
+                delim, src, closed, ..
+            } => {
+                bfmt![
+                    delim.bytes(),
+                    src,
+                    if *closed { b")".as_slice() } else { b"" }
+                ]
             }
             CmdSubBody::Parsed { prog, .. } => comsub_reprint(b"$(", prog),
         },
@@ -2060,7 +2254,11 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
         // The whole word's text, already cut — nothing to put back around it.
         WordPart::TokenText(raw) => raw.clone(),
         WordPart::Length(name) => bfmt![b"${#", name, b"}"],
-        WordPart::ArrayRef { name, index, length } => {
+        WordPart::ArrayRef {
+            name,
+            index,
+            length,
+        } => {
             let idx = match index {
                 ArrayIndex::Index(w) => word_src(w),
                 ArrayIndex::All => b"@".to_vec(),
@@ -2083,7 +2281,13 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
         WordPart::BadTransform { name, index, op } => {
             bfmt![b"${", &name_sub(name, index), b"@", &word_src(op), b"}"]
         }
-        WordPart::ArraySlice { name, star, offset, length, .. } => {
+        WordPart::ArraySlice {
+            name,
+            star,
+            offset,
+            length,
+            ..
+        } => {
             let sub = name_bulk(name, *star);
             let mut s = bfmt![b"${", &sub, b":", &word_src(offset)];
             if let Some(len) = length {
@@ -2096,7 +2300,11 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
         WordPart::ArrayBulk { name, star, op } => {
             let sub = name_bulk(name, *star);
             let opstr = match op {
-                BulkOp::Trim { suffix, longest, pattern } => {
+                BulkOp::Trim {
+                    suffix,
+                    longest,
+                    pattern,
+                } => {
                     let o = match (suffix, longest) {
                         (true, true) => "%%",
                         (true, false) => "%",
@@ -2105,7 +2313,12 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
                     };
                     bfmt![o, &word_src(pattern)]
                 }
-                BulkOp::Replace { all, anchor, pattern, replacement } => {
+                BulkOp::Replace {
+                    all,
+                    anchor,
+                    pattern,
+                    replacement,
+                } => {
                     let o = match anchor {
                         ReplaceAnchor::Start => "/#",
                         ReplaceAnchor::End => "/%",
@@ -2127,7 +2340,13 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
             };
             bfmt![b"${", &sub, &opstr, b"}"]
         }
-        WordPart::ArrayOp { name, star, op, colon, arg } => {
+        WordPart::ArrayOp {
+            name,
+            star,
+            op,
+            colon,
+            arg,
+        } => {
             let sub = bfmt![name, b"[", if *star { "*" } else { "@" }, b"]"];
             let o = match op {
                 ParamOp::UseDefault => "-",
@@ -2192,7 +2411,11 @@ mod tests {
         for item in &prog.items {
             for cmd in &item.list.first.commands {
                 if let Command::Simple(sc) = cmd {
-                    for a in sc.assignments.iter().chain(sc.decl_arrays.iter().map(|d| &d.assign)) {
+                    for a in sc
+                        .assignments
+                        .iter()
+                        .chain(sc.decl_arrays.iter().map(|d| &d.assign))
+                    {
                         if let AssignRhs::Array(items) = &a.value {
                             return items.clone();
                         }
@@ -2208,12 +2431,21 @@ mod tests {
     fn elem_tails(items: &[ArrayElem]) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut items = items.to_vec();
-        let want =
-            |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Parsed { .. } });
+        let want = |p: &WordPart| {
+            matches!(
+                p,
+                WordPart::CommandSub {
+                    body: CmdSubBody::Parsed { .. }
+                }
+            )
+        };
         let total = walk_elems(&mut items, &want, usize::MAX, &mut |_| {});
         for k in 0..total {
             walk_elems(&mut items, &want, k, &mut |p| {
-                if let WordPart::CommandSub { body: CmdSubBody::Parsed { tail, .. } } = p {
+                if let WordPart::CommandSub {
+                    body: CmdSubBody::Parsed { tail, .. },
+                } = p
+                {
                     out.push(text(tail.clone().expect("a parsed word has a tail")));
                 }
             });
@@ -2234,7 +2466,10 @@ mod tests {
 
         // What a prefix assignment's failed re-parse echoes, which is where the
         // tail is observable: bash gives `! )q" r)'.
-        assert_eq!(elem_tails(&items_of("a=( \"p$(\n!\n)q\" r ) echo hi")), vec![r#"q" r)"#]);
+        assert_eq!(
+            elem_tails(&items_of("a=( \"p$(\n!\n)q\" r ) echo hi")),
+            vec![r#"q" r)"#]
+        );
 
         // A subscript is walked before its value, and the `]=` between them is
         // part of the listing — so a substitution in a *subscript* runs on
@@ -2256,7 +2491,11 @@ mod tests {
         let (before, after) = array_listing_split(&items, 0).expect("one substitution");
         assert_eq!(text(before), r#"one two "p$(! "#);
         assert_eq!(text(after), r#"q" four"#);
-        assert_eq!(array_listing_split(&items, 1), None, "there is only the one");
+        assert_eq!(
+            array_listing_split(&items, 1),
+            None,
+            "there is only the one"
+        );
         assert_eq!(comsub_srcs(&items), vec!["! "]);
 
         // Walk order is subscript before value, and the last substitution's
@@ -2305,7 +2544,10 @@ mod tests {
 
     #[test]
     fn case_body_roundtrips() {
-        assert_roundtrip("h() { case $1 in a) echo A ;; b|c) echo BC ;; *) echo other ;; esac; }", "h");
+        assert_roundtrip(
+            "h() { case $1 in a) echo A ;; b|c) echo BC ;; *) echo other ;; esac; }",
+            "h",
+        );
     }
 
     #[test]
@@ -2338,7 +2580,10 @@ mod tests {
 
     #[test]
     fn param_expansions_roundtrip() {
-        assert_roundtrip(r#"p() { echo "${x:-def}" "${y#pre}" "${z//a/b}" "${#w}"; }"#, "p");
+        assert_roundtrip(
+            r#"p() { echo "${x:-def}" "${y#pre}" "${z//a/b}" "${#w}"; }"#,
+            "p",
+        );
     }
 
     #[test]
@@ -2388,7 +2633,10 @@ mod tests {
             dump_fn("f() ( echo out ) >/dev/null", "f"),
             "f () \n{ \n    ( echo out ) > /dev/null\n}\n"
         );
-        assert_eq!(dump_fn("f() ((1)) >/dev/null", "f"), "f () \n{ \n    ((1)) > /dev/null\n}\n");
+        assert_eq!(
+            dump_fn("f() ((1)) >/dev/null", "f"),
+            "f () \n{ \n    ((1)) > /dev/null\n}\n"
+        );
         assert_eq!(
             dump_fn("f() if true; then echo out; fi >/dev/null", "f"),
             "f () \n{ \n    if true; then\n        echo out;\n    fi > /dev/null\n}\n"
@@ -2400,7 +2648,10 @@ mod tests {
         );
         assert_eq!(dump_fn("f() ((1))", "f"), "f () \n{ \n    ((1))\n}\n");
         // A one-word conditional is re-printed as the `-n` test it means.
-        assert_eq!(dump_fn("f() [[ a ]]", "f"), "f () \n{ \n    [[ -n a ]]\n}\n");
+        assert_eq!(
+            dump_fn("f() [[ a ]]", "f"),
+            "f () \n{ \n    [[ -n a ]]\n}\n"
+        );
         assert_eq!(
             dump_fn("f() while false; do :; done", "f"),
             "f () \n{ \n    while false; do\n        :;\n    done\n}\n"
@@ -2415,7 +2666,10 @@ mod tests {
             dump_fn("function f if true; then echo hi; fi", "f"),
             "f () \n{ \n    if true; then\n        echo hi;\n    fi\n}\n"
         );
-        assert_eq!(dump_fn("function f () ((1))", "f"), "f () \n{ \n    ((1))\n}\n");
+        assert_eq!(
+            dump_fn("function f () ((1))", "f"),
+            "f () \n{ \n    ((1))\n}\n"
+        );
     }
 
     #[test]
@@ -2426,7 +2680,10 @@ mod tests {
         let d = dump_fn("r() { read x <&3; cat <&4; }", "r");
         assert!(d.contains("read x 0<&3"), "dump: {d:?}");
         assert!(d.contains("cat 0<&4"), "dump: {d:?}");
-        assert!(!d.contains(">&3"), "input dup rendered as output dup: {d:?}");
+        assert!(
+            !d.contains(">&3"),
+            "input dup rendered as output dup: {d:?}"
+        );
     }
 
     /// The *other* two shapes a `<&`/`>&` target can have, which bash's parser
@@ -2514,7 +2771,10 @@ mod tests {
         assert_eq!(dump_exported("f() { echo hi; }", "f"), "() {  echo hi\n}");
 
         // Every statement after the first starts at column 1, not column 4.
-        assert_eq!(dump_exported("f() { echo a; echo b; }", "f"), "() {  echo a;\n echo b\n}");
+        assert_eq!(
+            dump_exported("f() { echo a; echo b; }", "f"),
+            "() {  echo a;\n echo b\n}"
+        );
 
         // Nesting does *not* deepen the indent: the brace group and the subshell
         // sit at the same one space as the statements around them.
@@ -2525,7 +2785,10 @@ mod tests {
 
         // A redirect on the definition rides the closing-brace line, as in
         // `declare -f` — but with no trailing newline after it.
-        assert_eq!(dump_exported("f() { echo z; } > /dev/null", "f"), "() {  echo z\n} > /dev/null");
+        assert_eq!(
+            dump_exported("f() { echo z; } > /dev/null", "f"),
+            "() {  echo z\n} > /dev/null"
+        );
 
         // A newline *inside a string literal* is emitted verbatim at column 0.
         // This is why the exported shape has to be threaded through the printer
@@ -2562,8 +2825,12 @@ mod tests {
         ] {
             let value = dump_exported(src, "f");
             let reparsed = format!("f {value}");
-            let prog = parse(reparsed.as_bytes())
-                .unwrap_or_else(|e| panic!("re-parse {reparsed:?}: {}", String::from_utf8_lossy(&e.msg())));
+            let prog = parse(reparsed.as_bytes()).unwrap_or_else(|e| {
+                panic!(
+                    "re-parse {reparsed:?}: {}",
+                    String::from_utf8_lossy(&e.msg())
+                )
+            });
             let f = prog
                 .items
                 .iter()
@@ -2575,7 +2842,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("no function in {reparsed:?}"));
             // Unparsing the re-parsed definition reproduces the same value: the
             // encoding is a fixed point, so a chain of exec'd shells cannot drift.
-            assert_eq!(text(unparse_function_exported(&f.body, &f.redirects)), value);
+            assert_eq!(
+                text(unparse_function_exported(&f.body, &f.redirects)),
+                value
+            );
         }
     }
 
@@ -2633,7 +2903,9 @@ mod tests {
         assert!(
             inner.iter().any(|p| matches!(
                 p,
-                WordPart::CommandSub { body: CmdSubBody::Unread { .. } },
+                WordPart::CommandSub {
+                    body: CmdSubBody::Unread { .. }
+                },
             )),
             "the substitution inside the run is there, and unread: {inner:?}",
         );
@@ -2660,7 +2932,9 @@ mod tests {
         let one = filled(&scoped);
         let inner = one.first().and_then(Option::as_ref).expect("filled");
         assert!(
-            !inner.iter().any(|p| matches!(p, WordPart::CommandSub { .. })),
+            !inner
+                .iter()
+                .any(|p| matches!(p, WordPart::CommandSub { .. })),
             "the substitution is in a stretch the scan skips: {inner:?}",
         );
         assert_eq!(word_src(&plain), word_src(&scoped));
@@ -2671,7 +2945,9 @@ mod tests {
         let one = filled(&scoped);
         let inner = one.first().and_then(Option::as_ref).expect("filled");
         assert!(
-            inner.iter().any(|p| matches!(p, WordPart::CommandSub { .. })),
+            inner
+                .iter()
+                .any(|p| matches!(p, WordPart::CommandSub { .. })),
             "past the backquote the scan is reading again: {inner:?}",
         );
         assert_eq!(word_src(&plain), word_src(&scoped));

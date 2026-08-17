@@ -10,6 +10,11 @@
 # so a foreground build silently blocks behind a background test suite — so a
 # lane running one in the background needs a second dir for the other.
 **/target-hl/
+# And `target-hl2/`, for the third: a long workspace test in the background
+# holds `target-hl`, and the interactive edit-build-test cycle still needs a
+# dir of its own. The count is not principled — it is however many concurrent
+# cargo invocations a lane happens to have — so match any digits after `hl`.
+**/target-hl[0-9]*/
 **/*.rs.bk
 # Stray rustc codegen-unit objects written to the Windows `nul` device name
 # (these land in the crate root, not target/, when a build/clippy invocation

@@ -3927,7 +3927,7 @@ impl DbViewerApp {
             cmds.push(RenderCommand::Text {
                 x: x + 22.0,
                 y: hy + 1.0,
-                text: format!("{star}{}", truncate_str(&entry.sql, 80)),
+                text: format!("{star}{}", entry.sql),
                 color: SUBTEXT0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
@@ -4056,7 +4056,7 @@ impl DbViewerApp {
                             cmds.push(RenderCommand::Text {
                                 x: x + ci as f32 * col_w + 6.0,
                                 y: ry,
-                                text: truncate_str(&cell.display(), 30).clone(),
+                                text: cell.display(),
                                 color,
                                 font_size: 10.0,
                                 font_weight: FontWeightHint::Regular,
@@ -4477,17 +4477,16 @@ pub enum ExportFormat {
 // Helper functions
 // ============================================================================
 
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_owned()
-    } else {
-        let end = s
-            .char_indices()
-            .nth(max_len.saturating_sub(3))
-            .map_or(s.len(), |(i, _)| i);
-        format!("{}...", &s[..end])
-    }
-}
+// `truncate_str` was removed here. It cut the SQL-history line at 80
+// characters and a result cell at 30 before handing either to a `Text`
+// command that already carried `max_width` and `TextOverflow::Ellipsis` —
+// so the renderer, which measures with the real font, was being handed a
+// string that a fixed character count had already cut. Two answers to one
+// question, and the guess won because it cut first: a narrow column still
+// overflowed (30 characters is wider than a 90 px column) while a wide one
+// was cut with room to spare. The counts were also compared against `len()`,
+// which is bytes, so a cell of accented or CJK text lost half its content.
+// Pass the string whole; the renderer knows the width and this does not.
 
 // ============================================================================
 // Main
@@ -6093,18 +6092,42 @@ mod tests {
         assert!(nodes.iter().any(|n| n.kind == TreeNodeKind::TriggersHeader));
     }
 
-    // --- Truncate helper test ---
-
+    /// A cell wider than its column is cut by the renderer, which measures it,
+    /// rather than by a character count here, which cannot. The count was 30
+    /// for every column, so a narrow column overflowed and a wide one was cut
+    /// with room to spare — and 30 was compared against `len()`, which is
+    /// bytes, so a column of accented text lost a third of its characters.
     #[test]
-    fn test_truncate_str_short() {
-        assert_eq!(truncate_str("hello", 10), "hello");
-    }
-
-    #[test]
-    fn test_truncate_str_long() {
-        let result = truncate_str("hello world this is long", 10);
-        assert!(result.ends_with("..."));
-        assert!(result.len() <= 13); // 10 chars + "..."
+    fn a_cell_is_bounded_by_its_column_not_by_a_character_count() {
+        let mut app = DbViewerApp::new();
+        app.query_result = Some(QueryResult {
+            columns: vec!["note".to_string()],
+            rows: vec![vec![CellValue::Text(
+                "Ünterstützung für Änderungen an Verträgen".to_string(),
+            )]],
+            message: String::new(),
+            affected_rows: 0,
+            is_error: false,
+        });
+        let mut cmds = Vec::new();
+        app.render_results(&mut cmds, 0.0, 0.0, 600.0, 400.0);
+        let cell = cmds
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    text, max_width, ..
+                } if text.starts_with('\u{dc}') => Some((text.clone(), *max_width)),
+                _ => None,
+            })
+            .expect("the cell is drawn");
+        assert_eq!(
+            cell.0, "Ünterstützung für Änderungen an Verträgen",
+            "the cell text reaches the renderer whole: {cell:?}"
+        );
+        assert!(
+            cell.1.is_some(),
+            "and the renderer is told the column width: {cell:?}"
+        );
     }
 
     // --- Filter op tests ---

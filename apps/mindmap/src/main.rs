@@ -37,6 +37,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::{HashMap, VecDeque};
 
@@ -70,6 +71,14 @@ const NODE_COLORS: [Color; 8] = [BLUE, GREEN, RED, YELLOW, PEACH, TEAL, MAUVE, S
 const TOOLBAR_HEIGHT: f32 = 40.0;
 /// Height of the bottom status bar.
 const STATUS_BAR_HEIGHT: f32 = 24.0;
+/// Width the status bar's "Selected: … (ID: n)" line is drawn into.
+///
+/// Named because it is used twice and the two uses must agree: once to work
+/// out how much room the node's name may have, and once as the `max_width` the
+/// line is drawn with. A literal in both places is a pair that drifts.
+const SEL_INFO_WIDTH: f32 = 290.0;
+/// Size that line is drawn at — same reason.
+const SEL_INFO_SIZE: f32 = 11.0;
 /// Width of the sidebar panel.
 const SIDEBAR_WIDTH: f32 = 200.0;
 /// Height of a map tab.
@@ -2100,7 +2109,11 @@ impl MindMapApp {
                 cmds.push(RenderCommand::Text {
                     x: x + 10.0,
                     y: sy,
-                    text: format!("Text: {}", truncate_str(&node.text, 18)),
+                    // Nothing follows the node's text on this row, so the
+                    // renderer's own elision is the whole answer. It used to be
+                    // cut to 18 characters first — a budget with no relation to
+                    // the `SIDEBAR_WIDTH - 20` two lines below it.
+                    text: format!("Text: {}", node.text),
                     font_size: 11.0,
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
@@ -2392,19 +2405,37 @@ impl MindMapApp {
         if let Some(sel_id) = self.selected_node
             && let Some(node) = map.node(sel_id)
         {
-            let sel_info = format!(
-                "Selected: \"{}\" (ID: {})",
-                truncate_str(&node.text, 20),
-                sel_id
+            // The node's text is elided here rather than by the renderer,
+            // because it is *not* at the end of the line: the id follows it,
+            // and the id is what a reader needs when the name is too long to
+            // show whole. Eliding the line as a whole would drop the id and
+            // keep the name, which is backwards. So the room is worked out by
+            // measuring the parts that must survive and giving the name what is
+            // left — measured, not counted: this was a flat 20 characters,
+            // which is a different width in every name, compared against
+            // `s.len()`, a count of *bytes*.
+            let prefix = "Selected: \"";
+            let suffix = format!("\" (ID: {sel_id})");
+            let room = (SEL_INFO_WIDTH
+                - text::measure(prefix, SEL_INFO_SIZE, FontWeightHint::Regular)
+                - text::measure(&suffix, SEL_INFO_SIZE, FontWeightHint::Regular))
+            .max(0.0);
+            let name = text::elide(
+                &node.text,
+                room,
+                "\u{2026}",
+                SEL_INFO_SIZE,
+                FontWeightHint::Regular,
             );
+            let sel_info = format!("{prefix}{name}{suffix}");
             cmds.push(RenderCommand::Text {
                 x: self.win_width - 300.0,
                 y: y + 5.0,
                 text: sel_info,
-                font_size: 11.0,
+                font_size: SEL_INFO_SIZE,
                 color: BLUE,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(290.0),
+                max_width: Some(SEL_INFO_WIDTH),
                 overflow: TextOverflow::Ellipsis,
             });
         }
@@ -2426,16 +2457,11 @@ fn node_text_color(bg: Color) -> Color {
     }
 }
 
-/// Truncate a string to a maximum number of characters, appending "..." if truncated.
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
-        s.to_string()
-    } else {
-        let mut truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
-        truncated.push_str("...");
-        truncated
-    }
-}
+// A `truncate_str(s, max_chars)` used to live here. It is gone: one of its two
+// callers did not need it at all (the renderer elides the end of a line), and
+// the other needed a *width*, which a character count cannot express. It also
+// compared `s.len()` — bytes — against a character budget, so it cut accented
+// text early and CJK text several characters early.
 
 // ============================================================================
 // Entry point
@@ -2450,6 +2476,17 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+// A test that reaches into a structure it just built and finds it missing has
+// found a bug, and panicking is how it reports one. The defensive lints are
+// about untrusted input reaching production code; there is none here, and
+// leaving them on buried real warnings under ninety-odd of these.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -3586,21 +3623,38 @@ mod tests {
         assert!(color.r < 100);
     }
 
+    /// The status bar shortens a long node name so that the id *after* it
+    /// survives — that is the whole reason it elides here instead of leaving it
+    /// to the renderer — and the result fits the width it is drawn into.
     #[test]
-    fn test_truncate_str_short() {
-        assert_eq!(truncate_str("Hello", 10), "Hello");
-    }
+    fn a_long_node_name_is_shortened_around_the_id_that_follows_it() {
+        let mut app = MindMapApp::new();
+        let id = app.active_map_ref().root_id;
+        if let Some(node) = app.active_map_mut().node_mut(id) {
+            node.text = "A node whose name is far too long for the status bar, Café 日本語 and all"
+                .to_string();
+        }
+        app.selected_node = Some(id);
 
-    #[test]
-    fn test_truncate_str_exact() {
-        assert_eq!(truncate_str("Hello", 5), "Hello");
-    }
+        let mut cmds = Vec::new();
+        app.render_status_bar(&mut cmds);
+        let line = cmds
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } if text.starts_with("Selected: ") => Some(text),
+                _ => None,
+            })
+            .expect("the status bar names the selection");
 
-    #[test]
-    fn test_truncate_str_long() {
-        let result = truncate_str("Hello World", 8);
-        assert!(result.ends_with("..."));
-        assert!(result.len() <= 8);
+        assert!(
+            line.ends_with(&format!("(ID: {id})")),
+            "the id survives the shortening: {line}"
+        );
+        assert!(line.contains('\u{2026}'), "and the cut is marked: {line}");
+        assert!(
+            text::measure(&line, SEL_INFO_SIZE, FontWeightHint::Regular) <= SEL_INFO_WIDTH + 0.5,
+            "and the whole line fits the width it is drawn into: {line}"
+        );
     }
 
     #[test]

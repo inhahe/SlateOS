@@ -2725,8 +2725,10 @@ version = "0.1.0"
 name = "editor"
 version = "0.1.0"
 dependencies = [
+ "compositor",
  "diffcore",
  "guitk",
+ "oswindow",
  "safeio",
 ]
 
@@ -7483,6 +7485,7 @@ version = "0.1.0"
 name = "oswindow"
 version = "0.1.0"
 dependencies = [
+ "guiremote",
  "guitk",
 ]
 

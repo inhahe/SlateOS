@@ -42,6 +42,18 @@ at end-of-file unless your number happens to be the highest.
 | §300–§399 | **lane B** | contiguous, after A's band |
 | §400–§499 | **lane C** | contiguous, to end of file |
 
+**One exception, settled 2026-08-17: §217–§220 are lane C's, permanently.**
+Four lane-C entries about the AMD display engine were numbered in lane A's
+band by mistake. Lane A raised it
+(`requests/a-c-design-decisions-band-collision.md`), took §221 for its own
+next entry, and left the choice of remedy to lane C. Lane C chose to keep the
+numbers rather than renumber, because eight things already cite them —
+including three files under `kernel/src/drm/ati/`, which is **lane A's tree**,
+so renumbering could not be completed from lane C's worktree without editing
+another lane's files. Renumbering would therefore have traded a cosmetic
+inconsistency for either four dangling citations or a lane violation. Lane A
+continues from §221; §217–§220 are never reissued.
+
 The numeric *order* is what makes the bands physically disjoint, and that —
 not the numbering by itself — is what makes this file merge cleanly between
 three lanes: each lane's insertion point is a different line offset, so git
@@ -19474,3 +19486,602 @@ failing, it is unmeasurable.
    live memory type as `WC`. It now names the suspect that is actually still
    open — an MTRR covering the range that says `UC`, which beats PAT because the
    effective type is the combination of the two (Intel SDM Vol. 3, Table 11-7).
+
+## §456 — Scancodes become key names in the compositor, and the raw code rides along anyway
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** When you press a key, the hardware reports *which switch closed* —
+a number like 30 — not *which letter it means*. Something has to turn 30 into
+"A", and that depends on your keyboard layout (30 is "A" on a US layout and "Q"
+on a French one). The question was whether the display server does that
+translation once for the whole system, or whether every application does it for
+itself. Decision: the display server does it, and *also* forwards the raw
+number, so the handful of programs that genuinely want physical key positions
+can still have them.
+
+**Context.** `guiremote` gained an input direction (`gui/remote/src/input.rs`)
+so the compositor can deliver key and mouse events to clients — see
+`known-issues.md` → `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` for why there was
+none. The two ends spoke different languages about keys, and the wire format
+had to pick one:
+
+- The compositor's internal `EventNotification::KeyEvent`
+  (`gui/compositor/src/main.rs:3129`) carries `scancode: u32` plus
+  `character: Option<char>` — hardware-level.
+- `guitk::event::KeyEvent` (`gui/toolkit/src/event.rs:69`) carries a semantic
+  `Key` enum — `Key::Left`, `Key::F5`, `Key::Semicolon` — which is what widget
+  code is written against.
+
+No scancode→`Key` mapping existed anywhere in the tree; grepped, `scancode`
+appears only inside the compositor. So the translation had to be written, and
+where it lives was open.
+
+**Options.**
+
+1. **Translate in the compositor; send `Key`.**
+   *What changes:* an app receives `Key::Semicolon`; changing the system
+   keyboard layout in Settings immediately affects every running app with no
+   cooperation from any of them.
+2. **Send raw scancodes; each client translates.**
+   *What changes:* an app receives `30`; every app must load a keymap, and one
+   that does not, or loads a stale one, silently disagrees with the rest of the
+   desktop about what the user typed.
+3. **Translate in the compositor, and send the scancode too.**
+   *What changes:* the same as (1) for every ordinary app, plus a `scancode`
+   field that a game or a remapping utility can read to get physical key
+   positions.
+
+**Decision: (3).**
+
+**Reasoning.**
+
+- (2)'s failure mode is the disqualifying one. A keymap is *system* state — it
+  belongs to the user, not the application — and distributing it to 138 client
+  crates means 138 chances to be out of date. The version skew is invisible:
+  nothing looks broken, the wrong letter simply appears. Wayland can afford
+  client-side keymaps because it ships the keymap over the same protocol and
+  every client uses one library (xkbcommon) to read it; we have neither, so (2)
+  would mean writing that whole apparatus to be no better off.
+- Against (1) — and the reason (3) exists — is that semantic keys genuinely
+  lose information some programs need. A game binding "the key left of S" wants
+  the physical position regardless of layout; a remapper is *about* physical
+  positions. Under (1) those programs are simply not writable.
+- (3) costs five bytes per key event (a presence byte and a `u32`) and settles
+  the argument by not having it: the central keymap governs, and nothing is
+  foreclosed. Five bytes on an event that occurs at human typing speed is not a
+  cost worth reasoning about.
+- The scancode is on the *wire* type (`InputEvent::scancode`), not inside
+  `guitk::event::KeyEvent`. Putting it in `KeyEvent` would have obliged all
+  ~539 places in this tree that construct one to supply a value, nearly all of
+  them tests for which a scancode is meaningless. A widget reacting to a key
+  wants to know it was `Key::Left`; it has no use for which switch closed.
+
+**Consequences and what is still owed.** The compositor does not yet *have* the
+mapping table this decision assigns to it, nor modifier-state tracking (its
+`handle_key` passes `pressed` through without accumulating shift/ctrl/alt/super
+into a `Modifiers`). Both are now compositor work, and both are prerequisites
+for the first real client. The wire format is version 1 (`INPUT_VERSION`) and a
+later change to any of this is a version bump, not a silent reinterpretation.
+
+**Reversibility.** Moderate. Moving to (2) later would mean adding a keymap
+distribution message and is a protocol version bump; the `scancode` field means
+the data a client-side translation needs is already arriving, so the change
+would be additive rather than a break.
+
+## §457 — One connection carries every window, and a draw frame says which one it is for
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** A program can have several windows open at once — a text editor
+with two documents, a browser with two tabs torn off. All of them talk to the
+compositor (the program that actually puts pixels on the screen) down a single
+pipe, rather than one pipe per window. That choice created a problem: a picture
+travelling down that pipe didn't say which window it was a picture *of*, so the
+compositor would have had no way to know where to put it. The fix is a small
+envelope around each picture carrying the window's number.
+
+**Context.** `guiremote` had two frame kinds going in opposite directions:
+`ORDR` (a `RenderTree` — a list of drawing commands — from client to
+compositor) and `INPT` (input events back). Neither names a window: `ORDR` is a
+bare tree, and `INPT` names one per *event*. `oswindow`'s `EventLoop` owns a
+`Vec<Window>`, so the question "which window did this `ORDR` come from?" has to
+have an answer before it can send a second one.
+
+Two prior decisions bear on this. `INPT` and `ORDR` have distinct four-byte
+magics specifically so a frame sent the wrong way "fails on its first four
+bytes instead of decoding into plausible nonsense". And `SceneFrame` (`SCEN`)
+already embeds an `ORDR` per window, under a `SceneWindow` record that carries
+the window id.
+
+### Decision 1 — one connection per process, demultiplexed by window id
+
+**Options.**
+
+| | *What changes:* |
+|---|---|
+| **(1) One transport per process** ✅ | A program opens one connection at startup; every window it later creates rides on it. |
+| (2) One transport per window | Each `create_window` returns a fresh channel, and a program with three windows holds three. |
+
+**Chose (1)**, which is also what Wayland and X11 do.
+
+*For (1):* the connection is established once, before any window exists, so
+window creation is an ordinary request-and-reply on an existing channel.
+Backpressure and connection loss are one thing to reason about rather than *n*.
+A `select`-style wait has one thing to wait on.
+
+*For (2):* no demultiplexing at all — a frame's window is implied by which
+channel it arrived on, so no id is needed anywhere and a misrouted frame is
+impossible by construction. Per-window backpressure is genuinely better: one
+window flooding the compositor cannot delay another's input.
+
+*Against (2), decisively:* it requires the compositor to hand a **fresh channel
+back inside a reply**, and this protocol has no way to express that. Passing a
+capability (an unforgeable handle to a kernel object) through a message is a
+kernel-IPC feature the wire format does not have and would have to grow first.
+So (2) is not merely costlier — it is not currently expressible.
+
+*Cost accepted:* the demultiplexing has to be written and every message that
+concerns a window has to name it. `Connection::pump` sorts incoming frames into
+an event queue and a reply table keyed by correlation id, and counts what it
+cannot place (`unsolicited_replies`, `misdirected_frames`) rather than dropping
+it silently. `EventLoop` counts events for windows it does not know
+(`unrouted_events`) — ordinary when a window closes with events in flight, a
+compositor bug otherwise, and invisible if they simply vanished.
+
+### Decision 2 — the id goes in a wrapper frame, not in `ORDR`'s header
+
+**Options.**
+
+| | *What changes:* |
+|---|---|
+| **(1) A new `SURF` frame wrapping `ORDR`** ✅ | A draw frame on the wire is `SURF`[id + `ORDR`[tree]]; 18 bytes of overhead. |
+| (2) Add a `window` field to `ORDR`'s header | A draw frame stays one frame, 8 bytes smaller, and every `ORDR` everywhere gains the field. |
+
+**Chose (1).** (2) is fewer bytes and is the wrong shape.
+
+The reason is that `ORDR` is not only a top-level frame. It is nested *inside*
+`SceneFrame`, once per window, under a `SceneWindow` that already carries
+`id`. Putting a window id in `ORDR`'s header duplicates that field, and two
+fields that must agree eventually disagree — at which point every reader has to
+decide which one wins, and different readers will decide differently. Keeping
+`ORDR` a pure "here is a picture" and letting the *context* name the subject
+means there is exactly one id per window per frame, wherever the tree appears.
+
+The 18 bytes are 10 of `SURF` header plus 8 of id, against an `ORDR` payload
+that is a whole window's drawing commands. `SURF` also gets its own magic, so
+the demultiplexer in `frame.rs` sorts it by the same four-byte test as
+everything else, and a compositor reading a stream that mixes control requests
+and submissions tells them apart without guessing.
+
+*Reversibility.* Easy. `SURF` is additive: nothing that existed changed, and
+removing it would mean deleting one module and one `Frame` variant.
+
+### Decision 3 — a window is told where it moved, rather than assuming
+
+**Options.**
+
+| | *What changes:* |
+|---|---|
+| **(1) `Event::Moved { x, y }` on the wire** ✅ | `window.position()` reports where the window *is*. |
+| (2) Cache the requested position in `set_position` | `window.position()` reports where the window last *asked* to be. |
+
+**Chose (1).** (2) is a lie-by-cache. The compositor may snap a window to a
+screen edge, clamp it to a monitor, or rearrange everything when a display is
+unplugged — and a user dragging the title bar moves a window the client never
+asked to move at all. Under (2) a menu, a tooltip, or a remembered window
+position would all be computed against a stale answer, and nothing would
+detect it.
+
+The cost was measured before it was paid rather than guessed: grepping for an
+existing variant (`Event::ScaleChanged`) found four matches, all in
+`gui/remote/src/input.rs`. Only the codec matches `Event` exhaustively — 500-odd
+other sites construct events or match a variant or two — so a new variant is a
+codec change and nothing else. It came to about twenty lines, and `guitk`'s 759
+tests confirmed it after the fact.
+
+`WindowHandle::set_position` therefore sends the request and does *not* touch
+the local record; the new position arrives as an event, like any other. Same
+for `set_size`. `set_title` and `set_visible` do update the record, but only
+after the compositor acknowledges — a refusal leaves the old value, which a
+test pins.
+
+### Decision 4 — property changes wait for acknowledgement; frames do not
+
+`WindowHandle`'s property setters block until the compositor answers.
+Fire-and-forget would let a refusal pass unnoticed and leave the local record
+disagreeing with the screen with nothing able to detect the divergence. The
+cost is a round trip on operations a program performs a handful of times.
+
+`EventLoop::submit` does *not* wait, because that is the per-frame path and a
+round trip per frame would tie the client's frame rate to the compositor's
+scheduling latency.
+
+**Reversibility.** Easy for 2–4, moderate for 1: moving to a channel per window
+would change `Connection`'s shape, though the window ids it carries would remain
+correct and could simply become redundant.
+
+## §458 — A connection owns the windows opened over it, and that set is both the address book and the permission check
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** When you press a key, the compositor (the program that draws the
+screen) has to decide which application to hand the keystroke to. It also has
+to decide whether an application asking it to "close window 7" is allowed to —
+window 7 might belong to a different program. Both questions are answered the
+same way: the compositor remembers, per connection, which windows were opened
+over that connection. Keystrokes go to the connection that owns the window they
+were aimed at, and a request naming a window the sender doesn't own is refused
+as if that window didn't exist. The alternative — trusting the process id an
+application sends — would let one program read another's typing.
+
+**Context.** §457 settled that one connection carries every window a program
+opens. That makes both questions non-trivial: the compositor's
+`EventNotification`s each name a window, and every control request except
+"create" and "what display is this?" carries a window id that arrived as a
+plain number from an untrusted peer.
+
+### Decision 1 — route input by the connection's own window set, not by process id
+
+**Options.**
+
+| | *What changes:* |
+|---|---|
+| **(1) The link's window set** ✅ | Events go to the connection that opened the window; a program with two connections gets each window's events on the connection it opened it over. |
+| (2) The window's recorded `client_pid` | Events go to whichever connection claims that pid — ambiguous when one process holds two connections. |
+
+**Chose (1).** (2) looks equivalent and is not. One process may hold two
+connections (a plugin host, a library that opens its own), so a pid does not
+identify a connection; and a pid is a number the compositor is *told*, not one
+it observes, until a real transport gives it an authenticated peer credential.
+Getting this wrong means delivering one application's keystrokes to another,
+which is a password-shaped bug rather than a cosmetic one — so the routing key
+should be the one thing the compositor knows first-hand, which is which
+connection it was serving when it created the window.
+
+`client_pid` is still recorded and still travels with the window, because the
+taskbar and process-level policy want it. It is taken from the link rather than
+from the frame for the same reason: a client that could state its own pid could
+claim another process's windows in the window list.
+
+### Decision 2 — the same set authorises requests, and a refusal does not distinguish "not yours" from "not there"
+
+A request naming a window the link did not open is answered `no such window`,
+byte for byte the same as one naming a window that never existed. The
+alternative — a distinguishable "that exists, but is not yours" — is a probe:
+any client could count the desktop's open windows, and watch them come and go,
+by walking the id space. Since ids are sequential, that is a live inventory of
+what the user is running.
+
+The check happens in the translation layer, *before* the request reaches the
+compositor, so the compositor's own API keeps its existing meaning ("do this to
+this window") and does not grow an authorisation parameter that every internal
+caller would have to supply something for.
+
+### Decision 3 — a rejected picture is dropped silently, a rejected request is answered
+
+`SURF` (an addressed draw frame) carries no sequence number and has no reply, so
+a picture submitted for a window the sender does not own is discarded without
+comment. That asymmetry is deliberate rather than an oversight: drawing is the
+highest-frequency thing a client does, and giving it a reply to wait on would
+put the compositor's acknowledgement on the critical path of every repaint
+(§457 decision 4 made the same call for the honest case).
+
+### Decision 4 — a malformed or wrong-way frame ends the connection
+
+**Options.**
+
+| | *What changes:* |
+|---|---|
+| **(1) Terminal error** ✅ | A client that sends garbage is disconnected. |
+| (2) Skip the bad frame and resynchronise | The compositor tries to find the next valid frame in the stream. |
+
+**Chose (1).** (2) cannot be implemented honestly: the length that would say
+how far to skip is itself part of what is not trusted. A scanner looking for
+the next magic would be a decoder for an attacker-chosen grammar, and the
+"recovered" stream would be whatever the attacker arranged to appear next.
+
+The same applies to a frame that only the compositor sends (`CRSP`, `SCEN`,
+`INPT`, or a bare unaddressed `ORDR`): it means the peer is confused about
+which end of the connection it is on, and treating it as a no-op would defer
+that discovery to a much later symptom — a window that never draws.
+
+### Decision 5 — a hung-up client is not obeyed and not written to
+
+A closed link's buffered bytes are left alone rather than acted on: a client
+that has gone cannot receive replies, so honouring its last requests would
+create windows nobody can drive. Input addressed to its windows is dropped
+rather than encoded — an outbox no one will read is a leak with a queue in
+front of it — and specifically *not* left pending for another link to claim,
+because no other link owns those windows. The windows themselves outlive the
+link until the server destroys them, which keeps teardown the server's decision
+rather than a side effect of a decode pass.
+
+**Reversibility.** Easy. All five are confined to `gui/compositor/src/wire.rs`;
+none changes the wire format, so a client built against this needs no change if
+any of them is revisited. Decision 1 is the one worth revisiting when a real
+transport arrives with an authenticated peer credential — at that point pid
+becomes something the compositor *observes*, and could reinforce the link set
+rather than substitute for it.
+
+## §459 — The fake compositor ships in the library, unconditionally
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** To test a graphical program you have to pretend there is a
+screen. The pretend screen — a stand-in that answers "open a window" without
+one existing — used to be locked inside `oswindow`'s own test code, where no
+other program could reach it. It is now a normal, always-compiled part of the
+library (`oswindow::testing`), so the text editor's tests can use the same one.
+The cost is that it also ships in the real program, where nothing calls it.
+
+**The problem.** An application cannot get a window identifier by itself. It
+asks the compositor (the program that owns the screen) to create a window, and
+the compositor answers with the id. That is deliberate — §457's rewrite of
+`oswindow` removed the old behaviour where each process invented its own ids,
+because two processes would confidently invent the same one. The consequence is
+that *any* test of an application's event loop needs something on the other end
+of the connection answering `CreateWindow`. `oswindow` had exactly such a thing
+and it was `#[cfg(test)]`, which means it exists only while compiling
+`oswindow`'s own tests and is invisible to every other crate in the tree.
+
+So when `apps/editor` became the first real client
+(`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` step (e)), its event loop was
+untestable — and so was every other application's, all 138 of them.
+
+**Options.**
+
+1. **Promote the harness to a public module compiled unconditionally.**
+   *What changes:* `oswindow::testing::desktop()` is callable from any crate,
+   and the released editor binary carries a few hundred bytes of fake
+   compositor it never calls.
+2. **Put it behind a `testing` Cargo feature.**
+   *What changes:* the same API, absent unless the feature is on — but a
+   `dev-dependencies` entry that enables a feature on a crate that is also a
+   normal dependency turns the feature on for the *normal* build too, via
+   Cargo's feature unification. The saving is therefore usually imaginary,
+   and it is bought with a second dependency line per app and a build that
+   breaks with a confusing error when someone forgets it.
+3. **Let each app write its own fake.**
+   *What changes:* nothing ships that is not used — and every app encodes its
+   own idea of the wire format. This is the option that actively creates bugs:
+   a fake that decodes frames slightly wrong makes the *test* pass while the
+   real compositor rejects the same bytes, which is worse than no test.
+
+**Chosen: 1.** The deciding argument is option 3's failure mode. A test double
+for a *protocol* is not a convenience — it is a second implementation of that
+protocol, and the whole value of having one copy is that when the wire format
+changes, the double changes with it and every dependent test fails loudly. Two
+hundred bytes in a binary is not a cost worth trading that for. `guiremote`
+already made the same call for the same reason with `loopback::Pipe`, so this
+also keeps the two crates consistent rather than making a reader wonder why one
+hid its harness and the other did not.
+
+**What promoting it exposed.** The harness had a bug that only a non-test-module
+user could hit: `serve()` skipped submitted frames while decoding requests, so
+`drawn()` reported only frames sent since the last call to `serve`. That is
+adequate for a test that never gives the compositor a turn, and useless for any
+test of an event loop — taking turns is exactly how an event loop makes
+progress. Frames now accumulate in `absorb()`. The bug is worth recording
+because it is characteristic: a test double kept private is only ever shaped by
+one caller, and grows assumptions that caller happens to satisfy.
+
+**Revisit if** a release build ever measures the dead code as a real cost, or
+if the harness grows enough that it wants its own crate. Neither is true at
+~150 lines.
+
+## §460 — The first transport is a TCP socket, because this protocol was always a remote one
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** Applications draw pictures and the compositor (the program that
+owns the screen) puts them on screen, but until now there was no *pipe* between
+the two — the two halves of the conversation were both written, tested, and
+unable to reach each other. Something had to carry the bytes. The choice was
+between an ordinary network socket, an operating-system-local pipe of some
+kind, and waiting until SlateOS itself can carry messages between processes.
+A network socket was chosen: it works today on the development machine, it
+works unchanged on SlateOS once its networking is up, and it is the only one of
+the three that also gets remote desktops — which is what the crate carrying
+this protocol says it is for in its very first line.
+
+**The problem.** `guiremote` had two ends of a protocol and one transport:
+`loopback::Pipe`, two queues inside a single process. Everything on both sides
+was tested against it and nothing had ever crossed a process boundary. The
+compositor's `main()` had no listener; `apps/editor`'s `connect()` was
+literally `fn connect() -> Option<oswindow::Pipe> { None }` followed by a
+four-line diagnostic explaining that nothing carries frames between processes
+yet. So the question was not "which transport is best in the abstract" but
+"what is the first one, given that whichever it is will be what every
+application in the tree is written against."
+
+**Options.**
+
+1. **A TCP socket, with the address in an environment variable.**
+   *What changes:* the compositor listens on `127.0.0.1:7373` (or whatever
+   `SLATE_DISPLAY` says), applications dial it, and a compositor on another
+   machine is reachable by changing one string.
+2. **A local-only carrier — a Unix domain socket, or a Windows named pipe.**
+   *What changes:* the same thing on one machine, and nothing across machines.
+   The peer's process id becomes askable (`SO_PEERCRED`), and the address is a
+   path with filesystem permissions rather than a port anyone can dial.
+3. **Wait for SlateOS channel IPC.**
+   *What changes:* nothing, until SlateOS can run this code — and today it
+   cannot, so the editor stays unable to open a window and 138 application
+   crates stay written against an imagined caller.
+
+**Chosen: 1.** Three arguments, in descending weight.
+
+*It is not a stopgap.* `gui/remote/src/lib.rs` opens by describing itself as a
+remote display protocol; `design.txt` wants remote desktop as a feature, not as
+an afterthought. A protocol that is designed to be serialised and shipped
+somewhere else, and is then given a transport that cannot leave the machine,
+has had a capability removed on purpose. Option 2 is the one that would be
+thrown away later.
+
+*It is the same code on both targets.* SlateOS is getting a TCP/IP stack
+(`net/`, lane C's own zone), and `std::net` is what its `std` port will
+implement. A named pipe on the hosted build is Win32; a Unix socket is
+POSIX-only and needs `AF_UNIX` support the SlateOS netstack does not plan
+first. Option 1 is the only one where the hosted development build and the real
+build run the *same* transport rather than two that must be kept in agreement.
+
+*It is not the last one.* `Transport` is a trait with four methods
+(`read`, `write`, `is_open`, `wait`). A SlateOS channel becomes a second
+implementation beside `socket::Socket` and `loopback::Pipe`, and no application
+changes, because applications say `oswindow::connect()` and never name TCP —
+the same discipline §457 imposed on the wire format. Option 3's benefit is
+therefore obtainable *later*, without cost, which makes waiting for it pure
+loss.
+
+**What option 2 was genuinely better at, and what was done instead.** A local
+socket can be asked which process is on the other end; TCP cannot, and for a
+genuinely remote client the question is meaningless — a pid in another
+machine's namespace names nothing here. The compositor wanted a `client_pid`
+for window ownership and for the taskbar. `server::Server` therefore assigns
+each connection a counter value and documents it as standing in for a pid.
+That is honest about what it is, and it is sufficient: everything the
+compositor does with the number needs it to be *unique per connection*, not to
+be a real process id.
+
+The other thing option 2 has is filesystem permissions on the address. The
+mitigation is that `DEFAULT_DISPLAY` is `127.0.0.1:7373` — loopback, not
+`0.0.0.0` — so a default install is not listening to the network. That is a
+weaker boundary than a socket file's mode bits, and it is recorded here as a
+known limit rather than claimed as equivalent: any local process can dial the
+display. Closing that properly is a capability handshake on connect, which is
+SlateOS's model anyway and belongs with option 3's transport rather than being
+retrofitted onto this one.
+
+**Revisit if** the hosted build ever needs to run two mutually-untrusted local
+clients, which is when "any local process can connect" stops being acceptable
+and a real authentication step (or option 2's mode bits) has to arrive.
+
+## §461 — The compositor draws through a `Present` trait, and the first implementation is raw Win32
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** The compositor assembled a complete picture of the desktop every
+frame and then threw it away, because it had nothing to draw *on* — SlateOS's
+display driver does not exist yet, and the development machine's screen belongs
+to Windows. For the same reason it could not be typed at: a program running as
+a Windows process has no keyboard of its own. Both gaps had one cause, so one
+small interface closes both: a "display" is now anything that can accept a
+finished frame and report what the user did. The first one written talks to
+Windows directly, in about 400 lines of function declarations, rather than
+pulling in an off-the-shelf library — which matters because adding a library
+here needs another lane's permission and adding these declarations needs
+nobody's.
+
+**The problem.** `Compositor::compose_frame()` blends every visible window, the
+cursor and the desktop furniture into a buffer and flips it. `front_buffer()`
+hands out finished ARGB pixels. `Server::run` looked at them only to increment a
+counter. Symmetrically, `Compositor::handle_input` was reachable only from test
+code: a hosted build has no keyboard driver, so `route_input` — the whole
+mechanism that decides which client a keystroke belongs to — had nothing to
+route. The tree therefore had a rendering pipeline that no human had ever seen
+the output of, and an input pipeline that no human had ever exercised, and both
+were fully written and fully tested against themselves.
+
+That is the specific failure mode `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` was
+opened about, one level further down: code can be green against a stand-in on
+both ends and still be wrong.
+
+**The interface.** `Present`, in `gui/compositor/src/present.rs`:
+
+```rust
+pub trait Present {
+    fn show(&mut self, pixels: &[u32], width: u32, height: u32);
+    fn input(&mut self) -> Vec<InputEvent> { Vec::new() }
+    fn is_open(&self) -> bool { true }
+}
+```
+
+Three things, and the reasoning for each being there rather than elsewhere:
+
+- **`show` takes pixels, width and height, not a `&Compositor`.** A display
+  should not be able to reach back into the compositor's state; and the SlateOS
+  implementation will be a `memcpy` into a mapped framebuffer, which wants
+  exactly these three values and nothing else.
+- **`input` is on the same trait rather than a second one.** Every device that
+  can show a frame is also where the user is sitting. Splitting them would mean
+  every caller wiring two objects that are always the same object, and the loop
+  would have to decide what to do when they disagree about being open.
+- **`is_open` exists because a host window can be closed by someone who is not
+  us.** A SlateOS framebuffer never closes, so the default is `true`; a Win32
+  window returns `false` on `WM_CLOSE`, and that is how the shipped binary
+  exits.
+
+**The alternatives considered for the trait's shape.**
+
+*One method, `show`, with input as a separate concern.* Rejected above: the two
+are the same device, and the loop needs them ordered with respect to each other
+— input must be applied *before* clients are served, so that a click which
+raised a window is reflected in the events those clients hear about this frame
+rather than next. That ordering is only expressible if one loop owns both.
+
+*A callback/closure instead of a trait.* It reads well for `show` alone and
+badly for a thing with three methods and per-frame state. `Recording` — the test
+double — holds a `Vec` of frames and a tick counter; as closures that becomes
+shared mutable state threaded through `run_with`.
+
+*Give `Compositor` a `present()` method and have implementations be `Display`
+subtypes.* This conflates two ideas the crate already keeps apart:
+`display.rs`'s `Display` describes a *mode* (resolution, refresh, scale) and is
+pure policy with no hardware in it. A `Present` is a *device*. Merging them
+would mean the mode table could no longer be constructed in a test without a
+screen.
+
+**Why raw `extern "system"` rather than `softbuffer`, `minifb` or `winit`.**
+This is the part with a genuine cost on both sides.
+
+| | A crate | Raw FFI |
+|---|---|---|
+| Workspace `Cargo.toml` | needs an edit lane C does not own — a `requests/` file and a wait | nothing; `#[link]` attributes are source |
+| Portability | X11/Wayland/macOS for free | Windows only, today |
+| Code to review | none of ours | ~400 lines of declarations + a window procedure |
+| Failure mode | a dependency tree of unknown size in a kernel project | a linker error, immediately |
+| `unsafe` | hidden behind a safe API | ours, and every block needs a `SAFETY:` comment |
+
+The deciding argument is not the dependency count, though a kernel project
+adding a windowing stack to its workspace root is a real thing to be reluctant
+about. It is that **this code is scaffolding with a known demolition date.**
+Its whole purpose is to let a human look at the compositor's output until
+SlateOS can display it; on the day the display driver lands, this file stops
+being on any path that matters. Taking a permanent workspace dependency, and
+another lane's time to approve it, to host something temporary is the wrong
+trade — whereas 400 lines of `extern` blocks in one `#[cfg(windows)]` file are
+deleted by deleting the file.
+
+The cost is honest and worth stating: this harness runs on Windows only. A
+future contributor on Linux gets `--headless` and the `Recording` double, which
+is exactly what the tests use, so nothing is *untestable* there — but nobody on
+Linux can look at the desktop. If that becomes a real constraint, an X11
+implementation is another file next to this one and the trait does not move.
+
+**Why the binary opens a window by default on Windows.** The other option is
+headless-by-default with `--windowed` to opt in. Windowed-by-default was chosen
+because the harness's entire value is that someone *looks* at it, and a
+development tool that must be asked twice is a development tool nobody uses. It
+degrades safely: `Window::new` failing (a service, a session with no desktop)
+prints a warning and continues headless rather than exiting, because serving
+remote clients is still completely useful without a local screen.
+
+**What this does not decide.** It is not scanout.
+`TD-COMPOSITOR-HAS-NO-SCANOUT` stays open, and its item (1) — a mapping of the
+SlateOS display driver's framebuffer — remains the actual fix. The claim being
+made here is narrower and is the reason the trait was written before the driver
+exists: when that driver lands it is one more `impl Present`, and `Server`,
+`Compositor` and the binary do not change.
+
+**Revisit if** a second platform needs a window, which is the point at which
+"400 lines per platform" starts losing to a crate; or if the SlateOS
+framebuffer turns out to need something `show(pixels, w, h)` cannot express —
+a page flip that hands over buffer *ownership* rather than copying is the
+plausible one, and would make `show` take something like a `&mut Frame` instead.

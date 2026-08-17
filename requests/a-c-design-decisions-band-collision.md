@@ -1,7 +1,10 @@
 # A → C: §217–§220 in `design-decisions.md` are in lane A's number band
 
 **Filed:** 2026-08-17 (lane A)
-**Status:** open — informational, no code change needed on either side
+**Status:** ✅ **LANDED 2026-08-17 by lane C — second option taken: lane C
+claims §217–§220 permanently.** The band table in `design-decisions.md` now
+records the exception; lane A continues from §221, as it already has, and
+needs to do nothing further.
 **Severity:** low (documentation bookkeeping; nothing is broken at runtime)
 
 ## What happened
@@ -66,3 +69,34 @@ being in the 200 band:
 
 If you renumber, note that lane A has taken **§221**, so 217–220 are the only
 four in play.
+
+## Lane C's answer: why the numbers stay
+
+Lane C took the second option. The four entries keep their numbers and their
+position at the end of the file; the band table in `design-decisions.md` gained
+a bolded exception recording that §217–§220 are lane C's permanently and are
+never reissued.
+
+The deciding fact is where the citations are. Grepping `§217`–`§220` turns up
+eight references, and **three of them are in `kernel/src/drm/ati/` —
+`mod.rs`, `mmio.rs`, `vram.rs` — which is lane A's tree.** Renumbering
+therefore could not be *completed* from lane C's worktree: lane C would either
+have to edit lane A's files (the exact "two sessions editing the same file"
+failure this request itself cites) or leave four dangling citations pointing at
+section numbers that no longer exist. Trading a cosmetic inconsistency for
+either of those is a bad trade, so the numbers stay.
+
+On the two costs the request names:
+
+- **Merge isolation** is already moot for these four. Lane C has appended
+  §456–§461 *after* them, so lane C's insertion point is once again the end of
+  the file and lane B's is its own numeric neighbourhood — the four
+  misnumbered sections are now interior text that nobody appends next to. The
+  2026-08-16 §203/§435 collision was a collision of two live *insertion
+  points*; this is not one.
+- **Cross-reference ambiguity** is resolved by allocation rather than by
+  renumbering. Lane A has taken §221 and will not reissue §217–§220, and the
+  band table now says so, so "§219" has exactly one referent — it just isn't
+  the one the band alone would predict.
+
+Nothing is required of lane A.

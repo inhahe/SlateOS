@@ -30739,14 +30739,98 @@ visibly wrong on any proportional face, today, in English.
 `apps/markdowneditor/src/main.rs`: `col_x` (~139), the span draw loop
 (~2881–2898), and the caret at (~2902).
 
-## TD-EDITOR-HAS-NO-INPUT-LOOP (lane C, 2026-08-17)
+**Status 2026-08-17: the nominal-width half is fixed everywhere; the
+end-to-end/bidi half is untouched.** The two are separable, and only the
+second one is what this entry is really about.
 
-**What.** `apps/editor` is a document model plus a renderer with no way to
-drive it. `fn main()` is a demo harness that mutates a `Document`
-programmatically and prints to stdout; there is no key handler, no event
-dispatch, and no connection to the compositor. Every feature the editor has —
-undo/redo, find, folding, outline, structural selection, external-change
-merging, syntax highlighting — is reachable only from tests.
+The sweep that closed the first half started from this entry's own sentence
+that `markdowneditor`'s `col_x` "is not low severity", and found the same
+defect in five places, in three generations:
+
+| Generation | Shape | Sites |
+|---|---|---|
+| 1 | a hardcoded pixel constant | `apps/launcher/src/main.rs`, `gui/desktop/src/launcher.rs` (`INPUT_FONT_SIZE * 0.55`) |
+| 2 | `text::digit_advance` — a *digit's* advance in the proportional UI face | `apps/filediff`, `apps/snippets`, `apps/tmux`, `apps/hexeditor`, `SimpleTextView` (each a previous round's "fix" for generation 1; the doc comment at each site records the sequence) |
+| 3 | `chars().count() * text::cell_advance(..)` — a nominal cell count | `apps/markdowneditor`, `apps/snippets`, `apps/filediff`, `SimpleTextView` |
+
+All now call `text::measure_in(text, size, weight, family)` — the renderer's
+own answer, so there is no second number left to keep in step. `grep -rn
+"chars().count() as f32" apps/ gui/` returns nothing that positions text.
+`apps/tmux` and `apps/hexeditor` were examined and correctly left alone: both
+really are grids of known-ASCII content.
+
+**The finding worth keeping is the tab.** Generation 3 looks defensible — a
+mono face *is* a grid — and survived two previous rounds of "fixing" this bug
+for that reason. It is still wrong for a **tab**: one `char`, drawn four cells
+wide. A test written to assert the general claim
+(`the_pen_advances_by_what_is_drawn`, in `apps/snippets`) failed on
+`"\t": drawn 33.6, nominal 8.4`, which
+means every token on a tab-indented line in the snippets viewer had been drawn
+~25 px left of its highlight. The same reasoning covers a CJK ideograph, a
+combining mark, and any `.notdef` substitution. **A nominal cell count is not a
+safe approximation even in a monospace face** — that is the sentence the two
+earlier fixes were missing.
+
+Two adjacent bugs fell out of the same reading:
+
+- `SimpleTextView::line_char_count` returned `s.text.len()` — **bytes** — so
+  every column past a non-ASCII character was wrong independently of the
+  advance question. It counts characters now.
+- Four sites sliced a `str` at a caret byte offset (`self.query[..cursor]`,
+  `line[..col]`), which **aborts the process** off a character boundary. All
+  four now floor to a boundary or use `get(..).unwrap_or("")`. A caret is
+  drawn mid-keystroke; it must draw wrong rather than take the app down.
+
+`SimpleTextView` now derives every position from `column_offsets`, which
+accumulates the renderer's per-character advance (O(n), not the O(n²) of
+measuring a prefix per column — this view holds log output). That substitution
+is only exact if measurement is additive on this font stack, so
+`simple_view_advances_are_additive` asserts it and will fail loudly if a
+kerning face ever arrives.
+
+Commits `8b039f47d` (markdowneditor, snippets, filediff) and `796a5ddd0`
+(`SimpleTextView`, both launchers). What remains open here is unchanged: spans
+are still laid out end to end, which is still the assumption that screen order
+equals byte order, and still needs the widened render primitive described
+above.
+
+## TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR (lane C, 2026-08-17)
+
+*(Filed 2026-08-17 as `TD-EDITOR-HAS-NO-INPUT-LOOP`, and renamed the same day.
+The original entry blamed `apps/editor` for a gap that turned out to be
+tree-wide, and claimed `apps/markdowneditor` had a working event loop to copy
+from — it does not; its `main()` says `// In a real application, this would
+enter the event loop`. Both errors are corrected below. `roadmap.md` still
+refers to the old name at ~967.)*
+
+**What.** No application in this tree is connected to the compositor, and the
+protocol they would connect over has no input direction. Three separate
+findings, each verified:
+
+1. **`guiremote` is one-directional.** Its entire public API is
+   `encode_frame`, `encode_frame_to_vec`, `decode_frame`, `try_decode_frame`
+   (`gui/remote/src/lib.rs:352`, `:377`, `:747`, `:756`) — `RenderTree` → bytes
+   and back, and nothing else. There is no wire encoding for a key press, a
+   mouse move, a resize, or a focus change. Input cannot travel over it because
+   there is nothing to travel *as*.
+2. **Nothing depends on it but the compositor.** `guiremote` appears in exactly
+   one `Cargo.toml` besides its own: `gui/compositor/Cargo.toml:8`. Of the 142
+   crates in `apps/`, 138 depend on `guitk` — so they build `RenderTree`s — and
+   **zero** depend on `guiremote`, so none of those trees can reach a screen.
+3. **The compositor's input routing is complete and then discarded.** It
+   hit-tests, tracks focus, and builds properly addressed per-window events —
+   `handle_key` (`gui/compositor/src/main.rs:3129`) queues an
+   `EventNotification::KeyEvent { window_id, scancode, pressed, character }`,
+   the mouse handlers queue `MouseEvent`s with window-local coordinates
+   (`:2995`, `:3021`, `:3088`, `:3103`, `:3119`), and focus/resize/close
+   changes queue their own (`:2521`, `:2768`, `:2785`, `:3045`). Then
+   `main()`'s stub loop drains them into a `for` body whose entire content is
+   `// In production: send via IPC channel to the owning client.` (`:4305`).
+   The only other caller of `drain_notifications` is a test (`:4592`).
+
+So the two halves exist and the seam between them does not: the compositor
+produces events it cannot deliver, and 138 apps produce frames they cannot
+send.
 
 **How it was found.** Wiring horizontal auto-scroll for
 `TD-EDITOR-IS-NOT-BIDIRECTIONAL` step (d) needed a caller, and there was none.
@@ -30754,26 +30838,404 @@ merging, syntax highlighting — is reachable only from tests.
 had none since it was written: vertical auto-scroll is written, tested by
 nobody, and never runs. `EditorState::ensure_caret_visible_horizontally`, added
 by step (d), is in exactly the same position — correct, tested, and uncalled.
+Looking for another app to copy a loop from is what turned a one-app problem
+into this one: there was no app to copy from.
 
 **Why this matters more than it looks.** Two uncalled scroll functions is the
-visible symptom; the real cost is that *nothing* in the editor is exercised
-end to end. A model-level test can assert that `ensure_cursor_visible` moves
+visible symptom; the real cost is that *nothing* anywhere is exercised end to
+end. A model-level test can assert that `ensure_cursor_visible` moves
 `scroll_line`, but not that anything ever asks it to — and that is precisely
-the kind of defect that survives a green test suite. The longer the model
-grows without a driver, the more of it is written against an imagined caller.
+the kind of defect that survives a green test suite. Multiply that by 138
+crates and the exposure is the whole userland: every one of them is written
+against an imagined caller, and the interface each imagined may differ. The
+longer that goes on, the more of the tree has to be revised when a real caller
+finally arrives — which is the argument for building the seam *now*, while the
+cost of a mismatch is small.
 
-**The proper fix.** Give the editor a real event loop against
-`gui/remote`: connect, receive input events, translate them to the document
-operations that already exist, call `ensure_cursor_visible` and
-`ensure_caret_visible_horizontally` after any cursor movement, and push a
-`RenderTree` per frame. `apps/markdowneditor` has a working loop of this shape
-to copy from. The demo `main()` should become an example or a test, not be
-deleted — it is a compact tour of the model's API.
+**The proper fix**, in the order the dependencies force:
 
-**Severity.** High as a *blocker* (the editor cannot be used at all), low as a
-*defect* (nothing is wrong with what exists; it is only unreachable). Not
-urgent for correctness, but it should come before more model features are
-added, so that what is added is shaped by a real caller.
+- **(a) Give `guiremote` an input direction.** — **DONE 2026-08-17.**
+  `gui/remote/src/input.rs`: an `INPT`-magic frame carrying batched
+  `InputEvent`s, each a `guitk::event::Event` plus its addressee window. Its own
+  magic, so a frame sent the wrong way over a duplex transport fails on its
+  first four bytes rather than decoding into plausible nonsense. 23 tests,
+  including an exhaustive sweep of all 88 named keys, all 16 modifier
+  combinations, and every mouse kind × button — and a corruption sweep that
+  flips every byte of a frame in turn to confirm the decoder never panics on
+  input from another process.
+- **(b) Decide what a key looks like on the wire.** — **DECIDED 2026-08-17,
+  `design-decisions.md` §456.** The compositor translates scancode→`Key`
+  centrally, so one system keymap governs every app, *and* forwards the raw
+  scancode so games and remappers can still see physical key positions. The
+  scancode rides on the wire event rather than on `guitk::event::KeyEvent`,
+  which would have obliged all ~539 `KeyEvent` construction sites in the tree to
+  invent one.
+- **(c) Give the compositor the keymap and the modifier state** that (b) assigns
+  it. — **DONE 2026-08-17.** `gui/compositor/src/keymap.rs`: an 88-key
+  scan-code-set-1 table (extended keys keeping their `0xE0` prefix, so Left
+  arrow stays distinct from keypad 4) and a `ModifierState` tracking each
+  modifier *per side*, so releasing one Shift while the other is held does not
+  drop the modifier mid-capital. Caps Lock is a latch that cancels with Shift
+  rather than combining. `handle_key` folds the state *before* building the
+  notification, so `Ctrl+S` arrives as a chord rather than one event behind.
+  `Compositor::drain_input_frame` encodes the pending notifications as a
+  `guiremote` input frame. 21 tests, including compositor→wire→client round
+  trips for a key press, a chord, the arrow keys and a window-local mouse click.
+  **Still open under this item:** the transport itself — each window needs a
+  channel to its owning process, and until that exists `main()` builds the frame
+  and drops it. Also `TD-ONLY-ONE-KEYBOARD-LAYOUT`: the structure supports
+  layouts, and exactly one table occupies it.
+- **(d) Write the client-side loop once,** not once per app: read events,
+  dispatch to a handler, push a `RenderTree` per frame. 138 hand-written loops
+  is 138 chances to get the seam subtly different. — **DONE 2026-08-17.**
+  `gui\remote\src\client.rs`. Note the correction to this step's own text: it
+  said "in `guitk`", which is impossible — the loop needs both directions of the
+  `guiremote` wire format and `guiremote` already depends on `guitk`, so putting
+  it in `guitk` closes a dependency cycle. A third crate was the other option
+  and is not available to lane C, which may not edit the workspace-root
+  `Cargo.toml`. So it lives in `guiremote`.
+
+  An app implements `App` (`on_event` → `Idle`/`Redraw`/`Exit`, plus `render`);
+  the transport is a second trait, so the loop is testable without a kernel
+  channel and can later sit on a channel, a socket or a pipe unchanged. The
+  behaviours worth naming, each pinned by a test: a batch of events produces
+  **at most one** frame (ten mouse moves are not ten frames); a `Resize` is
+  applied *before* the frame that answers it, and the very first paint folds
+  into the first batch for that same reason — painting first would draw the
+  window at a size it does not have; a `CloseRequested` the app ignores still
+  closes, because a close button that does nothing is worse than an app that
+  wanted to stay; an event addressed to another window is counted, not
+  dispatched. 19 tests.
+- **(d½) Fold `gui/window` (`oswindow`) onto the protocol — found while starting
+  (e), and it changes (e).** — **DONE 2026-08-17.** There is already a crate whose stated job is
+  "compositor client for creating windows and receiving events", 1254 lines of
+  it, and **nothing in the tree depends on it** — the same count as `guiremote`
+  had before this work. It is not a client; it is a simulation of one:
+
+  * `Connection::send` calls `simulate_response()`, which pops the request it
+    just pushed and fabricates the reply. Nothing is serialised and no
+    transport is involved.
+  * `WindowBuilder::build` gets its window id from a local
+    `allocate_window_id()` counter, so two processes would confidently use the
+    same id.
+  * `EventLoop::run` — the blocking loop an app is supposed to live in — ends
+    with `// For now, break to avoid infinite loops in tests` and `break`. It
+    runs zero or one iterations.
+  * It declares a *third* event vocabulary, `oswindow::WindowEvent`, parallel
+    to `guitk::event::Event` and the wire `InputEvent`. Three enums for one
+    concept is three translation tables to keep in step.
+
+  This is the band-aid pattern `CLAUDE.md` names: the shape of the right
+  design with the substance stubbed, and the stub is what everything would be
+  written against. The fix is not to leave it beside `guiremote::client` as a
+  second answer — it is to make `oswindow` the app-facing crate *implemented
+  on* `guiremote`: `guitk::event::Event` as the only vocabulary, real frames
+  on a real `Transport`, and any simulation confined to a loopback transport
+  that is named as one.
+
+  **It also exposes a piece this plan never listed.** (a)–(d) cover two
+  directions: render frames out, input frames back. A window cannot be
+  *created* over either. `oswindow`'s `CompositorRequest`/`CompositorResponse`
+  are exactly that missing third message set — create/destroy window, set
+  title, resize, minimise, set cursor, and the replies — and they have no wire
+  encoding at all. So there is a **(c½): give `guiremote` a control frame**,
+  and the count of what is missing between here and a usable desktop was one
+  larger than this entry claimed.
+
+  **What landed.** `gui/window/src/lib.rs` is now 1200 lines of client rather
+  than 1254 of simulation. `WindowEvent` is gone; `guitk::event::Event` is the
+  only vocabulary end to end, pinned by a test that sends a mouse-scroll event
+  from the server side and asserts the handler receives the identical value.
+  Window ids come from the compositor — the test that would have caught the
+  old defect sets the fake compositor's counter to `0x00C0_FFEE` and asserts
+  that is the id returned. `EventLoop::run` blocks on `Transport::wait` and
+  ends only when the handler says so, `quit()` is called, or the connection
+  closes. 23 tests.
+
+  Three pieces the rewrite forced, each a design choice in its own right:
+
+  * **`SURF`, an addressed draw frame** (`gui/remote/src/submit.rs`). Designing
+    `Connection` for more than one window raised "which window is this `ORDR`
+    for?", and `ORDR` has no answer — it is a bare `RenderTree`. Adding an id
+    to its header would have been fewer bytes and the wrong shape: `ORDR` is
+    also nested *inside* a `SceneFrame`, under a `SceneWindow` that already
+    names the window, so the id would be duplicated, and two fields that must
+    agree eventually disagree. `SURF` wraps `ORDR` with the id instead.
+  * **`Event::Moved`** (`gui/toolkit/src/event.rs`). A window could otherwise
+    only know where it last *asked* to be. The alternative — caching the
+    requested position — is a lie-by-cache: the compositor may snap the window
+    to an edge or clamp it to a monitor, and anything placed in screen
+    coordinates would then be placed against a position the window never had.
+    Cost measured before writing it: only the codec matches `Event`
+    exhaustively (4 sites, all in `input.rs`), so the variant was ~20 lines.
+  * **`guiremote::loopback::Pipe`**, an in-process duplex pipe implementing
+    `Transport`. Both halves speak the real wire protocol; the only thing
+    missing versus a socket is the kernel. It is explicitly *not* a substitute
+    for a transport — `wait` does nothing, because on one thread nothing can
+    arrive while a caller is blocked, and `Rc` rather than `Arc` says so in the
+    type system. `oswindow`'s tests wrap it in a transport whose `wait` gives
+    the fake compositor a turn, which is what blocking *means* with one thread,
+    and that is what lets them exercise the genuinely blocking paths
+    (`create`, `set_title`, `run`) rather than reaching around them.
+
+- **(f) Give the compositor a wire front end — found while finishing (d½), and
+  it blocks (e).** — **DONE 2026-08-17**, in the three parts described at the
+  end of this item. The compositor has `handle_request(CompositorRequest) ->
+  CompositorResponse` and `drain_notifications()`, and **nothing that decodes
+  or encodes a frame on the request path**: no `CREQ` → `CompositorRequest`, no
+  `CompositorResponse` → `CRSP`, no `SURF` → `submit_render`. `drain_input_frame`
+  (added by (c)) is the one piece that exists, and `main()` drops what it
+  builds. So the client half of the protocol is now complete and has nothing to
+  talk to: `oswindow`'s tests pass against a fake compositor written in their
+  own test module, and there is no way to point one at the real thing.
+
+  The work is a translation layer, and its shape is fixed by what already
+  exists on both sides — but it is not mechanical, because the two enums do not
+  correspond one-to-one. `CompositorRequest` has `SetFullscreen`, `SetOpacity`
+  and the three `Stream*` variants that `RequestBody` does not; `RequestBody`
+  has `SetVisible` that `CompositorRequest` does not; `CompositorRequest::CreateWindow`
+  carries a `client_pid` and only title/width/height, where `WindowSpec` also
+  carries position, resizability, decorations, transparency and size limits —
+  which the compositor would currently discard. Deciding whether to widen
+  `CompositorRequest`, widen `RequestBody`, or accept a lossy edge is the
+  substance of this step.
+
+  There is also a **third cursor enum** to delete on the way past:
+  `compositor::CursorShape`, `guiremote::control::CursorShape` and the one
+  `oswindow` used to have cannot represent the same set — `Help` existed only
+  in `oswindow`'s, `NotAllowed` only in the compositor's. `oswindow`'s is gone;
+  the compositor's should become `guiremote`'s.
+
+  **What landed, in the order the work forced.** The question this step posed —
+  widen `CompositorRequest`, widen `RequestBody`, or accept a lossy edge — was
+  answered *both*: each side gained what the other had, because a lossy edge
+  here means a client asking for an undecorated window and silently getting a
+  title bar, and a defect that only shows up as pixels is the worst kind to
+  leave in a protocol.
+
+  * **(f1) The compositor honours the whole `WindowSpec`** (commit
+    `83d408c7d`). It previously stored title, width and height and dropped
+    position, decorations, resizability, transparency and both size limits.
+    Storing them was the small half; the real defect was that
+    `TITLE_BAR_HEIGHT`/`BORDER_WIDTH` were read *directly* in six `Window`
+    helpers, in `detect_border_drag`, in `maximize_window` and again in
+    `render_title_bar`, so "undecorated" could only ever have been honoured
+    where someone remembered to check. They are now behind
+    `Window::frame_insets()`/`shadow_extent()`, which return zeroes for an
+    undecorated or fullscreen window, and every consumer derives from those —
+    so hit testing, damage, drag detection and painting agree by construction.
+    Button rectangles became `Option<Rect>` (an empty rect contains no point
+    only by accident of arithmetic) and are placed by *slot*, so a
+    non-resizable window's minimise button moves up into the missing maximise
+    button's place rather than leaving a dead patch of title bar.
+    `clamp_size` puts a hard 100×50 floor beneath any client minimum and
+    resolves a contradictory `max < min` in favour of the minimum, so a client
+    cannot strand a window too small to grab. `transparent` and `opacity` are
+    kept distinct: the first skips the opaque white client-area undercoat that
+    would otherwise defeat the request, the second fades the whole window
+    including its frame. 13 tests.
+  * **(f2) One `CursorShape`, stored per window** (commit `f4f2db88d`). The
+    compositor's enum is deleted in favour of the wire's, which fixes the
+    `Help`/`NotAllowed` mismatch above, and the shape is stored on the
+    `Window`. This found a live bug: `handle_request`'s `SetCursor` arm was
+    `SetCursor { cursor, .. }` — it discarded the window id and wrote the
+    *global* cursor, so any client could repaint the desktop's cursor from
+    anywhere, including while the pointer was over another application.
+    `cursor_at(x, y)` now resolves it in the same order the user perceives:
+    a resize border wins, then the client area's own shape, then the frame's
+    arrow.
+  * **(f3) The front end itself** — `gui/compositor/src/wire.rs`, plus
+    `RequestBody::SetFullscreen`/`SetOpacity` and
+    `CompositorRequest::SetVisible` to close the last gaps between the two
+    enums. `Compositor::serve(&mut ClientLink)` decodes whatever a client has
+    sent — `CREQ` and `SURF` interleaved on one connection, in any framing,
+    including one byte per read — dispatches it, and queues the replies;
+    `route_input` writes each pending event to the link that owns its window.
+    The design decision that carried the most weight is in
+    `design-decisions.md` §458: **a link owns the windows opened over it**, and
+    that set both routes input and authorises every request naming a window.
+    15 tests here; 31 across the three parts, and the compositor suite went
+    from 105 to 136.
+
+- **(e) Wire `apps/editor` to it** as the first real client, calling
+  `ensure_cursor_visible` and `ensure_caret_visible_horizontally` after any
+  cursor movement. Its demo `main()` should become an example or a test, not be
+  deleted — it is a compact tour of the model's API. **Amended by (d½):** wire
+  it to `oswindow`, not to `guiremote::Client` directly — an app should not
+  name the wire format any more than a Unix program names the socket layer —
+  and do (c½) and (d½) first so the editor is not rewired twice.
+  — **DONE 2026-08-17** (commit `7f8c7b514`).
+
+  **What landed.** `apps/editor/src/input.rs`, ~800 lines and 31 tests: the
+  editor previously had *no* input handling at all, so this is the whole layer
+  rather than a rewiring of one. Its organising rule is that nothing in it
+  moves the caret directly — every motion goes through `EditorState::moving`,
+  which settles the selection anchor and then calls **both**
+  `ensure_cursor_visible` and `ensure_caret_visible_horizontally`. That is what
+  this step asked for, and routing it through one function rather than
+  appending two calls to each binding is what stops the thirty-second binding
+  from forgetting them. Both functions now have callers for the first time
+  since they were written, which closes the specific symptom that opened this
+  entry.
+
+  Three input modes are checked in order — external-change prompt, find bar,
+  document — and the find bar returns an `Option` rather than a bool, so a
+  chord it does not claim (`Ctrl+S`) falls through to the document's bindings
+  instead of being swallowed by the bar that happens to have focus.
+
+  `main` became `run(&mut EventLoop<T>, window, &mut EditorState)`, generic
+  over `oswindow::ConnectionTransport` and therefore testable end to end
+  against `oswindow::testing` — which is the point of the step, since a model
+  test can assert a scroll function *works* but not that anything ever calls
+  it. `mod loop_tests` drives the editor through the real protocol and asserts
+  the one thing `run` adds over `handle_event`: *when* a frame is sent. A
+  no-op mouse move, a keystroke and a close produce **two** frames — the
+  initial paint and the keystroke's — not one per event.
+
+  The demo `main()` is preserved as `mod api_tour` with its prints turned into
+  assertions, as this step required.
+
+  **`connect()` returns `None`.** There is still no transport, so the binary
+  prints a four-line diagnostic naming this entry and exits 1. It is a
+  function rather than an `unimplemented!` main precisely so everything above
+  it is real, compiled code: the day it returns a socket, the editor works
+  with no other change in `apps/editor`.
+
+  **One piece this step forced.** `oswindow`'s compositor stand-in was
+  `#[cfg(test)]`-private, so no other crate could test an event loop at all —
+  an app cannot obtain a window id without a compositor answering
+  `CreateWindow`, and (d½) deliberately removed the locally-minted ids that
+  used to make that possible. It is now a public `oswindow::testing`, compiled
+  unconditionally, for the same reason `guiremote::loopback` is: a per-app copy
+  of the fake is a fresh chance to get the wire format wrong in a way that
+  makes the *test* pass. Promoting it also exposed a defect in it — `serve()`
+  consumed submissions while decoding, so `drawn()` only ever reported frames
+  sent since the last turn, which is useless for an event-loop test where
+  taking turns is how the loop makes progress. Submissions now accumulate in
+  `absorb()`.
+
+  **What (e) does not close.** The editor cannot yet run: `connect()` has
+  nothing to return. Both halves of the protocol are complete and there is no
+  channel between them — the compositor's `main()` has no listener and no
+  client has an address to dial. That is the next step and is now the only
+  thing between this tree and a window on a screen. Two smaller gaps found on
+  the way: `guitk::event::MouseEvent` carries no modifiers, so shift-click is
+  recognised from state recorded on the last `KeyEvent` (correct, but it means
+  a mouse event that arrives before any key event cannot know the shift
+  state); and Save As needs a file dialog, which does not exist, so an unnamed
+  buffer reports "No file name — Save As needs a file dialog" and cannot be
+  saved.
+
+- **(g) Put a channel between the two ends** — the step (e) named as "the only
+  thing between this tree and a window on a screen". — **DONE 2026-08-17**
+  (commits `675dfc72c`, `4094767c1`, `f81aaec1b`).
+
+  Both halves of the protocol were finished and there was nothing to carry the
+  bytes: the compositor's `main()` had no listener, and no client had an address
+  to dial. Three pieces closed it.
+
+  * **A transport** (`gui/remote/src/socket.rs`). A TCP socket implementing
+    `guiremote::client::Transport`, plus the `Listener` the compositor accepts
+    on. The choice of TCP over a Unix socket or a named pipe is
+    `design-decisions.md` §460; the short version is that this crate's first
+    line calls itself a *remote* display protocol, and a carrier that cannot
+    leave the machine removes a capability on purpose. `SLATE_DISPLAY` names the
+    display and defaults to `127.0.0.1:7373` — loopback, so a default install is
+    not listening to the network. The whole of the awkwardness is in reconciling
+    two contradictory obligations on one socket: `read` **must not** block and
+    `wait` **must**. It is held non-blocking, and `wait` switches to blocking,
+    peeks one byte, and restores the mode *on every path including the failing
+    one* — which has its own test, because forgetting the failing path leaves a
+    socket whose next `read` blocks the whole application. 14 tests.
+  * **A front end** (`gui/compositor/src/server.rs`). `Server` binds the
+    listener, gives each connection its own `ClientLink` and identity, serves,
+    routes input, and paces frames on the display's refresh interval. A departed
+    client's windows are destroyed on reap, so a crash cannot leave a window
+    nobody can close; a client that speaks nonsense is dropped without
+    disturbing the others. Two limits found writing it are logged separately:
+    `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING` (the standard library has no
+    readiness primitive, so the loop polls) and `TD-COMPOSITOR-HAS-NO-SCANOUT`
+    (the composited frame is finished and then dropped, because nothing here
+    owns a framebuffer).
+  * **A dialer** (`oswindow::connect`, `connect_to`, `Link`), and the editor's
+    `connect()` replaced by it. An application still never names TCP.
+
+  **What this step forced, and it is the part worth remembering.**
+  `gui/compositor` was a binary with no library, so *nothing outside its own
+  source file could link it*. Every test that existed put the shipped code on
+  **one** end of the protocol and a stand-in on the other — the editor against
+  `oswindow::testing`, the compositor against a hand-written client in its own
+  test module — and two stand-ins can both be satisfied while the two real
+  halves disagree. That is exactly the class of defect this whole entry is
+  about, reproduced one level up. The compositor is now a library plus a thin
+  binary, and `apps/editor`'s `mod against_the_real_compositor` starts a genuine
+  `Server` on a thread and an ephemeral port and drives the editor into it: a
+  window is created and its id comes back over the socket, the editor's real
+  render tree crosses the wire and is composited, a scancode injected at the
+  compositor arrives as a character in the document, and the window is reclaimed
+  when the client goes away.
+
+  It found something immediately, which is the argument for having written it:
+  `ServerStats::frames` was incremented inline in `run()`, so any *other* driver
+  of the loop reported zero frames composited while the screen was demonstrably
+  being drawn. Composition is now `Server::compose`, counted for every caller.
+
+  **What is left between here and a visible desktop:** scanout
+  (`TD-COMPOSITOR-HAS-NO-SCANOUT`) and an input source. The hosted build has no
+  keyboard or mouse driver feeding `Compositor::handle_input`, so outside a test
+  that injects them, `route_input` has nothing to route.
+
+**Severity.** High as a *blocker* — it is the single gap between "142 app
+crates" and "an OS with any usable application at all". Low as a *defect*:
+nothing that exists is wrong, it is only unreachable, so the fix is additive
+and nothing has to be unwound first — with the one exception found in (d½),
+where `oswindow` is not merely unreachable but actively misleading, and does
+have to be unwound.
+
+**Status 2026-08-17: the transport chain is closed.** (a)–(g) are done, and one
+application really opens a window on a real compositor and receives a keystroke
+from it. This entry stays open for the remaining 137 apps, none of which is
+wired yet, and because a window whose pixels never reach a screen is not yet a
+usable desktop — `TD-COMPOSITOR-HAS-NO-SCANOUT` is now the last link in the
+chain from an app's `RenderTree` to a photon.
+
+## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
+
+**What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY
+scan-code-set-1 table, and there is no way to select another. Anyone using a
+non-US keyboard gets the wrong letters — a French AZERTY user pressing the key
+labelled `A` produces `Q`.
+
+**How it arose.** `design-decisions.md` §456 put scancode→key translation in the
+compositor (rather than in each of 138 client crates) so that one system keymap
+governs everything and a layout change takes effect everywhere at once. That is
+the right *structure* for layouts; this entry is the observation that the
+structure now exists and is occupied by exactly one table.
+
+**What is missing**, roughly in order of how much each is felt:
+
+1. **Layout selection** — a setting, a way to read it, and the table swap. The
+   table is already consulted in exactly one place (`key_for_scancode`), so this
+   is a lookup change rather than a redesign.
+2. **More tables.** Each is mechanical: the same 88 rows with different letters.
+3. **Dead keys.** On many European layouts `´` then `e` produces `é`. That needs
+   per-layout state between two key events, which nothing here has — the
+   translation is currently a pure function of one scancode.
+4. **Compose sequences** (`Compose`, `o`, `c` → `©`), the same shape of problem
+   as dead keys but with longer sequences.
+5. **AltGr as a level shift.** `Modifiers` has no AltGr; right Alt currently maps
+   to `Key::RightAlt` and sets the `alt` flag, so a layout where AltGr+`2`
+   produces `@` cannot be expressed.
+
+**Severity.** Low today, because nothing else about the input path is connected
+yet — see `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` — so no user is currently
+getting the wrong letter. It becomes a *correctness* issue the moment a real
+client exists and someone outside the US uses it, and (3)–(5) are the kind of
+thing that is much cheaper to design in than to retrofit, because they change
+`key_for_scancode` from a pure function into something that holds state.
+
+**Where.** `gui/compositor/src/keymap.rs` — the `key_for_scancode` table, and
+`Modifiers` in `gui/toolkit/src/event.rs:185` for the AltGr gap.
 
 ## A-JOB-CONTROL-SELF-STOP-LOST-A-RACING-SIGCONT (lane A, 2026-08-17) - **fixed**
 
@@ -30894,6 +31356,328 @@ deleting an eleven-day-old write-once log is safe, but do not delete a `.output`
 file for a task that may still be running — read the task list first. Files
 under `-mtime +7` are unambiguously dead.
 
+## TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING (lane C, 2026-08-17)
+
+**What.** `gui/compositor/src/server.rs`'s `run()` is a polling loop. Once per
+display frame interval it wakes, asks the listener whether anyone is trying to
+connect, asks every open socket whether it has bytes, composes, and sleeps the
+remainder of the interval. Nothing in it *waits* for work; it asks repeatedly
+whether work has appeared.
+
+Two costs, one small and one not:
+
+* **Latency.** A request that arrives just after a tick waits until the next
+  one — up to one frame interval, 16.7 ms at 60 Hz. That is invisible for
+  drawing, which is paced by the same clock anyway, but it is a real floor
+  under anything request-shaped: a window that asks for its title to change
+  waits a frame for the reply, and an app that does a create-then-draw at
+  startup pays two.
+* **An idle desktop never idles.** With no clients connected and nothing on
+  screen, the loop still runs 60 times a second, doing a `TcpListener::accept`
+  that returns `WouldBlock` and then sleeping. On a laptop that is a wakeup
+  source that prevents the CPU from reaching a deep idle state, which is
+  battery burned to discover nothing happened.
+
+**Why it is written this way.** The standard library has no readiness
+primitive. `std::net` gives blocking sockets, non-blocking sockets and
+timeouts, and nothing that can block on *several* file descriptors at once —
+no `poll`, no `epoll`, no `kqueue`, no IOCP. With only those parts, a server
+that must watch a listener and N client sockets has exactly two shapes
+available: one thread per socket blocking in `read`, or one thread polling
+them all. The polling loop was chosen because a thread per client makes every
+piece of compositor state shared-mutable — and the compositor's state is a
+window list, a focus stack, a damage set and a framebuffer, all of which are
+touched by nearly every operation, so "shared" would in practice mean one big
+lock held across composition, which is a worse design wearing a better name.
+
+**The proper fix**, in the order the dependencies force:
+
+1. **On SlateOS, this dissolves.** The design calls for an IOCP-like
+   completion port (`design.txt`; `CLAUDE.md`'s performance table lists
+   "IOCP-like completion wait" as a critical path). The moment the compositor
+   runs on SlateOS, its transport is a channel and its wait is a port wait: one
+   blocking call that returns when *any* client has a message or the frame
+   timer expires. `run()`'s shape survives — accept, serve, route, compose —
+   with the sleep replaced by that wait.
+2. **On the hosted build, take the dependency.** `mio` (the readiness layer
+   under `tokio`) wraps `epoll`/`kqueue`/IOCP and is the obvious answer if the
+   hosted build is ever more than a development harness. Not taken now because
+   lane C may not edit the workspace-root `Cargo.toml`, and because a
+   dependency added for a build that exists to test another build is a poor
+   trade.
+3. **Cheap mitigation available today:** back the tick rate off when there are
+   no clients *and* nothing composited — e.g. poll at 10 Hz while idle, snap
+   back to the frame interval on the first connection. This does not fix the
+   latency floor for connected clients and does fix the idle-battery half.
+   Worth doing if the hosted compositor is ever left running.
+
+**Severity.** Low. It is waste and a latency floor, not a defect: every
+request is answered, in order, within a frame. It is logged because the
+polling shape is the kind of thing that gets copied into the next server
+written in this tree if nobody has written down that it was a constraint of
+the standard library rather than a preference.
+
+## TD-COMPOSITOR-HAS-NO-SCANOUT (lane C, 2026-08-17)
+
+> **Read the Status note at the end of this entry first.** The description
+> below is the state *before* the `Present` trait and the Win32 host window
+> landed, and its flat claims — "there is no `present()`", "no window on the
+> host", "the screen was never involved" — are no longer true of the hosted
+> development build. They remain true of SlateOS itself, which is what this
+> entry is actually about, so the description is kept rather than rewritten:
+> it is the statement of the problem that is still open.
+
+**What.** The compositor composes a complete frame and then drops it.
+`Compositor::compose_frame()` blends every visible window, the cursor and the
+desktop furniture into a back buffer, flips it, and `front_buffer()` hands out
+a `&[u32]` of finished ARGB pixels — which `server::run` looks at only to
+count. Nothing in this tree puts those pixels in front of a human. There is no
+`present()`, no framebuffer device, no DRM plane, no window on the host.
+
+So the whole pipeline is real up to the last step: an app can connect, be given
+a window, submit a `RenderTree`, have it rasterised and composited with correct
+z-order, damage and opacity — and the result exists only as memory that is
+overwritten by the next frame.
+
+**Why it is like this.** Scanout is the one part that cannot be written
+portably. It needs either (a) SlateOS's display driver — a framebuffer the
+kernel maps for us, which is the target and does not run yet in a form the
+compositor can reach from the hosted build — or (b) a host window, which means
+a platform dependency (Win32 `BitBlt`, X11, Wayland, or a crate like
+`softbuffer`/`minifb`) that lane C cannot add to the workspace-root
+`Cargo.toml`. `gui/compositor/src/display.rs` models displays, modes and
+refresh rates faithfully and has no code that touches hardware, which is the
+honest state: the *policy* of scanout is written, the *mechanism* is not.
+
+**How to see the gap.** Run the compositor and connect a client. Everything
+reports success — `frame_stats().last_frame_time_us` is non-zero, the client
+gets its window id, `window_count()` is 1 — and the screen is unchanged,
+because the screen was never involved.
+
+**The proper fix.**
+
+1. **The real one: a SlateOS framebuffer.** The compositor asks the display
+   driver for a mapping of the scanout buffer and, after each `compose_frame`,
+   copies (or page-flips, which is why the back/front buffer pair already
+   exists) into it. `TD-NO-WRITE-COMBINING` is a prerequisite for this being
+   fast rather than merely correct — an uncached framebuffer makes the copy
+   roughly an order of magnitude more expensive than it needs to be.
+2. **For the hosted build: a host window behind a trait.** `Present` with one
+   method — take `&[u32]`, width, height — implemented once per platform and
+   once as a no-op. This is the shape that keeps `server::run` unchanged
+   between the two, and it is small; what it needs is the workspace dependency,
+   which is a cross-lane request rather than a design problem.
+3. **A useful intermediate that needs nothing:** dump `front_buffer()` to a PPM
+   or PNG on a key chord or a signal. It does not make the desktop visible, but
+   it makes "did the compositor draw what I think it drew" answerable without a
+   display at all.
+
+**Severity.** High as a *blocker*, low as a *defect*, in the same sense as
+`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`: nothing that exists is wrong, and the
+missing piece is additive. It is the last link in the chain from an app's
+`RenderTree` to a photon, and it is the only one still missing.
+
+**Status 2026-08-17: (2) is done; (1), the actual target, is not.**
+`gui/compositor/src/present.rs` defines the `Present` trait — `show(pixels,
+width, height)`, `input()`, `is_open()` — with `Headless`, a `Recording` test
+double, and, under `#[cfg(windows)]`, `present::host::Window`: a raw Win32
+window that blits with `StretchDIBits` and turns `WM_*` messages into
+`InputEvent`s. `Server::run_with` drives any implementor; `server.run()` is
+that same loop over `Headless`. The compositor binary opens one by default on
+Windows, and `--headless` opts out. The paragraph above about the workspace
+dependency turned out to be a non-problem: the whole thing is `extern "system"`
+declarations against `user32`/`gdi32`, so it adds no entry to any
+`Cargo.toml` — see `design-decisions.md` §461.
+
+**What that closed, precisely, and what it did not.** It closed *seeing*: the
+rendering pipeline — text, alpha blending, window decorations, shadows, the
+cursor — had never been looked at by a human eye, and the editor's title bar,
+tab strip, gutter and caret have now been observed drawn by the compositor over
+a real TCP socket. It also closed the input half, which was the same gap wearing
+a different hat: a hosted build has no keyboard driver, so `handle_input` was
+reachable only from tests, and `route_input` had nothing to route. It did
+**not** close scanout. A Win32 window is a *development harness* — it runs on
+the wrong OS, against a window manager we do not own. Item (1) is untouched and
+remains the real fix; when it lands it will be another `impl Present` with
+nothing else in this crate changing, which is the argument for the trait having
+been worth defining before the driver exists. This entry therefore stays open,
+and the sentence in `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` calling this the last
+link to a photon stays true of SlateOS, not of the harness.
+
+## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17)
+
+**What.** `CLAUDE.md` requires every crate to enable `clippy::all` +
+`clippy::pedantic` and five defensive lints (`unwrap_used`, `expect_used`,
+`panic`, `indexing_slicing`, `arithmetic_side_effects`). The workspace root
+defines all of them in `[workspace.lints.clippy]`, and a crate opts in with
+`[lints] workspace = true`. **Of the five `gui/` crates, exactly one —
+`gui/font` — opts in.** The other four are in two different states of partial
+compliance:
+
+| Crate | `clippy::all` / `pedantic` | The five defensive lints |
+|---|---|---|
+| `gui/font` | via `[lints] workspace = true` | **yes** |
+| `gui/remote` | inner attributes | **no** |
+| `gui/toolkit` | inner attributes | **no** |
+| `gui/window` | inner attributes | **no** |
+| `gui/compositor` | **neither** | **no** |
+
+So `gui/compositor` — 4900 lines, the display server every application depends
+on — is effectively unlinted: `cargo clippy -p compositor` reports the default
+warn-level `clippy::all` and nothing else, which is why a clean clippy run on
+that crate is a much weaker signal than it looks.
+
+**How big the backlog is.** Measured 2026-08-17 with
+`cargo clippy -p compositor --all-targets -- -W clippy::pedantic`: roughly 1200
+warnings. The large groups, in order: 370 `must_use_candidate` on methods and
+61 on functions and 27 returning `Self`; 162 `doc_markdown` (an identifier in a
+doc comment without backticks); ~250 numeric-cast warnings across
+`cast_precision_loss` (76 `u32`→`f32`, 59 `usize`→`f32`),
+`cast_possible_truncation` (35+35 `f32`→`u8`, 33 `f32`→`i32`, 26+26
+`f32`→`u32`, 20+20 `f32`→`usize`) and `cast_lossless` (41 `u8`→`f32`); 24+24
+`cast_possible_wrap` (`usize`→`i32`); 22 `missing_errors_doc`; 17
+`uninlined_format_args`; plus long-literal and identical-match-arm hits.
+
+**Why it matters unevenly.** Most of that list is cosmetic — backticks and
+`#[must_use]` are style. The numeric casts are not: a `f32`→`u8` truncation in
+a *compositor* is a colour channel, and an out-of-range float becomes a
+saturating or wrapping value depending on the cast, which is a rendering bug
+that shows up as a wrong pixel rather than a panic. The defensive five matter
+more still, and none of the four non-compliant crates has them on: an
+`indexing_slicing` hit in the compositor is a panic in the display server,
+which takes the whole desktop down, and the compositor indexes framebuffers by
+computed offsets constantly.
+
+**The proper fix**, and it should be done crate by crate rather than in one
+sweep:
+
+1. `gui/compositor` first, since it is both the largest exposure and the only
+   one with *no* lint header at all. Add `[lints] workspace = true`, then clear
+   the backlog in themed commits — the numeric casts first (they can hide real
+   bugs), `must_use`/`doc_markdown` last (they cannot).
+2. `gui/remote`, `gui/toolkit`, `gui/window`: replace the inner
+   `#![deny(clippy::all)] #![warn(clippy::pedantic)]` attributes with
+   `[lints] workspace = true`, which adds the defensive five. The inner
+   attributes are then redundant and should go, so there is one place that says
+   what the lints are.
+3. Test modules keep the standard three-line-comment `#![allow(...)]` header
+   the rest of the tree uses — a test that indexes out of range should fail
+   loudly.
+
+**Severity.** Medium. Nothing is known to be broken, and `clippy::all` is clean
+everywhere; what is missing is the enforcement that would *find* the next bug
+of these kinds. The reason it is logged rather than fixed on the spot is that
+clearing 1200 warnings in the middle of the transport work would have buried a
+functional change under a formatting one — but it should not wait long, because
+the backlog grows with the crate.
+
+
+## C-TEXT-WAS-CUT-BY-COUNTING-CHARACTERS-INSTEAD-OF-MEASURING-IT (lane C, 2026-08-17) - **fixed**
+
+**What.** Twenty-odd places across `gui/` and `apps/` decided how much text
+fits by arithmetic on a character count instead of by asking the font. The
+pattern always looked the same: pick a number that is roughly how wide a
+character is, divide the box by it, cut the string there. It produced four
+distinct generations of the same bug, each one a "fix" for the previous:
+
+1. **A hardcoded pixel constant** - `13.2`, `7.0`, `font_size * 0.55`,
+   `title_size * 0.62`. Wrong for every string, and wrong in a direction that
+   changes with the string: a line of `M`s overflows, a line of `i`s leaves a
+   third of the box empty.
+2. **`text::digit_advance`** - a digit's advance in the *proportional* UI face,
+   used as though it were a cell width. Right only if the face is monospace,
+   and the UI face is not.
+3. **`chars().count() * text::cell_advance(...)`** - a nominal cell count in the
+   mono face. Still not a width: a tab, a CJK ideograph, a combining mark and a
+   `.notdef` box are one character each and are not one cell each.
+4. **A character budget compared against a byte length** - `max_chars =
+   width / 7.0`, then `if s.len() > max_chars` and `&s[..max_chars]`. This one
+   is not a layout error: `&str[..n]` **panics** when `n` lands inside a
+   multi-byte character, so the *process aborts*. Four such sites existed, and
+   at least two were reachable from data the user does not control (an RSS
+   article body, a screenshot path).
+
+**What was actually wrong, and the rule that came out of it.** Most of these
+callers were pre-truncating text for a `RenderCommand::Text` that already
+carried `max_width` + `TextOverflow::Ellipsis` - that is, the renderer was
+already going to elide it, correctly, by measurement. A caller that truncates
+first is not being careful; it is supplying **a second, worse answer to a
+question that is already answered**, and the worse one wins because it cuts
+first. So six of those call sites were **deleted**, not repaired
+(`gui/desktop/src/taskbar.rs`, `window_peek.rs`, `apps/mindmap`'s sidebar,
+`apps/dbviewer` x2, `apps/photomanager`, `apps/slides`).
+
+The exception is a caller where text *follows* the elided part - mindmap's
+`Selected: "name" (ID: 7)`, the OSD's `Screenshot: .../shot.png` - because a
+renderer can only cut the end of a line. Those now measure the parts that must
+survive and give the remainder to the name.
+
+**The missing primitive.** `text::wrap` deliberately never breaks inside a word,
+because where to break one is a per-script decision that belongs to a real line
+breaker. That is right for a paragraph that can grow taller, and fatal for a box
+that cannot: a desktop icon's 72 px cell, or a Japanese file name, which
+contains no space at all and so came back as one over-long line at any width.
+`text::wrap_hard` (and `ScaledFont::wrap_hard`, `SystemFont::wrap_hard`,
+`ShapedRun::hard_breaks`) is the counterpart: it wraps on words first and breaks
+the remainder by measured fit. `hard_breaks` shapes each over-long run **once**
+and walks it, rather than calling `fit` per piece, which would be quadratic in a
+length chosen by whatever feed or file name produced the text. `wrap` remains
+the default; `wrap_hard` is for boxes that cannot grow.
+
+**Paint's text tool was a separate, worse instance.** It did not merely
+mis-measure - it stamped one *blank filled rectangle* per character onto the
+layer, on a `font_size * 0.6` advance, and called that a rasterization. Text
+placed on an image and saved to disk came out as a row of blocks. It now
+rasterizes through `guitk::text::draw_onto_canvas`, which was added for it: the
+existing `Surface` path forces every pixel it touches opaque (right for a
+screenshot, wrong for a paint layer), so the new path renders the string to a
+white-on-black coverage mask and blends the colour at that coverage, leaving an
+anti-aliased glyph on a transparent layer with a transparent edge rather than a
+black halo.
+
+**Where the tests are.** Each fix carries a test that states its premise rather
+than assuming it - `icons::wrap_long_label_two_lines` asserts the sample label
+really is too wide for one line before asserting it takes two, because the
+previous version of that test simply guessed and failed when the guess was
+wrong. `paint::placed_text_is_as_wide_as_the_font_makes_it_not_as_the_character_count`
+compares ten `W`s against ten `i`s, which is the one comparison no
+character-count implementation can pass.
+
+**What is left.** Nothing of this class is known to remain in `gui/` or
+`apps/`; the sweep ended on a grep for `digit_advance`, `* 0.55`, `* 0.62`,
+`/ 7.0` and friends whose surviving hits are all either real geometry (a
+calendar's `w / 7.0` is seven days) or comments in the files listed above
+explaining what used to be there. `apps/explorer/src/thumbs.rs` keeps a
+character count on purpose, and says so: its synthetic text-file minimap has no
+font in the path at all, so a character count is the honest unit there.
+
+## TD-GUI-AND-APPS-HAVE-DRIFTED-FROM-RUSTFMT (lane C, 2026-08-17)
+
+**What.** `CLAUDE.md` says "Formatting: rustfmt defaults. No manual formatting
+overrides." The tree does not meet that. `cargo fmt -p osfont -p guitk --check`
+reports **270 files' worth of diffs** on the committed tree, with no
+`rustfmt.toml` and no toolchain pin to explain it - the code was simply written
+in a style close to, but not identical with, what rustfmt produces (single-line
+`if c { a } else { b }`, hand-wrapped call chains).
+
+**Why it is worth an entry rather than a `cargo fmt`.** It actively obstructs
+normal work: running `cargo fmt -p <crate>` before committing - which is the
+documented workflow - rewrites hundreds of unrelated lines and buries the change
+in hand. During this task, `cargo fmt -p osfont` turned a 51-line addition into
+a 341-line diff. The recovery was to reformat the *committed* version of each
+edited file, treat committed-vs-reformatted as the formatting-only patch, and
+reverse it out of the working copy. That worked, but it is not a workflow.
+
+**The proper fix.** One dedicated commit per crate that does nothing but
+`cargo fmt`, with no semantic change in it, landed when no other work is in
+flight in that crate. `gui/**` and `apps/**` are lane C's alone, so this is
+lane C's to do and conflicts with nobody. Do `osfont` and `guitk` first (they
+are the ones that block edits most often), then the desktop and the apps.
+After that, `cargo fmt --check` becomes a usable gate.
+
+**Severity.** Low for correctness - formatting changes nothing that runs. Medium
+for friction, because it makes every `cargo fmt` a trap and therefore makes the
+documented pre-commit step something an agent learns to skip.
 ## A-VFS-READ-256-STEPPED-3X-WITH-BYTE-IDENTICAL-VFS-SOURCE (lane A, 2026-08-17)
 
 **Status: RESOLVED 2026-08-17 — not a regression. A QEMU/TCG code-layout

@@ -1879,16 +1879,28 @@ impl DesktopShell {
 
             fill_round(&mut tree, button, bg, radii);
 
-            // Window title, truncated to what the button can hold. The
-            // per-character estimate scales with the font, or a larger font
-            // would be cut at the same character count and overflow.
+            // Window title, fitted to what the button can hold — by the
+            // renderer, which is the only thing that knows how wide the title
+            // will be drawn. This used to take `button.w / (size * 0.62)`
+            // *characters*: a guessed average advance applied to a proportional
+            // face, so a title of capitals ("WWW Browser") overran the button
+            // and one of narrow letters ("initialising…") was cut with the
+            // space to spare. Scaling the guess with the font size, which the
+            // old comment was pleased about, fixes only the half of the error
+            // that depends on size; the half that depends on *which letters*
+            // cannot be fixed by any constant.
+            //
+            // `text_in` also marks the cut with `…`, so a truncated title is
+            // distinguishable from a short one — a silently clipped one is not,
+            // and a window called "Save changes to report.docx?" reading as
+            // "Save changes to rep" is a different sentence.
             let title_size = self.font_size(TextRole::Caption);
-            let max_chars = (button.w / (title_size * 0.62)).max(0.0) as usize;
-            let title: String = window.title.chars().take(max_chars).collect();
-            tree.text(
-                button.x + self.scale(8.0),
-                button.y + self.scale(8.0),
-                &title,
+            let inset = self.scale(8.0);
+            tree.text_in(
+                button.x + inset,
+                button.y + inset,
+                (button.w - inset - inset).max(0.0),
+                &window.title,
                 self.theme.taskbar_fg,
                 title_size,
             );

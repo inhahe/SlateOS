@@ -24,6 +24,7 @@ use guitk::canvas::Canvas;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::VecDeque;
 
@@ -2470,22 +2471,34 @@ impl PaintApp {
             return;
         }
         self.push_history("text");
-        // Text is rendered as UI commands; for the pixel buffer we draw a basic
-        // rasterized version (each character as a small filled block).
-        // In a real system the compositor would rasterize the font; here we
-        // approximate by treating each character as ~8px wide, font_size tall.
+        // The text tool used to stamp one filled rectangle per character, on a
+        // guessed advance of `font_size * 0.6` — so the saved image contained a
+        // row of blank blocks where the user's words were supposed to be, at
+        // positions no font agreed with. It was not a rendering approximation;
+        // it lost the text outright.
+        //
+        // `guitk::text::draw_onto_canvas` rasterizes with the same font cache
+        // the rest of the UI measures and draws with, and blends glyph coverage
+        // over the layer, so text on a transparent layer keeps a transparent
+        // (not black) anti-aliased edge.
         let tx = self.drag.start_x;
         let ty = self.drag.start_y;
         let color = self.drawing_color();
-        let char_w = (self.text_font_size * 0.6) as i32;
-        let char_h = self.text_font_size as i32;
+        let size = self.text_font_size;
+        // The anchor is the top-left of the text box, as it was when this drew
+        // blocks from `ty` downwards; the rasterizer wants a baseline.
+        let baseline = ty as f32 + text::ascent(size, FontWeightHint::Regular);
 
         if let Some(layer) = self.layers.get_mut(self.active_layer) {
-            for (i, _ch) in text_str.chars().enumerate() {
-                let cx = tx + (i as i32) * char_w;
-                // Draw a small rectangle for each character (placeholder raster)
-                draw_rect_filled(&mut layer.pixels, cx, ty, char_w - 1, char_h, color);
-            }
+            text::draw_onto_canvas(
+                &mut layer.pixels,
+                &text_str,
+                tx as f32,
+                baseline,
+                size,
+                FontWeightHint::Regular,
+                color,
+            );
         }
         self.text_input.clear();
     }
@@ -5614,6 +5627,123 @@ mod tests {
         app.text_input.insert_char('A');
         app.place_text();
         assert_eq!(app.text_input.as_str(), "");
+    }
+
+    /// The bounding box of every pixel the active layer has any coverage on,
+    /// as `(min_x, min_y, max_x, max_y)`, plus how many pixels were touched.
+    fn marked_extent(app: &PaintApp) -> Option<(u32, u32, u32, u32, usize)> {
+        let layer = app.layers.get(app.active_layer)?;
+        let (w, h) = (layer.pixels.width(), layer.pixels.height());
+        let mut bounds: Option<(u32, u32, u32, u32)> = None;
+        let mut count = 0;
+        for y in 0..h {
+            for x in 0..w {
+                if layer.pixels.get(x, y).is_some_and(|c| c.a != 0) {
+                    count += 1;
+                    bounds = Some(match bounds {
+                        None => (x, y, x, y),
+                        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                    });
+                }
+            }
+        }
+        bounds.map(|(x0, y0, x1, y1)| (x0, y0, x1, y1, count))
+    }
+
+    #[test]
+    fn placed_text_is_rasterized_glyphs_not_blank_blocks() {
+        // The old text tool stamped one filled rectangle per character, so the
+        // saved image held blank blocks where the words were meant to be. The
+        // pre-existing test only checked that the input box was cleared, which
+        // is exactly why that survived; this one looks at the pixels.
+        let mut app = PaintApp::new(400.0, 300.0);
+        // On a transparent layer, "has any coverage" means "the text put it
+        // there" — the base layer is an opaque white background.
+        app.add_layer();
+        app.current_tool = Tool::Text;
+        app.drag.start_x = 10;
+        app.drag.start_y = 10;
+        for ch in "Hi".chars() {
+            app.text_input.insert_char(ch);
+        }
+        app.place_text();
+
+        let (x0, y0, x1, y1, count) =
+            marked_extent(&app).expect("the text left no pixels on the layer at all");
+        assert!(x0 >= 5, "text drawn well left of its anchor: {x0}");
+        assert!(y0 >= 5, "text drawn well above its anchor: {y0}");
+
+        // A block stamp fills its bounding box almost entirely — the old code
+        // left one blank column between each `char_w`-wide rectangle and the
+        // next, so around 95% of the box. Glyphs cannot come near that: there
+        // is background inside every letter and between every pair. The
+        // threshold sits between the two and nearer the block end, because what
+        // is being told apart is "solid" from "text", not one font from another.
+        let box_area = ((x1 - x0 + 1) as usize) * ((y1 - y0 + 1) as usize);
+        assert!(
+            count * 4 < box_area * 3,
+            "{count} of {box_area} pixels covered — that is a solid block, not text"
+        );
+    }
+
+    #[test]
+    fn placed_text_is_as_wide_as_the_font_makes_it_not_as_the_character_count() {
+        // Two strings of equal character count and very different width. A
+        // per-character advance guess gives them the same extent; a font does
+        // not.
+        let extent_of = |s: &str| {
+            let mut app = PaintApp::new(600.0, 300.0);
+            app.add_layer();
+            app.current_tool = Tool::Text;
+            app.drag.start_x = 10;
+            app.drag.start_y = 10;
+            for ch in s.chars() {
+                app.text_input.insert_char(ch);
+            }
+            app.place_text();
+            let (x0, _, x1, _, _) = marked_extent(&app).expect("no pixels for {s}");
+            x1 - x0
+        };
+        let narrow = extent_of("iiiiiiiiii");
+        let wide = extent_of("WWWWWWWWWW");
+        assert!(
+            wide > narrow + 10,
+            "ten `W`s spanned {wide}px and ten `i`s {narrow}px — the raster is \
+             still following a character count, not the font"
+        );
+    }
+
+    #[test]
+    fn placed_text_on_a_transparent_layer_has_no_black_halo() {
+        // Coverage must scale the colour's alpha, not blend it against the
+        // nothing underneath — otherwise every anti-aliased edge darkens.
+        let mut app = PaintApp::new(400.0, 300.0);
+        app.add_layer();
+        app.current_tool = Tool::Text;
+        app.fg_color = Color::rgba(255, 0, 0, 255);
+        app.drag.start_x = 10;
+        app.drag.start_y = 10;
+        for ch in "Hi".chars() {
+            app.text_input.insert_char(ch);
+        }
+        app.place_text();
+
+        let layer = app.layers.get(app.active_layer).expect("an active layer");
+        for y in 0..layer.pixels.height() {
+            for x in 0..layer.pixels.width() {
+                let Some(px) = layer.pixels.get(x, y) else {
+                    continue;
+                };
+                if px.a == 0 {
+                    continue;
+                }
+                assert_eq!(
+                    (px.r, px.g, px.b),
+                    (255, 0, 0),
+                    "pixel ({x}, {y}) is {px:?}: darkened against the transparent layer"
+                );
+            }
+        }
     }
 
     #[test]

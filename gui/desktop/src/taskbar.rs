@@ -1094,22 +1094,25 @@ impl TaskbarState {
             corner_radii: CornerRadii::all(4.0),
         });
 
-        // If in label mode, render truncated name.
+        // If in label mode, render the name, fitted to the button by the
+        // renderer.
         if !self.config.icon_only {
             let label_x = x + 32.0;
             let label_y = y + (height - 12.0) / 2.0;
-            let max_chars = ((width - 40.0) / 7.0) as usize;
-            let label: String = if button.display_name.len() > max_chars && max_chars > 3 {
-                let truncated: String = button.display_name.chars().take(max_chars - 1).collect();
-                format!("{truncated}\u{2026}")
-            } else {
-                button.display_name.clone()
-            };
-
+            // The name goes to the renderer whole. `max_width` +
+            // `TextOverflow::Ellipsis` below already say "fit this to the
+            // button and mark the cut", and the renderer does it by measuring
+            // the face it is about to draw in. The pre-truncation this replaces
+            // did the same job by guessing — `(width - 40) / 7` characters,
+            // compared against `display_name.len()`, which is a count of
+            // *bytes*, so a name with one accented letter was elided a
+            // character early and a CJK one several early. Two elisions in
+            // series is also strictly worse than one: the guess cut first, so
+            // the measured pass never saw the text it was meant to fit.
             cmds.push(RenderCommand::Text {
                 x: label_x,
                 y: label_y,
-                text: label,
+                text: button.display_name.clone(),
                 color: icon_color,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,

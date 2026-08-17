@@ -255,7 +255,9 @@ pub fn replacen(s: BStr<'_>, from: BStr<'_>, to: BStr<'_>, n: usize) -> Str {
     {
         out.extend_from_slice(rest.get(..at).unwrap_or_default());
         out.extend_from_slice(to);
-        rest = rest.get(at.saturating_add(from.len())..).unwrap_or_default();
+        rest = rest
+            .get(at.saturating_add(from.len())..)
+            .unwrap_or_default();
         done = done.saturating_add(1);
     }
     out.extend_from_slice(rest);
@@ -379,7 +381,9 @@ pub fn char_count(s: BStr<'_>) -> usize {
 /// the end. Used to turn bash's character-indexed `${v:off:len}` into a byte
 /// range.
 pub fn char_offset(s: BStr<'_>, n: usize) -> usize {
-    s.char_indices().nth(n).map_or(s.len(), |(start, _, _)| start)
+    s.char_indices()
+        .nth(n)
+        .map_or(s.len(), |(start, _, _)| start)
 }
 
 /// `${v:off:len}` — `len` characters starting at character `off`, clamped to
@@ -410,7 +414,6 @@ pub fn char_at(s: BStr<'_>, n: usize) -> Str {
 ///
 /// See `ere`'s crate docs for why it is a crate at all.
 pub use ere::ch::{Ch, char_positions, chars, from_chars};
-
 
 /// A host path/OS string as shell bytes.
 ///
@@ -509,7 +512,9 @@ mod tests {
     #[test]
     fn bfmt_concatenates_every_argument_kind() {
         let owned: Str = b"val".to_vec();
-        let got = bfmt![b"n=", &owned, b'/', 42u32, b'/', "s", b'/', 'x', b'/', -7i32];
+        let got = bfmt![
+            b"n=", &owned, b'/', 42u32, b'/', "s", b'/', 'x', b'/', -7i32
+        ];
         assert_eq!(got, b"n=val/42/s/x/-7".to_vec());
     }
 
@@ -569,7 +574,10 @@ mod tests {
         assert_eq!(char_slice(LONE, 1, 1), b"\xff".to_vec());
         assert_eq!(char_slice(LONE, 3, 1), Str::new());
         assert_eq!(char_slice(LONE, 0, 99), LONE.to_vec());
-        assert_eq!(char_slice("héllo".as_bytes(), 1, 2), "él".as_bytes().to_vec());
+        assert_eq!(
+            char_slice("héllo".as_bytes(), 1, 2),
+            "él".as_bytes().to_vec()
+        );
         assert_eq!(char_at(LONE, 1), b"\xff".to_vec());
         assert_eq!(char_at(LONE, 9), Str::new());
     }
@@ -588,7 +596,13 @@ mod tests {
             vec![Ch::U('\u{fffd}')]
         );
         // Round trip: characters back to the same bytes.
-        for s in [LONE, "héllo".as_bytes(), b"\x80\x80", b"", "\u{fffd}".as_bytes()] {
+        for s in [
+            LONE,
+            "héllo".as_bytes(),
+            b"\x80\x80",
+            b"",
+            "\u{fffd}".as_bytes(),
+        ] {
             assert_eq!(from_chars(chars(s)), s.to_vec());
         }
     }

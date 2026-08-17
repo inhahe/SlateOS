@@ -5698,7 +5698,18 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
           `DrmMode` does not carry); 5-entry VESA DMT table; exact-match lookup.
     - [x] `drm/ati/tests.rs` — boot-time self-test: hand-computed register values
           for all 5 DMT modes, each encoding quirk isolated, every rejection path.
-    - [ ] MMIO probe + `DrmBackend::Ati`, validated against QEMU `ati-vga`.
+    - [x] `drm/ati/mmio.rs` — BAR2 aperture mapping (NO_CACHE), bounds- and
+          alignment-checked 32-bit register I/O, `MM_INDEX`/`MM_DATA` indirect
+          path, PCI probe. `-device ati-vga,model=rv100` is now on the boot
+          test's QEMU command line, so `drm::init()` proves on every boot that
+          the offsets in `regs.rs` name the registers they claim to: VRAM size
+          reads as a whole number of MiB, and the direct and indirect paths
+          agree. Reads only — it does not reprogram a CRTC it does not own.
+    - [ ] `DrmBackend::Ati` — CRTC programming and scanout from the BAR0
+          aperture. Deferred one commit deliberately: enabling it means taking
+          over a display, and the boot test's console is virtio-gpu, so the
+          mode-set path needs its own way to be observed before it is switched
+          on. The register map underneath it is now verified against a device.
 - [ ] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
 - [ ] `[A]` NVIDIA: defer until open-source driver matures, or use Linux compat layer later
 

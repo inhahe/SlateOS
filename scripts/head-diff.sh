@@ -334,6 +334,16 @@ run_ascii -n 1KiBB five.txt
 run_ascii -n 5K5 five.txt
 run_ascii -n 1Z five.txt
 run_ascii -n 1Q five.txt
+# The offending text is echoed back through gnulib's `quote()`, which escapes
+# the way C does and not the way a shell would. The two styles agree on
+# everything that holds neither a quote nor a backslash, so only these cases
+# tell them apart: `quote()` gives 'a\'b' where shell-escaping gives "a'b".
+run_ascii -n "a'b" five.txt
+run_ascii -n 'a\b' five.txt
+run_ascii -n 'a"b' five.txt
+run_ascii -n 'a b' five.txt
+run_ascii -n "$(printf 'a\tb')" five.txt
+run_ascii -c "a'b" five.txt
 # The suffixes gnulib knows but `head`'s list does not include.
 for bad in 1w 1c 1B 1g 1t 1D; do run_ascii -n "$bad" five.txt; done
 # The ones it does, checked for value rather than validity: five.txt has five

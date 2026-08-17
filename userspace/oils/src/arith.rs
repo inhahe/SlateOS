@@ -219,7 +219,13 @@ pub trait VarLookup {
     /// with the value it was going to have, so `x=$(( a[-7] = 1 ))` still yields
     /// 1 and succeeds. The `Err` is for a target the *shell* refuses (readonly),
     /// which does abandon the expression.
-    fn set_index(&mut self, name: &str, sub: BStr<'_>, index: i64, value: i64) -> Result<(), ArithError> {
+    fn set_index(
+        &mut self,
+        name: &str,
+        sub: BStr<'_>,
+        index: i64,
+        value: i64,
+    ) -> Result<(), ArithError> {
         let _ = (name, sub, index, value);
         Ok(())
     }
@@ -566,7 +572,8 @@ fn str_to_val(s: BStr<'_>, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, 
     if depth >= RECURSION_LIMIT {
         // bash reports the offending value token here, and uses the innermost
         // value as the `<expr>:` prefix (recorded via `expr_override`).
-        let mut e = ArithError::with_token("expression recursion level exceeded", trim_arith_start(t));
+        let mut e =
+            ArithError::with_token("expression recursion level exceeded", trim_arith_start(t));
         e.expr_override = Some(t.to_vec());
         return Err(e);
     }
@@ -575,13 +582,12 @@ fn str_to_val(s: BStr<'_>, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, 
     // `5 apples:`, not `x:`). Record the innermost failing value so the shell's
     // diagnostic matches — the deepest level sets it first as errors unwind, and
     // outer levels leave it in place.
-    run(t, vars, depth + 1)
-        .map_err(|mut e| {
-            if e.expr_override.is_none() {
-                e.expr_override = Some(t.to_vec());
-            }
-            e
-        })
+    run(t, vars, depth + 1).map_err(|mut e| {
+        if e.expr_override.is_none() {
+            e.expr_override = Some(t.to_vec());
+        }
+        e
+    })
 }
 
 /// Parse `t` as a plain decimal integer (optionally signed), returning `None`
@@ -778,13 +784,19 @@ pub(crate) fn is_arith_space(c: u8) -> bool {
 
 /// `s` with its leading arithmetic whitespace dropped. See [`is_arith_space`].
 fn trim_arith_start(s: BStr<'_>) -> BStr<'_> {
-    let i = s.iter().position(|b| !is_arith_space(*b)).unwrap_or(s.len());
+    let i = s
+        .iter()
+        .position(|b| !is_arith_space(*b))
+        .unwrap_or(s.len());
     s.get(i..).unwrap_or_default()
 }
 
 /// `s` with its trailing arithmetic whitespace dropped. See [`is_arith_space`].
 fn trim_arith_end(s: BStr<'_>) -> BStr<'_> {
-    let i = s.iter().rposition(|b| !is_arith_space(*b)).map_or(0, |i| i + 1);
+    let i = s
+        .iter()
+        .rposition(|b| !is_arith_space(*b))
+        .map_or(0, |i| i + 1);
     s.get(..i).unwrap_or_default()
 }
 
@@ -1073,7 +1085,10 @@ impl AParser<'_> {
                     Some(s) => self.str_val(&s)?,
                     None => 0,
                 };
-                let ix = Ix { raw: ix.raw, done: Some(i) };
+                let ix = Ix {
+                    raw: ix.raw,
+                    done: Some(i),
+                };
                 Ok((v, Lv::Index(n, ix)))
             }
             Lv::Assoc(n, k) => {
@@ -1651,7 +1666,13 @@ impl AParser<'_> {
             // it without parsing it (`expr_skipsubscript`, expr.c:1348-1358),
             // and whether it is ever evaluated — and when — depends on whether
             // the reference is read. See [`Ix`].
-            Lv::Index(name, Ix { raw: raw.to_vec(), done: None })
+            Lv::Index(
+                name,
+                Ix {
+                    raw: raw.to_vec(),
+                    done: None,
+                },
+            )
         })
     }
 
@@ -1735,10 +1756,7 @@ impl AParser<'_> {
             if base_str.len() > 1 && base_str.first() == Some(&b'0') {
                 for &c in base_str.get(1..).unwrap_or_default() {
                     if digit_value(c, 8).is_none() {
-                        return Err(ArithError::lexeme_error(
-                            "value too great for base",
-                            lexeme,
-                        ));
+                        return Err(ArithError::lexeme_error("value too great for base", lexeme));
                     }
                 }
                 return Err(ArithError::lexeme_error("invalid number", lexeme));
@@ -1769,9 +1787,7 @@ impl AParser<'_> {
                     // "value too great for base" (`2#12`, `16#gz`, `10#0a`).
                     return Err(ArithError::lexeme_error("value too great for base", lexeme));
                 };
-                val = val
-                    .wrapping_mul(i64::from(base))
-                    .wrapping_add(i64::from(d));
+                val = val.wrapping_mul(i64::from(base)).wrapping_add(i64::from(d));
             }
             return Ok(val);
         }
@@ -2012,7 +2028,13 @@ mod tests {
             a: vec![10, 20, 30],
             stores: Vec::new(),
         };
-        for src in ["a[1/0] = 9", "a[1/0]", "b = a[1/0]", "a[1/0]++", "a[1/0] += 2"] {
+        for src in [
+            "a[1/0] = 9",
+            "a[1/0]",
+            "b = a[1/0]",
+            "a[1/0]++",
+            "a[1/0] += 2",
+        ] {
             let e = eval(src.as_bytes(), &mut m).expect_err(src);
             assert_eq!(e.expr_override.as_deref(), Some(b"1/0".as_slice()), "{src}");
             assert!(e.in_subscript, "{src}");
@@ -2202,7 +2224,8 @@ mod tests {
             self.0.get(name).cloned()
         }
         fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
-            self.0.insert(name.to_string(), value.to_string().into_bytes());
+            self.0
+                .insert(name.to_string(), value.to_string().into_bytes());
             Ok(())
         }
     }
@@ -2242,7 +2265,10 @@ mod tests {
         m.0.insert("x".into(), "  1 +  ".into());
         let e = eval(b"x", &mut m).unwrap_err();
         assert_eq!(e.expr_override.as_deref(), Some(&b"  1 +  "[..]));
-        assert_eq!(e.body(), b"syntax error: operand expected (error token is \"+  \")");
+        assert_eq!(
+            e.body(),
+            b"syntax error: operand expected (error token is \"+  \")"
+        );
         // Same for a failure raised during evaluation rather than parsing.
         m.0.insert("d".into(), " 1/0 ".into());
         let e = eval(b"d", &mut m).unwrap_err();
@@ -2544,23 +2570,53 @@ mod tests {
             ("2**-(1)", "exponent less than 0 (error token is \")\")"),
             // Right-associative, so the inner `**` fails first and names its own.
             ("2**2**-1", "exponent less than 0 (error token is \"1\")"),
-            ("5 +", "syntax error: operand expected (error token is \"+\")"),
-            ("3 * ", "syntax error: operand expected (error token is \"* \")"),
-            ("* 3", "syntax error: operand expected (error token is \"* 3\")"),
+            (
+                "5 +",
+                "syntax error: operand expected (error token is \"+\")",
+            ),
+            (
+                "3 * ",
+                "syntax error: operand expected (error token is \"* \")",
+            ),
+            (
+                "* 3",
+                "syntax error: operand expected (error token is \"* 3\")",
+            ),
             // A missing operand after an assignment operator reports the operator
             // as the error token (bash: `x = ` → `= `, `y += ` → `+= `), not the
             // whole expression.
-            ("x = ", "syntax error: operand expected (error token is \"= \")"),
-            ("y += ", "syntax error: operand expected (error token is \"+= \")"),
+            (
+                "x = ",
+                "syntax error: operand expected (error token is \"= \")",
+            ),
+            (
+                "y += ",
+                "syntax error: operand expected (error token is \"+= \")",
+            ),
             // A missing operand after a prefix unary reports from the unary
             // operator; bash's error pointer for `++`/`--` lands one char in.
-            ("1 + + ", "syntax error: operand expected (error token is \"+ \")"),
-            ("++ ", "syntax error: operand expected (error token is \"+ \")"),
-            ("-- ", "syntax error: operand expected (error token is \"- \")"),
-            ("~ ", "syntax error: operand expected (error token is \"~ \")"),
+            (
+                "1 + + ",
+                "syntax error: operand expected (error token is \"+ \")",
+            ),
+            (
+                "++ ",
+                "syntax error: operand expected (error token is \"+ \")",
+            ),
+            (
+                "-- ",
+                "syntax error: operand expected (error token is \"- \")",
+            ),
+            (
+                "~ ",
+                "syntax error: operand expected (error token is \"~ \")",
+            ),
             ("@", "syntax error: operand expected (error token is \"@\")"),
             ("3 3", "syntax error in expression (error token is \"3\")"),
-            ("a b c", "syntax error in expression (error token is \"b c\")"),
+            (
+                "a b c",
+                "syntax error in expression (error token is \"b c\")",
+            ),
             (
                 "1 ;",
                 "syntax error: invalid arithmetic operator (error token is \";\")",
@@ -2620,10 +2676,7 @@ mod tests {
             ),
             // Empty ternary branches are "expression expected" (not "operand
             // expected"), reported at the `:` — or the `?` when input ends there.
-            (
-                "1 ? : 3",
-                "expression expected (error token is \": 3\")",
-            ),
+            ("1 ? : 3", "expression expected (error token is \": 3\")"),
             ("1 ? 2 :", "expression expected (error token is \":\")"),
             ("1 ? :", "expression expected (error token is \":\")"),
             ("1 ?", "expression expected (error token is \"?\")"),
@@ -2640,9 +2693,18 @@ mod tests {
             // not the first digit — is "value too great for base", and the token
             // spans the whole literal (not just the offending digit).
             ("2#12", "value too great for base (error token is \"2#12\")"),
-            ("10#0a", "value too great for base (error token is \"10#0a\")"),
-            ("5+2#12+9", "value too great for base (error token is \"2#12\")"),
-            ("16#gz+1", "value too great for base (error token is \"16#gz\")"),
+            (
+                "10#0a",
+                "value too great for base (error token is \"10#0a\")",
+            ),
+            (
+                "5+2#12+9",
+                "value too great for base (error token is \"2#12\")",
+            ),
+            (
+                "16#gz+1",
+                "value too great for base (error token is \"16#gz\")",
+            ),
             // Leading-zero octal with a non-octal digit.
             ("099", "value too great for base (error token is \"099\")"),
             ("0778", "value too great for base (error token is \"0778\")"),
@@ -2652,16 +2714,28 @@ mod tests {
             // bash never splits it into a number plus a stray identifier.
             // (`0b100` has no binary-literal syntax in bash: leading `0` = octal,
             // and `b` is an out-of-range digit.)
-            ("0b100", "value too great for base (error token is \"0b100\")"),
-            ("123abc", "value too great for base (error token is \"123abc\")"),
-            ("5+123abc", "value too great for base (error token is \"123abc\")"),
+            (
+                "0b100",
+                "value too great for base (error token is \"0b100\")",
+            ),
+            (
+                "123abc",
+                "value too great for base (error token is \"123abc\")",
+            ),
+            (
+                "5+123abc",
+                "value too great for base (error token is \"123abc\")",
+            ),
             ("123_", "value too great for base (error token is \"123_\")"),
             ("123@", "value too great for base (error token is \"123@\")"),
             ("1e3", "value too great for base (error token is \"1e3\")"),
             // The same rule applies after a `0x`/`0X` hex prefix: a trailing
             // non-hex digit char is part of the token, not a new one.
             ("0xg", "value too great for base (error token is \"0xg\")"),
-            ("0x1g+5", "value too great for base (error token is \"0x1g\")"),
+            (
+                "0x1g+5",
+                "value too great for base (error token is \"0x1g\")",
+            ),
             // Base edge cases: 0 → "invalid number", >64 → "invalid arithmetic
             // base", `N#` with no digits → "invalid integer constant".
             ("0#5", "invalid number (error token is \"0#5\")"),
@@ -2741,7 +2815,10 @@ mod tests {
             ),
             // `:` *is* a token, so it stays an expression error.
             ("2+3:", "syntax error in expression (error token is \":\")"),
-            ("(2+3))", "syntax error in expression (error token is \")\")"),
+            (
+                "(2+3))",
+                "syntax error in expression (error token is \")\")",
+            ),
         ];
         for (src, want) in cases {
             let e = eval(src.as_bytes(), &mut Map::default()).unwrap_err();

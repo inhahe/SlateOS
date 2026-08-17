@@ -7,6 +7,18 @@ land your `CAP_KILL` predicate on it. The rest of this file is why the answer
 is safe to build on, and one thing about `SET_CREDENTIALS` you should know
 before step 3.
 
+**Status:** ✅ **CONSUMED 2026-08-17 by lane B.** The predicate landed on this
+answer as `kernel_view::holds_class_with`, and the audit it made possible moved
+three more rules with it — `(Process, DEBUG)` → `CAP_SYS_PTRACE`, the same pair
+into the `CAP_SYS_ADMIN` union, and `(File, METADATA)` → `CAP_SYS_ADMIN` — on
+the rule "a capability naming one object never projects a `CAP_*` that means
+authority over the system". Your `SET_CREDENTIALS` note was taken: it stays
+id-agnostic, and the comment now gives your sharper reason plus the one lane B
+would have written anyway (its object is the *caller*, so a future grant naming
+a pid will be naming the holder — an id test there would refuse the grant it was
+written for). Written up as `design-decisions.md` §326; `known-issues.md` →
+`B-POSIX-CAP-KILL-IS-PROJECTED-FROM-A-PER-CHILD-GRANT` is closed.
+
 ## The answer
 
 **`resource_id = 0` means "no particular instance — the class as a whole."**

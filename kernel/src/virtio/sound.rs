@@ -33,6 +33,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::pci::{self, PciDevice};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 use crate::virtio::queue::{VRING_DESC_F_WRITE, Virtqueue};
 use crate::virtio::{STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, VirtioLegacyPci};
 
@@ -205,6 +206,17 @@ struct VirtioSndDevice {
     num_input_streams: u32,
     /// Stream currently playing (None if idle).
     active_stream: Option<u32>,
+    /// Monotonic counter identifying *which* playback owns `active_stream`.
+    ///
+    /// Incremented by [`play_test_tone`] each time it claims a stream.
+    /// `active_stream == Some(id)` is not sufficient on its own to answer "is
+    /// this still my tone?" after the lock has been released between chunks: a
+    /// concurrent [`stop`] followed by a second `play_test_tone` re-claims the
+    /// *same* stream id (playback always uses stream 0), so the first caller
+    /// would keep submitting into — and then tear down — the second caller's
+    /// stream. Comparing the generation recorded at start closes that ABA
+    /// window.
+    play_gen: u64,
 }
 
 // SAFETY: VirtioSndDevice contains raw pointers (inside Virtqueue) that point
@@ -213,7 +225,16 @@ struct VirtioSndDevice {
 unsafe impl Send for VirtioSndDevice {}
 
 /// Global device instance (single virtio-sound device supported).
-static DEVICE: spin::Mutex<Option<VirtioSndDevice>> = spin::Mutex::new(None);
+///
+/// A `PreemptSpinMutex` leaf lock (Q24 / design-decisions §70): nothing is
+/// acquired underneath it, and this driver polls its virtqueues rather than
+/// taking an interrupt, so `lock_irqsave` is not needed.
+///
+/// Every critical section must cover **one** device transaction and no more.
+/// See [`play_test_tone`], which re-acquires per chunk instead of holding the
+/// lock for the length of the tone.
+static DEVICE: PreemptSpinMutex<Option<VirtioSndDevice>> =
+    PreemptSpinMutex::named(None, b"VIRTIO_SND_DEVICE");
 
 /// Whether the device is initialized.
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -364,6 +385,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
         num_output_streams: 0,
         num_input_streams: 0,
         active_stream: None,
+        play_gen: 0,
     };
 
     // Query PCM stream info to classify output vs input streams.
@@ -759,40 +781,80 @@ pub fn is_available() -> bool {
 /// Start playback of a test tone (440 Hz sine wave, 48kHz 16-bit stereo).
 ///
 /// Configures stream 0 for playback and sends a short buffer of audio.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchDevice`] if there is no device or it has no output
+/// stream, [`KernelError::DeviceBusy`] if a stream is already running, or
+/// whatever the underlying control/PCM transactions return.
+///
+/// # Locking
+///
+/// `DEVICE` is re-acquired **per transaction** — once for the setup commands,
+/// once per PCM chunk, once for teardown — rather than held for the length of
+/// the tone. A whole tone is `duration_ms` milliseconds and each chunk's
+/// `submit_pcm_buffer` polls the used ring for up to ten million iterations, so
+/// holding a preempt-disabling spinlock across the loop would keep the
+/// scheduler off this CPU for the entire playback and spin every other caller
+/// for just as long. Mutual exclusion across the whole tone is provided by
+/// `dev.active_stream`, which is set under the lock during setup and cleared
+/// under the lock during teardown; a second caller sees it set and gets
+/// `DeviceBusy` instead of reprogramming a live stream.
+///
+/// [`stop`] is the one caller allowed to break that claim — it exists precisely
+/// to end a tone early. Every chunk therefore re-checks the claim after
+/// re-acquiring the lock; if it has been taken, playback ends there and the
+/// teardown is skipped, because whoever took it already issued STOP/RELEASE.
+/// The check is on `play_gen` as well as `active_stream`, because playback
+/// always uses stream 0 and so a stop-then-restart would otherwise be
+/// indistinguishable from our own claim — see [`VirtioSndDevice::play_gen`].
 pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
     if !is_available() {
         return Err(KernelError::NoSuchDevice);
     }
 
-    let mut guard = DEVICE.lock();
-    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
-
-    if dev.num_output_streams == 0 {
-        return Err(KernelError::NoSuchDevice);
-    }
-
     let stream_id: u32 = 0; // First output stream.
+    // Set inside the setup section below, and only there.
+    let my_gen: u64;
 
-    // Set parameters: 48kHz, 16-bit signed, stereo, 8192 buffer / 4096 period.
-    set_params(
-        dev,
-        stream_id,
-        2,
-        VIRTIO_SND_PCM_FMT_S16,
-        VIRTIO_SND_PCM_RATE_48000,
-        8192,
-        4096,
-    )?;
-    serial_println!("[virtio-snd] Stream 0: params set (48kHz/S16/stereo)");
+    // --- Setup: params, prepare, start. One critical section. ---
+    {
+        let mut guard = DEVICE.lock();
+        let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
 
-    // Prepare the stream.
-    control_stream_cmd(dev, VIRTIO_SND_R_PCM_PREPARE, stream_id)?;
-    serial_println!("[virtio-snd] Stream 0: prepared");
+        if dev.num_output_streams == 0 {
+            return Err(KernelError::NoSuchDevice);
+        }
+        if dev.active_stream.is_some() {
+            return Err(KernelError::DeviceBusy);
+        }
 
-    // Start the stream.
-    control_stream_cmd(dev, VIRTIO_SND_R_PCM_START, stream_id)?;
-    serial_println!("[virtio-snd] Stream 0: started");
-    dev.active_stream = Some(stream_id);
+        // Set parameters: 48kHz, 16-bit signed, stereo, 8192 buffer / 4096 period.
+        set_params(
+            dev,
+            stream_id,
+            2,
+            VIRTIO_SND_PCM_FMT_S16,
+            VIRTIO_SND_PCM_RATE_48000,
+            8192,
+            4096,
+        )?;
+        serial_println!("[virtio-snd] Stream 0: params set (48kHz/S16/stereo)");
+
+        // Prepare the stream.
+        control_stream_cmd(dev, VIRTIO_SND_R_PCM_PREPARE, stream_id)?;
+        serial_println!("[virtio-snd] Stream 0: prepared");
+
+        // Start the stream. Claim `active_stream` in the same section that
+        // starts it, so the device is never running without a claim recorded --
+        // otherwise a failure below would leak a started stream that `stop()`
+        // could not find.
+        control_stream_cmd(dev, VIRTIO_SND_R_PCM_START, stream_id)?;
+        dev.active_stream = Some(stream_id);
+        dev.play_gen = dev.play_gen.wrapping_add(1);
+        my_gen = dev.play_gen;
+        serial_println!("[virtio-snd] Stream 0: started");
+    }
 
     // Generate and submit PCM data in chunks.
     // 48000 samples/sec × 2 channels × 2 bytes = 192000 bytes/sec.
@@ -803,25 +865,91 @@ pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
     let mut sample_offset: u32 = 0;
 
     let mut bytes_sent: u32 = 0;
+    let mut submit_result = Ok(());
+    // Set when a concurrent `stop()` takes the claim out from under us. It has
+    // already issued STOP/RELEASE at that point, so our teardown must be
+    // skipped: a second RELEASE on a released stream is a protocol error, and
+    // clearing `active_stream` again could clobber a *third* caller's claim.
+    let mut claim_lost = false;
     while bytes_sent < total_bytes {
-        let remaining = (total_bytes - bytes_sent) as usize;
+        let remaining = (total_bytes.saturating_sub(bytes_sent)) as usize;
         let send_len = remaining.min(chunk_size);
 
-        // Generate 440 Hz sine wave (integer approximation).
-        generate_sine_440(&mut buf[..send_len], sample_offset);
+        // Generate 440 Hz sine wave (integer approximation) with the lock
+        // released -- this is pure computation over a stack buffer.
+        let Some(chunk) = buf.get_mut(..send_len) else {
+            break;
+        };
+        generate_sine_440(chunk, sample_offset);
         sample_offset = sample_offset.wrapping_add((send_len / 4) as u32); // 4 bytes per stereo sample
 
-        submit_pcm_buffer(dev, stream_id, &buf[..send_len])?;
+        // One transaction, one critical section.
+        {
+            let mut guard = DEVICE.lock();
+            let Some(dev) = guard.as_mut() else {
+                // Device torn down underneath us; nothing left to stop.
+                return Err(KernelError::NoSuchDevice);
+            };
+            // Re-verify the claim every time we re-enter. Holding DEVICE for the
+            // whole tone would make this unnecessary, but that is precisely the
+            // defect being fixed: the lock is released between chunks, so
+            // `stop()` can legitimately end the tone early. Treat that as a
+            // normal end of playback, not an error -- the caller asked for a
+            // tone and something deliberately stopped it.
+            if dev.play_gen != my_gen || dev.active_stream != Some(stream_id) {
+                claim_lost = true;
+                break;
+            }
+            if let Err(e) = submit_pcm_buffer(dev, stream_id, chunk) {
+                // Do not return yet: the stream is started and claimed, and
+                // bailing here would leave it that way forever. Fall through to
+                // the teardown below and report the error after.
+                submit_result = Err(e);
+                break;
+            }
+        }
         bytes_sent = bytes_sent.wrapping_add(send_len as u32);
     }
 
-    // Stop the stream.
-    control_stream_cmd(dev, VIRTIO_SND_R_PCM_STOP, stream_id)?;
-    dev.active_stream = None;
+    // --- Teardown: stop, release, drop the claim. One critical section. ---
+    // Skipped entirely when the claim was taken from us: whoever took it owns
+    // the teardown.
+    // `Ok(true)` = we tore the stream down, `Ok(false)` = someone else already
+    // had, so there was nothing to do.
+    let teardown: KernelResult<bool> = if claim_lost {
+        Ok(false)
+    } else {
+        let mut guard = DEVICE.lock();
+        match guard.as_mut() {
+            Some(dev) => {
+                // Re-check once more under the lock: `stop()` may have run
+                // between the last chunk and here.
+                if dev.play_gen == my_gen && dev.active_stream == Some(stream_id) {
+                    // Clear the claim first so a failing STOP/RELEASE cannot
+                    // strand the device as permanently busy. The worst case is
+                    // then a stream that stays running, which a later call
+                    // re-programs; the alternative is a driver that refuses to
+                    // play again.
+                    dev.active_stream = None;
+                    let stop = control_stream_cmd(dev, VIRTIO_SND_R_PCM_STOP, stream_id);
+                    let release = control_stream_cmd(dev, VIRTIO_SND_R_PCM_RELEASE, stream_id);
+                    stop.and(release).map(|()| true)
+                } else {
+                    Ok(false)
+                }
+            }
+            None => Err(KernelError::NoSuchDevice),
+        }
+    };
 
-    // Release the stream.
-    control_stream_cmd(dev, VIRTIO_SND_R_PCM_RELEASE, stream_id)?;
-    serial_println!("[virtio-snd] Stream 0: stopped and released");
+    // Report the first thing that actually went wrong: a submit failure is the
+    // cause, a teardown failure is a consequence.
+    submit_result?;
+    if teardown? {
+        serial_println!("[virtio-snd] Stream 0: stopped and released");
+    } else {
+        serial_println!("[virtio-snd] Stream 0: ended early (stopped by another caller)");
+    }
 
     Ok(())
 }

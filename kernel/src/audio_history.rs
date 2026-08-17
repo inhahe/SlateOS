@@ -20,6 +20,7 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -36,7 +37,10 @@ const NAME_LEN: usize = 32;
 // ---------------------------------------------------------------------------
 
 /// A single sound history entry.
-#[derive(Clone)]
+///
+/// `Copy` so [`recent`] can snapshot entries out of the locked buffer into a
+/// stack array without allocating under the lock.
+#[derive(Clone, Copy)]
 struct HistoryEntry {
     /// Stream name (null-terminated).
     name: [u8; NAME_LEN],
@@ -65,10 +69,18 @@ impl HistoryEntry {
     }
 
     /// Get name as a string slice.
+    ///
+    /// Checked rather than `from_utf8_unchecked`. The old unchecked version was
+    /// justified as "we only store valid UTF-8 names (from kernel code)", but
+    /// `record_open` truncates to `NAME_LEN - 1` *bytes*, which splits any
+    /// multi-byte character straddling that limit and leaves an invalid
+    /// sequence in the buffer — undefined behaviour to hand to
+    /// `from_utf8_unchecked`. `record_open` now truncates on a character
+    /// boundary, and this stays checked so a malformed buffer from any other
+    /// source degrades to an empty name instead of UB.
     fn name_str(&self) -> &str {
         let len = self.name.iter().position(|&b| b == 0).unwrap_or(NAME_LEN);
-        // SAFETY: We only store valid UTF-8 names (from kernel code).
-        unsafe { core::str::from_utf8_unchecked(&self.name[..len]) }
+        core::str::from_utf8(&self.name[..len]).unwrap_or("")
     }
 
     /// Duration in approximate milliseconds (assumes ~2 GHz TSC).
@@ -86,7 +98,14 @@ impl HistoryEntry {
 // ---------------------------------------------------------------------------
 
 /// Circular history buffer.
-static HISTORY: spin::Mutex<HistoryBuffer> = spin::Mutex::new(HistoryBuffer::new());
+///
+/// A `PreemptSpinMutex` leaf lock (Q24 / design-decisions §70): it guards a
+/// fixed-size array, takes no other lock underneath, and is unreachable from
+/// interrupt context, so `lock_irqsave` is not needed. It must also stay free
+/// of heap allocation — see [`recent`], which copies out under the lock and
+/// allocates after releasing it.
+static HISTORY: PreemptSpinMutex<HistoryBuffer> =
+    PreemptSpinMutex::named(HistoryBuffer::new(), b"AUDIO_HISTORY");
 
 /// Total events recorded.
 static TOTAL_EVENTS: AtomicU32 = AtomicU32::new(0);
@@ -126,8 +145,19 @@ pub fn record_open(name: &str, volume: u8) {
 
     let entry = &mut hist.entries[idx];
     entry.name.fill(0);
-    let copy_len = name.len().min(NAME_LEN - 1);
-    entry.name[..copy_len].copy_from_slice(&name.as_bytes()[..copy_len]);
+    // Truncate on a character boundary, not a byte one: cutting mid-character
+    // would leave an invalid UTF-8 sequence in the buffer. `floor_char_boundary`
+    // is still unstable, so walk down to the nearest boundary explicitly.
+    let mut copy_len = name.len().min(NAME_LEN.saturating_sub(1));
+    while copy_len > 0 && !name.is_char_boundary(copy_len) {
+        copy_len = copy_len.saturating_sub(1);
+    }
+    if let (Some(dst), Some(src)) = (
+        entry.name.get_mut(..copy_len),
+        name.as_bytes().get(..copy_len),
+    ) {
+        dst.copy_from_slice(src);
+    }
     entry.open_tsc = tsc;
     entry.close_tsc = 0;
     entry.bytes_played = 0;
@@ -196,26 +226,43 @@ pub fn stats() -> (u32, u64, u32) {
 /// Get recent history entries (up to `max` entries, newest first).
 ///
 /// Returns a Vec of (name, duration_ms, bytes_played, volume, still_playing).
+///
+/// # Locking
+///
+/// Snapshots the entries into a fixed-size stack array under `HISTORY`, then
+/// releases the lock and only then allocates. Building the `Vec`/`String`s
+/// under the lock instead — which is what this did — nests the kernel heap lock
+/// beneath a leaf spinlock, on a path that can allocate `HISTORY_SIZE` times in
+/// one critical section, and makes the section's length depend on allocator
+/// state (including an OOM reclaim). See design-decisions §70.
 pub fn recent(max: usize) -> alloc::vec::Vec<(alloc::string::String, u64, u64, u8, bool)> {
-    let hist = HISTORY.lock();
-    let mut result = alloc::vec::Vec::new();
     let count = max.min(HISTORY_SIZE);
 
-    for i in 0..count {
-        let idx = hist.write_idx.wrapping_sub(1).wrapping_sub(i) % HISTORY_SIZE;
-        let entry = &hist.entries[idx];
-        if !entry.valid {
-            break;
+    // Plain `Copy` snapshot: `HistoryEntry` is a fixed-size POD, so this needs
+    // no allocation and the whole critical section is a bounded memcpy.
+    let mut snapshot = [const { HistoryEntry::empty() }; HISTORY_SIZE];
+    let mut taken = 0usize;
+    {
+        let hist = HISTORY.lock();
+        for i in 0..count {
+            let idx = hist.write_idx.wrapping_sub(1).wrapping_sub(i) % HISTORY_SIZE;
+            let entry = &hist.entries[idx];
+            if !entry.valid {
+                break;
+            }
+            snapshot[taken] = *entry;
+            taken = taken.saturating_add(1);
         }
-        let name = alloc::string::String::from(entry.name_str());
-        let still_playing = entry.close_tsc == 0;
-        let duration = entry.duration_ms();
+    }
+
+    let mut result = alloc::vec::Vec::with_capacity(taken);
+    for entry in snapshot.iter().take(taken) {
         result.push((
-            name,
-            duration,
+            alloc::string::String::from(entry.name_str()),
+            entry.duration_ms(),
             entry.bytes_played,
             entry.volume,
-            still_playing,
+            entry.close_tsc == 0,
         ));
     }
 

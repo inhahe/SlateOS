@@ -12285,8 +12285,13 @@ per-lock triage (NOT a blind sed):
 - [ ] Route core-FS contended locks → `crate::sync::Mutex` (lockdep), triage the
   lock-ordering reports that surface.
 - [-] Sweep non-fs subsystem raw locks (`net/`, `ipc/`, drivers) per the same
-  triage. **Partially triaged 2026-08-17** (see [A]); 53 sites across 38 files
-  remain, conversion not started.
+  triage. **Partially triaged 2026-08-17** (see [A]). **Audio sub-batch DONE
+  2026-08-17** — `ac97`, `audio_history`, `audio_mixer`, `hda`, `virtio/sound`
+  (6 lock declarations across 5 files), see the [C] note below; **37 files still
+  hold a raw `spin::Mutex`**, excluding the four that are deliberately raw
+  (`sync.rs`, `mm/heap.rs`, `serial.rs`, `bench.rs`). Unlike the `fs/` batch,
+  every audio file needed its critical section restructured, not just its lock
+  type swapped — budget for that in the driver files that remain.
 - [ ] Final full wedge-soak (switch-off + switch-on) clean.
 
 **[A] 2026-08-17 — the `fs/` batch is finished, and auditing it first found
@@ -12470,6 +12475,141 @@ registry, failing loudly when it is not. Without it this list will regrow.
 
 Not fixed here because it is a much larger change than the lock sweep it was
 found inside, and mixing them would make both unreviewable.
+
+**[C] 2026-08-17 — the audio batch: 6 lock declarations across 5 files, and
+every one of them needed a restructure rather than an import swap.**
+
+The `fs/` batch in [A] was overwhelmingly a mechanical conversion with three
+exceptions. The audio batch is the inverse: **all five files** needed the
+critical section changed, not just the lock type, and one of them
+(`hda`) is best served by removing the lock from the caller entirely. This is
+worth recording because it says something about where the remaining 37 files
+are likely to sit: the closer a lock is to hardware, the less likely the swap
+is mechanical.
+
+| File | Lock(s) | What was actually wrong |
+|---|---|---|
+| `ac97.rs` | `DEVICE` | Held across `busy_wait_us(duration_ms × 1000)` — the **entire tone** |
+| `virtio/sound.rs` | `DEVICE` | Held across the whole tone, incl. a 10 M-iteration used-ring poll *per chunk* |
+| `audio_history.rs` | `HISTORY` | `String`/`Vec` allocation under the lock, up to 64 times per call; plus UTF-8 UB |
+| `audio_mixer.rs` | `StreamSlot::{name, ring}` | `Vec::push` with a ring guard alive in argument position; plus UTF-8 UB |
+| `hda.rs` | `DEVICE` | Taken from `handle_irq` — interrupt reentrancy |
+
+### Why a blind swap would have been actively harmful here
+
+`PreemptSpinMutex` disables preemption for the length of the hold. For a leaf
+lock held for a few hundred instructions that is exactly right. For
+`ac97::play_test_tone`, which held its lock across a multi-millisecond busy
+wait, converting *without* restructuring would have **made things worse** —
+turning a lock that merely blocked other callers into one that also stopped the
+scheduler on that CPU for the whole tone. The conversion is only "strictly
+safe" (checklist wording above) for sections that are already short. Deciding
+whether a section is short is per-lock work and cannot be delegated to the
+compiler.
+
+Both tone paths were restructured to the same shape: **claim under the lock,
+release, do the long thing, re-acquire to tear down.** The claim
+(`ac97: dev.playing`, `virtio-snd: dev.active_stream`) is what provides mutual
+exclusion over the tone; the lock now only covers individual transactions.
+
+### The ABA hole that shape opens, and how it is closed
+
+Releasing the lock mid-operation means the claim can be taken by the one caller
+entitled to take it — `stop()`, which exists precisely to end a tone early. A
+naive re-check (`is my claim still set?`) is **not** sufficient:
+
+```
+caller 1: claim ──────────── wait ─────────────── "still claimed, tear down"
+caller 2:        stop()  play_test_tone() claim ────────► destroyed by caller 1
+```
+
+`playing` is `true` again and `active_stream` is `Some(0)` again — playback
+always uses stream 0 — so caller 1 cannot tell caller 2's claim from its own.
+Both drivers therefore carry a monotonic `play_gen: u64`, bumped under the lock
+at claim time; a caller compares the generation it recorded, and on a mismatch
+ends quietly without a second teardown (a second `RELEASE` on a released
+virtio-snd stream is a protocol error, and a second `stop_playback_inner` would
+cut off the new tone).
+
+This is the part that would not have been found by looking at lock *types*. It
+only appears once you ask what the lock was doing for you that it no longer
+does.
+
+### `hda`: the handler gets atomics, not `lock_irqsave`
+
+`handle_irq()` took `DEVICE`, which self-deadlocks against a task-context
+holder on the same CPU the moment the handler is wired to the IOAPIC — latent
+today only because nothing calls it yet. The obvious fix, `lock_irqsave` at all
+nine sites, was implemented and then **rejected**: `configure_output()` holds
+`DEVICE` across two 10 ms stream-reset polls and six `send_verb` calls that each
+poll the RIRB for up to `CODEC_RESPONSE_TIMEOUT_US` (50 ms) — ~320 ms with
+interrupts off, reached exactly when a codec has stopped answering.
+
+The handler needs three values (`mmio_base`, `iss`, `out_stream_idx`), all
+written once in `init()` and never mutated. They are now published in
+`IRQ_MMIO_BASE`/`IRQ_STREAM_IDX` (index stored first, base stored last with
+`Release`; base read first with `Acquire`, so a non-zero base implies a valid
+index), and `handle_irq` takes no lock at all. `DEVICE` stays a plain
+task-context-only `PreemptSpinMutex`. Rationale and the register-overlap check
+that makes concurrent handler/task execution safe: `design-decisions.md` §221.
+
+`configure_output` still holds `DEVICE` across all six verbs, and that is
+correct rather than an oversight: `send_verb` advances `corb_wp`/`rirb_rp`, the
+shared CORB/RIRB ring pointers, so two interleaved sequences would desync the
+response ring and read each other's replies. Those verbs are one indivisible
+configuration. The 320 ms bound is unchanged but is now paid in preemption
+rather than in interrupts.
+
+### Two memory-safety bugs found on the way
+
+Both drivers copy a caller-supplied name into a fixed byte array and truncate:
+
+```rust
+let copy_len = name.len().min(NAME_LEN - 1);
+dst[..copy_len].copy_from_slice(&name.as_bytes()[..copy_len]);
+```
+
+Truncating at a **byte** offset splits any multi-byte UTF-8 character that
+straddles the limit, leaving an invalid sequence in the buffer.
+`audio_history::HistoryEntry::name_str` then handed that buffer to
+`core::str::from_utf8_unchecked` — undefined behaviour, justified in a comment
+by "we only store valid UTF-8 names (from kernel code)", which is true of the
+*input* and not of what was stored. Both sites now walk down to a character
+boundary with `is_char_boundary`, and `name_str` is checked
+(`from_utf8(..).unwrap_or("")`) so a malformed buffer from any other source
+degrades to an empty name instead of UB.
+
+### Allocation under a spinlock, including one that hides in plain sight
+
+`audio_history::recent` built its `Vec<(String, …)>` **inside** the `HISTORY`
+critical section — up to 64 `String` allocations, nesting the kernel heap lock
+under a leaf spinlock and making the section's length depend on allocator state
+(including an OOM reclaim). It now `Copy`-snapshots the fixed-size entries into
+a stack array under the lock and allocates after releasing it; `HistoryEntry`
+gained `Copy` for exactly that.
+
+`audio_mixer::list_streams` had the subtler form:
+
+```rust
+result.push((i as StreamId, …, slot.ring.lock().len()));   // guard lives to `;`
+```
+
+A temporary guard in an argument position lives until the end of the enclosing
+**statement**, not the sub-expression — so the ring stayed locked across a
+`Vec::push` that can allocate. Bound to a local first. Worth internalising as a
+pattern: `container.push(… lock().x …)` is always this bug.
+
+### Inventory after this batch
+
+| | Files | Note |
+|---|---|---|
+| Before | 42 | excluding the four deliberately-raw |
+| Converted here | 5 | `ac97`, `audio_history`, `audio_mixer`, `hda`, `virtio/sound` |
+| **Remaining** | **37** | plus `sync.rs`, `mm/heap.rs`, `serial.rs`, `bench.rs` (deliberately raw) |
+
+Still-flagged allocation-under-spinlock, unconverted, for whoever takes the next
+batch: `cap/request.rs:148` (`String::from`) and `sched/mod.rs` lines 1258,
+1303, 1553 (`Box::new` into `state.tasks`).
 
 **Superseded reactive strategy (kept for context):** the armed hang soak
 (`scripts/wedge-soak.sh`) reliably reproduces these under stress; each catch names

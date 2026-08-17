@@ -40,6 +40,7 @@ use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::pci::{self, PciDevice};
 use crate::port;
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // PCI device IDs
@@ -181,6 +182,15 @@ struct Ac97Device {
     hhdm_offset: u64,
     /// Whether playback is active.
     playing: bool,
+    /// Monotonic counter identifying *which* tone is currently playing.
+    ///
+    /// Incremented by [`play_test_tone`] each time it claims the device.
+    /// `playing` alone cannot answer "is the tone still mine?" after the lock
+    /// has been released across the wait: a concurrent [`stop`] followed by a
+    /// second `play_test_tone` leaves `playing == true` again, and the first
+    /// caller would then stop the *second* caller's tone. Comparing the
+    /// generation it recorded at start closes that ABA window.
+    play_gen: u64,
     /// Sample rate (default 48000).
     sample_rate: u32,
     /// Codec vendor ID (for diagnostics).
@@ -188,7 +198,15 @@ struct Ac97Device {
 }
 
 /// Global device instance.
-static DEVICE: spin::Mutex<Option<Ac97Device>> = spin::Mutex::new(None);
+///
+/// A `PreemptSpinMutex` leaf lock (Q24 / design-decisions §70): nothing is
+/// acquired underneath it and it is unreachable from interrupt context — this
+/// driver programs DMA and polls, it wires up no IRQ handler — so a
+/// preempt-disabling spinlock is the right weight and `lock_irqsave` is not
+/// needed. Every critical section under it must stay short; see
+/// [`play_test_tone`], which deliberately drops it across the playback wait.
+static DEVICE: PreemptSpinMutex<Option<Ac97Device>> =
+    PreemptSpinMutex::named(None, b"AC97_DEVICE");
 
 /// Whether AC97 is initialized and available.
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -349,6 +367,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
         pcm_frame,
         hhdm_offset,
         playing: false,
+        play_gen: 0,
         sample_rate,
         codec_vendor,
     };
@@ -393,7 +412,24 @@ fn find_device() -> KernelResult<PciDevice> {
 
 /// Play a test tone (440 Hz) for the specified duration in milliseconds.
 ///
-/// Fills the PCM buffer with a 440 Hz triangle wave and starts DMA playback.
+/// Fills the PCM buffer with a 440 Hz triangle wave and starts DMA playback,
+/// waits out the tone, then stops the engine.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchDevice`] if no AC97 controller was detected, or
+/// [`KernelError::DeviceBusy`] if a tone is already playing.
+///
+/// # Locking
+///
+/// `DEVICE` is held only to program the BDL and start the engine, and again to
+/// stop it — **not** across the wait in between. Holding it there would pin a
+/// preempt-disabling spinlock for the whole tone (up to `duration_ms`
+/// milliseconds), blocking the scheduler on this CPU and spinning every other
+/// caller for the same duration. `dev.playing` is what actually serialises
+/// overlapping callers now that the lock no longer spans the wait: it is set
+/// under the lock before it is released, so a second caller sees the device as
+/// busy rather than reprogramming a live BDL.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
     if !is_available() {
@@ -402,6 +438,9 @@ pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
 
     let mut guard = DEVICE.lock();
     let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
+    if dev.playing {
+        return Err(KernelError::DeviceBusy);
+    }
 
     // Calculate how many bytes we need.
     // 48000 Hz × 2 channels × 2 bytes/sample = 192000 bytes/sec.
@@ -461,15 +500,36 @@ pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
         port::outb(dev.nabm_base.wrapping_add(NABM_PCMO_CR), CR_RPBM);
     }
     dev.playing = true;
+    dev.play_gen = dev.play_gen.wrapping_add(1);
+    let my_gen = dev.play_gen;
+    // Released before the wait, and before the serial write: see the Locking
+    // section above. `playing` is now true, so a concurrent caller gets
+    // DeviceBusy instead of reprogramming the BDL out from under this tone.
+    drop(guard);
+
     serial_println!("[ac97] Playback started ({} ms, LVI={})", duration_ms, lvi);
 
-    // Wait for playback to complete (busy-wait).
+    // Wait for playback to complete (busy-wait), with DEVICE unlocked.
     let wait_us = u64::from(duration_ms).saturating_mul(1000);
     busy_wait_us(wait_us);
 
-    // Stop playback.
-    stop_playback_inner(dev);
-    serial_println!("[ac97] Playback complete");
+    // Stop playback. Re-acquire rather than reuse the old guard; the device may
+    // have been torn down while unlocked, in which case there is nothing to
+    // stop and `playing` went with it. Stop only if this is still *our* tone —
+    // see `play_gen`: a `stop()` plus a fresh `play_test_tone()` during the wait
+    // would otherwise have us cut off someone else's playback.
+    let stopped = match DEVICE.lock().as_mut() {
+        Some(dev) if dev.playing && dev.play_gen == my_gen => {
+            stop_playback_inner(dev);
+            true
+        }
+        _ => false,
+    };
+    if stopped {
+        serial_println!("[ac97] Playback complete");
+    } else {
+        serial_println!("[ac97] Playback ended early (stopped by another caller)");
+    }
 
     Ok(())
 }

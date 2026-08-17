@@ -28991,12 +28991,13 @@ clear multiple, the PAT entry is not actually being selected — which is easy t
 get wrong silently, since a wrong index just yields a different valid memory
 type rather than a fault.
 
-## TD-TEXTVIEW-LAYS-SPANS-OUT-END-TO-END (lane C, 2026-08-17)
+## TD-SPANS-ARE-LAID-OUT-END-TO-END (lane C, 2026-08-17)
 
-**What.** `gui/toolkit/src/textview.rs` has the defect
-`TD-EDITOR-IS-NOT-BIDIRECTIONAL` item 4 just had fixed, in two widgets, and it
-was left alone deliberately: the fix that worked for the editor does not fit
-here, for a reason worth writing down before someone tries it.
+**What.** Three more places have the defect `TD-EDITOR-IS-NOT-BIDIRECTIONAL`
+item 4 just had fixed — two widgets in `gui/toolkit/src/textview.rs` and
+`apps/markdowneditor` — and all three were left alone deliberately: the fix
+that worked for the editor does not fit them, for a reason worth writing down
+before someone tries it.
 
 `RichTextView` draws a wrapped line by walking its `RichSpan`s, emitting a
 `RenderCommand::Text` per span at a running `x` and advancing
@@ -29016,6 +29017,20 @@ right-to-left run — a terminal has to reorder within the line to display one �
 but fixing it is a terminal-bidi question (BiDi in a cell grid), not the same
 question as `RichTextView`'s.
 
+`apps/markdowneditor` has the same shape as `RichTextView` and one extra fault
+on top. It emits a `RenderCommand::Text` per `HighlightSpan`
+(`markdowneditor/src/main.rs:2881–2898`) positioned by
+`col_x(line, span.start, text_x)` — and `col_x` (`:139`) is
+`text_x + prefix.chars().count() * char_width()`, a *nominal* character width
+multiplied by a character count. That is wrong before bidi ever enters: it
+assumes every glyph is exactly `char_width()` wide, so on a proportional face
+the error compounds along the line and every span after the first lands in the
+wrong place. The same expression positions the caret, so the caret and the text
+drift together and the editor looks self-consistent while both are wrong. Fix
+the nominal width first — that one is a plain bug with a plain fix
+(`text::measure`, exactly as `apps/editor`'s caret comment already argues) —
+and the span layout with the rest of this entry.
+
 **Why `RichText` does not simply apply.** The editor's spans differ only in
 *colour*, which is why a `TextSpan { end, color }` could carry them. These do
 not:
@@ -29024,6 +29039,7 @@ not:
 |---|---|
 | `RichSpan` → `RichSpanStyle` (`:1215`) | `weight`, `font_style`, `font_size`, `bg_color`, `underline`, `strikethrough`, `link` |
 | `SimpleTextView` → `AnsiStyle` (`:161`) | `bg`, `bold`, `dim`, `italic`, `underline`, `reverse` |
+| `markdowneditor` → `HighlightSpan` (`:2197`) | `weight` |
 
 A span that changes the *size* or the *weight* changes the shaping, so it is
 not merely a colour attribute painted onto glyphs that were shaped uniformly —
@@ -29046,11 +29062,16 @@ shape-the-whole-line-and-clip in the editor, which is the same shape this
 needs, and doing them in the other order means designing the multi-run
 machinery against no caller.
 
-**Severity.** Low today, same as the editor's: uni-directional text lays out
-correctly under the present code, and `RichTextView`'s callers are help text
-and markdown-ish rendering. It bites on a document with a quoted Arabic or
-Hebrew phrase — which is precisely what a markdown view exists to display.
+**Severity.** Low today for the bidi part, same as the editor's:
+uni-directional text lays out correctly under the present code, and
+`RichTextView`'s callers are help text and markdown-ish rendering. It bites on
+a document with a quoted Arabic or Hebrew phrase — which is precisely what a
+markdown view exists to display. **`markdowneditor`'s nominal character width
+is not low severity** and is not really part of this entry's question: it is
+visibly wrong on any proportional face, today, in English.
 
 **Where.** `gui/toolkit/src/textview.rs`: `RichTextView::span_width` (~1751),
 `selection_boxes_of_cols` (~1796–1821), the draw loop (~2470–2545); and
 `SimpleTextView`'s draw loop (~1090–1126) for the terminal-grid variant.
+`apps/markdowneditor/src/main.rs`: `col_x` (~139), the span draw loop
+(~2881–2898), and the caret at (~2902).

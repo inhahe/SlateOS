@@ -18543,7 +18543,7 @@ of a substring of it. That is item 3 / step (d) of
 `TD-EDITOR-IS-NOT-BIDIRECTIONAL`, deliberately left separate.
 `gui/toolkit/src/textview.rs` has the same end-to-end layout in two widgets and
 is *not* covered by this decision, because its spans carry size and weight as
-well as colour — see `TD-TEXTVIEW-LAYS-SPANS-OUT-END-TO-END`.
+well as colour — see `TD-SPANS-ARE-LAID-OUT-END-TO-END`.
 
 **Where.** `gui/toolkit/src/render.rs` (`TextSpan`, `RenderCommand::RichText`,
 `RenderTree::rich_text` / `rich_text_clipped`), `gui/compositor/src/main.rs`

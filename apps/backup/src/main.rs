@@ -3160,7 +3160,78 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that unwraps a failure should fail loudly at the line that did
+    // it — that is the diagnosis. The defensive lints exist to keep panics out
+    // of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
+
     use super::*;
+
+    // --- Blob-store write routing ---
+
+    /// Both ways a blob enters the content-addressed store go through
+    /// `safeio`, not `fs::write`/`fs::copy`.
+    ///
+    /// A successful atomic write and a successful truncating one leave
+    /// identical bytes at an identical path; they differ only when the write
+    /// is interrupted, which no portable test can stage. So the routing itself
+    /// is asserted, via `safeio`'s `audit` counters.
+    ///
+    /// This is the case `safeio`'s own docs single out as actively dangerous
+    /// rather than merely bad. A content-addressed store treats a file's
+    /// presence at its hash-derived path as proof that the hash's content is
+    /// there — nothing re-verifies it. One interrupted write therefore leaves a
+    /// truncated blob that every future backup silently deduplicates against,
+    /// handing back short data forever, with no error anywhere. In the one
+    /// application whose entire purpose is that the data survives.
+    ///
+    /// `store_bytes` and `store_file` are asserted separately: they use
+    /// different `safeio` entry points (`write_atomically` vs
+    /// `copy_atomically`) and so are counted separately.
+    ///
+    /// The counters are process-global and tests run in parallel, so each
+    /// check compares a before and after reading rather than an absolute.
+    #[test]
+    fn both_blob_store_paths_go_through_safeio() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("slate_backup_routing_{nanos}"));
+        fs::create_dir_all(&dir).expect("temp dir");
+
+        let store = ContentStore::new(&dir);
+
+        // store_bytes -> safeio::write_atomically
+        let data = b"blob contents that must never be half-written";
+        let hash = sha256_hex(data);
+        let before = safeio::writes_performed();
+        assert!(store.store_bytes(data, &hash).expect("store_bytes"));
+        assert!(
+            safeio::writes_performed() > before,
+            "store_bytes did not go through safeio -- it must not use std::fs::write"
+        );
+        assert_eq!(store.read_blob(&hash).expect("read back"), data);
+
+        // store_file -> safeio::copy_atomically
+        let source = dir.join("source.bin");
+        let body: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        fs::write(&source, &body).expect("write source");
+        let file_hash = sha256_hex(&body);
+        let before = safeio::copies_performed();
+        assert!(store.store_file(&source, &file_hash).expect("store_file"));
+        assert!(
+            safeio::copies_performed() > before,
+            "store_file did not go through safeio -- it must not use fs::copy"
+        );
+        assert_eq!(store.read_blob(&file_hash).expect("read back"), body);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     // --- SHA-256 Tests ---
 

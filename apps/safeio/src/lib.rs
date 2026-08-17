@@ -50,6 +50,51 @@ const MAX_TEMP_ATTEMPTS: u32 = 1024;
 /// name and the second would clobber the first's half-written file.
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Successful [`write_atomically`] calls, counted only under the `audit`
+/// feature. See [`writes_performed`].
+#[cfg(feature = "audit")]
+static WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// Successful [`copy_atomically`] calls, counted only under the `audit`
+/// feature. See [`copies_performed`].
+#[cfg(feature = "audit")]
+static COPIES: AtomicU64 = AtomicU64::new(0);
+
+/// How many [`write_atomically`] calls have succeeded in this process.
+///
+/// This exists so a caller can *test* that its saves go through this crate.
+/// It cannot be tested any other way: a successful atomic write and a
+/// successful `std::fs::write` leave identical bytes at identical paths, and
+/// the difference between them — that `fs::write` truncates the target before
+/// it writes, so an interrupted save destroys the file it was saving — only
+/// shows up in an interruption a portable test cannot stage. Without this
+/// counter, swapping an adopter back to `fs::write` leaves all of its tests
+/// green, which is exactly what happened.
+///
+/// Compare a reading taken before an operation with one taken after, rather
+/// than against an absolute: tests in a crate share a process and run in
+/// parallel, so the absolute value is not reproducible.
+///
+/// Only available under the `audit` feature, which callers enable in their
+/// `[dev-dependencies]`.
+#[cfg(feature = "audit")]
+#[must_use]
+pub fn writes_performed() -> u64 {
+    WRITES.load(Ordering::Relaxed)
+}
+
+/// How many [`copy_atomically`] calls have succeeded in this process.
+///
+/// As [`writes_performed`], for copies. Kept separate so a test can assert
+/// which of the two an operation used, rather than only that it used one.
+///
+/// Only available under the `audit` feature.
+#[cfg(feature = "audit")]
+#[must_use]
+pub fn copies_performed() -> u64 {
+    COPIES.load(Ordering::Relaxed)
+}
+
 /// Write `contents` to `path` so that `path` is never left partially written.
 ///
 /// On success `path` holds exactly `contents`. On failure `path` is untouched
@@ -124,6 +169,11 @@ pub fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&tmp_path); // Best effort; the rename error is the one worth reporting.
         return Err(e);
     }
+
+    // Counted after the rename, so the number reports saves that actually
+    // landed rather than saves that were attempted.
+    #[cfg(feature = "audit")]
+    WRITES.fetch_add(1, Ordering::Relaxed);
 
     Ok(())
 }
@@ -234,6 +284,10 @@ pub fn copy_atomically(src: &Path, dest: &Path) -> io::Result<u64> {
         let _ = fs::remove_file(&tmp_path); // Best effort; the rename error is the one worth reporting.
         return Err(e);
     }
+
+    // Counted after the rename, for the same reason as in `write_atomically`.
+    #[cfg(feature = "audit")]
+    COPIES.fetch_add(1, Ordering::Relaxed);
 
     Ok(copied)
 }

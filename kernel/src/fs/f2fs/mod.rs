@@ -204,8 +204,8 @@ impl F2fsFs {
                 return Err(KernelError::NotADirectory);
             }
 
-            let entry = dir::lookup(&self.nat(), &self.sb, &inode, name)?
-                .ok_or(KernelError::NotFound)?;
+            let entry =
+                dir::lookup(&self.nat(), &self.sb, &inode, name)?.ok_or(KernelError::NotFound)?;
             stack.push(ino);
             ino = entry.ino;
             inode = self.inode(ino)?;
@@ -255,7 +255,9 @@ impl F2fsFs {
             .ok_or(KernelError::InvalidArgument)?;
 
         while pos < end {
-            let index = pos.checked_div(block_size).ok_or(KernelError::InternalError)?;
+            let index = pos
+                .checked_div(block_size)
+                .ok_or(KernelError::InternalError)?;
             let within = usize::try_from(pos.checked_rem(block_size).unwrap_or(0))
                 .map_err(|_| KernelError::InternalError)?;
             let take = usize::try_from(end.saturating_sub(pos))
@@ -402,7 +404,10 @@ impl FileSystem for F2fsFs {
         // write bits masked off, because the mount refuses every write and a
         // mode that says otherwise is a lie userspace will act on.
         let permissions = (inode.mode & 0o777) & 0o555;
-        let ns = |t: (u64, u32)| t.0.saturating_mul(1_000_000_000).saturating_add(u64::from(t.1));
+        let ns = |t: (u64, u32)| {
+            t.0.saturating_mul(1_000_000_000)
+                .saturating_add(u64::from(t.1))
+        };
 
         Ok(FileMeta {
             size,

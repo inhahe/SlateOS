@@ -34,7 +34,7 @@ use super::raw::{
     BLOCK_SIZE, DENTRY_BITMAP_SIZE, DENTRY_RESERVED_SIZE, DIR_ENTRY_LEN, F2FS_FT_BLKDEV,
     F2FS_FT_CHRDEV, F2FS_FT_DIR, F2FS_FT_FIFO, F2FS_FT_REG_FILE, F2FS_FT_SOCK, F2FS_FT_SYMLINK,
     F2FS_NAME_LEN, F2FS_SLOT_LEN, NR_DENTRY_IN_BLOCK, bucket_blocks, dentry_hash, dir_block_index,
-    dir_buckets, read_u16, read_u32, read_u8, slots_for_name, test_bit,
+    dir_buckets, read_u8, read_u16, read_u32, slots_for_name, test_bit,
 };
 use super::sb::SuperBlock;
 
@@ -106,7 +106,9 @@ impl DentryLayout {
         Self {
             slots: NR_DENTRY_IN_BLOCK,
             entries_off: DENTRY_BITMAP_SIZE + DENTRY_RESERVED_SIZE,
-            names_off: DENTRY_BITMAP_SIZE + DENTRY_RESERVED_SIZE + NR_DENTRY_IN_BLOCK * DIR_ENTRY_LEN,
+            names_off: DENTRY_BITMAP_SIZE
+                + DENTRY_RESERVED_SIZE
+                + NR_DENTRY_IN_BLOCK * DIR_ENTRY_LEN,
         }
     }
 
@@ -161,7 +163,10 @@ fn for_each_entry<T>(
 
         let eoff = layout
             .entries_off
-            .checked_add(slot.checked_mul(DIR_ENTRY_LEN).ok_or(KernelError::InternalError)?)
+            .checked_add(
+                slot.checked_mul(DIR_ENTRY_LEN)
+                    .ok_or(KernelError::InternalError)?,
+            )
             .ok_or(KernelError::InternalError)?;
 
         let ino = read_u32(area, eoff.saturating_add(4))?;
@@ -181,9 +186,14 @@ fn for_each_entry<T>(
         let used = slots_for_name(name_len).max(1);
         let noff = layout
             .names_off
-            .checked_add(slot.checked_mul(F2FS_SLOT_LEN).ok_or(KernelError::InternalError)?)
+            .checked_add(
+                slot.checked_mul(F2FS_SLOT_LEN)
+                    .ok_or(KernelError::InternalError)?,
+            )
             .ok_or(KernelError::InternalError)?;
-        let nend = noff.checked_add(name_len).ok_or(KernelError::InternalError)?;
+        let nend = noff
+            .checked_add(name_len)
+            .ok_or(KernelError::InternalError)?;
 
         if let Some(name) = area.get(noff..nend) {
             if ino != 0 {
@@ -283,9 +293,13 @@ pub fn lookup(
 
     if inode.has_inline_dentry() {
         let (area, layout) = inline_area(inode)?;
-        return for_each_entry(area, layout, |e| {
-            if e.name == name { Some(e) } else { None }
-        });
+        return for_each_entry(
+            area,
+            layout,
+            |e| {
+                if e.name == name { Some(e) } else { None }
+            },
+        );
     }
 
     let hash = dentry_hash(name);

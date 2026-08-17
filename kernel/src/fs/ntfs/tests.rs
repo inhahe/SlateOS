@@ -53,12 +53,12 @@ use crate::fs::path::Path;
 use crate::fs::vfs::{EntryType, FileSystem};
 use crate::serial_println;
 
+use super::NtfsFs;
 use super::attr::{AttributeType, DataRun, NameSpace, decode_runlist};
 use super::boot::BootSector;
 use super::raw::{filetime_to_unix_ns, utf16le_at};
 use super::record::{FILE_MAGIC, apply_fixups, mft_ref_record, mft_ref_sequence};
 use crate::fs::blocksrc::MemorySource;
-use super::NtfsFs;
 
 // ---------------------------------------------------------------------------
 // Volume geometry
@@ -239,10 +239,18 @@ fn resident_attr(ty: u32, name: &str, flags: u16, id: u16, value: &[u8], indexed
 
     let mut a = vec![0u8; length];
     put(&mut a, 0x00, &ty.to_le_bytes());
-    put(&mut a, 0x04, &u32::try_from(length).unwrap_or(0).to_le_bytes());
+    put(
+        &mut a,
+        0x04,
+        &u32::try_from(length).unwrap_or(0).to_le_bytes(),
+    );
     put_u8(&mut a, 0x08, 0); // resident
     put_u8(&mut a, 0x09, u8::try_from(name_units).unwrap_or(0));
-    put(&mut a, 0x0A, &u16::try_from(name_off).unwrap_or(0).to_le_bytes());
+    put(
+        &mut a,
+        0x0A,
+        &u16::try_from(name_off).unwrap_or(0).to_le_bytes(),
+    );
     put(&mut a, 0x0C, &flags.to_le_bytes());
     put(&mut a, 0x0E, &id.to_le_bytes());
     put(
@@ -282,10 +290,18 @@ fn non_resident_attr(
 
     let mut a = vec![0u8; length];
     put(&mut a, 0x00, &ty.to_le_bytes());
-    put(&mut a, 0x04, &u32::try_from(length).unwrap_or(0).to_le_bytes());
+    put(
+        &mut a,
+        0x04,
+        &u32::try_from(length).unwrap_or(0).to_le_bytes(),
+    );
     put_u8(&mut a, 0x08, 1); // non-resident
     put_u8(&mut a, 0x09, u8::try_from(name_units).unwrap_or(0));
-    put(&mut a, 0x0A, &u16::try_from(name_off).unwrap_or(0).to_le_bytes());
+    put(
+        &mut a,
+        0x0A,
+        &u16::try_from(name_off).unwrap_or(0).to_le_bytes(),
+    );
     put(&mut a, 0x0C, &flags.to_le_bytes());
     put(&mut a, 0x0E, &id.to_le_bytes());
     put(&mut a, 0x10, &start_vcn.to_le_bytes());
@@ -348,7 +364,11 @@ fn index_entry(reference: u64, key: &[u8], child_vcn: Option<u64>, is_last: bool
 
     let mut e = vec![0u8; length];
     put(&mut e, 0x00, &reference.to_le_bytes());
-    put(&mut e, 0x08, &u16::try_from(length).unwrap_or(0).to_le_bytes());
+    put(
+        &mut e,
+        0x08,
+        &u16::try_from(length).unwrap_or(0).to_le_bytes(),
+    );
     put(
         &mut e,
         0x0A,
@@ -370,7 +390,12 @@ fn index_entry(reference: u64, key: &[u8], child_vcn: Option<u64>, is_last: bool
 }
 
 /// Build an `$INDEX_ROOT` value from a list of already-built entries.
-fn index_root_value(block_size: u32, clusters_per_block: u8, entries: &[Vec<u8>], large: bool) -> Vec<u8> {
+fn index_root_value(
+    block_size: u32,
+    clusters_per_block: u8,
+    entries: &[Vec<u8>],
+    large: bool,
+) -> Vec<u8> {
     let body: Vec<u8> = entries.iter().flat_map(|e| e.iter().copied()).collect();
     let mut v = vec![0u8; 0x20usize.saturating_add(body.len())];
 
@@ -465,7 +490,10 @@ fn write_fixups(buf: &mut [u8], usa_offset: usize, usa_count: usize, usn: u16) {
         let Some(original) = buf.get(tail..tail.saturating_add(2)) else {
             continue;
         };
-        let original = [*original.first().unwrap_or(&0), *original.get(1).unwrap_or(&0)];
+        let original = [
+            *original.first().unwrap_or(&0),
+            *original.get(1).unwrap_or(&0),
+        ];
         let slot = usa_offset.saturating_add(i.saturating_add(1).saturating_mul(2));
         put(buf, slot, &original);
         put(buf, tail, &usn.to_le_bytes());
@@ -498,10 +526,18 @@ fn mft_record(number: u64, flags: u16, base_reference: u64, attrs: &[Vec<u8>]) -
         &u16::try_from(attrs_offset).unwrap_or(0).to_le_bytes(),
     );
     put(&mut r, 0x16, &flags.to_le_bytes());
-    put(&mut r, 0x1C, &u32::try_from(MFT_RECORD).unwrap_or(0).to_le_bytes());
+    put(
+        &mut r,
+        0x1C,
+        &u32::try_from(MFT_RECORD).unwrap_or(0).to_le_bytes(),
+    );
     put(&mut r, 0x20, &base_reference.to_le_bytes());
     put(&mut r, 0x28, &8u16.to_le_bytes()); // next attribute id
-    put(&mut r, 0x2C, &u32::try_from(number).unwrap_or(0).to_le_bytes());
+    put(
+        &mut r,
+        0x2C,
+        &u32::try_from(number).unwrap_or(0).to_le_bytes(),
+    );
 
     let mut offset = attrs_offset;
     for attr in attrs {
@@ -525,7 +561,11 @@ fn attribute_list_entry(ty: u32, start_vcn: u64, reference: u64, id: u16) -> Vec
     let length = 0x20usize;
     let mut e = vec![0u8; length];
     put(&mut e, 0x00, &ty.to_le_bytes());
-    put(&mut e, 0x04, &u16::try_from(length).unwrap_or(0).to_le_bytes());
+    put(
+        &mut e,
+        0x04,
+        &u16::try_from(length).unwrap_or(0).to_le_bytes(),
+    );
     put_u8(&mut e, 0x06, 0); // name length
     put_u8(&mut e, 0x07, 0x1A); // name offset
     put(&mut e, 0x08, &start_vcn.to_le_bytes());
@@ -572,7 +612,11 @@ fn build_image() -> Vec<u8> {
 
     // ---- File data ----
     let big = big_content();
-    put(&mut image, (LCN_BIG_1 as usize).saturating_mul(CLUSTER), big.get(0..CLUSTER).unwrap_or(&[]));
+    put(
+        &mut image,
+        (LCN_BIG_1 as usize).saturating_mul(CLUSTER),
+        big.get(0..CLUSTER).unwrap_or(&[]),
+    );
     put(
         &mut image,
         (LCN_BIG_2 as usize).saturating_mul(CLUSTER),
@@ -715,14 +759,7 @@ fn build_image() -> Vec<u8> {
                 &file_name_value(mref(REC_ROOT), ".", 1, DOS_DIR, 0, 0),
                 true,
             ),
-            resident_attr(
-                AttributeType::INDEX_ROOT.0,
-                "$I30",
-                0,
-                2,
-                &root_root,
-                false,
-            ),
+            resident_attr(AttributeType::INDEX_ROOT.0, "$I30", 0, 2, &root_root, false),
             non_resident_attr(
                 AttributeType::INDEX_ALLOCATION.0,
                 "$I30",
@@ -736,7 +773,14 @@ fn build_image() -> Vec<u8> {
                 #[allow(clippy::cast_possible_wrap)]
                 &encode_runs(&[(1, Some(LCN_ROOT_INDX as i64))]),
             ),
-            resident_attr(AttributeType::BITMAP.0, "$I30", 0, 4, &[1, 0, 0, 0, 0, 0, 0, 0], false),
+            resident_attr(
+                AttributeType::BITMAP.0,
+                "$I30",
+                0,
+                4,
+                &[1, 0, 0, 0, 0, 0, 0, 0],
+                false,
+            ),
         ],
     );
     put(
@@ -971,14 +1015,7 @@ fn build_image() -> Vec<u8> {
                 &standard_information(0),
                 false,
             ),
-            resident_attr(
-                AttributeType::ATTRIBUTE_LIST.0,
-                "",
-                0,
-                1,
-                &attr_list,
-                false,
-            ),
+            resident_attr(AttributeType::ATTRIBUTE_LIST.0, "", 0, 1, &attr_list, false),
             resident_attr(
                 AttributeType::FILE_NAME.0,
                 "",
@@ -1210,19 +1247,21 @@ fn test_runlists(c: &mut Checks) -> KernelResult<()> {
     let runs = decode_runlist(&encoded, 0)?;
     c.check(runs.len() == 2, "two runs decode")?;
     c.check(
-        runs.first() == Some(&DataRun {
-            vcn: 0,
-            lcn: Some(10),
-            length: 1,
-        }),
+        runs.first()
+            == Some(&DataRun {
+                vcn: 0,
+                lcn: Some(10),
+                length: 1,
+            }),
         "first run",
     )?;
     c.check(
-        runs.get(1) == Some(&DataRun {
-            vcn: 1,
-            lcn: Some(20),
-            length: 1,
-        }),
+        runs.get(1)
+            == Some(&DataRun {
+                vcn: 1,
+                lcn: Some(20),
+                length: 1,
+            }),
         "second run is a delta, not an absolute",
     )?;
 
@@ -1347,7 +1386,11 @@ fn test_fixups(c: &mut Checks) -> KernelResult<()> {
     put(&mut torn, 0x04, &0x30u16.to_le_bytes());
     put(&mut torn, 0x06, &3u16.to_le_bytes());
     write_fixups(&mut torn, 0x30, 3, 0x0101);
-    put(&mut torn, 2 * BYTES_PER_SECTOR - 2, &0x9999u16.to_le_bytes());
+    put(
+        &mut torn,
+        2 * BYTES_PER_SECTOR - 2,
+        &0x9999u16.to_le_bytes(),
+    );
     c.check(
         apply_fixups(&mut torn, FILE_MAGIC, 512) == Err(KernelError::CorruptedData),
         "a torn write is detected, not silently accepted",
@@ -1430,7 +1473,10 @@ fn test_volume(c: &mut Checks) -> KernelResult<()> {
         "volume label comes from $Volume's $VOLUME_NAME",
     )?;
     c.check(info.read_only, "an NTFS mount is read-only")?;
-    c.check(info.block_size == CLUSTER as u64, "block size is the cluster")?;
+    c.check(
+        info.block_size == CLUSTER as u64,
+        "block size is the cluster",
+    )?;
 
     // -- root listing ---------------------------------------------------
     let names = names_of(&mut fs, "/")?;
@@ -1507,10 +1553,16 @@ fn test_volume(c: &mut Checks) -> KernelResult<()> {
     c.check(st.size == BIG_SIZE as u64, "stat: size")?;
 
     let st = fs.stat(Path::new("/sub"))?;
-    c.check(st.entry_type == EntryType::Directory, "stat: directory type")?;
+    c.check(
+        st.entry_type == EntryType::Directory,
+        "stat: directory type",
+    )?;
 
     let meta = fs.metadata(Path::new("/hello.txt"))?;
-    c.check(meta.ino == REC_HELLO, "metadata: ino is the MFT record number")?;
+    c.check(
+        meta.ino == REC_HELLO,
+        "metadata: ino is the MFT record number",
+    )?;
     c.check(
         meta.modified_ns == TEST_UNIX_NS,
         "metadata: $STANDARD_INFORMATION timestamps convert",

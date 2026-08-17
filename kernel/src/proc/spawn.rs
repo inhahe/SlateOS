@@ -7615,7 +7615,11 @@ pub fn self_test_jobctl() -> KernelResult<()> {
         // first — there are none, and the fixture's numbering is designed to keep
         // it that way (the child's 80-99 are skipped by the parent on purpose).
         const BANDS: &[(i32, i32, &str)] = &[
-            (10, 11, "setup — pipe() or fork() failed before any check ran"),
+            (
+                10,
+                11,
+                "setup — pipe() or fork() failed before any check ran",
+            ),
             (
                 52,
                 57,
@@ -7685,34 +7689,32 @@ pub fn self_test_jobctl() -> KernelResult<()> {
         ];
 
         match exit_code {
-            Some(code) => {
-                match BANDS.iter().find(|(lo, hi, _)| code >= *lo && code <= *hi) {
-                    Some((lo, hi, what)) => serial_println!(
-                        "[spawn]   FAIL: ctest-jobctl (ring 3) — reached Zombie but exit code was \
+            Some(code) => match BANDS.iter().find(|(lo, hi, _)| code >= *lo && code <= *hi) {
+                Some((lo, hi, what)) => serial_println!(
+                    "[spawn]   FAIL: ctest-jobctl (ring 3) — reached Zombie but exit code was \
                          {}, expected {}. That is band {}-{}: {}. For the exact line and its \
                          comment, grep for `rc = {}` in services/ctest-jobctl/main.c",
-                        code,
-                        EXPECTED,
-                        lo,
-                        hi,
-                        what,
-                        code
-                    ),
-                    None => serial_println!(
-                        "[spawn]   FAIL: ctest-jobctl (ring 3) — reached Zombie but exit code was \
+                    code,
+                    EXPECTED,
+                    lo,
+                    hi,
+                    what,
+                    code
+                ),
+                None => serial_println!(
+                    "[spawn]   FAIL: ctest-jobctl (ring 3) — reached Zombie but exit code was \
                          {}, expected {}. This kernel's decoder does NOT cover that code (it knows \
                          up to {}), so it is almost certainly a check added to the fixture since \
                          the decoder was last updated — do NOT read it as related to any band with \
                          similar digits. Grep for `rc = {}` in services/ctest-jobctl/main.c for the \
                          authoritative answer, and add the band to BANDS in \
                          kernel/src/proc/spawn.rs::self_test_jobctl while you are there",
-                        code,
-                        EXPECTED,
-                        BANDS.last().map_or(0, |b| b.1),
-                        code
-                    ),
-                }
-            }
+                    code,
+                    EXPECTED,
+                    BANDS.last().map_or(0, |b| b.1),
+                    code
+                ),
+            },
             None => serial_println!(
                 "[spawn]   FAIL: ctest-jobctl (ring 3) — reached Zombie with NO exit code at all, \
                  which no check in the fixture can produce: it was reaped or destroyed by \

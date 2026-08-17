@@ -260,6 +260,50 @@ pub struct AtiDevice {
     pub mmio: AtiMmio,
     /// Video RAM size in bytes, as the hardware reports it.
     pub vram_bytes: u32,
+    /// Physical base of BAR0, the linear VRAM aperture.
+    ///
+    /// Not mapped by [`probe`] — 16 MiB of it would be, which is a lot of
+    /// address space to map for a device we may turn out not to drive. It is
+    /// retained because it is what decides whether this card is the one already
+    /// showing the console; see [`AtiDevice::owns_console`].
+    pub vram_phys: u64,
+}
+
+impl AtiDevice {
+    /// Whether the console's framebuffer lives in this device's VRAM.
+    ///
+    /// This is the question that decides whether the driver may retime the
+    /// CRTC. On the boot test's QEMU line the answer is no — a standard VGA
+    /// adapter provides the console and this card is an unused second head, so
+    /// programming it costs nothing and proves the mode-set path works. On a
+    /// machine whose *only* display is a Radeon 7000, the answer is yes, and
+    /// retiming it would blank the one screen the operator has, with the
+    /// explanation stuck in a framebuffer nobody can see.
+    ///
+    /// Answered by address rather than by guessing from device order: the
+    /// bootloader hands us the framebuffer's address, and if that address falls
+    /// inside this card's VRAM then this card is scanning it out. `vram_bytes`
+    /// rather than the full BAR0 aperture bounds the test, because a
+    /// framebuffer has to live in real memory, and the aperture can be
+    /// configured larger than the RAM behind it.
+    ///
+    /// Returns `false` if there is no console framebuffer at all, which is the
+    /// headless case: nothing is being displayed, so nothing can be disturbed.
+    #[must_use]
+    pub fn owns_console(&self) -> bool {
+        let Some((fb_virt, _, _, _)) = crate::console::framebuffer_info() else {
+            return false;
+        };
+        let Some(hhdm) = page_table::hhdm() else {
+            // Without the HHDM offset the framebuffer's physical address cannot
+            // be recovered, so the question cannot be answered. Claim ownership:
+            // the conservative answer is the one that leaves the display alone.
+            return true;
+        };
+        let fb_phys = fb_virt.wrapping_sub(hhdm);
+        let end = self.vram_phys.saturating_add(u64::from(self.vram_bytes));
+        fb_phys >= self.vram_phys && fb_phys < end
+    }
 }
 
 /// Look for a supported ATI display device and map its registers.
@@ -314,10 +358,17 @@ pub fn probe() -> KernelResult<Option<AtiDevice>> {
         vram_bytes / (1024 * 1024)
     );
 
+    // BAR0 is the linear VRAM aperture. Recorded but not mapped: what it is
+    // needed for here is deciding whether this card is showing the console,
+    // which is an address comparison.
+    let vram_phys = pci::bar_mmio_addr64(&dev, 0).unwrap_or(0);
+    serial_println!("[ati]   BAR0 VRAM aperture at {:#x}", vram_phys);
+
     Ok(Some(AtiDevice {
         info,
         mmio,
         vram_bytes,
+        vram_phys,
     }))
 }
 

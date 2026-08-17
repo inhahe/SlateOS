@@ -5299,8 +5299,7 @@ pub fn sys_process_set_credentials(args: &SyscallArgs) -> SyscallResult {
     let ((want_uid, want_gid), is_change) =
         resolve_credential_request((creds.uid, creds.gid), args.arg0, args.arg1);
 
-    if is_change && !pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_CREDENTIALS)
-    {
+    if is_change && !pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_CREDENTIALS) {
         return SyscallResult::err(KernelError::PermissionDenied);
     }
 

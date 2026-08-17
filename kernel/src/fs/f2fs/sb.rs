@@ -21,9 +21,7 @@ use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::blocksrc::{SectorSource, read_bytes};
 
-use super::raw::{
-    BLOCK_SIZE, LOG_BLOCK_SIZE, MAGIC, SUPER_OFFSET, read_u16, read_u32, read_u64,
-};
+use super::raw::{BLOCK_SIZE, LOG_BLOCK_SIZE, MAGIC, SUPER_OFFSET, read_u16, read_u32, read_u64};
 
 // ---------------------------------------------------------------------------
 // Feature flags

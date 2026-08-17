@@ -57,6 +57,7 @@ use alloc::vec::Vec;
 
 use crate::context::{MAX_NESTING, Matched, chain_match, context_match, read_records};
 use crate::device::Corrections;
+use crate::digest::Digest;
 use crate::gsub::SubGlyph;
 use crate::lang::Lang;
 use crate::mark::{attachment, lig_attachment};
@@ -380,7 +381,21 @@ impl Positioning {
         if run.zero_marks_first {
             zero_marks(&mut out, run.marks);
         }
+        // A summary of the glyphs in the run, so a lookup that cannot act on
+        // any of them is skipped in O(1) rather than walked.
+        //
+        // Built once for the whole pass, where `gsub` has to rebuild its
+        // equivalent behind a dirty flag: positioning never changes which
+        // glyphs there are, only where they sit, so this is exact for every
+        // lookup rather than only for the one being applied.
+        let mut seen = Digest::EMPTY;
+        for glyph in run.glyphs {
+            seen.add(glyph.gid);
+        }
         for (lookup, _) in self.lookups.for_script(run.script, run.lang) {
+            if !seen.may_intersect(lookup.digest) {
+                continue;
+            }
             self.run_lookup(data, lookup, run, &mut out);
         }
         if !run.zero_marks_first {
@@ -407,7 +422,14 @@ impl Positioning {
         );
         let mut i = 0usize;
         while i < run.glyphs.len() {
-            let next = if skip.considers(run.glyphs, i) {
+            // The digest is checked before the skipper, not after: it is three
+            // shifts and three `and`s against a glyph id already in hand,
+            // where `considers` reads the face's `GDEF` class for the glyph.
+            let admitted = run
+                .glyphs
+                .get(i)
+                .is_some_and(|g| lookup.digest.may_have(g.gid));
+            let next = if admitted && skip.considers(run.glyphs, i) {
                 self.at(data, lookup, run, i, out, MAX_NESTING)
             } else {
                 None
@@ -441,11 +463,25 @@ impl Positioning {
         out: &mut [Adjust],
         depth: usize,
     ) -> Option<usize> {
+        // Same filter as `gsub`'s `admitting`, and correct here for the same
+        // reason: `otl::subtable_coverage` reads whichever coverage decides
+        // where the lookup applies — the *mark* coverage for types 4-6, the
+        // first glyph's for a pair, the first input glyph's for a contextual
+        // one — and that is the glyph standing at `i`, including when a
+        // contextual lookup calls back in here at a position it chose.
+        //
+        // This pass was left unfiltered when the digests were introduced,
+        // because the A/B taken then charged it ~0% of shaping cost. That was
+        // an artefact of `GSUB` costing 4,000us at the time: a direct
+        // per-phase measurement, taken once `GSUB` was fixed, puts positioning
+        // at 32us of a 161us shape — the second-largest item. See
+        // `C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE`.
+        let glyph = run.glyphs.get(i)?.gid;
         lookup
             .subtables
             .iter()
-            .copied()
-            .find_map(|sub| self.one(data, lookup, sub, run, i, out, depth))
+            .filter(|sub| sub.digest.may_have(glyph))
+            .find_map(|sub| self.one(data, lookup, sub.at, run, i, out, depth))
     }
 
     /// Try one subtable at one position, reporting where to resume.
@@ -1585,6 +1621,116 @@ mod tests {
     /// convenience — it is the arrangement the tests are about.
     fn gpos_table(lookups: &[(u16, Vec<u8>)]) -> Vec<u8> {
         gpos_table_for(b"DFLT", b"kern", lookups)
+    }
+
+    /// A `GPOS` holding exactly one lookup, of `kind`, carrying *several*
+    /// subtables.
+    ///
+    /// [`gpos_table_for`] fixes `subTableCount` at 1, which is all any test
+    /// needed until the per-subtable digests: a filter that keeps only the
+    /// subtables whose own coverage admits the glyph cannot be got wrong when
+    /// there is only ever one of them to keep.
+    fn gpos_subtables(kind: u16, subtables: &[&[u8]]) -> Vec<u8> {
+        let m = subtables.len();
+        // Laid out exactly as `gpos_table_for`, with one lookup, and with the
+        // Lookup header grown by one offset per extra subtable.
+        let script_len = 2 + 6 + 4 + 8;
+        let feature_list = 10 + script_len;
+        let lookup_list = feature_list + 8 + 6;
+        let lookup_at = lookup_list + 2 + 2;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1)); // major
+        out.extend_from_slice(&be16(0)); // minor
+        out.extend_from_slice(&be16(10)); // scriptList
+        out.extend_from_slice(&be16(u16::try_from(feature_list).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(lookup_list).unwrap()));
+
+        out.extend_from_slice(&be16(1)); // scriptCount
+        out.extend_from_slice(b"DFLT");
+        out.extend_from_slice(&be16(8)); // Script, from the ScriptList
+        out.extend_from_slice(&be16(4)); // defaultLangSys, from the Script
+        out.extend_from_slice(&be16(0)); // langSysCount
+        out.extend_from_slice(&be16(0)); // lookupOrder, always zero
+        out.extend_from_slice(&be16(0xFFFF)); // no required feature
+        out.extend_from_slice(&be16(1)); // featureIndexCount
+        out.extend_from_slice(&be16(0)); // feature 0
+
+        out.extend_from_slice(&be16(1)); // featureCount
+        out.extend_from_slice(b"kern");
+        out.extend_from_slice(&be16(8)); // Feature, from the FeatureList
+        out.extend_from_slice(&be16(0)); // featureParams
+        out.extend_from_slice(&be16(1)); // lookupIndexCount
+        out.extend_from_slice(&be16(0)); // lookup 0
+
+        out.extend_from_slice(&be16(1)); // lookupCount
+        out.extend_from_slice(&be16(u16::try_from(lookup_at - lookup_list).unwrap()));
+
+        out.extend_from_slice(&be16(kind));
+        out.extend_from_slice(&be16(0)); // lookupFlag
+        out.extend_from_slice(&be16(u16::try_from(m).unwrap()));
+        let mut sub_at = lookup_at + 6 + m * 2;
+        for subtable in subtables {
+            out.extend_from_slice(&be16(u16::try_from(sub_at - lookup_at).unwrap()));
+            sub_at += subtable.len();
+        }
+        for subtable in subtables {
+            out.extend_from_slice(subtable);
+        }
+        out
+    }
+
+    /// The far-away glyph the per-subtable tests separate with. Chosen so that
+    /// no digest shift can confuse it with 10: it differs in all three of the
+    /// bits the digest reads.
+    const FAR: u16 = 9000;
+
+    #[test]
+    fn a_glyph_only_the_second_gpos_subtable_covers_is_still_positioned() {
+        // The assertion the per-subtable filter has to survive. Getting it
+        // wrong by checking every subtable against the *first* one's coverage
+        // would leave `FAR` unmoved, and no test of the digests on their own
+        // would notice, because the digests would still be right.
+        let near = single_pos1(
+            &[10],
+            Value {
+                x_placement: -64,
+                ..Value::default()
+            },
+        );
+        let far = single_pos1(
+            &[FAR],
+            Value {
+                x_placement: -32,
+                ..Value::default()
+            },
+        );
+        let data = gpos_subtables(SINGLE_POS, &[&near, &far]);
+        assert_eq!(positioned(&data, &[10]), alloc::vec![-64]);
+        assert_eq!(positioned(&data, &[FAR]), alloc::vec![-32]);
+        assert_eq!(positioned(&data, &[10, FAR]), alloc::vec![-64, -32]);
+        // And the run-level skip does not lose a lookup that acts on only
+        // *part* of the run: 11 is covered by neither subtable, 10 by one.
+        assert_eq!(positioned(&data, &[11, 10]), alloc::vec![0, -64]);
+    }
+
+    #[test]
+    fn a_gpos_lookup_no_glyph_in_the_run_can_match_is_skipped_harmlessly() {
+        // The O(1) run-level skip. It is not directly observable — a lookup
+        // that is skipped and a lookup that matches nothing produce the same
+        // output — so what is checked is that it never skips one that *would*
+        // have fired, across a run that shares no glyph, one glyph, and all.
+        let sub = single_pos1(
+            &[10, FAR],
+            Value {
+                x_placement: -64,
+                ..Value::default()
+            },
+        );
+        let data = gpos_subtables(SINGLE_POS, &[&sub]);
+        assert_eq!(positioned(&data, &[11, 12]), alloc::vec![0, 0]);
+        assert_eq!(positioned(&data, &[11, FAR]), alloc::vec![0, -64]);
+        assert_eq!(positioned(&data, &[10, FAR]), alloc::vec![-64, -64]);
     }
 
     /// The same, with the ScriptList's one script and the FeatureList's one

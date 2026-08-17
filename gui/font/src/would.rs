@@ -85,10 +85,14 @@ pub(crate) fn would_apply(
     if glyphs.is_empty() {
         return false;
     }
+    // No digest filter: `would_apply` is asked once per candidate pair while
+    // building a syllable, not once per glyph per lookup, so the search it
+    // would save is not on a hot path — and the question here is about the
+    // *whole* hypothetical run rather than about the glyph a lookup stands on.
     lookup
         .subtables
         .iter()
-        .any(|&sub| subtable(data, lookup.kind, sub, glyphs, zero_context).unwrap_or(false))
+        .any(|sub| subtable(data, lookup.kind, sub.at, glyphs, zero_context).unwrap_or(false))
 }
 
 /// One subtable's answer. `None` is a truncated or malformed table, which the

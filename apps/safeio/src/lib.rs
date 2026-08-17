@@ -175,6 +175,69 @@ pub fn write_str_atomically(path: &Path, contents: &str) -> io::Result<()> {
     write_atomically(path, contents.as_bytes())
 }
 
+/// Copy `src` to `dest` so that `dest` never exists in a partial state.
+///
+/// `fs::copy` writes straight into the destination, so an interrupted copy
+/// leaves a truncated file *at the destination's final name*. That is merely
+/// bad for a plain file copy and actively dangerous for a content-addressed
+/// store, where a file's presence at a hash-derived path is taken as proof
+/// that the hash's content is there: one interrupted copy makes every future
+/// deduplication against that hash hand back truncated data, forever, with no
+/// error anywhere.
+///
+/// The copy therefore goes to a temporary in the destination's directory and
+/// is renamed into place only once it is complete and flushed.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] if the source cannot be read, the
+/// destination directory cannot be written, or the rename fails. On any
+/// failure `dest` is untouched and no temporary is left behind.
+pub fn copy_atomically(src: &Path, dest: &Path) -> io::Result<u64> {
+    let target = fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf());
+    let parent = target.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir: PathBuf = parent.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+
+    // Create the temporary through the same exclusive path the write uses, so
+    // two concurrent copies of the same blob cannot share one temporary.
+    let (file, tmp_path) = create_temp_in(&dir, &target)?;
+    // `fs::copy` needs to open the destination itself, and it is worth keeping
+    // rather than hand-rolling a read/write loop: it uses the platform's
+    // accelerated path (`CopyFileEx`, `copy_file_range`) where one exists.
+    drop(file);
+
+    let copied = match fs::copy(src, &tmp_path) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path); // Best effort; the copy error is the one worth reporting.
+            return Err(e);
+        }
+    };
+
+    // Flush before the rename, for the same reason as in `write_atomically`:
+    // a rename that reaches the disk ahead of the data leaves a
+    // correctly-named file full of nothing.
+    //
+    // Reopened for *write*: `sync_all` issues a flush, which Windows refuses
+    // on a read-only handle with ERROR_ACCESS_DENIED. A read handle here made
+    // every copy fail.
+    if let Err(e) = fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp_path)
+        .and_then(|f| f.sync_all())
+    {
+        let _ = fs::remove_file(&tmp_path); // Best effort; the sync error is the one worth reporting.
+        return Err(e);
+    }
+
+    if let Err(e) = fs::rename(&tmp_path, &target) {
+        let _ = fs::remove_file(&tmp_path); // Best effort; the rename error is the one worth reporting.
+        return Err(e);
+    }
+
+    Ok(copied)
+}
+
 #[cfg(test)]
 mod tests {
     // A test that unwraps a failure should fail loudly at the line that did
@@ -326,6 +389,43 @@ mod tests {
         write_atomically(&path, b"").unwrap();
 
         assert_eq!(fs::read(&path).unwrap(), b"");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_copy_reproduces_the_source() {
+        let dir = temp_dir("copy_ok");
+        let src = dir.join("src.bin");
+        let dest = dir.join("dest.bin");
+        let body: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        fs::write(&src, &body).unwrap();
+
+        let n = copy_atomically(&src, &dest).unwrap();
+
+        assert_eq!(n, body.len() as u64);
+        assert_eq!(fs::read(&dest).unwrap(), body);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The content-addressed-store case: a copy that cannot complete must not
+    /// leave anything at the destination name, because a store treats the mere
+    /// presence of that name as proof the content is there.
+    #[test]
+    fn a_failed_copy_leaves_nothing_at_the_destination() {
+        let dir = temp_dir("copy_fail");
+        let dest = dir.join("blob");
+
+        let err = copy_atomically(&dir.join("no_such_source"), &dest).unwrap_err();
+
+        assert!(!dest.exists(), "a failed copy must not create the destination");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+        let _ = err;
+
         let _ = fs::remove_dir_all(&dir);
     }
 

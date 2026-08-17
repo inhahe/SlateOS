@@ -1353,6 +1353,20 @@ impl ContentStore {
     }
 
     /// Check if a blob exists in the store.
+    ///
+    /// Existence *is* the deduplication test — there is no hash verification
+    /// on this path — so it is only sound if a blob can never appear at its
+    /// final name in a partial state. That is why both store methods below go
+    /// through `safeio`: a blob is built under a temporary name and renamed
+    /// into place, so a blob that exists is a blob that is whole.
+    ///
+    /// Before that, an interrupted `fs::copy`/`fs::write` left a truncated
+    /// blob sitting at the hash's path. Nothing ever rechecked it, so every
+    /// later backup containing that content deduplicated against the damaged
+    /// copy and `store_*` cheerfully reported "already have it". One
+    /// interrupted write silently poisoned that content for every future
+    /// backup — in the one application whose entire purpose is that the data
+    /// survives.
     fn has_blob(&self, hash: &str) -> bool {
         self.blob_path(hash).exists()
     }
@@ -1368,7 +1382,7 @@ impl ContentStore {
             fs::create_dir_all(parent)?;
         }
 
-        fs::copy(source_path, &blob_path)?;
+        safeio::copy_atomically(source_path, &blob_path)?;
         Ok(true)
     }
 
@@ -1383,7 +1397,7 @@ impl ContentStore {
             fs::create_dir_all(parent)?;
         }
 
-        fs::write(&blob_path, data)?;
+        safeio::write_atomically(&blob_path, data)?;
         Ok(true)
     }
 
@@ -1844,9 +1858,20 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     let backup_dir = backups_dir(&opts.dest).join(&backup_id);
     fs::create_dir_all(&backup_dir)?;
 
-    // Write manifest
+    // Write manifest.
+    //
+    // The order of these two writes is load-bearing and must not be swapped:
+    // `list_backups` only counts a directory as a backup if `meta.json` is
+    // present *and* parses, so writing meta.json last makes it the completion
+    // marker. An interrupted backup leaves a directory with no meta, which is
+    // correctly ignored rather than offered to the user as restorable.
+    //
+    // Both go through `safeio` as well, so that neither file can exist in a
+    // half-written state even momentarily. That is belt-and-braces given the
+    // ordering above, and cheap enough to be worth not having the safety rest
+    // on a subtle argument that a future edit could invalidate silently.
     let manifest_str = manifest.serialize();
-    fs::write(backup_dir.join("manifest.json"), &manifest_str)?;
+    safeio::write_str_atomically(&backup_dir.join("manifest.json"), &manifest_str)?;
 
     // Write metadata
     let parent_id = parent_manifest.map(|(id, _)| id);
@@ -1862,7 +1887,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
         dedup_blobs,
     };
     let meta_str = meta.serialize();
-    fs::write(backup_dir.join("meta.json"), &meta_str)?;
+    safeio::write_str_atomically(&backup_dir.join("meta.json"), &meta_str)?;
 
     println!("\nBackup complete: {}", backup_id);
     println!("  Type: {}", effective_type);
@@ -1965,7 +1990,12 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
                     errors += 1;
                     continue;
                 }
-                fs::write(&dest_path, &data)?;
+                // Crash-safe: a restore usually writes *over* a file the user
+                // still has. `fs::write` truncates first, so an interrupted
+                // restore destroyed the existing file and failed to supply
+                // the replacement — the one outcome a restore must never
+                // produce.
+                safeio::write_atomically(&dest_path, &data)?;
                 restored += 1;
             }
             Err(e) => {
@@ -2304,7 +2334,9 @@ fn cmd_schedule(dest: &Path, source: &str, interval: &str) -> io::Result<()> {
     // Save
     let json_arr = JsonValue::Array(schedules.iter().map(|s| s.to_json()).collect());
     fs::create_dir_all(dest)?;
-    fs::write(&sched_path, json_pretty(&json_arr, 2))?;
+    // Crash-safe: this rewrites the whole schedule list, so a truncated write
+    // does not lose the one schedule being added — it loses all of them.
+    safeio::write_str_atomically(&sched_path, &json_pretty(&json_arr, 2))?;
 
     println!(
         "Schedule saved: {} -> {} ({})",

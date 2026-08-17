@@ -28583,7 +28583,8 @@ upstream C source rather than a black-box probe:
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
-**Status: OPEN — item 4 (step (c)) done 2026-08-17; 1, 2 and 3 remain.**
+**Status: OPEN — items 3 and 4 (steps (c) and (d)) done 2026-08-17; 1 and 2
+remain.**
 
 **Update 2026-08-17 — item 4 is fixed.** `draw_tokens` no longer emits a
 command per token. The toolkit gained a `RenderCommand::RichText`: one string,
@@ -28599,12 +28600,52 @@ pixels are unchanged for ordinary text. The kerning across token boundaries
 that the old comment accepted losing comes back for free, and the 2.3x cost of
 the decomposition goes with it.
 
-**What that leaves.** The output is still not correct under a right-to-left
-run, because item 3 is untouched: `draw_tokens` still slices the line at
-`scroll_col` and hands the renderer the tail, so the *spans* are now right but
-the *string being shaped* is still a substring — and the visible portion of a
-bidirectional line is not the shaping of a substring of it. Step (d) is next
-and is what makes the whole line the unit of shaping.
+**Update 2026-08-17 — item 3 is fixed too.** `Document::scroll_col`, a byte
+offset, is now `Document::scroll_px`, a pixel offset. The line is shaped once,
+whole, and *translated* left by `scroll_px` under a clip rectangle, instead of
+being sliced at a byte and the tail re-shaped. That is the difference between a
+window onto the correctly-ordered line and a separate shaping of part of it:
+the bidi algorithm resolves visual order from the whole paragraph, so a suffix
+can come out ordered differently from the way those same characters sit in the
+complete line — scrolling would have rearranged the text rather than slid it.
+`a_scroll_changes_only_where_the_line_is_drawn_not_what` is the regression
+guard; it asserts the drawn string and every span are *identical* at rest and
+scrolled, and only the `x` differs.
+
+Three things fell out of it:
+
+- **The "scrolled into the middle of a character" bug class is gone, not
+  guarded.** There is no slice left to land inside a character, so `rebase` lost
+  its scroll argument and became `span_end`, and the test that drove
+  `scroll_col` through every byte of `"café au lait"` was replaced by one
+  asserting a multi-byte line is drawn *whole* at every scroll position.
+- **The caret is measured over the whole prefix**, from byte 0, then shifted —
+  not measured from the scroll position. It therefore keeps the kerning that
+  used to be lost at the scroll boundary, and sits in the same coordinate
+  system as the glyphs it is placed among.
+- **`max_width` is measured from the shifted x**, since the renderer stops at
+  `x + max_width`. Getting that wrong is invisible until someone scrolls and
+  then truncates the line early by exactly the scroll distance;
+  `the_drawn_run_is_bounded_by_the_viewport` now asserts the stop lands on the
+  viewport edge at a non-zero scroll.
+
+Also added `EditorState::ensure_caret_visible_horizontally`, the companion to
+the existing `Document::ensure_cursor_visible` and the reason `scroll_px` is
+ever non-zero. **Note that neither is called by anything yet** — `apps/editor`
+has no live input loop; its `main()` is a demo harness, and the editor is a
+model plus a renderer driven by tests. Both are ready for the loop when it
+lands. (`ensure_cursor_visible` having sat uncalled since it was written is
+worth knowing: vertical auto-scroll is equally unwired, so a caret moved below
+the viewport vanishes today for the same reason a horizontal one used to.)
+
+**What that leaves.** Items 1 and 2 — the caret's x and the selection
+rectangles are still prefix-*width* sums, and under a right-to-left run the
+caret between two characters is not at the summed width of the bytes before
+it, nor is a selection one rectangle. Both need the shaped run's cluster
+positions rather than a measured width, which is step (e), and step (b)'s
+per-line shaped cache is what makes asking for those positions cheap. **(b) is
+now the head of the queue**, because (e) wants somewhere to ask for cluster
+positions and (b) is what provides it.
 
 **What.** `apps/editor` was left out of `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`
 above, and not because its arrow keys are fine — they have the same defect. It
@@ -28703,9 +28744,10 @@ the foundation and 3 and 4 both sit on it, so: (a) ~~measure the shaping cost on
 a pathological line and decide the caching question~~ — **done 2026-08-17; the
 answer is "cache it", and the numbers are in the shaping entry below**;
 ~~(c) convert `draw_tokens` to colour glyphs rather than slice strings (4)~~ —
-**done 2026-08-17, see the update at the top**; **(d) is now the head of the
-queue:** convert scrolling to
-pixels over the shaped run with clipping (3); (b) build the per-line shaped
+**done 2026-08-17, see the update at the top**;
+~~(d) convert scrolling to pixels over the shaped run with clipping (3)~~ —
+**done 2026-08-17, see the second update at the top**; **(b) is now the head of
+the queue:** build the per-line shaped
 cache keyed on document revision; (e) 1 and 2 then fall out as
 one-line substitutions to `text::caret_x` / `cursor_at` / `selection_boxes`,
 because by then the shaped line they need is already in hand. Motion (the arrow
@@ -29751,11 +29793,17 @@ selections, and the same machinery is the answer here.
 decorations }` — and have the renderer shape each style run, order the runs by
 the bidi algorithm over the whole line, then emit glyphs and, for each span,
 the set of rectangles its glyphs cover (which the decorations and the
-background are drawn into). That is a larger change than §455's, and it wants
+background are drawn into). That is a larger change than §455's, and it wanted
 `TD-EDITOR-IS-NOT-BIDIRECTIONAL` step (d) done first: (d) establishes
 shape-the-whole-line-and-clip in the editor, which is the same shape this
 needs, and doing them in the other order means designing the multi-run
 machinery against no caller.
+
+**That prerequisite is met as of 2026-08-17** — step (d) landed, and the
+pattern it establishes is worth copying verbatim here: shape the whole line,
+translate it under a clip rectangle rather than slicing it, and measure
+`max_width` from the *shifted* x. `apps/editor`'s `draw_tokens` is the worked
+example.
 
 **Severity.** Low today for the bidi part, same as the editor's:
 uni-directional text lays out correctly under the present code, and
@@ -29770,3 +29818,39 @@ visibly wrong on any proportional face, today, in English.
 `SimpleTextView`'s draw loop (~1090–1126) for the terminal-grid variant.
 `apps/markdowneditor/src/main.rs`: `col_x` (~139), the span draw loop
 (~2881–2898), and the caret at (~2902).
+
+## TD-EDITOR-HAS-NO-INPUT-LOOP (lane C, 2026-08-17)
+
+**What.** `apps/editor` is a document model plus a renderer with no way to
+drive it. `fn main()` is a demo harness that mutates a `Document`
+programmatically and prints to stdout; there is no key handler, no event
+dispatch, and no connection to the compositor. Every feature the editor has —
+undo/redo, find, folding, outline, structural selection, external-change
+merging, syntax highlighting — is reachable only from tests.
+
+**How it was found.** Wiring horizontal auto-scroll for
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL` step (d) needed a caller, and there was none.
+`Document::ensure_cursor_visible` turned out to have *zero* callers and to have
+had none since it was written: vertical auto-scroll is written, tested by
+nobody, and never runs. `EditorState::ensure_caret_visible_horizontally`, added
+by step (d), is in exactly the same position — correct, tested, and uncalled.
+
+**Why this matters more than it looks.** Two uncalled scroll functions is the
+visible symptom; the real cost is that *nothing* in the editor is exercised
+end to end. A model-level test can assert that `ensure_cursor_visible` moves
+`scroll_line`, but not that anything ever asks it to — and that is precisely
+the kind of defect that survives a green test suite. The longer the model
+grows without a driver, the more of it is written against an imagined caller.
+
+**The proper fix.** Give the editor a real event loop against
+`gui/remote`: connect, receive input events, translate them to the document
+operations that already exist, call `ensure_cursor_visible` and
+`ensure_caret_visible_horizontally` after any cursor movement, and push a
+`RenderTree` per frame. `apps/markdowneditor` has a working loop of this shape
+to copy from. The demo `main()` should become an example or a test, not be
+deleted — it is a compact tour of the model's API.
+
+**Severity.** High as a *blocker* (the editor cannot be used at all), low as a
+*defect* (nothing is wrong with what exists; it is only unreachable). Not
+urgent for correctness, but it should come before more model features are
+added, so that what is added is shaped by a real caller.

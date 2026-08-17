@@ -650,6 +650,9 @@ version = "0.1.0"
 [[package]]
 name = "backup-app"
 version = "0.1.0"
+dependencies = [
+ "safeio",
+]
 
 [[package]]
 name = "backuppc-cli"
@@ -2719,6 +2722,7 @@ version = "0.1.0"
 dependencies = [
  "diffcore",
  "guitk",
+ "safeio",
 ]
 
 [[package]]
@@ -4613,6 +4617,7 @@ name = "installer"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "safeio",
 ]
 
 [[package]]
@@ -5993,6 +5998,7 @@ version = "0.1.0"
 dependencies = [
  "diffcore",
  "guitk",
+ "safeio",
 ]
 
 [[package]]
@@ -7560,6 +7566,7 @@ version = "0.1.0"
 dependencies = [
  "byteread",
  "guitk",
+ "safeio",
 ]
 
 [[package]]
@@ -9013,6 +9020,10 @@ version = "0.1.0"
 
 [[package]]
 name = "safari-cli"
+version = "0.1.0"
+
+[[package]]
+name = "safeio"
 version = "0.1.0"
 
 [[package]]

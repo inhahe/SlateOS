@@ -28168,7 +28168,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 8 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 9 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28501,6 +28501,47 @@ is handled in `nl` instead: `ere` refuses an empty pattern on purpose (bash's
 `[[ x =~ "" ]]` is status 2) while glibc's `re_compile_pattern` accepts one and
 matches everywhere, so `Style::Matching` carries an `Option<Regex>` whose `None`
 is the empty expression.
+
+`expand` is the ninth (`scripts/expand-diff.sh`: 205 passed, 0 differed, 3
+differ on purpose — a directory operand, `--help`, `--version`). It brought the
+first *shared* module between two utilities rather than all of them:
+`userspace/coreutils/src/tabstops.rs`, a port of `expand-common.c`, which
+`unexpand` will call too. The old parser recognised only `-t N`, read the file
+through `lines()` as UTF-8 (corrupting every non-UTF-8 byte), used
+`unwrap_or(8)` so `-t bogus` silently became eight, and exited 0 no matter what
+went wrong. Four traps:
+
+- **A utility that emits padding will emit as much as you ask for, and a
+  harness case is not safe merely because it is valid.** `expand -t
+  18446744073709551615` is accepted by GNU and by us, and turns one tab into
+  2**64-1 spaces at ~11 MB/s. Two orphaned processes leaked 109 GB of temp
+  files before this was noticed. The fix is general, not per-case: **every**
+  invocation in `expand-diff.sh` runs under `timeout -k 2 30`, both sides. This
+  is the same class as `nl -w 2147483647` one conversion earlier, so treat it
+  as a standing rule when converting any utility that pads — `fold`, `pr`,
+  `printf`, `seq`, `yes`.
+- **The obsolete digit form is a different mechanism in `expand` and in
+  `unexpand`, though it looks like the same feature.** `expand`'s short string
+  is `"0::"`…`"9::"` — ten options with *optional* arguments — and it recovers
+  the whole cluster with `parse_tab_stops (optarg - 1)`, pointer arithmetic
+  back onto the digit itself, so `-4,8` is one list. `unexpand`'s is
+  `",0123456789at:"`: eleven **no-argument** options that accumulate a number
+  one digit at a time, with `,` flushing it, so `-1,3` is two stops and `-12`
+  is one at twelve. Porting the first to the second would be wrong in a way no
+  black-box probe of `-t` would ever reveal.
+- **A tab-stop diagnostic preempts every option after it**, because upstream's
+  `parse_tab_stops` calls `error` where it is found, inside the option loop —
+  so `expand -t x -Z` reports the bad tab stop and never mentions `-Z`. Ours
+  had to defer `finalize()` to after the loop while reporting *parse* errors in
+  place, since the ascending/zero/`+`-vs-`/` checks are the ones upstream also
+  defers to `finalize_tab_stops`.
+- **`-i` is evaluated against the byte as rewritten, not as read**, and
+  backspace is not blank. Upstream sets `convert &= entire_line || c == ' ' ||
+  c == '\t'` *after* a tab has already become a space, and `\b` falls through
+  that test to end the leading run while also rewinding both the column and the
+  index into the stop list — so `printf 'abc\b\tx\n' | expand -t 2,4` yields
+  two spaces, not one. A unit test asserting the intuitive answer failed; GNU
+  was right and the test was wrong.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 

@@ -6,6 +6,7 @@ description = "SlateOS Markdown Editor — split-view editor with live preview"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
 diffcore = { path = "../diffcore" }
+safeio = { path = "../safeio" }
 
 [lints]
 workspace = true

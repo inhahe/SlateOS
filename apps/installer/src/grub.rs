@@ -582,7 +582,12 @@ impl GrubInstaller {
         }
 
         let script = generate_custom_script(entry)?;
-        fs::write(&path, &script)?;
+        // Crash-safe: `fs::write` truncates first, so an interrupted write
+        // leaves a *partial shell script* in the custom-script directory —
+        // and `grub-mkconfig` executes whatever is there. A half-written
+        // script does not fail loudly; it silently contributes a malformed
+        // `grub.cfg`, which is not discovered until the next boot.
+        safeio::write_str_atomically(&path, &script)?;
 
         // Make the script executable (Unix).
         #[cfg(unix)]
@@ -620,7 +625,11 @@ impl GrubInstaller {
         }
 
         let script = generate_custom_script(entry)?;
-        fs::write(&path, &script)?;
+        // Crash-safe, and more important here than in `install`: this path
+        // overwrites an entry that is *already working*. A truncated write
+        // would replace a boot entry that boots with one that does not, which
+        // is a machine the user cannot start to fix it from.
+        safeio::write_str_atomically(&path, &script)?;
         Ok(())
     }
 

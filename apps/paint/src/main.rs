@@ -2025,10 +2025,16 @@ impl PaintApp {
     // ========================================================================
 
     /// Saves the flattened image as a BMP to the given path.
+    ///
+    /// Written through [`safeio::write_atomically`], not `fs::write`, which
+    /// truncates first: a save interrupted part-way used to leave the image on
+    /// disk as a fragment. An image is one blob behind a header, so a partial
+    /// write is not a partially-recovered picture — it is an unopenable file.
     pub fn save_bmp(&self, path: &str) -> Result<(), String> {
         let flat = self.flatten();
         let data = encode_bmp(&flat);
-        std::fs::write(path, &data).map_err(|e| format!("Failed to save BMP: {}", e))
+        safeio::write_atomically(std::path::Path::new(path), &data)
+            .map_err(|e| format!("Failed to save BMP: {e}"))
     }
 
     /// Loads a BMP file into the active layer (replaces its content).

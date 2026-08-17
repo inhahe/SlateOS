@@ -1,0 +1,10 @@
+[package]
+name = "safeio"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS shared crash-safe file writes — write-to-temporary-and-rename so an interrupted save can never truncate the file it was saving."
+
+[dependencies]
+
+[lints]
+workspace = true

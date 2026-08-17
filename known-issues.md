@@ -26352,3 +26352,983 @@ line. It is worth saying plainly that the comment next to the `let _ =`
 correctly described the bug ("we drop the data") and it still shipped — a
 documented data-loss path is still a data-loss path, and `todo.txt` is where
 that belongs, not a comment nobody greps.
+
+---
+
+## B-SYSTEMRESTORE-EXPORT-IMPORT-FLATTENED-THE-SNAPSHOT-TREE (lane C, 2026-08-16) — FIXED
+
+**In short:** System Restore keeps snapshots in a family tree — a big "full"
+snapshot, and under it a chain of small "incremental" ones that each record
+only what changed since the one before. Exporting the snapshots to a file and
+importing them back threw the family away: every snapshot came back as an
+unrelated orphan. Since an incremental snapshot is meaningless without knowing
+which snapshot it was taken against, importing a backup gave you a pile of
+deltas nobody could replay. Fixed: the import now rebuilds the tree.
+
+**Where:** `apps/systemrestore/src/main.rs`, `SnapshotManager::import_snapshots`.
+
+**The bug.** Every snapshot was added with `parent_id = None`, under a comment
+saying "Parent relationships from export are not guaranteed to exist". The
+parents do exist — they are right there in the same file. What is not
+guaranteed is that they appear *before* their children, and `add_snapshot`
+only accepts a parent that is already in the tree. So a real ordering problem
+was resolved by discarding the data instead of by reordering the work.
+
+**The fix.** Two passes. Pass 1 adds every snapshot detached and records
+`old id -> new id` in a remap (exported ids cannot be reused — they can
+collide with snapshots already in the tree). Pass 2 walks the imported
+snapshots again and re-links each one through the remap. A parent that is not
+in the file — an export of one sub-tree, or a hand-edited file — leaves that
+snapshot as a root rather than failing the import: losing a snapshot's
+position in the tree is recoverable, refusing the import loses the snapshot
+itself.
+
+**A hang, found on the way.** Re-linking needs a re-parenting operation, so
+`SnapshotTree::set_parent` is new — and re-parenting is what makes cycles
+reachable. A cycle here is not a wrong answer, it is a frozen application:
+`depth_of` and `ancestry_chain` follow parent links until they reach a root,
+and both run inside the GUI event loop. `set_parent` rejects a cycle at the
+mutation point, and both walks are *additionally* bounded by the snapshot
+count, so a tree corrupted by some other route (a future importer, a
+hand-edited file) still cannot hang the app. Defence in depth on purpose: the
+bound alone would give a wrong answer silently, and the rejection alone trusts
+that `set_parent` stays the only writer.
+
+**Also.** The two `let _ =` discards on `lock_snapshot` / `add_tag` in the same
+function became `?`. Neither can fail today (both only return `NotFound(id)`
+for an id `add_snapshot` just returned), so this is not a live bug — but a
+discarded result is how a later change to that guarantee would silently unlock
+a snapshot the user marked as protected, and the lock is the only thing
+stopping retention from pruning it.
+
+**Not a bug, checked and retracted:** `size_bytes` looked like it was lost too,
+since the export carries it and the import never sets it. It is not —
+`Snapshot::new` derives it from `components`, which *are* passed through, so it
+is reconstructed identically. Only the parent link was genuinely lost.
+
+**Tests:** `an_import_preserves_the_snapshot_chain`,
+`an_import_preserves_locks_and_tags`,
+`an_import_links_a_child_that_appears_before_its_parent`,
+`an_import_of_a_subtree_without_its_parent_keeps_the_snapshot`,
+`set_parent_refuses_to_create_a_cycle`,
+`set_parent_moves_a_snapshot_between_parents`, `set_parent_rejects_unknown_ids`.
+Injection-verified: disabling pass 2 fails exactly the two chain tests and
+nothing else.
+
+**Sweep note.** Third find of the `apps/**` sweep, and the third instance of
+the same shape as the explorer and PTY bugs — the app had the right answer in
+hand and dropped it. Worth noting how it differed, though: the explorer and
+PTY bugs were `let _ =` on a call, which greps. This one was an argument —
+a literal `None` passed where a value was available — which does not grep at
+all. It was found by reading the comment that justified it. A comment
+explaining why a value is being discarded is a reliable marker for this bug
+class, and a better one than the discard syntax, because it is written at
+exactly the moment the author knew they were cutting a corner.
+
+---
+
+## B-EXPLORER-RECYCLE-BIN-IDS-COULD-COLLIDE-AND-DESTROY-A-FILE (lane C, 2026-08-16) — FIXED
+
+**In short:** When you delete a file, the file explorer moves it into a recycle
+bin folder under a made-up name. The name was built from the file's own name
+plus the current time — so two files that share a name and are deleted at the
+same moment got the *same* made-up name, and the second one landed on top of
+the first. Selecting `projA/README.md` and `projB/README.md` and pressing
+Delete could therefore leave you with one of them, permanently, with no error
+message and nothing in the bin to undo it from. Fixed: the bin now asks the
+filesystem for a name nobody else has, instead of assuming the clock provided
+one.
+
+**Where:** `apps/explorer/src/fileops.rs`, `RecycleBin::recycle` / `make_id`.
+
+**The bug.** `make_id` returned `{file_name}_{hash}` where
+`hash = timestamp ^ (name.len() * K)` — for two files with the same name and
+the same length, the timestamp is the *only* thing that differs. `recycle`
+then did `fs::create_dir_all(&entry_dir)?`, which **succeeds when the
+directory already exists**. So a colliding id did not fail; it silently
+returned an existing entry's directory. `recycle` proceeded to overwrite that
+entry's `meta.txt` and then `move_path`'d its data onto the existing `data`
+file, and `fs::rename` overwrites. Net effect: the earlier file's contents and
+the record of where it came from were both gone.
+
+**The fix.** `create_entry_dir` uses `fs::create_dir`, which returns
+`AlreadyExists` rather than succeeding, and on collision tries `{base}-1`,
+`{base}-2`, … up to a bound. Uniqueness becomes something the filesystem
+enforces rather than something the clock is trusted to supply — which is also
+the only version that holds when two explorer processes share one bin, a case
+no clock-derived id can cover. The retry is bounded (4096) so a pathological
+bin cannot hang the explorer; exhausting it fails the delete, which leaves the
+file where it is, which is the recoverable outcome.
+
+**On reachability — stated plainly, because the first two tests I wrote
+passed.** This does *not* reproduce by calling `recycle` twice in a row: each
+call does enough filesystem I/O (create dir, write meta, rename data) to
+advance even a coarse clock, so consecutive ids differ in practice. Measured
+on this host, `SystemTime::now()` ticks at 100 ns and ~70% of back-to-back
+readings are identical — but "back to back" with a file rename in between is
+not back to back. So the guard against this bug was *timing*, not logic.
+
+That is still worth fixing rather than filing as theoretical, for three
+reasons: a coarser clock removes the guard entirely (some VMs expose ~15 ms
+granularity through the same API); two explorer processes sharing a bin remove
+it regardless of clock; and the failure mode is silent, unrecoverable
+destruction of a file the user only asked to put in the bin. A safety property
+that holds by accident is worth converting into one that holds by
+construction, especially when the conversion is six lines.
+
+**Test seam.** Because the accident hides the bug, `recycle_at(path, ts)` takes
+the clock as a parameter and `recycle` calls it with `now_nanos()`. The two new
+tests recycle at one fixed instant, which is what makes them able to fail.
+
+**Tests:** `two_same_named_files_recycled_together_both_survive`,
+`a_burst_of_same_named_files_keeps_every_one`. Injection-verified: restoring
+`create_dir_all` collapses 64 deleted files into a single bin entry and fails
+exactly these two.
+
+**Sweep note.** Fourth find of the `apps/**` sweep, and the first that is not
+the "computed the answer and threw it away" shape. This one is a different
+recurring shape worth naming: **an API that is permissive where the caller
+needed it to be strict.** `create_dir_all` succeeding on an existing directory
+is correct and documented; it was simply the wrong function to reach for when
+the whole point of the call was to claim a name. Related instance already
+fixed in this crate: `thumbs.rs`'s
+`two_names_differing_only_in_undecodable_units_do_not_share_a_cache_entry`.
+Worth grepping the rest of `apps/**` for `create_dir_all` on a path that is
+meant to be freshly claimed, and for `fs::rename` onto a path not verified to
+be free.
+
+---
+
+## B-EXPLORER-RENAME-OVERWROTE-AND-ESCAPED (lane C, 2026-08-16) — FIXED
+
+**In short:** Renaming a file in the explorer could delete a different file.
+If you renamed `draft.txt` to `notes.txt` while a `notes.txt` was already
+sitting in the folder, the old `notes.txt` was destroyed — no warning, no
+recycle bin, and the status bar said "Renamed to: notes.txt" as though
+everything was fine. Typing a name like `../notes.txt` was worse: it moved the
+file out of the folder you were looking at and clobbered whatever it landed
+on. Fixed: rename now refuses a name that is already taken, and refuses names
+that point outside the folder.
+
+**Where:** `apps/explorer/src/main.rs`, `ExplorerState::rename_entry` and
+`ExplorerState::create_folder`.
+
+**Three defects, one root cause: the typed name was trusted.**
+
+1. **Overwrite.** `fs::rename` overwrites its destination silently. The call
+   was unguarded, so any rename onto an existing name destroyed that file.
+2. **Directory escape.** `old_path.with_file_name(new_name)` does not
+   constrain the result to the same directory. `../taken.txt` produced
+   `dir/../taken.txt`, which resolves outside — so the rename both left the
+   folder and overwrote a file the user had not selected and could not see.
+   `create_folder` had the same hole through `current_path.join(name)`.
+3. **Non-names.** `""` makes `with_file_name` return the *parent directory*,
+   so an empty rename box operated on the directory itself. `.` and `..`
+   likewise.
+
+**The fix.** `validate_entry_name` rejects `""`, `.`, `..`, anything with `/`
+or `\`, and anything with a NUL. It deliberately does **not** impose Windows'
+character rules: `design.txt` specifies "all characters except `/` and null",
+and an explorer that refuses names the OS accepts is its own bug. `\` is
+rejected anyway because the app is developed and tested on Windows, where it
+is also a separator — a name that escapes only on the dev host is a bug found
+late. Then `rename_entry` refuses a destination that already exists.
+
+**Case-only renames still work.** `notes.txt` → `Notes.txt` is a legitimate
+rename, but on a case-insensitive filesystem the destination "exists" — it is
+the source. `is_same_file` canonicalises both sides so that case is allowed
+through. SlateOS's own filesystem is case-sensitive, where the two really are
+distinct and `canonicalize` reports them as such, so the same code is correct
+on both.
+
+**Known race, accepted deliberately.** Between `new_path.exists()` and
+`fs::rename` another process could create that file, and `std` has no portable
+"rename only if the destination is free" (`RENAME_NOREPLACE` is Linux-only;
+Windows needs `MoveFileEx` / `SetFileInformationByHandle`). The check is still
+right: the realistic trigger is a user typing a name they can *see* in the
+listing, not another process winning a microsecond. The `fileops` engine makes
+the same tradeoff. If SlateOS's VFS ever exposes an atomic no-replace rename,
+both call sites should move to it — noted here rather than in `todo.txt`
+because the fix is one call, not a project.
+
+**Reachability.** `rename_entry` and `create_folder` currently have no callers
+— they are the public API the UI layer is meant to wire to. So this was not
+yet user-reachable; fixing it now is what makes wiring them safe, and the
+alternative was a data-loss bug waiting behind a keybinding.
+
+**Tests:** `a_rename_onto_an_existing_file_does_not_destroy_it`,
+`a_rename_cannot_escape_the_current_directory`,
+`a_new_folder_cannot_escape_the_current_directory`,
+`a_rename_rejects_names_that_are_not_names`,
+`a_rename_to_the_same_name_is_harmless`, `an_ordinary_rename_still_renames`.
+The first three were written before the fix and observed failing, which is
+stronger evidence than injection after the fact.
+
+**Sweep note.** Fifth find, and it sharpens the fourth's lesson. The recycle
+bin bug and this one are the same shape — *an API permissive where the caller
+needed it strict* — but this one adds the more useful signal: **the codebase
+already knew.** `paste`'s doc comment says in as many words that it was
+rewritten because "it overwrote an existing destination file without asking",
+and `rename_entry` sat eleven lines away still doing exactly that. When a bug
+is fixed on one path, grep for the other callers of the same primitive before
+closing it out; the comment explaining the fix is itself the best search term.
+
+---
+
+## B-APPS-SAVING-A-DOCUMENT-COULD-DESTROY-IT (lane C, 2026-08-16) — FIXED for the editors, tracked below for the rest
+
+**In short:** Saving a file emptied it first and then wrote the new contents.
+If anything interrupted the save in between — the disk filling up, a USB stick
+pulled out, the app being killed, the power going — the file was left empty or
+half-written, permanently. Saving is the operation users perform *to protect*
+their work, so this turned the safety action into the thing that lost the work.
+Fixed for the text editor, markdown editor and paint: they now write a
+temporary file alongside and swap it into place in one step, so an interrupted
+save leaves the previous version untouched.
+
+**Where:** `std::fs::write` call sites across `apps/**`. The new shared crate
+is `apps/safeio`.
+
+**The mechanism.** `fs::write` opens with `O_TRUNC`: truncate, then write. The
+old contents are gone from the moment the file is opened, and the new contents
+arrive over some non-zero interval. Every byte of that interval is a window in
+which a crash leaves a file that is neither the old version nor the new one.
+The larger the document, the wider the window.
+
+**The fix.** `safeio::write_atomically` writes to a temporary in the target's
+own directory, `sync_all`s it, then `rename`s it over the target. `rename`
+within a directory is atomic, so there is no instant at which a reader can see
+a partial file, and an interruption anywhere leaves the original exactly as it
+was.
+
+**Five things that are easy to get wrong here, and what was done about each:**
+
+| Hazard | Why it bites | Handling |
+|---|---|---|
+| Temporary in `/tmp` | `rename` is only atomic within one filesystem; across a mount point it silently degrades to copy-then-delete, restoring the exact bug | Temporary is created in the target's own directory |
+| Symlinked target | rename-over replaces what it renames *onto*, so saving a symlinked dotfile would delete the symlink and leave a regular file | `canonicalize` first, replace the resolved file |
+| Permissions | the replacement is a brand-new file created with the process's default mode, so a private file could come back world-readable | copy the original's permissions onto the temporary before renaming |
+| Temporary name collisions | two concurrent saves picking one name write into each other's half-finished file | `create_new`, which fails rather than truncating, plus a per-process counter |
+| Open handle on Windows | Windows refuses to rename a file that is still open, so a naive version fails *every* save on the dev host | explicit `drop(file)` before the rename |
+
+**What it deliberately does not promise.** That the *new* contents survive a
+power loss. That needs the containing directory flushed too, which Windows
+cannot express (a directory cannot be opened as a file). The asymmetry is the
+whole point of the trade: losing the edit you just made is recoverable by
+making it again, whereas losing the file that existed *before* the save is not.
+
+**Remaining call sites — not yet converted, deliberately.**
+
+| Site | Assessment |
+|---|---|
+| `apps/installer/src/grub.rs` (4) | **Highest severity of the remainder.** A truncated `grub.cfg` is an unbootable machine, and the installer writes it exactly once with no chance to retry. Should be converted. Not done here only because the installer's write paths need reading as a whole first — they write several related files that must be consistent with each other, which is a stronger property than per-file atomicity and may want a different shape. |
+| `apps/backup/src/main.rs` (6) | Manifest and metadata for a backup set. A truncated `manifest.json` makes the whole backup unrestorable, so severity is high; same caveat as the installer about multi-file consistency. |
+| `apps/indexer/src/main.rs` (3) | Index + PID file. The index is a **cache**: a corrupt one costs a re-scan, not user data. Worth converting for the reduced startup pain, not urgent. |
+| `apps/screenshot/src/main.rs` (1) | Writes a new file to a new name; there is no previous version to destroy. The failure mode is a truncated PNG the user can see is broken and simply retake. Low. |
+| `apps/explorer/src/thumbs.rs` (1) | Thumbnail **cache**, regenerable by definition. Lowest. |
+
+The tiering is the point: atomicity is not free (an extra file creation and an
+fsync per save), and for a regenerable cache the naive write is the correct
+engineering choice, not an oversight. Converting all eight uniformly would have
+been the easy call and the wrong one.
+
+**Tests:** 9 in `apps/safeio`, including `a_failed_save_leaves_the_original_untouched`
+and `a_failed_save_cleans_up_after_itself` (failure injected portably by putting
+a directory where the target file should be, so the final rename fails on every
+platform), `concurrent_saves_do_not_share_a_temporary`, and
+`repeated_saves_of_one_file_all_land`.
+
+**Sweep note.** Sixth find, and the first that is *systemic* rather than local:
+the same defect in eight places because the standard library's most obvious
+function has a sharp edge that its name does not mention. Worth recording as a
+lesson about where to look next — the previous five finds were all "this call
+site is wrong", found by reading call sites. This one was found by asking a
+different question: **which std functions are dangerous by default, and who
+calls them?** That question generalises, and `fs::write` is unlikely to be the
+only answer. `fs::rename` (silently overwrites) already produced two finds
+today; `create_dir_all` (succeeds on an existing directory) produced one.
+
+### UPDATE 2026-08-16 (2) — the remaining sites, and a correction
+
+The table above tiered five remaining `fs::write` sites and deferred the
+installer and backup ones on the grounds that they "write several related
+files that must be consistent with each other". Having actually read them,
+**that was wrong in both directions**, which is worth recording as-is rather
+than quietly editing: I over-rated one and badly under-rated the other.
+
+**Under-rated: the backup blob store.** Not in the table at all, because the
+grep that produced the table found `fs::write` and this site's worse half is
+`fs::copy`. `CasStore::has_blob` is `path.exists()` — existence *is* the
+deduplication test, with no hash check on that path. An interrupted store left
+a **truncated blob at the hash's own path**, and nothing ever rechecked it. So
+every subsequent backup containing that content deduplicated against the
+damaged copy and reported "already have it". A single interrupted write
+silently poisons that content for every future backup, in the one application
+whose entire purpose is that the data survives — and the user finds out at
+restore time, which is the worst possible moment. This was the most severe
+find of the whole sweep, and the tiering exercise nearly missed it because it
+was framed around one function name.
+
+**Over-rated: the backup manifest.** The claimed multi-file consistency
+problem does not exist, and the existing code is already correct: `list_backups`
+counts a directory as a backup only if `meta.json` is present *and* parses, and
+`meta.json` is written last. So an interrupted backup leaves a directory
+without a valid meta and is correctly ignored rather than offered as
+restorable. That is a well-chosen completion-marker design that nothing in the
+code called out. It is now documented at the call site as load-bearing, because
+an invariant that only survives while nobody reorders two adjacent lines should
+say so.
+
+**Converted since:** the two GRUB script writes (`update` overwrites a *working*
+boot entry; `install` leaves a partial shell script that `grub-mkconfig`
+executes without complaint), the backup restore write (it writes over a file
+the user still has, so an interruption destroyed the original *and* failed to
+supply the replacement), the schedule list, and both CAS store paths. New
+`safeio::copy_atomically` covers the copy case.
+
+**Still deliberately not converted:** `apps/indexer` (index is a cache — a
+corrupt one costs a re-scan), `apps/screenshot` (writes a new name; no previous
+version to destroy), `apps/explorer/src/thumbs.rs` (thumbnail cache). The
+reasoning in the original table stands for these three.
+
+**Windows gotcha, cost about ten minutes:** `File::sync_all` on a handle opened
+for *reading* fails with `ERROR_ACCESS_DENIED`. `copy_atomically` reopens the
+temporary to flush it, and doing so read-only made every copy fail. Reopened
+for write.
+
+**Lesson for the rest of the sweep — the one worth keeping.** Both errors above
+came from tiering by *severity of the file* rather than by *what the code does
+with the file*. The manifest looked scary and was fine; a blob-store `fs::copy`
+looked routine and was the worst bug found. The question that separates them is
+not "how important is this file" but **"does anything downstream treat this
+file's existence as a promise about its contents?"** Where the answer is yes —
+a content-addressed store, a lockfile, a completion marker, a cache keyed by
+hash — a partial write is not corruption of one file, it is a false promise
+that propagates. Grep for `.exists()` used as a guard.
+
+## B-INDEXER-A-CRASHED-SERVICE-LOOKED-ALIVE-AND-`stop`-NEVER-STOPPED-IT (lane C, 2026-08-16) — FIXED
+
+**Status: FIXED 2026-08-16** (lane C, `606a6e514`).
+
+**In short:** the file indexer decided whether it was running by checking
+whether a file existed. That file survives a crash, so after one crash
+`indexer status` said "running" forever and there was no way to clear it short
+of deleting the file by hand. Separately, `indexer stop` never actually stopped
+anything — it deleted that file and printed "Stop signal sent." while the
+service carried on scanning your disk.
+
+### What the code did
+
+`apps/indexer/src/main.rs`, three commands sharing one wrong assumption:
+
+```rust
+fn cmd_status() {
+    let running = Path::new(PID_FILE).exists();      // <- the whole liveness test
+```
+
+```rust
+fn cmd_stop() {
+    match fs::read_to_string(PID_FILE) {
+        Ok(pid_str) => {
+            println!("Stopping indexer service (PID {})...", pid_str.trim());
+            // On Slate OS, we'd send an IPC shutdown message. For now, remove PID file.
+            fs::remove_file(PID_FILE)?;
+            println!("Stop signal sent.");           // <- nothing was sent
+```
+
+```rust
+fn cmd_start(config: &Config) {
+    // ... no check of any kind ...
+    if let Err(e) = write_pid_file() { eprintln!("warning: ..."); }
+```
+
+Three distinct failures fall out of that:
+
+1. **A crash is permanent.** `/var/indexer/indexer.pid` outlives a panic, a
+   kill and a power cut. `status` reports "running" from then on. `stop` reads
+   the stale pid, announces it is stopping PID N — a number that may by then
+   belong to an unrelated process — deletes the file and reports success.
+2. **`stop` was a no-op with a success message.** The comment says so outright.
+   The service kept rescanning and kept calling `index.save()`. The user, and
+   `status`, believed it was stopped. This is the worst of the three, because
+   the failure is *silent and in the opposite direction from the report*.
+3. **Two services could run at once.** `start` never looked. After a `stop`
+   (which stopped nothing) a second `start` succeeded, and both services then
+   wrote `/var/indexer/index.db`; whichever `save()` landed second won and the
+   other's whole scan was lost.
+
+### Why the shape matters
+
+This is the same defect as `B-APPS-SAVING-A-DOCUMENT-COULD-DESTROY-IT`, one
+level up: **something downstream treated a file's existence as a promise**. There
+the promise was about the file's *contents*; here it is about a *process being
+alive*. Both fail the same way — the file is trivially producible by an event
+that has nothing to do with the promise (an interrupted write; an abnormal
+exit), and nothing ever re-checks.
+
+The general lesson, recorded so the next sweep can use it as a search: a file's
+existence can only stand in for a fact that the filesystem itself maintains. It
+cannot stand in for a fact about a *running process*, because a file has no way
+to learn that a process died. Anything of the form "`X.pid`/`X.lock`/`X.running`
+exists, therefore X is alive" is wrong by construction, and no amount of careful
+cleanup on the exit paths fixes it — the exits that matter are the ones that do
+not run cleanup.
+
+### The fix
+
+Liveness is an **exclusive lock** (`std::fs::File::try_lock`, stable since
+1.89) held on `/var/indexer/indexer.lock` for the whole life of the service.
+The kernel drops the lock when the process exits by *any* route, so a dead
+service leaves nothing behind that claims otherwise. A new `ServiceControl`
+type owns the three files, and a `ServiceGuard` releases the lock and cleans up
+on drop.
+
+- `start` takes the lock, and exits 1 with "already running" if it cannot.
+- `status`/`stop` probe it with `try_lock` and release immediately.
+- `stop` writes a stop-request file, which the service polls for every 100 ms
+  while it sleeps between scans, then **waits for the lock to be released**
+  before reporting success — so it reports what happened, not what it asked
+  for. If the service does not exit within 30 s it says so and exits 1.
+- A stop request left over from a crash is discarded by the next `start`, so it
+  cannot stop a service it was never aimed at.
+
+Two details worth keeping:
+
+- **The pid lives in a separate file from the lock, and is display-only.**
+  Windows file locks are mandatory, not advisory: measured on this host, a
+  second process reading a locked file gets `Os { code: 33, "another process
+  has locked a portion of the file" }`. Putting the pid inside the lock file
+  would make it unreadable exactly when it is wanted. Being a separate file, it
+  can go stale — which is now harmless, because it is only ever read after the
+  lock has already said the service is alive.
+- **`start` retries a locked lock file for one second** before concluding a
+  real service holds it. `status` takes the same lock for an instant to answer
+  its question, and a `status` landing in that window would otherwise make a
+  legitimate `start` refuse.
+
+`stop`'s request file is a stand-in for the IPC shutdown message this will send
+once the service runs under Slate OS's service manager — Slate OS has no Unix
+signals for process control by design, so there is no signal to send instead.
+
+### Verification
+
+Eight tests, in `apps/indexer/src/main.rs`. The load-bearing one is
+`a_crashed_service_leaves_nothing_that_looks_alive`, which builds precisely the
+on-disk state a killed service leaves — lock file and pid file present, no lock
+held — and asserts `is_running()` is false. Re-introducing the old
+`self.pid_path().exists()` as the body of `is_running` was tried: that test, and
+only that test, went red (70 passed / 1 failed), then green again on revert.
+
+Note that `holding_the_lock_is_what_reports_a_running_service` passes *with* the
+injected bug, because a live service has a pid file too. That is the point — the
+happy path cannot distinguish the two implementations, which is why the bug
+survived in the first place, and why the regression test has to construct the
+crash state explicitly.
+
+Clippy: 150 non-test warnings before, 150 after (the first draft added three
+`clippy::arithmetic_side_effects` from `Instant + Duration`, which panics on
+overflow; rewritten to `Instant::elapsed` and `Duration::saturating_sub`).
+
+## B-EXPLORER-RESTORING-FROM-THE-RECYCLE-BIN-DESTROYED-THE-FILE-IN-ITS-PLACE (lane C, 2026-08-16) — FIXED
+
+**In short:** you delete `notes.txt`, then later make a *new* `notes.txt` in the
+same folder, then change your mind and restore the old one from the recycle
+bin. The old file landed on top of the new one and the new one was gone — not
+to the recycle bin, just gone. The recycle bin is the feature whose entire
+promise is "deleting is undoable"; it was the thing doing the undoable
+deleting. Fixed: a restore that finds something already at the original path
+now lands beside it as `notes (2).txt`, and reports where it actually put the
+file.
+
+### The bug
+
+`RecycleBin::restore` in `apps/explorer/src/fileops.rs` moved the recycled data
+straight to the path recorded at delete time:
+
+```rust
+pub fn restore(&self, entry_id: &str) -> io::Result<()> {
+    let entry = self.read_entry(entry_id)?;
+    let data_path = self.root.join(entry_id).join("data");
+    if let Some(parent) = entry.original_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    move_path(&data_path, &entry.original_path)?;   // <-- unconditional
+    …
+}
+```
+
+Nothing checked whether `original_path` was still free. `move_path` overwrites,
+so whatever occupied the path was destroyed in place.
+
+The rest of the explorer already knew better — `resolve_rename` (same file) is
+exactly the "pick a free `name (2)` variant" helper the copy/move engine uses on
+a name collision, and had been for as long as the engine has existed. The
+recycle bin simply never called it. This is the same shape as
+`B-EXPLORER-RENAME-OVERWROTE-AND-ESCAPED` above: the conflict policy existed and
+one code path did not consult it.
+
+Two aggravating details:
+
+- **The window is unbounded.** A copy/move collision happens while the user is
+  watching a progress dialog. A restore collision happens an arbitrary time
+  after the delete, against a file the user made in between and has no reason to
+  associate with the recycle bin at all.
+- **The destroyed file did not go to the recycle bin either.** There was nothing
+  left to recover from anywhere.
+
+### The fix
+
+`restore` now returns `io::Result<PathBuf>` — **where the file actually landed**,
+which is what the caller must show the user:
+
+```rust
+let dest = if entry.original_path.exists() {
+    resolve_rename(&entry.original_path)
+} else {
+    entry.original_path.clone()
+};
+move_path(&data_path, &dest)?;
+```
+
+Returning the path rather than silently relocating matters: a restore that puts
+your file somewhere other than where you asked, and does not say so, is only
+marginally better than one that overwrites.
+
+The gap between the `exists()` check and the move is a genuine race that `std`
+alone cannot close — there is no "rename only if the destination is free" in the
+standard library. The same tradeoff is already documented on the engine's
+conflict handling; narrowing it needs a platform primitive we do not have yet.
+
+While in there, the entry-directory cleanup after a successful restore stopped
+discarding its errors. A `meta.txt` that outlives its `data` leaves an entry
+`list` still shows and `restore` can never satisfy again, and the user's only
+clue would be the failure of some restore attempted much later.
+
+### Verification
+
+Three tests in `apps/explorer/src/fileops.rs`:
+`restoring_over_a_newer_file_of_the_same_name_keeps_both`,
+`restoring_to_a_free_path_uses_the_original_name`, and
+`restoring_a_directory_does_not_merge_into_one_that_is_in_the_way`.
+
+Re-introducing the bug (`let dest = entry.original_path.clone();`) turned
+exactly two of them red — the newer-file one and the directory one — and only
+those, out of 207 (205 passed / 2 failed). Green again on revert.
+`restoring_to_a_free_path_uses_the_original_name` passes *with* the bug, as it
+must: on a free path the two implementations are identical. That is the
+happy-path blindness that let this survive.
+
+Clippy: explorer 46 non-test warnings before, 46 after.
+
+## B-EXPLORER-THE-DROP-ONTO-MY-OWN-SUBFOLDER-CHECK-COULD-BE-WALKED-AROUND (lane C, 2026-08-16) — FIXED
+
+**In short:** dragging a folder onto a folder inside itself is refused, because
+doing it would move a directory into its own descendant and lose the whole
+subtree. The refusal compared the two paths as *text*, so writing the same
+destination a different way — `photos/2024/../2024/summer`, or via a symlink —
+slipped past it. Fixed by resolving both paths on the filesystem before
+comparing.
+
+### The bug
+
+`check_nested_drop` in `apps/explorer/src/dropzone.rs`:
+
+```rust
+for src in sources {
+    if src == target_dir { … }
+    if target_dir.starts_with(src) { … }
+}
+```
+
+`Path::starts_with` is a component-wise *textual* comparison. It does not
+resolve `..`, and it does not know what a symlink points at. So
+`check_nested_drop(&["/a/b"], "/a/b/c/../c")` is refused (the prefix is still
+literally there) but `check_nested_drop(&["/a/b"], "/a/x/../b/c")` is not — the
+literal prefix is `/a/x`, while the real target is `/a/b/c`, inside the source.
+
+### The fix
+
+Both sides are canonicalized before comparison, falling back to the literal path
+when the filesystem cannot answer (a target that does not exist yet, a
+permission error) — a check that refuses to run is worse than one that runs on
+the text:
+
+```rust
+let real_target = canonical_or_literal(target_dir);
+for src in sources {
+    let real_src = canonical_or_literal(src);
+    …
+}
+```
+
+Error messages still quote the path the *user* typed or dragged, not its
+canonical form; being told about `/mnt/data/photos` when you dragged
+`~/photos` is a worse message even though it is a truer path.
+
+### Status and scope
+
+`apps/explorer/src/dropzone.rs` is **dead code today** — the module carries
+`#![allow(dead_code)]`, `main.rs` has only `mod dropzone;`, and nothing calls
+`check_nested_drop`. It is the drag-and-drop plumbing waiting on the toolkit's
+drop events. Fixed now rather than when it is wired up, because the wiring is
+where attention will be on the event flow, not on a containment predicate that
+already looks correct.
+
+### Verification
+
+`nested_drop_sees_through_a_parent_component`, in the same file: builds a real
+directory tree, then aims a drop at the source's own child written with a `..`
+detour, and asserts it is refused. It fails against the old textual comparison.
+
+## B-BACKUP-`prune`-DELETED-THE-BACKUP-EVERY-BACKUP-IT-KEPT-DEPENDED-ON (lane C, 2026-08-16) — FIXED
+
+**In short:** `backup prune --keep-last 3` said it kept your three newest
+backups. Two of those three could not be restored afterwards, and the data was
+physically deleted from disk. The three newest are usually *incremental* —
+each stores only what changed since the one before, so restoring any of them
+needs the older full backup at the start of the chain. Pruning by age deleted
+exactly that one, then deleted its file contents as unreferenced, printed
+"Prune complete" and exited 0. You would find out the next time you tried to
+restore. Fixed: pruning now keeps the whole chain a kept backup depends on, and
+says so.
+
+### The bug
+
+`compute_retention` in `apps/backup/src/main.rs` selected purely by age —
+`keep_last`, `keep_daily`, `keep_weekly`, `keep_monthly` — and knew nothing
+about `parent_id`. For the standard usage pattern (one full backup, then
+incrementals forever) that is precisely the wrong selection: the newest N are
+all incrementals, and the one thing they all need is the oldest.
+
+Then `cmd_prune`'s garbage collector removed every blob no *surviving* manifest
+referenced. The full backup's blobs — which is to say, the actual file contents
+— were referenced only by the manifest just deleted.
+
+The two halves compound. Deleting the base manifest alone would be recoverable
+in principle, since the blobs would still be there. Deleting the blobs too is
+not recoverable by anything.
+
+### A second, independent way the same GC destroyed data
+
+```rust
+if let Ok(manifest) = load_manifest(&opts.dest, &meta.id) {
+    for entry in &manifest.files { referenced_hashes.insert(entry.hash.clone()); }
+}
+```
+
+A manifest that failed to load contributed **no hashes**, so every blob only it
+referenced was collected as an orphan. One unreadable manifest — a transient
+I/O error, a permissions problem, a partial write — silently destroyed the file
+contents of a backup that was being *kept*. The `if let Ok` reads as caution;
+it is the opposite.
+
+### The fix
+
+`compute_retention` now returns a `Retention` struct, and runs `keep_ancestors`
+over the policy's selection: walk `parent_id` from every selected backup and
+hold everything on the way to the root. A `parent_id` naming a backup not
+present is deliberately **not** invented — keeping a phantom id would report
+that we are holding a backup that does not exist. It is returned as a broken
+chain and reported to the user, because its child cannot be restored either
+way and that is worth saying out loud rather than keeping a corpse.
+
+`insert` returning false is also what terminates a `parent_id` cycle in
+hand-edited or corrupt metadata.
+
+The manifest read in the GC is now propagated, with a message naming the
+consequence:
+
+> refusing to collect unreferenced blobs: cannot read the manifest for backup
+> {id}: {e}. Blobs it references would be deleted as orphans.
+
+Refusing to prune is recoverable; deleting blobs is not. That asymmetry is the
+whole argument.
+
+`prune` reports both `Keeping N older backup(s) that newer ones are built on
+top of:` and any broken chains. For a purely linear chain this can make `prune`
+a near no-op — which is the correct behaviour, and is now visible rather than
+silent.
+
+### Verification
+
+Five tests. Neutralising `keep_ancestors` turns exactly the four chain tests
+red out of 63, and only those. `independent_full_backups_are_pruned_as_the_policy_says`
+stays green, as it must: with no chains the two implementations agree, which is
+exactly why this survived — anyone testing prune with standalone full backups
+sees correct behaviour.
+
+Also covered: a `parent_id` cycle does not hang the prune, and a parent that is
+already gone is reported rather than invented.
+
+## B-BACKUP-`restore`-WROTE-OUTSIDE-ITS-DESTINATION-AND-EXITED-0-AFTER-FAILING (lane C, 2026-08-16) — FIXED
+
+**In short:** `backup restore --dest /tmp/check` was supposed to put everything
+under `/tmp/check`. Some entries were written to absolute paths instead — a
+backup of `/etc` could restore straight over the live `/etc`. Separately, a
+restore in which every single file failed still printed a summary and exited 0,
+so `backup restore … && rm -rf original/` would delete the original after
+restoring nothing. Both fixed; the restore now refuses out-of-destination paths
+and returns an error when anything failed.
+
+### The bug
+
+Three defects in `cmd_restore`, `apps/backup/src/main.rs`.
+
+**1. `Path::join` replaces its base when the argument is absolute.**
+
+```rust
+let dest_path = opts.restore_dest.join(&entry.path);
+```
+
+`Path::new("/tmp/check").join("/etc/passwd")` is `/etc/passwd`. This is the
+classic archive-traversal ("zip slip") vector, and it is *not* hypothetical
+here — the backup program puts absolute paths in its own manifests.
+`relative_path` is `full.strip_prefix(base).unwrap_or(full)`: whenever the
+prefix does not match, the full absolute path is stored. `..` components were
+equally unchecked, and reach anywhere the absolute case does.
+
+**2. Failure was reported as success.**
+
+```rust
+println!("\nRestore complete:");
+println!("  Files restored: {restored}");
+if errors > 0 { println!("  Errors: {errors}"); }
+Ok(())
+```
+
+Exit status 0, and the word "complete", after restoring nothing. Any script
+that guards a deletion on the restore succeeding was guarding on a constant.
+
+**3. Symlink creation results were discarded.**
+
+```rust
+std::os::unix::fs::symlink(target, &dest_path).ok();
+restored += 1;
+```
+
+Counted as restored whether or not the link was made, so a restore that
+dropped every symlink reported complete success. An `is_symlink` entry with no
+`link_target` was silently skipped and also counted.
+
+### The fix
+
+A new pure function, `restore_path_within(dest_root, rel) -> Option<PathBuf>`,
+walks the components and **refuses** — returns `None` — for `ParentDir`,
+`RootDir` or `Prefix`, and for a path with no `Normal` component at all (which
+names the destination directory itself, not a file).
+
+Refusing rather than sanitising is the deliberate choice, and it is specific to
+*restore*. Silently rewriting `/etc/passwd` to `<dest>/etc/passwd` would put
+the user's data somewhere they did not ask for with no way to notice; a
+refusal, counted as an error, is visible and the restore of everything else
+still proceeds.
+
+Failures are counted per entry and the run returns `io::Error` at the end if
+any occurred. Directory-creation failures stay counted rather than propagated —
+one unwritable directory must not strand the other several thousand files —
+but they now reach the exit status.
+
+### Verification
+
+Five tests for `restore_path_within`: the ordinary relative case (including `.`
+noise), an absolute entry, a `..` climb, an entry naming no file at all, and a
+Windows drive prefix (`#[cfg(windows)]`).
+
+Clippy: this work also converted the file's path formatting from `{:?}` to
+`.display()` and the restore counters to `saturating_add`, taking backup-app
+from 198 non-test warnings to 183.
+
+### Still open in this program
+
+- **The blob GC can delete the blobs of an *in-progress* backup.** `meta.json`
+  is written last, so a backup still being written is invisible to
+  `list_backups`, and a concurrent `prune` sees its already-stored blobs as
+  unreferenced. Needs the same kind of liveness primitive the indexer now uses
+  (an OS-held lock on the destination), not a marker file. Not fixed.
+
+## B-IMAGEVIEWER-A-FILE-IT-COULD-NOT-OPEN-LEFT-THE-PREVIOUS-PICTURE-ON-SCREEN (lane C, 2026-08-16) — FIXED
+
+**In short:** Open a photo, then open a second file the viewer cannot read — a
+damaged download, a file on a disconnected drive, a name typed slightly wrong.
+The viewer showed the **first** photo still, but labelled it with the **second**
+file's name, and told you its size and dimensions were the first photo's. There
+was no message anywhere saying the second file had failed to load. So the
+program confidently showed you the wrong picture under the right name, which is
+worse than showing nothing: you would have no reason to doubt it. Running
+`imageviewer sometypo.jpg` from a command line was the same story — it printed
+nothing, opened an empty window, and reported success.
+
+**Where:** `apps/imageviewer/src/main.rs`, `ViewerState::display_image`, and the
+argument handling in `main`.
+
+**What was wrong**
+
+`display_image` mutated the existing `self.image_info` one field at a time and
+never touched `self.current_image` on the failure path:
+
+- When `std::fs::read` failed it set the filename and returned, leaving
+  `current_image` holding the previous file's decoded placeholder and
+  `image_info` holding the previous file's `file_size`, `width`, `height`,
+  `format` and `date_modified`.
+- Even when the read *succeeded*, any field the new file did not supply kept
+  the old file's value, because the struct was updated rather than rebuilt. A
+  readable file whose dimensions could not be parsed therefore displayed the
+  previous image's dimensions. This is the same bug in a second place, and it
+  is the half that survives any fix aimed only at the read error.
+- `display_image` returned nothing, so no caller could tell a load had failed.
+- `main` guarded on `path.exists()` with no `else` branch. Existence is not the
+  question — a path can exist and still be unreadable (permissions, an I/O
+  error, a directory) — and when it did not exist the program said nothing at
+  all and exited 0.
+
+**The general shape.** This is the same rule the rest of this sweep has been
+following, in its display form: *a field that is not overwritten is not blank,
+it is stale.* Building a fresh value and assigning it once makes "I did not set
+this" and "this is empty" the same state; updating in place makes them silently
+different. The failure path is where they diverge, and the failure path is the
+one nobody looks at.
+
+**The fix**
+
+- `ImageInfo` is built fresh from `ImageInfo::default()` on every call, so no
+  field can survive from the last image, and assigned to `self.image_info` in
+  one move.
+- On any read failure `current_image` is cleared, the transform is reset, and
+  the reason is stored in a new `ViewerState::load_error`.
+- `render_image` draws that reason in place of the picture — "Cannot display
+  this image" with the underlying error beneath it, elided to the canvas width
+  — instead of the "No image loaded / Open a file or drag an image here"
+  welcome text, which is a lie once a file has been chosen.
+- `display_image` and `open_file` return `bool`. `main` reports the reason on
+  stderr and exits 1. Directory navigation deliberately ignores the return
+  (`let _ = self.display_image(&path)`) with a comment: arrowing through a
+  folder must not stop dead at one bad file, it must show the failure and let
+  you keep going.
+
+**Tests** (`apps/imageviewer/src/main.rs`, 4 new, 103 pass):
+`a_file_that_will_not_open_does_not_keep_the_last_image_on_screen`,
+`a_failed_load_renders_its_reason_rather_than_the_welcome_text`,
+`a_successful_load_clears_the_previous_failure`,
+`navigation_onto_an_unreadable_file_shows_no_stale_dimensions`.
+
+**Verified by injection.** Restoring the read-error path reddens three of the
+four; restoring the field-by-field assignment reddens two (one of which the
+first injection does not touch, because its trigger file *is* readable). No
+pre-existing test fails under either — which is exactly why this shipped: every
+test anyone had written opened a file that worked.
+
+## B-RENAMER-A-BULK-RENAME-COULD-DESTROY-A-FILE-AND-REFUSED-THE-COMMON-CASE (lane C, 2026-08-16) — FIXED
+
+**In short:** The bulk renamer had two opposite problems at once. It **refused**
+the most ordinary bulk rename there is — shifting a numbered run, `1.jpg` to
+`2.jpg`, `2.jpg` to `3.jpg` and so on — reporting a conflict for every file,
+because it treated a name another file is *moving out of* as a name that is
+taken. And it would have **destroyed** a file in the renames it did allow,
+because it performed them in list order: told to swap two names, whichever move
+ran first would write over the other file. It also never updated the stored
+location of a renamed file, so a second rename in the same session acted on a
+file that was no longer there. Nothing here has reached a real filesystem yet
+(the rename is still in-memory), which is the only reason no data was lost.
+
+**Where:** `apps/renamer/src/main.rs` — `detect_conflicts`, `execute_rename`,
+`undo`, and the path rewriting inside them.
+
+**What was wrong**
+
+1. **The path was never updated.** `execute_rename` did:
+
+   ```rust
+   file.original_name = file.new_name.clone();
+   file.original_path = file.original_path.replace(&file.original_name, &file.new_name);
+   ```
+
+   The assignment happens *first*, so by the time `replace` runs both arguments
+   are the new name and the call is a no-op. `original_path` kept naming the
+   old file forever.
+
+   Fixing only the order would have left a second bug behind it. `str::replace`
+   substitutes **every** occurrence, and a path is not just a filename: a file
+   called `Nirvana` inside a folder called `Nirvana` becomes
+   `/music/Nevermind/Nevermind` — a path under a directory that does not exist.
+   A folder that merely *contains* the name is enough (`/report-archive/report`
+   → `/summary-archive/summary`). The replacement, `replace_file_name`, is
+   structural: it splits at the final separator and substitutes only what
+   follows it.
+
+2. **The conflict check asked the wrong question, twice.** It compared each
+   file's new name against every *other* file's **original** name:
+
+   ```rust
+   if i != j && orig.eq_ignore_ascii_case(&file.new_name) { file.conflict = true; }
+   ```
+
+   - Comparing against *original* names means a name that another file is
+     **vacating** counts as occupied. Shifting a numbered sequence — the single
+     most common bulk rename — was flagged as one conflict per file and refused
+     outright. That is not a collision; it is an **ordering constraint**.
+   - `eq_ignore_ascii_case` is wrong on this OS specifically. Slate OS has a
+     case-sensitive filesystem (`design.txt`), so `photo.jpg` and `PHOTO.jpg`
+     are two different files and renaming one to the other's case variant is a
+     legitimate rename. Being ASCII-only, it was not even *consistently*
+     case-insensitive for the names where a user might have expected it.
+
+   It now computes the name each file will **end up** with (its new name if
+   selected, its current name otherwise), counts those, and flags a file only
+   when its final name is shared — and compares exactly.
+
+3. **Nothing ordered the renames.** This became load-bearing the moment (2) was
+   fixed: permitting shifts and swaps means the *order* of the moves decides
+   whether a file survives. `a.txt → b.txt` and `b.txt → a.txt` performed in
+   list order loses a file whichever one runs first, and a shift performed
+   front-to-back overwrites each file with the one behind it.
+
+**The general shape.** A batch of renames is a graph, not a list. Each rename
+is an edge; a destination that is currently occupied by another *source* is a
+dependency, not a conflict. The distinction the old code could not draw is
+between a name that is occupied **permanently** (a real collision — refuse it)
+and one that is occupied **for now** (do it later). Only a true cycle has no
+valid order at all, and a cycle needs exactly one extra move to break.
+
+**The fix — `rename_plan`**
+
+Repeatedly emit every pending rename whose destination is currently free,
+updating the occupied set as it goes. When a full pass emits nothing, everything
+left is in a cycle: park one source under an unused temporary name
+(`.renamer-tmp-N`, chosen so it collides with nothing in the directory, *including
+a real file that happens to be called that*) and re-queue the remainder of that
+rename against the temporary. Renames where the name does not change are
+dropped up front — otherwise they are permanently "blocked" by themselves and
+get mistaken for a cycle.
+
+The output is an ordered `Vec<RenameStep>` that can be handed straight to
+`fs::rename` when this is wired to a real filesystem, which is the point:
+whoever wires it cannot reintroduce the clobber, because the ordering is not
+their responsibility any more. `execute_rename`, `undo` and `redo` all go
+through it — undoing a batch is itself a batch, and reversing a swap by walking
+the stored pairs in order clobbers exactly as the forward direction does.
+
+**Tests** (15 new, 83 pass), including `no_step_in_any_plan_overwrites_a_file`,
+which simulates the plan against a model directory and asserts the invariant
+that actually matters at every step — the source is present and the destination
+is free — across a forward shift, a backward shift, a two-cycle, a three-cycle,
+two independent cycles with a bystander, and a cycle with a tail.
+
+**Verified by injection.** Each of the three original behaviours was put back in
+turn: the unordered plan reddens 10 new tests, the path bug 4, the old conflict
+check 5. **No pre-existing test fails under any of them**, and the new tests
+that stay green under each injection are the happy-path ones —
+`two_files_renamed_to_the_same_name_are_flagged` and
+`colliding_with_a_file_that_is_not_being_renamed_is_flagged` pass with the old
+conflict check in place, because a genuine duplicate is the one case it got
+right. That is why all three shipped.
+
+**Still open in this program**
+
+- **The rename is still entirely in-memory.** `execute_rename` mutates the file
+  list and never calls `fs::rename`, so `rename_plan`'s ordering guarantee is
+  currently unexercised against a real filesystem. When it is wired up, the
+  plan must be executed step-by-step with the failure of any step aborting the
+  rest — a half-applied plan that has parked a file under `.renamer-tmp-N` and
+  then stopped leaves that file under a hidden name with nothing pointing at
+  it. The plan should be journalled, or the temporary parking undone on
+  failure. Not fixed; nothing to fix until the filesystem call exists.

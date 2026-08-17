@@ -1360,6 +1360,25 @@ pub struct RecycleBin {
 /// nightly toolchain for nothing but a nicer literal.
 const DEFAULT_RECYCLE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// How many candidate names a new recycle bin entry will try before failing.
+///
+/// Collisions come from same-named files recycled inside one clock tick, so
+/// the realistic worst case is a handful. The bound is generous enough never
+/// to be reached by that, and exists only so a pathological bin cannot spin
+/// forever.
+const MAX_ENTRY_ID_ATTEMPTS: usize = 4096;
+
+/// Nanoseconds since the Unix epoch, or 0 if the clock is before it.
+///
+/// A clock that cannot be read yields a usable-but-colliding id rather than
+/// failing the delete; [`RecycleBin::create_entry_dir`] resolves the collision,
+/// so the degraded case costs a suffix, not the user's file.
+fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+}
+
 impl RecycleBin {
     /// Create a new `RecycleBin` rooted at `root`.
     ///
@@ -1385,11 +1404,20 @@ impl RecycleBin {
     /// place of every undecodable byte, and restore would then have recreated
     /// the file under a different name.
     pub fn recycle(&self, path: &Path) -> io::Result<String> {
-        let id = self.make_id(path);
-        let entry_dir = self.root.join(&id);
-        let data_path = entry_dir.join("data");
+        self.recycle_at(path, now_nanos())
+    }
 
-        fs::create_dir_all(&entry_dir)?;
+    /// [`Self::recycle`] with the clock supplied by the caller.
+    ///
+    /// The seam exists so that the collision handling in
+    /// [`Self::create_entry_dir`] can be tested deterministically. Through
+    /// `recycle` the timestamps of two successive calls always differ, because
+    /// each call does enough filesystem work to advance even a coarse clock —
+    /// but that is an accident of timing, not a guarantee, and it is not one
+    /// the correctness of the bin should rest on.
+    fn recycle_at(&self, path: &Path, ts: u128) -> io::Result<String> {
+        let (id, entry_dir) = self.create_entry_dir(path, ts)?;
+        let data_path = entry_dir.join("data");
 
         // Write metadata *before* moving the data: if the move fails, the
         // orphaned metadata is harmless (`read_entry` reports size 0), whereas
@@ -1416,7 +1444,16 @@ impl RecycleBin {
         Ok(id)
     }
 
-    /// Restore a recycled item back to its original location.
+    /// Restore a recycled item, returning where it actually landed.
+    ///
+    /// **The return value is the path to show the user**, not
+    /// `entry.original_path`: if something else now occupies the original path,
+    /// the item is restored beside it under a `name (2)` variant rather than on
+    /// top of it. Restoring used to call [`move_path`] straight at the original
+    /// path, and `fs::rename` replaces its destination without a word — so
+    /// deleting `report.docx`, writing a new `report.docx`, then restoring the
+    /// old one from the bin destroyed the new one. It did not go to the bin
+    /// either; there was nothing left to recover.
     pub fn restore(&self, entry_id: &str) -> io::Result<PathBuf> {
         let entry = self.read_entry(entry_id)?;
         let data_path = self.root.join(entry_id).join("data");
@@ -1426,14 +1463,42 @@ impl RecycleBin {
             fs::create_dir_all(parent)?;
         }
 
-        move_path(&data_path, &entry.original_path)?;
+        // The gap between this check and the move is a race that `std` alone
+        // cannot close — there is no "rename only if the destination is free".
+        // The same tradeoff is documented on the engine's own conflict handling
+        // above; narrowing it needs a platform primitive we do not have here.
+        let dest = if entry.original_path.exists() {
+            resolve_rename(&entry.original_path)
+        } else {
+            entry.original_path.clone()
+        };
 
-        // Clean up the entry directory.
+        move_path(&data_path, &dest)?;
+
+        // Clean up the entry directory. Reported rather than ignored: a
+        // `meta.txt` that survives its `data` leaves an entry that `list` still
+        // shows and `restore` can no longer satisfy, and the user's only clue
+        // would be the failure of a restore they try much later.
         let entry_dir = self.root.join(entry_id);
-        let _ = fs::remove_file(entry_dir.join("meta.txt"));
-        let _ = fs::remove_dir(&entry_dir);
+        for path in [entry_dir.join("meta.txt"), entry_dir.clone()] {
+            let removed = if path == entry_dir {
+                fs::remove_dir(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            if let Err(e) = removed
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!(
+                    "warning: restored {} but could not clear its recycle bin entry {}: {}",
+                    dest.display(),
+                    path.display(),
+                    e
+                );
+            }
+        }
 
-        Ok(entry.original_path)
+        Ok(dest)
     }
 
     /// List all items in the recycle bin.
@@ -1514,18 +1579,69 @@ impl RecycleBin {
     // ------------------------------------------------------------------
 
     /// Generate a unique entry id from the file path and current time.
-    fn make_id(&self, path: &Path) -> String {
+    /// A *candidate* directory name for a new entry.
+    ///
+    /// This is a hint, not a unique key, and must not be treated as one. Its
+    /// only entropy is `ts`; two files that share a `file_name` and are
+    /// recycled within one tick of the system clock produce the same string.
+    /// That is not far-fetched — `SystemTime::now()` advances in 100 ns steps
+    /// on Windows, and deleting `projA/README.md` and `projB/README.md`
+    /// together is an ordinary multi-select. Uniqueness is enforced by
+    /// [`Self::create_entry_dir`], which asks the filesystem.
+    fn make_id(&self, path: &Path, ts: u128) -> String {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let ts = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
         // Simple hash to keep directory names manageable.
         let hash = ts ^ (name.len() as u128).wrapping_mul(0x517cc1b727220a95);
         format!("{name}_{hash:016x}")
+    }
+
+    /// Claim a fresh entry directory, returning its id and path.
+    ///
+    /// # Why the filesystem decides
+    ///
+    /// The previous code took [`Self::make_id`]'s output on trust and called
+    /// `create_dir_all`, which succeeds when the directory already exists. Two
+    /// entries landing on the same id therefore *shared* one directory: the
+    /// second `recycle` overwrote the first's `meta.txt` and then renamed its
+    /// `data` on top of the first's. One of the two deleted files ceased to
+    /// exist, silently — no error, and nothing in the bin to restore it from.
+    ///
+    /// `fs::create_dir` fails with `AlreadyExists` instead of succeeding, so
+    /// an entry directory is only ever used by the caller that created it.
+    /// Uniqueness is then a property the filesystem guarantees rather than one
+    /// the clock happens to provide, which also makes it hold across two
+    /// explorer processes sharing a bin.
+    fn create_entry_dir(&self, path: &Path, ts: u128) -> io::Result<(String, PathBuf)> {
+        fs::create_dir_all(&self.root)?;
+        let base = self.make_id(path, ts);
+
+        for attempt in 0..MAX_ENTRY_ID_ATTEMPTS {
+            // The first candidate is the unsuffixed name, so the common case
+            // of no collision leaves the on-disk layout exactly as before.
+            let id = if attempt == 0 {
+                base.clone()
+            } else {
+                format!("{base}-{attempt}")
+            };
+            let dir = self.root.join(&id);
+            match fs::create_dir(&dir) {
+                Ok(()) => return Ok((id, dir)),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Bounded rather than looping forever: a bin whose root has become
+        // unwritable in a way that reports `AlreadyExists` would otherwise
+        // hang the explorer. Failing the delete leaves the file where it is,
+        // which is the recoverable outcome.
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("could not find a free recycle bin entry name for {base}"),
+        ))
     }
 
     /// Read the metadata for a recycled entry.
@@ -2241,6 +2357,167 @@ mod tests {
         assert_eq!(restored, file_path);
         assert!(file_path.exists());
         assert_eq!(read_file(&file_path), "important data");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Delete a file, make a new one with the same name, then restore the old
+    /// one from the bin. The new file must survive.
+    ///
+    /// It did not. `restore` moved the recycled data straight onto
+    /// `entry.original_path`, and `fs::rename` replaces its destination
+    /// silently — so the newer file was destroyed by an action the user
+    /// understands as *recovering* a file, and it did not go to the bin either.
+    #[test]
+    fn restoring_over_a_newer_file_of_the_same_name_keeps_both() {
+        let dir = temp_dir("restore_conflict");
+        let bin_root = dir.join("bin");
+        let file_path = dir.join("report.docx");
+        write_file(&file_path, "the old draft");
+
+        let bin = RecycleBin::new(bin_root, Duration::from_secs(86400));
+        let id = bin.recycle(&file_path).expect("recycle");
+        assert!(!file_path.exists());
+
+        // The user moves on and writes a new file under the same name.
+        write_file(&file_path, "the new draft");
+
+        let restored = bin.restore(&id).expect("restore");
+
+        assert_eq!(
+            read_file(&file_path),
+            "the new draft",
+            "restoring must never overwrite a file the user made since"
+        );
+        assert_ne!(
+            restored, file_path,
+            "the restored copy has to land somewhere else, and say where"
+        );
+        assert_eq!(
+            read_file(&restored),
+            "the old draft",
+            "and the recycled contents must be what landed there"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The unoccupied case must be untouched: a restore with nothing in the
+    /// way still goes back to exactly where it came from, under its own name.
+    #[test]
+    fn restoring_to_a_free_path_uses_the_original_name() {
+        let dir = temp_dir("restore_free");
+        let bin_root = dir.join("bin");
+        let file_path = dir.join("notes.txt");
+        write_file(&file_path, "notes");
+
+        let bin = RecycleBin::new(bin_root, Duration::from_secs(86400));
+        let id = bin.recycle(&file_path).expect("recycle");
+        let restored = bin.restore(&id).expect("restore");
+
+        assert_eq!(restored, file_path, "no conflict, no renaming");
+        assert_eq!(read_file(&file_path), "notes");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A directory in the way is the same hazard with more to lose: the old
+    /// code's `move_path` fell back to `copy_tree`, which merges into an
+    /// existing directory and overwrites the same-named files inside it.
+    #[test]
+    fn restoring_a_directory_does_not_merge_into_one_that_is_in_the_way() {
+        let dir = temp_dir("restore_dir_conflict");
+        let bin_root = dir.join("bin");
+        let src_dir = dir.join("project");
+        fs::create_dir_all(&src_dir).expect("project");
+        write_file(&src_dir.join("main.rs"), "the old source");
+
+        let bin = RecycleBin::new(bin_root, Duration::from_secs(86400));
+        let id = bin.recycle(&src_dir).expect("recycle");
+
+        // A new, unrelated `project/` with a file of the same name.
+        fs::create_dir_all(&src_dir).expect("new project");
+        write_file(&src_dir.join("main.rs"), "the new source");
+
+        let restored = bin.restore(&id).expect("restore");
+
+        assert_eq!(
+            read_file(&src_dir.join("main.rs")),
+            "the new source",
+            "the directory in the way must not be merged into"
+        );
+        assert_eq!(read_file(&restored.join("main.rs")), "the old source");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Two files that share a name but live in different directories are an
+    /// entirely ordinary multi-select delete — `projA/README.md` and
+    /// `projB/README.md`. They must both survive it.
+    ///
+    /// They did not. The entry id was `{file_name}_{hash}` where the hash's
+    /// only entropy was `SystemTime::now()`, and on Windows that clock
+    /// advances in 100 ns ticks — measured here, ~70% of back-to-back readings
+    /// are *identical*. Two same-named files recycled in the same tick
+    /// therefore got the same id, and the second `recycle` overwrote the
+    /// first's metadata and then renamed its data on top of the first's data.
+    /// One of the two files was gone, with no error reported anywhere.
+    #[test]
+    fn two_same_named_files_recycled_together_both_survive() {
+        let dir = temp_dir("recycle_collide");
+        let bin = RecycleBin::new(dir.join("bin"), Duration::from_secs(86400));
+
+        // Both recycled at the *same* instant. Going through `recycle` would
+        // not reproduce this: each call does enough filesystem work to advance
+        // the clock, which is why the bug survived so long. The seam removes
+        // that accident so the collision handling is what is under test.
+        let a = dir.join("projA/README.md");
+        let b = dir.join("projB/README.md");
+        write_file(&a, "contents of A");
+        write_file(&b, "contents of B");
+        let id_a = bin.recycle_at(&a, 1_700_000_000_000_000_000).expect("recycle a");
+        let id_b = bin.recycle_at(&b, 1_700_000_000_000_000_000).expect("recycle b");
+
+        assert_ne!(id_a, id_b, "two different files must not share a bin entry");
+
+        let entries = bin.list().expect("list");
+        assert_eq!(entries.len(), 2, "both files must be listed in the bin");
+
+        // Both must restore, to their own original paths, with their own data.
+        let restored_a = bin.restore(&id_a).expect("restore a");
+        let restored_b = bin.restore(&id_b).expect("restore b");
+        assert_eq!(restored_a, a);
+        assert_eq!(restored_b, b);
+        assert_eq!(read_file(&a), "contents of A");
+        assert_eq!(read_file(&b), "contents of B");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The same collision, but at the scale a "delete this whole folder"
+    /// produces: many identically-named files, all recycled at one instant.
+    /// Uniqueness has to hold for all of them, not just for a pair.
+    #[test]
+    fn a_burst_of_same_named_files_keeps_every_one() {
+        let dir = temp_dir("recycle_burst");
+        let bin = RecycleBin::new(dir.join("bin"), Duration::from_secs(86400));
+
+        let mut ids = Vec::new();
+        for i in 0..64 {
+            let path = dir.join(format!("d{i}/notes.txt"));
+            write_file(&path, &format!("file {i}"));
+            ids.push((i, bin.recycle_at(&path, 4242).expect("recycle")));
+        }
+
+        let unique: std::collections::BTreeSet<&String> = ids.iter().map(|(_, id)| id).collect();
+        assert_eq!(unique.len(), ids.len(), "every entry needs its own id");
+        assert_eq!(bin.list().expect("list").len(), ids.len());
+
+        for (i, id) in &ids {
+            let restored = bin.restore(id).expect("restore");
+            assert_eq!(restored, dir.join(format!("d{i}/notes.txt")));
+            assert_eq!(read_file(&restored), format!("file {i}"));
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }

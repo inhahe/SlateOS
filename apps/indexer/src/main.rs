@@ -21,7 +21,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use textfmt::kv;
 
 // ============================================================================
@@ -30,7 +30,19 @@ use textfmt::kv;
 
 const CONFIG_PATH: &str = "/etc/indexer.conf";
 const INDEX_PATH: &str = "/var/indexer/index.db";
-const PID_FILE: &str = "/var/indexer/indexer.pid";
+/// Where the running service keeps its lock, pid and stop-request files.
+/// See [`ServiceControl`].
+const SERVICE_DIR: &str = "/var/indexer";
+/// How long `indexer stop` waits for the service to actually exit before it
+/// reports that it has not. A scan in progress is not interrupted, so this is
+/// generous enough to cover finishing one directory, not a whole rescan.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often anything waiting on the service re-checks: the service looking
+/// for a stop request, and `stop` looking for the service to have gone.
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How long `start` retries a locked lock file before concluding that a real
+/// service holds it rather than a passing `status` check.
+const LOCK_CONTENTION_GRACE: Duration = Duration::from_secs(1);
 const INDEX_MAGIC: &[u8; 4] = b"OIDX";
 /// Version 2 stores entry paths as their exact bytes. Version 1 wrote them
 /// through `to_string_lossy`, so any path that was not UTF-8 came back with
@@ -1320,6 +1332,219 @@ fn scan_directory_incremental(
 // Service Management
 // ============================================================================
 
+/// The control files the running service and the `stop`/`status` commands use
+/// to find each other.
+///
+/// The authority on "is the service running" is an **exclusive lock** held on
+/// [`Self::lock_path`] for the whole lifetime of the service process — never
+/// the existence of a file. The operating system drops the lock when the
+/// process exits by any route: a clean stop, a panic, a kill, a power cut. So
+/// there is nothing a dead service can leave behind that claims it is alive.
+///
+/// This replaced a liveness test that was `indexer.pid.exists()`. A pid file
+/// survives every one of those exits, so a single crash made `indexer status`
+/// report "running" for good, `indexer stop` report success against a process
+/// that was already gone, and — because nothing checked at all on the way in —
+/// a second `indexer start` quietly run a second service writing the same
+/// index file as the first.
+struct ServiceControl {
+    dir: PathBuf,
+}
+
+/// Proof that this process holds the service lock.
+///
+/// Dropping it releases the lock and removes the two files that only mean
+/// anything while the service is running.
+struct ServiceGuard {
+    control: ServiceControl,
+    /// Held solely for its lock; closing the handle is what releases it.
+    lock: fs::File,
+}
+
+impl ServiceControl {
+    fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    /// The file whose lock — not whose existence — means "a service is running".
+    fn lock_path(&self) -> PathBuf {
+        self.dir.join("indexer.lock")
+    }
+
+    /// The running service's process id, for a human to read.
+    ///
+    /// Display only. It is never consulted to decide whether the service is
+    /// running, so a copy left behind by a crash is harmless; a torn or absent
+    /// read just means the pid is not shown. It is deliberately a separate
+    /// file from the lock: Windows locks are mandatory, so another process
+    /// cannot read the bytes of a file the service has locked.
+    fn pid_path(&self) -> PathBuf {
+        self.dir.join("indexer.pid")
+    }
+
+    /// A request for the service to shut down at its next opportunity.
+    ///
+    /// A stand-in for the IPC shutdown message this will send once the service
+    /// runs under Slate OS's service manager; Slate OS has no Unix signals for
+    /// process control by design.
+    fn stop_path(&self) -> PathBuf {
+        self.dir.join("indexer.stop")
+    }
+
+    /// Take the service lock, or fail if another service already holds it.
+    ///
+    /// Returns an error of kind [`io::ErrorKind::WouldBlock`] when a service is
+    /// already running.
+    fn acquire(&self) -> io::Result<ServiceGuard> {
+        fs::create_dir_all(&self.dir)?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.lock_path())?;
+
+        // `is_running` below takes the same lock for an instant to answer its
+        // question, so a `status` that happens to land between these two lines
+        // would otherwise make a legitimate `start` report "already running".
+        // Retrying over a second costs nothing on a command that is about to
+        // walk the filesystem, and closes the window.
+        let mut waited = Duration::ZERO;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::Error(e)) => return Err(e),
+                Err(fs::TryLockError::WouldBlock) => {
+                    if waited >= LOCK_CONTENTION_GRACE {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "another indexer service is already running",
+                        ));
+                    }
+                    std::thread::sleep(STOP_POLL_INTERVAL);
+                    waited = waited.saturating_add(STOP_POLL_INTERVAL);
+                }
+            }
+        }
+
+        let guard = ServiceGuard {
+            control: Self::new(self.dir.clone()),
+            lock,
+        };
+        // A stop request that outlived the service it was meant for would stop
+        // this one before its first scan finished.
+        guard.control.clear_stop_request()?;
+        fs::write(guard.control.pid_path(), process::id().to_string())?;
+        Ok(guard)
+    }
+
+    /// Whether a service process is alive right now.
+    fn is_running(&self) -> io::Result<bool> {
+        let lock = match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.lock_path())
+        {
+            Ok(f) => f,
+            // No service has ever run here, so none is running now. Creating
+            // the file to answer the question would be a side effect on a
+            // read-only command.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        match lock.try_lock() {
+            Ok(()) => {
+                lock.unlock()?;
+                Ok(false)
+            }
+            Err(fs::TryLockError::WouldBlock) => Ok(true),
+            Err(fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
+    /// The pid the running service reported, if it can be read and parsed.
+    fn reported_pid(&self) -> Option<u32> {
+        fs::read_to_string(self.pid_path())
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+    }
+
+    fn request_stop(&self) -> io::Result<()> {
+        fs::create_dir_all(&self.dir)?;
+        fs::write(self.stop_path(), b"stop\n")
+    }
+
+    fn stop_requested(&self) -> bool {
+        self.stop_path().exists()
+    }
+
+    fn clear_stop_request(&self) -> io::Result<()> {
+        match fs::remove_file(self.stop_path()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Delete the files a crashed service left behind.
+    ///
+    /// Only correct to call once [`Self::is_running`] has said no.
+    fn clear_stale_files(&self) {
+        for path in [self.pid_path(), self.stop_path()] {
+            if let Err(e) = fs::remove_file(&path)
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!("warning: could not remove {}: {}", path.display(), e);
+            }
+        }
+    }
+
+    /// Wait for the running service to release its lock.
+    ///
+    /// `Ok(false)` means it was still holding it when `timeout` ran out.
+    fn wait_until_stopped(&self, timeout: Duration) -> io::Result<bool> {
+        let started = Instant::now();
+        loop {
+            if !self.is_running()? {
+                return Ok(true);
+            }
+            if started.elapsed() >= timeout {
+                return Ok(false);
+            }
+            std::thread::sleep(STOP_POLL_INTERVAL);
+        }
+    }
+}
+
+impl Drop for ServiceGuard {
+    fn drop(&mut self) {
+        // Before the lock goes, so nothing can observe "not running" with the
+        // pid file still in place. `lock` is declared after `control`, so the
+        // handle — and with it the lock — closes once this returns.
+        self.control.clear_stale_files();
+    }
+}
+
+/// Sleep until the next scan is due, returning early if a stop is requested.
+///
+/// Returns `true` if the service should shut down. The scan interval defaults
+/// to an hour, so a stop that waited for it to elapse would look like a hang.
+fn sleep_until_scan_or_stop(control: &ServiceControl, interval: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        if control.stop_requested() {
+            return true;
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= interval {
+            return false;
+        }
+        // Never overshoot the scan deadline just because a poll slice is
+        // longer than the time left.
+        std::thread::sleep(STOP_POLL_INTERVAL.min(interval.saturating_sub(elapsed)));
+    }
+}
+
 /// Start the indexer service (runs in foreground, for service manager to daemonize).
 fn cmd_start(config: &Config) {
     if !config.enabled {
@@ -1327,14 +1552,23 @@ fn cmd_start(config: &Config) {
         process::exit(1);
     }
 
+    // Taken before any work: two services indexing the same paths would write
+    // the same index file over each other, and the loser's scan is lost.
+    let guard = match ServiceControl::new(SERVICE_DIR).acquire() {
+        Ok(g) => g,
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            eprintln!("error: the indexer service is already running.");
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("error: could not take the service lock: {}", e);
+            process::exit(1);
+        }
+    };
+
     println!("Starting file indexer service...");
     println!("  Indexing paths: {:?}", config.index_paths);
     println!("  Scan interval: {} seconds", config.scan_interval_secs);
-
-    // Write PID file.
-    if let Err(e) = write_pid_file() {
-        eprintln!("warning: could not write PID file: {}", e);
-    }
 
     // Initial full scan.
     println!("Performing initial scan...");
@@ -1351,9 +1585,12 @@ fn cmd_start(config: &Config) {
         );
     }
 
-    // Main service loop: periodic rescan.
+    // Main service loop: periodic rescan, until asked to stop.
+    let interval = Duration::from_secs(config.scan_interval_secs);
     loop {
-        std::thread::sleep(Duration::from_secs(config.scan_interval_secs));
+        if sleep_until_scan_or_stop(&guard.control, interval) {
+            break;
+        }
 
         println!("Starting incremental rescan...");
         let stats = scan_incremental(config, &mut index);
@@ -1362,23 +1599,64 @@ fn cmd_start(config: &Config) {
         if let Err(e) = index.save() {
             eprintln!("error: failed to save index: {}", e);
         }
+
+        // A stop that arrived during the scan above: honour it now rather than
+        // sleeping out another whole interval first.
+        if guard.control.stop_requested() {
+            break;
+        }
     }
+
+    println!("Stop requested; shutting down.");
+    // Explicit so the order is visible: the lock and the control files go
+    // before the process does, not as a side effect of unwinding.
+    drop(guard);
 }
 
-/// Stop the indexer service by signaling the PID.
+/// Ask the indexer service to shut down, and wait until it has.
+///
+/// This used to delete the pid file and print "Stop signal sent." — nothing
+/// was ever signalled, so the service carried on scanning and saving while
+/// both the user and `indexer status` believed it had stopped.
 fn cmd_stop() {
-    match fs::read_to_string(PID_FILE) {
-        Ok(pid_str) => {
-            let pid = pid_str.trim();
-            println!("Stopping indexer service (PID {})...", pid);
-            // On Slate OS, we'd send an IPC shutdown message. For now, remove PID file.
-            if let Err(e) = fs::remove_file(PID_FILE) {
-                eprintln!("warning: could not remove PID file: {}", e);
-            }
-            println!("Stop signal sent.");
+    let control = ServiceControl::new(SERVICE_DIR);
+    match control.is_running() {
+        Ok(true) => {}
+        Ok(false) => {
+            // Whatever files are here outlived the service that wrote them.
+            control.clear_stale_files();
+            eprintln!("error: indexer does not appear to be running.");
+            process::exit(1);
         }
-        Err(_) => {
-            eprintln!("error: indexer does not appear to be running (no PID file).");
+        Err(e) => {
+            eprintln!("error: could not tell whether the indexer is running: {}", e);
+            process::exit(1);
+        }
+    }
+
+    match control.reported_pid() {
+        Some(pid) => println!("Stopping indexer service (PID {})...", pid),
+        None => println!("Stopping indexer service..."),
+    }
+
+    if let Err(e) = control.request_stop() {
+        eprintln!("error: could not write the stop request: {}", e);
+        process::exit(1);
+    }
+
+    match control.wait_until_stopped(STOP_TIMEOUT) {
+        Ok(true) => println!("Indexer service stopped."),
+        Ok(false) => {
+            eprintln!(
+                "error: the service is still running after {} seconds. \
+                 The stop request stays in place and will be honoured when \
+                 the scan in progress finishes.",
+                STOP_TIMEOUT.as_secs()
+            );
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("error: could not wait for the indexer to stop: {}", e);
             process::exit(1);
         }
     }
@@ -1386,11 +1664,17 @@ fn cmd_stop() {
 
 /// Show service status.
 fn cmd_status() {
-    let running = Path::new(PID_FILE).exists();
-    println!(
-        "Indexer service: {}",
-        if running { "running" } else { "stopped" }
-    );
+    let control = ServiceControl::new(SERVICE_DIR);
+    match control.is_running() {
+        Ok(true) => match control.reported_pid() {
+            Some(pid) => println!("Indexer service: running (PID {})", pid),
+            None => println!("Indexer service: running"),
+        },
+        Ok(false) => println!("Indexer service: stopped"),
+        // Reporting "stopped" because the check itself failed would be the
+        // same lie in a new place.
+        Err(e) => println!("Indexer service: unknown ({})", e),
+    }
 
     match FileIndex::load() {
         Ok(index) => {
@@ -1552,13 +1836,6 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
-}
-
-fn write_pid_file() -> io::Result<()> {
-    if let Some(parent) = Path::new(PID_FILE).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(PID_FILE, format!("{}", process::id()))
 }
 
 // ============================================================================
@@ -2585,5 +2862,174 @@ exclude_extensions = .o, .tmp
         });
         assert_eq!(index.file_count(), 2);
         assert!(index.name_lookup.contains_key("updated.txt"));
+    }
+
+    // ---- Service Control Tests ----
+
+    /// A directory of its own per test, so the locks never collide.
+    fn service_dir(label: &str) -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("indexer_svc_{label}_{ts}"));
+        fs::create_dir_all(&dir).expect("could not create the test directory");
+        dir
+    }
+
+    /// The bug this whole type exists to prevent: the files a service leaves
+    /// behind when it dies must not make it look alive.
+    #[test]
+    fn a_crashed_service_leaves_nothing_that_looks_alive() {
+        let dir = service_dir("crashed");
+        let control = ServiceControl::new(&dir);
+
+        // Exactly the state a killed service leaves: every file present, no
+        // lock held. The old liveness test was `indexer.pid.exists()`, which
+        // this satisfies.
+        fs::write(control.lock_path(), b"").unwrap();
+        fs::write(control.pid_path(), b"4242").unwrap();
+
+        assert!(
+            !control.is_running().unwrap(),
+            "a pid file outlives the process that wrote it; only the lock does not"
+        );
+
+        control.clear_stale_files();
+        assert!(!control.pid_path().exists(), "the stale pid file is cleaned up");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn holding_the_lock_is_what_reports_a_running_service() {
+        let dir = service_dir("running");
+        let control = ServiceControl::new(&dir);
+        assert!(!control.is_running().unwrap(), "nothing has run here yet");
+
+        let guard = control.acquire().unwrap();
+        assert!(control.is_running().unwrap());
+        assert_eq!(
+            control.reported_pid(),
+            Some(process::id()),
+            "the pid file names the process that holds the lock"
+        );
+
+        drop(guard);
+        assert!(
+            !control.is_running().unwrap(),
+            "releasing the lock is what makes the service stopped"
+        );
+        assert!(!control.pid_path().exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_second_service_cannot_start_alongside_the_first() {
+        let dir = service_dir("second");
+        let control = ServiceControl::new(&dir);
+        let first = control.acquire().unwrap();
+
+        let err = match control.acquire() {
+            Ok(_) => panic!("two services would write the same index over each other"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        drop(first);
+        // And once the first is gone, the second may take over.
+        let second = control.acquire().unwrap();
+        drop(second);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stop_request_is_visible_to_the_service_and_cleared_on_exit() {
+        let dir = service_dir("stopreq");
+        let control = ServiceControl::new(&dir);
+        let guard = control.acquire().unwrap();
+        assert!(!control.stop_requested());
+
+        control.request_stop().unwrap();
+        assert!(control.stop_requested());
+        assert!(
+            sleep_until_scan_or_stop(&control, Duration::from_secs(3600)),
+            "an hour-long sleep must return at once when a stop is pending"
+        );
+
+        drop(guard);
+        assert!(
+            !control.stop_requested(),
+            "an honoured request must not stop the next service too"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn starting_discards_a_stop_request_left_by_a_crash() {
+        let dir = service_dir("stalestop");
+        let control = ServiceControl::new(&dir);
+        control.request_stop().unwrap();
+
+        let guard = control.acquire().unwrap();
+        assert!(
+            !control.stop_requested(),
+            "a request aimed at a service that is already dead must not stop this one"
+        );
+
+        drop(guard);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn waiting_for_a_stop_returns_when_the_service_lets_go() {
+        let dir = service_dir("wait");
+        let control = ServiceControl::new(&dir);
+        let guard = control.acquire().unwrap();
+
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(guard);
+        });
+
+        assert!(
+            control.wait_until_stopped(Duration::from_secs(10)).unwrap(),
+            "the wait must end when the lock is released"
+        );
+        holder.join().unwrap();
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn waiting_gives_up_rather_than_hanging_on_a_service_that_will_not_go() {
+        let dir = service_dir("timeout");
+        let control = ServiceControl::new(&dir);
+        let guard = control.acquire().unwrap();
+
+        assert!(
+            !control
+                .wait_until_stopped(Duration::from_millis(200))
+                .unwrap(),
+            "a service that ignores the request must be reported, not waited on forever"
+        );
+
+        drop(guard);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_status_check_never_creates_the_lock_it_looks_for() {
+        let dir = service_dir("nocreate");
+        let control = ServiceControl::new(&dir);
+        assert!(!control.is_running().unwrap());
+        assert!(
+            !control.lock_path().exists(),
+            "`indexer status` must not leave state behind"
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

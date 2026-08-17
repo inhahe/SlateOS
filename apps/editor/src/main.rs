@@ -334,6 +334,13 @@ impl Document {
     }
 
     /// Save the document to its file path.
+    ///
+    /// Written through [`safeio::write_str_atomically`] rather than
+    /// `fs::write`. `fs::write` truncates the target *before* writing it, so a
+    /// save interrupted part-way — a full disk, a removed drive, a killed
+    /// process, a power loss — left the user's document on disk as a fragment
+    /// or as nothing at all. For a text editor that is the worst possible
+    /// failure, because the file *is* the user's only copy.
     pub fn save(&mut self) -> std::io::Result<()> {
         let path = self
             .path
@@ -341,7 +348,7 @@ impl Document {
             .ok_or_else(|| std::io::Error::other("no file path"))?;
 
         let content: String = self.lines.join(self.line_ending.chars());
-        fs::write(path, &content)?;
+        safeio::write_str_atomically(path, &content)?;
         self.modified = false;
         // Refresh the merge ancestor and mtime so the file we just wrote is not
         // mistaken for an external change on the next check.

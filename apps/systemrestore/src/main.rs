@@ -437,6 +437,73 @@ impl SnapshotTree {
         Ok(id)
     }
 
+    /// Re-parent an existing snapshot, or detach it with `parent_id = None`.
+    ///
+    /// # Why this exists
+    ///
+    /// [`Self::add_snapshot`] can only accept a parent that already exists, so
+    /// a caller restoring a whole tree from a file cannot always add snapshots
+    /// in an order that satisfies it — a child may appear before its parent.
+    /// Import does two passes instead: add everything detached, then link it up
+    /// through this.
+    ///
+    /// # Cycles
+    ///
+    /// A cycle would hang the application, not merely corrupt it:
+    /// [`Self::depth_of`] and [`Self::ancestry_chain`] walk parent links until
+    /// they reach a root, so a loop never terminates. Because the parent comes
+    /// from a file the user can edit, this rejects any link that would create
+    /// one, and reports it as `ParentNotFound` — the parent is not reachable as
+    /// an ancestor-free node, which is the same thing from the caller's side.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if `id` is not in the tree, `ParentNotFound` if the parent is
+    /// not in the tree or the link would create a cycle.
+    pub fn set_parent(&mut self, id: u64, parent_id: Option<u64>) -> Result<(), SnapshotError> {
+        if !self.snapshots.contains_key(&id) {
+            return Err(SnapshotError::NotFound(id));
+        }
+        if let Some(pid) = parent_id {
+            if pid == id || !self.snapshots.contains_key(&pid) {
+                return Err(SnapshotError::ParentNotFound(pid));
+            }
+            // Walking up from the proposed parent must reach a root without
+            // passing through `id`. Bounded by the tree size so a pre-existing
+            // cycle cannot hang this check either.
+            let mut cursor = Some(pid);
+            for _ in 0..=self.snapshots.len() {
+                match cursor {
+                    None => break,
+                    Some(c) if c == id => return Err(SnapshotError::ParentNotFound(pid)),
+                    Some(c) => cursor = self.snapshots.get(&c).and_then(|s| s.parent_id),
+                }
+            }
+            if cursor.is_some() {
+                // Ran out of steps with links still to follow: the existing
+                // chain is longer than the tree, i.e. already cyclic.
+                return Err(SnapshotError::ParentNotFound(pid));
+            }
+        }
+
+        let old_parent = self.snapshots.get(&id).and_then(|s| s.parent_id);
+        if old_parent == parent_id {
+            return Ok(());
+        }
+        if let Some(old) = old_parent
+            && let Some(siblings) = self.children.get_mut(&old)
+        {
+            siblings.retain(|&cid| cid != id);
+        }
+        if let Some(snap) = self.snapshots.get_mut(&id) {
+            snap.parent_id = parent_id;
+        }
+        if let Some(pid) = parent_id {
+            self.children.entry(pid).or_default().push(id);
+        }
+        Ok(())
+    }
+
     /// Remove a snapshot by ID. Fails if it has children (must delete leaf first).
     pub fn remove_snapshot(&mut self, id: u64) -> Result<Snapshot, SnapshotError> {
         // Check the snapshot exists.
@@ -520,25 +587,34 @@ impl SnapshotTree {
     }
 
     /// Get the depth of a snapshot in the tree (root = 0).
+    ///
+    /// The walk is bounded by the number of snapshots. `add_snapshot` and
+    /// `set_parent` both refuse links that would form a cycle, so the bound
+    /// should be unreachable — but this runs in a GUI event loop, where an
+    /// unbounded walk over a corrupt tree is not a wrong answer, it is a frozen
+    /// application the user has to kill.
     pub fn depth_of(&self, id: u64) -> usize {
         let mut depth = 0;
         let mut current = id;
-        while let Some(snap) = self.snapshots.get(&current) {
-            if let Some(pid) = snap.parent_id {
-                depth += 1;
-                current = pid;
-            } else {
-                break;
+        for _ in 0..self.snapshots.len() {
+            match self.snapshots.get(&current).and_then(|s| s.parent_id) {
+                Some(pid) => {
+                    depth += 1;
+                    current = pid;
+                }
+                None => break,
             }
         }
         depth
     }
 
     /// Get the full ancestry chain from root to the given snapshot (inclusive).
+    ///
+    /// Bounded for the same reason as [`Self::depth_of`].
     pub fn ancestry_chain(&self, id: u64) -> Vec<u64> {
         let mut chain = Vec::new();
         let mut current = id;
-        loop {
+        for _ in 0..=self.snapshots.len() {
             chain.push(current);
             match self.snapshots.get(&current).and_then(|s| s.parent_id) {
                 Some(pid) => current = pid,
@@ -1525,24 +1601,56 @@ impl SnapshotManager {
     ) -> Result<Vec<u64>, SnapshotError> {
         let imported = SnapshotExport::import_all(text)?;
         let mut new_ids = Vec::new();
+        // Exported IDs cannot be reused — they may collide with snapshots
+        // already in this tree — so every snapshot gets a fresh one and the
+        // parent links are translated through this map.
+        let mut remap: BTreeMap<u64, u64> = BTreeMap::new();
 
-        for snap in imported {
-            // Assign new IDs when importing; parent relationships are not preserved.
+        // Pass 1: add every snapshot detached. `add_snapshot` only accepts a
+        // parent that already exists, and nothing guarantees the file lists
+        // parents before children, so linking has to wait for pass 2.
+        for snap in &imported {
             let id = self.tree.add_snapshot(
                 &snap.name,
                 &snap.description,
                 snap.timestamp.max(base_timestamp),
                 snap.snapshot_type,
-                snap.components,
-                None, // Parent relationships from export are not guaranteed to exist.
+                snap.components.clone(),
+                None,
             )?;
+            remap.insert(snap.id, id);
+            // `?` rather than `let _ =`. Neither can fail for an id
+            // `add_snapshot` just returned, but discarding the result is how a
+            // later change to that guarantee would silently unlock a snapshot
+            // the user marked as protected — the lock is what stops retention
+            // from pruning it.
             if snap.locked {
-                let _ = self.tree.lock_snapshot(id);
+                self.tree.lock_snapshot(id)?;
             }
             for tag in &snap.tags {
-                let _ = self.tree.add_tag(id, tag);
+                self.tree.add_tag(id, tag)?;
             }
             new_ids.push(id);
+        }
+
+        // Pass 2: restore the tree shape. This used to be dropped outright,
+        // so an export/import round trip flattened every incremental snapshot
+        // into a root — losing which full snapshot each one was taken against,
+        // which is the information a restore needs.
+        for snap in &imported {
+            let Some(&new_id) = remap.get(&snap.id) else {
+                continue;
+            };
+            let Some(old_parent) = snap.parent_id else {
+                continue;
+            };
+            // A parent outside the file — an export of one sub-tree, or a
+            // hand-edited file — leaves the snapshot as a root rather than
+            // failing the import. Losing a snapshot's position in the tree is
+            // recoverable; refusing the import loses the snapshot itself.
+            if let Some(&new_parent) = remap.get(&old_parent) {
+                self.tree.set_parent(new_id, Some(new_parent))?;
+            }
         }
 
         Ok(new_ids)
@@ -5976,5 +6084,202 @@ mod tests {
         let ids = mgr2.import_snapshots(&exported, 0).unwrap();
         assert_eq!(ids.len(), 1);
         assert_eq!(mgr2.tree.get_snapshot(ids[0]).unwrap().name, "Backup");
+    }
+
+    /// Build a manager holding `full` ← `inc1` ← `inc2`, with `inc2` locked
+    /// and tagged, for the round-trip tests below.
+    fn chained_manager() -> SnapshotManager {
+        let mut mgr = SnapshotManager::new();
+        let full = mgr
+            .create_snapshot(
+                "Full",
+                "base",
+                1000,
+                SnapshotType::Manual,
+                vec![SnapshotComponent::SystemFiles],
+                None,
+            )
+            .unwrap();
+        let inc1 = mgr
+            .create_snapshot(
+                "Inc1",
+                "first delta",
+                2000,
+                SnapshotType::Scheduled,
+                vec![SnapshotComponent::BootConfig],
+                Some(full),
+            )
+            .unwrap();
+        let inc2 = mgr
+            .create_snapshot(
+                "Inc2",
+                "second delta",
+                3000,
+                SnapshotType::Scheduled,
+                vec![SnapshotComponent::NetworkConfig],
+                Some(inc1),
+            )
+            .unwrap();
+        mgr.tree.lock_snapshot(inc2).unwrap();
+        mgr.tree.add_tag(inc2, "keep").unwrap();
+        mgr
+    }
+
+    /// An incremental snapshot is only meaningful relative to the snapshot it
+    /// was taken against. Import used to pass `None` for every parent, so a
+    /// round trip flattened the whole chain into three unrelated roots and lost
+    /// which full snapshot each delta belonged to.
+    #[test]
+    fn an_import_preserves_the_snapshot_chain() {
+        let exported = chained_manager().export_all();
+
+        let mut restored = SnapshotManager::new();
+        let ids = restored.import_snapshots(&exported, 0).unwrap();
+        assert_eq!(ids.len(), 3);
+
+        // Exactly one root, and a three-deep chain under it.
+        assert_eq!(restored.tree.root_ids().len(), 1, "the chain was flattened");
+        let deepest = ids
+            .iter()
+            .copied()
+            .max_by_key(|&id| restored.tree.depth_of(id))
+            .unwrap();
+        assert_eq!(restored.tree.depth_of(deepest), 2);
+
+        let chain: Vec<String> = restored
+            .tree
+            .ancestry_chain(deepest)
+            .into_iter()
+            .filter_map(|id| restored.tree.get_snapshot(id).map(|s| s.name.clone()))
+            .collect();
+        assert_eq!(chain, ["Full", "Inc1", "Inc2"]);
+    }
+
+    /// The lock is what stops retention from pruning a snapshot the user marked
+    /// as protected, and the tags are what they labelled it with. Both must
+    /// survive the round trip.
+    #[test]
+    fn an_import_preserves_locks_and_tags() {
+        let exported = chained_manager().export_all();
+
+        let mut restored = SnapshotManager::new();
+        let ids = restored.import_snapshots(&exported, 0).unwrap();
+
+        let inc2 = ids
+            .iter()
+            .copied()
+            .find(|&id| restored.tree.get_snapshot(id).is_some_and(|s| s.name == "Inc2"))
+            .expect("Inc2 was not imported");
+        let snap = restored.tree.get_snapshot(inc2).unwrap();
+        assert!(snap.locked, "the lock was lost on import");
+        assert_eq!(snap.tags, ["keep"], "the tags were lost on import");
+    }
+
+    /// The file lists snapshots in timestamp order, but nothing enforces that a
+    /// parent precedes its child — a hand-edited or concatenated file need not.
+    /// The two-pass import must link them anyway.
+    #[test]
+    fn an_import_links_a_child_that_appears_before_its_parent() {
+        let exported = chained_manager().export_all();
+        // Reverse the section order.
+        let mut sections: Vec<&str> = exported.split("\n\n").collect();
+        sections.reverse();
+        let reversed = sections.join("\n\n");
+
+        let mut restored = SnapshotManager::new();
+        let ids = restored.import_snapshots(&reversed, 0).unwrap();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(
+            restored.tree.root_ids().len(),
+            1,
+            "a child listed before its parent was left detached"
+        );
+    }
+
+    /// A parent that is not in the file leaves the snapshot as a root. Losing
+    /// its position is recoverable; refusing the import would lose the snapshot.
+    #[test]
+    fn an_import_of_a_subtree_without_its_parent_keeps_the_snapshot() {
+        let exported = chained_manager().export_all();
+        // Keep only the last section (Inc2), whose parent is absent.
+        let sections: Vec<&str> = exported.split("\n\n").collect();
+        let last = (*sections.last().unwrap()).to_string();
+
+        let mut restored = SnapshotManager::new();
+        let ids = restored.import_snapshots(&last, 0).unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(restored.tree.depth_of(ids[0]), 0);
+        assert_eq!(restored.tree.get_snapshot(ids[0]).unwrap().name, "Inc2");
+    }
+
+    // --- set_parent ---
+
+    /// A cycle would not merely corrupt the tree, it would hang the app:
+    /// `depth_of` and `ancestry_chain` follow parent links until they reach a
+    /// root.
+    #[test]
+    fn set_parent_refuses_to_create_a_cycle() {
+        let mut tree = SnapshotTree::new();
+        let a = tree
+            .add_snapshot("a", "", 1, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let b = tree
+            .add_snapshot("b", "", 2, SnapshotType::Manual, vec![], Some(a))
+            .unwrap();
+        let c = tree
+            .add_snapshot("c", "", 3, SnapshotType::Manual, vec![], Some(b))
+            .unwrap();
+
+        assert!(matches!(
+            tree.set_parent(a, Some(c)),
+            Err(SnapshotError::ParentNotFound(_))
+        ));
+        assert!(matches!(
+            tree.set_parent(a, Some(a)),
+            Err(SnapshotError::ParentNotFound(_))
+        ));
+        // The tree is untouched by the refusals.
+        assert_eq!(tree.depth_of(c), 2);
+        assert_eq!(tree.root_ids(), vec![a]);
+    }
+
+    #[test]
+    fn set_parent_moves_a_snapshot_between_parents() {
+        let mut tree = SnapshotTree::new();
+        let a = tree
+            .add_snapshot("a", "", 1, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let b = tree
+            .add_snapshot("b", "", 2, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let c = tree
+            .add_snapshot("c", "", 3, SnapshotType::Manual, vec![], Some(a))
+            .unwrap();
+
+        tree.set_parent(c, Some(b)).unwrap();
+        assert_eq!(tree.children_of(a), &[] as &[u64]);
+        assert_eq!(tree.children_of(b), &[c]);
+        assert_eq!(tree.get_snapshot(c).unwrap().parent_id, Some(b));
+
+        // Detaching makes it a root and clears the old child link.
+        tree.set_parent(c, None).unwrap();
+        assert_eq!(tree.children_of(b), &[] as &[u64]);
+        assert_eq!(tree.depth_of(c), 0);
+    }
+
+    #[test]
+    fn set_parent_rejects_unknown_ids() {
+        let mut tree = SnapshotTree::new();
+        let a = tree
+            .add_snapshot("a", "", 1, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        assert!(matches!(
+            tree.set_parent(999, None),
+            Err(SnapshotError::NotFound(999))
+        ));
+        assert!(matches!(
+            tree.set_parent(a, Some(999)),
+            Err(SnapshotError::ParentNotFound(999))
+        ));
     }
 }

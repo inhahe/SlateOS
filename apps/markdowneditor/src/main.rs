@@ -526,6 +526,12 @@ impl Document {
     }
 
     /// Save the document to its current path. Returns an error if no path is set.
+    ///
+    /// Written through [`safeio::write_str_atomically`] rather than
+    /// `fs::write`, which truncates the target before writing it and so left
+    /// the user's document as a fragment if the save was interrupted. See the
+    /// `safeio` crate docs for why that is the worst failure a document editor
+    /// has available to it.
     pub fn save(&mut self) -> std::io::Result<()> {
         let path = self
             .path
@@ -533,7 +539,7 @@ impl Document {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No file path set"))?
             .clone();
         let content = self.lines.join("\n");
-        fs::write(&path, &content)?;
+        safeio::write_str_atomically(&path, &content)?;
         self.modified = false;
         self.seconds_since_save = 0;
         // Refresh the merge ancestor/mtime so our own write is not mistaken for
@@ -545,7 +551,7 @@ impl Document {
     /// Save the document to a specific path.
     pub fn save_as(&mut self, path: &std::path::Path) -> std::io::Result<()> {
         let content = self.lines.join("\n");
-        fs::write(path, &content)?;
+        safeio::write_str_atomically(path, &content)?;
         self.path = Some(path.to_path_buf());
         self.name = path
             .file_name()

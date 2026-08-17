@@ -1654,7 +1654,7 @@ impl ScaledFont {
             let rtl = levels
                 .get(glyph.cluster)
                 .is_some_and(|l| !l.is_multiple_of(2));
-            let origin = self.face.glyph_bbox(gid).map(|b| {
+            let origin = self.face.glyph_bbox_at(gid, &self.coords).map(|b| {
                 let mut origin =
                     Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max));
                 // Horizontal placement measures against the *cell*, not the
@@ -1734,7 +1734,7 @@ impl ScaledFont {
                 let gid = glyphs.get(i).map_or(0, |glyph| glyph.key.gid());
                 let mark = self
                     .face
-                    .glyph_bbox(gid)
+                    .glyph_bbox_at(gid, &self.coords)
                     .map(|b| Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max)));
                 let Some(mark) = mark else {
                     // No box to measure, so no placement — but the mark still

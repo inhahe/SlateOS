@@ -1844,6 +1844,37 @@ impl Face {
         })
     }
 
+    /// The same at a variable-font instance, which is not the same box.
+    ///
+    /// The box a `glyf` glyph states in its header describes the *default*
+    /// outline and nothing else — `gvar` moves the points without rewriting it,
+    /// and there is no per-instance box anywhere in the format. So away from the
+    /// default instance the outline has to be built and measured, which is what
+    /// FreeType and HarfBuzz both do: HarfBuzz reads the stated box only while
+    /// `font->num_coords` is zero.
+    ///
+    /// That makes the answer very slightly *looser* off the default instance —
+    /// the hull of the control points rather than the tight box around the
+    /// curves — because that is the only box a point walk can produce, and it is
+    /// the one HarfBuzz produces there too. A caller comparing the two instances
+    /// is comparing two different measurements, not one measurement of two
+    /// shapes; the boxes are used to stack accents, where a few units of slack
+    /// off the default weight is invisible and disagreeing with HarfBuzz about
+    /// where the accent goes is not.
+    #[must_use]
+    pub fn glyph_bbox_at(&self, gid: u16, coords: &var::Coords) -> Option<BBox> {
+        if coords.is_default() || self.gvar.is_none() {
+            return self.glyph_bbox(gid);
+        }
+        const EMPTY: BBox = BBox {
+            x_min: 0.0,
+            y_min: 0.0,
+            x_max: 0.0,
+            y_max: 0.0,
+        };
+        Some(self.outline_at(gid, coords).ok()?.bbox().unwrap_or(EMPTY))
+    }
+
     /// How far a `glyf` glyph's ink has to move right for it to start at the
     /// left side bearing `hmtx` states.
     ///
@@ -3893,6 +3924,70 @@ pub(crate) mod tests {
                 PathCmd::Close,
             ]
         );
+    }
+
+    #[test]
+    fn an_ink_box_follows_the_instance_rather_than_the_stored_header_box() {
+        // The regression this pins: `glyph_bbox` reads the four words in the
+        // glyph header, and `gvar` never rewrites them, so off the default
+        // instance that box describes a shape the face no longer draws. Mark
+        // positioning stacks accents on this box, so a stale one puts the
+        // accent where the *default* weight's ink used to be — visible as an
+        // accent drifting off its base as the weight is dragged.
+        let f = variable_face();
+        let bold = at_weight(&f, 700.0);
+        let box_at = f.glyph_bbox_at(1, &bold).expect("glyph 1 has an outline");
+
+        // Glyph 1 at weight 700 draws its corners at (105,1) (215,2) (225,103)
+        // (135,104) — see `a_phantom_delta_corrects_the_varied_side_bearing`.
+        // The box is their hull, which is the box a point walk can produce and
+        // the one HarfBuzz produces off the default instance too.
+        assert_eq!(box_at.x_min, 105.0);
+        assert_eq!(box_at.y_min, 1.0);
+        assert_eq!(box_at.x_max, 225.0);
+        assert_eq!(box_at.y_max, 104.0);
+
+        // And it is genuinely a different answer, not the stored box arrived at
+        // by a longer route: without this assertion the test above would pass
+        // just as well on a fixture whose deltas happened to cancel.
+        let stored = f.glyph_bbox(1).expect("glyph 1 states a header box");
+        assert_ne!(box_at, stored);
+    }
+
+    #[test]
+    fn the_default_instance_still_reads_the_box_the_glyph_states() {
+        // The default instance is the one case where the header box is exactly
+        // right, and it is the tight box around the *curves* where a point walk
+        // gives the looser control-point hull. Measuring it anyway would make
+        // every static face disagree with itself about its own ink for no gain,
+        // so the fast path is a correctness requirement, not an optimisation.
+        let f = variable_face();
+        for gid in 1..4 {
+            assert_eq!(
+                f.glyph_bbox_at(gid, &var::Coords::default()),
+                f.glyph_bbox(gid),
+                "glyph {gid} must read its stated box at the default instance"
+            );
+            assert_eq!(
+                f.glyph_bbox_at(gid, &at_weight(&f, 400.0)),
+                f.glyph_bbox(gid),
+                "glyph {gid}: weight 400 *is* the default, by another spelling"
+            );
+        }
+    }
+
+    #[test]
+    fn a_face_without_gvar_measures_the_same_box_at_every_instance() {
+        // The plain fixture cannot vary, so asking it for an instance must give
+        // the stated box rather than falling into the point walk and quietly
+        // loosening every box in a static face.
+        let f = face();
+        for gid in 0..4 {
+            assert_eq!(
+                f.glyph_bbox_at(gid, &var::Coords::default()),
+                f.glyph_bbox(gid)
+            );
+        }
     }
 
     #[test]

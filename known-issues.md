@@ -25304,8 +25304,13 @@ candidate spellings parse back as zero. It is recorded rather than guessed at
 because guessing twice from the same unreliable source is how a systematic error
 gets in.
 
-**Also still missing from `dc`:** the `a` command (turn the top of the stack
-into a one-character string). Everything else in POSIX `dc` is implemented.
+**`dc`'s `a` command is now implemented** (was listed here as the last gap):
+the top of the stack becomes a one-byte string — a number contributes its
+low-order byte, a string its first. Implementing it forced `dc`'s strings to
+become byte strings rather than `String`, which also fixed a separate bug found
+on the way: `dc` read its script files with `read_to_string`, so a script
+holding a non-UTF-8 byte in a string literal was refused before its first
+command ran. Every POSIX `dc` command is now present.
 
 **The proper fix** is a differential harness, which needs a real `bc`/`dc` on
 the development host — the same thing that settled `grep`, `sed`, `awk`, `expr`

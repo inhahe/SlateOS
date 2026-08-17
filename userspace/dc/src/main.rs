@@ -16,6 +16,16 @@
 //! true value ends `...835301376`, and every digit past the seventeenth was
 //! fiction. See `design-decisions.md` §324.
 //!
+//! # A `dc` string is bytes, and so is a `dc` program
+//!
+//! `a` turns a number into a one-byte string, so a program can compute a byte
+//! and print it — which means a string here may hold any of the 256 values,
+//! not only those that spell something in some encoding. Registers are named
+//! by a byte for the same reason, and there are exactly 256 of them. The
+//! interpreter therefore runs on `[u8]` throughout: source, macro bodies,
+//! register names and output. Reading a script as text instead would refuse to
+//! run a perfectly good program over one byte in a string literal.
+//!
 //! # Errors do not stop the program
 //!
 //! A command that cannot be carried out — a division by zero, a pop from an
@@ -39,10 +49,17 @@ use bignum::{BigInt, Decimal, DecimalError};
 
 /// A stack entry. `dc` mixes numbers and strings on one stack; a string is
 /// both a datum and a macro body, depending on which command reaches it.
+///
+/// A `dc` string is a sequence of *bytes*, not text: `2 55 * a` builds the byte
+/// 110 with no claim that it is a character, `P` writes it out unchanged, and a
+/// script may hold a string in any encoding at all — none of which survives
+/// being forced through `String`. Holding `Vec<u8>` is also what lets the whole
+/// interpreter run on bytes, so a `dc` program in Latin-1 executes instead of
+/// being rejected before its first command.
 #[derive(Debug, Clone)]
 enum Value {
     Num(Decimal),
-    Str(String),
+    Str(Vec<u8>),
 }
 
 impl Value {
@@ -53,9 +70,9 @@ impl Value {
     /// value and may be continued across lines with a trailing `\`; a string
     /// is the user's bytes, and inserting a backslash into it would corrupt
     /// the one thing they asked to be printed verbatim.
-    fn display(&self, obase: u32, line_length: usize) -> String {
+    fn display(&self, obase: u32, line_length: usize) -> Vec<u8> {
         match self {
-            Value::Num(n) => bignum::wrap_number(&n.format(obase), line_length),
+            Value::Num(n) => bignum::wrap_number(&n.format(obase), line_length).into_bytes(),
             Value::Str(s) => s.clone(),
         }
     }
@@ -81,7 +98,7 @@ fn line_length_from_env(var: &str) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DcError {
     StackEmpty,
-    NotANumber(String),
+    NotANumber(Vec<u8>),
     Math(DecimalError),
     BadInputBase,
     BadOutputBase,
@@ -89,8 +106,7 @@ enum DcError {
     NegativeExponent,
     ZeroModulus,
     NonIntegerModularArgument,
-    MissingRegister(char),
-    NonAsciiRegister(char),
+    MissingRegister(u8),
     TooDeep,
     Io(String),
 }
@@ -105,7 +121,13 @@ impl std::fmt::Display for DcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DcError::StackEmpty => write!(f, "stack empty"),
-            DcError::NotANumber(s) => write!(f, "not a number: '{s}'"),
+            // A diagnostic is prose for a person, not data for a program, so a
+            // string that is not valid UTF-8 is shown with replacement
+            // characters rather than suppressing the message. The value itself
+            // is never routed through here.
+            DcError::NotANumber(s) => {
+                write!(f, "not a number: '{}'", String::from_utf8_lossy(s))
+            }
             DcError::Math(e) => write!(f, "{e}"),
             DcError::BadInputBase => write!(f, "input base must be between 2 and 16 (inclusive)"),
             DcError::BadOutputBase => write!(f, "output base must be between 2 and 36 (inclusive)"),
@@ -115,8 +137,9 @@ impl std::fmt::Display for DcError {
             DcError::NonIntegerModularArgument => {
                 write!(f, "modular exponentiation requires integer arguments")
             }
-            DcError::MissingRegister(c) => write!(f, "'{c}' requires a register name"),
-            DcError::NonAsciiRegister(c) => write!(f, "register name '{c}' is not a byte"),
+            DcError::MissingRegister(c) => {
+                write!(f, "'{}' requires a register name", char::from(*c))
+            }
             DcError::TooDeep => write!(f, "macro recursion too deep"),
             DcError::Io(e) => write!(f, "write: {e}"),
         }
@@ -222,8 +245,10 @@ impl<'a> Dc<'a> {
         self.stack.push(Value::Num(n));
     }
 
-    fn write_out(&mut self, s: &str) -> Result<(), DcError> {
-        write!(self.out, "{s}").map_err(|e| DcError::Io(e.to_string()))
+    fn write_out(&mut self, bytes: &[u8]) -> Result<(), DcError> {
+        self.out
+            .write_all(bytes)
+            .map_err(|e| DcError::Io(e.to_string()))
     }
 
     fn report(&mut self, e: &DcError) {
@@ -249,8 +274,8 @@ impl<'a> Dc<'a> {
     /// a loop of a million would abort the process rather than produce an
     /// answer. Replacing the chunk makes it a loop, in constant stack, which is
     /// what the source says it is.
-    fn execute(&mut self, input: &str) -> Flow {
-        let mut program: Vec<char> = input.chars().collect();
+    fn execute(&mut self, input: &[u8]) -> Flow {
+        let mut program: Vec<u8> = input.to_vec();
 
         'tail: loop {
             let mut i = 0usize;
@@ -262,7 +287,7 @@ impl<'a> Dc<'a> {
                     Ok(Step::Next(next)) => next,
                     Ok(Step::Call { body, next }) => {
                         if is_tail_position(&program, next) {
-                            program = body.chars().collect();
+                            program = body;
                             continue 'tail;
                         }
                         match self.call(&body) {
@@ -297,7 +322,7 @@ impl<'a> Dc<'a> {
     }
 
     /// Run a macro body one level deeper, refusing if that is too deep.
-    fn call(&mut self, body: &str) -> Result<Flow, DcError> {
+    fn call(&mut self, body: &[u8]) -> Result<Flow, DcError> {
         if self.depth >= MAX_DEPTH {
             return Err(DcError::TooDeep);
         }
@@ -309,22 +334,22 @@ impl<'a> Dc<'a> {
 
     /// Carry out the command at `i`, reporting where the next one starts.
     #[allow(clippy::too_many_lines)]
-    fn step(&mut self, program: &[char], i: usize, c: char) -> Result<Step, DcError> {
+    fn step(&mut self, program: &[u8], i: usize, c: u8) -> Result<Step, DcError> {
         let next = i.saturating_add(1);
 
         match c {
-            ' ' | '\t' | '\n' | '\r' => {}
+            b' ' | b'\t' | b'\n' | b'\r' => {}
 
             // A number. `_` is the negative sign, because `-` is subtraction.
             // `A`-`F` are digit values 10-15 and may begin a number, so the
             // scanner has to trigger on them as well as on `0`-`9`.
-            '0'..='9' | '.' | '_' | 'A'..='F' => {
-                let negative = c == '_';
+            b'0'..=b'9' | b'.' | b'_' | b'A'..=b'F' => {
+                let negative = c == b'_';
                 let mut j = if negative { next } else { i };
                 let mut text = String::new();
                 while let Some(&d) = program.get(j) {
-                    if d.is_ascii_digit() || d == '.' || ('A'..='F').contains(&d) {
-                        text.push(d);
+                    if d.is_ascii_digit() || d == b'.' || (b'A'..=b'F').contains(&d) {
+                        text.push(char::from(d));
                         j = j.saturating_add(1);
                     } else {
                         break;
@@ -336,23 +361,23 @@ impl<'a> Dc<'a> {
             }
 
             // A string, which nests, so that a macro can contain a macro.
-            '[' => {
+            b'[' => {
                 let mut depth = 1usize;
-                let mut s = String::new();
+                let mut s: Vec<u8> = Vec::new();
                 let mut j = next;
                 while let Some(&d) = program.get(j) {
                     j = j.saturating_add(1);
                     match d {
-                        '[' => {
+                        b'[' => {
                             depth = depth.saturating_add(1);
-                            s.push('[');
+                            s.push(b'[');
                         }
-                        ']' => {
+                        b']' => {
                             depth = depth.saturating_sub(1);
                             if depth == 0 {
                                 break;
                             }
-                            s.push(']');
+                            s.push(b']');
                         }
                         _ => s.push(d),
                     }
@@ -362,29 +387,29 @@ impl<'a> Dc<'a> {
             }
 
             // ── Arithmetic ──
-            '+' => {
+            b'+' => {
                 let (a, b) = self.pop_two()?;
                 self.push_num(a.add(&b));
             }
-            '-' => {
+            b'-' => {
                 let (a, b) = self.pop_two()?;
                 self.push_num(a.sub(&b));
             }
-            '*' => {
+            b'*' => {
                 let (a, b) = self.pop_two()?;
                 // POSIX's scale for a product, not the `k` register: `k`
                 // governs division, where digits must be invented.
                 self.push_num(a.multiply(&b, self.scale));
             }
-            '/' => {
+            b'/' => {
                 let (a, b) = self.pop_two()?;
                 self.push_num(a.div(&b, self.scale)?);
             }
-            '%' => {
+            b'%' => {
                 let (a, b) = self.pop_two()?;
                 self.push_num(a.modulo(&b, self.scale)?);
             }
-            '~' => {
+            b'~' => {
                 // Quotient and remainder together, quotient pushed first.
                 let (a, b) = self.pop_two()?;
                 let quotient = a.div(&b, self.scale)?;
@@ -392,17 +417,17 @@ impl<'a> Dc<'a> {
                 self.push_num(quotient);
                 self.push_num(remainder);
             }
-            '^' => {
+            b'^' => {
                 let (base, exp) = self.pop_two()?;
                 self.push_num(base.pow(&exp, self.scale)?);
             }
-            '|' => {
+            b'|' => {
                 let modulus = self.pop_num()?;
                 let exp = self.pop_num()?;
                 let base = self.pop_num()?;
                 self.push_num(modular_power(&base, &exp, &modulus)?);
             }
-            'v' => {
+            b'v' => {
                 let n = self.pop_num()?;
                 // POSIX gives a square root the larger of `k` and the operand's
                 // own scale, so `v` on an exact value does not throw away
@@ -412,54 +437,78 @@ impl<'a> Dc<'a> {
             }
 
             // ── Stack ──
-            'p' => {
+            b'p' => {
                 let val = self.stack.last().ok_or(DcError::StackEmpty)?.clone();
-                let s = val.display(self.obase, self.line_length);
-                self.write_out(&format!("{s}\n"))?;
+                let mut line = val.display(self.obase, self.line_length);
+                line.push(b'\n');
+                self.write_out(&line)?;
             }
-            'n' => {
+            b'n' => {
                 let val = self.pop()?;
                 let s = val.display(self.obase, self.line_length);
                 self.write_out(&s)?;
             }
-            'f' => {
+            b'f' => {
                 // The whole stack, top first, without disturbing it.
-                let lines: Vec<String> = self
+                let lines: Vec<Vec<u8>> = self
                     .stack
                     .iter()
                     .rev()
                     .map(|v| v.display(self.obase, self.line_length))
                     .collect();
-                for line in lines {
-                    self.write_out(&format!("{line}\n"))?;
+                for mut line in lines {
+                    line.push(b'\n');
+                    self.write_out(&line)?;
                 }
             }
-            'P' => {
+            b'P' => {
                 // A string prints as itself; a number prints as the bytes of
                 // its magnitude, base 256, most significant first.
-                match self.pop()? {
-                    Value::Str(s) => self.write_out(&s)?,
-                    Value::Num(n) => {
-                        let bytes = base256_bytes(&n);
-                        self.out
-                            .write_all(&bytes)
-                            .map_err(|e| DcError::Io(e.to_string()))?;
-                    }
-                }
+                let bytes = match self.pop()? {
+                    Value::Str(s) => s,
+                    Value::Num(n) => base256_bytes(&n),
+                };
+                self.write_out(&bytes)?;
             }
-            'c' => self.stack.clear(),
-            'd' => {
+            b'a' => {
+                // The top of the stack as a one-byte string: a number becomes
+                // its low-order byte, a string keeps its first byte. This is
+                // how a `dc` program builds output it computed -- `2 55 * a P`
+                // writes `n` -- and it is the reason a string here is bytes
+                // rather than text: byte 200 is a perfectly good result and is
+                // not a character in any encoding `dc` gets to assume.
+                let byte = match self.pop()? {
+                    Value::Num(n) => {
+                        let (_, rem) = n.rescale(0).digits.divmod(&BigInt::from_i64(256));
+                        let magnitude = u8::try_from(rem.to_usize_saturating() & 0xff).unwrap_or(0);
+                        // A negative value contributes the same low byte its
+                        // two's-complement representation would.
+                        if rem.negative && magnitude != 0 {
+                            Some(0u8.wrapping_sub(magnitude))
+                        } else {
+                            Some(magnitude)
+                        }
+                    }
+                    // An empty string has no first byte, and inventing one
+                    // would put a byte on the stack the program never made.
+                    Value::Str(s) => s.first().copied(),
+                };
+                self.stack
+                    .push(Value::Str(byte.map(|b| vec![b]).unwrap_or_default()));
+            }
+            b'c' => self.stack.clear(),
+            b'd' => {
                 let val = self.stack.last().ok_or(DcError::StackEmpty)?.clone();
                 self.stack.push(val);
             }
-            'r' => {
+            b'r' => {
                 let len = self.stack.len();
                 let (Some(x), Some(y)) = (len.checked_sub(1), len.checked_sub(2)) else {
                     return Err(DcError::StackEmpty);
                 };
                 self.stack.swap(x, y);
             }
-            'R' => {
+            b'R' => {
                 let n = self.pop_count()?;
                 let len = self.stack.len();
                 if n > 1 && n <= len {
@@ -470,18 +519,20 @@ impl<'a> Dc<'a> {
                     self.stack.insert(at, top);
                 }
             }
-            'z' => {
+            b'z' => {
                 let depth = i64::try_from(self.stack.len()).unwrap_or(i64::MAX);
                 self.push_num(Decimal::from_i64(depth));
             }
-            'Z' => {
+            b'Z' => {
                 let len = match self.pop()? {
                     Value::Num(n) => n.length(),
-                    Value::Str(s) => s.chars().count(),
+                    // Bytes, not characters: `Z` answers how much there is to
+                    // print, and `P` prints bytes.
+                    Value::Str(s) => s.len(),
                 };
                 self.push_num(Decimal::from_i64(i64::try_from(len).unwrap_or(i64::MAX)));
             }
-            'X' => {
+            b'X' => {
                 let scale = match self.pop()? {
                     Value::Num(n) => n.scale,
                     // A string has no fractional part, and `dc` answers zero
@@ -492,7 +543,7 @@ impl<'a> Dc<'a> {
             }
 
             // ── Parameters ──
-            'i' => {
+            b'i' => {
                 let base = self.pop_num()?.rescale(0);
                 let value = base.digits.to_usize_saturating();
                 if base.is_negative() || !(2..=16).contains(&value) {
@@ -500,7 +551,7 @@ impl<'a> Dc<'a> {
                 }
                 self.ibase = u32::try_from(value).unwrap_or(10);
             }
-            'o' => {
+            b'o' => {
                 let base = self.pop_num()?.rescale(0);
                 let value = base.digits.to_usize_saturating();
                 if base.is_negative() || !(2..=36).contains(&value) {
@@ -508,30 +559,30 @@ impl<'a> Dc<'a> {
                 }
                 self.obase = u32::try_from(value).unwrap_or(10);
             }
-            'k' => {
+            b'k' => {
                 let k = self.pop_num()?.rescale(0);
                 if k.is_negative() {
                     return Err(DcError::NegativeScale);
                 }
                 self.scale = k.digits.to_usize_saturating();
             }
-            'I' => {
+            b'I' => {
                 self.push_num(Decimal::from_i64(i64::from(self.ibase)));
             }
-            'O' => {
+            b'O' => {
                 self.push_num(Decimal::from_i64(i64::from(self.obase)));
             }
-            'K' => {
+            b'K' => {
                 let k = i64::try_from(self.scale).unwrap_or(i64::MAX);
                 self.push_num(Decimal::from_i64(k));
             }
 
             // ── Registers ──
-            's' | 'l' | 'S' | 'L' => {
+            b's' | b'l' | b'S' | b'L' => {
                 let reg = register_at(program, next, c)?;
                 match c {
                     // `s` replaces the top of the register stack; `S` pushes.
-                    's' => {
+                    b's' => {
                         let val = self.pop()?;
                         let slot = self.register_mut(reg);
                         if slot.is_empty() {
@@ -543,14 +594,14 @@ impl<'a> Dc<'a> {
                             }
                         }
                     }
-                    'S' => {
+                    b'S' => {
                         let val = self.pop()?;
                         self.register_mut(reg).push(val);
                     }
                     // An unset register reads as zero, which is what makes the
                     // `0 sX` initialisation that every dc program opens with
                     // optional rather than required.
-                    'l' => {
+                    b'l' => {
                         let val = self
                             .register_mut(reg)
                             .last()
@@ -570,7 +621,7 @@ impl<'a> Dc<'a> {
             }
 
             // ── Macros and conditionals ──
-            'x' => {
+            b'x' => {
                 return Ok(match self.pop()? {
                     Value::Str(body) => Step::Call { body, next },
                     // A number is not a macro; `dc` puts it back rather than
@@ -581,13 +632,13 @@ impl<'a> Dc<'a> {
                     }
                 });
             }
-            '>' | '<' | '=' => {
+            b'>' | b'<' | b'=' => {
                 let reg = register_at(program, next, c)?;
                 let after = next.saturating_add(1);
                 return Ok(self.conditional(c, false, reg, after));
             }
-            '!' if matches!(program.get(next), Some('>' | '<' | '=')) => {
-                let op = program.get(next).copied().unwrap_or('=');
+            b'!' if matches!(program.get(next), Some(b'>' | b'<' | b'=')) => {
+                let op = program.get(next).copied().unwrap_or(b'=');
                 let name_at = next.saturating_add(1);
                 let reg = register_at(program, name_at, op)?;
                 let after = name_at.saturating_add(1);
@@ -595,30 +646,34 @@ impl<'a> Dc<'a> {
             }
 
             // ── Input ──
-            '?' => {
-                let mut line = String::new();
+            b'?' => {
+                // Read the line as bytes: a `?` may be answered with anything
+                // the caller's terminal or pipe produced, and refusing input
+                // that is not UTF-8 would make the command unusable for the
+                // byte-building programs `a` and `P` exist to serve.
+                let mut line: Vec<u8> = Vec::new();
                 io::stdin()
                     .lock()
-                    .read_line(&mut line)
+                    .read_until(b'\n', &mut line)
                     .map_err(|e| DcError::Io(e.to_string()))?;
-                return Ok(Step::Call {
-                    body: line.trim_end_matches(['\n', '\r']).to_string(),
-                    next,
-                });
+                while matches!(line.last(), Some(b'\n' | b'\r')) {
+                    line.pop();
+                }
+                return Ok(Step::Call { body: line, next });
             }
 
             // `q` leaves two levels: the macro that ran it and the one that
             // called that. At the top level there are not two, so dc exits.
-            'q' => return Ok(Step::Quit(2)),
-            'Q' => {
+            b'q' => return Ok(Step::Quit(2)),
+            b'Q' => {
                 let levels = self.pop_count()?;
                 return Ok(Step::Quit(levels.max(1)));
             }
 
-            '#' => {
+            b'#' => {
                 let mut j = i;
                 while let Some(&d) = program.get(j) {
-                    if d == '\n' {
+                    if d == b'\n' {
                         break;
                     }
                     j = j.saturating_add(1);
@@ -638,7 +693,7 @@ impl<'a> Dc<'a> {
     /// The comparison is `a op b` where `b` is the *second* value popped —
     /// `3 5 <a` asks whether 3 is less than 5, reading in source order rather
     /// than stack order.
-    fn conditional(&mut self, op: char, negated: bool, reg: u8, next: usize) -> Step {
+    fn conditional(&mut self, op: u8, negated: bool, reg: u8, next: usize) -> Step {
         let (a, b) = match self.pop_two() {
             Ok(pair) => pair,
             Err(e) => {
@@ -656,8 +711,8 @@ impl<'a> Dc<'a> {
         // into a single pass (30! came out as 870).
         let ordering = b.cmp(&a);
         let holds = match op {
-            '>' => ordering.is_gt(),
-            '<' => ordering.is_lt(),
+            b'>' => ordering.is_gt(),
+            b'<' => ordering.is_lt(),
             _ => ordering.is_eq(),
         } != negated;
 
@@ -689,7 +744,7 @@ enum Step {
     /// Continue at this index.
     Next(usize),
     /// Run this macro body, then continue at `next`.
-    Call { body: String, next: usize },
+    Call { body: Vec<u8>, next: usize },
     /// Stop, unwinding this many levels.
     Quit(usize),
 }
@@ -699,10 +754,10 @@ enum Step {
 /// Only whitespace may follow: a macro call is in tail position when nothing
 /// remains for the caller to do after it returns, which is exactly when its
 /// frame can be reused rather than stacked.
-fn is_tail_position(program: &[char], at: usize) -> bool {
+fn is_tail_position(program: &[u8], at: usize) -> bool {
     program
         .get(at..)
-        .is_none_or(|rest| rest.iter().all(|c| c.is_whitespace()))
+        .is_none_or(|rest| rest.iter().all(u8::is_ascii_whitespace))
 }
 
 /// The index just past the command starting at `i`, for use after a failure.
@@ -711,24 +766,25 @@ fn is_tail_position(program: &[char], at: usize) -> bool {
 /// `!<`, `!>`, `!=`). Resuming at `i + 1` after one of them fails would run the
 /// register name as a command — a failed `sa` would push nothing and then be
 /// followed by a stray `a`.
-fn advance_past(program: &[char], i: usize, c: char) -> usize {
+fn advance_past(program: &[u8], i: usize, c: u8) -> usize {
     let width = match c {
-        's' | 'l' | 'S' | 'L' | '>' | '<' | '=' => 2,
-        '!' if matches!(program.get(i.saturating_add(1)), Some('>' | '<' | '=')) => 3,
+        b's' | b'l' | b'S' | b'L' | b'>' | b'<' | b'=' => 2,
+        b'!' if matches!(program.get(i.saturating_add(1)), Some(b'>' | b'<' | b'=')) => 3,
         _ => 1,
     };
     i.saturating_add(width)
 }
 
 /// The register name at `at`, as the byte that indexes it.
-fn register_at(program: &[char], at: usize, command: char) -> Result<u8, DcError> {
-    let name = program
+///
+/// Registers are named by a byte and there are 256 of them, so every byte is a
+/// valid name — including the ones that are half of a multi-byte character in
+/// some encoding. That is `dc`'s own rule, not a simplification of it.
+fn register_at(program: &[u8], at: usize, command: u8) -> Result<u8, DcError> {
+    program
         .get(at)
         .copied()
-        .ok_or(DcError::MissingRegister(command))?;
-    // Registers are named by a byte. Casting a wider `char` would silently fold
-    // it onto some unrelated register -- `Ā` (U+0100) would become register 0.
-    u8::try_from(name as u32).map_err(|_| DcError::NonAsciiRegister(name))
+        .ok_or(DcError::MissingRegister(command))
 }
 
 /// `(base ^ exp) mod modulus`, on integers.
@@ -851,13 +907,17 @@ fn run() -> Result<(), String> {
     let mut dc = Dc::new(&mut out, &mut err);
 
     for expr in &expressions {
-        if dc.execute(expr) != Flow::Normal {
+        if dc.execute(expr.as_bytes()) != Flow::Normal {
             return Ok(());
         }
     }
 
     for file in &files {
-        let content = fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+        // Bytes, not text. A `dc` script is a byte stream: `[»]P` is a
+        // perfectly good program in whatever encoding its author used, and
+        // `read_to_string` would refuse to run it at all rather than execute
+        // the arithmetic and print the bytes back.
+        let content = fs::read(file).map_err(|e| format!("{file}: {e}"))?;
         if dc.execute(&content) != Flow::Normal {
             return Ok(());
         }
@@ -865,8 +925,16 @@ fn run() -> Result<(), String> {
 
     if expressions.is_empty() && files.is_empty() {
         let stdin = io::stdin();
-        for line in stdin.lock().lines() {
-            let line = line.map_err(|e| format!("read: {e}"))?;
+        let mut input = stdin.lock();
+        loop {
+            let mut line: Vec<u8> = Vec::new();
+            if input
+                .read_until(b'\n', &mut line)
+                .map_err(|e| format!("read: {e}"))?
+                == 0
+            {
+                break;
+            }
             if dc.execute(&line) != Flow::Normal {
                 return Ok(());
             }
@@ -897,13 +965,22 @@ mod tests {
 
     /// Run `input`, returning what it wrote to stdout.
     fn eval(input: &str) -> String {
+        String::from_utf8(eval_bytes(input.as_bytes())).unwrap_or_default()
+    }
+
+    /// Run `input`, returning the raw bytes it wrote to stdout.
+    ///
+    /// `dc`'s output is not text — `a` and `P` exist precisely to emit bytes
+    /// that no encoding need accept — so the tests for those go through this
+    /// rather than through [`eval`], which would flatten them to nothing.
+    fn eval_bytes(input: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         let mut err = Vec::new();
         {
             let mut dc = Dc::new(&mut out, &mut err);
             dc.execute(input);
         }
-        String::from_utf8(out).unwrap_or_default()
+        out
     }
 
     /// Run `input`, returning what it wrote to stderr.
@@ -912,7 +989,7 @@ mod tests {
         let mut err = Vec::new();
         {
             let mut dc = Dc::new(&mut out, &mut err);
-            dc.execute(input);
+            dc.execute(input.as_bytes());
         }
         String::from_utf8(err).unwrap_or_default()
     }
@@ -922,7 +999,7 @@ mod tests {
         let mut out = Vec::new();
         let mut err = Vec::new();
         let mut dc = Dc::new(&mut out, &mut err);
-        dc.execute(input);
+        dc.execute(input.as_bytes());
         dc.stack
     }
 
@@ -1281,7 +1358,7 @@ mod tests {
         // `5 +` has only one operand. It must not vanish.
         let stack = eval_stack("5 +");
         assert_eq!(stack.len(), 1);
-        assert_eq!(stack[0].display(10, bignum::DEFAULT_LINE_LENGTH), "5");
+        assert_eq!(stack[0].display(10, bignum::DEFAULT_LINE_LENGTH), b"5");
     }
 
     #[test]
@@ -1394,6 +1471,50 @@ mod tests {
             eval(&format!("[{long_string}] p")),
             format!("{long_string}\n")
         );
+    }
+
+    #[test]
+    fn a_number_becomes_the_byte_it_names_and_a_string_keeps_its_first() {
+        // `a` is how a dc program emits text it computed: build the byte, then
+        // print it. 72 is 'H', 105 is 'i'.
+        assert_eq!(eval("72 a P 105 a P"), "Hi");
+        // A string contributes its first byte and nothing else.
+        assert_eq!(eval("[hello] a P"), "h");
+        // Only the low-order byte of a number is taken, so 321 is 'A' (65).
+        assert_eq!(eval("321 a P"), "A");
+        // A fraction is truncated before the byte is taken, not rounded.
+        assert_eq!(eval("65.9 a P"), "A");
+        // A negative number contributes the byte its two's-complement
+        // representation ends in: -321 is ...FEBF, so 0xBF.
+        assert_eq!(eval_bytes(b"_321 a P"), vec![0xbf]);
+        // -256 ends in a zero byte, which is a byte like any other.
+        assert_eq!(eval_bytes(b"_256 a P"), vec![0x00]);
+        // The result is a string, so `Z` answers one and `x` would run it.
+        assert_eq!(eval("65 a Z p"), "1\n");
+        // An empty string has no first byte; inventing one would put a byte on
+        // the stack the program never made.
+        assert_eq!(eval("[] a Z p"), "0\n");
+    }
+
+    #[test]
+    fn a_byte_that_is_not_text_survives_being_built_and_printed() {
+        // The reason `Value::Str` holds bytes rather than a `String`: 200 is
+        // not a character in any encoding dc is entitled to assume, and
+        // rendering it as UTF-8 would emit two bytes where dc emits one.
+        assert_eq!(eval_bytes(b"200 a P"), vec![200u8]);
+        assert_eq!(eval_bytes(b"255 a P"), vec![255u8]);
+        // A source file may hold such a byte in a string literal, and it must
+        // come back out unchanged rather than stopping the program.
+        assert_eq!(eval_bytes(b"[\xc3\x28] P"), vec![0xc3, 0x28]);
+        // And it is counted as the bytes it is.
+        assert_eq!(eval_bytes(b"[\xc3\x28] Z p"), b"2\n".to_vec());
+    }
+
+    #[test]
+    fn a_register_may_be_named_by_any_byte() {
+        // There are 256 registers and every byte names one, including bytes
+        // that are half of a character in some encoding.
+        assert_eq!(eval_bytes(b"42 s\xff l\xff p"), b"42\n".to_vec());
     }
 
     #[test]

@@ -3893,6 +3893,7 @@ pub fn render_status_bar(
     y: f32,
     width: f32,
     autosave_enabled: bool,
+    save_error: Option<&str>,
 ) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
@@ -3936,30 +3937,47 @@ pub fn render_status_bar(
         overflow: TextOverflow::Clip,
     });
 
-    // Center: statistics.
-    let words = doc.word_count();
-    let chars = doc.char_count();
-    let lines = doc.lines.len();
-    let reading_mins = doc.reading_time_minutes();
-    let stats_text = format!(
-        "{} words | {} chars | {} lines | ~{:.0} min read",
-        words, chars, lines, reading_mins
-    );
-    cmds.push(RenderCommand::Text {
-        x: text::center_x(
-            &stats_text,
-            x + width / 2.0,
-            STATUS_FONT_SIZE,
-            FontWeightHint::Regular,
-        ),
-        y: y + 5.0,
-        text: stats_text,
-        font_size: STATUS_FONT_SIZE,
-        color: SUBTEXT0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(width * 0.6),
-        overflow: TextOverflow::Ellipsis,
-    });
+    // Center: a save failure if there is one, otherwise the statistics.
+    // The error *displaces* the word count rather than sharing the row with
+    // it: the two would collide on a narrow window, and of the two it is the
+    // word count that can wait.
+    if let Some(err) = save_error {
+        let text = err.to_string();
+        cmds.push(RenderCommand::Text {
+            x: text::center_x(&text, x + width / 2.0, STATUS_FONT_SIZE, FontWeightHint::Bold),
+            y: y + 5.0,
+            text,
+            font_size: STATUS_FONT_SIZE,
+            color: RED,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(width * 0.6),
+            overflow: TextOverflow::Ellipsis,
+        });
+    } else {
+        let words = doc.word_count();
+        let chars = doc.char_count();
+        let lines = doc.lines.len();
+        let reading_mins = doc.reading_time_minutes();
+        let stats_text = format!(
+            "{} words | {} chars | {} lines | ~{:.0} min read",
+            words, chars, lines, reading_mins
+        );
+        cmds.push(RenderCommand::Text {
+            x: text::center_x(
+                &stats_text,
+                x + width / 2.0,
+                STATUS_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
+            y: y + 5.0,
+            text: stats_text,
+            font_size: STATUS_FONT_SIZE,
+            color: SUBTEXT0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width * 0.6),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
 
     // Right side: view mode and auto-save status.
     let right_items = format!(
@@ -4367,6 +4385,14 @@ pub struct App {
     pub window_height: f32,
     /// Pending external-change prompt (file edited/deleted outside the editor).
     pub external_prompt: Option<ExternalChangePrompt>,
+    /// The most recent save failure, or `None` if the last save worked.
+    ///
+    /// Sticky rather than transient. A failed write is the one message in this
+    /// app the user must not miss — the buffer survives it (`Document::save`
+    /// leaves `modified` set when the write fails), but only until the window
+    /// closes — and there is no frame clock here to expire a toast on. It is
+    /// cleared by the next save that succeeds, and by nothing else.
+    pub save_error: Option<String>,
 }
 
 /// A pending prompt shown when the active document's file changed on disk.
@@ -4417,6 +4443,7 @@ impl App {
             window_width,
             window_height,
             external_prompt: None,
+            save_error: None,
         }
     }
 
@@ -4623,7 +4650,7 @@ impl App {
                 self.new_document();
             }
             ToolbarAction::Save => {
-                let _ = self.active_document_mut().save();
+                self.save_active();
             }
             ToolbarAction::SaveAs => {
                 // Would open a save dialog in a real app.
@@ -4700,19 +4727,64 @@ impl App {
         }
     }
 
+    /// Save the active document, recording any failure where the user can see
+    /// it. Returns whether the write succeeded.
+    ///
+    /// Every user-initiated save goes through here. The write itself was
+    /// always correct — `Document::save` uses `?`, so a failed write leaves
+    /// `modified` set and the buffer intact — but until this existed all three
+    /// call sites discarded the `Result`, so a save onto a full disk or a
+    /// read-only file looked exactly like a save that worked.
+    pub fn save_active(&mut self) -> bool {
+        let name = self.active_document().name.clone();
+        match self.active_document_mut().save() {
+            Ok(()) => {
+                self.save_error = None;
+                true
+            }
+            Err(e) => {
+                self.save_error = Some(format!("Could not save {name}: {e}"));
+                false
+            }
+        }
+    }
+
     /// Perform auto-save if conditions are met.
+    ///
+    /// A failure here is reported the same way a manual save's is: an autosave
+    /// that fails every interval for a whole session, silently, is the worst
+    /// version of this bug — the user has been told the file is being looked
+    /// after and it is not.
     pub fn tick_autosave(&mut self, elapsed_seconds: u64) {
         if !self.autosave_enabled {
             return;
         }
+        let mut attempted = false;
+        let mut failure = None;
         for doc in self.documents.iter_mut() {
             doc.seconds_since_save += elapsed_seconds;
             if doc.modified
                 && doc.path.is_some()
                 && doc.seconds_since_save >= self.autosave_interval
             {
-                let _ = doc.save();
+                attempted = true;
+                if let Err(e) = doc.save() {
+                    // First failure wins: it is the one the user can act on,
+                    // and a later tab's error would otherwise overwrite it.
+                    if failure.is_none() {
+                        failure = Some(format!("Auto-save failed for {}: {e}", doc.name));
+                    }
+                }
             }
+        }
+        // The notice describes the most recent save *attempt*, so a tick that
+        // saved everything clears an older complaint — otherwise a transient
+        // failure would leave a false alarm on screen until the next manual
+        // save, which is its own way of being untrustworthy.
+        if failure.is_some() {
+            self.save_error = failure;
+        } else if attempted {
+            self.save_error = None;
         }
     }
 
@@ -4853,6 +4925,7 @@ impl App {
             status_y,
             self.window_width,
             self.autosave_enabled,
+            self.save_error.as_deref(),
         ));
 
         // Template chooser overlay.
@@ -5213,7 +5286,7 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) {
                 return;
             }
             Key::Char('s') | Key::Char('S') => {
-                let _ = app.active_document_mut().save();
+                app.save_active();
                 return;
             }
             Key::Char('z') | Key::Char('Z') => {
@@ -6586,7 +6659,7 @@ mod tests {
     #[test]
     fn test_render_status_bar_produces_commands() {
         let doc = Document::new();
-        let cmds = render_status_bar(&doc, ViewMode::Split, 0.0, 0.0, 1200.0, true);
+        let cmds = render_status_bar(&doc, ViewMode::Split, 0.0, 0.0, 1200.0, true, None);
         assert!(!cmds.is_empty());
     }
 
@@ -7116,6 +7189,133 @@ mod tests {
             .unwrap_or(0);
         p.push(format!("slate_md_test_{tag}_{nanos}.md"));
         p
+    }
+
+    // --- A save that fails must say so -------------------------------------
+    //
+    // The regression these guard: all three save call sites (the toolbar
+    // button, Ctrl+S and the autosave tick) discarded `Document::save`'s
+    // `Result`, so a write onto a read-only file or a full disk was
+    // indistinguishable from one that worked. The buffer was never lost —
+    // `save()` uses `?`, so `modified` stays set — but only until the window
+    // closed, and nothing on screen said anything was wrong.
+
+    /// A path whose *parent directory does not exist*, so `fs::write` to it
+    /// fails on every platform without needing permissions to be manipulated.
+    fn unwritable_path(tag: &str) -> PathBuf {
+        temp_path(tag).join("no_such_dir").join("doc.md")
+    }
+
+    #[test]
+    fn a_failed_ctrl_s_leaves_a_message_and_keeps_the_buffer() {
+        let mut app = App::new(1280.0, 800.0);
+        app.active_document_mut().lines = vec!["precious".to_string()];
+        app.active_document_mut().modified = true;
+        app.active_document_mut().path = Some(unwritable_path("ctrl_s"));
+
+        handle_key(
+            &mut app,
+            Key::Char('s'),
+            Modifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+            },
+        );
+
+        assert!(app.save_error.is_some(), "a failed save said nothing");
+        assert!(
+            app.active_document().modified,
+            "document was marked clean by a write that never happened"
+        );
+        assert_eq!(app.active_document().lines, vec!["precious".to_string()]);
+    }
+
+    #[test]
+    fn a_successful_save_clears_the_message() {
+        let path = temp_path("md_clears");
+        let mut app = App::new(1280.0, 800.0);
+        app.active_document_mut().lines = vec!["ok".to_string()];
+        app.active_document_mut().modified = true;
+        app.active_document_mut().path = Some(unwritable_path("clears"));
+        assert!(!app.save_active());
+        assert!(app.save_error.is_some());
+
+        app.active_document_mut().path = Some(path.clone());
+        assert!(app.save_active());
+
+        assert!(app.save_error.is_none(), "stale complaint left on screen");
+        assert!(!app.active_document().modified);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_failing_autosave_is_not_silent() {
+        // The worst version of this bug: the user has been told the file is
+        // being looked after every interval, and it is not.
+        let mut app = App::new(1280.0, 800.0);
+        app.autosave_enabled = true;
+        app.autosave_interval = 1;
+        app.active_document_mut().lines = vec!["work".to_string()];
+        app.active_document_mut().modified = true;
+        app.active_document_mut().path = Some(unwritable_path("autosave"));
+
+        app.tick_autosave(60);
+
+        let msg = app.save_error.clone().unwrap_or_default();
+        assert!(msg.to_lowercase().contains("auto-save"), "{msg}");
+        assert!(app.active_document().modified);
+    }
+
+    #[test]
+    fn an_autosave_that_works_clears_an_earlier_complaint() {
+        let path = temp_path("md_autoclear");
+        let mut app = App::new(1280.0, 800.0);
+        app.autosave_enabled = true;
+        app.autosave_interval = 1;
+        app.save_error = Some("stale".to_string());
+        app.active_document_mut().lines = vec!["work".to_string()];
+        app.active_document_mut().modified = true;
+        app.active_document_mut().path = Some(path.clone());
+
+        app.tick_autosave(60);
+
+        assert!(app.save_error.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_idle_autosave_tick_does_not_clear_a_real_complaint() {
+        // Nothing was attempted, so nothing was learned; the outstanding
+        // failure must survive a tick that saved no document at all.
+        let mut app = App::new(1280.0, 800.0);
+        app.autosave_enabled = true;
+        app.save_error = Some("disk full".to_string());
+        app.active_document_mut().modified = false;
+
+        app.tick_autosave(60);
+
+        assert_eq!(app.save_error.as_deref(), Some("disk full"));
+    }
+
+    #[test]
+    fn the_status_bar_shows_the_save_error_instead_of_the_word_count() {
+        let doc = Document::new();
+        let msg = "Could not save notes.md: disk full";
+        let cmds = render_status_bar(&doc, ViewMode::Split, 0.0, 0.0, 1200.0, true, Some(msg));
+
+        let texts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&msg), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("min read")),
+            "the stats and the error would collide: {texts:?}"
+        );
     }
 
     #[test]

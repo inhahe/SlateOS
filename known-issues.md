@@ -28168,7 +28168,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 10 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 11 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28580,6 +28580,57 @@ upstream C source rather than a black-box probe:
   everything past column 4 alone. Writing the expectation from intuition and
   the code from the C source, then reconciling, is what caught these; writing
   both from intuition would have produced a self-consistent wrong utility.
+
+`fold` is the eleventh (`scripts/fold-diff.sh`: 272 passed, 0 differed, 5 differ
+on purpose — the directory operand, `--help`, `--version`, and the two
+*abbreviations* of the latter pair, which are xfails rather than plain cases so
+that what they certify is "`--he` resolves at all", not the help text we already
+know differs). The old implementation was wrong in six ways a one-line command
+would show — a column was always a byte, input was decoded as UTF-8 through
+`lines()` (so a non-UTF-8 file stopped at the first bad byte, CRs vanished, and
+an unterminated last line *gained* a newline), `-w bogus` silently became
+`-w 80` via `parse().unwrap_or(80)`, `-w 0` meant "don't wrap" where GNU refuses
+it, every exit was 0, and `-b`/`--width=N`/`-40`/`--` were all read as
+filenames. Four things worth carrying forward:
+
+- **Measuring the *next* utility found a bug in the *last* one.** Probing
+  `fold --width 5` to establish its grammar is what exposed that `expand
+  --tabs 4` and `unexpand --tabs 4` — shipped an hour earlier — printed
+  `option '--tabs' requires an argument`. A long option with a *required*
+  argument takes the next word when there is no `=`; both files had been
+  written from the opposite belief, and *both harnesses lacked the row that
+  would have caught it*, so the harnesses were part of the fix (commit
+  `2a70349c7`). Every other converted utility already got this right, which is
+  the tell: when one conversion disagrees with seven, suspect the one.
+  Generalise: a utility with a required-argument long option needs the
+  separated spelling in its harness, not only the `=` one.
+- **A sixth shared module, `xnum.rs`,** rather than a third hand-rolled copy of
+  gnulib's `xstrtoumax`/`xdectoint`. `nl` and `head` had each already written a
+  partial one, disagreeing exactly where two partial copies would, and `fold
+  -w` would have been the third. The grammar is much larger than "a decimal
+  integer": leading whitespace, an accepted `+`, a suffix table with two
+  possible bases, a bare suffix meaning *one* of it (`head -c K` is 1024), and
+  — the part no one reinvents correctly — a choice between two different
+  `strerror` sentences for out-of-range decided by a heuristic on the *value*
+  (`INT_MAX / 2`) rather than on the bound that was violated. The suffix table
+  was certified against GNU `head -c` rather than against my reading of it.
+  `fold` passes `Some(b"")` (no suffixes at all), which is why `fold -w 1K` is
+  an error though `head -c 1K` is not: one function, different caller lists.
+- **The over-wide character does not reset the column.** When a character alone
+  exceeds the width, upstream emits it on its own line via `if (offset_out ==
+  0) { line_out[offset_out++] = c; continue; }` — and that `continue` skips the
+  `column = offset_out = 0` that every *other* break performs. So `printf
+  'a\tb\n' | fold -w 4` is `a\n\t\nb\n`, not the intuitive `a\n\tb\n`: the tab
+  lands alone at column 8, and `b` is therefore column 9 and breaks again. Both
+  halves of the unit test asserting the intuitive answer were wrong and GNU was
+  right, at width 8 as well as at width 4.
+- **`fold` is per-file where `expand` is one stream.** `column` and
+  `offset_out` are locals of `fold_file`, so a file not ending in a newline has
+  its partial line flushed *without* one and the next operand starts at column
+  zero. `expand`'s operands are a single continuous stream. The two utilities
+  are neighbours, share a harness shape, and differ here — which is precisely
+  why `half1.txt`/`half2.txt` exist in both harnesses with opposite
+  expectations.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 

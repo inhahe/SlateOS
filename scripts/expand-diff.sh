@@ -184,12 +184,23 @@ for f in plain.txt leading.txt blanks.txt empty.txt aligned.txt ramp.txt runs.tx
   run_case "$f"
 done
 
-# --- the four spellings of a tab size ----------------------------------------
+# --- the five spellings of a tab size -----------------------------------------
+# The separated long form is here because it was missing, and its absence
+# certified a parser that rejected `--tabs 4` outright: a long option with a
+# *required* argument takes the next word when there is no `=`, exactly as the
+# short form does. Every harness for a utility with such an option needs this
+# row, not only the `=` one.
 for size in 1 2 3 4 7 8 9 16; do
   run_case -t$size ramp.txt
   run_case -t "$size" ramp.txt
   run_case --tabs=$size ramp.txt
+  run_case --tabs "$size" ramp.txt
 done
+# A separated argument must be consumed, not left an operand, and the option
+# may still be abbreviated when it is written that way.
+run_case --tabs 4 ramp.txt plain.txt
+run_case --tab 4 ramp.txt
+
 # The obsolete form, which is a short option with an optional argument and so is
 # not restricted to the first argument the way `head -5` is.
 for size in 1 2 3 4 7 8 9 16; do

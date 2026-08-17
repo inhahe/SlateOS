@@ -367,48 +367,46 @@ impl<'a> Unexpander<'a> {
                 }
             }
 
-            if self.convert {
-                if blank {
-                    if self.next_tab_column < self.column {
-                        return Err(Trouble::TooLong);
-                    }
-                    if c == b'\t' {
-                        self.column = self.next_tab_column;
-                        // A tab arriving over pending blanks turns them into
-                        // one tab, whatever they were.
-                        if let Some(first) = self.pending.first_mut() {
-                            *first = b'\t';
-                        }
-                    } else {
-                        self.column = self.column.wrapping_add(1);
-                        if !(self.prev_blank && self.column == self.next_tab_column) {
-                            // Undecided: this blank might yet become part of a
-                            // tab, so buffer it and wait for the next byte.
-                            if self.column == self.next_tab_column {
-                                self.one_blank_before_tab_stop = true;
-                            }
-                            self.pending.push(c);
-                            self.prev_blank = true;
-                            return Ok(());
-                        }
-                        // A run of blanks that reached a stop: replace it with a
-                        // tab. Upstream writes `pending_blank[0]` unguarded
-                        // here, into a buffer that may have length 0 — harmless
-                        // there because the truncation below immediately
-                        // discards it, and spelled out here so it stays so.
-                        c = b'\t';
-                        if self.pending.is_empty() {
-                            self.pending.push(b'\t');
-                        } else if let Some(first) = self.pending.first_mut() {
-                            *first = b'\t';
-                        }
-                    }
-                    // Discard the pending blanks — unless it was the single
-                    // blank sitting just before the previous stop, which stays
-                    // because one blank is not worth a tab.
-                    self.pending
-                        .truncate(usize::from(self.one_blank_before_tab_stop));
+            if self.convert && blank {
+                if self.next_tab_column < self.column {
+                    return Err(Trouble::TooLong);
                 }
+                if c == b'\t' {
+                    self.column = self.next_tab_column;
+                    // A tab arriving over pending blanks turns them into one
+                    // tab, whatever they were.
+                    if let Some(first) = self.pending.first_mut() {
+                        *first = b'\t';
+                    }
+                } else {
+                    self.column = self.column.wrapping_add(1);
+                    if !(self.prev_blank && self.column == self.next_tab_column) {
+                        // Undecided: this blank might yet become part of a tab,
+                        // so buffer it and wait for the next byte.
+                        if self.column == self.next_tab_column {
+                            self.one_blank_before_tab_stop = true;
+                        }
+                        self.pending.push(c);
+                        self.prev_blank = true;
+                        return Ok(());
+                    }
+                    // A run of blanks that reached a stop: replace it with a
+                    // tab. Upstream writes `pending_blank[0]` unguarded here,
+                    // into a buffer that may have length 0 — harmless there
+                    // because the truncation below immediately discards it, and
+                    // spelled out here so it stays so.
+                    c = b'\t';
+                    if self.pending.is_empty() {
+                        self.pending.push(b'\t');
+                    } else if let Some(first) = self.pending.first_mut() {
+                        *first = b'\t';
+                    }
+                }
+                // Discard the pending blanks — unless it was the single blank
+                // sitting just before the previous stop, which stays because
+                // one blank is not worth a tab.
+                self.pending
+                    .truncate(usize::from(self.one_blank_before_tab_stop));
             }
 
             if !blank {
@@ -458,10 +456,11 @@ impl<'a> Unexpander<'a> {
         }
         // More than one blank *and* the first one was on a stop: the run really
         // does span a stop, so the leading blank becomes a tab after all.
-        if self.pending.len() > 1 && self.one_blank_before_tab_stop {
-            if let Some(first) = self.pending.first_mut() {
-                *first = b'\t';
-            }
+        if self.pending.len() > 1
+            && self.one_blank_before_tab_stop
+            && let Some(first) = self.pending.first_mut()
+        {
+            *first = b'\t';
         }
         out.write_all(&self.pending).map_err(Trouble::Write)?;
         self.pending.clear();
@@ -644,7 +643,9 @@ fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
             // A lone `-` is standard input, which is an operand.
             files.push(arg.clone());
         } else if let Some(body) = bytes.strip_prefix(b"--") {
-            if let Some(request) = long_option(body, &bytes, &mut settings, &mut first_only)? {
+            if let Some(request) =
+                long_option(body, &bytes, args, &mut at, &mut settings, &mut first_only)?
+            {
                 return Ok(request);
             }
         } else {
@@ -664,10 +665,15 @@ fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
     Ok(Request::Run(settings, files))
 }
 
-/// One `--name` or `--name=value` argument.
+/// One `--name`, `--name=value` or `--name value` argument.
+///
+/// `next` is the caller's position in `args`, advanced when `--tabs` has to
+/// reach forward for a separated argument.
 fn long_option(
     body: &[u8],
     whole: &[u8],
+    args: &[OsString],
+    next: &mut usize,
     settings: &mut Settings,
     first_only: &mut bool,
 ) -> Result<Option<Request>, Refusal> {
@@ -690,14 +696,22 @@ fn long_option(
 
     match which {
         Long::Tabs => {
-            // `--tabs` takes a required argument, and a long option's required
-            // argument may only be written attached — `--tabs 8` leaves `8` an
-            // operand, so glibc reports the option as missing its argument.
-            let Some(value) = inline else {
-                return Err(Refusal::Getopt(UNEXPAND.long_missing_argument(name)));
+            // A long option's *required* argument may be written either way:
+            // `--tabs=8` or `--tabs 8`. (An *optional* one may not — it only
+            // ever comes from the `=` form — but `unexpand` has none.) Only the
+            // last argument on the line can leave it genuinely missing.
+            let value = match inline {
+                Some(value) => value.to_vec(),
+                None => {
+                    let Some(separate) = args.get(*next) else {
+                        return Err(Refusal::Getopt(UNEXPAND.long_missing_argument(name)));
+                    };
+                    *next = next.saturating_add(1);
+                    arg_bytes(separate)
+                }
             };
             settings.entire_line = true;
-            settings.tabs.parse(value).map_err(Refusal::Tabs)?;
+            settings.tabs.parse(&value).map_err(Refusal::Tabs)?;
         }
         Long::All | Long::FirstOnly | Long::Help | Long::Version => {
             if inline.is_some() {
@@ -938,6 +952,19 @@ mod tests {
     fn the_separated_and_attached_forms_of_dash_t_agree() {
         assert_eq!(run(&["-t", "4"], "    x\n"), run(&["-t4"], "    x\n"));
         assert_eq!(run(&["-t4"], "    x\n"), run(&["--tabs=4"], "    x\n"));
+        // The separated long form. A long option with a *required* argument
+        // takes the next word when there is no `=`, exactly as `-t` does;
+        // believing otherwise left `--tabs 4` reporting a missing argument.
+        assert_eq!(run(&["-t4"], "    x\n"), run(&["--tabs", "4"], "    x\n"));
+    }
+
+    #[test]
+    fn a_separated_long_argument_is_consumed_rather_than_left_an_operand() {
+        let args: Vec<OsString> = ["--tabs", "4", "file"].iter().map(OsString::from).collect();
+        let Ok(Request::Run(_, files)) = parse_args(&args) else {
+            panic!("expected a run");
+        };
+        assert_eq!(files, vec![OsString::from("file")]);
     }
 
     #[test]

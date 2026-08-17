@@ -47,6 +47,8 @@
 #![allow(dead_code)]
 
 #[allow(dead_code)]
+pub mod ati;
+#[allow(dead_code)]
 pub mod atomic;
 #[allow(dead_code)]
 pub mod card_fd;
@@ -908,6 +910,12 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[drm]   Cursor operations: OK");
         Ok(())
     })?;
+
+    // 11. ATI/AMD legacy register + timing arithmetic.
+    //
+    // Pure arithmetic, so it runs on every boot regardless of what display
+    // hardware is present — the machine need not have an ATI device in it.
+    ati::self_test()?;
 
     serial_println!("[drm] Self-test PASSED");
     Ok(())

@@ -5685,7 +5685,20 @@ _Port ext4 first. Don't write a custom filesystem._
 _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a graphical desktop._
 
 ### 3.1 GPU drivers
-- [ ] `[A]` Port AMDGPU driver (open source, well-documented — first priority)
+- [-] `[A]` Port AMDGPU driver (open source, well-documented — first priority)
+  - **Modern GCN/RDNA is untestable by any available route** — QEMU emulates no
+    modern AMD part and the dev machine has an NVIDIA GPU. Blocked on an
+    operator decision: `open-questions.md` Q49. Rationale: `design-decisions.md` §217.
+  - [x] ATI/AMD legacy display block (R100 / Rage 128) — QEMU `ati-vga` emulates
+        this faithfully, so it is the one AMD-family engine that can be run.
+    - [x] `drm/ati/regs.rs` — register map; CRTC timing packing (8-pixel character
+          units, bias-by-one totals, split sync-start, character-denominated sync
+          width); `PixWidth` format mapping; pitch encoding. Pure, no MMIO.
+    - [x] `drm/ati/timing.rs` — `ModeTiming` (full sync edges + polarity, which
+          `DrmMode` does not carry); 5-entry VESA DMT table; exact-match lookup.
+    - [x] `drm/ati/tests.rs` — boot-time self-test: hand-computed register values
+          for all 5 DMT modes, each encoding quirk isolated, every rejection path.
+    - [ ] MMIO probe + `DrmBackend::Ati`, validated against QEMU `ati-vga`.
 - [ ] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
 - [ ] `[A]` NVIDIA: defer until open-source driver matures, or use Linux compat layer later
 

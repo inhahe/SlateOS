@@ -27501,22 +27501,59 @@ restoring `fs::write`/`fs::copy` fails the new test *and nothing else*.
 | `paint` | `save_bmp` — previously had **no test at all** | 158 passed, 1 failed |
 | `installer` | `grub::install`, `grub::update` (separately) | 92 passed, 1 failed (each) |
 | `backup` | `store_bytes`, `store_file` (both counters) | 63 passed, 1 failed (each) |
+| `backup` | `manifest.json`, `meta.json`, restore, `schedules.json` | 64 passed, 1 failed (each) |
 
 That "and nothing else" is the point: it reconfirms the original finding that
 the rest of each suite stays green through the regression.
 
-**Two notes for whoever picks this up next.**
+**One note for whoever picks this up next.** The adopter list above was
+incomplete when this entry was first written — it said "five programs" and
+omitted `apps/backup`, which is the adopter with the *most* at stake (see the
+content-addressed-store reasoning in `safeio`'s docs).
 
-1. **The adopter list above was incomplete** — this entry originally said "five
-   programs" and omitted `apps/backup`, which is the adopter with the *most* at
-   stake (see the content-addressed-store reasoning in `safeio`'s docs).
-2. **`backup` has four call sites still unenforced**: `manifest.json` and
-   `meta.json` (`create`), the restore write, and the schedule-list write. They
-   were left because each sits inside a large command function rather than a
-   unit-testable seam, not because they matter less — the restore write in
-   particular overwrites a file the user still has. Covering them wants those
-   commands factored so a test can drive them; that is the remaining work.
+### Follow-up 2026-08-16 — `backup`'s remaining four sites are now covered
 
-Option 2 (the workspace `disallowed-methods` lint) is still the stronger,
-build-time enforcement and is still worth filing as a cross-lane request if the
-workspace lint table's owner wants it. The counters do not preclude it.
+This entry first shipped with `backup`'s other four writes unenforced —
+`manifest.json` and `meta.json` (`create`), the restore write, and the
+schedule-list write — on the grounds that each sits inside a large command
+function rather than a unit-testable seam. That reason did not survive
+contact: `cmd_create`, `cmd_restore` and `cmd_schedule` are all plain
+functions over a directory, so the test drives each command **end-to-end**
+and no factoring was needed at all. Driving the real command is also the
+better test, because it exercises the same call the binary makes and cannot
+drift away from it the way an extracted helper can.
+
+**A counting bug was found and fixed while doing it.** The original
+assertions were `writes_performed() > before` — a strict inequality, because
+the counters are process-global and `cargo test` runs tests in parallel, so a
+delta is an *upper* bound on the span's own writes, not an equality. That
+asymmetry points the wrong way. A site that regressed to `fs::write`
+contributes one fewer write, and a concurrent test can make up the
+difference, so the check would pass and the regression would ship — the test
+disarming itself precisely when it was needed. The fix is a test-module
+`audit_lock()` mutex held across each measured span, which makes the delta
+exactly that span's own and lets every assertion be an equality
+(`== 2` for create's two metadata files, `== one per restored file`, `== 1`
+for the schedule). The pre-existing blob-store test was moved under the same
+lock and tightened from `>` to `== 1` for the same reason.
+
+Worth generalising: **a routing check that can only be inflated by unrelated
+activity is not a check.** Any assertion of the form "the counter went up"
+over a shared counter has this shape, and it fails open.
+
+The severity ordering, for whoever reads the four sites as interchangeable —
+they are not. A truncated `manifest.json` leaves the blobs intact but
+unreachable (bytes with no index); `meta.json` doubles as the completion
+marker `list_backups` keys off, so a half-written one can make a *finished*
+backup unlistable; `schedules.json` is rewritten whole, so a truncated write
+loses every schedule rather than the one being added; and the restore write
+is the worst, because it writes *over* a file the user still has — a
+truncating write there destroys the original and fails to supply the
+replacement, which is the one outcome a restore must never produce.
+
+All nine-plus-four call sites across six crates are now enforced. Option 2
+(the workspace `disallowed-methods` lint) remains the stronger, build-time
+enforcement — it would catch a *new* call site, which no counter test can, since
+a test can only assert about code someone thought to test. Still worth filing as
+a cross-lane request if the workspace lint table's owner wants it; the counters
+do not preclude it.

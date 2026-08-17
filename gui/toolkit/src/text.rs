@@ -361,7 +361,16 @@ pub fn draw_into(
     weight: FontWeightHint,
     color: Color,
 ) -> f32 {
-    draw_into_family(surface, text, x, baseline_y, size, weight, FontFamily::Ui, color)
+    draw_into_family(
+        surface,
+        text,
+        x,
+        baseline_y,
+        size,
+        weight,
+        FontFamily::Ui,
+        color,
+    )
 }
 
 /// The family-aware form of [`draw_into`].
@@ -1256,7 +1265,10 @@ mod shaping_cost {
     #[ignore = "timing instrument, not an assertion; see the module doc"]
     fn whole_line_against_visible_window() {
         const VISIBLE: usize = 200;
-        println!("\n{:>9}  {:>12}  {:>12}  {:>8}", "chars", "whole", "visible", "ratio");
+        println!(
+            "\n{:>9}  {:>12}  {:>12}  {:>8}",
+            "chars", "whole", "visible", "ratio"
+        );
         for chars in [200usize, 1_000, 5_000, 20_000] {
             let whole = pathological(chars);
             let window = pathological(VISIBLE.min(chars));
@@ -1384,7 +1396,10 @@ mod shaping_cost {
         // The ratio is formed from the *best* of each block, because that is
         // the candidate statistic being tested against the median.
         let ratios: Vec<f64> = sys_best.iter().zip(&bi_best).map(|(s, b)| s / b).collect();
-        println!("\n{:>12}  {:>10}  {:>10}  {:>8}", "column", "min", "max", "spread");
+        println!(
+            "\n{:>12}  {:>10}  {:>10}  {:>8}",
+            "column", "min", "max", "spread"
+        );
         for (name, v) in [
             ("system med", &sys_med),
             ("system best", &sys_best),
@@ -1456,11 +1471,7 @@ mod tests {
     }
 
     fn changed(before: &[u32], after: &[u32]) -> usize {
-        before
-            .iter()
-            .zip(after)
-            .filter(|(a, b)| a != b)
-            .count()
+        before.iter().zip(after).filter(|(a, b)| a != b).count()
     }
 
     #[test]

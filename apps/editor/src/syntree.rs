@@ -145,7 +145,9 @@ impl SyntaxTree {
     }
 
     fn enclosing_from(&self, idx: usize, pos: Pos) -> usize {
-        let Some(node) = self.node(idx) else { return idx };
+        let Some(node) = self.node(idx) else {
+            return idx;
+        };
         for &child in &node.children {
             if self.node(child).is_some_and(|c| c.contains(pos)) {
                 return self.enclosing_from(child, pos);
@@ -165,7 +167,9 @@ impl SyntaxTree {
     }
 
     fn enclosing_range_from(&self, idx: usize, start: Pos, end: Pos) -> usize {
-        let Some(node) = self.node(idx) else { return idx };
+        let Some(node) = self.node(idx) else {
+            return idx;
+        };
         for &child in &node.children {
             let Some(c) = self.node(child) else { continue };
             if c.start <= start && end <= c.end {
@@ -586,10 +590,7 @@ mod tests {
         let t = build(Language::Rust, src);
         // Only the outer Paren-less code: no Block nodes.
         assert!(
-            t.nodes
-                .iter()
-                .skip(1)
-                .all(|n| n.kind != NodeKind::Block),
+            t.nodes.iter().skip(1).all(|n| n.kind != NodeKind::Block),
             "found a stray block: {:?}",
             t.nodes
         );
@@ -637,11 +638,7 @@ mod tests {
         // Expect at least the two Block headers (the Parens are single-line
         // so not included).
         let multiline_blocks: Vec<_> = outline.iter().collect();
-        assert!(
-            multiline_blocks.len() >= 2,
-            "outline = {:?}",
-            outline
-        );
+        assert!(multiline_blocks.len() >= 2, "outline = {:?}", outline);
         // The inner one should have greater depth than the outer one.
         let max_depth = outline.iter().map(|(d, _)| *d).max().unwrap();
         let min_depth = outline.iter().map(|(d, _)| *d).min().unwrap();

@@ -142,20 +142,20 @@ impl Theme {
             string: Color::from_hex(0xA6E3A1),       // green
             number: Color::from_hex(0xFAB387),       // peach
             comment: Color::from_hex(0x6C7086),      // overlay0
-            operator: Color::from_hex(0x89DCEB),      // sky
-            punctuation: Color::from_hex(0x9399B2),   // overlay2
-            preprocessor: Color::from_hex(0xF5C2E7),  // pink
-            attribute: Color::from_hex(0xF5C2E7),     // pink
-            macro_name: Color::from_hex(0x94E2D5),    // teal
-            builtin: Color::from_hex(0xFAB387),       // peach
-            variable: Color::from_hex(0xCDD6F4),      // text
-            function: Color::from_hex(0x89B4FA),      // blue
-            heading: Color::from_hex(0xF38BA8),       // red
-            bold: Color::from_hex(0xFAB387),          // peach
-            italic: Color::from_hex(0xF5C2E7),        // pink
-            link: Color::from_hex(0x89B4FA),           // blue
-            code_block: Color::from_hex(0xA6E3A1),    // green
-            plain: Color::from_hex(0xCDD6F4),         // text
+            operator: Color::from_hex(0x89DCEB),     // sky
+            punctuation: Color::from_hex(0x9399B2),  // overlay2
+            preprocessor: Color::from_hex(0xF5C2E7), // pink
+            attribute: Color::from_hex(0xF5C2E7),    // pink
+            macro_name: Color::from_hex(0x94E2D5),   // teal
+            builtin: Color::from_hex(0xFAB387),      // peach
+            variable: Color::from_hex(0xCDD6F4),     // text
+            function: Color::from_hex(0x89B4FA),     // blue
+            heading: Color::from_hex(0xF38BA8),      // red
+            bold: Color::from_hex(0xFAB387),         // peach
+            italic: Color::from_hex(0xF5C2E7),       // pink
+            link: Color::from_hex(0x89B4FA),         // blue
+            code_block: Color::from_hex(0xA6E3A1),   // green
+            plain: Color::from_hex(0xCDD6F4),        // text
         }
     }
 
@@ -505,7 +505,12 @@ fn scan_string(bytes: &[u8], i: usize, quote: u8) -> usize {
 /// This existed as six near-copies — an open-it-here and a resume-from-above
 /// arm in each of three tokenizers — which is six places for the `i + 1 < len`
 /// guard and the two-byte step to disagree.
-fn scan_block_comment(bytes: &[u8], mut i: usize, mut depth: usize, nested: bool) -> (usize, usize) {
+fn scan_block_comment(
+    bytes: &[u8],
+    mut i: usize,
+    mut depth: usize,
+    nested: bool,
+) -> (usize, usize) {
     while depth > 0 {
         if nested && is_pair(bytes, i, b'/', b'*') {
             depth = depth.saturating_add(1);
@@ -540,16 +545,16 @@ fn is_punctuation_byte(b: u8) -> bool {
 
 // Keywords must be sorted for binary search.
 const RUST_KEYWORDS: &[&str] = &[
-    "Self", "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else",
-    "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod",
-    "move", "mut", "pub", "ref", "return", "self", "static", "struct", "super", "trait", "true",
-    "type", "union", "unsafe", "use", "where", "while", "yield",
+    "Self", "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+    "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
+    "mut", "pub", "ref", "return", "self", "static", "struct", "super", "trait", "true", "type",
+    "union", "unsafe", "use", "where", "while", "yield",
 ];
 
 const RUST_TYPES: &[&str] = &[
-    "Arc", "Box", "HashMap", "HashSet", "Mutex", "Option", "Rc", "Result", "String", "Vec",
-    "bool", "char", "f32", "f64", "i128", "i16", "i32", "i64", "i8", "isize", "str", "u128",
-    "u16", "u32", "u64", "u8", "usize",
+    "Arc", "Box", "HashMap", "HashSet", "Mutex", "Option", "Rc", "Result", "String", "Vec", "bool",
+    "char", "f32", "f64", "i128", "i16", "i32", "i64", "i8", "isize", "str", "u128", "u16", "u32",
+    "u64", "u8", "usize",
 ];
 
 fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
@@ -594,7 +599,6 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     }
 
     while let Some(b) = at(bytes, i) {
-
         // Line comment
         if is_pair(bytes, i, b'/', b'/') {
             push_token(&mut tokens, i, len, Token::Comment);
@@ -616,8 +620,7 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         // Attribute: `#[...]` or `#![...]`
         if b == b'#'
             && (is_pair(bytes, i, b'#', b'[')
-                || (is_pair(bytes, i, b'#', b'!')
-                    && at(bytes, i.saturating_add(2)) == Some(b'[')))
+                || (is_pair(bytes, i, b'#', b'!') && at(bytes, i.saturating_add(2)) == Some(b'[')))
         {
             let start = i;
             // Find the matching `]`. The scan starts on the `#`, and the
@@ -660,9 +663,7 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
                         push_token(&mut tokens, start, len, Token::String);
                         return tokens;
                     };
-                    if c == b'"'
-                        && count_hashes(bytes, j.saturating_add(1), hashes) == hashes
-                    {
+                    if c == b'"' && count_hashes(bytes, j.saturating_add(1), hashes) == hashes {
                         j = j.saturating_add(1).saturating_add(hashes).min(len);
                         break;
                     }
@@ -732,9 +733,8 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 
         // Number
         if b.is_ascii_digit()
-                || (b == b'.'
-                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
-            {
+            || (b == b'.' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+        {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(&mut tokens, start, end, Token::Number);
@@ -800,20 +800,78 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 // ============================================================================
 
 const PYTHON_KEYWORDS: &[&str] = &[
-    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
-    "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
-    "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return",
-    "try", "while", "with", "yield",
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
 ];
 
 const PYTHON_BUILTINS: &[&str] = &[
-    "abs", "all", "any", "bin", "bool", "bytes", "callable", "chr", "classmethod", "compile",
-    "complex", "delattr", "dict", "dir", "divmod", "enumerate", "eval", "exec", "filter",
-    "float", "format", "frozenset", "getattr", "globals", "hasattr", "hash", "help", "hex",
-    "id", "input", "int", "isinstance", "issubclass", "iter", "len", "list", "locals", "map",
-    "max", "memoryview", "min", "next", "object", "oct", "open", "ord", "pow", "print",
-    "property", "range", "repr", "reversed", "round", "set", "setattr", "slice", "sorted",
-    "staticmethod", "str", "sum", "super", "tuple", "type", "vars", "zip",
+    "abs",
+    "all",
+    "any",
+    "bin",
+    "bool",
+    "bytes",
+    "callable",
+    "chr",
+    "classmethod",
+    "compile",
+    "complex",
+    "delattr",
+    "dict",
+    "dir",
+    "divmod",
+    "enumerate",
+    "eval",
+    "exec",
+    "filter",
+    "float",
+    "format",
+    "frozenset",
+    "getattr",
+    "globals",
+    "hasattr",
+    "hash",
+    "help",
+    "hex",
+    "id",
+    "input",
+    "int",
+    "isinstance",
+    "issubclass",
+    "iter",
+    "len",
+    "list",
+    "locals",
+    "map",
+    "max",
+    "memoryview",
+    "min",
+    "next",
+    "object",
+    "oct",
+    "open",
+    "ord",
+    "pow",
+    "print",
+    "property",
+    "range",
+    "repr",
+    "reversed",
+    "round",
+    "set",
+    "setattr",
+    "slice",
+    "sorted",
+    "staticmethod",
+    "str",
+    "sum",
+    "super",
+    "tuple",
+    "type",
+    "vars",
+    "zip",
 ];
 
 fn highlight_python(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
@@ -858,7 +916,6 @@ fn highlight_python_normal(
     let mut i = start_offset;
 
     while let Some(b) = at(bytes, i) {
-
         // Comment
         if b == b'#' {
             push_token(tokens, i, len, Token::Comment);
@@ -882,14 +939,11 @@ fn highlight_python_normal(
             // the string, not to the identifier the scanner already emitted
             // for it — so take that token back and start the string there.
             let prefixed = i > start_offset
-                && at(bytes, i.saturating_sub(1)).is_some_and(|prev| {
-                    matches!(prev, b'f' | b'F' | b'b' | b'B' | b'r' | b'R')
-                });
+                && at(bytes, i.saturating_sub(1))
+                    .is_some_and(|prev| matches!(prev, b'f' | b'F' | b'b' | b'B' | b'r' | b'R'));
             let actual_start = if prefixed {
                 match tokens.last() {
-                    Some(last)
-                        if last.end == i && last.start == i.saturating_sub(1) =>
-                    {
+                    Some(last) if last.end == i && last.start == i.saturating_sub(1) => {
                         let prev_start = last.start;
                         tokens.pop();
                         prev_start
@@ -934,9 +988,8 @@ fn highlight_python_normal(
 
         // Number
         if b.is_ascii_digit()
-                || (b == b'.'
-                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
-            {
+            || (b == b'.' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+        {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(tokens, start, end, Token::Number);
@@ -993,20 +1046,96 @@ fn highlight_python_normal(
 // ============================================================================
 
 const C_KEYWORDS: &[&str] = &[
-    "alignas", "alignof", "auto", "bool", "break", "case", "catch", "class", "const",
-    "constexpr", "constinit", "continue", "decltype", "default", "delete", "do", "else", "enum",
-    "explicit", "export", "extern", "false", "final", "for", "friend", "goto", "if", "inline",
-    "mutable", "namespace", "new", "noexcept", "nullptr", "operator", "override", "private",
-    "protected", "public", "register", "requires", "return", "signed", "sizeof", "static",
-    "static_assert", "static_cast", "struct", "switch", "template", "this", "throw", "true",
-    "try", "typedef", "typeid", "typename", "union", "unsigned", "using", "virtual", "void",
-    "volatile", "while",
+    "alignas",
+    "alignof",
+    "auto",
+    "bool",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "constexpr",
+    "constinit",
+    "continue",
+    "decltype",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "explicit",
+    "export",
+    "extern",
+    "false",
+    "final",
+    "for",
+    "friend",
+    "goto",
+    "if",
+    "inline",
+    "mutable",
+    "namespace",
+    "new",
+    "noexcept",
+    "nullptr",
+    "operator",
+    "override",
+    "private",
+    "protected",
+    "public",
+    "register",
+    "requires",
+    "return",
+    "signed",
+    "sizeof",
+    "static",
+    "static_assert",
+    "static_cast",
+    "struct",
+    "switch",
+    "template",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typedef",
+    "typeid",
+    "typename",
+    "union",
+    "unsigned",
+    "using",
+    "virtual",
+    "void",
+    "volatile",
+    "while",
 ];
 
 const C_TYPES: &[&str] = &[
-    "FILE", "char", "char16_t", "char32_t", "char8_t", "double", "float", "int", "int16_t",
-    "int32_t", "int64_t", "int8_t", "intptr_t", "long", "ptrdiff_t", "short", "size_t",
-    "ssize_t", "uint16_t", "uint32_t", "uint64_t", "uint8_t", "uintptr_t", "wchar_t",
+    "FILE",
+    "char",
+    "char16_t",
+    "char32_t",
+    "char8_t",
+    "double",
+    "float",
+    "int",
+    "int16_t",
+    "int32_t",
+    "int64_t",
+    "int8_t",
+    "intptr_t",
+    "long",
+    "ptrdiff_t",
+    "short",
+    "size_t",
+    "ssize_t",
+    "uint16_t",
+    "uint32_t",
+    "uint64_t",
+    "uint8_t",
+    "uintptr_t",
+    "wchar_t",
 ];
 
 fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
@@ -1042,7 +1171,6 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     }
 
     while let Some(b) = at(bytes, i) {
-
         // Line comment
         if is_pair(bytes, i, b'/', b'/') {
             push_token(&mut tokens, i, len, Token::Comment);
@@ -1075,9 +1203,8 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 
         // Number
         if b.is_ascii_digit()
-                || (b == b'.'
-                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
-            {
+            || (b == b'.' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+        {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(&mut tokens, start, end, Token::Number);
@@ -1095,7 +1222,11 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
                 Token::Type
             } else if at(bytes, end) == Some(b'(') {
                 Token::Function
-            } else if word.chars().all(|c| c.is_ascii_uppercase() || c == b'_' as char) && word.len() > 1 {
+            } else if word
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == b'_' as char)
+                && word.len() > 1
+            {
                 // ALL_CAPS identifiers are usually macros/constants in C.
                 Token::Macro
             } else {
@@ -1136,21 +1267,105 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 // ============================================================================
 
 const JS_KEYWORDS: &[&str] = &[
-    "abstract", "arguments", "as", "async", "await", "break", "case", "catch", "class", "const",
-    "continue", "debugger", "default", "delete", "do", "else", "enum", "export", "extends",
-    "false", "finally", "for", "from", "function", "get", "if", "implements", "import", "in",
-    "instanceof", "interface", "let", "new", "null", "of", "package", "private", "protected",
-    "public", "return", "set", "static", "super", "switch", "this", "throw", "true", "try",
-    "type", "typeof", "undefined", "var", "void", "while", "with", "yield",
+    "abstract",
+    "arguments",
+    "as",
+    "async",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "from",
+    "function",
+    "get",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "new",
+    "null",
+    "of",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "set",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "type",
+    "typeof",
+    "undefined",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
 ];
 
 const JS_BUILTINS: &[&str] = &[
-    "Array", "Boolean", "Buffer", "Console", "Date", "Error", "Function", "Infinity", "JSON",
-    "Map", "Math", "NaN", "Number", "Object", "Promise", "Proxy", "Reflect", "RegExp",
-    "Set", "String", "Symbol", "WeakMap", "WeakSet", "clearInterval", "clearTimeout",
-    "console", "decodeURI", "encodeURI", "eval", "fetch", "globalThis",
-    "isFinite", "isNaN", "parseInt", "parseFloat", "process", "require",
-    "setInterval", "setTimeout", "window",
+    "Array",
+    "Boolean",
+    "Buffer",
+    "Console",
+    "Date",
+    "Error",
+    "Function",
+    "Infinity",
+    "JSON",
+    "Map",
+    "Math",
+    "NaN",
+    "Number",
+    "Object",
+    "Promise",
+    "Proxy",
+    "Reflect",
+    "RegExp",
+    "Set",
+    "String",
+    "Symbol",
+    "WeakMap",
+    "WeakSet",
+    "clearInterval",
+    "clearTimeout",
+    "console",
+    "decodeURI",
+    "encodeURI",
+    "eval",
+    "fetch",
+    "globalThis",
+    "isFinite",
+    "isNaN",
+    "parseInt",
+    "parseFloat",
+    "process",
+    "require",
+    "setInterval",
+    "setTimeout",
+    "window",
 ];
 
 fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
@@ -1199,7 +1414,6 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
     }
 
     while let Some(b) = at(bytes, i) {
-
         // Line comment
         if is_pair(bytes, i, b'/', b'/') {
             push_token(&mut tokens, i, len, Token::Comment);
@@ -1241,9 +1455,7 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         }
 
         // Regex literal — simple heuristic: `/` after `=`, `(`, `,`, `[`, `!`, `&`, `|`, `:`, `;`, `{`, `}`, `return`, newline start
-        if b == b'/'
-            && at(bytes, i.saturating_add(1)).is_some_and(|c| c != b'/' && c != b'*')
-        {
+        if b == b'/' && at(bytes, i.saturating_add(1)).is_some_and(|c| c != b'/' && c != b'*') {
             // Whether a `/` opens a regex or divides depends on what came
             // before it. Anything that cannot end an expression — an
             // operator, an opening bracket, a separator — means the `/` must
@@ -1289,9 +1501,8 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
 
         // Number
         if b.is_ascii_digit()
-                || (b == b'.'
-                    && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
-            {
+            || (b == b'.' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+        {
             let start = i;
             let end = scan_number(bytes, i);
             push_token(&mut tokens, start, end, Token::Number);
@@ -1360,7 +1571,6 @@ fn highlight_json(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     // Track whether the next string is a key (true) or value (false).
     // A string is a key if it's followed (ignoring whitespace) by `:`.
     while let Some(b) = at(bytes, i) {
-
         // String
         if b == b'"' {
             let start = i;
@@ -1381,7 +1591,10 @@ fn highlight_json(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         }
 
         // Number
-        if b.is_ascii_digit() || b == b'-' || (b == b'.' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit())) {
+        if b.is_ascii_digit()
+            || b == b'-'
+            || (b == b'.' && at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()))
+        {
             // For `-`, only treat as number start if followed by digit.
             if b == b'-' {
                 if at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()) {
@@ -1509,7 +1722,6 @@ fn highlight_toml(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 
         // Value — highlight strings, numbers, booleans.
         while let Some(b) = at(bytes, i) {
-
             if b == b'#' {
                 push_token(&mut tokens, i, len, Token::Comment);
                 return tokens;
@@ -1621,8 +1833,7 @@ fn highlight_markdown(line: &str, state: &mut HighlightState) -> Vec<StyledToken
     }
 
     // Unordered list marker
-    if at(bytes, 0).is_some_and(|c| matches!(c, b'-' | b'*' | b'+')) && at(bytes, 1) == Some(b' ')
-    {
+    if at(bytes, 0).is_some_and(|c| matches!(c, b'-' | b'*' | b'+')) && at(bytes, 1) == Some(b' ') {
         push_token(&mut tokens, 0, 2, Token::Keyword);
         i = 2;
     }
@@ -1642,7 +1853,6 @@ fn highlight_markdown(line: &str, state: &mut HighlightState) -> Vec<StyledToken
 
     // Inline formatting
     while let Some(b) = at(bytes, i) {
-
         // Inline code: `...`
         if b == b'`' {
             let start = i;
@@ -1703,9 +1913,9 @@ const SHELL_KEYWORDS: &[&str] = &[
 
 const SHELL_BUILTINS: &[&str] = &[
     "alias", "bg", "bind", "builtin", "cd", "command", "compgen", "complete", "declare", "dirs",
-    "disown", "echo", "enable", "eval", "exec", "exit", "fg", "getopts", "hash", "help",
-    "history", "jobs", "kill", "let", "logout", "popd", "printf", "pushd", "pwd", "set",
-    "shopt", "test", "times", "type", "ulimit", "umask", "unalias", "wait",
+    "disown", "echo", "enable", "eval", "exec", "exit", "fg", "getopts", "hash", "help", "history",
+    "jobs", "kill", "let", "logout", "popd", "printf", "pushd", "pwd", "set", "shopt", "test",
+    "times", "type", "ulimit", "umask", "unalias", "wait",
 ];
 
 fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
@@ -1716,7 +1926,6 @@ fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     let mut i = 0;
 
     while let Some(b) = at(bytes, i) {
-
         // Comment (but not inside a string)
         if b == b'#' {
             push_token(&mut tokens, i, len, Token::Comment);
@@ -1902,15 +2111,27 @@ mod tests {
             (Language::C, "char *s = \"日本語\"; // コメント"),
             (Language::Python, "变量 = \"日本語\"  # コメント"),
             (Language::Python, "s = '''日本語 multi'''"),
-            (Language::JavaScript, "const 変数 = `日本語 ${x}`; // コメント"),
+            (
+                Language::JavaScript,
+                "const 変数 = `日本語 ${x}`; // コメント",
+            ),
             (Language::JavaScript, "let s = \"emoji 😀\"; /* κόσμε */"),
-            (Language::Html, "<p class=\"日本語\">κόσμε</p><!-- コメント -->"),
-            (Language::Css, ".日本語 { content: \"κόσμε\"; } /* コメント */"),
+            (
+                Language::Html,
+                "<p class=\"日本語\">κόσμε</p><!-- コメント -->",
+            ),
+            (
+                Language::Css,
+                ".日本語 { content: \"κόσμε\"; } /* コメント */",
+            ),
             (Language::Shell, "echo \"日本語\" # コメント"),
             (Language::Toml, "名前 = \"日本語\" # コメント"),
             (Language::Yaml, "名前: \"日本語\" # コメント"),
             (Language::Json, "{\"名前\": \"日本語\"}"),
-            (Language::Markdown, "# 見出し **太字** `コード` [リンク](url)"),
+            (
+                Language::Markdown,
+                "# 見出し **太字** `コード` [リンク](url)",
+            ),
             (Language::Plain, "日本語 κόσμε 😀"),
         ]
     }
@@ -1977,23 +2198,23 @@ mod tests {
         // A line ending mid-construct is not exotic — it is what the buffer
         // holds for the whole time the user is typing the construct.
         let endings = [
-            "\\",       // dangling escape
-            "\"\\",     // open string, dangling escape
-            "'\\",      // open char, dangling escape
-            "\"",       // unterminated string
-            "/*",       // unterminated block comment
-            "/",        // half an operator or comment
-            "0x",       // radix prefix with no digits
-            "1e",       // exponent with no digits
-            "1.",       // decimal point with no fraction
-            "r#\"",     // unterminated Rust raw string
-            "`",        // unterminated JS template literal
-            "`\\",      // open JS template literal, dangling escape
-            "/\\",      // open JS regex literal, dangling escape
-            "/ab\\",    // open JS regex literal with a body, dangling escape
-            "<",        // unterminated HTML tag
-            "&",        // unterminated HTML entity
-            "$",        // shell expansion with no name
+            "\\",    // dangling escape
+            "\"\\",  // open string, dangling escape
+            "'\\",   // open char, dangling escape
+            "\"",    // unterminated string
+            "/*",    // unterminated block comment
+            "/",     // half an operator or comment
+            "0x",    // radix prefix with no digits
+            "1e",    // exponent with no digits
+            "1.",    // decimal point with no fraction
+            "r#\"",  // unterminated Rust raw string
+            "`",     // unterminated JS template literal
+            "`\\",   // open JS template literal, dangling escape
+            "/\\",   // open JS regex literal, dangling escape
+            "/ab\\", // open JS regex literal with a body, dangling escape
+            "<",     // unterminated HTML tag
+            "&",     // unterminated HTML entity
+            "$",     // shell expansion with no name
         ];
         // Prefixes put the ending somewhere other than offset 0, and the
         // non-ASCII ones also exercise `advance`'s truncation clamp.
@@ -2037,8 +2258,7 @@ mod tests {
                                 line.len()
                             );
                             assert!(
-                                line.is_char_boundary(t.start)
-                                    && line.is_char_boundary(t.end),
+                                line.is_char_boundary(t.start) && line.is_char_boundary(t.end),
                                 "{lang:?}: token {}..{} splits a character in \
                                  {line:?}",
                                 t.start,

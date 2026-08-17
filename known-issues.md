@@ -27867,7 +27867,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 2 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 3 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -27939,3 +27939,41 @@ That is `Program::usage()`, separate from the getopt sentences.
    for the `other as char` bug while there: both `sort` and `cat` had it, and it
    reports an option nobody typed (0xC3 rendered as `Ã`, then re-encoded as two
    bytes). Iterate short-option bytes, not chars.
+
+### Progress (appended 2026-08-17)
+
+`wc` is the third (`scripts/wc-diff.sh`: 113 passed, 0 differed, 3 differ on
+purpose). It was not a table swap — the whole front end was rewritten — and it
+added three traps to the list above:
+
+- **Some usage errors *do* keep the referral.** `wc --files0-from=- FILE` prints
+  `Try 'wc --help' for more information.` where `sort -k0` prints no such line.
+  The difference is in the upstream call: `error (0, …)` followed by
+  `usage (EXIT_FAILURE)` prints it, `error (EXIT_FAILURE, …)` does not. That is
+  now `Program::usage_referring()` beside `Program::usage()`, and **which one a
+  diagnostic uses is per-message, not per-utility** — read the call site.
+- **Measurement alone is not always enough; read the upstream source.** `wc`'s
+  column width looks like a fixed 7 and is not: it is the digit count of the sum
+  of the operands' *sizes*, except that a lone count of a lone input is exempt
+  and prints bare, and any input that stats but has no size (a pipe, a terminal,
+  a directory) forces 7. Four rules inferred from the harness each fit every case
+  measured to that point and each broke on the next; `coreutils-9.4/src/wc.c`
+  (`get_input_fstatus`, `compute_number_width`) settled it in one read. When a
+  utility's output depends on something the output does not show — here `S_ISREG`
+  of every operand, and whether the `--files0-from` list was small enough
+  (10 MiB) to slurp, which is the *only* reason `--files0-from=-` on a pipe pads
+  differently from `--files0-from=FILE` — fetch the source rather than infer.
+- **The harness runs a Windows build, and `Metadata::is_file()` lies there.** On
+  Windows it means "not a directory and not a symlink", so an MSYS pipe answers
+  *yes* and reports a length of whatever is buffered in it. Every `S_ISREG`
+  question in a converted utility needs the host analogue — `GetFileType`, where
+  only `FILE_TYPE_DISK` is a regular file — or the harness will certify a rule
+  that is wrong on the target. `wc.rs` → `Stat` is the shape to copy: the three
+  answers are `Failed`, `Regular(len)` and `Other`, and conflating the first two
+  with the third is exactly the bug this caught.
+
+One divergence found here is not `wc`'s and affects all 85: under a UTF-8
+locale GNU quotes option arguments with `‘…’` rather than `'…'`. Confined to
+`quote()`/`argmatch` — `quotef`, `quoteaf` and getopt's own sentences are ASCII
+in every locale. Left as-is and queued for the operator: `open-questions.md` →
+**B-Q2**.

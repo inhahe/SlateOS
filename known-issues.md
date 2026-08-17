@@ -29896,10 +29896,20 @@ cost of a mismatch is small.
   which would have obliged all ~539 `KeyEvent` construction sites in the tree to
   invent one.
 - **(c) Give the compositor the keymap and the modifier state** that (b) assigns
-  it. `handle_key` (`gui/compositor/src/main.rs:3129`) currently passes
-  `pressed` straight through and accumulates nothing, so there is no
-  `Modifiers` to put in a `KeyEvent`; and the scancode→`Key` table it now owns
-  does not exist yet. Then replace the stub drain at `:4305` with a real send.
+  it. — **DONE 2026-08-17.** `gui/compositor/src/keymap.rs`: an 88-key
+  scan-code-set-1 table (extended keys keeping their `0xE0` prefix, so Left
+  arrow stays distinct from keypad 4) and a `ModifierState` tracking each
+  modifier *per side*, so releasing one Shift while the other is held does not
+  drop the modifier mid-capital. Caps Lock is a latch that cancels with Shift
+  rather than combining. `handle_key` folds the state *before* building the
+  notification, so `Ctrl+S` arrives as a chord rather than one event behind.
+  `Compositor::drain_input_frame` encodes the pending notifications as a
+  `guiremote` input frame. 21 tests, including compositor→wire→client round
+  trips for a key press, a chord, the arrow keys and a window-local mouse click.
+  **Still open under this item:** the transport itself — each window needs a
+  channel to its owning process, and until that exists `main()` builds the frame
+  and drops it. Also `TD-ONLY-ONE-KEYBOARD-LAYOUT`: the structure supports
+  layouts, and exactly one table occupies it.
 - **(d) Write the client-side loop once, in `guitk`,** not once per app: connect,
   block on events, dispatch to a handler, push a `RenderTree` per frame. 138
   hand-written loops is 138 chances to get the seam subtly different.
@@ -29912,3 +29922,41 @@ cost of a mismatch is small.
 crates" and "an OS with any usable application at all". Low as a *defect*:
 nothing that exists is wrong, it is only unreachable, so the fix is additive
 and nothing has to be unwound first.
+
+## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
+
+**What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY
+scan-code-set-1 table, and there is no way to select another. Anyone using a
+non-US keyboard gets the wrong letters — a French AZERTY user pressing the key
+labelled `A` produces `Q`.
+
+**How it arose.** `design-decisions.md` §456 put scancode→key translation in the
+compositor (rather than in each of 138 client crates) so that one system keymap
+governs everything and a layout change takes effect everywhere at once. That is
+the right *structure* for layouts; this entry is the observation that the
+structure now exists and is occupied by exactly one table.
+
+**What is missing**, roughly in order of how much each is felt:
+
+1. **Layout selection** — a setting, a way to read it, and the table swap. The
+   table is already consulted in exactly one place (`key_for_scancode`), so this
+   is a lookup change rather than a redesign.
+2. **More tables.** Each is mechanical: the same 88 rows with different letters.
+3. **Dead keys.** On many European layouts `´` then `e` produces `é`. That needs
+   per-layout state between two key events, which nothing here has — the
+   translation is currently a pure function of one scancode.
+4. **Compose sequences** (`Compose`, `o`, `c` → `©`), the same shape of problem
+   as dead keys but with longer sequences.
+5. **AltGr as a level shift.** `Modifiers` has no AltGr; right Alt currently maps
+   to `Key::RightAlt` and sets the `alt` flag, so a layout where AltGr+`2`
+   produces `@` cannot be expressed.
+
+**Severity.** Low today, because nothing else about the input path is connected
+yet — see `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` — so no user is currently
+getting the wrong letter. It becomes a *correctness* issue the moment a real
+client exists and someone outside the US uses it, and (3)–(5) are the kind of
+thing that is much cheaper to design in than to retrofit, because they change
+`key_for_scancode` from a pure function into something that holds state.
+
+**Where.** `gui/compositor/src/keymap.rs` — the `key_for_scancode` table, and
+`Modifiers` in `gui/toolkit/src/event.rs:185` for the AltGr gap.

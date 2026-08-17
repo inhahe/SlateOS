@@ -42,6 +42,16 @@ use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
 use guitk::color::Color;
+// Aliased because this crate has its own `MouseButton` and `MouseEventKind`
+// describing the *hardware* side of the same concepts. They are genuinely
+// different types — the compositor's carry no coordinates and no Enter/Leave,
+// which are properties of a window rather than of a device — and letting the
+// names collide would make every conversion below ambiguous to a reader.
+use guitk::event::{
+    Event as ClientEvent, Key, KeyEvent as ClientKeyEvent, Modifiers,
+    MouseButton as ClientMouseButton, MouseEvent as ClientMouseEvent,
+    MouseEventKind as ClientMouseKind,
+};
 #[allow(unused_imports)]
 use guitk::render::{
     FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow, TextSpan,
@@ -53,6 +63,8 @@ use osfont::system::{Family, FontCache, Weight};
 
 mod buffer;
 pub use buffer::{BufferFormat, SharedBuffer};
+mod keymap;
+pub use keymap::{ModifierState, key_for_scancode};
 // Remote draw-command streaming uses the shared `guiremote` crate's scene
 // protocol (multi-window deltas built on its single-window RenderCommand wire
 // codec), rather than a compositor-local duplicate.
@@ -1461,8 +1473,17 @@ pub enum EventNotification {
     /// Keyboard event for the focused window.
     KeyEvent {
         window_id: WindowId,
+        /// Scan-code-set-1 code, extended keys carrying their `0xE0` prefix in
+        /// the high byte. Forwarded to clients alongside the resolved key name
+        /// so that games and remappers can read physical key positions
+        /// (`design-decisions.md` §456).
         scancode: u32,
+        /// The key this scancode means under the system keymap.
+        key: Key,
         pressed: bool,
+        /// Modifiers held *at the moment this key changed state*, including
+        /// this key itself if it is a modifier.
+        modifiers: Modifiers,
         character: Option<char>,
     },
     /// Mouse event for a window.
@@ -1484,6 +1505,96 @@ pub enum EventNotification {
     FocusGained { window_id: WindowId },
     /// Window lost keyboard focus.
     FocusLost { window_id: WindowId },
+}
+
+/// Translate one compositor notification into the wire event a client receives.
+///
+/// The two vocabularies differ deliberately rather than accidentally. The
+/// compositor's side is about hardware and windows — a scancode, a window id,
+/// integer screen-derived coordinates. The client's side
+/// ([`guitk::event::Event`]) is what widget code is written against: a named
+/// key, float coordinates in the widget's own space, and no window id at all,
+/// because a client already knows which of its windows it is dispatching to.
+/// This function is the single place that crossing happens, so the mapping is
+/// stated once instead of being re-improvised per app.
+fn wire_event(n: EventNotification) -> guiremote::InputEvent {
+    match n {
+        EventNotification::KeyEvent {
+            window_id,
+            scancode,
+            key,
+            pressed,
+            modifiers,
+            character,
+        } => guiremote::InputEvent::key(
+            window_id.0,
+            ClientKeyEvent {
+                key,
+                pressed,
+                modifiers,
+                text: character,
+            },
+            scancode,
+        ),
+        EventNotification::MouseEvent {
+            window_id,
+            x,
+            y,
+            kind,
+        } => guiremote::InputEvent::new(
+            window_id.0,
+            ClientEvent::Mouse(ClientMouseEvent {
+                // Widened, not converted: these are already window-local
+                // integers, and every value an i32 can hold is exactly
+                // representable in f32 only up to 2^24. A coordinate that
+                // large is not a real window, so the lossy cast is bounded by
+                // the display's size rather than by the type.
+                x: x as f32,
+                y: y as f32,
+                kind: wire_mouse_kind(kind),
+            }),
+        ),
+        EventNotification::WindowClose { window_id } => {
+            guiremote::InputEvent::new(window_id.0, ClientEvent::CloseRequested)
+        }
+        EventNotification::WindowResized {
+            window_id,
+            width,
+            height,
+        } => guiremote::InputEvent::new(window_id.0, ClientEvent::Resize { width, height }),
+        EventNotification::FocusGained { window_id } => {
+            guiremote::InputEvent::new(window_id.0, ClientEvent::FocusIn)
+        }
+        EventNotification::FocusLost { window_id } => {
+            guiremote::InputEvent::new(window_id.0, ClientEvent::FocusOut)
+        }
+    }
+}
+
+/// The client-side mouse kind for a compositor one.
+///
+/// `Enter`/`Leave` and `DoubleClick` exist only on the client side and are
+/// never produced here: entering a *widget* is the client's business, since the
+/// compositor does not know where a client's widgets are, and double-click
+/// timing belongs with the widget that has to honour it. Synthesising them here
+/// would be guessing at layout the compositor cannot see.
+const fn wire_mouse_kind(kind: MouseEventKind) -> ClientMouseKind {
+    match kind {
+        MouseEventKind::Move => ClientMouseKind::Move,
+        MouseEventKind::ButtonPress(b) => ClientMouseKind::Press(wire_button(b)),
+        MouseEventKind::ButtonRelease(b) => ClientMouseKind::Release(wire_button(b)),
+        MouseEventKind::Scroll { dx, dy } => ClientMouseKind::Scroll { dx, dy },
+    }
+}
+
+const fn wire_button(b: MouseButton) -> ClientMouseButton {
+    match b {
+        MouseButton::Left => ClientMouseButton::Left,
+        MouseButton::Right => ClientMouseButton::Right,
+        MouseButton::Middle => ClientMouseButton::Middle,
+        MouseButton::Back => ClientMouseButton::Back,
+        MouseButton::Forward => ClientMouseButton::Forward,
+    }
 }
 
 /// Mouse event kind for notifications.
@@ -2362,6 +2473,15 @@ pub struct Compositor {
     theme: DecorationTheme,
     /// Outbound event notifications for clients (stub queue).
     pending_notifications: VecDeque<EventNotification>,
+    /// Which modifier keys are held, and whether Caps Lock is latched.
+    ///
+    /// Kept here rather than derived per event because a modifier is a *state*
+    /// spanning two events — a press and a release, arbitrarily far apart —
+    /// and the chord a client is told about is the state at the moment the
+    /// other key went down. Held centrally for the same reason the keymap is
+    /// (`design-decisions.md` §456): one answer for the whole system, so two
+    /// applications cannot disagree about whether Ctrl was down.
+    modifiers: ModifierState,
     /// Whether a full recomposite is needed (e.g., after display resize).
     full_recomposite: bool,
     /// Whether [`render_all_windows`](Self::render_all_windows) may skip the
@@ -2410,6 +2530,7 @@ impl Compositor {
             render_engine: RenderEngine::new(),
             theme: DecorationTheme::default(),
             pending_notifications: VecDeque::new(),
+            modifiers: ModifierState::new(),
             full_recomposite: true,
             occlusion_cull: true,
             scanout: Scanout::Composited,
@@ -3127,16 +3248,46 @@ impl Compositor {
     }
 
     fn handle_key(&mut self, scancode: u32, pressed: bool, character: Option<char>) {
-        // Keyboard events go to the focused window.
-        if let Some(window_id) = self.focused_window {
-            self.pending_notifications
-                .push_back(EventNotification::KeyEvent {
-                    window_id,
-                    scancode,
-                    pressed,
-                    character,
-                });
-        }
+        // Folded *before* the notification is built, so a client told about
+        // Shift+A sees `shift: true`. Folding afterwards would report the state
+        // as it was before the chord completed, which for the modifier key's
+        // own event means Shift arriving as unmodified — and any client
+        // tracking modifiers from these events would then be permanently one
+        // event behind.
+        self.modifiers.update(scancode, pressed);
+
+        // Updated unconditionally, even with no focused window: a modifier
+        // pressed while focus was elsewhere is still physically down, and
+        // skipping it here would leave the state wrong for every later event.
+        let Some(window_id) = self.focused_window else {
+            return;
+        };
+        self.pending_notifications
+            .push_back(EventNotification::KeyEvent {
+                window_id,
+                scancode,
+                key: key_for_scancode(scancode),
+                pressed,
+                modifiers: self.modifiers.modifiers(),
+                character,
+            });
+    }
+
+    /// Release every held modifier.
+    ///
+    /// Call when the compositor loses the keyboard — session switch, device
+    /// unplug, VT change. Without it a modifier held at that moment stays held
+    /// forever and every later keystroke arrives as a chord: the classic
+    /// "stuck Ctrl" that makes a desktop look crashed when nothing has
+    /// actually failed.
+    pub const fn release_all_modifiers(&mut self) {
+        self.modifiers.release_all();
+    }
+
+    /// The modifier keys currently held.
+    #[must_use]
+    pub const fn modifiers(&self) -> Modifiers {
+        self.modifiers.modifiers()
     }
 
     fn handle_text_input(&mut self, _text: &str) {
@@ -4031,9 +4182,37 @@ impl Compositor {
         }
     }
 
-    /// Drain pending event notifications (would be sent to clients via IPC).
+    /// Drain pending event notifications in the compositor's own vocabulary.
+    ///
+    /// Prefer [`drain_input_frame`](Self::drain_input_frame) for anything
+    /// actually being sent to a client; this stays for tests and for internal
+    /// consumers that want the events before they are translated for the wire.
     pub fn drain_notifications(&mut self) -> Vec<EventNotification> {
         self.pending_notifications.drain(..).collect()
+    }
+
+    /// Drain pending notifications as an encoded `guiremote` input frame, ready
+    /// to write to a client's transport.
+    ///
+    /// This is the seam that did not exist until now: the compositor has always
+    /// hit-tested, tracked focus and built correctly addressed per-window
+    /// events, and then had nowhere to put them, because the display protocol
+    /// only ran outwards. See `known-issues.md` →
+    /// `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`.
+    ///
+    /// Returns `None` when nothing is pending, so a caller can skip a write
+    /// rather than send an empty frame every tick — input is bursty and most
+    /// ticks have none.
+    pub fn drain_input_frame(&mut self) -> Option<Vec<u8>> {
+        if self.pending_notifications.is_empty() {
+            return None;
+        }
+        let events: Vec<guiremote::InputEvent> = self
+            .pending_notifications
+            .drain(..)
+            .map(wire_event)
+            .collect();
+        Some(guiremote::encode_input_frame(&events))
     }
 
     // -----------------------------------------------------------------------
@@ -4301,10 +4480,17 @@ fn main() {
             // In production: write buffer to framebuffer device or DRM plane.
         }
 
-        // 4. Drain and send notifications to clients.
-        let notifications = compositor.drain_notifications();
-        for _notification in &notifications {
-            // In production: send via IPC channel to the owning client.
+        // 4. Drain input events as an encoded frame and send them onward.
+        //
+        // The encoding half is now real — `drain_input_frame` produces the
+        // exact bytes a client decodes with `guiremote::decode_input_frame`.
+        // What is still missing is the transport underneath: each window needs
+        // a channel to the process that owns it. Until that exists the frame is
+        // built and dropped, which is a strictly better place to be stuck than
+        // the previous stub — the translation is written and tested, so wiring
+        // a transport is a plumbing change rather than a design one.
+        if let Some(frame) = compositor.drain_input_frame() {
+            let _ = frame;
         }
 
         // 5. Sleep until next frame or input event.
@@ -4603,6 +4789,228 @@ mod tests {
             )
         });
         assert!(key_event.is_some());
+    }
+
+    /// Decode what `drain_input_frame` produced, as a client would.
+    fn decode_drained(comp: &mut Compositor) -> Vec<guiremote::InputEvent> {
+        let frame = comp
+            .drain_input_frame()
+            .expect("expected at least one pending event");
+        let (events, used) =
+            guiremote::decode_input_frame(&frame).expect("compositor emitted an undecodable frame");
+        assert_eq!(used, frame.len(), "frame must decode in full");
+        events
+    }
+
+    #[test]
+    fn a_key_press_reaches_a_client_as_a_named_key_over_the_wire() {
+        // The end-to-end path that did not exist: hardware scancode in one
+        // side, a `guitk::event::Event` a widget tree can consume out the
+        // other, having actually crossed the wire codec in between. Asserting
+        // on `EventNotification` alone would leave the encode/decode pair
+        // untested against a real compositor's output.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let id = comp.create_window("Focused".to_string(), 400, 300, 1);
+
+        // 0x1E is `A` in scan code set 1.
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1E,
+            character: Some('a'),
+        });
+
+        let key = decode_drained(&mut comp)
+            .into_iter()
+            .find(|e| matches!(e.event, ClientEvent::Key(_)))
+            .expect("no key event survived the round trip");
+
+        assert_eq!(key.window, id.0, "must be addressed to the focused window");
+        assert_eq!(key.scancode, Some(0x1E), "the raw code rides along (§456)");
+        let ClientEvent::Key(k) = key.event else {
+            unreachable!("filtered to key events above")
+        };
+        assert_eq!(k.key, Key::A);
+        assert!(k.pressed);
+        assert_eq!(k.text, Some('a'));
+        assert_eq!(k.modifiers, Modifiers::NONE);
+    }
+
+    #[test]
+    fn a_chord_reports_the_modifier_that_formed_it() {
+        // The ordering trap: fold the modifier into the state *after* building
+        // the notification and Ctrl+S arrives as a bare S, which every
+        // keyboard shortcut in the system would then miss.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1D, // left ctrl
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1F, // S
+            character: Some('s'),
+        });
+
+        let events = decode_drained(&mut comp);
+        let chord = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                ClientEvent::Key(k) if k.key == Key::S => Some(k),
+                _ => None,
+            })
+            .next()
+            .expect("no S key event");
+        assert!(chord.modifiers.ctrl, "Ctrl+S must arrive as a chord");
+
+        // And the modifier's own event reports itself held, rather than being
+        // one event behind.
+        let ctrl = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                ClientEvent::Key(k) if k.key == Key::LeftCtrl => Some(k),
+                _ => None,
+            })
+            .next()
+            .expect("no Ctrl key event");
+        assert!(ctrl.modifiers.ctrl);
+    }
+
+    #[test]
+    fn arrow_keys_keep_their_extended_prefix_end_to_end() {
+        // The keys a text editor uses most, and the ones that collide with the
+        // keypad if the prefix is lost anywhere along the path.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+
+        for (scancode, expected) in [
+            (0xE04Bu32, Key::Left),
+            (0xE04D, Key::Right),
+            (0xE048, Key::Up),
+            (0xE050, Key::Down),
+        ] {
+            comp.handle_input(InputEvent::KeyDown {
+                scancode,
+                character: None,
+            });
+            let got = decode_drained(&mut comp)
+                .into_iter()
+                .find_map(|e| match e.event {
+                    ClientEvent::Key(k) => Some(k.key),
+                    _ => None,
+                })
+                .expect("no key event");
+            assert_eq!(got, expected, "scancode {scancode:#x}");
+        }
+    }
+
+    #[test]
+    fn a_key_release_survives_the_wire_as_a_release() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x39,
+            character: Some(' '),
+        });
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x39 });
+
+        let states: Vec<bool> = decode_drained(&mut comp)
+            .into_iter()
+            .filter_map(|e| match e.event {
+                ClientEvent::Key(k) if k.key == Key::Space => Some(k.pressed),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(states, vec![true, false]);
+    }
+
+    #[test]
+    fn a_mouse_click_arrives_in_window_local_coordinates() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let id = comp.create_window("Target".to_string(), 400, 300, 1);
+        let (wx, wy) = {
+            let w = comp.window_ref(id).expect("window just created");
+            (w.x, w.y)
+        };
+
+        // Twenty pixels into the client area from the window's own origin.
+        comp.handle_input(InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+            x: wx + 20,
+            y: wy + 30,
+        });
+
+        let click = decode_drained(&mut comp)
+            .into_iter()
+            .find_map(|e| match e.event {
+                ClientEvent::Mouse(m) if matches!(m.kind, ClientMouseKind::Press(_)) => Some(m),
+                _ => None,
+            })
+            .expect("no press event");
+        // A client knows nothing about where it sits on screen, so an absolute
+        // coordinate here would be unusable to it.
+        assert!(
+            (click.x - 20.0).abs() < 1.0 && (click.y - 30.0).abs() < 1.0,
+            "expected roughly (20, 30) window-local, got ({}, {})",
+            click.x,
+            click.y
+        );
+    }
+
+    #[test]
+    fn a_quiet_tick_sends_no_frame_at_all() {
+        // Input is bursty; most ticks have none. An empty frame every 16ms is
+        // pure overhead on an idle desktop.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Idle".to_string(), 400, 300, 1);
+        let _ = comp.drain_input_frame(); // clear the creation/focus events
+        assert!(comp.drain_input_frame().is_none());
+    }
+
+    #[test]
+    fn a_modifier_held_when_the_keyboard_is_lost_does_not_stay_stuck() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1D,
+            character: None,
+        });
+        assert!(comp.modifiers().ctrl);
+
+        comp.release_all_modifiers();
+        assert_eq!(
+            comp.modifiers(),
+            Modifiers::NONE,
+            "a session switch must not leave Ctrl down forever"
+        );
+
+        let _ = comp.drain_input_frame();
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1F,
+            character: Some('s'),
+        });
+        let k = decode_drained(&mut comp)
+            .into_iter()
+            .find_map(|e| match e.event {
+                ClientEvent::Key(k) => Some(k),
+                _ => None,
+            })
+            .expect("no key event");
+        assert!(!k.modifiers.ctrl, "later keys must not arrive as chords");
+    }
+
+    #[test]
+    fn a_modifier_pressed_with_no_focused_window_is_still_tracked() {
+        // No window means no notification, but the key is physically down all
+        // the same. Skipping the state update would make every event after it
+        // wrong.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        assert!(comp.focused_window.is_none());
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x2A, // left shift
+            character: None,
+        });
+        assert!(comp.modifiers().shift);
     }
 
     #[test]

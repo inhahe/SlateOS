@@ -23105,16 +23105,61 @@ waved through as "probably noise again".
 
 ## TD-FONT-DOES-NOT-READ-VARIATION-STORES
 
-**Status 2026-08-16: step 1 of 4 landed — `fvar` and `avar`.** The entry stays
-open; the device-table slot is still declined, and correctly so. What exists
-now is `gui/font/src/var.rs`: axes, named instances, and the user →
-normalized-F2Dot14 conversion, reachable as `Face::variation_axes()`. What does
-not: `gvar`, the `ItemVariationStore`, and the `Coords` on `ScaledFont` that
-would make a chosen instance actually draw. A face still renders at its default
-instance, which is what the ordering argument below asks for.
+**Status 2026-08-16: steps 1-3 of 4 landed — `fvar`, `avar`, `gvar`, and the
+instance on `ScaledFont`. A variable face now draws at the weight you ask
+for.** The entry stays open; the device-table slot is still declined, and
+correctly so. What exists now is `gui/font/src/var.rs` (axes, named instances,
+user → normalized-F2Dot14, reachable as `Face::variation_axes()`),
+`gui/font/src/gvar.rs` (per-glyph outline deltas, tuple scalars, IUP, phantom
+points, composite component offsets) behind `Face::outline_at`, and
+`ScaledFont::shared_at` / `set_axes` / `set_variations`, which is what makes a
+chosen instance reach the rasterizer.
 
-Three things learned doing it, recorded because they change what the remaining
-steps have to handle:
+**What is still missing, and what it costs today:**
+
+* **The `ItemVariationStore`, i.e. step 4** — `HVAR`, `MVAR`, and the `GDEF`
+  store this entry is named for. Concretely: **advances do not vary.** A varied
+  glyph is drawn at its varied shape and spaced at its *default* width, which
+  is visibly wrong at the extremes of a weight axis and invisible near the
+  default. `ScaledFont::rasterize_glyph` says so at the call site. Deriving the
+  advance from `gvar`'s phantom points instead would be a second source of
+  truth for one number before either had been checked against a real file, and
+  is not the fix.
+* **`CFF2`.** A `CFF2` face varies through the charstring interpreter, not
+  through `gvar`. No face on this host has one, so it is neither implemented
+  nor checkable against a real file. `Face::outline_at` falls back to the
+  default outline for a non-`glyf` face rather than pretending.
+
+Four things learned doing steps 2-3, recorded because they bear on step 4:
+
+* **No installed face moves a phantom point.** All 7 express their advance and
+  side-bearing variation in `HVAR` instead, so in 400 glyphs per face not one
+  `gvar` phantom delta is non-zero. The phantom side-bearing correction in
+  `Face::outline_at` is therefore **untestable from host fonts** — flipping its
+  sign left all 25 host tests passing — and is covered only by the synthetic
+  variable font in `sfnt.rs`'s test module (`build_variable_test_font`). Same
+  for IUP with a visible effect, and for a composite's component offset, which
+  no host face varies at all. Any future variation work should expect to
+  extend that fixture rather than to find a real file that exercises the path.
+* **The oracle has to be split in two.** `gui/font/tools/gvar_oracle.py` is
+  written from the specification rather than transcribed from `gvar.rs`, but
+  its `glyf` reader and its point→path conversion cannot be independent of
+  ours in any useful sense. Those are validated by a *separate* table taken at
+  the **default instance**, where every tuple's scalar is provably zero, so a
+  failure says which of the two kinds of bug it is.
+* **A comparison needs a "did it move" assertion.** Agreement between two
+  readers is satisfiable by a reader that ignores `gvar` and an oracle that
+  agrees with it about nothing. `installed_variable_fonts_vary_their_outlines`
+  asserts each non-default row *differs* from the unvaried glyph (51 of 63 do)
+  and fails if fewer than three quarters move.
+* **Wiring is a different failure from reading.** Every outline-level test
+  passed with `ScaledFont` still calling `outline` instead of `outline_at`.
+  What catches it is `a_weight_axis_reaches_the_rasterized_glyph`, which
+  rasterizes 'H' at the heaviest weight on all 7 host faces and demands more
+  ink than at the default.
+
+Three things learned doing step 1 (`fvar`/`avar`), recorded because they change
+what the remaining step has to handle:
 
 * **This host has 7 variable faces out of 556**, and they use *two* of the five
   optional variation tables in any quantity: all 7 carry `gvar` + `HVAR` +
@@ -23147,13 +23192,18 @@ the caller's axis settings into normalized coordinates), which this crate does
 not parse. `Ppem::delta` recognises the format and returns zero.
 
 **Symptom.** A variable font drawn at a non-default instance positions its
-marks and its kerns at the *default* instance's values. The glyph outlines
-themselves are already wrong for the same reason — `gvar` is not read either —
-so nothing here is visible in isolation: a variable face renders at its default
-weight and width throughout, and positioning is consistent with that. It is
-recorded as its own entry because it is the one place where the missing feature
-is silently *skipped inside code that is otherwise doing its job*, rather than
-absent at the top level.
+marks and its kerns at the *default* instance's values.
+
+Until 2026-08-16 this was invisible in isolation, because the outlines were the
+default instance's too — the whole face rendered at its default weight, and
+positioning was consistent with that. **Step 3 removed that cover.** `gvar` is
+now read, so the shapes move and the marks do not: at the heavy end of a weight
+axis an accent sits where the light glyph's anchor was, which is a visible
+misregistration rather than a uniformly-wrong-but-coherent page. That makes this
+entry *more* urgent than it was when it was filed, not less. It is recorded as
+its own entry because it is the one place where the missing feature is silently
+*skipped inside code that is otherwise doing its job*, rather than absent at the
+top level.
 
 **Measured.** `gui/font/tools/device_survey.py` over this host's fonts: 9,215
 `VariationIndex` records across the font directory, against 152 real device
@@ -23161,22 +23211,39 @@ tables. Variation indices outnumber real device tables 60 to 1 here, so the
 un-read case is by far the common one — nearly all of them in
 `anchor:base4/variation` (8,720), i.e. mark-to-base attachment.
 
-**Why it is filed rather than fixed.** It is not a device-table change; it is
+**Why it was filed rather than fixed.** It is not a device-table change; it is
 variable-font support, and the device-table slot is the last piece of it rather
 than the first. In order: `fvar` (what axes exist and their defaults), `avar`
 (the caller's axis value mapped onto the normalized -1..1 scale), `gvar`/`CFF2`
 (the outlines, which is the part a user actually sees), then
 `HVAR`/`MVAR`/`GDEF`'s `ItemVariationStore` (advances, metrics and *these*
-deltas). Reading the store on its own would apply a positioning correction for
-an instance whose outlines are the default instance's — worse than applying
+deltas). Reading the store first would have applied a positioning correction for
+an instance whose outlines were the default instance's — worse than applying
 none, because the marks would move off the shapes they belong to.
 
-**Proper fix.** Parse `fvar`/`avar` into a normalized coordinate vector on
-`ScaledFont` (not on `Face` — the same parsed face must be usable at two
-instances at once), then an `ItemVariationStore` reader, and give `Ppem` a
-sibling that carries the coordinates so `Ppem::delta` can dispatch on the
-format instead of declining one arm of it. Until `gvar` exists, this should
-stay declined.
+**That precondition is now met.** Steps 1-3 landed on 2026-08-16, so the
+ordering no longer argues for declining the arm; it argues for finishing it.
+
+**Proper fix.** Steps 1-3 are done: `fvar`/`avar` parse into a normalized
+coordinate vector that lives on `ScaledFont` (not on `Face` — the same parsed
+face must be usable at two instances at once), and `gvar` applies it to the
+outlines. What remains is step 4, in two pieces:
+
+1. **An `ItemVariationStore` reader** — the shared format behind `HVAR`
+   (advances, so a varied glyph is spaced at its varied width), `MVAR` (the
+   `OS/2`/`hhea` metrics), and the `GDEF` store *this* entry indexes into. One
+   reader serves all three; they differ only in how the outer/inner index pair
+   is arrived at (`HVAR` through a `DeltaSetIndexMap` keyed by glyph id,
+   `MVAR` through a value-tag record, `GDEF` from the `VariationIndex`'s own
+   four bytes).
+2. **Coordinates at the `Ppem` boundary** — give `Ppem` a sibling that carries
+   the normalized coordinates and a borrow of the store, so `pixel_delta` can
+   dispatch on `deltaFormat` and *compute* the `0x8000` arm instead of
+   returning zero for it. Then delete the decline, and the "What is not here"
+   paragraph in `device.rs`'s module doc that names this entry.
+
+`CFF2` stays out of scope until a face on some host actually has one; see the
+missing-pieces list at the top of this entry.
 
 **Where.** `gui/font/src/device.rs` — `VARIATION_INDEX` and the format check in
 `pixel_delta`, and the "What is not here" section of the module doc, which

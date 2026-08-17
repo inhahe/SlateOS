@@ -926,6 +926,35 @@ Roadmap:
   lines). Still open, and wanting its own entry: arrow keys move in *logical*
   order, so a caret crossing a direction boundary jumps across the screen
   rather than stepping. Vello itself waits on `[A]`'s GPU driver.
+  **Variable fonts are three quarters done** (§448, §449). Of the four steps
+  `TD-FONT-DOES-NOT-READ-VARIATION-STORES` mandates, the first three have
+  landed: `gui/font/src/var.rs` reads `fvar`/`avar` and turns "weight 600" into
+  the normalized coordinates the format works in — with HarfBuzz's truncating
+  division, bit for bit, because this crate is checked against HarfBuzz
+  everywhere else and a one-unit disagreement here would come back as an
+  unattributable sub-pixel difference in a *shape*; `gui/font/src/gvar.rs`
+  applies the per-glyph outline deltas (tuple scalars, interpolation of
+  unnamed points, phantom points, composite component offsets) behind
+  `Face::outline_at`; and `ScaledFont::shared_at`/`set_axes` put the chosen
+  instance on the **scaled** font rather than the face, so one loaded file
+  draws bold and regular at the same time. What survived that is worth
+  knowing: **no font installed on this machine exercises a third of `gvar`** —
+  all 7 variable faces express advance and side-bearing variation in `HVAR`
+  and leave every one of ~2,800 glyphs' phantom deltas at zero, and none
+  varies a composite's component offset, so flipping the sign of the phantom
+  side-bearing correction left all 25 host tests passing. Those paths are
+  covered instead by a variable font hand-assembled inside `sfnt.rs`'s test
+  module, whose axis is arranged so both tested instances have scalars of
+  exactly 1.0 and 0.5 and every expected outline is computable on paper with
+  no tolerance. Step 4 is the `ItemVariationStore` — `HVAR` (so advances
+  vary; today a varied glyph is drawn at its varied shape and spaced at its
+  *default* width, deliberately, rather than making `gvar`'s phantoms a second
+  source of truth for one number), `MVAR`, and the `GDEF` store the entry is
+  named for, which then un-declines `device.rs`'s `VariationIndex` arm. That
+  arm is now more urgent than when it was filed: it used to be invisible
+  because the outlines were the default instance's too, and step 3 removed
+  that cover, so a heavy instance currently puts its accents where the light
+  glyph's anchors were.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

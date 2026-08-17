@@ -11,14 +11,26 @@
 //!
 //! # Input
 //!
-//! One UTF-8 file, named on the command line, and an optional pixel size after
-//! it. Without the size the face is opened at its own em, which is the only
-//! size at which nothing is scaled; with one it is opened at that many pixels
-//! and the positions are divided back into font units before printing, so the
-//! two runs are directly comparable. The size is not decoration: a `GPOS`
-//! device table names a range of pixel sizes and corrects the value only
-//! inside it, so a sweep run at the em size exercises none of them — every
-//! real table on this host tops out below 30 ppem.
+//! One UTF-8 file, named on the command line, an optional pixel size after it,
+//! and an optional variation instance after that. Without the size the face is
+//! opened at its own em, which is the only size at which nothing is scaled;
+//! with one it is opened at that many pixels and the positions are divided back
+//! into font units before printing, so the two runs are directly comparable.
+//! The size is not decoration: a `GPOS` device table names a range of pixel
+//! sizes and corrects the value only inside it, so a sweep run at the em size
+//! exercises none of them — every real table on this host tops out below 30
+//! ppem. A size of `0` means no size, which is how the instance argument is
+//! reached without also asking at a size.
+//!
+//! The instance is `tag=value,tag=value` in user coordinates — `wght=700`,
+//! `wght=300,wdth=75` — and axes it does not name stay at their defaults. It is
+//! the other half of the same argument the size is: three of a variable face's
+//! `GPOS` numbers vary with the instance and with nothing else — an advance
+//! through `HVAR`, a mark anchor through a `GDEF` `VariationIndex`, a kern the
+//! same way — so a sweep at the default instance exercises none of them and
+//! agrees with any oracle by both sides doing nothing. A face with no `fvar`
+//! ignores the argument, which is not an error: it is a font that cannot honour
+//! it, and the sweep still wants its answer.
 //!
 //! The file is:
 //!
@@ -90,13 +102,18 @@ use osfont::shape::ShapedGlyph;
 
 fn main() {
     let Some(input) = env::args().nth(1) else {
-        eprintln!("usage: shape_dump <input-file> [ppem]");
+        eprintln!("usage: shape_dump <input-file> [ppem] [tag=value,...]");
         process::exit(2);
     };
-    let ppem: Option<f32> = env::args().nth(2).map(|size| {
-        size.parse()
-            .unwrap_or_else(|_| panic!("not a pixel size: {size:?}"))
+    // A size of zero is "no size" rather than a face opened at nothing, so the
+    // instance argument after it can be given on its own.
+    let ppem: Option<f32> = env::args().nth(2).and_then(|size| {
+        let px: f32 = size
+            .parse()
+            .unwrap_or_else(|_| panic!("not a pixel size: {size:?}"));
+        (px > 0.0).then_some(px)
     });
+    let axes: Vec<([u8; 4], f32)> = env::args().nth(3).map_or_else(Vec::new, |spec| axes(&spec));
     let text = match fs::read_to_string(&input) {
         Ok(text) => text,
         Err(err) => {
@@ -137,10 +154,13 @@ fn main() {
         let upem = f32::from(probe.units_per_em());
         drop(probe);
         let size = ppem.unwrap_or(upem);
-        let Ok(font) = ScaledFont::from_bytes(data, size) else {
+        let Ok(mut font) = ScaledFont::from_bytes(data, size) else {
             eprintln!("{path}: will not open at {size}px");
             continue;
         };
+        if !axes.is_empty() {
+            font.set_axes(&axes);
+        }
         let back = upem / size;
         for (i, (lang, string)) in corpus.iter().enumerate() {
             let run = font.shape_lang(string, *lang);
@@ -189,6 +209,36 @@ fn dump<'a>(glyphs: impl Iterator<Item = &'a ShapedGlyph>, back: f32) -> (String
         .unwrap();
     }
     (ids, pos)
+}
+
+/// Read `tag=value,tag=value` into the pairs [`ScaledFont::set_axes`] wants.
+///
+/// A malformed spec stops the run rather than being skipped. The alternative —
+/// shaping at the default instance because `wght-700` had a hyphen in it —
+/// produces a full sweep of numbers that agree with an oracle asked the same
+/// wrong question, which is indistinguishable from success and much worse than
+/// a crash.
+fn axes(spec: &str) -> Vec<([u8; 4], f32)> {
+    spec.split(',')
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| {
+            let (tag, value) = part
+                .split_once('=')
+                .unwrap_or_else(|| panic!("not a tag=value pair: {part:?}"));
+            // An axis tag is four bytes, and a shorter one is padded with
+            // spaces the way every other OpenType tag is — `ital` is four
+            // already but a private axis need not be.
+            let mut bytes = [b' '; 4];
+            let tag = tag.trim().as_bytes();
+            assert!(tag.len() <= 4, "not an axis tag: {tag:?}");
+            bytes[..tag.len()].copy_from_slice(tag);
+            let value: f32 = value
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("not an axis value: {value:?}"));
+            (bytes, value)
+        })
+        .collect()
 }
 
 /// Split one corpus line into the language it names and the text itself.

@@ -77,10 +77,13 @@ use std::collections::VecDeque;
 
 use guiremote::client::{ClientError, Connection, Transport};
 use guiremote::control::{CursorShape, DisplayInfo, RequestBody, ResponseBody, WindowSpec};
-use guiremote::input::InputEvent;
 
 pub use guiremote::client::{ClientError as ConnectionError, Transport as ConnectionTransport};
 pub use guiremote::control::{CursorShape as Cursor, DisplayInfo as Display, WindowSpec as Spec};
+// An addressed event, as it travels. Applications never build one — they
+// receive `(window, Event)` pairs from the loop — but anything driving an
+// application synthetically does, which is what [`testing`] is for.
+pub use guiremote::input::InputEvent;
 pub use guiremote::{Pipe, pipe};
 pub use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 pub use guitk::render::{RenderCommand, RenderTree};
@@ -747,23 +750,60 @@ impl<T: Transport> EventLoop<T> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::indexing_slicing
-    )]
-
+/// A compositor that answers, for testing an application's event loop.
+///
+/// An application cannot have a window without a compositor to grant one, so
+/// until this module was public there was no way to test an application's event
+/// loop at all: [`EventLoop::create`] blocks for an id that nothing would send.
+/// Every application in the tree would otherwise have had to write its own
+/// stand-in compositor, and each copy would be a fresh chance to get the wire
+/// format subtly wrong in a way that made the *test* pass.
+///
+/// It is **not a simulation of the protocol**. Requests are decoded and
+/// responses encoded with the real `guiremote` codecs, so a test written
+/// against this fails when the wire format is wrong. Only the *policy* behind
+/// the answers is stubbed — which window id to hand out, whether to refuse —
+/// and that is what a test of an application is entitled to stand in for.
+///
+/// It is compiled unconditionally rather than behind `#[cfg(test)]`, for the
+/// same reason `guiremote::loopback` is: a `#[cfg(test)]` item is invisible to
+/// every *other* crate's tests, which are precisely the ones that need it.
+///
+/// ```rust
+/// use oswindow::{Event, EventResponse, InputEvent, WindowBuilder, testing};
+///
+/// let (mut events, desktop) = testing::desktop();
+/// let id = WindowBuilder::new("Test", 800, 600).build(&mut events).unwrap();
+///
+/// // Queue a batch of input to arrive the next time the client blocks.
+/// desktop
+///     .borrow_mut()
+///     .script
+///     .push_back(vec![InputEvent::new(id, Event::CloseRequested)]);
+///
+/// let mut seen = 0;
+/// events
+///     .run(|_, _, _| {
+///         seen += 1;
+///         EventResponse::Continue
+///     })
+///     .unwrap();
+/// assert_eq!(seen, 1, "the close request was delivered");
+/// ```
+pub mod testing {
     use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::rc::Rc;
 
-    use guiremote::control::{Request, Response, decode_requests, encode_responses};
-    use guiremote::loopback::Pipe;
+    use guiremote::control::{
+        DisplayInfo, Request, RequestBody, Response, ResponseBody, decode_requests,
+        encode_responses,
+    };
+    use guiremote::input::InputEvent;
+    use guiremote::loopback::{Pipe, pipe};
     use guiremote::submit::decode_submit;
 
-    use super::*;
+    use crate::{EventLoop, Transport};
 
     /// The compositor's side of the pipe.
     ///
@@ -771,70 +811,98 @@ mod tests {
     /// encoders, so a test here fails if the wire format is wrong. Only the
     /// policy behind the answers is stubbed, which is what a test of this crate
     /// is entitled to stand in for.
-    struct FakeServer {
-        pipe: Pipe,
-        next_window: u64,
+    pub struct TestDesktop {
+        pub pipe: Pipe,
+        pub next_window: u64,
         /// Requests seen, so a test can assert what actually went out.
-        seen: Vec<Request>,
+        pub seen: Vec<Request>,
+        /// Frames drawn, as `(window, command count)`, in arrival order.
+        pub submitted: Vec<(u64, usize)>,
         /// When set, every request is refused with this message.
-        refuse: Option<String>,
+        pub refuse: Option<String>,
         /// Input to deliver, one batch per turn.
-        script: VecDeque<Vec<InputEvent>>,
+        pub script: VecDeque<Vec<InputEvent>>,
     }
 
-    impl FakeServer {
-        fn new(pipe: Pipe) -> Self {
+    impl TestDesktop {
+        /// A desktop that will answer on `pipe`.
+        #[must_use]
+        pub fn new(pipe: Pipe) -> Self {
             Self {
                 pipe,
                 next_window: 100,
                 seen: Vec::new(),
+                submitted: Vec::new(),
                 refuse: None,
                 script: VecDeque::new(),
             }
         }
 
-        /// Answer every pending request. Reports whether anything was said.
-        fn serve(&mut self) -> bool {
+        /// Read everything waiting, recording requests and submissions.
+        ///
+        /// Both are recorded rather than one being answered and the other
+        /// discarded, because the two arrive interleaved on one connection and
+        /// a read consumes whatever it finds. A version that dropped
+        /// submissions here would make them visible only to a test that never
+        /// let the compositor take a turn — which excludes every test of an
+        /// event loop, since taking turns is how the loop makes progress.
+        fn absorb(&mut self) -> Vec<Request> {
             let mut wire = Vec::new();
             self.pipe.read(&mut wire).unwrap();
 
             let mut at = 0usize;
-            let mut replies = Vec::new();
+            let mut requests = Vec::new();
             while at < wire.len() {
                 // Control requests and submissions share one connection; only
                 // the former want an answer. Each direction has its own magic,
                 // so telling them apart is a four-byte test and not a guess.
                 if wire[at..].starts_with(&guiremote::SUBMIT_MAGIC) {
-                    let (_, used) = decode_submit(&wire[at..]).unwrap();
+                    let (sub, used) = decode_submit(&wire[at..]).unwrap();
+                    self.submitted
+                        .push((sub.window, sub.commands.commands.len()));
                     at += used;
                     continue;
                 }
                 let (reqs, used) = decode_requests(&wire[at..]).unwrap();
                 at += used;
-                for req in reqs {
-                    let body = if let Some(why) = &self.refuse {
-                        ResponseBody::Error {
-                            message: why.clone(),
+                requests.extend(reqs);
+            }
+            requests
+        }
+
+        /// Answer every pending request. Reports whether anything was said.
+        ///
+        /// # Panics
+        ///
+        /// If the client sent something that will not decode. That is a test
+        /// harness's job: a malformed frame here means the encoder under test
+        /// is wrong, and failing loudly at the byte that proves it is the
+        /// diagnosis.
+        pub fn serve(&mut self) -> bool {
+            let mut replies = Vec::new();
+            for req in self.absorb() {
+                let body = if let Some(why) = &self.refuse {
+                    ResponseBody::Error {
+                        message: why.clone(),
+                    }
+                } else {
+                    match &req.body {
+                        RequestBody::CreateWindow(_) => {
+                            let window = self.next_window;
+                            self.next_window += 1;
+                            ResponseBody::WindowCreated { window }
                         }
-                    } else {
-                        match &req.body {
-                            RequestBody::CreateWindow(_) => {
-                                let window = self.next_window;
-                                self.next_window += 1;
-                                ResponseBody::WindowCreated { window }
-                            }
-                            RequestBody::GetDisplayInfo => ResponseBody::Display(DisplayInfo {
-                                width: 2560,
-                                height: 1440,
-                                refresh_rate: 144,
-                                scale_factor: 1.5,
-                            }),
-                            _ => ResponseBody::Ok,
-                        }
-                    };
-                    replies.push(Response::new(req.seq, body));
-                    self.seen.push(req);
-                }
+                        RequestBody::GetDisplayInfo => ResponseBody::Display(DisplayInfo {
+                            width: 2560,
+                            height: 1440,
+                            refresh_rate: 144,
+                            scale_factor: 1.5,
+                        }),
+                        _ => ResponseBody::Ok,
+                    }
+                };
+                replies.push(Response::new(req.seq, body));
+                self.seen.push(req);
             }
             if replies.is_empty() {
                 return false;
@@ -844,7 +912,12 @@ mod tests {
         }
 
         /// Deliver input to the client immediately.
-        fn send_input(&mut self, events: &[InputEvent]) {
+        ///
+        /// # Panics
+        ///
+        /// Never in practice: the loopback pipe's write is infallible while the
+        /// pipe is open, and a closed one is a test that has already ended.
+        pub fn send_input(&mut self, events: &[InputEvent]) {
             self.pipe
                 .write(&guiremote::encode_input_frame(events))
                 .unwrap();
@@ -858,7 +931,7 @@ mod tests {
         /// anything further is over, and hanging up is how a compositor would
         /// say so. Without it a client waiting for input that will never come
         /// would spin until the harness timed out.
-        fn turn(&mut self) {
+        pub fn turn(&mut self) {
             let answered = self.serve();
             if let Some(batch) = self.script.pop_front() {
                 self.send_input(&batch);
@@ -867,23 +940,20 @@ mod tests {
             }
         }
 
-        /// Everything the client has drawn, as `(window, command count)`.
-        fn drawn(&mut self) -> Vec<(u64, usize)> {
-            let mut wire = Vec::new();
-            self.pipe.read(&mut wire).unwrap();
-            let mut at = 0usize;
-            let mut out = Vec::new();
-            while at < wire.len() {
-                if wire[at..].starts_with(&guiremote::SUBMIT_MAGIC) {
-                    let (sub, used) = decode_submit(&wire[at..]).unwrap();
-                    out.push((sub.window, sub.commands.commands.len()));
-                    at += used;
-                    continue;
-                }
-                let (_, used) = decode_requests(&wire[at..]).unwrap();
-                at += used;
-            }
-            out
+        /// Everything the client has drawn so far, as `(window, command count)`,
+        /// in the order it was drawn.
+        ///
+        /// Cumulative over the desktop's whole life, including frames that
+        /// arrived during a [`Self::turn`]. Requests waiting alongside them are
+        /// recorded but *not* answered — call [`Self::serve`] for that.
+        ///
+        /// # Panics
+        ///
+        /// As [`Self::serve`]: on a frame that will not decode.
+        pub fn drawn(&mut self) -> Vec<(u64, usize)> {
+            let pending = self.absorb();
+            self.seen.extend(pending);
+            self.submitted.clone()
         }
     }
 
@@ -895,12 +965,12 @@ mod tests {
     /// `wait` — whose whole contract is "block until there is plausibly
     /// something to read" — is implemented as "let the compositor act", which
     /// is exactly what blocking means when there is only one thread.
-    struct Served {
-        pipe: Pipe,
-        server: Rc<RefCell<FakeServer>>,
+    pub struct TestConnection {
+        pub pipe: Pipe,
+        pub server: Rc<RefCell<TestDesktop>>,
     }
 
-    impl Transport for Served {
+    impl Transport for TestConnection {
         type Error = std::convert::Infallible;
 
         fn read(&mut self, buf: &mut Vec<u8>) -> Result<usize, Self::Error> {
@@ -922,18 +992,35 @@ mod tests {
     }
 
     /// A loop wired to a compositor that answers when the client waits.
-    fn wired() -> (EventLoop<Served>, Rc<RefCell<FakeServer>>) {
+    ///
+    /// The desktop is shared so a test can script input into it and read back
+    /// what the application drew, while the loop holds its own end of the pipe.
+    #[must_use]
+    pub fn desktop() -> (EventLoop<TestConnection>, Rc<RefCell<TestDesktop>>) {
         let (client_end, server_end) = pipe();
-        let server = Rc::new(RefCell::new(FakeServer::new(server_end)));
-        let transport = Served {
+        let server = Rc::new(RefCell::new(TestDesktop::new(server_end)));
+        let transport = TestConnection {
             pipe: client_end,
             server: Rc::clone(&server),
         };
         (EventLoop::new(transport), server)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use super::testing::{TestConnection, desktop as wired};
+    use super::*;
 
     /// Create a window through the real path, blocking until the id arrives.
-    fn open(events: &mut EventLoop<Served>, title: &str) -> u64 {
+    fn open(events: &mut EventLoop<TestConnection>, title: &str) -> u64 {
         events
             .create(WindowSpec::new(title, 800, 600))
             .expect("the compositor should have created it")

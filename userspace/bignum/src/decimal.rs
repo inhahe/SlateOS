@@ -39,6 +39,54 @@
 
 use crate::{BigInt, digit_to_char};
 
+/// How many columns a line of calculator output occupies before it is broken.
+///
+/// POSIX requires `bc` to split a number too long for a line, and the
+/// traditional width is 70 — a terminal of the era, less nothing. The break
+/// itself costs a column, so 69 digits are followed by a `\` to reach 70.
+pub const DEFAULT_LINE_LENGTH: usize = 70;
+
+/// Break a rendered number across lines the way `bc` and `dc` have always done.
+///
+/// A 300-digit answer arrives as five lines, the first four ending in `\`:
+/// backslash-newline is the continuation the shell and every other reader of
+/// `bc`'s output already understands, and it is what makes the output
+/// re-readable as a single number.
+///
+/// `line_length` of 0 disables the wrap entirely, which is what
+/// `BC_LINE_LENGTH=0` is for and the only way a script gets one long line.
+/// Anything below 2 is treated the same way, since a line with no room for a
+/// digit beside the `\` could never terminate.
+///
+/// Only *numbers* go through here. `print "…"` in `bc` and `dc`'s string `p`
+/// emit what the program said, unbroken; inserting a backslash into a string
+/// the user chose would corrupt it.
+#[must_use]
+pub fn wrap_number(text: &str, line_length: usize) -> String {
+    let Some(per_line) = line_length.checked_sub(1).filter(|n| *n >= 1) else {
+        return text.to_string();
+    };
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= per_line {
+        return text.to_string();
+    }
+    // Two bytes of continuation per line after the first; a hint only, so a
+    // saturating estimate is as good as an exact one.
+    let continuations = text
+        .len()
+        .checked_div(per_line)
+        .unwrap_or(0)
+        .saturating_mul(2);
+    let mut out = String::with_capacity(text.len().saturating_add(continuations));
+    for (i, chunk) in chars.chunks(per_line).enumerate() {
+        if i > 0 {
+            out.push_str("\\\n");
+        }
+        out.extend(chunk.iter());
+    }
+    out
+}
+
 /// Why an operation could not produce a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecimalError {
@@ -982,6 +1030,47 @@ mod tests {
         v.sort();
         let rendered: Vec<String> = v.iter().map(Decimal::format_base10).collect();
         assert_eq!(rendered, ["-1", ".25", "1.5", "2"]);
+    }
+
+    #[test]
+    fn a_long_number_is_continued_with_a_trailing_backslash() {
+        // 69 digits beside the `\` makes 70 columns, the traditional width.
+        let n = d("2").pow(&d("1000"), 0).unwrap().format_base10();
+        assert_eq!(n.len(), 302);
+        let wrapped = wrap_number(&n, DEFAULT_LINE_LENGTH);
+        let lines: Vec<&str> = wrapped.split('\n').collect();
+        assert_eq!(lines.len(), 5);
+        for line in lines.iter().take(4) {
+            assert_eq!(line.len(), 70);
+            assert!(line.ends_with('\\'));
+        }
+        assert_eq!(lines[4].len(), 26);
+        assert!(!lines[4].ends_with('\\'));
+        // And it is the same number afterwards, which is the point of the
+        // backslash rather than a bare newline.
+        let rejoined: String = lines
+            .iter()
+            .map(|l| l.strip_suffix('\\').unwrap_or(l))
+            .collect();
+        assert_eq!(rejoined, n);
+    }
+
+    #[test]
+    fn a_number_that_fits_is_left_alone_and_zero_disables_the_wrap() {
+        // 61 digits: shorter than the 69 a continued line carries.
+        let short = d("2").pow(&d("200"), 0).unwrap().format_base10();
+        assert_eq!(short.len(), 61);
+        assert_eq!(wrap_number(&short, DEFAULT_LINE_LENGTH), short);
+        // Exactly 69 is the last width that does not wrap; 70 is the first
+        // that does. Off-by-one here would be invisible in ordinary use.
+        let sixty_nine = "1".repeat(69);
+        assert_eq!(wrap_number(&sixty_nine, 70), sixty_nine);
+        let seventy = "1".repeat(70);
+        assert_eq!(wrap_number(&seventy, 70), format!("{sixty_nine}\\\n1"));
+        // `BC_LINE_LENGTH=0` means one long line, however long it is.
+        let long = d("2").pow(&d("1000"), 0).unwrap().format_base10();
+        assert_eq!(wrap_number(&long, 0), long);
+        assert_eq!(wrap_number(&long, 1), long);
     }
 
     #[test]

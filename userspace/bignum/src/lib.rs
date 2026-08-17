@@ -67,7 +67,7 @@
 
 pub mod decimal;
 
-pub use decimal::{Decimal, DecimalError};
+pub use decimal::{DEFAULT_LINE_LENGTH, Decimal, DecimalError, wrap_number};
 
 /// Base for each limb -- 10^9 fits comfortably in u32 and makes
 /// decimal conversion trivial (each limb is exactly 9 decimal digits).

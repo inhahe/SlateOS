@@ -25277,45 +25277,47 @@ diagnostic. Nothing in the tree depends on `dc` yet, so it is not blocking.
 tested against hand-computed values and against each other. What is not verified
 is how they *write* those numbers down, because this machine has no real `bc` or
 `dc` to compare against. Three formatting details were decided from memory of
-what the traditional tools do. If any is wrong, every script that reads our
+what the traditional tools do. Two have since been changed to match that memory;
+the third is still a guess. If any is wrong, every script that reads our
 calculators' output parses something slightly different from what it expects.
 
-**Where:** `userspace/bignum/src/decimal.rs` — `format_base10` and `format`.
+**Where:** `userspace/bignum/src/decimal.rs` — `format_base10`, `format` and
+`wrap_number`.
 
-**The three, most-likely-wrong first:**
+**The three:**
 
-| Detail | Ours prints | Traditional `bc`/`dc` print | Confidence |
+| Detail | Ours prints | Traditional `bc`/`dc` print | State |
 |---|---|---|---|
-| A value below one | `0.5` | `.5` (no leading zero) | **Low — ours is probably wrong.** That `bc` omits the leading zero is a common enough surprise to be a recurring question wherever shell scripting is discussed. |
-| Zero at a non-zero scale | `0` | `0` believed; possibly `.000` | Medium |
-| Line length | unlimited | wrapped at 70 columns with a trailing `\` | **Ours is definitely wrong** — the wrap is specified, and we do not do it. See below. |
+| A value below one | `.5` | `.5` (no leading zero) | ✅ **changed to match** (`a1625db82`). Acted on documentary evidence: that `bc` omits the leading zero is a recurring surprise wherever shell scripting is discussed, which is only possible if it does omit it. |
+| Line length | wrapped at 70 columns with a trailing `\` | same | ✅ **implemented.** `BC_LINE_LENGTH`/`DC_LINE_LENGTH` override it, `0` disables it, and strings are never wrapped. Verified by reassembling `2^1000` from the emitted lines. |
+| Zero at a non-zero scale | `0` | `0` believed; possibly `.000` | ⚠️ **still a guess.** The only one left. |
 
-**The leading zero is the one that matters** and it is not a cosmetic
-preference: `$(echo "scale=2;1/2" | bc)` yields `.50` on every traditional
-implementation, and a script that does `[ "$x" = ".50" ]`, or that feeds the
-value back to a tool with a stricter number parser, breaks on `0.50`. Changing
-it is a two-line edit in `format_base10` plus a sweep of the two crates' test
-expectations; the reason it was not done in the same commit is only that it is
-a user-visible output change and deserves to be revertible on its own.
+**Why the leading zero mattered enough to change on memory alone:**
+`$(echo "scale=2;1/2" | bc)` yields `.50` on every traditional implementation,
+and a script that does `[ "$x" = ".50" ]`, or that feeds the value back to a
+tool with a stricter number parser, breaks on `0.50`. It was made as its own
+commit so it can be reverted alone if a real `bc` ever contradicts it.
 
-**The 70-column wrap is separately specified and simply missing.** POSIX says
-`bc` output longer than the line length is split with a backslash-newline.
-`2 200 ^ p` prints one 61-character line here and one wrapped line elsewhere,
-so any golden-output comparison against a real `bc` fails on long numbers
-regardless of how the digits come out.
+**What is left here is the zero-at-scale question**, which is much lower stakes:
+it only shows up for an exact zero result at a non-zero `scale`, and both
+candidate spellings parse back as zero. It is recorded rather than guessed at
+because guessing twice from the same unreliable source is how a systematic error
+gets in.
 
 **Also still missing from `dc`:** the `a` command (turn the top of the stack
 into a one-character string). Everything else in POSIX `dc` is implemented.
 
 **The proper fix** is a differential harness, which needs a real `bc`/`dc` on
 the development host — the same thing that settled `grep`, `sed`, `awk`, `expr`
-and `cat`. Failing that, the leading-zero change should be made on the strength
-of the documentary evidence, since "every other implementation does X" is the
-whole specification for a compatibility utility.
+and `cat`. Note that the `bc`↔`dc` cross-check used in the meantime *cannot*
+substitute for it here: both front-ends format through the same `Decimal`, so a
+formatting misreading is inherited by both and they agree with each other while
+both being wrong.
 
-**Until then** the numbers are right and the punctuation around them may not be.
-Nothing in the tree consumes `bc` or `dc` output yet, so this is not blocking;
-it becomes blocking the moment a shell script does arithmetic through them.
+**Until then** the numbers are right and one detail of the punctuation around
+them may not be. Nothing in the tree consumes `bc` or `dc` output yet, so this
+is not blocking; it becomes blocking the moment a shell script does arithmetic
+through them.
 
 ---
 

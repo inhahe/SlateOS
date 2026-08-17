@@ -46,12 +46,31 @@ enum Value {
 }
 
 impl Value {
-    fn display(&self, obase: u32) -> String {
+    /// Render for output: a number in `obase` and broken at `line_length`, a
+    /// string exactly as the program wrote it.
+    ///
+    /// The asymmetry is deliberate. A number is `dc`'s own rendering of a
+    /// value and may be continued across lines with a trailing `\`; a string
+    /// is the user's bytes, and inserting a backslash into it would corrupt
+    /// the one thing they asked to be printed verbatim.
+    fn display(&self, obase: u32, line_length: usize) -> String {
         match self {
-            Value::Num(n) => n.format(obase),
+            Value::Num(n) => bignum::wrap_number(&n.format(obase), line_length),
             Value::Str(s) => s.clone(),
         }
     }
+}
+
+/// The output line length, from the environment or the traditional default.
+///
+/// A value of 0 turns the line break off. A setting that is not a number is
+/// ignored rather than rejected: a malformed environment should not stop a
+/// calculator from calculating.
+fn line_length_from_env(var: &str) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(bignum::DEFAULT_LINE_LENGTH)
 }
 
 /// Why a command could not be carried out.
@@ -135,6 +154,8 @@ struct Dc<'a> {
     /// produce. It is *not* a property of the numbers on the stack, each of
     /// which carries its own scale.
     scale: usize,
+    /// Columns before a printed number is broken with a trailing `\`.
+    line_length: usize,
     depth: usize,
     out: &'a mut dyn Write,
     err: &'a mut dyn Write,
@@ -148,6 +169,7 @@ impl<'a> Dc<'a> {
             ibase: 10,
             obase: 10,
             scale: 0,
+            line_length: line_length_from_env("DC_LINE_LENGTH"),
             depth: 0,
             out,
             err,
@@ -392,12 +414,12 @@ impl<'a> Dc<'a> {
             // ── Stack ──
             'p' => {
                 let val = self.stack.last().ok_or(DcError::StackEmpty)?.clone();
-                let s = val.display(self.obase);
+                let s = val.display(self.obase, self.line_length);
                 self.write_out(&format!("{s}\n"))?;
             }
             'n' => {
                 let val = self.pop()?;
-                let s = val.display(self.obase);
+                let s = val.display(self.obase, self.line_length);
                 self.write_out(&s)?;
             }
             'f' => {
@@ -406,7 +428,7 @@ impl<'a> Dc<'a> {
                     .stack
                     .iter()
                     .rev()
-                    .map(|v| v.display(self.obase))
+                    .map(|v| v.display(self.obase, self.line_length))
                     .collect();
                 for line in lines {
                     self.write_out(&format!("{line}\n"))?;
@@ -1259,7 +1281,7 @@ mod tests {
         // `5 +` has only one operand. It must not vanish.
         let stack = eval_stack("5 +");
         assert_eq!(stack.len(), 1);
-        assert_eq!(stack[0].display(10), "5");
+        assert_eq!(stack[0].display(10, bignum::DEFAULT_LINE_LENGTH), "5");
     }
 
     #[test]
@@ -1348,6 +1370,30 @@ mod tests {
     #[test]
     fn test_factorial_like() {
         assert_eq!(eval("1 2 * 3 * 4 * 5 * p"), "120\n");
+    }
+
+    #[test]
+    fn a_number_too_long_for_a_line_is_continued() {
+        // End to end, through the real print path rather than the formatter:
+        // 2^1000 is 302 digits, so four continued lines of 69 and a last of 26.
+        let out = eval("2 1000 ^ p");
+        let lines: Vec<&str> = out.trim_end().split('\n').collect();
+        assert_eq!(lines.len(), 5);
+        assert!(lines[0].ends_with('\\'), "no continuation: {}", lines[0]);
+        assert_eq!(lines[0].len(), 70);
+        let rejoined: String = lines
+            .iter()
+            .map(|l| l.strip_suffix('\\').unwrap_or(l))
+            .collect();
+        assert_eq!(rejoined.len(), 302);
+        assert!(rejoined.ends_with("069376"));
+        // A string is printed as the program wrote it, never continued: a
+        // backslash inserted into the user's own bytes would corrupt them.
+        let long_string = "x".repeat(200);
+        assert_eq!(
+            eval(&format!("[{long_string}] p")),
+            format!("{long_string}\n")
+        );
     }
 
     #[test]

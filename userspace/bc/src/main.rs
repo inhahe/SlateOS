@@ -1113,6 +1113,9 @@ struct Interpreter {
     last: Decimal,
     /// Whether the math library is loaded (-l flag).
     math_lib: bool,
+    /// Columns before a printed number is broken with a trailing `\`.
+    /// Zero disables the break; see [`bignum::wrap_number`].
+    line_length: usize,
     /// When set, output is captured here instead of going to stdout.
     /// Used by tests to verify output without I/O.
     #[cfg(test)]
@@ -1131,9 +1134,19 @@ impl Interpreter {
             obase: 10,
             last: Decimal::zero(),
             math_lib,
+            line_length: line_length_from_env("BC_LINE_LENGTH"),
             #[cfg(test)]
             output_buf: Vec::new(),
         }
+    }
+
+    /// Render a value for output: in `obase`, then broken across lines.
+    ///
+    /// Every path that prints a number goes through here, which is what keeps
+    /// `1/3` in a `print` statement and `1/3` on a line of its own from being
+    /// written two different ways.
+    fn render(&self, val: &Decimal) -> String {
+        bignum::wrap_number(&val.format(self.obase), self.line_length)
     }
 
     /// Output a line (with trailing newline).  In test mode, captured to
@@ -1249,7 +1262,7 @@ impl Interpreter {
                 // In bc, a bare expression prints its value.
                 // But assignments don't print (they are silent).
                 if !suppresses_auto_print(expr) {
-                    let formatted = val.format(self.obase);
+                    let formatted = self.render(&val);
                     self.output_line(&formatted);
                 }
                 self.last = val;
@@ -1261,7 +1274,7 @@ impl Interpreter {
                         PrintItem::StringLit(s) => self.output_str(s),
                         PrintItem::Expr(expr) => {
                             let val = self.eval(expr)?;
-                            let formatted = val.format(self.obase);
+                            let formatted = self.render(&val);
                             self.output_str(&formatted);
                             self.last = val;
                         }
@@ -1932,6 +1945,19 @@ impl Interpreter {
 /// bc echoes the value of any expression written as a statement, *except* an
 /// assignment (which is silent, so that `x = 1` does not print) and a string
 /// literal (which writes its own text and has no value to echo).
+/// The output line length, from the environment or the traditional default.
+///
+/// A value of 0 turns the line break off, which is the documented way for a
+/// script to get one long number instead of a continued one. A setting that is
+/// not a number is ignored rather than rejected: a malformed environment
+/// should not stop a calculator from calculating.
+fn line_length_from_env(var: &str) -> usize {
+    env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(bignum::DEFAULT_LINE_LENGTH)
+}
+
 fn suppresses_auto_print(expr: &Expr) -> bool {
     matches!(
         expr,

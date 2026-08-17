@@ -32,6 +32,17 @@
 //! because it needs both directions of this protocol, and `guiremote` already
 //! depends on `guitk` — putting the loop there would close the cycle.
 //!
+//! ## Carriers
+//!
+//! The frames above say nothing about what moves them. Two things do:
+//!
+//! * [`socket`] — a TCP connection, and the compositor's [`Listener`] for it.
+//!   The one that crosses a process boundary, and the one an application
+//!   actually uses; [`socket::display_addr`] says where to dial.
+//! * [`loopback`] — two ends of a queue inside one process. Real codecs, no
+//!   kernel: for tests on either side of the protocol, and for a hosted build
+//!   with the compositor in the same process.
+//!
 //! ## Frame format
 //!
 //! Each frame is a self-contained, length-prefixed envelope:
@@ -112,6 +123,9 @@ pub use client::{App, Client, ClientError, Connection, Response, Transport};
 
 pub mod loopback;
 pub use loopback::{Pipe, pipe};
+
+pub mod socket;
+pub use socket::{DEFAULT_DISPLAY, DISPLAY_VAR, Listener, Socket, display_addr};
 
 // ============================================================================
 // Protocol constants

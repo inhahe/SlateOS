@@ -358,6 +358,13 @@ impl core::fmt::Display for SaveError {
 ///
 /// Pixel data is in ARGB format (u32 per pixel), row-major, top-down.
 /// BMP stores rows bottom-up with BGRA byte order.
+///
+/// Written through [`safeio::write_atomically`], not `fs::write`. `fs::write`
+/// truncates the target *before* writing it, so re-saving an annotated capture
+/// over its own file and running out of space part-way would leave the user
+/// with neither the new image nor the one they already had. A screenshot is
+/// large enough — a 4K capture is ~33 MB — that a short write is a realistic
+/// failure rather than a theoretical one.
 pub fn write_bmp(path: &Path, width: u32, height: u32, pixels: &[u32]) -> Result<(), BmpError> {
     let expected = (width as usize).saturating_mul(height as usize);
     if pixels.len() != expected {
@@ -373,8 +380,41 @@ pub fn write_bmp(path: &Path, width: u32, height: u32, pixels: &[u32]) -> Result
     let file_size = header_size.checked_add(pixel_data_size).ok_or(BmpError::DimensionOverflow)?;
 
     let data = encode_bmp_bytes(width, height, pixels, file_size, header_size, pixel_data_size)?;
-    std::fs::write(path, &data)?;
+    safeio::write_atomically(path, &data)?;
     Ok(())
+}
+
+/// A path in `dir` for `filename` that no file already occupies.
+///
+/// Every save target is chosen through this, because
+/// [`Capture::default_filename`] is derived from the capture's timestamp and
+/// so is *not* unique: two captures taken in the same second produce the same
+/// name, and `Capture::new`'s placeholder timestamp makes every capture
+/// produce the same name. Writing to the name as given therefore destroys the
+/// earlier screenshot and reports "saved" for both.
+///
+/// The suffix goes before the extension (`screenshot_… (2).bmp`) so the file
+/// stays a `.bmp` to anything that dispatches on extension.
+fn unused_save_path(dir: &Path, filename: &str) -> PathBuf {
+    let candidate = dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let (stem, ext) = match filename.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (filename, String::new()),
+    };
+    // Bounded: an unbounded search would spin forever on a directory that
+    // cannot be read. Falling back to the plain name after the bound is the
+    // same behaviour as before this function existed, and by then something is
+    // wrong that renaming cannot fix.
+    for n in 2..10_000u32 {
+        let candidate = dir.join(format!("{stem} ({n}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(filename)
 }
 
 /// Encode pixel data to an in-memory BMP byte buffer.
@@ -686,6 +726,15 @@ pub struct ScreenshotApp {
 
     /// The most recently captured screenshot.
     pub current_capture: Option<Capture>,
+    /// Where [`Self::current_capture`] has already been written, if it has.
+    ///
+    /// Saving the same capture twice — the ordinary "draw an arrow, save,
+    /// draw another, save again" loop — must update the file it already
+    /// produced rather than leave a trail of near-duplicates. Saving a
+    /// *different* capture must never touch it. The distinction cannot be
+    /// drawn from the filename, because the filename is a timestamp and two
+    /// captures can share one, so it is remembered here instead.
+    pub current_saved_path: Option<PathBuf>,
     /// History of previous captures (most recent first).
     pub capture_history: Vec<Capture>,
 
@@ -723,6 +772,7 @@ impl ScreenshotApp {
             countdown_remaining: 0,
             countdown_elapsed_ms: 0,
             current_capture: None,
+            current_saved_path: None,
             capture_history: Vec::new(),
             annotation_tool: AnnotationTool::Rectangle,
             annotation_color: ANNOTATION_RED,
@@ -822,13 +872,21 @@ impl ScreenshotApp {
 
     /// Process a completed capture: store it, save if needed, show notification.
     fn finish_capture(&mut self, capture: Capture) {
+        // A new capture has not been saved anywhere yet, so it must not inherit
+        // the previous one's file — that is precisely the file it would
+        // otherwise overwrite.
+        self.current_saved_path = None;
+
         // Save to file if that is the default action.
         if self.settings.default_action == PostCaptureAction::SaveToFile {
             let filename = capture.default_filename();
-            let save_path = self.settings.save_directory.join(&filename);
+            let save_path = unused_save_path(&self.settings.save_directory, &filename);
             let outcome = write_bmp(&save_path, capture.width, capture.height, &capture.pixels)
-                .map(|()| save_path)
+                .map(|()| save_path.clone())
                 .map_err(SaveError::Bmp);
+            if outcome.is_ok() {
+                self.current_saved_path = Some(save_path);
+            }
             self.notify_save(&outcome);
         }
 
@@ -853,16 +911,27 @@ impl ScreenshotApp {
     /// The annotations are flattened into a *copy* of the pixels: the capture
     /// itself stays clean, so undo still works and a second save after another
     /// arrow does not stack the first one twice.
+    ///
+    /// Saving the same capture again rewrites the file this capture already
+    /// produced. Saving a capture for the first time picks a name no file
+    /// holds — see [`unused_save_path`] for why the timestamp-derived name
+    /// cannot be trusted to be free.
     pub fn save_current(&mut self) -> Result<PathBuf, SaveError> {
         let capture = match &self.current_capture {
             Some(c) => c,
             None => return Err(SaveError::NoCapture),
         };
 
-        let filename = capture.default_filename();
-        let save_path = self.settings.save_directory.join(filename);
+        let save_path = match &self.current_saved_path {
+            Some(existing) => existing.clone(),
+            None => unused_save_path(&self.settings.save_directory, &capture.default_filename()),
+        };
         let pixels = flatten_annotations(capture, &self.annotations);
         write_bmp(&save_path, capture.width, capture.height, &pixels)?;
+        // Recorded only on success: a failed first save must not claim a name
+        // it did not manage to create, or the retry would rewrite a file that
+        // is not there while a *different* capture keeps the name it wanted.
+        self.current_saved_path = Some(save_path.clone());
         Ok(save_path)
     }
 
@@ -881,6 +950,9 @@ impl ScreenshotApp {
     /// Discard the current capture and return to the menu.
     pub fn discard_current(&mut self) {
         self.current_capture = None;
+        // Dropped with the capture it belongs to: the next capture must choose
+        // its own name, not inherit and overwrite this one's file.
+        self.current_saved_path = None;
         self.annotations.clear();
         self.pending_annotation = None;
         self.view = AppView::Menu;
@@ -1950,7 +2022,16 @@ fn main() {
 // Tests
 // ============================================================================
 
+// Panicking on bad data is the point in a test: an `expect` that fires is the
+// failure report. CLAUDE.md sanctions allowing these in `#[cfg(test)]`, and
+// every other app crate in the tree already does.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -2000,6 +2081,173 @@ mod tests {
         app.current_capture = Some(Capture::solid(100, 80, 0xFF0000FF));
         app.view = AppView::Preview;
         app
+    }
+
+    // ---- Saving must not overwrite another capture's file ----
+
+    /// Two captures taken in the same second share a filename, and
+    /// `Capture::new`'s placeholder timestamp makes *every* capture share one.
+    /// Saving the second must not destroy the first.
+    #[test]
+    fn a_second_capture_does_not_overwrite_the_first_ones_file() {
+        let dir = temp_dir("collide");
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        app.settings.save_directory = dir.clone();
+        app.settings.default_action = PostCaptureAction::SaveToFile;
+
+        app.finish_capture(Capture::solid(20, 10, 0xFF0000FF));
+        let first = app.current_saved_path.clone().expect("first save");
+        let first_bytes = std::fs::read(&first).expect("read first");
+
+        app.finish_capture(Capture::solid(20, 10, 0xFF00FF00));
+        let second = app.current_saved_path.clone().expect("second save");
+
+        assert_ne!(
+            first, second,
+            "the second capture was written over the first one's file"
+        );
+        assert_eq!(
+            std::fs::read(&first).expect("first still there"),
+            first_bytes,
+            "the first screenshot's contents changed when the second was saved"
+        );
+        assert_ne!(
+            std::fs::read(&second).expect("read second"),
+            first_bytes,
+            "the two captures are different images and must not be one file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The suffix must keep the file a `.bmp`, or anything dispatching on
+    /// extension stops recognising it.
+    #[test]
+    fn a_disambiguated_name_keeps_its_extension() {
+        let dir = temp_dir("ext");
+        std::fs::write(dir.join("shot.bmp"), b"taken").expect("occupy");
+        let picked = unused_save_path(&dir, "shot.bmp");
+        assert_eq!(picked, dir.join("shot (2).bmp"));
+
+        std::fs::write(dir.join("shot (2).bmp"), b"taken too").expect("occupy");
+        assert_eq!(unused_save_path(&dir, "shot.bmp"), dir.join("shot (3).bmp"));
+
+        // A free name is used as-is -- no suffix on the common case.
+        assert_eq!(unused_save_path(&dir, "fresh.bmp"), dir.join("fresh.bmp"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Re-saving the *same* capture updates the file it already made, rather
+    /// than leaving a trail of near-duplicates behind every annotation.
+    #[test]
+    fn re_saving_one_capture_rewrites_its_own_file() {
+        let dir = temp_dir("resave");
+        let mut app = app_in_preview();
+        app.settings.save_directory = dir.clone();
+
+        let first = app.save_current().expect("save");
+        app.annotations.push(annotation(
+            AnnotationTool::Rectangle,
+            5.0,
+            5.0,
+            40.0,
+            30.0,
+            Color::rgb(255, 0, 0),
+        ));
+        let second = app.save_current().expect("save again");
+
+        assert_eq!(first, second, "same capture, same file");
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .expect("list")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1, "annotating and re-saving left extra files");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Discarding a capture must drop the name it was using, or the next
+    /// capture inherits it and writes over a screenshot the user kept.
+    #[test]
+    fn a_discarded_capture_does_not_lend_its_file_to_the_next_one() {
+        let dir = temp_dir("discard");
+        let mut app = app_in_preview();
+        app.settings.save_directory = dir.clone();
+
+        let kept = app.save_current().expect("save");
+        let kept_bytes = std::fs::read(&kept).expect("read");
+        app.discard_current();
+        assert!(app.current_saved_path.is_none());
+
+        app.current_capture = Some(Capture::solid(100, 80, 0xFF00FF00));
+        let next = app.save_current().expect("save next");
+        assert_ne!(kept, next);
+        assert_eq!(
+            std::fs::read(&kept).expect("kept still there"),
+            kept_bytes,
+            "the discarded capture's file was overwritten by the next capture"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed save must not claim the name it could not create: the retry
+    /// would then rewrite a file that does not exist while a later capture
+    /// takes the name for itself.
+    #[test]
+    fn a_failed_save_claims_no_filename() {
+        let mut app = app_in_preview();
+        app.settings.save_directory = unwritable_dir("noclaim");
+        assert!(app.save_current().is_err());
+        assert!(app.current_saved_path.is_none());
+    }
+
+    /// A rejected encode must not have touched the target. This holds for
+    /// either write strategy -- validation runs first -- and is pinned because
+    /// moving the `fs::write` earlier would silently break it.
+    #[test]
+    fn a_rejected_encode_leaves_the_previous_file_untouched() {
+        let dir = temp_dir("reject");
+        let path = dir.join("shot.bmp");
+        std::fs::write(&path, b"the screenshot the user already had").expect("seed");
+
+        assert!(write_bmp(&path, 100, 100, &[0u32; 4]).is_err());
+        assert_eq!(
+            std::fs::read(&path).expect("read back"),
+            b"the screenshot the user already had",
+            "the file the user already had was damaged by a rejected save"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The atomic write stages through a temporary in the same directory. It
+    /// must clean up after itself on both paths -- a save directory that
+    /// accumulates litter is how a user's screenshots folder fills with files
+    /// no program will open.
+    ///
+    /// This does **not** verify that `write_bmp` routes through `safeio`:
+    /// `fs::write` leaves no litter either, so this test passes with the
+    /// non-atomic write restored (checked by injection). The truncate-then-fail
+    /// guarantee is `safeio`'s and is tested there. See `known-issues.md`
+    /// "safeio adoption is not enforced by any test" for the gap.
+    #[test]
+    fn a_save_leaves_no_temporary_files_behind() {
+        let dir = temp_dir("litter");
+        let path = dir.join("shot.bmp");
+        write_bmp(&path, 4, 4, &[0xFF00_00FFu32; 16]).expect("save");
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .expect("list")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["shot.bmp".to_string()]);
+
+        // And on the failure path, where the temporary has already been created.
+        assert!(write_bmp(&dir, 4, 4, &[0xFF00_00FFu32; 16]).is_err());
+        let after: Vec<String> = std::fs::read_dir(&dir)
+            .expect("list")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(after, vec!["shot.bmp".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn annotation(tool: AnnotationTool, x1: f32, y1: f32, x2: f32, y2: f32, color: Color) -> Annotation {

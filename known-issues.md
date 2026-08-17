@@ -29932,7 +29932,7 @@ cost of a mismatch is small.
   wanted to stay; an event addressed to another window is counted, not
   dispatched. 19 tests.
 - **(d½) Fold `gui/window` (`oswindow`) onto the protocol — found while starting
-  (e), and it changes (e).** There is already a crate whose stated job is
+  (e), and it changes (e).** — **DONE 2026-08-17.** There is already a crate whose stated job is
   "compositor client for creating windows and receiving events", 1254 lines of
   it, and **nothing in the tree depends on it** — the same count as `guiremote`
   had before this work. It is not a client; it is a simulation of one:
@@ -29966,6 +29966,69 @@ cost of a mismatch is small.
   encoding at all. So there is a **(c½): give `guiremote` a control frame**,
   and the count of what is missing between here and a usable desktop was one
   larger than this entry claimed.
+
+  **What landed.** `gui/window/src/lib.rs` is now 1200 lines of client rather
+  than 1254 of simulation. `WindowEvent` is gone; `guitk::event::Event` is the
+  only vocabulary end to end, pinned by a test that sends a mouse-scroll event
+  from the server side and asserts the handler receives the identical value.
+  Window ids come from the compositor — the test that would have caught the
+  old defect sets the fake compositor's counter to `0x00C0_FFEE` and asserts
+  that is the id returned. `EventLoop::run` blocks on `Transport::wait` and
+  ends only when the handler says so, `quit()` is called, or the connection
+  closes. 23 tests.
+
+  Three pieces the rewrite forced, each a design choice in its own right:
+
+  * **`SURF`, an addressed draw frame** (`gui/remote/src/submit.rs`). Designing
+    `Connection` for more than one window raised "which window is this `ORDR`
+    for?", and `ORDR` has no answer — it is a bare `RenderTree`. Adding an id
+    to its header would have been fewer bytes and the wrong shape: `ORDR` is
+    also nested *inside* a `SceneFrame`, under a `SceneWindow` that already
+    names the window, so the id would be duplicated, and two fields that must
+    agree eventually disagree. `SURF` wraps `ORDR` with the id instead.
+  * **`Event::Moved`** (`gui/toolkit/src/event.rs`). A window could otherwise
+    only know where it last *asked* to be. The alternative — caching the
+    requested position — is a lie-by-cache: the compositor may snap the window
+    to an edge or clamp it to a monitor, and anything placed in screen
+    coordinates would then be placed against a position the window never had.
+    Cost measured before writing it: only the codec matches `Event`
+    exhaustively (4 sites, all in `input.rs`), so the variant was ~20 lines.
+  * **`guiremote::loopback::Pipe`**, an in-process duplex pipe implementing
+    `Transport`. Both halves speak the real wire protocol; the only thing
+    missing versus a socket is the kernel. It is explicitly *not* a substitute
+    for a transport — `wait` does nothing, because on one thread nothing can
+    arrive while a caller is blocked, and `Rc` rather than `Arc` says so in the
+    type system. `oswindow`'s tests wrap it in a transport whose `wait` gives
+    the fake compositor a turn, which is what blocking *means* with one thread,
+    and that is what lets them exercise the genuinely blocking paths
+    (`create`, `set_title`, `run`) rather than reaching around them.
+
+- **(f) Give the compositor a wire front end — found while finishing (d½), and
+  it blocks (e).** The compositor has `handle_request(CompositorRequest) ->
+  CompositorResponse` and `drain_notifications()`, and **nothing that decodes
+  or encodes a frame on the request path**: no `CREQ` → `CompositorRequest`, no
+  `CompositorResponse` → `CRSP`, no `SURF` → `submit_render`. `drain_input_frame`
+  (added by (c)) is the one piece that exists, and `main()` drops what it
+  builds. So the client half of the protocol is now complete and has nothing to
+  talk to: `oswindow`'s tests pass against a fake compositor written in their
+  own test module, and there is no way to point one at the real thing.
+
+  The work is a translation layer, and its shape is fixed by what already
+  exists on both sides — but it is not mechanical, because the two enums do not
+  correspond one-to-one. `CompositorRequest` has `SetFullscreen`, `SetOpacity`
+  and the three `Stream*` variants that `RequestBody` does not; `RequestBody`
+  has `SetVisible` that `CompositorRequest` does not; `CompositorRequest::CreateWindow`
+  carries a `client_pid` and only title/width/height, where `WindowSpec` also
+  carries position, resizability, decorations, transparency and size limits —
+  which the compositor would currently discard. Deciding whether to widen
+  `CompositorRequest`, widen `RequestBody`, or accept a lossy edge is the
+  substance of this step.
+
+  There is also a **third cursor enum** to delete on the way past:
+  `compositor::CursorShape`, `guiremote::control::CursorShape` and the one
+  `oswindow` used to have cannot represent the same set — `Help` existed only
+  in `oswindow`'s, `NotAllowed` only in the compositor's. `oswindow`'s is gone;
+  the compositor's should become `guiremote`'s.
 
 - **(e) Wire `apps/editor` to it** as the first real client, calling
   `ensure_cursor_visible` and `ensure_caret_visible_horizontally` after any

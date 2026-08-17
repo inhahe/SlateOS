@@ -110,6 +110,9 @@ pub use frame::{Frame, decode_any, try_decode_any};
 pub mod client;
 pub use client::{App, Client, ClientError, Connection, Response, Transport};
 
+pub mod loopback;
+pub use loopback::{Pipe, pipe};
+
 // ============================================================================
 // Protocol constants
 // ============================================================================

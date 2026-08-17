@@ -1,773 +1,507 @@
-//! Slate OS Window Library — compositor client for creating windows and receiving events.
+//! SlateOS window library — the API an application uses to have windows.
 //!
-//! This crate provides the primary API for applications to interact with the Slate OS
-//! compositor. It handles window creation, event dispatch, rendering submission,
-//! and window lifecycle management.
-//!
-//! # Architecture
+//! An application should no more name the display protocol than a Unix program
+//! names the socket layer. This crate is that boundary: it speaks
+//! [`guiremote`]'s frames on one side and offers windows, properties and an
+//! event loop on the other. Nothing above it should mention `SURF`, `CREQ` or
+//! a correlation id.
 //!
 //! ```text
-//! Application
-//!     │
-//!     ▼
-//! oswindow (this crate)
-//!     │ (IPC channel to compositor)
-//!     ▼
-//! Compositor Server
+//!   application            ← windows, events, "set the title"
+//!        │
+//!   oswindow (here)        ← the translation
+//!        │
+//!   guiremote::Connection  ← frames, correlation ids, one socket
+//!        │
+//!   compositor
 //! ```
 //!
-//! # Usage
+//! ## What changed, and why the previous version had to go
 //!
-//! ```rust,no_run
-//! use oswindow::{WindowBuilder, EventLoop, WindowEvent, EventResponse};
+//! Until this rewrite this crate did not connect to anything. It allocated
+//! window ids from a local counter, answered its own requests from a
+//! `simulate_response` function, and its `run` loop exited on its first
+//! iteration with a comment saying a real one would block. Every application
+//! written against it therefore *appeared* to work and could never have shown a
+//! pixel. It also defined a third event vocabulary — `WindowEvent`, alongside
+//! [`guitk::event::Event`] and the compositor's — so that connecting it later
+//! would have required a lossy translation in the middle of the input path.
 //!
-//! let window = WindowBuilder::new("My App", 800, 600)
+//! So: ids come from the compositor and nowhere else, requests go out on a real
+//! transport and their answers come back over it, `run` really blocks, and
+//! there is exactly one event type — `guitk::event::Event` — end to end.
+//!
+//! ## Ownership
+//!
+//! One connection carries every window a process owns (see
+//! [`guiremote::frame`] for why one rather than several), so the connection
+//! cannot live inside a `Window`. [`EventLoop`] owns it, and a [`Window`] is a
+//! record of what the compositor last told us about one window. Mutating one
+//! goes through [`EventLoop::window_mut`], which hands back a [`WindowHandle`]
+//! borrowing both.
+//!
+//! ## Usage
+//!
+//! ```rust
+//! use oswindow::{EventLoop, EventResponse, Event, WindowBuilder};
+//! use guiremote::pipe;
+//!
+//! // A real application connects to the compositor; this doc test uses an
+//! // in-process pipe so it can run without one.
+//! let (client_end, _server_end) = pipe();
+//! let mut events = EventLoop::new(client_end);
+//!
+//! // `build` blocks until the compositor answers with the window's id.
+//! # if false {
+//! let id = WindowBuilder::new("My App", 800, 600)
 //!     .resizable(true)
-//!     .build()
-//!     .expect("failed to create window");
+//!     .build(&mut events)
+//!     .expect("the compositor refused the window");
 //!
-//! let mut event_loop = EventLoop::new();
-//! event_loop.register(window);
-//! event_loop.run(|window_id, event| {
-//!     match event {
-//!         WindowEvent::CloseRequested => EventResponse::Exit,
-//!         _ => EventResponse::Continue,
+//! events.run(|events, window, event| match event {
+//!     Event::CloseRequested => EventResponse::Exit,
+//!     Event::Resize { width, height } => {
+//!         let _ = events.submit(window, &guitk::render::RenderTree::new());
+//!         EventResponse::Continue
 //!     }
-//! });
+//!     _ => EventResponse::Continue,
+//! })
+//! .expect("the connection failed");
+//! # }
 //! ```
 
-// Internal protocol types will be used when real IPC is connected.
-#![allow(dead_code)]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-pub use guitk::event::{Key, Modifiers, MouseButton};
+use guiremote::client::{ClientError, Connection, Transport};
+use guiremote::control::{CursorShape, DisplayInfo, RequestBody, ResponseBody, WindowSpec};
+use guiremote::input::InputEvent;
+
+pub use guiremote::client::{ClientError as ConnectionError, Transport as ConnectionTransport};
+pub use guiremote::control::{CursorShape as Cursor, DisplayInfo as Display, WindowSpec as Spec};
+pub use guiremote::{Pipe, pipe};
+pub use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 pub use guitk::render::{RenderCommand, RenderTree};
 
-// ---------------------------------------------------------------------------
-// ID generation
-// ---------------------------------------------------------------------------
-
-/// Global atomic counter for generating unique connection-local window IDs.
-static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Allocate a new unique window ID for this client session.
-fn allocate_window_id() -> u64 {
-    NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-// ---------------------------------------------------------------------------
-// Error types
-// ---------------------------------------------------------------------------
-
-/// Errors that can occur during window operations.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WindowError {
-    /// The compositor connection could not be established.
-    ConnectionFailed(String),
-    /// The compositor rejected the window creation request.
-    CreationFailed(String),
-    /// The window ID is not valid (window was closed or never created).
-    InvalidWindow(u64),
-    /// An IPC communication error occurred.
-    IpcError(String),
-    /// The requested operation is not supported.
-    Unsupported(String),
-}
-
-impl std::fmt::Display for WindowError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ConnectionFailed(msg) => write!(f, "connection failed: {msg}"),
-            Self::CreationFailed(msg) => write!(f, "window creation failed: {msg}"),
-            Self::InvalidWindow(id) => write!(f, "invalid window id: {id}"),
-            Self::IpcError(msg) => write!(f, "ipc error: {msg}"),
-            Self::Unsupported(msg) => write!(f, "unsupported: {msg}"),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Cursor shapes
-// ---------------------------------------------------------------------------
-
-/// Mouse cursor shape that the compositor should display.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CursorShape {
-    /// Default pointer arrow.
-    #[default]
-    Arrow,
-    /// Text insertion beam (I-beam).
-    IBeam,
-    /// Pointing hand (for clickable elements).
-    Hand,
-    /// Vertical resize (north-south).
-    ResizeNS,
-    /// Horizontal resize (east-west).
-    ResizeEW,
-    /// Diagonal resize (northeast-southwest).
-    ResizeNESW,
-    /// Diagonal resize (northwest-southeast).
-    ResizeNWSE,
-    /// Move/drag cursor.
-    Move,
-    /// Busy/wait spinner.
-    Wait,
-    /// Help cursor (question mark).
-    Help,
-    /// Crosshair (precision select).
-    Crosshair,
-    /// Hidden cursor (no cursor visible).
-    Hidden,
-}
-
-// ---------------------------------------------------------------------------
-// Display information
-// ---------------------------------------------------------------------------
-
-/// Information about the connected display.
-#[derive(Clone, Debug)]
-pub struct DisplayInfo {
-    /// Display width in pixels.
-    pub width: u32,
-    /// Display height in pixels.
-    pub height: u32,
-    /// Refresh rate in Hz.
-    pub refresh_rate: u32,
-    /// DPI scale factor (1.0 = 96 DPI, 2.0 = 192 DPI, etc.).
-    pub scale_factor: f32,
-}
-
-/// Query display information from the compositor.
+/// What can go wrong, for a given transport.
 ///
-/// Returns information about the primary display's resolution, refresh rate,
-/// and scale factor. Used to make layout decisions before creating windows.
-pub fn display_info() -> DisplayInfo {
-    let mut conn = Connection::new();
-    conn.send(CompositorRequest::GetDisplayInfo);
+/// An alias rather than a new type: an application that wants to report a
+/// failure needs the same information [`guiremote`] already distinguishes —
+/// a transport failure, a protocol violation, a refusal with a reason — and
+/// wrapping them again would only add a layer to unwrap.
+pub type Error<T> = ClientError<<T as Transport>::Error>;
 
-    // Process the response from the compositor.
-    if let Some(CompositorResponse::DisplayInfo {
-        width,
-        height,
-        refresh_rate,
-        scale_factor,
-    }) = conn.recv()
-    {
-        return DisplayInfo {
-            width,
-            height,
-            refresh_rate,
-            scale_factor,
-        };
-    }
-
-    // Fallback to reasonable defaults if the compositor is unreachable.
-    DisplayInfo {
-        width: 1920,
-        height: 1080,
-        refresh_rate: 60,
-        scale_factor: 1.0,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Compositor protocol types (client-side mirror of compositor's protocol)
-// ---------------------------------------------------------------------------
-
-/// Request types matching the compositor protocol.
-#[derive(Clone, Debug)]
-enum CompositorRequest {
-    /// Create a new window with the given parameters.
-    CreateWindow {
-        title: String,
-        width: u32,
-        height: u32,
-        x: i32,
-        y: i32,
-    },
-    /// Destroy an existing window.
-    DestroyWindow { id: u64 },
-    /// Set the window title.
-    SetTitle { id: u64, title: String },
-    /// Submit render commands for a window's client area.
-    Submit { id: u64, commands: Vec<RenderCommand> },
-    /// Move a window to a new position.
-    Move { id: u64, x: i32, y: i32 },
-    /// Resize a window's client area.
-    Resize { id: u64, width: u32, height: u32 },
-    /// Minimize a window.
-    Minimize { id: u64 },
-    /// Maximize a window.
-    Maximize { id: u64 },
-    /// Restore a window from minimized/maximized state.
-    Restore { id: u64 },
-    /// Set the cursor shape.
-    SetCursor { shape: CursorShape },
-    /// Set window visibility.
-    SetVisible { id: u64, visible: bool },
-    /// Query display information.
-    GetDisplayInfo,
-}
-
-/// Response types from the compositor.
-#[derive(Clone, Debug)]
-enum CompositorResponse {
-    /// A window was created successfully with the given server-assigned ID.
-    WindowCreated { window_id: u64 },
-    /// Operation completed successfully.
-    Ok,
-    /// Operation failed with an error message.
-    Error { message: String },
-    /// Display information response.
-    DisplayInfo {
-        width: u32,
-        height: u32,
-        refresh_rate: u32,
-        scale_factor: f32,
-    },
-}
-
-// ---------------------------------------------------------------------------
-// Connection to compositor
-// ---------------------------------------------------------------------------
-
-/// Connection state to the compositor.
-///
-/// In a real system this would hold an IPC channel handle to the compositor
-/// server. For now, we simulate communication via request/response queues
-/// that will be replaced with actual channel IPC when the kernel's IPC
-/// subsystem is integrated.
-#[derive(Clone, Debug)]
-struct Connection {
-    /// Whether the connection has been established.
-    connected: bool,
-    /// Outgoing request queue (to compositor).
-    outgoing: VecDeque<CompositorRequest>,
-    /// Incoming response queue (from compositor).
-    incoming: VecDeque<CompositorResponse>,
-    /// Incoming event queue (asynchronous notifications from compositor).
-    events: VecDeque<WindowEvent>,
-}
-
-impl Connection {
-    /// Create a new connection to the compositor.
-    ///
-    /// In a full system, this would open an IPC channel to the compositor
-    /// service. Currently stubs the connection as always successful.
-    fn new() -> Self {
-        Self {
-            connected: true,
-            outgoing: VecDeque::new(),
-            incoming: VecDeque::new(),
-            events: VecDeque::new(),
-        }
-    }
-
-    /// Send a request to the compositor.
-    fn send(&mut self, request: CompositorRequest) {
-        if self.connected {
-            self.outgoing.push_back(request);
-            // In a real system, this would serialize and send over IPC.
-            // For now, simulate immediate processing.
-            self.simulate_response();
-        }
-    }
-
-    /// Receive the next response from the compositor (blocking in real impl).
-    fn recv(&mut self) -> Option<CompositorResponse> {
-        self.incoming.pop_front()
-    }
-
-    /// Poll for the next event notification from the compositor.
-    fn poll_event(&mut self) -> Option<WindowEvent> {
-        self.events.pop_front()
-    }
-
-    /// Simulate compositor responses for the stub implementation.
-    ///
-    /// This will be removed when real IPC is available. For now, it provides
-    /// sensible default responses so the library's API can be exercised.
-    fn simulate_response(&mut self) {
-        if let Some(request) = self.outgoing.pop_front() {
-            match request {
-                CompositorRequest::CreateWindow { .. } => {
-                    let window_id = allocate_window_id();
-                    self.incoming.push_back(CompositorResponse::WindowCreated {
-                        window_id,
-                    });
-                }
-                CompositorRequest::GetDisplayInfo => {
-                    self.incoming.push_back(CompositorResponse::DisplayInfo {
-                        width: 1920,
-                        height: 1080,
-                        refresh_rate: 60,
-                        scale_factor: 1.0,
-                    });
-                }
-                CompositorRequest::DestroyWindow { .. }
-                | CompositorRequest::SetTitle { .. }
-                | CompositorRequest::Submit { .. }
-                | CompositorRequest::Move { .. }
-                | CompositorRequest::Resize { .. }
-                | CompositorRequest::Minimize { .. }
-                | CompositorRequest::Maximize { .. }
-                | CompositorRequest::Restore { .. }
-                | CompositorRequest::SetCursor { .. }
-                | CompositorRequest::SetVisible { .. } => {
-                    self.incoming.push_back(CompositorResponse::Ok);
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Window events
-// ---------------------------------------------------------------------------
-
-/// Events received from the compositor for a window.
-///
-/// These are dispatched to application event handlers via the [`EventLoop`].
-#[derive(Clone, Debug)]
-pub enum WindowEvent {
-    /// Window received keyboard focus.
-    FocusGained,
-    /// Window lost keyboard focus.
-    FocusLost,
-    /// Window close requested (user clicked X or pressed Alt+F4).
-    CloseRequested,
-    /// Window was resized (by user or compositor).
-    Resized { width: u32, height: u32 },
-    /// Window was moved to a new position.
-    Moved { x: i32, y: i32 },
-    /// A key was pressed.
-    KeyDown { key: Key, modifiers: Modifiers },
-    /// A key was released.
-    KeyUp { key: Key, modifiers: Modifiers },
-    /// Text input (Unicode character after keyboard layout processing).
-    TextInput { character: char },
-    /// Mouse cursor moved within the window's client area.
-    MouseMove { x: f32, y: f32 },
-    /// Mouse button was pressed within the window.
-    MouseDown {
-        button: MouseButton,
-        x: f32,
-        y: f32,
-    },
-    /// Mouse button was released within the window.
-    MouseUp {
-        button: MouseButton,
-        x: f32,
-        y: f32,
-    },
-    /// Mouse scroll wheel moved.
-    Scroll { dx: f32, dy: f32 },
-    /// Mouse cursor entered the window's client area.
-    MouseEnter,
-    /// Mouse cursor left the window's client area.
-    MouseLeave,
-    /// The window should repaint its contents.
-    RedrawRequested,
-}
-
-// ---------------------------------------------------------------------------
-// Event response
-// ---------------------------------------------------------------------------
-
-/// Application response to an event, controlling event loop behavior.
+/// An application's answer to an event, controlling the loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventResponse {
-    /// Continue running the event loop.
+    /// Keep running.
     Continue,
-    /// Stop the event loop and exit.
+    /// Stop the event loop and return.
     Exit,
 }
 
 // ---------------------------------------------------------------------------
-// Window builder
+// Window
 // ---------------------------------------------------------------------------
 
-/// Builder for creating windows with various configuration options.
+/// The terms a window was created on.
 ///
-/// Use [`WindowBuilder::new`] to start, chain configuration methods, then
-/// call [`WindowBuilder::build`] to create the window.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use oswindow::WindowBuilder;
-///
-/// let window = WindowBuilder::new("Settings", 640, 480)
-///     .position(100, 100)
-///     .resizable(true)
-///     .min_size(320, 240)
-///     .build()
-///     .expect("failed to create window");
-/// ```
-pub struct WindowBuilder {
-    title: String,
-    width: u32,
-    height: u32,
-    x: Option<i32>,
-    y: Option<i32>,
-    resizable: bool,
-    decorations: bool,
-    min_size: Option<(u32, u32)>,
-    max_size: Option<(u32, u32)>,
-    transparent: bool,
+/// Separate from [`Window`] because these are a different kind of fact. The
+/// geometry and focus in a `Window` are *reports* — the compositor sends an
+/// event whenever they change, and the record is rewritten to match. These are
+/// *terms*: agreed once when the window was created, never contradicted
+/// afterwards, and not folded from any event. Storing them beside the reported
+/// state made `is_resizable()` read like live state sitting next to
+/// `is_focused()`, when only one of the two is ever updated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowAttributes {
+    /// Whether the user may resize the window.
+    pub resizable: bool,
+    /// Whether the compositor draws a frame and title bar for it.
+    pub decorations: bool,
+    /// Whether its client area may be see-through.
+    pub transparent: bool,
+    /// The smallest size the user may resize it to, if constrained.
+    pub min_size: Option<(u32, u32)>,
+    /// The largest size the user may resize it to, if constrained.
+    pub max_size: Option<(u32, u32)>,
 }
 
-impl WindowBuilder {
-    /// Create a new window builder with the given title and dimensions.
-    ///
-    /// The window will be centered on screen by default unless a position
-    /// is specified with [`WindowBuilder::position`].
-    pub fn new(title: &str, width: u32, height: u32) -> Self {
-        Self {
-            title: title.to_string(),
-            width,
-            height,
-            x: None,
-            y: None,
-            resizable: true,
-            decorations: true,
-            min_size: None,
-            max_size: None,
-            transparent: false,
-        }
-    }
-
-    /// Set the initial position of the window (top-left corner).
-    ///
-    /// If not called, the compositor will center the window on screen.
-    pub fn position(mut self, x: i32, y: i32) -> Self {
-        self.x = Some(x);
-        self.y = Some(y);
-        self
-    }
-
-    /// Set whether the window can be resized by the user.
-    ///
-    /// Defaults to `true`.
-    pub fn resizable(mut self, resizable: bool) -> Self {
-        self.resizable = resizable;
-        self
-    }
-
-    /// Set whether the compositor draws window decorations (title bar, borders).
-    ///
-    /// Defaults to `true`. Set to `false` for custom-decorated windows.
-    pub fn decorations(mut self, decorations: bool) -> Self {
-        self.decorations = decorations;
-        self
-    }
-
-    /// Set the minimum allowed size for the window.
-    ///
-    /// The compositor will not allow resizing below these dimensions.
-    pub fn min_size(mut self, w: u32, h: u32) -> Self {
-        self.min_size = Some((w, h));
-        self
-    }
-
-    /// Set the maximum allowed size for the window.
-    ///
-    /// The compositor will not allow resizing above these dimensions.
-    pub fn max_size(mut self, w: u32, h: u32) -> Self {
-        self.max_size = Some((w, h));
-        self
-    }
-
-    /// Set whether the window background is transparent.
-    ///
-    /// Defaults to `false`. When `true`, the window's undrawn areas are
-    /// transparent rather than filled with the default background color.
-    pub fn transparent(mut self, transparent: bool) -> Self {
-        self.transparent = transparent;
-        self
-    }
-
-    /// Build and create the window by communicating with the compositor.
-    ///
-    /// Returns the created [`Window`] handle, or a [`WindowError`] if the
-    /// compositor rejected the creation request.
-    pub fn build(self) -> Result<Window, WindowError> {
-        let mut connection = Connection::new();
-        if !connection.connected {
-            return Err(WindowError::ConnectionFailed(
-                "could not connect to compositor".to_string(),
-            ));
-        }
-
-        // Use centered position if none specified.
-        let x = self.x.unwrap_or(0);
-        let y = self.y.unwrap_or(0);
-
-        connection.send(CompositorRequest::CreateWindow {
-            title: self.title.clone(),
-            width: self.width,
-            height: self.height,
-            x,
-            y,
-        });
-
-        match connection.recv() {
-            Some(CompositorResponse::WindowCreated { window_id }) => Ok(Window {
-                id: window_id,
-                title: self.title,
-                width: self.width,
-                height: self.height,
-                x,
-                y,
-                visible: true,
-                resizable: self.resizable,
-                decorations: self.decorations,
-                min_size: self.min_size,
-                max_size: self.max_size,
-                transparent: self.transparent,
-                connection,
-            }),
-            Some(CompositorResponse::Error { message }) => {
-                Err(WindowError::CreationFailed(message))
-            }
-            _ => Err(WindowError::CreationFailed(
-                "unexpected response from compositor".to_string(),
-            )),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Window handle
-// ---------------------------------------------------------------------------
-
-/// A handle to a window managed by the compositor.
+/// What is known about one window.
 ///
-/// Provides methods to manipulate the window state and submit rendering.
-/// When dropped, the window is destroyed on the compositor side.
+/// A record, not a handle: it holds no connection, so reading a property costs
+/// nothing and cannot fail. The geometry and focus track what the compositor has
+/// told us — [`EventLoop`] folds `Resize`, `Moved` and the focus events into
+/// them as they arrive, so a size read here is the size the window actually has
+/// and not the size it was last asked for. The creation terms live in
+/// [`WindowAttributes`].
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Window {
-    /// Compositor-assigned window identifier.
     id: u64,
-    /// Current window title.
     title: String,
-    /// Current client area width in pixels.
     width: u32,
-    /// Current client area height in pixels.
     height: u32,
-    /// Current X position of the window.
     x: i32,
-    /// Current Y position of the window.
     y: i32,
-    /// Whether the window is currently visible.
     visible: bool,
-    /// Whether the window can be resized by the user.
-    resizable: bool,
-    /// Whether window decorations are drawn by the compositor.
-    decorations: bool,
-    /// Minimum allowed size, if set.
-    min_size: Option<(u32, u32)>,
-    /// Maximum allowed size, if set.
-    max_size: Option<(u32, u32)>,
-    /// Whether the window background is transparent.
-    transparent: bool,
-    /// IPC connection to the compositor.
-    connection: Connection,
+    focused: bool,
+    attributes: WindowAttributes,
 }
 
 impl Window {
-    /// Get the compositor-assigned window ID.
-    pub fn id(&self) -> u64 {
+    /// The compositor-assigned id. Stable for the window's lifetime.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
         self.id
     }
 
-    /// Get the current window title.
+    /// The title as last set.
+    #[must_use]
     pub fn title(&self) -> &str {
         &self.title
     }
 
-    /// Get the current client area size as (width, height).
-    pub fn size(&self) -> (u32, u32) {
+    /// Client-area size in pixels.
+    #[must_use]
+    pub const fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
-    /// Get the current window position as (x, y).
-    pub fn position(&self) -> (i32, i32) {
-        (self.x, self.y)
-    }
-
-    /// Get the current client area width.
-    pub fn width(&self) -> u32 {
+    /// Client-area width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
         self.width
     }
 
-    /// Get the current client area height.
-    pub fn height(&self) -> u32 {
+    /// Client-area height in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
         self.height
     }
 
-    /// Check whether the window is currently visible.
-    pub fn is_visible(&self) -> bool {
+    /// Screen position of the top-left corner.
+    ///
+    /// Signed because a multi-monitor desktop puts displays left of and above
+    /// the primary one's origin.
+    #[must_use]
+    pub const fn position(&self) -> (i32, i32) {
+        (self.x, self.y)
+    }
+
+    /// Whether the window is mapped.
+    #[must_use]
+    pub const fn is_visible(&self) -> bool {
         self.visible
     }
 
-    /// Check whether the window is resizable.
-    pub fn is_resizable(&self) -> bool {
-        self.resizable
+    /// Whether this window currently has keyboard focus.
+    #[must_use]
+    pub const fn is_focused(&self) -> bool {
+        self.focused
     }
 
-    /// Check whether window decorations are enabled.
-    pub fn has_decorations(&self) -> bool {
-        self.decorations
+    /// The terms this window was created on.
+    #[must_use]
+    pub const fn attributes(&self) -> WindowAttributes {
+        self.attributes
     }
 
-    /// Check whether the window has a transparent background.
-    pub fn is_transparent(&self) -> bool {
-        self.transparent
+    /// Whether the user may resize it.
+    #[must_use]
+    pub const fn is_resizable(&self) -> bool {
+        self.attributes.resizable
     }
 
-    /// Submit a render tree to be displayed in the window's client area.
-    ///
-    /// The compositor will rasterize the render commands and composite the
-    /// result into the final framebuffer at this window's position.
-    pub fn submit(&mut self, tree: &RenderTree) {
-        self.connection.send(CompositorRequest::Submit {
-            id: self.id,
-            commands: tree.commands.clone(),
-        });
-        // Consume the response (fire-and-forget for rendering).
-        let _ = self.connection.recv();
+    /// Whether the compositor draws a frame and title bar for it.
+    #[must_use]
+    pub const fn has_decorations(&self) -> bool {
+        self.attributes.decorations
     }
 
-    /// Set the window title.
-    ///
-    /// Updates both the local state and notifies the compositor to redraw
-    /// the title bar.
-    pub fn set_title(&mut self, title: &str) {
-        self.title = title.to_string();
-        self.connection.send(CompositorRequest::SetTitle {
-            id: self.id,
-            title: title.to_string(),
-        });
-        let _ = self.connection.recv();
+    /// Whether its client area may be see-through.
+    #[must_use]
+    pub const fn is_transparent(&self) -> bool {
+        self.attributes.transparent
     }
 
-    /// Move the window to a new position.
-    pub fn set_position(&mut self, x: i32, y: i32) {
-        self.x = x;
-        self.y = y;
-        self.connection.send(CompositorRequest::Move {
-            id: self.id,
-            x,
-            y,
-        });
-        let _ = self.connection.recv();
+    /// The smallest size the user may resize it to, if constrained.
+    #[must_use]
+    pub const fn min_size(&self) -> Option<(u32, u32)> {
+        self.attributes.min_size
     }
 
-    /// Resize the window's client area.
-    ///
-    /// The actual size may be clamped to the window's min/max size constraints.
-    pub fn set_size(&mut self, width: u32, height: u32) {
-        // Apply size constraints locally.
-        let clamped_width = self.clamp_width(width);
-        let clamped_height = self.clamp_height(height);
-
-        self.width = clamped_width;
-        self.height = clamped_height;
-        self.connection.send(CompositorRequest::Resize {
-            id: self.id,
-            width: clamped_width,
-            height: clamped_height,
-        });
-        let _ = self.connection.recv();
+    /// The largest size the user may resize it to, if constrained.
+    #[must_use]
+    pub const fn max_size(&self) -> Option<(u32, u32)> {
+        self.attributes.max_size
     }
 
-    /// Minimize the window (hide to taskbar).
-    pub fn minimize(&mut self) {
-        self.connection.send(CompositorRequest::Minimize { id: self.id });
-        let _ = self.connection.recv();
-    }
-
-    /// Maximize the window (fill the screen).
-    pub fn maximize(&mut self) {
-        self.connection.send(CompositorRequest::Maximize { id: self.id });
-        let _ = self.connection.recv();
-    }
-
-    /// Restore the window from minimized or maximized state.
-    pub fn restore(&mut self) {
-        self.connection.send(CompositorRequest::Restore { id: self.id });
-        let _ = self.connection.recv();
-    }
-
-    /// Show or hide the window.
-    pub fn set_visible(&mut self, visible: bool) {
-        self.visible = visible;
-        self.connection.send(CompositorRequest::SetVisible {
-            id: self.id,
-            visible,
-        });
-        let _ = self.connection.recv();
-    }
-
-    /// Set the mouse cursor shape for this window.
-    ///
-    /// The cursor shape is displayed when the mouse is over this window's
-    /// client area.
-    pub fn set_cursor(&mut self, cursor: CursorShape) {
-        self.connection.send(CompositorRequest::SetCursor { shape: cursor });
-        let _ = self.connection.recv();
-    }
-
-    /// Close and destroy the window.
-    ///
-    /// Notifies the compositor to remove this window. After calling this,
-    /// the window handle is consumed and no further operations are possible.
-    pub fn close(mut self) {
-        self.connection.send(CompositorRequest::DestroyWindow { id: self.id });
-        let _ = self.connection.recv();
-    }
-
-    /// Clamp a width value to the configured min/max constraints.
-    fn clamp_width(&self, width: u32) -> u32 {
-        let mut result = width;
-        if let Some((min_w, _)) = self.min_size
-            && result < min_w
-        {
-            result = min_w;
+    /// Fold an event into what we know about this window.
+    fn apply(&mut self, event: &Event) {
+        match *event {
+            Event::Resize { width, height } => {
+                self.width = width;
+                self.height = height;
+            }
+            Event::Moved { x, y } => {
+                self.x = x;
+                self.y = y;
+            }
+            Event::FocusIn => self.focused = true,
+            Event::FocusOut => self.focused = false,
+            _ => {}
         }
-        if let Some((max_w, _)) = self.max_size
-            && result > max_w
-        {
-            result = max_w;
-        }
-        result
-    }
-
-    /// Clamp a height value to the configured min/max constraints.
-    fn clamp_height(&self, height: u32) -> u32 {
-        let mut result = height;
-        if let Some((_, min_h)) = self.min_size
-            && result < min_h
-        {
-            result = min_h;
-        }
-        if let Some((_, max_h)) = self.max_size
-            && result > max_h
-        {
-            result = max_h;
-        }
-        result
     }
 }
 
-impl Drop for Window {
-    fn drop(&mut self) {
-        // Notify the compositor that this window is being destroyed.
-        // Ignore the response since we are dropping.
-        self.connection.send(CompositorRequest::DestroyWindow { id: self.id });
-        let _ = self.connection.recv();
+/// A window together with the connection that can change it.
+///
+/// Every method here sends a request and waits for the compositor to confirm
+/// it. Waiting rather than firing and forgetting is deliberate: a `set_title`
+/// the compositor refused would otherwise fail silently, and the local record
+/// would then disagree with the screen with nothing to detect it. The cost is a
+/// round trip on operations a program performs a handful of times, not on the
+/// per-frame path — [`EventLoop::submit`] does not wait.
+pub struct WindowHandle<'a, T: Transport> {
+    events: &'a mut EventLoop<T>,
+    /// The window's id rather than its index. An index would be a reference
+    /// into a `Vec` by another name, and would silently address a different
+    /// window if the vector were ever reordered.
+    id: u64,
+}
+
+impl<T: Transport> WindowHandle<'_, T> {
+    /// What is known about this window.
+    ///
+    /// # Panics
+    ///
+    /// Never: a handle cannot outlive the window it names, because holding one
+    /// borrows the loop that would have to remove it.
+    #[must_use]
+    pub fn get(&self) -> &Window {
+        self.events
+            .window(self.id)
+            .unwrap_or_else(|| unreachable!("a handle borrows the loop that owns its window"))
+    }
+
+    /// The compositor-assigned id.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Send this window's picture. Does not wait — this is the per-frame path.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Transport`] if the write fails.
+    pub fn submit(&mut self, tree: &RenderTree) -> Result<(), Error<T>> {
+        self.events.submit(self.id, tree)
+    }
+
+    /// Rename the window.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn set_title(&mut self, title: impl Into<String>) -> Result<(), Error<T>> {
+        let title = title.into();
+        self.events.confirm(RequestBody::SetTitle {
+            window: self.id,
+            title: title.clone(),
+        })?;
+        self.events.record_mut(self.id, |w| w.title = title);
+        Ok(())
+    }
+
+    /// Move the window.
+    ///
+    /// The local position is *not* updated here: the compositor may place the
+    /// window elsewhere — snapped to an edge, constrained to a monitor — and it
+    /// reports where it actually put it with [`Event::Moved`]. Recording the
+    /// requested position would make [`Window::position`] a record of what was
+    /// asked rather than what happened, which is the bug this whole layer
+    /// exists to avoid.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn set_position(&mut self, x: i32, y: i32) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::Move {
+            window: self.id,
+            x,
+            y,
+        })
+    }
+
+    /// Resize the window.
+    ///
+    /// As with [`Self::set_position`], the new size arrives as an
+    /// [`Event::Resize`] rather than being assumed here.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn set_size(&mut self, width: u32, height: u32) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::Resize {
+            window: self.id,
+            width,
+            height,
+        })
+    }
+
+    /// Minimise the window.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn minimize(&mut self) -> Result<(), Error<T>> {
+        self.events
+            .confirm(RequestBody::Minimize { window: self.id })
+    }
+
+    /// Maximise the window.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn maximize(&mut self) -> Result<(), Error<T>> {
+        self.events
+            .confirm(RequestBody::Maximize { window: self.id })
+    }
+
+    /// Return the window to its pre-minimised/maximised geometry.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn restore(&mut self) -> Result<(), Error<T>> {
+        self.events
+            .confirm(RequestBody::Restore { window: self.id })
+    }
+
+    /// Map or unmap the window.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn set_visible(&mut self, visible: bool) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::SetVisible {
+            window: self.id,
+            visible,
+        })?;
+        self.events.record_mut(self.id, |w| w.visible = visible);
+        Ok(())
+    }
+
+    /// Choose the cursor shown over this window's client area.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn set_cursor(&mut self, shape: CursorShape) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::SetCursor {
+            window: self.id,
+            shape,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Builder
+// ---------------------------------------------------------------------------
+
+/// Describes a window to be created.
+///
+/// ```rust
+/// use oswindow::{EventLoop, WindowBuilder};
+/// use guiremote::pipe;
+///
+/// let (client_end, _server) = pipe();
+/// let mut events = EventLoop::new(client_end);
+/// let request = WindowBuilder::new("Settings", 640, 480)
+///     .position(100, 100)
+///     .min_size(320, 240);
+/// # let _ = (request, &mut events);
+/// ```
+#[derive(Clone, Debug)]
+pub struct WindowBuilder {
+    spec: WindowSpec,
+}
+
+impl WindowBuilder {
+    /// A titled window of the given size, with the ordinary defaults.
+    #[must_use]
+    pub fn new(title: impl Into<String>, width: u32, height: u32) -> Self {
+        Self {
+            spec: WindowSpec::new(title, width, height),
+        }
+    }
+
+    /// Ask for a specific screen position. Left unset, the compositor places
+    /// it — which is what a window should normally allow, since only the
+    /// compositor knows what else is on screen.
+    #[must_use]
+    pub const fn position(mut self, x: i32, y: i32) -> Self {
+        self.spec.position = Some((x, y));
+        self
+    }
+
+    /// Whether the user may resize it.
+    #[must_use]
+    pub const fn resizable(mut self, resizable: bool) -> Self {
+        self.spec.resizable = resizable;
+        self
+    }
+
+    /// Whether the compositor draws a frame and title bar.
+    #[must_use]
+    pub const fn decorations(mut self, decorations: bool) -> Self {
+        self.spec.decorations = decorations;
+        self
+    }
+
+    /// Constrain how small the user may make it.
+    #[must_use]
+    pub const fn min_size(mut self, width: u32, height: u32) -> Self {
+        self.spec.min_size = Some((width, height));
+        self
+    }
+
+    /// Constrain how large the user may make it.
+    #[must_use]
+    pub const fn max_size(mut self, width: u32, height: u32) -> Self {
+        self.spec.max_size = Some((width, height));
+        self
+    }
+
+    /// Whether the client area may be see-through.
+    #[must_use]
+    pub const fn transparent(mut self, transparent: bool) -> Self {
+        self.spec.transparent = transparent;
+        self
+    }
+
+    /// The underlying protocol description, for a caller that needs it.
+    #[must_use]
+    pub fn spec(&self) -> &WindowSpec {
+        &self.spec
+    }
+
+    /// Create the window and register it with the loop, returning its id.
+    ///
+    /// Blocks until the compositor answers. The id is the compositor's to
+    /// choose — a client that minted its own would be naming windows that do
+    /// not exist.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::create_window`]: [`ClientError::Refused`] if the
+    /// compositor declined, [`ClientError::Closed`] if it went away first.
+    pub fn build<T: Transport>(self, events: &mut EventLoop<T>) -> Result<u64, Error<T>> {
+        events.create(self.spec)
     }
 }
 
@@ -775,480 +509,873 @@ impl Drop for Window {
 // Event loop
 // ---------------------------------------------------------------------------
 
-/// The application event loop.
-///
-/// Manages one or more windows and dispatches compositor events to the
-/// application's event handler callback. This is the primary entry point
-/// for GUI applications after creating windows.
-pub struct EventLoop {
-    /// Registered windows managed by this event loop.
+/// One connection, every window on it, and the loop that drives them.
+pub struct EventLoop<T: Transport> {
+    conn: Connection<T>,
     windows: Vec<Window>,
-    /// Whether the event loop is currently running.
+    /// Events read from the connection but not yet handed to the application.
+    pending: VecDeque<InputEvent>,
     running: bool,
-    /// Pending events that have not yet been dispatched.
-    pending_events: VecDeque<(u64, WindowEvent)>,
+    /// Events addressed to a window this loop does not know about.
+    ///
+    /// Counted rather than dropped: a nonzero value means the compositor is
+    /// misrouting, or that a window was closed while its events were in
+    /// flight — the second is ordinary and the first is a bug, and neither is
+    /// visible if the events simply vanish.
+    unrouted: u64,
 }
 
-impl EventLoop {
-    /// Create a new event loop with no registered windows.
-    pub fn new() -> Self {
+impl<T: Transport> EventLoop<T> {
+    /// Take over a transport. No traffic happens until something asks for it.
+    pub fn new(transport: T) -> Self {
+        Self::over(Connection::new(transport))
+    }
+
+    /// Take over an existing connection.
+    pub const fn over(conn: Connection<T>) -> Self {
         Self {
+            conn,
             windows: Vec::new(),
+            pending: VecDeque::new(),
             running: false,
-            pending_events: VecDeque::new(),
+            unrouted: 0,
         }
     }
 
-    /// Register a window with this event loop.
+    /// The connection underneath, for requests this crate does not wrap.
+    pub const fn connection(&mut self) -> &mut Connection<T> {
+        &mut self.conn
+    }
+
+    /// Ask the compositor about the display.
     ///
-    /// The event loop will dispatch events for this window to the handler.
-    pub fn register(&mut self, window: Window) {
-        self.windows.push(window);
-    }
-
-    /// Get a reference to a registered window by ID.
-    pub fn window(&self, window_id: u64) -> Option<&Window> {
-        self.windows.iter().find(|w| w.id == window_id)
-    }
-
-    /// Get a mutable reference to a registered window by ID.
-    pub fn window_mut(&mut self, window_id: u64) -> Option<&mut Window> {
-        self.windows.iter_mut().find(|w| w.id == window_id)
-    }
-
-    /// Get a slice of all registered windows.
-    pub fn windows(&self) -> &[Window] {
-        &self.windows
-    }
-
-    /// Run the event loop, calling the handler for each event.
+    /// # Errors
     ///
-    /// This blocks until the handler returns [`EventResponse::Exit`] or
-    /// [`EventLoop::quit`] is called. Events are dispatched as
-    /// `(window_id, event)` pairs.
-    pub fn run<F>(&mut self, mut handler: F)
-    where
-        F: FnMut(u64, WindowEvent) -> EventResponse,
-    {
-        self.running = true;
-
-        while self.running {
-            // Poll all windows for events from the compositor.
-            self.poll_all_windows();
-
-            // Dispatch all pending events.
-            while let Some((window_id, event)) = self.pending_events.pop_front() {
-                let response = handler(window_id, event);
-                if response == EventResponse::Exit {
-                    self.running = false;
-                    break;
-                }
-            }
-
-            // If no events were pending, yield to avoid busy-spinning.
-            // In a real system this would block on the IPC channel.
-            if self.pending_events.is_empty() && self.running {
-                // Placeholder: in real implementation, this would be a
-                // blocking wait on the compositor's event channel.
-                // For now, break to avoid infinite loops in tests.
-                break;
-            }
+    /// As [`Connection::round_trip`], plus [`ClientError::Mismatched`] if the
+    /// answer is not display information.
+    pub fn display_info(&mut self) -> Result<DisplayInfo, Error<T>> {
+        match self.conn.round_trip(RequestBody::GetDisplayInfo)? {
+            ResponseBody::Display(info) => Ok(info),
+            ResponseBody::Error { message } => Err(ClientError::Refused(message)),
+            ResponseBody::Ok | ResponseBody::WindowCreated { .. } => Err(ClientError::Mismatched),
         }
     }
 
-    /// Poll for events without blocking.
+    /// Create a window from a protocol spec. [`WindowBuilder::build`] is the
+    /// usual way in.
     ///
-    /// Returns the next pending event, or `None` if no events are available.
-    pub fn poll(&mut self) -> Option<(u64, WindowEvent)> {
-        self.poll_all_windows();
-        self.pending_events.pop_front()
-    }
-
-    /// Request a redraw for a specific window.
+    /// # Errors
     ///
-    /// Enqueues a [`WindowEvent::RedrawRequested`] event for the specified
-    /// window, which will be delivered on the next event loop iteration.
-    pub fn request_redraw(&mut self, window_id: u64) {
-        self.pending_events
-            .push_back((window_id, WindowEvent::RedrawRequested));
+    /// As [`Connection::create_window`].
+    pub fn create(&mut self, spec: WindowSpec) -> Result<u64, Error<T>> {
+        let id = self.conn.create_window(spec.clone())?;
+        self.windows.push(Window {
+            id,
+            title: spec.title,
+            width: spec.width,
+            height: spec.height,
+            // The compositor places an unpositioned window and reports where
+            // with `Event::Moved`; until then the origin is a placeholder and
+            // is documented as such rather than guessed at.
+            x: spec.position.map_or(0, |p| p.0),
+            y: spec.position.map_or(0, |p| p.1),
+            visible: true,
+            focused: false,
+            attributes: WindowAttributes {
+                resizable: spec.resizable,
+                decorations: spec.decorations,
+                transparent: spec.transparent,
+                min_size: spec.min_size,
+                max_size: spec.max_size,
+            },
+        });
+        Ok(id)
     }
 
-    /// Stop the event loop.
-    ///
-    /// Causes [`EventLoop::run`] to return on the next iteration.
-    pub fn quit(&mut self) {
-        self.running = false;
+    /// What is known about one window.
+    #[must_use]
+    pub fn window(&self, id: u64) -> Option<&Window> {
+        self.windows.iter().find(|w| w.id == id)
     }
 
-    /// Check whether the event loop is currently running.
-    pub fn is_running(&self) -> bool {
-        self.running
-    }
-
-    /// Get the number of registered windows.
-    pub fn window_count(&self) -> usize {
-        self.windows.len()
-    }
-
-    /// Remove a window from the event loop by ID.
-    ///
-    /// Returns the window if found, or `None` if no window with that ID
-    /// was registered.
-    pub fn unregister(&mut self, window_id: u64) -> Option<Window> {
-        if let Some(idx) = self.windows.iter().position(|w| w.id == window_id) {
-            Some(self.windows.remove(idx))
+    /// A handle that can change one window.
+    pub fn window_mut(&mut self, id: u64) -> Option<WindowHandle<'_, T>> {
+        // Checked before the handle is built so that the handle's own accessor
+        // can be infallible.
+        if self.windows.iter().any(|w| w.id == id) {
+            Some(WindowHandle { events: self, id })
         } else {
             None
         }
     }
 
-    /// Inject an event into the pending queue (useful for testing and
-    /// synthetic event generation).
-    pub fn inject_event(&mut self, window_id: u64, event: WindowEvent) {
-        self.pending_events.push_back((window_id, event));
+    /// Every window this loop owns.
+    #[must_use]
+    pub fn windows(&self) -> &[Window] {
+        &self.windows
     }
 
-    /// Poll all registered windows for compositor events.
-    fn poll_all_windows(&mut self) {
-        for window in &mut self.windows {
-            while let Some(event) = window.connection.poll_event() {
-                self.pending_events.push_back((window.id, event));
+    /// How many windows this loop owns.
+    #[must_use]
+    pub fn window_count(&self) -> usize {
+        self.windows.len()
+    }
+
+    /// How many events arrived for a window this loop does not know about.
+    #[must_use]
+    pub const fn unrouted_events(&self) -> u64 {
+        self.unrouted
+    }
+
+    /// Send one window's picture. Does not wait.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Transport`] if the write fails.
+    pub fn submit(&mut self, window: u64, tree: &RenderTree) -> Result<(), Error<T>> {
+        self.conn.submit(window, tree)
+    }
+
+    /// Destroy a window and forget it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]. The window is forgotten locally even if the
+    /// compositor reports an error, because an id it refuses to destroy is one
+    /// this process can no longer usefully address.
+    pub fn close(&mut self, window: u64) -> Result<(), Error<T>> {
+        let result = self.conn.confirm(RequestBody::DestroyWindow { window });
+        self.windows.retain(|w| w.id != window);
+        result
+    }
+
+    /// Read whatever is available and take the next event, if any.
+    ///
+    /// Returns `Ok(None)` when nothing is waiting — the ordinary state of an
+    /// idle desktop, not an error.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::pump`].
+    pub fn poll(&mut self) -> Result<Option<(u64, Event)>, Error<T>> {
+        if self.pending.is_empty() {
+            self.conn.pump()?;
+            self.pending.extend(self.conn.drain_events());
+        }
+        while let Some(ev) = self.pending.pop_front() {
+            let Some(window) = self.windows.iter_mut().find(|w| w.id == ev.window) else {
+                self.unrouted = self.unrouted.saturating_add(1);
+                continue;
+            };
+            // Folded in before the application sees it, so a handler that asks
+            // the window how big it is during a `Resize` gets the new answer.
+            window.apply(&ev.event);
+            return Ok(Some((ev.window, ev.event)));
+        }
+        Ok(None)
+    }
+
+    /// Run until the handler asks to stop, [`Self::quit`] is called, or the
+    /// connection closes.
+    ///
+    /// The handler receives the loop itself, because responding to an event
+    /// almost always means drawing, and drawing needs the connection. A handler
+    /// that could not reach it would force every application to keep its
+    /// windows in a second place outside the loop that owns them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::pump`] and [`Connection::wait`].
+    pub fn run<F>(&mut self, mut handler: F) -> Result<(), Error<T>>
+    where
+        F: FnMut(&mut Self, u64, Event) -> EventResponse,
+    {
+        self.running = true;
+        while self.running && self.conn.is_open() {
+            let mut dispatched = false;
+            while let Some((window, event)) = self.poll()? {
+                dispatched = true;
+                // A close request the handler does not act on still closes the
+                // window. A title-bar X that does nothing is worse than an
+                // application that quits when it would rather not have.
+                let requested_close = matches!(event, Event::CloseRequested);
+                if handler(self, window, event) == EventResponse::Exit || requested_close {
+                    self.running = false;
+                    break;
+                }
             }
+            // Only block when there was nothing to do. Waiting after a burst
+            // would add a frame of latency to the next one for no benefit.
+            if !dispatched && self.running {
+                self.conn.wait()?;
+            }
+        }
+        self.running = false;
+        Ok(())
+    }
+
+    /// Stop [`Self::run`] at the end of the current batch.
+    pub const fn quit(&mut self) {
+        self.running = false;
+    }
+
+    /// Whether [`Self::run`] is executing.
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
+        self.running
+    }
+
+    /// Place an event at the front of the queue as though it had arrived.
+    ///
+    /// For synthetic input — a test, a scripted demo, an accessibility tool
+    /// driving an application. It does not reach the compositor, so it cannot
+    /// be used to fake something the compositor would have had to agree to.
+    pub fn inject_event(&mut self, window: u64, event: Event) {
+        self.pending.push_back(InputEvent::new(window, event));
+    }
+
+    /// Send a request and wait for the acknowledgement.
+    fn confirm(&mut self, body: RequestBody) -> Result<(), Error<T>> {
+        self.conn.confirm(body)
+    }
+
+    /// Update the local record of a window, if it is still known.
+    fn record_mut(&mut self, id: u64, f: impl FnOnce(&mut Window)) {
+        if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
+            f(w);
         }
     }
 }
 
-impl Default for EventLoop {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use guiremote::control::{Request, Response, decode_requests, encode_responses};
+    use guiremote::loopback::Pipe;
+    use guiremote::submit::decode_submit;
+
     use super::*;
 
-    #[test]
-    fn test_window_builder_defaults() {
-        let builder = WindowBuilder::new("Test Window", 800, 600);
-        assert_eq!(builder.title, "Test Window");
-        assert_eq!(builder.width, 800);
-        assert_eq!(builder.height, 600);
-        assert!(builder.resizable);
-        assert!(builder.decorations);
-        assert!(builder.x.is_none());
-        assert!(builder.y.is_none());
-        assert!(builder.min_size.is_none());
-        assert!(builder.max_size.is_none());
-        assert!(!builder.transparent);
+    /// The compositor's side of the pipe.
+    ///
+    /// Not a simulation of the *protocol* — it runs the real decoders and
+    /// encoders, so a test here fails if the wire format is wrong. Only the
+    /// policy behind the answers is stubbed, which is what a test of this crate
+    /// is entitled to stand in for.
+    struct FakeServer {
+        pipe: Pipe,
+        next_window: u64,
+        /// Requests seen, so a test can assert what actually went out.
+        seen: Vec<Request>,
+        /// When set, every request is refused with this message.
+        refuse: Option<String>,
+        /// Input to deliver, one batch per turn.
+        script: VecDeque<Vec<InputEvent>>,
+    }
+
+    impl FakeServer {
+        fn new(pipe: Pipe) -> Self {
+            Self {
+                pipe,
+                next_window: 100,
+                seen: Vec::new(),
+                refuse: None,
+                script: VecDeque::new(),
+            }
+        }
+
+        /// Answer every pending request. Reports whether anything was said.
+        fn serve(&mut self) -> bool {
+            let mut wire = Vec::new();
+            self.pipe.read(&mut wire).unwrap();
+
+            let mut at = 0usize;
+            let mut replies = Vec::new();
+            while at < wire.len() {
+                // Control requests and submissions share one connection; only
+                // the former want an answer. Each direction has its own magic,
+                // so telling them apart is a four-byte test and not a guess.
+                if wire[at..].starts_with(&guiremote::SUBMIT_MAGIC) {
+                    let (_, used) = decode_submit(&wire[at..]).unwrap();
+                    at += used;
+                    continue;
+                }
+                let (reqs, used) = decode_requests(&wire[at..]).unwrap();
+                at += used;
+                for req in reqs {
+                    let body = if let Some(why) = &self.refuse {
+                        ResponseBody::Error {
+                            message: why.clone(),
+                        }
+                    } else {
+                        match &req.body {
+                            RequestBody::CreateWindow(_) => {
+                                let window = self.next_window;
+                                self.next_window += 1;
+                                ResponseBody::WindowCreated { window }
+                            }
+                            RequestBody::GetDisplayInfo => ResponseBody::Display(DisplayInfo {
+                                width: 2560,
+                                height: 1440,
+                                refresh_rate: 144,
+                                scale_factor: 1.5,
+                            }),
+                            _ => ResponseBody::Ok,
+                        }
+                    };
+                    replies.push(Response::new(req.seq, body));
+                    self.seen.push(req);
+                }
+            }
+            if replies.is_empty() {
+                return false;
+            }
+            self.pipe.write(&encode_responses(&replies)).unwrap();
+            true
+        }
+
+        /// Deliver input to the client immediately.
+        fn send_input(&mut self, events: &[InputEvent]) {
+            self.pipe
+                .write(&guiremote::encode_input_frame(events))
+                .unwrap();
+        }
+
+        /// One turn of the other end, taken whenever the client blocks.
+        ///
+        /// A turn in which the server has nothing to answer and nothing left to
+        /// say ends the conversation. That rule is what makes every blocking
+        /// call in these tests terminate: a test where neither side has
+        /// anything further is over, and hanging up is how a compositor would
+        /// say so. Without it a client waiting for input that will never come
+        /// would spin until the harness timed out.
+        fn turn(&mut self) {
+            let answered = self.serve();
+            if let Some(batch) = self.script.pop_front() {
+                self.send_input(&batch);
+            } else if !answered {
+                self.pipe.close();
+            }
+        }
+
+        /// Everything the client has drawn, as `(window, command count)`.
+        fn drawn(&mut self) -> Vec<(u64, usize)> {
+            let mut wire = Vec::new();
+            self.pipe.read(&mut wire).unwrap();
+            let mut at = 0usize;
+            let mut out = Vec::new();
+            while at < wire.len() {
+                if wire[at..].starts_with(&guiremote::SUBMIT_MAGIC) {
+                    let (sub, used) = decode_submit(&wire[at..]).unwrap();
+                    out.push((sub.window, sub.commands.commands.len()));
+                    at += used;
+                    continue;
+                }
+                let (_, used) = decode_requests(&wire[at..]).unwrap();
+                at += used;
+            }
+            out
+        }
+    }
+
+    /// A transport that gives the other end a turn when the client blocks.
+    ///
+    /// Both halves of a [`Pipe`] live on one thread, so a client blocked in a
+    /// request would never see its answer: nothing can run while it waits. On a
+    /// socket the kernel is what runs the other side; here the test is. So
+    /// `wait` — whose whole contract is "block until there is plausibly
+    /// something to read" — is implemented as "let the compositor act", which
+    /// is exactly what blocking means when there is only one thread.
+    struct Served {
+        pipe: Pipe,
+        server: Rc<RefCell<FakeServer>>,
+    }
+
+    impl Transport for Served {
+        type Error = std::convert::Infallible;
+
+        fn read(&mut self, buf: &mut Vec<u8>) -> Result<usize, Self::Error> {
+            self.pipe.read(buf)
+        }
+
+        fn write(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+            self.pipe.write(bytes)
+        }
+
+        fn is_open(&self) -> bool {
+            self.pipe.is_open()
+        }
+
+        fn wait(&mut self) -> Result<(), Self::Error> {
+            self.server.borrow_mut().turn();
+            Ok(())
+        }
+    }
+
+    /// A loop wired to a compositor that answers when the client waits.
+    fn wired() -> (EventLoop<Served>, Rc<RefCell<FakeServer>>) {
+        let (client_end, server_end) = pipe();
+        let server = Rc::new(RefCell::new(FakeServer::new(server_end)));
+        let transport = Served {
+            pipe: client_end,
+            server: Rc::clone(&server),
+        };
+        (EventLoop::new(transport), server)
+    }
+
+    /// Create a window through the real path, blocking until the id arrives.
+    fn open(events: &mut EventLoop<Served>, title: &str) -> u64 {
+        events
+            .create(WindowSpec::new(title, 800, 600))
+            .expect("the compositor should have created it")
     }
 
     #[test]
-    fn test_window_builder_with_position() {
-        let builder = WindowBuilder::new("Positioned", 400, 300)
-            .position(100, 200);
-        assert_eq!(builder.x, Some(100));
-        assert_eq!(builder.y, Some(200));
+    fn a_window_id_comes_from_the_compositor_and_not_from_a_local_counter() {
+        // The defect that made the previous version of this crate a
+        // simulation: ids were minted locally, so a client named windows that
+        // did not exist and could never have been told otherwise.
+        let (mut events, server) = wired();
+        server.borrow_mut().next_window = 0x00C0_FFEE;
+        assert_eq!(open(&mut events, "A"), 0x00C0_FFEE);
+        assert_eq!(events.window_count(), 1);
     }
 
     #[test]
-    fn test_window_builder_with_constraints() {
-        let builder = WindowBuilder::new("Constrained", 640, 480)
-            .min_size(320, 240)
-            .max_size(1920, 1080)
+    fn creating_a_window_blocks_until_the_compositor_answers() {
+        // Not a formality: the id is the compositor's to choose, so there is
+        // nothing to return until it has spoken. A version that returned early
+        // would have to invent one.
+        let (mut events, server) = wired();
+        assert!(events.window(100).is_none(), "nothing exists yet");
+        let id = open(&mut events, "A");
+        assert!(events.window(id).is_some());
+        assert!(matches!(
+            server.borrow().seen[0].body,
+            RequestBody::CreateWindow(_)
+        ));
+    }
+
+    #[test]
+    fn building_a_window_sends_the_spec_the_builder_describes() {
+        let (mut events, server) = wired();
+        let id = WindowBuilder::new("Settings", 640, 480)
+            .position(10, -20)
             .resizable(false)
             .decorations(false)
-            .transparent(true);
-
-        assert_eq!(builder.min_size, Some((320, 240)));
-        assert_eq!(builder.max_size, Some((1920, 1080)));
-        assert!(!builder.resizable);
-        assert!(!builder.decorations);
-        assert!(builder.transparent);
-    }
-
-    #[test]
-    fn test_window_builder_build() {
-        let window = WindowBuilder::new("Built Window", 800, 600)
-            .position(50, 75)
-            .build();
-
-        assert!(window.is_ok());
-        let win = window.unwrap();
-        assert_eq!(win.title(), "Built Window");
-        assert_eq!(win.size(), (800, 600));
-        assert_eq!(win.position(), (50, 75));
-        assert!(win.is_visible());
-    }
-
-    #[test]
-    fn test_window_set_title() {
-        let mut window = WindowBuilder::new("Original", 640, 480)
-            .build()
-            .unwrap();
-        assert_eq!(window.title(), "Original");
-
-        window.set_title("Updated Title");
-        assert_eq!(window.title(), "Updated Title");
-    }
-
-    #[test]
-    fn test_window_set_position() {
-        let mut window = WindowBuilder::new("Movable", 640, 480)
-            .position(0, 0)
-            .build()
-            .unwrap();
-
-        window.set_position(200, 300);
-        assert_eq!(window.position(), (200, 300));
-    }
-
-    #[test]
-    fn test_window_set_size() {
-        let mut window = WindowBuilder::new("Resizable", 640, 480)
-            .build()
-            .unwrap();
-
-        window.set_size(1024, 768);
-        assert_eq!(window.size(), (1024, 768));
-    }
-
-    #[test]
-    fn test_window_size_clamping() {
-        let mut window = WindowBuilder::new("Clamped", 640, 480)
+            .transparent(true)
             .min_size(320, 240)
-            .max_size(1920, 1080)
-            .build()
+            .max_size(1280, 960)
+            .build(&mut events)
             .unwrap();
 
-        // Try setting below minimum.
-        window.set_size(100, 100);
-        assert_eq!(window.size(), (320, 240));
+        {
+            let borrowed = server.borrow();
+            let RequestBody::CreateWindow(sent) = &borrowed.seen[0].body else {
+                panic!("expected a create");
+            };
+            assert_eq!(sent.title, "Settings");
+            assert_eq!(sent.position, Some((10, -20)));
+            assert!(!sent.resizable);
+            assert!(!sent.decorations);
+            assert!(sent.transparent);
+            assert_eq!(sent.min_size, Some((320, 240)));
+            assert_eq!(sent.max_size, Some((1280, 960)));
+        }
 
-        // Try setting above maximum.
-        window.set_size(3000, 2000);
-        assert_eq!(window.size(), (1920, 1080));
-
-        // Valid size within bounds.
-        window.set_size(800, 600);
-        assert_eq!(window.size(), (800, 600));
+        // And the local record repeats the spec rather than inventing defaults.
+        let w = events.window(id).unwrap();
+        assert_eq!(w.size(), (640, 480));
+        assert_eq!(w.position(), (10, -20));
+        assert!(!w.is_resizable());
+        assert!(!w.has_decorations());
+        assert!(w.is_transparent());
+        assert_eq!(w.min_size(), Some((320, 240)));
+        assert_eq!(w.max_size(), Some((1280, 960)));
+        assert_eq!(
+            w.attributes(),
+            WindowAttributes {
+                resizable: false,
+                decorations: false,
+                transparent: true,
+                min_size: Some((320, 240)),
+                max_size: Some((1280, 960)),
+            }
+        );
     }
 
     #[test]
-    fn test_window_visibility() {
-        let mut window = WindowBuilder::new("Visible", 640, 480)
-            .build()
+    fn a_resize_updates_what_the_window_reports_before_the_handler_sees_it() {
+        // A handler that asks "how big am I?" while handling a resize must get
+        // the new answer; the old one is a frame drawn at the wrong size.
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        assert_eq!(events.window(id).unwrap().size(), (800, 600));
+
+        server.borrow_mut().send_input(&[InputEvent::new(
+            id,
+            Event::Resize {
+                width: 1024,
+                height: 768,
+            },
+        )]);
+        let (w, ev) = events.poll().unwrap().expect("an event");
+        assert_eq!(w, id);
+        assert!(matches!(ev, Event::Resize { .. }));
+        assert_eq!(events.window(id).unwrap().size(), (1024, 768));
+    }
+
+    #[test]
+    fn a_move_the_client_did_not_ask_for_still_updates_its_position() {
+        // A user dragging the title bar. Without `Event::Moved` a window could
+        // only know where it last asked to be, and anything placed in screen
+        // coordinates would be placed against a stale answer.
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+
+        server
+            .borrow_mut()
+            .send_input(&[InputEvent::new(id, Event::Moved { x: -300, y: 40 })]);
+        events.poll().unwrap().expect("an event");
+        assert_eq!(events.window(id).unwrap().position(), (-300, 40));
+    }
+
+    #[test]
+    fn a_move_request_does_not_pretend_to_know_where_the_window_landed() {
+        // The compositor may snap the window to an edge or clamp it to a
+        // monitor. Recording the asked-for position would make `position()` a
+        // record of the request rather than of the result, which is the bug
+        // this whole layer exists to avoid.
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        events
+            .window_mut(id)
+            .unwrap()
+            .set_position(5000, 5000)
             .unwrap();
+        assert_eq!(
+            events.window(id).unwrap().position(),
+            (0, 0),
+            "still what was last reported, not what was asked"
+        );
 
-        assert!(window.is_visible());
-        window.set_visible(false);
-        assert!(!window.is_visible());
-        window.set_visible(true);
-        assert!(window.is_visible());
+        server
+            .borrow_mut()
+            .send_input(&[InputEvent::new(id, Event::Moved { x: 1900, y: 0 })]);
+        events.poll().unwrap();
+        assert_eq!(events.window(id).unwrap().position(), (1900, 0));
     }
 
     #[test]
-    fn test_event_loop_creation() {
-        let event_loop = EventLoop::new();
-        assert_eq!(event_loop.window_count(), 0);
-        assert!(!event_loop.is_running());
+    fn focus_is_tracked_from_the_events_that_report_it() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        assert!(!events.window(id).unwrap().is_focused());
+
+        server
+            .borrow_mut()
+            .send_input(&[InputEvent::new(id, Event::FocusIn)]);
+        events.poll().unwrap();
+        assert!(events.window(id).unwrap().is_focused());
+
+        server
+            .borrow_mut()
+            .send_input(&[InputEvent::new(id, Event::FocusOut)]);
+        events.poll().unwrap();
+        assert!(!events.window(id).unwrap().is_focused());
     }
 
     #[test]
-    fn test_event_loop_register_window() {
-        let mut event_loop = EventLoop::new();
-        let window = WindowBuilder::new("Loop Window", 800, 600)
-            .build()
-            .unwrap();
-        let wid = window.id();
-
-        event_loop.register(window);
-        assert_eq!(event_loop.window_count(), 1);
-        assert!(event_loop.window(wid).is_some());
-    }
-
-    #[test]
-    fn test_event_loop_inject_and_poll() {
-        let mut event_loop = EventLoop::new();
-        let window = WindowBuilder::new("Poll Test", 640, 480)
-            .build()
-            .unwrap();
-        let wid = window.id();
-        event_loop.register(window);
-
-        // Inject synthetic events.
-        event_loop.inject_event(wid, WindowEvent::FocusGained);
-        event_loop.inject_event(wid, WindowEvent::RedrawRequested);
-
-        let first = event_loop.poll();
-        assert!(first.is_some());
-        let (id, ev) = first.unwrap();
-        assert_eq!(id, wid);
-        assert!(matches!(ev, WindowEvent::FocusGained));
-
-        let second = event_loop.poll();
-        assert!(second.is_some());
-        let (id, ev) = second.unwrap();
-        assert_eq!(id, wid);
-        assert!(matches!(ev, WindowEvent::RedrawRequested));
-
-        // No more events.
-        assert!(event_loop.poll().is_none());
-    }
-
-    #[test]
-    fn test_event_loop_request_redraw() {
-        let mut event_loop = EventLoop::new();
-        let window = WindowBuilder::new("Redraw Test", 640, 480)
-            .build()
-            .unwrap();
-        let wid = window.id();
-        event_loop.register(window);
-
-        event_loop.request_redraw(wid);
-
-        let polled = event_loop.poll();
-        assert!(polled.is_some());
-        let (id, ev) = polled.unwrap();
-        assert_eq!(id, wid);
-        assert!(matches!(ev, WindowEvent::RedrawRequested));
-    }
-
-    #[test]
-    fn test_event_loop_quit() {
-        let mut event_loop = EventLoop::new();
-        event_loop.running = true;
-        assert!(event_loop.is_running());
-
-        event_loop.quit();
-        assert!(!event_loop.is_running());
-    }
-
-    #[test]
-    fn test_event_loop_run_exits_on_close() {
-        let mut event_loop = EventLoop::new();
-        let window = WindowBuilder::new("Close Test", 640, 480)
-            .build()
-            .unwrap();
-        let wid = window.id();
-        event_loop.register(window);
-
-        // Inject a close event.
-        event_loop.inject_event(wid, WindowEvent::CloseRequested);
-
-        event_loop.run(|_window_id, event| match event {
-            WindowEvent::CloseRequested => EventResponse::Exit,
-            _ => EventResponse::Continue,
-        });
-
-        // Event loop should have stopped.
-        assert!(!event_loop.is_running());
-    }
-
-    #[test]
-    fn test_event_loop_unregister() {
-        let mut event_loop = EventLoop::new();
-        let window = WindowBuilder::new("Unregister Test", 640, 480)
-            .build()
-            .unwrap();
-        let wid = window.id();
-        event_loop.register(window);
-
-        assert_eq!(event_loop.window_count(), 1);
-        let removed = event_loop.unregister(wid);
-        assert!(removed.is_some());
-        assert_eq!(event_loop.window_count(), 0);
-    }
-
-    #[test]
-    fn test_connection_new() {
-        let conn = Connection::new();
-        assert!(conn.connected);
-        assert!(conn.outgoing.is_empty());
-        assert!(conn.incoming.is_empty());
-        assert!(conn.events.is_empty());
-    }
-
-    #[test]
-    fn test_display_info_returns_valid_data() {
-        let info = display_info();
-        assert!(info.width > 0);
-        assert!(info.height > 0);
-        assert!(info.refresh_rate > 0);
-        assert!(info.scale_factor > 0.0);
-    }
-
-    #[test]
-    fn test_cursor_shape_default() {
-        let cursor: CursorShape = CursorShape::default();
-        assert_eq!(cursor, CursorShape::Arrow);
-    }
-
-    #[test]
-    fn test_window_submit_render_tree() {
-        let mut window = WindowBuilder::new("Render Test", 640, 480)
-            .build()
-            .unwrap();
+    fn a_submission_reaches_the_compositor_addressed_to_the_right_window() {
+        // The reason `SURF` exists: two windows on one connection, and a bare
+        // `ORDR` frame says nothing about which one it is for.
+        let (mut events, server) = wired();
+        let a = open(&mut events, "A");
+        let b = open(&mut events, "B");
+        assert_ne!(a, b);
 
         let mut tree = RenderTree::new();
-        tree.fill_rect(0.0, 0.0, 640.0, 480.0, guitk::color::Color::rgb(30, 30, 30));
-        tree.text(10.0, 20.0, "Hello, Slate OS!", guitk::color::Color::WHITE, 14.0);
+        tree.fill_rect(0.0, 0.0, 4.0, 4.0, guitk::color::Color::WHITE);
+        events.submit(a, &tree).unwrap();
+        events.submit(b, &RenderTree::new()).unwrap();
 
-        // Should not panic; verifies the submit path works.
-        window.submit(&tree);
+        assert_eq!(server.borrow_mut().drawn(), vec![(a, 1), (b, 0)]);
     }
 
     #[test]
-    fn test_window_close_consumes_handle() {
-        let window = WindowBuilder::new("Close Me", 640, 480)
-            .build()
-            .unwrap();
-        let _id = window.id();
+    fn setting_a_title_waits_for_the_compositor_to_agree() {
+        // Fire-and-forget would let a refusal pass unnoticed and leave the
+        // local record disagreeing with the screen.
+        let (mut events, server) = wired();
+        let id = open(&mut events, "Before");
+        events.window_mut(id).unwrap().set_title("After").unwrap();
 
-        // close() takes ownership — this just verifies it compiles and runs.
-        window.close();
+        assert_eq!(events.window(id).unwrap().title(), "After");
+        assert!(matches!(
+            server.borrow().seen.last().unwrap().body,
+            RequestBody::SetTitle { .. }
+        ));
     }
 
     #[test]
-    fn test_window_error_display() {
-        let err = WindowError::ConnectionFailed("timeout".to_string());
-        assert_eq!(format!("{err}"), "connection failed: timeout");
+    fn a_refused_property_change_leaves_the_local_record_alone() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "Before");
+        server.borrow_mut().refuse = Some("no".to_string());
 
-        let err = WindowError::InvalidWindow(42);
-        assert_eq!(format!("{err}"), "invalid window id: 42");
+        let err = events
+            .window_mut(id)
+            .unwrap()
+            .set_title("After")
+            .expect_err("a refusal must not read as success");
+        assert!(matches!(err, ClientError::Refused(_)));
+        assert_eq!(
+            events.window(id).unwrap().title(),
+            "Before",
+            "the record must not claim a change the compositor rejected"
+        );
     }
 
     #[test]
-    fn test_multiple_windows_in_event_loop() {
-        let mut event_loop = EventLoop::new();
+    fn a_handle_names_a_window_by_id_so_it_cannot_address_the_wrong_one() {
+        let (mut events, _server) = wired();
+        let a = open(&mut events, "A");
+        let b = open(&mut events, "B");
+        assert!(events.window_mut(b.wrapping_add(1)).is_none());
 
-        let w1 = WindowBuilder::new("Window 1", 400, 300)
-            .build()
+        let mut handle = events.window_mut(b).unwrap();
+        assert_eq!(handle.id(), b);
+        assert_eq!(handle.get().title(), "B");
+        handle.set_title("renamed").unwrap();
+        assert_eq!(events.window(a).unwrap().title(), "A");
+        assert_eq!(events.window(b).unwrap().title(), "renamed");
+    }
+
+    #[test]
+    fn an_event_for_an_unknown_window_is_counted_not_dispatched() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+
+        server.borrow_mut().send_input(&[
+            InputEvent::new(id.wrapping_add(999), Event::FocusIn),
+            InputEvent::new(id, Event::CloseRequested),
+        ]);
+        let (w, ev) = events.poll().unwrap().expect("the good one still arrives");
+        assert_eq!(w, id);
+        assert!(matches!(ev, Event::CloseRequested));
+        assert_eq!(events.unrouted_events(), 1);
+    }
+
+    #[test]
+    fn run_stops_when_the_handler_says_so() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        server.borrow_mut().script.push_back(vec![
+            InputEvent::new(id, Event::FocusIn),
+            InputEvent::new(
+                id,
+                Event::Key(KeyEvent {
+                    key: Key::Q,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                    text: None,
+                }),
+            ),
+            InputEvent::new(id, Event::FocusOut),
+        ]);
+
+        let mut seen = Vec::new();
+        events
+            .run(|_loop, _w, event| {
+                let quit = matches!(event, Event::Key(_));
+                seen.push(event);
+                if quit {
+                    EventResponse::Exit
+                } else {
+                    EventResponse::Continue
+                }
+            })
             .unwrap();
-        let w2 = WindowBuilder::new("Window 2", 600, 400)
-            .build()
+        assert_eq!(seen.len(), 2, "the focus, then the key — not what follows");
+        assert!(!events.is_running());
+    }
+
+    #[test]
+    fn run_ends_on_a_close_request_the_handler_ignores() {
+        // A title-bar X that does nothing is worse than an application that
+        // quits when it would rather not have.
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        server
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(id, Event::CloseRequested)]);
+
+        let mut count = 0u32;
+        events
+            .run(|_loop, _w, _event| {
+                count += 1;
+                EventResponse::Continue
+            })
             .unwrap();
-        let id1 = w1.id();
-        let id2 = w2.id();
+        assert_eq!(count, 1);
+        assert!(!events.is_running());
+    }
 
-        event_loop.register(w1);
-        event_loop.register(w2);
-        assert_eq!(event_loop.window_count(), 2);
+    #[test]
+    fn quit_stops_the_loop_from_inside_the_handler() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        server
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(id, Event::FocusIn)]);
 
-        // Inject events for both windows.
-        event_loop.inject_event(id1, WindowEvent::FocusGained);
-        event_loop.inject_event(id2, WindowEvent::MouseEnter);
+        events
+            .run(|ev_loop, _w, _event| {
+                ev_loop.quit();
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert!(!events.is_running());
+    }
 
-        let (eid1, ev1) = event_loop.poll().unwrap();
-        assert_eq!(eid1, id1);
-        assert!(matches!(ev1, WindowEvent::FocusGained));
+    #[test]
+    fn run_ends_when_the_connection_closes() {
+        // The previous version of this crate exited its loop on the first
+        // iteration with a comment saying a real one would block. This one runs
+        // until there is a reason to stop.
+        let (client_end, server_end) = pipe();
+        let mut events = EventLoop::new(client_end);
+        server_end.close();
+        events
+            .run(|_loop, _w, _event| EventResponse::Continue)
+            .unwrap();
+        assert!(!events.is_running());
+    }
 
-        let (eid2, ev2) = event_loop.poll().unwrap();
-        assert_eq!(eid2, id2);
-        assert!(matches!(ev2, WindowEvent::MouseEnter));
+    #[test]
+    fn a_handler_can_draw_because_it_is_given_the_loop() {
+        // The old handler signature took only `(id, event)`, so an application
+        // responding to an event had no way to submit the frame that response
+        // called for.
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        server
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(id, Event::CloseRequested)]);
+
+        events
+            .run(|ev_loop, window, _event| {
+                let mut tree = RenderTree::new();
+                tree.fill_rect(0.0, 0.0, 1.0, 1.0, guitk::color::Color::WHITE);
+                ev_loop.submit(window, &tree).unwrap();
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(server.borrow_mut().drawn(), vec![(id, 1)]);
+    }
+
+    #[test]
+    fn display_info_comes_from_the_compositor() {
+        let (mut events, _server) = wired();
+        let info = events.display_info().unwrap();
+        assert_eq!(info.width, 2560);
+        assert_eq!(info.height, 1440);
+        assert_eq!(info.refresh_rate, 144);
+        assert!((info.scale_factor - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_refused_request_is_reported_rather_than_swallowed() {
+        let (mut events, server) = wired();
+        server.borrow_mut().refuse = Some("out of memory".to_string());
+        let err = events
+            .create(WindowSpec::new("A", 1, 1))
+            .expect_err("a refusal must not read as success");
+        assert!(matches!(err, ClientError::Refused(ref why) if why == "out of memory"));
+        assert_eq!(events.window_count(), 0, "and nothing is recorded");
+    }
+
+    #[test]
+    fn closing_a_window_forgets_it_and_its_late_events_are_counted() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        assert_eq!(events.window_count(), 1);
+
+        // Events already in flight when a window closes are ordinary, not a
+        // bug — but they must not be dispatched to a window that is gone.
+        server
+            .borrow_mut()
+            .send_input(&[InputEvent::new(id, Event::FocusIn)]);
+        events.close(id).unwrap();
+        assert_eq!(events.window_count(), 0);
+        assert!(events.poll().unwrap().is_none());
+        assert_eq!(events.unrouted_events(), 1);
+    }
+
+    #[test]
+    fn injected_events_are_dispatched_like_real_ones() {
+        let (mut events, _server) = wired();
+        let id = open(&mut events, "A");
+
+        events.inject_event(id, Event::ScaleChanged { scale: 2.0 });
+        let (w, ev) = events.poll().unwrap().expect("an event");
+        assert_eq!(w, id);
+        assert!(matches!(ev, Event::ScaleChanged { .. }));
+    }
+
+    #[test]
+    fn there_is_exactly_one_event_type_end_to_end() {
+        // The previous version defined a third vocabulary alongside
+        // `guitk::event::Event` and the compositor's, so connecting it would
+        // have needed a lossy translation in the middle of the input path.
+        // What the compositor encodes is what the handler receives, unchanged.
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+
+        let sent = Event::Mouse(MouseEvent {
+            x: 12.5,
+            y: -3.25,
+            kind: MouseEventKind::Scroll { dx: 1.0, dy: -2.0 },
+        });
+        server
+            .borrow_mut()
+            .send_input(&[InputEvent::new(id, sent.clone())]);
+        let (_, got) = events.poll().unwrap().expect("an event");
+        assert_eq!(got, sent);
+    }
+
+    #[test]
+    fn many_windows_share_one_connection() {
+        // The design this crate is built on: one transport, demultiplexed by
+        // window id, rather than a socket per window.
+        let (mut events, server) = wired();
+        let ids: Vec<u64> = (0..4)
+            .map(|i| open(&mut events, &format!("W{i}")))
+            .collect();
+        assert_eq!(events.window_count(), 4);
+
+        for &id in &ids {
+            server
+                .borrow_mut()
+                .send_input(&[InputEvent::new(id, Event::FocusIn)]);
+        }
+        let mut focused = Vec::new();
+        while let Some((w, _)) = events.poll().unwrap() {
+            focused.push(w);
+        }
+        assert_eq!(focused, ids);
+        assert!(events.windows().iter().all(Window::is_focused));
     }
 }

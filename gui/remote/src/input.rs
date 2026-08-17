@@ -132,6 +132,7 @@ enum EventTag {
     CloseRequested = 0x06,
     Tick = 0x07,
     ScaleChanged = 0x08,
+    Moved = 0x09,
 }
 
 impl EventTag {
@@ -145,6 +146,7 @@ impl EventTag {
             0x06 => Some(Self::CloseRequested),
             0x07 => Some(Self::Tick),
             0x08 => Some(Self::ScaleChanged),
+            0x09 => Some(Self::Moved),
             _ => None,
         }
     }
@@ -316,6 +318,15 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
         Event::ScaleChanged { scale } => {
             out.push(EventTag::ScaleChanged as u8);
             write_f32(out, *scale);
+        }
+        Event::Moved { x, y } => {
+            out.push(EventTag::Moved as u8);
+            // Screen coordinates are signed — a window can sit left of or above
+            // the origin on a multi-monitor desktop. Encode the raw
+            // two's-complement bits, as the scene codec does for the same
+            // reason.
+            write_u32(out, x.cast_unsigned());
+            write_u32(out, y.cast_unsigned());
         }
     }
 }
@@ -521,6 +532,13 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
             },
             None,
         ),
+        EventTag::Moved => (
+            Event::Moved {
+                x: r.read_u32()?.cast_signed(),
+                y: r.read_u32()?.cast_signed(),
+            },
+            None,
+        ),
     };
     Ok(InputEvent {
         window,
@@ -692,10 +710,20 @@ mod tests {
             Event::CloseRequested,
             Event::Tick { elapsed_ms: 16 },
             Event::ScaleChanged { scale: 1.5 },
+            Event::Moved { x: 100, y: 200 },
         ]
         .into_iter()
         .map(|e| InputEvent::new(9, e))
         .collect();
+        assert_eq!(roundtrip(&events), events);
+    }
+
+    #[test]
+    fn a_window_left_of_the_origin_is_not_reported_as_a_distant_one() {
+        // Screen coordinates are signed: on a multi-monitor desktop the primary
+        // display's origin is not the leftmost point. Read as unsigned, x = -1
+        // would come back as 4294967295.
+        let events = vec![InputEvent::new(1, Event::Moved { x: -1920, y: -12 })];
         assert_eq!(roundtrip(&events), events);
     }
 

@@ -17,6 +17,15 @@ pub enum Event {
     Key(KeyEvent),
     /// Window resized.
     Resize { width: u32, height: u32 },
+    /// Window moved: the new screen position of its top-left corner.
+    ///
+    /// Sent for moves the client did not initiate as well as ones it did — a
+    /// user dragging the title bar, or the compositor rearranging windows when
+    /// a monitor is unplugged. Without it a window can only ever know where it
+    /// last *asked* to be, which is not the same thing, and anything that must
+    /// be placed in screen coordinates — a menu, a tooltip, a window position
+    /// remembered across runs — would be computed against a stale answer.
+    Moved { x: i32, y: i32 },
     /// Window focus gained.
     FocusIn,
     /// Window focus lost.

@@ -34,12 +34,18 @@
 //!   and being pure it is verified in full on every boot.
 //! - [`timing`] — the VESA DMT mode table and the full timing type the generic
 //!   [`super::mode::DrmMode`] does not carry.
-//! - [`tests`] — the boot-time self-test over both of the above.
-//! - [`mmio`] — BAR mapping and register I/O. Impure by nature, so it is
+//! - [`modeset`] — deciding the CRTC register values (pure) and writing them
+//!   (not).
+//! - [`vram`] — suballocation of the card's video memory. Pure.
+//! - [`tests`] — the boot-time self-test over all of the above.
+//! - [`mmio`] — BAR2 mapping and register I/O. Impure by nature, so it is
 //!   validated by *running* it against QEMU's `ati-vga` rather than by
 //!   assertion. See that module's documentation for what that does and does
 //!   not establish.
+//! - [`aperture`] — BAR0 mapping: the video memory itself, so the CPU can put
+//!   pixels in it. Impure, and validated the same way.
 
+pub mod aperture;
 pub mod mmio;
 pub mod modeset;
 pub mod regs;
@@ -47,7 +53,7 @@ pub mod tests;
 pub mod timing;
 pub mod vram;
 
-use crate::error::KernelResult;
+use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 
 /// PCI vendor ID for ATI Technologies, inherited by AMD.
@@ -190,7 +196,10 @@ pub fn probe_hardware() {
 ///
 /// The mode chosen is 640x480@60 — the smallest in the DMT table, so it fits in
 /// any VRAM a supported part could have, and the one mode whose acceptance is
-/// least interesting to be wrong about.
+/// least interesting to be wrong about. It is also the largest that is *cheap*
+/// to paint: the aperture is mapped uncacheable for want of a write-combining
+/// page attribute, so 1.2 MB of pixels is a few tens of milliseconds and 1080p
+/// would be seconds. See [`aperture`]'s module documentation.
 fn exercise_modeset(dev: &mmio::AtiDevice) {
     if dev.owns_console() {
         serial_println!(
@@ -204,30 +213,222 @@ fn exercise_modeset(dev: &mmio::AtiDevice) {
         return;
     };
 
-    let plan = match modeset::ModeSetPlan::new(
-        mode,
-        crate::drm::mode::PixelFormat::Xrgb8888,
-        0,
-        dev.vram_bytes,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            serial_println!("[ati]   WARNING: mode-set plan for 640x480@60 rejected: {e:?}");
-            return;
-        }
-    };
+    if let Err(e) = drive_display(dev, mode) {
+        serial_println!("[ati]   WARNING: display exercise failed: {e:?}");
+    }
+}
 
-    if let Err(e) = modeset::apply(&dev.mmio, &plan) {
-        serial_println!("[ati]   WARNING: mode-set failed: {e:?}");
-        return;
+/// Colours for the three horizontal bands, in `XRGB8888`.
+///
+/// Three distinct values rather than one solid fill, because a solid fill is
+/// the one pattern a broken aperture can pass. A mapping that reads back a
+/// constant — because it is backed by nothing, or because every read is served
+/// by the same stale cache line — agrees with a single-colour framebuffer at
+/// every pixel. It cannot agree with three.
+const BAND_COLOURS: [u32; 3] = [0x00FF_0000, 0x0000_FF00, 0x0000_00FF];
+
+/// Allocate video memory, paint it, display it, and flip to a second buffer.
+///
+/// This is the end-to-end check the register-map verification cannot be: it
+/// establishes that BAR0 really is video memory (pixels written through it read
+/// back), that the allocator's offsets are ones the CRTC accepts, and that a
+/// page flip changes what is displayed. Each step is reported separately so a
+/// failure names the stage rather than the outcome.
+///
+/// # Errors
+///
+/// Propagates the first failing step. Every one of them means something
+/// specific: a mapping failure means BAR0 is not where config space says, an
+/// allocation failure means the card reported less memory than a 640x480
+/// buffer, and a readback mismatch means the aperture is mapped but not backed.
+fn drive_display(dev: &mmio::AtiDevice, mode: &timing::ModeTiming) -> KernelResult<()> {
+    const FORMAT: crate::drm::mode::PixelFormat = crate::drm::mode::PixelFormat::Xrgb8888;
+
+    // SAFETY: `vram_phys` is BAR0 as the device's own config space reports it,
+    // so it names device memory rather than RAM, and this is the only
+    // `VramAperture` created for it — `probe_hardware` runs once from
+    // `drm::init`.
+    let ap = unsafe { aperture::VramAperture::map(dev.vram_phys, u64::from(dev.vram_bytes))? };
+    serial_println!(
+        "[ati]   VRAM aperture mapped: {} MiB at {:#x} (cacheable={})",
+        ap.len() / (1024 * 1024),
+        ap.phys(),
+        ap.is_cached()
+    );
+
+    // The allocator is sized from the *mapped* length, never the card's
+    // reported VRAM. An allocator that knew about memory the CPU cannot reach
+    // would eventually return an offset outside the mapping, producing a
+    // framebuffer the CRTC scans out as garbage and the driver cannot write to
+    // — with both halves looking correct in isolation.
+    let total = u32::try_from(ap.len()).map_err(|_| KernelError::InvalidArgument)?;
+    let mut pool = vram::VramAllocator::new(total)?;
+
+    // Plan once at offset zero to learn how large the scanout buffer must be,
+    // then allocate, then plan again at the offset actually obtained. The first
+    // plan is thrown away; it is cheaper than duplicating the size arithmetic
+    // here, and duplicating it is how the allocation and the CRTC come to
+    // disagree about how big a framebuffer is.
+    let sizing = modeset::ModeSetPlan::new(mode, FORMAT, 0, total)?;
+    let front = pool.alloc(sizing.size_bytes, modeset::SCANOUT_ALIGN)?;
+    let back = pool.alloc(sizing.size_bytes, modeset::SCANOUT_ALIGN)?;
+    serial_println!(
+        "[ati]   Allocated two {} B scanout buffers at VRAM +{:#x} and +{:#x} ({} B free)",
+        sizing.size_bytes,
+        front,
+        back,
+        pool.free_bytes()
+    );
+
+    // Paint the two buffers with the same three bands in different orders, so
+    // that a flip which does not take effect is visible: if the displayed
+    // buffer never changed, the two would be indistinguishable.
+    paint_bands(&ap, front, &sizing, BAND_COLOURS)?;
+    paint_bands(
+        &ap,
+        back,
+        &sizing,
+        [BAND_COLOURS[2], BAND_COLOURS[0], BAND_COLOURS[1]],
+    )?;
+    verify_bands(&ap, front, &sizing, BAND_COLOURS)?;
+    serial_println!(
+        "[ati]   Painted and read back 3 colour bands in each buffer — BAR0 is real video memory"
+    );
+
+    // Mode-set onto the front buffer.
+    let plan = modeset::ModeSetPlan::new(mode, FORMAT, front, total)?;
+    modeset::apply(&dev.mmio, &plan)?;
+    modeset::verify_applied(&dev.mmio, &plan)?;
+    let displayed = modeset::scanout_offset(&dev.mmio)?;
+    if displayed != front {
+        serial_println!(
+            "[ati]   FAIL: CRTC_OFFSET reads {:#x}, wrote {:#x}",
+            displayed,
+            front
+        );
+        return Err(KernelError::CorruptedData);
     }
-    match modeset::verify_applied(&dev.mmio, &plan) {
-        Ok(()) => serial_println!(
-            "[ati]   Mode-set 640x480@60 XRGB8888 applied and read back exactly \
-             (pitch {} B, {} B scanout) — CRTC programming confirmed",
-            plan.pitch_bytes,
-            plan.size_bytes
-        ),
-        Err(e) => serial_println!("[ati]   WARNING: mode-set did not read back: {e:?}"),
+    serial_println!(
+        "[ati]   Mode-set 640x480@60 XRGB8888 applied and read back exactly \
+         (pitch {} B, {} B scanout at +{:#x}) — CRTC programming confirmed",
+        plan.pitch_bytes,
+        plan.size_bytes,
+        front
+    );
+
+    // Page flip to the back buffer: one register write, no copy.
+    modeset::page_flip(&dev.mmio, back)?;
+    let displayed = modeset::scanout_offset(&dev.mmio)?;
+    if displayed != back {
+        serial_println!(
+            "[ati]   FAIL: after flip, CRTC_OFFSET reads {:#x}, wrote {:#x}",
+            displayed,
+            back
+        );
+        return Err(KernelError::CorruptedData);
     }
+    verify_bands(
+        &ap,
+        back,
+        &sizing,
+        [BAND_COLOURS[2], BAND_COLOURS[0], BAND_COLOURS[1]],
+    )?;
+    serial_println!("[ati]   Page-flipped to +{back:#x} and confirmed — scanout base is live");
+
+    // Release both, and check the card came back whole. A driver that leaks its
+    // scanout buffers works perfectly until the resolution changes a few times.
+    pool.free(front, sizing.size_bytes)?;
+    pool.free(back, sizing.size_bytes)?;
+    pool.check_invariants()?;
+    if pool.free_bytes() != total || pool.region_count() != 1 {
+        serial_println!(
+            "[ati]   FAIL: after freeing both buffers, {} B free in {} runs, want {} B in 1",
+            pool.free_bytes(),
+            pool.region_count(),
+            total
+        );
+        return Err(KernelError::CorruptedData);
+    }
+
+    Ok(())
+}
+
+/// Fill a scanout buffer with three horizontal colour bands.
+fn paint_bands(
+    ap: &aperture::VramAperture,
+    base: u32,
+    plan: &modeset::ModeSetPlan,
+    colours: [u32; 3],
+) -> KernelResult<()> {
+    let height = plan
+        .size_bytes
+        .checked_div(plan.pitch_bytes)
+        .ok_or(KernelError::InvalidArgument)?;
+    let words = plan
+        .pitch_bytes
+        .checked_div(4)
+        .ok_or(KernelError::InvalidArgument)?;
+    // Integer division, so with a height that is not a multiple of three the
+    // last band absorbs the remainder — which is why the band index is clamped
+    // rather than trusted to stay below three.
+    let band = height.checked_div(3).filter(|b| *b > 0).unwrap_or(height);
+
+    for row in 0..height {
+        let idx = (row.checked_div(band).unwrap_or(0) as usize).min(2);
+        let colour = *colours.get(idx).ok_or(KernelError::InternalError)?;
+        let row_off = base
+            .checked_add(
+                row.checked_mul(plan.pitch_bytes)
+                    .ok_or(KernelError::InvalidArgument)?,
+            )
+            .ok_or(KernelError::InvalidArgument)?;
+        ap.fill32(row_off, words, colour)?;
+    }
+    ap.flush(base, plan.size_bytes)
+}
+
+/// Read one pixel back from the middle of each band and check its colour.
+///
+/// One pixel per band, not the whole buffer: reads across the bus are slow, and
+/// what is in question is whether the mapping is backed at all, which three
+/// well-separated samples answer as well as three hundred thousand.
+fn verify_bands(
+    ap: &aperture::VramAperture,
+    base: u32,
+    plan: &modeset::ModeSetPlan,
+    colours: [u32; 3],
+) -> KernelResult<()> {
+    let height = plan
+        .size_bytes
+        .checked_div(plan.pitch_bytes)
+        .ok_or(KernelError::InvalidArgument)?;
+    let band = height.checked_div(3).filter(|b| *b > 0).unwrap_or(height);
+
+    for (i, want) in colours.iter().enumerate() {
+        // The middle row of band `i`, and the middle pixel of that row.
+        let row = (u32::try_from(i).unwrap_or(0))
+            .checked_mul(band)
+            .and_then(|r| r.checked_add(band / 2))
+            .filter(|r| *r < height)
+            .ok_or(KernelError::InvalidArgument)?;
+        let off = base
+            .checked_add(
+                row.checked_mul(plan.pitch_bytes)
+                    .ok_or(KernelError::InvalidArgument)?,
+            )
+            .and_then(|o| o.checked_add((plan.pitch_bytes / 2) & !3))
+            .ok_or(KernelError::InvalidArgument)?;
+        let got = ap.read32(off)?;
+        if got != *want {
+            serial_println!(
+                "[ati]   FAIL: VRAM +{:#x} (band {}) reads {:#010x}, wrote {:#010x}",
+                off,
+                i,
+                got,
+                want
+            );
+            return Err(KernelError::CorruptedData);
+        }
+    }
+    Ok(())
 }

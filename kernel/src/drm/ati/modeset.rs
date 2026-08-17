@@ -189,6 +189,40 @@ pub fn apply(mmio: &AtiMmio, plan: &ModeSetPlan) -> KernelResult<()> {
     Ok(())
 }
 
+/// Point the CRTC at a different scanout base, leaving the timing alone.
+///
+/// This is the whole of a page flip on this hardware, and the reason a scanout
+/// buffer is worth keeping in VRAM: the displayed image changes by one register
+/// write, with no copy. A driver whose buffers live in system RAM has to move
+/// the pixels across the bus every frame instead.
+///
+/// The CRTC is *not* disabled around this, unlike [`apply`]. `CRTC_OFFSET` is a
+/// single register, so there is no half-applied state to hide — the worst case
+/// is one frame torn between the two buffers, which is what a flip outside
+/// vblank means everywhere and is vastly preferable to the black frame that
+/// blanking the CRTC would produce.
+///
+/// # Errors
+///
+/// `InvalidArgument` if `offset` is not [`SCANOUT_ALIGN`]-aligned. Refused
+/// rather than rounded: rounding would display a buffer other than the one the
+/// caller asked for, which looks like a page-flip that did not happen.
+pub fn page_flip(mmio: &AtiMmio, offset: u32) -> KernelResult<()> {
+    if !offset.is_multiple_of(SCANOUT_ALIGN) {
+        return Err(KernelError::InvalidArgument);
+    }
+    mmio.write32(regs::CRTC_OFFSET, offset)
+}
+
+/// The scanout base the CRTC is currently reading from.
+///
+/// # Errors
+///
+/// Propagates the register access.
+pub fn scanout_offset(mmio: &AtiMmio) -> KernelResult<u32> {
+    mmio.read32(regs::CRTC_OFFSET)
+}
+
 /// Read the timing registers back and confirm they hold what was written.
 ///
 /// This is the check that makes a mode-set falsifiable. Every value comes from

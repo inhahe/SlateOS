@@ -32175,3 +32175,139 @@ pins the containment that keeps it harmless.
 Not urgent: nothing is visibly wrong and nothing is unsafe. Logged because a
 one-pixel disagreement between drawing and measurement is exactly the kind of
 thing that becomes a real bug the moment either side is touched.
+
+## C-THE-CREDENTIAL-STORE-ENCRYPTS-EVERY-SECRET-WITH-THE-SAME-KEYSTREAM (lane C, 2026-08-17)
+
+**In short:** the credential manager — the thing that holds the user's saved
+passwords — scrambles every secret in the vault with the *same* repeating
+pattern. Anyone who can read the vault file can recover its contents without
+ever learning the master password, by lining two entries up against each
+other and cancelling the pattern out. This is the single worst defect
+currently known in lane C's tree.
+
+**Where:** `gui/credentials/src/main.rs`, `encrypt` / `decrypt` /
+`generate_keystream`.
+
+`generate_keystream(key, len)` produces `SHA-256(key ‖ 0) ‖ SHA-256(key ‖ 1) ‖
+…`. It takes no nonce (a number used once, mixed in so that encrypting the
+same thing twice gives different output). So it is a pure function of the
+session key, and every credential in a vault is XORed with the identical
+keystream. XOR two ciphertexts together and the keystream cancels, leaving the
+two plaintexts XORed with each other — the classic "two-time pad", which is
+routinely solved by hand for text. No key recovery is needed and no master
+password is needed; read access to the stored ciphertexts is enough.
+
+The doc comment says "this is a demonstration cipher; production use would
+employ AES-256-GCM", which covers *weak* but not *broken*: a demonstration
+cipher is still expected to keep two records from decrypting each other.
+
+**Proper fix (does not need any new primitive):** give every encryption its own
+nonce and mix it into the keystream — `SHA-256(key ‖ nonce ‖ counter)` — then
+store the nonce beside the ciphertext. A per-record sequence number that is
+persisted and never reused under a given key is a sufficient nonce and needs
+no randomness, so this is fixable today with the SHA-256 already in the file.
+That turns the construction into SHA-256 used as a counter-mode PRF, which is
+a defensible stream cipher rather than a broken one.
+
+Still missing after that fix, and requiring things the tree does not yet have:
+authentication (the ciphertext can be flipped bit-for-bit undetected — wants an
+HMAC or a real AEAD) and a vetted AES-256-GCM. See
+`open-questions.md` → "Do we write our own cryptographic primitives?".
+
+## C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES (lane C, 2026-08-17)
+
+**In short:** the credential manager turns the user's master password into a
+key with a single pass of SHA-256, mixed with a fixed word that is compiled
+into the program and is therefore identical on every SlateOS machine. Both
+halves of that are wrong in the same direction: a single pass means an
+attacker can try billions of candidate passwords per second on a GPU, and a
+shared fixed word means one precomputed table cracks every user in the world
+rather than having to be rebuilt per user.
+
+**Where:** `gui/credentials/src/main.rs`, `derive_session_key` and the
+`KEY_DERIVATION_SALT` constant.
+
+```rust
+const KEY_DERIVATION_SALT: &str = "slateos_credential_salt";
+
+fn derive_session_key(master_password: &str) -> [u8; 32] {
+    let mut input = master_password.as_bytes().to_vec();
+    input.extend_from_slice(KEY_DERIVATION_SALT.as_bytes());
+    sha256(&input)
+}
+```
+
+A password-to-key function is supposed to be *deliberately slow* (key
+stretching) and *per-user distinct* (a random salt stored with the vault).
+This is neither. `apps/lockscreen` derives its stored hash the same way and
+has the same problem.
+
+**Proper fix:** iterate. Even a plain `for _ in 0..N { h = sha256(h ‖ pw) }`
+with N in the hundreds of thousands is an enormous improvement and needs
+nothing new — that is essentially PBKDF2's structure. The per-vault random
+salt needs a randomness source the crate does not have (see below), but a
+salt that merely varies per *installation* already defeats a shared table, so
+it should not wait for one. The end state wants a memory-hard KDF (scrypt or
+Argon2id), which is gated on the same open question as the cipher.
+
+## C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE (lane C, 2026-08-17)
+
+**In short:** nothing in lane C can obtain an unpredictable number. The
+credential manager's password *generator* — the feature whose entire job is
+producing something an attacker cannot guess — runs a 3-line xorshift
+generator seeded by a number its caller passes in, in practice a timestamp.
+An attacker who knows roughly when a password was generated can enumerate the
+possibilities.
+
+**Where:** `gui/credentials/src/main.rs`, `Xorshift64` and
+`generate_password(.., seed: u64)`.
+
+`Xorshift64` is a perfectly good *statistical* generator and a useless
+*cryptographic* one: its entire future output is determined by 64 bits of
+state, and recovering that state from output is trivial. Seeded from a
+second-resolution timestamp, the real entropy is closer to 20 bits.
+
+**Where the fix has to come from:** the kernel. A userspace CSPRNG needs a
+seed from an entropy pool the kernel maintains (RDRAND/RDSEED, interrupt
+timing, etc.), surfaced through a syscall. `kernel/src/crypto.rs` exists
+(lane A) but lane C has no interface to it. Filed as
+`requests/c-a-userspace-entropy-syscall.md`.
+
+Until then the honest thing is for `generate_password` to *say* it is not
+cryptographically strong rather than to look like it is, and for anything that
+needs a real nonce to use a persisted counter instead (see the keystream
+entry above).
+
+## C-SHA-256-IS-IMPLEMENTED-ELEVEN-TIMES-IN-THIS-TREE (lane C, 2026-08-17)
+
+**In short:** eleven separate copies of the same cryptographic hash function
+have been written by hand in this repository. Each one can be independently
+wrong, and each one has to be independently reviewed, tested and fixed. Some
+of them guard logging in and unlocking the screen.
+
+**Where** (found by `grep -rn "fn sha256" --include=*.rs`):
+
+| Copy | Lane | Shape |
+|---|---|---|
+| `kernel/src/crypto.rs` | A | one-shot |
+| `posix/src/sha2.rs` | B | one-shot, has the FIPS million-`a` vector |
+| `posix/src/crypt.rs` | B | via `sha2` |
+| `init/login/src/main.rs` | B | block compression + one-shot |
+| `userspace/coreutils/src/bin/sha256sum.rs` | B | one-shot |
+| `userspace/backup/src/main.rs` | B | streaming |
+| `kernel/src/oci.rs` | A | digest string |
+| `kernel/build.rs` | A | build-time |
+| `gui/credentials/src/main.rs` | **C** | one-shot |
+| `apps/lockscreen/src/main.rs` | **C** | one-shot |
+| `apps/backup/src/main.rs` | **C** | streaming `Sha256` struct |
+
+All three lane-C copies do carry the standard known-answer vectors (empty,
+`"abc"`, the 448-bit message), so none of them is presently *wrong*. That is
+luck holding, not a design.
+
+**Proper fix:** one implementation, one set of test vectors, shared. Lane C
+can extract its three into a small top-level crate alongside the existing
+`byteread` / `textfind` / `textfmt` utility crates and adopt it; lanes A and B
+have to opt in themselves, so the cross-lane half is a request rather than an
+edit. Note `kernel/` is `no_std`, so the shared crate must be `no_std` with an
+`alloc`-free one-shot API to be adoptable by all three lanes.

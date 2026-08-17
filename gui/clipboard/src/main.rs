@@ -5,11 +5,6 @@
 //! clipboard data. The service maintains a ring buffer of recent clips, supports
 //! format negotiation, and enforces security policies for sensitive data.
 
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::module_name_repetitions)]
-#![warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-#![warn(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime};
 

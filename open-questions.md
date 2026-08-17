@@ -508,6 +508,85 @@ re-run, and it neither grows nor worsens with time. Full detail in
 `known-issues.md` → "Two lanes merging up at once race in the shared `os`
 worktree".
 
+## C-Q5 — [C] This OS writes all of its own cryptography by hand. Keep doing that, or port implementations other people have already broken and fixed? — Status: OPEN
+
+**In short:** the code that protects saved passwords, login and the lock
+screen is cryptography we wrote ourselves — including eleven separate
+hand-written copies of the same hash function. Writing your own cryptography
+is the one thing security practitioners are close to unanimous about not
+doing, and not because the algorithms are secret: they are public, and ours
+compute the right answers. The problem is that the *bugs* are silent. Code
+that produces correct output can still leak the secret through how long it
+takes to run, and no test will ever notice. The question is whether to keep
+writing these and fix them in place, or to bring in implementations that
+already survived twenty years of people attacking them.
+
+**How we got here.** Nothing was ever decided. The OS has no third-party
+crypto dependency, so each feature that needed a hash wrote one. It worked, so
+it kept happening.
+
+**What is actually wrong right now** (all four logged in `known-issues.md`,
+found while turning the workspace lints on for `gui/credentials`):
+
+| Problem | What it means |
+|---|---|
+| The password vault scrambles every secret with an identical repeating pattern | two saved passwords cancel each other out; the vault can be read without the master password |
+| The master password is hashed once, with an extra ingredient that is the same on every SlateOS machine | guessable at billions of tries per second, and one precomputed table cracks every user everywhere |
+| Nothing in userspace can obtain an unpredictable number | the built-in password *generator* produces guessable passwords |
+| Eleven hand-written copies of SHA-256 | eleven chances for one of them to be wrong, forever |
+
+The first three can be brought up to "defensible" using only what is already
+in the tree, and I am doing that regardless of the answer here. What the
+answer decides is the *end state* — specifically two things I would rather not
+write myself:
+
+- **authenticated encryption** (so an attacker who cannot read the vault also
+  cannot silently alter what is in it), and
+- **a deliberately-slow password hash** (so guessing costs an attacker real
+  money — Argon2id or scrypt).
+
+**The options.**
+
+- **A — Keep writing our own, carefully.**
+  *What changes:* I implement AES-GCM and Argon2id in-tree with the official
+  test vectors, and the eleven hash copies collapse into one shared crate.
+  *For:* no outside code in the trust base; works in the kernel's no-allocator
+  environment by construction; consistent with how the rest of the OS is
+  built.
+  *Against:* this is the one area where "passes its tests" and "is secure" are
+  different sentences. The classic break is a comparison that returns a
+  fraction sooner when the first byte is wrong — an attacker measures the
+  timing and recovers the secret one byte at a time, against code that is
+  perfectly correct. I cannot test my way to confidence here the way I can
+  everywhere else in this project, and that is the honest reason I am asking.
+- **B — Port a vetted implementation for everything.**
+  *What changes:* the tree gains a vendored copy of an established Rust crypto
+  implementation (RustCrypto's, or BearSSL in C), used everywhere; the
+  hand-written copies are deleted.
+  *For:* written to be constant-time on purpose, by people who do only this;
+  and it is what this project's own spec already says to do elsewhere —
+  `design.txt` requires porting battle-tested code for the filesystem rather
+  than writing our own.
+  *Against:* a real dependency to vendor and keep current; more moving parts
+  in the build.
+- **C — Port the primitives, keep our own glue.**
+  *What changes:* the hash, the cipher and the password hash are vendored; the
+  vault file format and the service plumbing on top stay ours.
+  *For:* this is what actual operating systems do, and it puts the borrowed
+  code exactly where writing your own hurts most.
+  *Against:* same dependency cost as B, on a smaller surface.
+
+**Recommendation: C.** The spec's own "port battle-tested code" rule was
+written for the filesystem and applies with more force here, where a bug does
+not crash — it just quietly stops protecting anything.
+
+**If this is never answered:** nothing breaks and nothing is blocked — I will
+still fix the four defects above as far as hand-written primitives allow. But
+the vault stays unauthenticated (an attacker who cannot read it can still
+alter it undetectably), password hashing stays cheap to attack, and every
+further piece of crypto written meanwhile is more work to throw away if the
+answer is later B or C.
+
 ## C-Q4 — [C] Nothing in the system can print. Two half-built printing features exist and neither is connected. Which one should applications talk to? — Status: OPEN
 
 **In short:** There is no way to print anything from this OS today. Two

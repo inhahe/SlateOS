@@ -29931,15 +29931,56 @@ cost of a mismatch is small.
   closes, because a close button that does nothing is worse than an app that
   wanted to stay; an event addressed to another window is counted, not
   dispatched. 19 tests.
+- **(d½) Fold `gui/window` (`oswindow`) onto the protocol — found while starting
+  (e), and it changes (e).** There is already a crate whose stated job is
+  "compositor client for creating windows and receiving events", 1254 lines of
+  it, and **nothing in the tree depends on it** — the same count as `guiremote`
+  had before this work. It is not a client; it is a simulation of one:
+
+  * `Connection::send` calls `simulate_response()`, which pops the request it
+    just pushed and fabricates the reply. Nothing is serialised and no
+    transport is involved.
+  * `WindowBuilder::build` gets its window id from a local
+    `allocate_window_id()` counter, so two processes would confidently use the
+    same id.
+  * `EventLoop::run` — the blocking loop an app is supposed to live in — ends
+    with `// For now, break to avoid infinite loops in tests` and `break`. It
+    runs zero or one iterations.
+  * It declares a *third* event vocabulary, `oswindow::WindowEvent`, parallel
+    to `guitk::event::Event` and the wire `InputEvent`. Three enums for one
+    concept is three translation tables to keep in step.
+
+  This is the band-aid pattern `CLAUDE.md` names: the shape of the right
+  design with the substance stubbed, and the stub is what everything would be
+  written against. The fix is not to leave it beside `guiremote::client` as a
+  second answer — it is to make `oswindow` the app-facing crate *implemented
+  on* `guiremote`: `guitk::event::Event` as the only vocabulary, real frames
+  on a real `Transport`, and any simulation confined to a loopback transport
+  that is named as one.
+
+  **It also exposes a piece this plan never listed.** (a)–(d) cover two
+  directions: render frames out, input frames back. A window cannot be
+  *created* over either. `oswindow`'s `CompositorRequest`/`CompositorResponse`
+  are exactly that missing third message set — create/destroy window, set
+  title, resize, minimise, set cursor, and the replies — and they have no wire
+  encoding at all. So there is a **(c½): give `guiremote` a control frame**,
+  and the count of what is missing between here and a usable desktop was one
+  larger than this entry claimed.
+
 - **(e) Wire `apps/editor` to it** as the first real client, calling
   `ensure_cursor_visible` and `ensure_caret_visible_horizontally` after any
   cursor movement. Its demo `main()` should become an example or a test, not be
-  deleted — it is a compact tour of the model's API.
+  deleted — it is a compact tour of the model's API. **Amended by (d½):** wire
+  it to `oswindow`, not to `guiremote::Client` directly — an app should not
+  name the wire format any more than a Unix program names the socket layer —
+  and do (c½) and (d½) first so the editor is not rewired twice.
 
 **Severity.** High as a *blocker* — it is the single gap between "142 app
 crates" and "an OS with any usable application at all". Low as a *defect*:
 nothing that exists is wrong, it is only unreachable, so the fix is additive
-and nothing has to be unwound first.
+and nothing has to be unwound first — with the one exception found in (d½),
+where `oswindow` is not merely unreachable but actively misleading, and does
+have to be unwound.
 
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 

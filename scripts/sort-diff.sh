@@ -430,11 +430,44 @@ run_stdin '\xff\n\xfe\n' -r
 # bad argument *to* an option, and were missing `--sort`, `--files0-from`,
 # `--random-sort` and `--debug` from the table entirely — so `--d`, which GNU
 # calls ambiguous, silently resolved to `--dictionary-order`.
-run_msg() {
+#
+# ...and it then spent a while measuring the wrong thing, which is worth more
+# than the defects it found. `$GNU` is MSYS2's `sort`, and MSYS2 is a Cygwin
+# derivative: it links `msys-2.0.dll` rather than glibc, and **its getopt is not
+# glibc's**. The two disagree on every message in this section:
+#
+#     command      msys-2.0 (coreutils 8.32)          glibc (coreutils 9.4)
+#     sort -x      unknown option -- x                invalid option -- 'x'
+#     sort --bogus unknown option -- bogus            unrecognized option '--bogus'
+#     sort --s     ambiguous option -- s              option '--s' is ambiguous; …
+#     sort --key   option requires an argument -- key option '--key' requires an argument
+#     sort --rev=x option doesn't take an argument …  option '--rev' doesn't allow an argument
+#
+# So these cases all *passed* while our sort emitted wording no GNU/Linux system
+# has ever printed. A differential harness is only as good as the thing it
+# differs against, and "GNU sort" on this host turned out to be two different
+# programs. The rest of the script is unaffected — the disagreement is confined
+# to getopt — so the fix is not to move the whole harness but to give this one
+# section the reference it actually needs.
+GLIBC=${GLIBC:-"wsl -e env LC_ALL=C sort"}
+if printf 'b\na\n' | $GLIBC >/dev/null 2>&1; then
+  HAVE_GLIBC=yes
+else
+  HAVE_GLIBC=no
+  echo "sort-diff: glibc sort not reachable (tried: $GLIBC)"
+  echo "           -- skipping the option-diagnostic comparisons."
+fi
+
+# Compare stderr and status against a reference. `$1` is the reference command;
+# the option diagnostics use glibc's sort, the `--files0-from` cases below use
+# the local one because their text comes from sort itself and strerror, not from
+# getopt.
+run_msg_against() {
+  local ref="$1"; shift
   local o_err g_err o_rc g_rc
   o_err=$(mktemp); g_err=$(mktemp)
   printf 'a\n' | "$OURS_ABS" "$@" >/dev/null 2>"$o_err"; o_rc=$?
-  printf 'a\n' | "$GNU" "$@" >/dev/null 2>"$g_err"; g_rc=$?
+  printf 'a\n' | $ref "$@" >/dev/null 2>"$g_err"; g_rc=$?
   if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_err" "$g_err"; then
     AGREED=yes
   else
@@ -446,36 +479,103 @@ run_msg() {
   report "sort $* [stderr]"
 }
 
+run_msg() { run_msg_against "$GNU" "$@"; }
+# Skips rather than fails when there is no WSL, so the script still runs on a
+# host that has only the MSYS reference.
+run_getopt() {
+  [ "$HAVE_GLIBC" = yes ] || return 0
+  run_msg_against "$GLIBC" "$@"
+}
+
+# The cases where differing from glibc is the point. `report` is bypassed so a
+# difference counts as expected and, more usefully, so agreement is reported as
+# an XPASS — if we ever stop escaping, this says so instead of going quiet.
+xfail_getopt() {
+  [ "$HAVE_GLIBC" = yes ] || return 0
+  local reason="$1"; shift
+  local o_err g_err o_rc g_rc
+  o_err=$(mktemp); g_err=$(mktemp)
+  printf 'a\n' | "$OURS_ABS" "$@" >/dev/null 2>"$o_err"; o_rc=$?
+  printf 'a\n' | $GLIBC "$@" >/dev/null 2>"$g_err"; g_rc=$?
+  if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_err" "$g_err"; then
+    xpass=$((xpass+1))
+    printf 'XPASS sort %s [stderr]\n  now agrees with glibc, so this reason is stale: %s\n' \
+      "$*" "$reason"
+  else
+    xfail=$((xfail+1))
+    [ -n "${VERBOSE:-}" ] && printf 'XFAIL sort %s [stderr]  (%s)\n' "$*" "$reason"
+  fi
+  rm -f "$o_err" "$g_err"
+  return 0
+}
+
 # Abbreviation: unambiguous ones resolve, ambiguous ones are refused, and an
 # exact match wins even when it is a prefix of a longer option.
-run_msg --rev
-run_msg --r
-run_msg --d
-run_msg --c
-run_msg --che
-run_msg --k
-run_msg --m
-run_msg --s
-run_msg --u
-run_msg --i
-run_msg --z
-run_msg --b
-run_msg --h
-run_msg --v
-run_msg --n
-run_msg --g
-# The four option diagnostics, in the one shape GNU uses for all of them.
-run_msg --bogus
-run_msg -x
-run_msg --rev=x
-run_msg --key
-run_msg -k
-run_msg -o
-run_msg --output
-run_msg --sort
-# argmatch: a bad argument *to* an option lists the valid ones and exits 1.
-run_msg --sort=bogus
-run_msg --check=bogus
+run_getopt --rev
+run_getopt --r
+run_getopt --d
+run_getopt --c
+run_getopt --che
+run_getopt --k
+run_getopt --m
+run_getopt --s
+run_getopt --u
+run_getopt --i
+run_getopt --z
+run_getopt --b
+run_getopt --h
+run_getopt --v
+run_getopt --n
+run_getopt --g
+run_getopt --co
+run_getopt --fie
+run_getopt --stab
+# The ambiguous list is printed in the order the options are *declared*, not
+# alphabetically, so it is a direct readout of GNU's table. An empty prefix
+# matches everything, which makes `--=x` print the whole table in one line and
+# is how that order was measured in the first place.
+run_getopt --=x
+# The five getopt diagnostics. A short option and a long one get different
+# sentences, and the two that resolve to something name the resolution rather
+# than what was typed — `--k` reports `--key`, `--stab=x` reports `--stable`.
+run_getopt -x
+run_getopt -k
+run_getopt -o
+run_getopt --bogus
+run_getopt --fo=bar
+run_getopt --key
+run_getopt --output
+run_getopt --sort
+run_getopt --rev=x
+run_getopt --stab=x
+run_getopt --zero-term=x
+run_getopt --help=x
+run_getopt --version=x
+run_getopt --parallel
+run_getopt --field-separator
+# A byte that is neither an option nor printable. This is the one place we
+# differ from glibc deliberately: glibc writes the byte between two literal `'`
+# and escapes nothing between them, so the diagnostic carries a raw control byte
+# — and for a *long* option, whose name is arbitrary-length, a raw newline, which
+# lets a file called `--fo\nsort: ...` forge a second diagnostic line. We put the
+# name through `quote` instead. Every name a person would type is unaffected,
+# which is what the cases above check.
+xfail_getopt "glibc emits the raw byte; we escape it" -$'\xc3'
+xfail_getopt "glibc emits the raw byte; we escape it" -$'\x01'
+# argmatch: a bad argument *to* an option lists the valid ones and exits 1. It
+# is a prefix match like getopt's, and an ambiguous one is a different sentence
+# from an invalid one — but only when the candidates disagree, which is why
+# `--check=q` resolves while `--check=` does not.
+run_getopt --sort=bogus
+run_getopt --check=bogus
+run_getopt --check=
+run_getopt --sort=
+run_getopt --check=quiets
+run_getopt --sort=NUMERIC
+run_stdin '10\n9\n' --sort=hum
+run_stdin '10\n9\n' --sort=n
+run_stdin 'b\na\n' --check=q
+run_stdin 'b\na\n' --check=d
 # `--files0-from` and its refusals.
 run_msg --files0-from=no-such-list
 printf 'sorted.txt\0' > names0

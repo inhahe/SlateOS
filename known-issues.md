@@ -23105,30 +23105,80 @@ waved through as "probably noise again".
 
 ## TD-FONT-DOES-NOT-READ-VARIATION-STORES
 
-**Status 2026-08-16: steps 1-3 of 4 landed — `fvar`, `avar`, `gvar`, and the
-instance on `ScaledFont`. A variable face now draws at the weight you ask
-for.** The entry stays open; the device-table slot is still declined, and
-correctly so. What exists now is `gui/font/src/var.rs` (axes, named instances,
-user → normalized-F2Dot14, reachable as `Face::variation_axes()`),
-`gui/font/src/gvar.rs` (per-glyph outline deltas, tuple scalars, IUP, phantom
-points, composite component offsets) behind `Face::outline_at`, and
-`ScaledFont::shared_at` / `set_axes` / `set_variations`, which is what makes a
-chosen instance reach the rasterizer.
+**Status 2026-08-17: steps 1-3 and two thirds of step 4 landed — `fvar`,
+`avar`, `gvar`, the instance on `ScaledFont`, and now `HVAR` + `MVAR` through a
+shared `ItemVariationStore` reader (commit `94748f2c0`). A variable face draws
+at the weight you ask for *and is spaced at that weight*.** The entry stays
+open for one reason only: the `GDEF` store — the `VariationIndex` arm this
+entry is named for — is still declined in `device.rs`. What exists now is
+`gui/font/src/var.rs` (axes, named instances, user → normalized-F2Dot14,
+reachable as `Face::variation_axes()`), `gui/font/src/gvar.rs` (per-glyph
+outline deltas, tuple scalars, IUP, phantom points, composite component
+offsets) behind `Face::outline_at`, `gui/font/src/varstore.rs` (regions,
+subtables, `DeltaSetIndexMap`, `Hvar`, `Mvar`) behind `Face::advance_at` /
+`Face::metric_delta` / `Face::metrics_at`, and `ScaledFont::shared_at` /
+`set_axes` / `set_variations`, which is what makes a chosen instance reach the
+rasterizer.
 
 **What is still missing, and what it costs today:**
 
-* **The `ItemVariationStore`, i.e. step 4** — `HVAR`, `MVAR`, and the `GDEF`
-  store this entry is named for. Concretely: **advances do not vary.** A varied
-  glyph is drawn at its varied shape and spaced at its *default* width, which
-  is visibly wrong at the extremes of a weight axis and invisible near the
-  default. `ScaledFont::rasterize_glyph` says so at the call site. Deriving the
-  advance from `gvar`'s phantom points instead would be a second source of
-  truth for one number before either had been checked against a real file, and
-  is not the fix.
+* **The `GDEF` `ItemVariationStore`, i.e. the last third of step 4** — the
+  store this entry is named for, reached from a `GPOS` `VariationIndex` rather
+  than from a glyph id or a metric tag. Concretely: **marks and kerns still
+  position at the default instance.** The reader that will serve it already
+  exists and is proved; what is missing is `Face` parsing `GDEF`'s Offset32
+  (at +14, version 1.3 and later only) and a way to carry the coordinates and
+  a borrow of the store down to `pixel_delta`. See "Proper fix" item 2.
 * **`CFF2`.** A `CFF2` face varies through the charstring interpreter, not
   through `gvar`. No face on this host has one, so it is neither implemented
   nor checkable against a real file. `Face::outline_at` falls back to the
   default outline for a non-`glyf` face rather than pretending.
+
+Six things learned doing the `HVAR`/`MVAR` two thirds of step 4, recorded
+because every one of them bears on the `GDEF` third:
+
+* **What the two new host tests actually measured.**
+  `installed_variable_fonts_vary_their_advances` reads 8 sampled glyphs on each
+  of the 7 variable faces at the default instance and at every named instance,
+  against a table pinned from `gui/font/tools/varstore_oracle.py`: **7 faces
+  read through `HVAR`, 5 of them varying.**
+  `installed_variable_fonts_vary_their_global_metrics` does the same for
+  `hasc`/`hdsc`/`hlgp`: **4 faces read through `MVAR`, all 4 varying.** The two
+  faces that read but do not move are Cascadia Code and Cascadia Mono, whose
+  advances are constant by construction — a monospace face has one width. That
+  is why both tests carry a floor (`>= 5`, `>= 4`) rather than "some face
+  moved": the null implementation passes the equality half.
+* **A null `HVAR` advance-mapping offset means the *implicit* map, not
+  "no variation".** Outer index 0, inner index = the glyph id. Reading it as
+  absent silently spaces the whole face at its default width — and on this host
+  the only two faces that take that path are exactly the two whose advances do
+  not vary, so **no host font can catch the mistake**. It is caught by
+  `a_null_advance_map_means_outer_zero_and_inner_equals_the_glyph_id` in
+  `varstore.rs`'s test module, on a synthetic store.
+* **A delta row is not fixed-width, and getting that wrong misreads every
+  row after the first column.** `wordDeltaCount`'s low 15 bits give the number
+  of leading *wide* columns; bit 15 (`LONG_WORDS`, 0x8000) doubles both widths,
+  so "wide" is `i16` or `i32` and "narrow" is `i8` or `i16` depending on one
+  flag. Both widths and the flag are exercised synthetically; host fonts here
+  use only the narrow-`i8` case.
+* **A region axis with `peak == 0` scores 1, not 0.** It means "this region
+  does not constrain that axis", so it must contribute the identity to the
+  product. Scoring it zero makes every multi-axis face's deltas vanish, which
+  looks exactly like "the font does not vary" and is the single easiest way to
+  write a reader that passes an equality test against nothing.
+* **Degenerate regions are unreachable from any installed font.** `start > peak`,
+  `peak > end`, or a span straddling zero with a non-zero peak all score 1.0
+  following HarfBuzz; measured **0 of 199** region axes on this host, so the
+  synthetic fixture is the only thing that reaches the branch. The oracle
+  deliberately implements the plain spec reading instead and documents the
+  divergence, so the two can never agree by transcription.
+* **Cap-height and x-height are deliberately *not* taken from `MVAR`'s
+  `cpht`/`xhgt`,** even though 4 host faces carry them. They are measured off
+  the varied outline, which is ground truth and is what the non-variable path
+  already does; reading the tag as well would make two things the source of
+  truth for one number. `Face::metrics_at` therefore applies only
+  `hasc`/`hdsc`/`hlgp`. Same reasoning as the advance: `gvar`'s phantom points
+  also know the advance, and `HVAR` is the one that is read.
 
 Four things learned doing steps 2-3, recorded because they bear on step 4:
 
@@ -23227,20 +23277,38 @@ ordering no longer argues for declining the arm; it argues for finishing it.
 **Proper fix.** Steps 1-3 are done: `fvar`/`avar` parse into a normalized
 coordinate vector that lives on `ScaledFont` (not on `Face` — the same parsed
 face must be usable at two instances at once), and `gvar` applies it to the
-outlines. What remains is step 4, in two pieces:
+outlines. What remains is the second half of step 4:
 
-1. **An `ItemVariationStore` reader** — the shared format behind `HVAR`
-   (advances, so a varied glyph is spaced at its varied width), `MVAR` (the
-   `OS/2`/`hhea` metrics), and the `GDEF` store *this* entry indexes into. One
-   reader serves all three; they differ only in how the outer/inner index pair
-   is arrived at (`HVAR` through a `DeltaSetIndexMap` keyed by glyph id,
-   `MVAR` through a value-tag record, `GDEF` from the `VariationIndex`'s own
-   four bytes).
+1. ~~**An `ItemVariationStore` reader**~~ — **done, commit `94748f2c0`.**
+   `gui/font/src/varstore.rs` is the shared format behind `HVAR` (advances, so
+   a varied glyph is spaced at its varied width), `MVAR` (the `OS/2`/`hhea`
+   metrics), and the `GDEF` store *this* entry indexes into. One reader serves
+   all three; they differ only in how the outer/inner index pair is arrived at
+   (`HVAR` through a `DeltaSetIndexMap` keyed by glyph id, `MVAR` through a
+   value-tag record, `GDEF` from the `VariationIndex`'s own four bytes). The
+   first two are wired; `VarStore::delta` takes the pair directly and is
+   already what the third needs.
 2. **Coordinates at the `Ppem` boundary** — give `Ppem` a sibling that carries
    the normalized coordinates and a borrow of the store, so `pixel_delta` can
    dispatch on `deltaFormat` and *compute* the `0x8000` arm instead of
    returning zero for it. Then delete the decline, and the "What is not here"
    paragraph in `device.rs`'s module doc that names this entry.
+
+   Two things to get right in that piece, both found while planning it:
+
+   * **A `VariationIndex` delta is in font design units, not pixels.** A real
+     device table stores a *pixel* correction, which is why `Ppem::delta` runs
+     its result through `to_font_units`. HarfBuzz's `VariationDevice::get_x_delta`
+     instead scales the store's value by `em_scalef_x`, i.e. treats it as
+     already being in design units. So the new arm must **bypass**
+     `to_font_units` — and, consequently, it applies at `Ppem::NONE` too,
+     where a device table correctly contributes nothing. A reader that routes
+     both arms through the same conversion is wrong twice: wrong magnitude,
+     and silently zero whenever the caller did not supply a ppem.
+   * **`Face` must parse the `GDEF` store itself.** The offset is an Offset32
+     at `GDEF` + 14 and exists only from version 1.3; earlier `GDEF`s stop
+     before it, so reading it unconditionally reads whatever follows the
+     header. 6 of this host's 7 variable faces carry one.
 
 `CFF2` stays out of scope until a face on some host actually has one; see the
 missing-pieces list at the top of this entry.

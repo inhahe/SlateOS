@@ -926,8 +926,9 @@ Roadmap:
   lines). Still open, and wanting its own entry: arrow keys move in *logical*
   order, so a caret crossing a direction boundary jumps across the screen
   rather than stepping. Vello itself waits on `[A]`'s GPU driver.
-  **Variable fonts are three quarters done** (§448, §449). Of the four steps
-  `TD-FONT-DOES-NOT-READ-VARIATION-STORES` mandates, the first three have
+  **Variable fonts are all but done** (§448, §449). Of the four steps
+  `TD-FONT-DOES-NOT-READ-VARIATION-STORES` mandates, the first three and two
+  thirds of the fourth have
   landed: `gui/font/src/var.rs` reads `fvar`/`avar` and turns "weight 600" into
   the normalized coordinates the format works in — with HarfBuzz's truncating
   division, bit for bit, because this crate is checked against HarfBuzz
@@ -946,15 +947,27 @@ Roadmap:
   covered instead by a variable font hand-assembled inside `sfnt.rs`'s test
   module, whose axis is arranged so both tested instances have scalars of
   exactly 1.0 and 0.5 and every expected outline is computable on paper with
-  no tolerance. Step 4 is the `ItemVariationStore` — `HVAR` (so advances
-  vary; today a varied glyph is drawn at its varied shape and spaced at its
-  *default* width, deliberately, rather than making `gvar`'s phantoms a second
-  source of truth for one number), `MVAR`, and the `GDEF` store the entry is
-  named for, which then un-declines `device.rs`'s `VariationIndex` arm. That
-  arm is now more urgent than when it was filed: it used to be invisible
-  because the outlines were the default instance's too, and step 3 removed
-  that cover, so a heavy instance currently puts its accents where the light
-  glyph's anchors were.
+  no tolerance. Step 4 is the `ItemVariationStore`, and its shared reader now
+  exists: `gui/font/src/varstore.rs` (regions, subtables, `DeltaSetIndexMap`)
+  serves `HVAR` behind `Face::advance_at` — every advance `ScaledFont` takes
+  now varies, so a glyph is spaced at the width it is drawn at, from `HVAR`
+  rather than from `gvar`'s phantoms, which would have been a second source of
+  truth for one number — and `MVAR` behind `Face::metrics_at`, which moves
+  ascender/descender/line-gap. Cap-height and x-height are *not* read from
+  `MVAR` even though 4 faces carry them: they stay measured off the varied
+  outline, which is what the non-variable path does and is ground truth.
+  Cross-checked against an independently-written oracle
+  (`tools/varstore_oracle.py`) over every named instance of every host face: 7
+  faces read through `HVAR`, 5 varying; 4 through `MVAR`, all varying. The
+  three paths no installed font reaches — a null advance map meaning the
+  *implicit* map, `LONG_WORDS` doubling both column widths, and a degenerate
+  region scoring 1.0 (0 of 199 region axes here are degenerate) — are covered
+  by synthetic stores instead. What remains is the `GDEF` store the entry is
+  named for, which un-declines `device.rs`'s `VariationIndex` arm. That arm is
+  now more urgent than when it was filed: it used to be invisible because the
+  outlines were the default instance's too, and step 3 removed that cover, so
+  a heavy instance currently puts its accents where the light glyph's anchors
+  were.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

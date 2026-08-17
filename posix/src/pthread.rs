@@ -3385,7 +3385,10 @@ mod tests {
     #[test]
     fn pthread_kill_rejects_the_empty_slot_sentinel() {
         assert_eq!(pthread_kill(SLOT_EMPTY, 0), errno::ESRCH);
-        assert_eq!(pthread_kill(SLOT_EMPTY, crate::signal::SIGTERM), errno::ESRCH);
+        assert_eq!(
+            pthread_kill(SLOT_EMPTY, crate::signal::SIGTERM),
+            errno::ESRCH
+        );
     }
 
     /// The initial thread has no `THREAD_TABLE` slot — only

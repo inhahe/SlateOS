@@ -746,7 +746,9 @@ mod tests {
         set.bits[15] = 1 << 63; // CPU 1023, the highest CPU_SETSIZE allows
         assert_eq!(__sched_cpucount(size_of::<CpuSetT>(), &raw const set), 4);
 
-        let full = CpuSetT { bits: [u64::MAX; 16] };
+        let full = CpuSetT {
+            bits: [u64::MAX; 16],
+        };
         assert_eq!(
             __sched_cpucount(size_of::<CpuSetT>(), &raw const full),
             i32::try_from(CPU_SETSIZE).expect("CPU_SETSIZE fits in i32")
@@ -778,7 +780,9 @@ mod tests {
     /// many CPUs are online, this would disagree.
     #[test]
     fn test_cpucount_agrees_with_sched_getaffinity() {
-        let mut set = CpuSetT { bits: [0xffff_ffff_ffff_ffff; 16] };
+        let mut set = CpuSetT {
+            bits: [0xffff_ffff_ffff_ffff; 16],
+        };
         assert_eq!(
             sched_getaffinity(0, size_of::<CpuSetT>(), &raw mut set),
             0,
@@ -2466,7 +2470,9 @@ mod tests {
             set_rtprio_limit(99);
             drop_cap_sys_nice();
             // SCHED_FIFO's range is [1, 99]; 100 is out of range.
-            let p = SchedParam { sched_priority: 100 };
+            let p = SchedParam {
+                sched_priority: 100,
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);

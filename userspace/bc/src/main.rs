@@ -366,44 +366,24 @@ impl<'a> Lexer<'a> {
         Token::Number(self.slice_from(start).to_string())
     }
 
+    /// Read a string literal.
+    ///
+    /// A `bc` string runs to the very next `"` and holds exactly the bytes
+    /// between the quotes — there is no escape here, not even for the quote
+    /// itself, so `"a\"b"` is the string `a\` followed by the syntax error
+    /// GNU `bc` reports for the stray `b"`. Escapes are a property of
+    /// `print`, not of the literal (see [`Interp::print_escaped`]), which is
+    /// why `"a\nb"` on its own line writes four characters while
+    /// `print "a\nb"` writes three.
     fn read_string(&mut self) -> Token {
         self.advance(); // skip opening "
         let mut s = String::new();
         while let Some(b) = self.peek_byte() {
+            self.advance();
             if b == b'"' {
-                self.advance();
                 break;
             }
-            if b == b'\\' {
-                self.advance();
-                match self.peek_byte() {
-                    Some(b'n') => {
-                        s.push('\n');
-                        self.advance();
-                    }
-                    Some(b't') => {
-                        s.push('\t');
-                        self.advance();
-                    }
-                    Some(b'\\') => {
-                        s.push('\\');
-                        self.advance();
-                    }
-                    Some(b'"') => {
-                        s.push('"');
-                        self.advance();
-                    }
-                    Some(other) => {
-                        s.push('\\');
-                        s.push(other as char);
-                        self.advance();
-                    }
-                    None => break,
-                }
-            } else {
-                s.push(b as char);
-                self.advance();
-            }
+            s.push(b as char);
         }
         Token::StringLit(s)
     }
@@ -1113,9 +1093,13 @@ struct Interpreter {
     last: Decimal,
     /// Whether the math library is loaded (-l flag).
     math_lib: bool,
-    /// Columns before a printed number is broken with a trailing `\`.
-    /// Zero disables the break; see [`bignum::wrap_number`].
-    line_length: usize,
+    /// Digits per line before a printed number is continued with a `\`.
+    ///
+    /// Already converted from `BC_LINE_LENGTH` by [`wrap_chunk`], because the
+    /// two are not the same number: `bc` keeps the backslash *inside* the
+    /// stated width, so `BC_LINE_LENGTH=10` puts 8 digits on a line. Zero
+    /// disables the break; see [`bignum::wrap_number`].
+    wrap_chunk: usize,
     /// When set, output is captured here instead of going to stdout.
     /// Used by tests to verify output without I/O.
     #[cfg(test)]
@@ -1134,7 +1118,7 @@ impl Interpreter {
             obase: 10,
             last: Decimal::zero(),
             math_lib,
-            line_length: line_length_from_env("BC_LINE_LENGTH"),
+            wrap_chunk: line_length_from_env("BC_LINE_LENGTH"),
             #[cfg(test)]
             output_buf: Vec::new(),
         }
@@ -1146,7 +1130,7 @@ impl Interpreter {
     /// `1/3` in a `print` statement and `1/3` on a line of its own from being
     /// written two different ways.
     fn render(&self, val: &Decimal) -> String {
-        bignum::wrap_number(&val.format(self.obase), self.line_length)
+        bignum::wrap_number(&val.format(self.obase), self.wrap_chunk)
     }
 
     /// Output a line (with trailing newline).  In test mode, captured to
@@ -1174,6 +1158,15 @@ impl Interpreter {
             print!("{}", s);
             let _ = io::stdout().flush();
         }
+    }
+
+    /// Report something the program can carry on past, on stderr.
+    ///
+    /// A warning is not a value, so it never goes through `output_str` and is
+    /// not captured in tests: a caller redirecting stdout must not find
+    /// diagnostics mixed into the numbers.
+    fn warn(&self, message: &str) {
+        eprintln!("Runtime warning (func=(main)): {message}");
     }
 
     fn get_var(&self, name: &str) -> Decimal {
@@ -1204,7 +1197,15 @@ impl Interpreter {
                 let v = val.rescale(0);
                 let s = v.digits.to_string_base10();
                 let b = s.trim_start_matches('-').parse::<u32>().unwrap_or(10);
-                if (2..=16).contains(&b) {
+                // There is no upper limit: past sixteen a digit is written as
+                // a decimal group rather than a character (`obase=36; 1295`
+                // is ` 35 35`), so every base has a notation. GNU accepts
+                // 2^30 and clamps anything below two up to two with a warning
+                // on stderr rather than refusing it.
+                if v.is_negative() || b < 2 {
+                    self.warn("obase too small, set to 2");
+                    self.obase = 2;
+                } else {
                     self.obase = b;
                 }
             }
@@ -1271,7 +1272,10 @@ impl Interpreter {
             Stmt::Print(items) => {
                 for item in items {
                     match item {
-                        PrintItem::StringLit(s) => self.output_str(s),
+                        PrintItem::StringLit(s) => {
+                            let text = print_escaped(s);
+                            self.output_str(&text);
+                        }
                         PrintItem::Expr(expr) => {
                             let val = self.eval(expr)?;
                             let formatted = self.render(&val);
@@ -1940,33 +1944,95 @@ impl Interpreter {
     }
 }
 
+/// How many digits `bc` puts on a line, given a `BC_LINE_LENGTH` of `n`.
+///
+/// `bc` counts the continuation backslash against the stated width and then
+/// leaves one column beyond it unused, so `BC_LINE_LENGTH=10` emits nine
+/// columns: eight digits and a `\`. That is one digit narrower than `dc` makes
+/// of the same number, which is why the arithmetic lives in each front-end
+/// rather than in `bignum` (see [`bignum::wrap_number`]).
+///
+/// Below 3 there is no room to make progress, and `bc` stops wrapping entirely
+/// rather than emitting a backslash per digit — as does `BC_LINE_LENGTH=0`,
+/// the documented way for a script to ask for one long number.
+fn wrap_chunk(line_length: usize) -> usize {
+    if line_length < 3 {
+        return 0;
+    }
+    line_length.saturating_sub(2)
+}
+
+/// The output line length, from the environment or the traditional default.
+///
+/// A setting that is not a number is ignored rather than rejected: a malformed
+/// environment should not stop a calculator from calculating.
+fn line_length_from_env(var: &str) -> usize {
+    let stated = env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(bignum::DEFAULT_LINE_LENGTH);
+    wrap_chunk(stated)
+}
+
+/// Apply `print`'s escape table to a string literal.
+///
+/// Only `print` interprets escapes; a bare string statement writes its bytes
+/// as they were typed. This is not a subtlety we invented — it is what GNU
+/// `bc` 1.07.1 does, and `scripts/calc-diff.sh` compares against it:
+///
+/// | source | `print "…"` | `"…"` alone |
+/// |---|---|---|
+/// | `a\nb` | `a`, newline, `b` | `a`, `\`, `n`, `b` |
+/// | `a\\b` | `a\b` | `a\\b` |
+///
+/// An escape that is not in the table takes *both* characters with it —
+/// `print "a\vb"` writes `ab`, not `a\vb` — as does a backslash with nothing
+/// after it. That is deliberate on GNU's part (it is how `\` at end of line
+/// continues a string) and a program that relies on an unknown escape
+/// surviving would break differently on the two implementations, so we match
+/// it rather than improve on it.
+fn print_escaped(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('a') => out.push('\x07'),
+            Some('b') => out.push('\x08'),
+            Some('f') => out.push('\x0c'),
+            Some('n') => out.push('\n'),
+            // `\q` is bc's way of writing a quote, since the lexer ends a
+            // string at the first unescaped `"` and there is no escaped one.
+            Some('q') => out.push('"'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            // Both characters are dropped: an unknown escape, and a trailing
+            // backslash with nothing to escape.
+            Some(_) | None => {}
+        }
+    }
+    out
+}
+
 /// Whether a bare expression statement prints nothing of its own.
 ///
 /// bc echoes the value of any expression written as a statement, *except* an
 /// assignment (which is silent, so that `x = 1` does not print) and a string
 /// literal (which writes its own text and has no value to echo).
-/// The output line length, from the environment or the traditional default.
 ///
-/// A value of 0 turns the line break off, which is the documented way for a
-/// script to get one long number instead of a continued one. A setting that is
-/// not a number is ignored rather than rejected: a malformed environment
-/// should not stop a calculator from calculating.
-fn line_length_from_env(var: &str) -> usize {
-    env::var(var)
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(bignum::DEFAULT_LINE_LENGTH)
-}
-
+/// `++`/`--` are *not* assignments for this purpose: GNU `bc` prints `10` for
+/// `x = 10; x++` and `11` for `x = 10; ++x`, which falls straight out of each
+/// operator's value once the statement is allowed to echo at all. Only a real
+/// `=` is silent, so `y = x++` prints nothing while `x++` prints the old `x`.
 fn suppresses_auto_print(expr: &Expr) -> bool {
     matches!(
         expr,
         Expr::Assign(_, _)
             | Expr::OpAssign(_, _, _)
-            | Expr::PreInc(_)
-            | Expr::PreDec(_)
-            | Expr::PostInc(_)
-            | Expr::PostDec(_)
             // A bare string statement -- `"hello"` -- writes the string and
             // nothing else. Evaluating it returns zero for want of anything
             // better, and printing that zero as well made every string
@@ -2254,21 +2320,60 @@ mod tests {
         assert_eq!(output, vec!["3.33333"]);
     }
 
+    // `++`/`--` written as a statement *do* echo, unlike `=`. The two tests
+    // below used to assert that they were silent, which is what GNU bc
+    // 1.07.1 disagrees with: `x=5; x++; x` prints `5` then `6`.
     #[test]
     fn test_increment() {
-        let output = capture_output("x=5\nx++\nx");
-        // x++ returns 5 (post-increment), then x is 6
-        assert_eq!(output, vec!["6"]);
+        // `x++` echoes the value before the increment, then `x` is 6.
+        assert_eq!(capture_output("x=5\nx++\nx"), vec!["5", "6"]);
+        assert_eq!(capture_output("x=5\nx--\nx"), vec!["5", "4"]);
     }
 
     #[test]
     fn test_pre_increment() {
-        let _output = capture_output("x=5\n++x");
-        // ++x returns 6 (pre-increment)
-        // But ++x is an assignment expr so it doesn't auto-print.
-        // x is now 6, check via bare expression.
-        let output2 = capture_output("x=5\n++x\nx");
-        assert_eq!(output2, vec!["6"]);
+        // `++x` echoes the value after the increment.
+        assert_eq!(capture_output("x=5\n++x\nx"), vec!["6", "6"]);
+        assert_eq!(capture_output("x=5\n--x\nx"), vec!["4", "4"]);
+    }
+
+    #[test]
+    fn an_increment_inside_an_assignment_stays_silent() {
+        // Only the outermost operator decides: `=` is silent even though the
+        // `++` it wraps would have echoed on its own.
+        assert_eq!(capture_output("x=5\ny=x++\ny\nx"), vec!["5", "6"]);
+    }
+
+    #[test]
+    fn a_bare_string_statement_does_not_interpret_escapes() {
+        // Escapes belong to `print`, not to the literal. GNU bc writes four
+        // characters for `"a\nb"` on its own line and three for the same
+        // string given to `print`.
+        assert_eq!(capture_output("\"a\\nb\""), vec!["a\\nb"]);
+        assert_eq!(capture_output("print \"a\\nb\""), vec!["a\nb"]);
+        // `\q` is the only way to get a quote out, since the lexer ends a
+        // string at the very next `"`.
+        assert_eq!(capture_output("print \"a\\qb\""), vec!["a\"b"]);
+        // An escape that is not in the table takes both characters with it.
+        assert_eq!(capture_output("print \"a\\vb\""), vec!["ab"]);
+        assert_eq!(capture_output("print \"a\\\\b\""), vec!["a\\b"]);
+    }
+
+    #[test]
+    fn a_base_above_sixteen_prints_digits_as_decimal_groups() {
+        // Measured against GNU bc 1.07.1; see `Decimal::format_grouped`.
+        assert_eq!(capture_output("obase=36\n1295"), vec![" 35 35"]);
+        assert_eq!(capture_output("obase=36\n1"), vec![" 01"]);
+        assert_eq!(capture_output("obase=36\n0"), vec!["0"]);
+        assert_eq!(capture_output("obase=36\n-1295"), vec!["- 35 35"]);
+        assert_eq!(capture_output("obase=100\n12345"), vec![" 01 23 45"]);
+        assert_eq!(capture_output("obase=17\n255"), vec![" 15 00"]);
+        assert_eq!(capture_output("obase=1000\n999999"), vec![" 999 999"]);
+        // The `.` stands in for the first fractional digit's space.
+        assert_eq!(
+            capture_output("scale=4\nobase=20\n1/2"),
+            vec![".10 00 00 00"]
+        );
     }
 
     // --- Function definition tests ---
@@ -2580,5 +2685,47 @@ s
         // exactly `scale` places -- `.125` padded to five, not trimmed to three.
         let output = capture_output("scale=5\n2^-3");
         assert_eq!(output, vec![".12500"]);
+    }
+
+    #[test]
+    fn the_stated_line_length_leaves_a_column_beyond_the_backslash() {
+        // Measured against GNU bc 1.07.1: `BC_LINE_LENGTH=10` emits nine
+        // columns, eight digits and a `\`, and the default 70 gives 68 digits.
+        // GNU *dc* puts one more on each line from the same source tarball,
+        // which is why this conversion lives here and not in `bignum`.
+        assert_eq!(wrap_chunk(10), 8);
+        assert_eq!(wrap_chunk(70), 68);
+        assert_eq!(wrap_chunk(4), 2);
+        assert_eq!(wrap_chunk(3), 1);
+        // Below 3, GNU bc stops wrapping rather than emitting a backslash per
+        // digit -- `BC_LINE_LENGTH=2` prints 2^40 on one line.
+        assert_eq!(wrap_chunk(2), 0);
+        assert_eq!(wrap_chunk(1), 0);
+        assert_eq!(wrap_chunk(0), 0);
+    }
+
+    #[test]
+    fn a_long_number_is_continued_at_the_width_bc_uses() {
+        // End to end through `render`, at the default width: 2^1000 is 302
+        // digits, so four lines of 68 and a last of 30, each continued line 69
+        // columns wide including the backslash. Verified against GNU bc.
+        let interp = Interpreter::new(false);
+        let value = Decimal::parse("2", 10)
+            .pow(&Decimal::parse("1000", 10), 0)
+            .expect("2^1000");
+        let rendered = interp.render(&value);
+        let lines: Vec<&str> = rendered.split('\n').collect();
+        assert_eq!(lines.len(), 5);
+        for line in lines.iter().take(4) {
+            assert_eq!(line.len(), 69);
+            assert!(line.ends_with('\\'));
+        }
+        assert_eq!(lines[4].len(), 30);
+        let rejoined: String = lines
+            .iter()
+            .map(|l| l.strip_suffix('\\').unwrap_or(l))
+            .collect();
+        assert_eq!(rejoined.len(), 302);
+        assert!(rejoined.ends_with("069376"));
     }
 }

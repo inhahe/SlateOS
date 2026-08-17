@@ -39,50 +39,61 @@
 
 use crate::{BigInt, digit_to_char};
 
-/// How many columns a line of calculator output occupies before it is broken.
+/// The traditional line length for calculator output: a terminal of the era.
 ///
-/// POSIX requires `bc` to split a number too long for a line, and the
-/// traditional width is 70 — a terminal of the era, less nothing. The break
-/// itself costs a column, so 69 digits are followed by a `\` to reach 70.
+/// It is the value of `BC_LINE_LENGTH`/`DC_LINE_LENGTH`, *not* the number of
+/// digits that fit on a line — see [`wrap_number`], which takes the latter,
+/// because `bc` and `dc` disagree about how to get from one to the other.
 pub const DEFAULT_LINE_LENGTH: usize = 70;
 
-/// Break a rendered number across lines the way `bc` and `dc` have always done.
+/// Break a rendered number every `chunk` characters, continuing with `\`.
 ///
 /// A 300-digit answer arrives as five lines, the first four ending in `\`:
 /// backslash-newline is the continuation the shell and every other reader of
 /// `bc`'s output already understands, and it is what makes the output
 /// re-readable as a single number.
 ///
-/// `line_length` of 0 disables the wrap entirely, which is what
-/// `BC_LINE_LENGTH=0` is for and the only way a script gets one long line.
-/// Anything below 2 is treated the same way, since a line with no room for a
-/// digit beside the `\` could never terminate.
+/// # Why this takes a chunk width rather than a line length
+///
+/// Because `bc` and `dc` — the same program, from the same source tarball —
+/// answer that question differently, and both answers are observable:
+///
+/// | | `LINE_LENGTH=10` emits | chunk | wrap off below |
+/// |---|---|---|---|
+/// | `bc` | `12345678\` — 9 columns | `L - 2` | `L = 3` |
+/// | `dc` | `123456789\` — 10 columns | `L - 1` | `L = 2` |
+///
+/// So `bc` treats the length as a column the backslash may not reach and `dc`
+/// treats it as one it may. Encoding either rule here would silently impose it
+/// on the other front-end; each computes its own `chunk` and this function
+/// keeps no opinion. A `chunk` of 0 means no wrapping, which is what
+/// `BC_LINE_LENGTH=0` asks for and the only way a script gets one long line.
+///
+/// Every character counts toward the width, including a leading `-` or `.`:
+/// `-1/3` at 20 places and `BC_LINE_LENGTH=10` begins `-.333333\`, eight
+/// characters of which only six are digits.
 ///
 /// Only *numbers* go through here. `print "…"` in `bc` and `dc`'s string `p`
 /// emit what the program said, unbroken; inserting a backslash into a string
 /// the user chose would corrupt it.
 #[must_use]
-pub fn wrap_number(text: &str, line_length: usize) -> String {
-    let Some(per_line) = line_length.checked_sub(1).filter(|n| *n >= 1) else {
+pub fn wrap_number(text: &str, chunk: usize) -> String {
+    if chunk == 0 {
         return text.to_string();
-    };
+    }
     let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= per_line {
+    if chars.len() <= chunk {
         return text.to_string();
     }
     // Two bytes of continuation per line after the first; a hint only, so a
     // saturating estimate is as good as an exact one.
-    let continuations = text
-        .len()
-        .checked_div(per_line)
-        .unwrap_or(0)
-        .saturating_mul(2);
+    let continuations = text.len().checked_div(chunk).unwrap_or(0).saturating_mul(2);
     let mut out = String::with_capacity(text.len().saturating_add(continuations));
-    for (i, chunk) in chars.chunks(per_line).enumerate() {
+    for (i, piece) in chars.chunks(chunk).enumerate() {
         if i > 0 {
             out.push_str("\\\n");
         }
-        out.extend(chunk.iter());
+        out.extend(piece.iter());
     }
     out
 }
@@ -602,6 +613,9 @@ impl Decimal {
         if obase == 10 {
             return self.format_base10();
         }
+        if obase > MAX_CHAR_BASE {
+            return self.format_grouped(obase);
+        }
         let int_val = self.rescale(0);
         if self.scale == 0 {
             return int_val.digits.to_str_radix(obase);
@@ -630,6 +644,75 @@ impl Decimal {
             let (q, r) = frac.divmod(&ten_pow);
             let d = q.limbs.first().copied().unwrap_or(0);
             result.push(digit_to_char(d));
+            frac = r;
+        }
+        result
+    }
+
+    /// Render in a base too large to spend one character on a digit.
+    ///
+    /// Above base sixteen the digit characters run out, so both GNU `bc`
+    /// 1.07.1 and GNU `dc` 1.4.1 switch to writing each digit as a *decimal*
+    /// number, zero-padded to the width the largest digit needs and preceded
+    /// by a space. Base 36 writes 1295 as ` 35 35`, base 1000 writes 999999
+    /// as ` 999 999`, and base 17 writes 255 as ` 15 00` — note that 17 does
+    /// *not* get `F0`, so the switch is at 16 exactly and is about the
+    /// notation, not about whether letters would suffice.
+    ///
+    /// Three details that are easy to get wrong, all measured:
+    ///
+    /// - The space belongs *to* each digit rather than sitting between
+    ///   digits, so the output begins with one: base 36 writes 1 as ` 01`.
+    /// - A `.` takes the place of the first fractional digit's space, which
+    ///   is why `scale=4; obase=20; 1/2` is `.10 00 00 00` and not
+    ///   `. 10 00 00 00`.
+    /// - Zero is plain `0`, and a value under one has no integer group at
+    ///   all — the same rules base ten follows.
+    #[must_use]
+    fn format_grouped(&self, obase: u32) -> String {
+        if self.digits.is_zero() {
+            return "0".to_string();
+        }
+        let width = decimal_width(obase.saturating_sub(1));
+        let base_big = BigInt::from_i64(i64::from(obase));
+        let int_val = self.rescale(0);
+
+        let mut result = String::new();
+        if self.is_negative() {
+            result.push('-');
+        }
+
+        // Integer digits, least significant first, then reversed: division is
+        // the only way round, since a digit of a large base is not a substring
+        // of the decimal mantissa.
+        let mut magnitude = int_val.digits.clone();
+        magnitude.negative = false;
+        let mut groups: Vec<u32> = Vec::new();
+        while !magnitude.is_zero() {
+            let (q, r) = magnitude.divmod(&base_big);
+            // The remainder is below the base, so it is one limb.
+            groups.push(r.limbs.first().copied().unwrap_or(0));
+            magnitude = q;
+        }
+        for digit in groups.iter().rev() {
+            result.push(' ');
+            push_padded(&mut result, *digit, width);
+        }
+
+        if self.scale == 0 {
+            return result;
+        }
+        result.push('.');
+        let ten_pow = ten_to_the(self.scale);
+        let mut frac = self.sub(&int_val.rescale(self.scale)).abs().digits;
+        for place in 0..self.scale {
+            frac = frac.mul(&base_big);
+            let (q, r) = frac.divmod(&ten_pow);
+            let digit = q.limbs.first().copied().unwrap_or(0);
+            if place > 0 {
+                result.push(' ');
+            }
+            push_padded(&mut result, digit, width);
             frac = r;
         }
         result
@@ -704,6 +787,34 @@ impl Decimal {
     pub fn is_negligible(&self, working_scale: usize) -> bool {
         self.is_zero() || self.abs().rescale(working_scale).digits.is_zero()
     }
+}
+
+/// The largest output base whose digits each fit in one character.
+///
+/// `0`–`9` and `A`–`F`. Above this both GNU calculators change notation
+/// entirely — see [`Decimal::format_grouped`] — rather than carrying on
+/// through `G`–`Z`, which is why this is 16 and not 36 even though
+/// [`digit_to_char`] can name a digit as far as 35.
+pub const MAX_CHAR_BASE: u32 = 16;
+
+/// How many decimal digits it takes to write `n`.
+fn decimal_width(n: u32) -> usize {
+    let mut width = 1usize;
+    let mut rest = n / 10;
+    while rest > 0 {
+        width = width.saturating_add(1);
+        rest /= 10;
+    }
+    width
+}
+
+/// Append `digit` in decimal, zero-padded on the left to `width`.
+fn push_padded(out: &mut String, digit: u32, width: usize) {
+    let text = digit.to_string();
+    for _ in text.len()..width {
+        out.push('0');
+    }
+    out.push_str(&text);
 }
 
 /// `10^n` as a `BigInt`.
@@ -1034,10 +1145,12 @@ mod tests {
 
     #[test]
     fn a_long_number_is_continued_with_a_trailing_backslash() {
-        // 69 digits beside the `\` makes 70 columns, the traditional width.
+        // 69 digits beside the `\` makes 70 columns, which is what `dc` emits
+        // at its default width. (`bc` puts 68 there; the difference lives in
+        // the front-ends, which is why this function takes the chunk itself.)
         let n = d("2").pow(&d("1000"), 0).unwrap().format_base10();
         assert_eq!(n.len(), 302);
-        let wrapped = wrap_number(&n, DEFAULT_LINE_LENGTH);
+        let wrapped = wrap_number(&n, 69);
         let lines: Vec<&str> = wrapped.split('\n').collect();
         assert_eq!(lines.len(), 5);
         for line in lines.iter().take(4) {
@@ -1057,20 +1170,24 @@ mod tests {
 
     #[test]
     fn a_number_that_fits_is_left_alone_and_zero_disables_the_wrap() {
-        // 61 digits: shorter than the 69 a continued line carries.
+        // 61 digits: shorter than the 69 a continued `dc` line carries.
         let short = d("2").pow(&d("200"), 0).unwrap().format_base10();
         assert_eq!(short.len(), 61);
-        assert_eq!(wrap_number(&short, DEFAULT_LINE_LENGTH), short);
-        // Exactly 69 is the last width that does not wrap; 70 is the first
-        // that does. Off-by-one here would be invisible in ordinary use.
+        assert_eq!(wrap_number(&short, 69), short);
+        // A chunk is the last width that does not wrap; one more is the first
+        // that does. Off-by-one here would be invisible in ordinary use — and
+        // was in fact wrong for `bc` until both tools were run side by side.
         let sixty_nine = "1".repeat(69);
-        assert_eq!(wrap_number(&sixty_nine, 70), sixty_nine);
+        assert_eq!(wrap_number(&sixty_nine, 69), sixty_nine);
         let seventy = "1".repeat(70);
-        assert_eq!(wrap_number(&seventy, 70), format!("{sixty_nine}\\\n1"));
-        // `BC_LINE_LENGTH=0` means one long line, however long it is.
+        assert_eq!(wrap_number(&seventy, 69), format!("{sixty_nine}\\\n1"));
+        // A chunk of 0 means one long line, however long it is — what the
+        // front-ends pass for `BC_LINE_LENGTH=0`.
         let long = d("2").pow(&d("1000"), 0).unwrap().format_base10();
         assert_eq!(wrap_number(&long, 0), long);
-        assert_eq!(wrap_number(&long, 1), long);
+        // A chunk of 1 really does emit one character per line: it is the
+        // front-end's job to decide that a width that small means "off".
+        assert_eq!(wrap_number("123", 1), "1\\\n2\\\n3");
     }
 
     #[test]

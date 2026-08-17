@@ -68,6 +68,13 @@ pub use keymap::{ModifierState, key_for_scancode};
 // Remote draw-command streaming uses the shared `guiremote` crate's scene
 // protocol (multi-window deltas built on its single-window RenderCommand wire
 // codec), rather than a compositor-local duplicate.
+// The cursor shape a client asks for and the cursor shape the compositor
+// displays were two separate enums that had to agree, and did not: the wire
+// one carried `Help` and the compositor's did not, so a client asking for a
+// context-help cursor got silently nothing. There is one type now, and it is
+// the wire's — the compositor is the end of that pipe, not a parallel
+// vocabulary for the same thing.
+pub use guiremote::control::CursorShape;
 use guiremote::control::WindowSpec;
 use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
 
@@ -387,24 +394,6 @@ pub enum InputEvent {
     TextInput { text: String },
 }
 
-/// Cursor shape the compositor should display.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CursorShape {
-    #[default]
-    Arrow,
-    ResizeNS,
-    ResizeEW,
-    ResizeNESW,
-    ResizeNWSE,
-    Text,
-    Hand,
-    Move,
-    Wait,
-    Crosshair,
-    NotAllowed,
-    Hidden,
-}
-
 // ---------------------------------------------------------------------------
 // Window
 // ---------------------------------------------------------------------------
@@ -475,6 +464,14 @@ pub struct Window {
     pub min_size: Option<(u32, u32)>,
     /// Largest client area the window may be resized to, if it named one.
     pub max_size: Option<(u32, u32)>,
+    /// The cursor this window asks for while the pointer is over its client
+    /// area.
+    ///
+    /// Per-window, not global: the shape belongs to what is under the pointer.
+    /// A text editor setting an I-beam must not change the cursor over the
+    /// file manager next to it, which is exactly what a single compositor-wide
+    /// shape did — any client could repaint the desktop cursor from anywhere.
+    pub cursor: CursorShape,
 }
 
 impl Window {
@@ -511,6 +508,7 @@ impl Window {
             transparent: spec.transparent,
             min_size: spec.min_size,
             max_size: spec.max_size,
+            cursor: CursorShape::Arrow,
         }
     }
 
@@ -3150,6 +3148,24 @@ impl Compositor {
         Ok(())
     }
 
+    /// Set the cursor a window asks for over its own client area.
+    ///
+    /// Takes effect on screen immediately only if the pointer is already over
+    /// that window; otherwise it is remembered and applies when the pointer
+    /// arrives. A client cannot move the cursor it is not under — which is the
+    /// point, since the previous global assignment let any client repaint the
+    /// desktop cursor from anywhere on the desktop.
+    pub fn set_cursor(&mut self, window_id: WindowId, cursor: CursorShape) -> CompositorResult<()> {
+        let window = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        window.cursor = cursor;
+
+        let (x, y) = (self.cursor_x, self.cursor_y);
+        self.update_cursor_shape(x, y);
+        Ok(())
+    }
+
     /// Set a window's opacity.
     pub fn set_opacity(&mut self, window_id: WindowId, opacity: f32) -> CompositorResult<()> {
         let window = self
@@ -3611,37 +3627,55 @@ impl Compositor {
         }
     }
 
-    /// Update the cursor shape based on what's under the cursor.
-    fn update_cursor_shape(&mut self, x: i32, y: i32) {
-        // Check if we're on a window border (resize cursor).
+    /// What cursor belongs at this point on the desktop.
+    ///
+    /// Resolution order, topmost window first: a resize border wins over
+    /// everything (it is the compositor's own affordance, and a client cannot
+    /// know the pointer is on it); then the client area shows whatever shape
+    /// that window asked for; then the rest of the frame — title bar, buttons
+    /// — is always an arrow, because those are the compositor's, not the
+    /// client's. Off every window it is the desktop's arrow.
+    ///
+    /// A window's requested shape applies only where that window is, which is
+    /// the whole reason the shape is stored per window: a client asking for an
+    /// I-beam is describing its own text field, not seizing the desktop.
+    fn cursor_at(&self, x: i32, y: i32) -> CursorShape {
         for &window_id in self.z_stack.iter().rev() {
-            if let Some(win) = self.window_ref(window_id) {
-                if !win.visible || win.minimized {
-                    continue;
-                }
-                if let Some(mode) = self.detect_border_drag(win, x, y) {
-                    self.cursor_shape = match mode {
-                        DragMode::ResizeLeft | DragMode::ResizeRight => CursorShape::ResizeEW,
-                        DragMode::ResizeTop | DragMode::ResizeBottom => CursorShape::ResizeNS,
-                        DragMode::ResizeTopLeft | DragMode::ResizeBottomRight => {
-                            CursorShape::ResizeNWSE
-                        }
-                        DragMode::ResizeTopRight | DragMode::ResizeBottomLeft => {
-                            CursorShape::ResizeNESW
-                        }
-                        DragMode::MoveWindow => CursorShape::Move,
-                    };
-                    return;
-                }
-                if win.outer_rect().contains(x, y) {
-                    // Inside a window area but not on a border.
-                    self.cursor_shape = CursorShape::Arrow;
-                    return;
-                }
+            let Some(win) = self.window_ref(window_id) else {
+                continue;
+            };
+            if !win.visible || win.minimized {
+                continue;
+            }
+            if let Some(mode) = self.detect_border_drag(win, x, y) {
+                return match mode {
+                    DragMode::ResizeLeft | DragMode::ResizeRight => CursorShape::ResizeEW,
+                    DragMode::ResizeTop | DragMode::ResizeBottom => CursorShape::ResizeNS,
+                    DragMode::ResizeTopLeft | DragMode::ResizeBottomRight => {
+                        CursorShape::ResizeNWSE
+                    }
+                    DragMode::ResizeTopRight | DragMode::ResizeBottomLeft => {
+                        CursorShape::ResizeNESW
+                    }
+                    DragMode::MoveWindow => CursorShape::Move,
+                };
+            }
+            if win.client_rect().contains(x, y) {
+                return win.cursor;
+            }
+            if win.outer_rect().contains(x, y) {
+                // On the frame but not on a resize edge: the title bar and its
+                // buttons are the compositor's furniture.
+                return CursorShape::Arrow;
             }
         }
         // Over the desktop background.
-        self.cursor_shape = CursorShape::Arrow;
+        CursorShape::Arrow
+    }
+
+    /// Recompute the displayed cursor for a pointer at this position.
+    fn update_cursor_shape(&mut self, x: i32, y: i32) {
+        self.cursor_shape = self.cursor_at(x, y);
     }
 
     // -----------------------------------------------------------------------
@@ -4378,9 +4412,13 @@ impl Compositor {
                     },
                 }
             }
-            CompositorRequest::SetCursor { cursor, .. } => {
-                self.cursor_shape = cursor;
-                CompositorResponse::Ok
+            CompositorRequest::SetCursor { window_id, cursor } => {
+                match self.set_cursor(window_id, cursor) {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
             }
             CompositorRequest::SetOpacity { window_id, opacity } => {
                 match self.set_opacity(window_id, opacity) {
@@ -5444,6 +5482,69 @@ mod tests {
         let win = comp.window_ref(id).expect("window");
         assert_eq!((win.x, win.y), (0, 0));
         assert_eq!((win.width, win.height), (800, 600));
+    }
+
+    #[test]
+    fn a_cursor_a_client_asks_for_applies_only_over_that_client() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+
+        let mut left = WindowSpec::new("Editor", 200, 150);
+        left.position = Some((50, 200));
+        let left_id = comp.create_window_from_spec(&left, 1);
+
+        let mut right = WindowSpec::new("Files", 200, 150);
+        right.position = Some((400, 200));
+        let right_id = comp.create_window_from_spec(&right, 2);
+
+        comp.set_cursor(left_id, CursorShape::Text).expect("cursor");
+
+        // Over the editor: the I-beam it asked for.
+        assert_eq!(comp.cursor_at(100, 250), CursorShape::Text);
+        // Over the file manager, which asked for nothing: still an arrow. The
+        // bug this replaces set one global shape, so the editor's I-beam
+        // showed here too.
+        assert_eq!(comp.cursor_at(450, 250), CursorShape::Arrow);
+        // Over the desktop: an arrow.
+        assert_eq!(comp.cursor_at(700, 500), CursorShape::Arrow);
+
+        // And a second client's request does not disturb the first's.
+        comp.set_cursor(right_id, CursorShape::Hand)
+            .expect("cursor");
+        assert_eq!(comp.cursor_at(100, 250), CursorShape::Text);
+        assert_eq!(comp.cursor_at(450, 250), CursorShape::Hand);
+    }
+
+    #[test]
+    fn the_compositors_own_furniture_keeps_its_own_cursor() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Editor", 200, 150);
+        spec.position = Some((100, 200));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.set_cursor(id, CursorShape::Text).expect("cursor");
+
+        let win = comp.window_ref(id).expect("window").clone();
+        let bar = win.title_bar_rect().expect("decorated");
+        // The title bar is the compositor's, not the client's: the client's
+        // I-beam must not follow the pointer onto it.
+        assert_eq!(comp.cursor_at(bar.x + 4, bar.y + 4), CursorShape::Arrow);
+        // The left border is a resize affordance, which outranks everything.
+        assert_eq!(comp.cursor_at(win.x - 1, win.y + 10), CursorShape::ResizeEW);
+    }
+
+    #[test]
+    fn setting_a_cursor_takes_effect_under_the_pointer_without_moving_it() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Editor", 200, 150);
+        spec.position = Some((100, 200));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        comp.handle_mouse_move(150, 250);
+        assert_eq!(comp.cursor_shape(), CursorShape::Arrow);
+
+        // The pointer is already inside the window; a client switching to an
+        // I-beam should not require the user to jiggle the mouse to see it.
+        comp.set_cursor(id, CursorShape::Text).expect("cursor");
+        assert_eq!(comp.cursor_shape(), CursorShape::Text);
     }
 
     #[test]

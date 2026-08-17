@@ -3866,3 +3866,91 @@ fn installed_variable_fonts_vary_their_global_metrics() {
     );
     println!("{checked} faces read through MVAR, {faces_that_move} of them varying");
 }
+
+/// A `GPOS` kern whose correction is a `VariationIndex` follows the instance.
+///
+/// A `Device` slot in a value record holds one of two tables. A device table is
+/// indexed by pixel size; a `VariationIndex` names an `(outer, inner)` pair in
+/// `GDEF`'s `ItemVariationStore` and depends on the *instance* instead. Reem
+/// Kufi puts one on 1333 of its cmapped `PairPosFormat1` records, so its kerning
+/// is almost entirely instance-driven: at the default weight the corrections are
+/// all zero and the stored value is the whole answer, and they grow to the full
+/// stored delta at 700.
+///
+/// `kern_across` is the assertion rather than a shaped run, deliberately. A
+/// shaped advance folds in `HVAR`, so a run that moved would not say *which* of
+/// the two variation paths moved it; `kern_across` reads the pair value and
+/// nothing else, so a difference here can only have come through the store.
+///
+/// The font is opened at its own em (1000px) so the scale is exactly 1 and the
+/// numbers below are design units rather than pixels. That also puts the size
+/// far outside any real device table's ppem range, which is the second half of
+/// the isolation: nothing but a `VariationIndex` can contribute at 1000px.
+///
+/// Every pair below carries a nonzero stored value *and* a correction, which is
+/// the arrangement that hides a broken reader: drop the correction and the kern
+/// is still roughly right, so only exact numbers catch it. `w`/`a` is the pair
+/// whose device offset first showed that format 1 measures from its `PairSet`
+/// and not from the subtable — from the subtable its offset decodes as a
+/// format-3 device table claiming to cover 6934..7012 ppem.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn a_variation_index_kern_follows_the_instance() {
+    // (left gid, right gid, [default, wght=550, wght=700]).
+    //
+    // The stored values are -41, -27, -42 and -15; the store adds -9, -3, -18
+    // and -5 at the top of the axis. Weight 550 is exactly half way up Reem
+    // Kufi's 400..700 axis and its one region peaks at the top, so every delta
+    // is halved and then rounded half away from zero: -9 -> -5 rather than -4,
+    // -3 -> -2 rather than -1, -5 -> -3 rather than -2. Truncating, or rounding
+    // half to even, disagrees with three of these four middle entries.
+    let expected: &[(u16, u16, [f32; 3])] = &[
+        (2, 30, [-41.0, -46.0, -50.0]),    // A / C
+        (2, 62, [-27.0, -29.0, -30.0]),    // A / G
+        (2, 69, [-42.0, -51.0, -60.0]),    // A / Hbar
+        (374, 196, [-15.0, -18.0, -20.0]), // w / a
+    ];
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    let Some(path) = files
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some("ReemKufi.ttf"))
+    else {
+        panic!("ReemKufi.ttf is not installed on this host");
+    };
+    let data = fs::read(path).expect("ReemKufi.ttf is readable");
+
+    for (col, weight) in [None, Some(550.0), Some(700.0)].into_iter().enumerate() {
+        let mut font = ScaledFont::from_bytes(data.clone(), 1000.0).expect("ReemKufi scales");
+        assert_eq!(font.units_per_em(), 1000, "the em this test assumes");
+        if let Some(w) = weight {
+            font.set_axes(&[(*b"wght", w)]);
+        }
+        for &(left, right, want) in expected {
+            let got = font.kern_across(left, right, &[]);
+            assert!(
+                (got - want[col]).abs() < 0.001,
+                "{left}/{right} at {weight:?}: kern {got}, expected {}",
+                want[col]
+            );
+        }
+    }
+
+    // And the direction of travel, stated once so a fixture that somehow
+    // pinned three identical columns could not pass: every one of these pairs
+    // must actually move between the two ends of the axis.
+    let mut light = ScaledFont::from_bytes(data.clone(), 1000.0).expect("scales");
+    light.set_axes(&[(*b"wght", 400.0)]);
+    let mut bold = ScaledFont::from_bytes(data, 1000.0).expect("scales");
+    bold.set_axes(&[(*b"wght", 700.0)]);
+    for &(left, right, _) in expected {
+        assert!(
+            light.kern_across(left, right, &[]) != bold.kern_across(left, right, &[]),
+            "{left}/{right} does not move across the weight axis"
+        );
+    }
+    println!("{} Reem Kufi pairs corrected through GDEF's store", expected.len());
+}

@@ -169,14 +169,39 @@ impl BtrfsFs {
             RootItem::parse(path.current_data()?)?
         };
 
-        Ok(Self {
+        let fs = Self {
             src,
             sb,
             map,
             fs_root,
             device: None,
             ops: 0,
-        })
+        };
+
+        // Step 6: the root *directory*, which everything above proves nothing
+        // about. Steps 1-5 end at the FS tree's `ROOT_ITEM`, which lives in the
+        // *root* tree and only says where the FS tree is; not one block of the
+        // FS tree has been touched. A volume whose FS tree root block is
+        // unreadable, stale, or mistranslated by the chunk map therefore
+        // completes every step above and mounts — after which every path
+        // lookup fails. A successful mount is a claim: it publishes a VFS
+        // entry, shadows whatever was at the mount point, and tells callers
+        // the volume is usable. Returning it for a volume with no reachable
+        // root asserts something never checked, and moves the error to a
+        // later call that has nothing obviously to do with the mount. See
+        // `design-decisions.md` §216 Decision 5, which found the identical gap
+        // in F2FS by running its driver against a volume built to be
+        // unreadable.
+        let root = fs.lookup_inode(fs.fs_root.root_dirid)?;
+        if !root.is_dir() {
+            serial_println!(
+                "[btrfs] Root inode {} is not a directory (mode {:#o}).",
+                fs.fs_root.root_dirid,
+                root.mode
+            );
+            return Err(KernelError::CorruptedData);
+        }
+        Ok(fs)
     }
 
     /// Open the Btrfs volume on a named block device.

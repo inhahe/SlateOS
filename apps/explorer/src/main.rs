@@ -668,6 +668,10 @@ impl ExplorerState {
 
     /// Create a new folder.
     pub fn create_folder(&mut self, name: &str) {
+        if let Err(reason) = validate_entry_name(name) {
+            self.status_message = format!("Error creating folder: {reason}");
+            return;
+        }
         let path = self.current_path.join(name);
         match fs::create_dir(&path) {
             Ok(()) => {
@@ -681,18 +685,61 @@ impl ExplorerState {
     }
 
     /// Rename an entry.
+    ///
+    /// # Why this is more than one `fs::rename`
+    ///
+    /// `fs::rename` **overwrites its destination**. Renaming `draft.txt` onto
+    /// an existing `notes.txt` therefore destroyed the notes and reported
+    /// success. Paste already refuses to do that — see [`Self::paste`], which
+    /// runs through the [`fileops`] engine's conflict policy precisely so a
+    /// paste "must never silently destroy a file that is already in the
+    /// destination" — and rename has to hold the same line, for the same
+    /// reason and with the same escape hatch: delete the old file first, which
+    /// is an explicit act.
+    ///
+    /// The name is also validated rather than trusted. `with_file_name` does
+    /// not constrain its result to the same directory, so `../taken.txt`
+    /// renamed the file *out* of the folder being viewed and onto whatever was
+    /// already sitting there — a second way to destroy a file the user never
+    /// selected.
     pub fn rename_entry(&mut self, index: usize, new_name: &str) {
-        if let Some(entry) = self.entries.get(index) {
-            let old_path = &entry.path;
-            let new_path = old_path.with_file_name(new_name);
-            match fs::rename(old_path, &new_path) {
-                Ok(()) => {
-                    self.status_message = format!("Renamed to: {new_name}");
-                    self.load_directory();
-                }
-                Err(e) => {
-                    self.status_message = format!("Rename failed: {e}");
-                }
+        let Some(entry) = self.entries.get(index) else {
+            return;
+        };
+        let old_path = entry.path.clone();
+
+        if let Err(reason) = validate_entry_name(new_name) {
+            self.status_message = format!("Rename failed: {reason}");
+            return;
+        }
+
+        let new_path = old_path.with_file_name(new_name);
+
+        // Renaming something to the name it already has is what pressing Enter
+        // in the rename box does. It is a no-op, not a collision with itself.
+        if new_path == old_path {
+            self.status_message = format!("Renamed to: {new_name}");
+            return;
+        }
+
+        // The gap between this check and the rename is a race, and it is not
+        // closable with `std` alone — there is no portable "rename only if the
+        // destination is free". It is still worth checking: the realistic way
+        // to hit this is the user typing a name they can see in the listing,
+        // not another process creating that exact file inside the intervening
+        // microsecond. `fileops`'s engine makes the same tradeoff.
+        if new_path.exists() && !is_same_file(&old_path, &new_path) {
+            self.status_message = format!("Rename failed: \"{new_name}\" already exists");
+            return;
+        }
+
+        match fs::rename(&old_path, &new_path) {
+            Ok(()) => {
+                self.status_message = format!("Renamed to: {new_name}");
+                self.load_directory();
+            }
+            Err(e) => {
+                self.status_message = format!("Rename failed: {e}");
             }
         }
     }
@@ -934,6 +981,58 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     } else {
         format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+/// Check that `name` is usable as a single entry name in a directory.
+///
+/// The rule the OS itself enforces is "all bytes except `/` and NUL" — see
+/// `design.txt`'s filesystem section — so this deliberately does *not* impose
+/// Windows' extra restrictions on the name's characters. What it does reject
+/// is the set of strings that are not names at all, and whose common property
+/// is that they silently redirect an operation somewhere the user was not
+/// looking:
+///
+/// - `""` — `with_file_name("")` yields the *parent* directory;
+/// - `.` and `..` — resolve to the directory itself and its parent, turning a
+///   rename of a file into an operation on a directory;
+/// - anything containing `/` or `\` — escapes the directory being viewed, so
+///   `../taken.txt` renames the file out of the folder and onto whatever is
+///   there. `\` is included because this app is developed and tested on
+///   Windows, where it is also a separator, and a name that escapes on the
+///   development host is a bug found late.
+/// - anything containing a NUL byte — cannot be passed to the OS at all.
+fn validate_entry_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("the name cannot be empty".to_string());
+    }
+    if name == "." || name == ".." {
+        return Err(format!("\"{name}\" is not a usable name"));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("the name cannot contain a path separator".to_string());
+    }
+    if name.contains('\0') {
+        return Err("the name cannot contain a null byte".to_string());
+    }
+    Ok(())
+}
+
+/// Whether two paths refer to the same file on disk.
+///
+/// Used to tell a real collision apart from a rename that only changes the
+/// spelling of the name. On a case-insensitive filesystem `notes.txt` and
+/// `Notes.txt` are the same file, so `new_path.exists()` is true for a
+/// perfectly legitimate rename; refusing it would make case corrections
+/// impossible on the development host. SlateOS's own filesystem is
+/// case-sensitive, where the two are distinct and `canonicalize` says so.
+///
+/// A path that cannot be canonicalised is reported as *not* the same file,
+/// which makes the caller take the cautious branch and refuse the rename.
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -1299,6 +1398,156 @@ mod tests {
         state.selected_indices = vec![0];
         state.copy_selected();
         assert_eq!(state.status_message, "2 item(s) copied to clipboard");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ------------------------------------------------------------------
+    // Rename and folder creation
+    // ------------------------------------------------------------------
+
+    fn index_of(state: &ExplorerState, name: &str) -> usize {
+        state
+            .entries
+            .iter()
+            .position(|e| e.name == name)
+            .unwrap_or_else(|| panic!("no entry named {name}"))
+    }
+
+    /// `fs::rename` overwrites its destination. Renaming `draft.txt` to
+    /// `notes.txt` when a `notes.txt` is sitting right there therefore
+    /// destroyed the user's notes and reported "Renamed to: notes.txt".
+    ///
+    /// Paste was already fixed for exactly this ("it overwrote an existing
+    /// destination file without asking"); rename kept the bug. The policy has
+    /// to match: never silently destroy, make the user delete first.
+    #[test]
+    fn a_rename_onto_an_existing_file_does_not_destroy_it() {
+        let root = temp_dir("rename_clobber");
+        write(&root.join("notes.txt"), "the notes I care about");
+        write(&root.join("draft.txt"), "a throwaway draft");
+
+        let mut state = state_at(&root);
+        let idx = index_of(&state, "draft.txt");
+        state.rename_entry(idx, "notes.txt");
+
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "the notes I care about",
+            "the existing file must survive"
+        );
+        assert!(root.join("draft.txt").exists(), "the rename must not happen");
+        assert!(
+            state.status_message.contains("already exists"),
+            "the user must be told why: {}",
+            state.status_message
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `with_file_name` does not constrain the result to the same directory,
+    /// so a name of `../taken.txt` renamed the file *out* of the folder the
+    /// user was looking at — and onto whatever was already there.
+    #[test]
+    fn a_rename_cannot_escape_the_current_directory() {
+        let root = temp_dir("rename_escape");
+        let inner = root.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+        write(&inner.join("file.txt"), "inner file");
+        write(&root.join("taken.txt"), "outside file");
+
+        let mut state = state_at(&inner);
+        let idx = index_of(&state, "file.txt");
+        state.rename_entry(idx, "../taken.txt");
+
+        assert_eq!(
+            fs::read_to_string(root.join("taken.txt")).unwrap(),
+            "outside file",
+            "a file outside the directory must not be touched"
+        );
+        assert!(inner.join("file.txt").exists(), "the file must stay put");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The same escape through the folder-creation path.
+    #[test]
+    fn a_new_folder_cannot_escape_the_current_directory() {
+        let root = temp_dir("mkdir_escape");
+        let inner = root.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+
+        let mut state = state_at(&inner);
+        state.create_folder("../escaped");
+
+        assert!(
+            !root.join("escaped").exists(),
+            "a folder must not be created outside the directory being viewed"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An empty name, `.` and `..` are not names. Left unchecked they turn a
+    /// rename into an operation on the directory itself.
+    #[test]
+    fn a_rename_rejects_names_that_are_not_names() {
+        let root = temp_dir("rename_badnames");
+        write(&root.join("file.txt"), "data");
+
+        for bad in ["", ".", "..", "a/b"] {
+            let mut state = state_at(&root);
+            let idx = index_of(&state, "file.txt");
+            state.rename_entry(idx, bad);
+            assert!(
+                root.join("file.txt").exists(),
+                "rename to {bad:?} must not move the file"
+            );
+            assert!(
+                state.status_message.contains("Rename failed"),
+                "rename to {bad:?} must report a failure, got: {}",
+                state.status_message
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Renaming to the name it already has is a no-op the user may well
+    /// trigger by pressing Enter in the rename box. It must not be reported as
+    /// a collision with itself, and must not delete anything.
+    #[test]
+    fn a_rename_to_the_same_name_is_harmless() {
+        let root = temp_dir("rename_noop");
+        write(&root.join("file.txt"), "data");
+
+        let mut state = state_at(&root);
+        let idx = index_of(&state, "file.txt");
+        state.rename_entry(idx, "file.txt");
+
+        assert_eq!(fs::read_to_string(root.join("file.txt")).unwrap(), "data");
+        assert!(
+            !state.status_message.contains("failed"),
+            "a no-op rename is not an error: {}",
+            state.status_message
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A genuine rename still has to work.
+    #[test]
+    fn an_ordinary_rename_still_renames() {
+        let root = temp_dir("rename_ok");
+        write(&root.join("before.txt"), "data");
+
+        let mut state = state_at(&root);
+        let idx = index_of(&state, "before.txt");
+        state.rename_entry(idx, "after.txt");
+
+        assert!(!root.join("before.txt").exists());
+        assert_eq!(fs::read_to_string(root.join("after.txt")).unwrap(), "data");
 
         let _ = fs::remove_dir_all(&root);
     }

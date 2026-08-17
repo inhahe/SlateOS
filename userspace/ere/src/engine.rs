@@ -1,10 +1,10 @@
-//! A small POSIX Extended Regular Expression (ERE) engine for the shell's
-//! `[[ str =~ re ]]` operator.
+//! A small POSIX Extended Regular Expression (ERE) engine.
 //!
-//! ## Why in-tree (not a crate)
-//! `osh` targets `x86_64-slateos` where a heavyweight, `std`-only regex crate is
-//! awkward, and `bash`'s `=~` semantics are POSIX ERE (matched by the C
-//! library's `regexec`) — a focused, dependency-free engine is the right size.
+//! This is the crate's matcher. Its first caller was the shell's
+//! `[[ str =~ re ]]`, whose semantics are POSIX ERE (bash matches it with the C
+//! library's `regexec`); `grep -E`, `sed`, `awk` and `expr` want the same
+//! engine, reached through [`crate::bre`] where the dialect is Basic rather
+//! than Extended. See the crate docs for why they share one.
 //!
 //! ## Why a Pike VM (not backtracking)
 //! Naive recursive backtracking is prone to catastrophic backtracking
@@ -15,7 +15,11 @@
 //! program length, so matching is `O(len(input) × len(program))` with **no**
 //! exponential blow-up. Thread priority (higher-priority = added first, deduped
 //! per step) yields leftmost, greedy submatches — the common expectation for
-//! `=~`.
+//! `=~`, and the behaviour POSIX requires of `grep` and `sed`.
+//!
+//! The ReDoS argument is stronger for the utilities than it was for the shell:
+//! `grep -f patterns.txt` and `sed -f script.sed` take their pattern from a
+//! *file*, so the pattern is as much untrusted input as the subject is.
 //!
 //! ## Supported syntax
 //! `. ^ $`, literals, `\`-escapes (`\.`, `\(`, `\\`, `\n`, `\t`, `\r`, …),
@@ -37,8 +41,20 @@
 //! metacharacter test goes through [`Ch::as_ascii`] and no encoding question
 //! arises in the parser.
 
-use crate::bfmt;
-use crate::bytes::{self, BStr, Ch, Str};
+use crate::ch::{self as bytes, BStr, Ch, Str};
+
+/// Concatenate the pieces of a diagnostic that quotes bytes back.
+///
+/// The shell builds these with its `bfmt!` macro; exactly two messages here
+/// need it and nothing else does, so this crate spells the concatenation out
+/// rather than carrying a macro across a crate boundary for two call sites.
+fn cat(parts: &[BStr<'_>]) -> Str {
+    let mut out = Str::new();
+    for p in parts {
+        out.extend_from_slice(p);
+    }
+    out
+}
 
 /// A compile-time error in an ERE pattern.
 ///
@@ -51,9 +67,35 @@ use crate::bytes::{self, BStr, Ch, Str};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EreError(pub Str);
 
-/// Upper bound on `{m,n}` expansion, to keep the compiled program small and
-/// bound compile-time/memory (POSIX `RE_DUP_MAX` is 255; we allow a bit more).
+/// Upper bound on a *single* `{m,n}` count (POSIX `RE_DUP_MAX` is 255; we allow
+/// a bit more).
+///
+/// This bounds one interval and nothing else. Intervals compose by
+/// multiplication — `(a{1000}){1000}` is a million copies of `a` and
+/// `((a{1000}){1000}){1000}` is a billion — so the thing that actually bounds
+/// compilation is [`MAX_PROG`], not this.
 const MAX_REPEAT: usize = 1000;
+
+/// Upper bound on the size of the compiled program, in instructions.
+///
+/// [`MAX_REPEAT`] alone does not bound anything: repetition counts *multiply*
+/// under nesting, so `((a{1000}){1000}){1000}` asks for ~10⁹ instructions —
+/// tens of gigabytes — from a 24-byte pattern. That is a denial of service in
+/// every caller, and the pattern is not always the operator's own text:
+/// `grep -f patterns.txt` and `sed -f script.sed` read it from a file, and
+/// osh's `[[ $s =~ $re ]]` takes it from a variable. Refusing to compile is the
+/// only answer that stays inside the process.
+///
+/// The cap is also what bounds *matching*, not just compilation: the Pike VM
+/// visits every live instruction at every input position, so the cost of a
+/// search is `O(len(input) × len(prog))`. A program this size is already the
+/// most a caller can force; without the cap there is no upper bound on either
+/// axis.
+///
+/// 65 536 is far above any pattern written to be read — `a{1000}b{1000}` is
+/// 2000 instructions, and a hand-written pattern rarely reaches 100 — and small
+/// enough that the program itself is a couple of megabytes at worst.
+const MAX_PROG: usize = 65_536;
 
 // ---- AST --------------------------------------------------------------------
 
@@ -190,6 +232,18 @@ impl EParser {
         self.chars.get(self.pos).copied()
     }
 
+    /// Consume `n` characters.
+    ///
+    /// Saturating, and every advance in this parser goes through it. The cursor
+    /// only moves past a character [`Self::peek`] returned, so it never leads
+    /// `chars.len()` by more than the two-character `[:`/`:]` step and could not
+    /// overflow — but a parser is exactly where an off-by-one becomes a panic
+    /// deep in someone else's `grep`, and one saturating add per character is
+    /// not a cost worth arguing about.
+    fn bump(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n);
+    }
+
     /// The cursor's character *if it is ASCII*, which is what every syntax test
     /// below asks for: ERE metacharacters are all ASCII, and no byte of a
     /// multi-byte character — decodable or not — can be mistaken for one.
@@ -214,7 +268,7 @@ impl EParser {
             // character is quoted back as its own bytes — it is a slice of the
             // pattern, which need not be text.
             let at = self.peek().map(Ch::to_str).unwrap_or_default();
-            return Err(EreError(bfmt![b"unexpected '", at, b"' in regex"]));
+            return Err(EreError(cat(&[b"unexpected '", &at, b"' in regex"])));
         }
         Ok(node)
     }
@@ -222,7 +276,7 @@ impl EParser {
     fn parse_alt(&mut self) -> Result<Node, EreError> {
         let mut branches = vec![self.parse_concat()?];
         while self.peek_ascii() == Some('|') {
-            self.pos += 1;
+            self.bump(1);
             branches.push(self.parse_concat()?);
         }
         if branches.len() == 1 {
@@ -304,15 +358,15 @@ impl EParser {
     fn parse_quantifier(&mut self) -> Result<Option<(usize, Option<usize>)>, EreError> {
         match self.peek_ascii() {
             Some('*') => {
-                self.pos += 1;
+                self.bump(1);
                 Ok(Some((0, None)))
             }
             Some('+') => {
-                self.pos += 1;
+                self.bump(1);
                 Ok(Some((1, None)))
             }
             Some('?') => {
-                self.pos += 1;
+                self.bump(1);
                 Ok(Some((0, Some(1))))
             }
             Some('{') => self.parse_brace().map(Some),
@@ -327,12 +381,12 @@ impl EParser {
     /// `a{1,2,3}` outright, and only `\{` or `[{]` gets you a literal one.
     fn parse_brace(&mut self) -> Result<(usize, Option<usize>), EreError> {
         let bad = || EreError(b"invalid interval in regex".to_vec());
-        self.pos += 1; // consume '{'
+        self.bump(1); // consume '{'
         let Some(min) = self.parse_int() else {
             return Err(bad());
         };
         let max = if self.peek_ascii() == Some(',') {
-            self.pos += 1;
+            self.bump(1);
             if self.peek_ascii() == Some('}') {
                 None // `{m,}`
             } else {
@@ -344,7 +398,7 @@ impl EParser {
         if self.peek_ascii() != Some('}') {
             return Err(bad());
         }
-        self.pos += 1; // consume '}'
+        self.bump(1); // consume '}'
         if min > MAX_REPEAT || max.is_some_and(|n| n > MAX_REPEAT) {
             return Err(EreError(b"repetition count too large".to_vec()));
         }
@@ -361,7 +415,7 @@ impl EParser {
     fn parse_int(&mut self) -> Option<usize> {
         let start = self.pos;
         while self.peek_ascii().is_some_and(|c| c.is_ascii_digit()) {
-            self.pos += 1;
+            self.bump(1);
         }
         if self.pos == start {
             return None;
@@ -374,35 +428,35 @@ impl EParser {
     fn parse_atom(&mut self) -> Result<Node, EreError> {
         match self.peek_ascii() {
             Some('(') => {
-                self.pos += 1;
-                self.ngroups += 1;
+                self.bump(1);
+                self.ngroups = self.ngroups.saturating_add(1);
                 let idx = self.ngroups;
                 let inner = self.parse_alt()?;
                 if self.peek_ascii() != Some(')') {
                     return Err(EreError(b"expected ')' in regex".to_vec()));
                 }
-                self.pos += 1;
+                self.bump(1);
                 Ok(Node::Group(idx, Box::new(inner)))
             }
             Some('[') => self.parse_class(),
             Some('.') => {
-                self.pos += 1;
+                self.bump(1);
                 Ok(Node::Any)
             }
             Some('^') => {
-                self.pos += 1;
+                self.bump(1);
                 Ok(Node::Start)
             }
             Some('$') => {
-                self.pos += 1;
+                self.bump(1);
                 Ok(Node::End)
             }
             Some('\\') => {
-                self.pos += 1;
+                self.bump(1);
                 let e = self
                     .peek()
                     .ok_or_else(|| EreError(b"trailing backslash in regex".to_vec()))?;
-                self.pos += 1;
+                self.bump(1);
                 Ok(Node::Lit(unescape(e)))
             }
             // Only `parse_quantifier` may consume a `{`, and `parse_repeat`
@@ -415,7 +469,7 @@ impl EParser {
             // decodes to no character at all.
             _ => match self.peek() {
                 Some(c) => {
-                    self.pos += 1;
+                    self.bump(1);
                     Ok(Node::Lit(c))
                 }
                 None => Ok(Node::Empty),
@@ -424,11 +478,11 @@ impl EParser {
     }
 
     fn parse_class(&mut self) -> Result<Node, EreError> {
-        self.pos += 1; // consume '['
+        self.bump(1); // consume '['
         let mut negated = false;
         if self.peek_ascii() == Some('^') {
             negated = true;
-            self.pos += 1;
+            self.bump(1);
         }
         let mut ranges: Vec<(Ch, Ch)> = Vec::new();
         let mut posix: Vec<PosixClass> = Vec::new();
@@ -440,7 +494,7 @@ impl EParser {
             // A `]` closes the class, except as the very first member where it
             // is a literal (POSIX rule).
             if c == ']' && !first {
-                self.pos += 1;
+                self.bump(1);
                 break;
             }
             first = false;
@@ -449,10 +503,10 @@ impl EParser {
             // the scan below can never stop inside a multi-byte character.
             if c == '[' && self.peek_ascii_at(1) == Some(':') {
                 let saved = self.pos;
-                self.pos += 2; // consume '[:'
+                self.bump(2); // consume '[:'
                 let name_start = self.pos;
                 while self.peek_ascii().is_some_and(|ch| ch.is_ascii_alphabetic()) {
-                    self.pos += 1;
+                    self.bump(1);
                 }
                 let name: String = self
                     .chars
@@ -462,7 +516,7 @@ impl EParser {
                     .filter_map(|c| c.as_ascii())
                     .collect();
                 if self.peek_ascii() == Some(':') && self.peek_ascii_at(1) == Some(']') {
-                    self.pos += 2; // consume ':]'
+                    self.bump(2); // consume ':]'
                     match PosixClass::from_name(&name) {
                         Some(pc) => {
                             posix.push(pc);
@@ -485,18 +539,18 @@ impl EParser {
                 && self.peek_ascii_at(1) != Some(']')
                 && self.chars.get(self.pos.saturating_add(1)).is_some()
             {
-                self.pos += 1; // consume '-'
+                self.bump(1); // consume '-'
                 let hi = self.class_char()?;
                 if lo > hi {
                     // Both endpoints are slices of the pattern, so the message
                     // is bytes.
-                    return Err(EreError(bfmt![
+                    return Err(EreError(cat(&[
                         b"invalid range ",
-                        lo.to_str(),
+                        &lo.to_str(),
                         b"-",
-                        hi.to_str(),
-                        b" in class"
-                    ]));
+                        &hi.to_str(),
+                        b" in class",
+                    ])));
                 }
                 ranges.push((lo, hi));
             } else {
@@ -516,14 +570,14 @@ impl EParser {
             return Err(EreError(b"unterminated '[' in regex".to_vec()));
         };
         if c == '\\' {
-            self.pos += 1;
+            self.bump(1);
             let e = self
                 .peek()
                 .ok_or_else(|| EreError(b"trailing backslash in class".to_vec()))?;
-            self.pos += 1;
+            self.bump(1);
             return Ok(unescape(e));
         }
-        self.pos += 1;
+        self.bump(1);
         Ok(c)
     }
 }
@@ -568,15 +622,31 @@ enum Inst {
 
 struct Compiler {
     prog: Vec<Inst>,
+    /// Set once the program has passed [`MAX_PROG`]. Every loop that can
+    /// multiply — the repetition expansions — checks it and unwinds, so a
+    /// pattern asking for 10⁹ instructions costs the cap plus one iteration per
+    /// nesting level rather than 10⁹ no-ops. `new_flags` turns it into an error.
+    over: bool,
 }
 
 impl Compiler {
     fn emit(&mut self, i: Inst) -> usize {
+        // The index of what was just pushed. Written before the push so it is
+        // an addition on a length rather than a subtraction that would be wrong
+        // (and would underflow) if the push had not happened.
+        let at = self.prog.len();
+        if at >= MAX_PROG {
+            self.over = true;
+            return at;
+        }
         self.prog.push(i);
-        self.prog.len() - 1
+        at
     }
 
     fn compile(&mut self, node: &Node) {
+        if self.over {
+            return;
+        }
         match node {
             Node::Empty => {}
             Node::Lit(c) => {
@@ -595,9 +665,14 @@ impl Compiler {
                 self.emit(Inst::AssertEnd);
             }
             Node::Group(idx, inner) => {
-                self.emit(Inst::Save(2 * idx));
+                // The two slots of group `idx`. `idx` counts opening parens in
+                // the pattern, so `2·idx + 1` is bounded by the pattern's own
+                // length and cannot overflow; `saturating` says so without
+                // asking the reader to reconstruct the argument.
+                let slot = idx.saturating_mul(2);
+                self.emit(Inst::Save(slot));
                 self.compile(inner);
-                self.emit(Inst::Save(2 * idx + 1));
+                self.emit(Inst::Save(slot.saturating_add(1)));
             }
             Node::Concat(parts) => {
                 for p in parts {
@@ -614,23 +689,42 @@ impl Compiler {
                         self.compile(b);
                         jmp_ends.push(self.emit(Inst::Jmp(0)));
                         let l2 = self.prog.len();
-                        self.prog[split] = Inst::Split(l1, l2);
+                        self.patch(split, Inst::Split(l1, l2));
                     } else {
                         self.compile(b);
                     }
                 }
                 let end = self.prog.len();
                 for j in jmp_ends {
-                    self.prog[j] = Inst::Jmp(end);
+                    self.patch(j, Inst::Jmp(end));
                 }
             }
             Node::Repeat { node, min, max } => self.compile_repeat(node, *min, *max),
         }
     }
 
+    /// Fill in a forward branch whose target was not known when it was emitted.
+    ///
+    /// A `get_mut` rather than an index because [`Self::emit`] stops emitting
+    /// once the program passes [`MAX_PROG`] and hands back a slot that was never
+    /// written: the compilation is being abandoned, and abandoning it must not
+    /// take the process with it.
+    fn patch(&mut self, at: usize, i: Inst) {
+        if let Some(slot) = self.prog.get_mut(at) {
+            *slot = i;
+        }
+    }
+
     fn compile_repeat(&mut self, node: &Node, min: usize, max: Option<usize>) {
-        // Mandatory copies.
+        // Mandatory copies. The `over` check belongs *in* the loop, not only at
+        // the top of `compile`: these loops nest and multiply, so a body that
+        // merely returned early would still be entered 10⁹ times for
+        // `((a{1000}){1000}){1000}`. Breaking here costs one iteration per
+        // nesting level instead.
         for _ in 0..min {
+            if self.over {
+                return;
+            }
             self.compile(node);
         }
         match max {
@@ -641,23 +735,28 @@ impl Compiler {
                 self.compile(node);
                 self.emit(Inst::Jmp(l));
                 let out = self.prog.len();
-                self.prog[l] = Inst::Split(body, out);
+                self.patch(l, Inst::Split(body, out));
             }
             Some(max) => {
                 // `max - min` greedy optional copies, each able to jump to `out`.
                 let extra = max.saturating_sub(min);
-                let mut splits: Vec<usize> = Vec::with_capacity(extra);
+                // Not `with_capacity(extra)`: `extra` is attacker-chosen up to
+                // `MAX_REPEAT`, and the loop below may stop far short of it.
+                let mut splits: Vec<usize> = Vec::new();
                 for _ in 0..extra {
+                    if self.over {
+                        break;
+                    }
                     let s = self.emit(Inst::Split(0, 0));
                     splits.push(s);
                     let body = self.prog.len();
                     self.compile(node);
-                    self.prog[s] = Inst::Split(body, 0); // second target patched below
+                    self.patch(s, Inst::Split(body, 0)); // second target patched below
                 }
                 let out = self.prog.len();
                 for s in splits {
-                    if let Inst::Split(a, _) = self.prog[s] {
-                        self.prog[s] = Inst::Split(a, out);
+                    if let Some(&Inst::Split(a, _)) = self.prog.get(s) {
+                        self.patch(s, Inst::Split(a, out));
                     }
                 }
             }
@@ -695,9 +794,33 @@ fn char_fold_eq(a: Ch, b: Ch) -> bool {
 pub struct Regex {
     prog: Vec<Inst>,
     ngroups: usize,
+    /// The first instruction of the pattern proper — past the unanchored search
+    /// prefix. Entering here matches only at the position the search is seeded
+    /// at, which is what the longest-match pass in [`Regex::run`] needs. Stored
+    /// rather than assumed to be a constant so that changing the prefix cannot
+    /// silently leave the second pass entering the wrong instruction.
+    entry: usize,
     /// Case-insensitive matching (`shopt -s nocasematch`). When set, `Char`
     /// and `Class` instructions match without regard to letter case.
     ci: bool,
+}
+
+/// A compiled regex prints as its shape, not its program.
+///
+/// It exists so a caller can `#[derive(Debug)]` a structure that holds one —
+/// awk's syntax tree does, and a tree that cannot be printed cannot be debugged.
+/// The pattern text is not kept (nothing else needs it, and keeping a copy per
+/// regex to serve `{:?}` would be paying for the debugger in production), and
+/// dumping two hundred instructions where the reader expected `/^a.*b$/` would
+/// bury the rest of the tree; the counts are enough to tell two regexes apart.
+impl std::fmt::Debug for Regex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Regex")
+            .field("insts", &self.prog.len())
+            .field("groups", &self.ngroups)
+            .field("ci", &self.ci)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Per-step NFA thread frontier with a `seen` set for `O(1)` dedupe, so each
@@ -752,7 +875,10 @@ impl Regex {
         let ast = parser.parse()?;
         let ngroups = parser.ngroups;
 
-        let mut c = Compiler { prog: Vec::new() };
+        let mut c = Compiler {
+            prog: Vec::new(),
+            over: false,
+        };
         // Unanchored search prefix: prefer entering the match at the current
         // position (leftmost) over skipping one char and retrying.
         //   0: Split(real, skip)
@@ -763,15 +889,22 @@ impl Regex {
         let skip = c.emit(Inst::Any);
         c.emit(Inst::Jmp(split));
         let real = c.prog.len();
-        c.prog[split] = Inst::Split(real, skip);
+        c.patch(split, Inst::Split(real, skip));
         c.emit(Inst::Save(0));
         c.compile(&ast);
         c.emit(Inst::Save(1));
         c.emit(Inst::Match);
+        if c.over {
+            // Reported as a compile error rather than a truncated program: a
+            // program that stopped part-way would match the wrong language, and
+            // silently answering a different question is worse than refusing.
+            return Err(EreError(b"regex too large".to_vec()));
+        }
 
         Ok(Regex {
             prog: c.prog,
             ngroups,
+            entry: real,
             ci,
         })
     }
@@ -780,6 +913,16 @@ impl Regex {
     #[must_use]
     pub fn group_count(&self) -> usize {
         self.ngroups
+    }
+
+    /// Number of instructions in the compiled program.
+    ///
+    /// Exposed for callers that decide how much work to allow: a search costs
+    /// `O(len(subject) × len(prog))`, and a program near [`MAX_PROG`] on a
+    /// large file is the one shape that is slow without being wrong.
+    #[must_use]
+    pub fn program_len(&self) -> usize {
+        self.prog.len()
     }
 
     /// `true` if the pattern matches anywhere in `text`.
@@ -798,10 +941,15 @@ impl Regex {
     #[must_use]
     pub fn captures(&self, text: BStr<'_>) -> Option<Vec<Option<Str>>> {
         let chars: Vec<Ch> = bytes::chars(text).collect();
-        let slots = self.run(&chars)?;
-        let mut out = Vec::with_capacity(self.ngroups + 1);
+        let slots = self.run(&chars, 0)?;
+        let mut out = Vec::with_capacity(self.ngroups.saturating_add(1));
         for g in 0..=self.ngroups {
-            match (slots.get(2 * g).copied().flatten(), slots.get(2 * g + 1).copied().flatten()) {
+            // The open and close slots of group `g`. A group is an opening paren
+            // in the pattern, so `2·g + 1` is bounded by the pattern's length;
+            // the slots are read with `get`, so even a saturated index is a
+            // missing capture rather than a panic.
+            let (open, close) = (g.saturating_mul(2), g.saturating_mul(2).saturating_add(1));
+            match (slots.get(open).copied().flatten(), slots.get(close).copied().flatten()) {
                 (Some(s), Some(e)) if s <= e && e <= chars.len() => {
                     let span = chars.get(s..e).unwrap_or_default();
                     out.push(Some(bytes::from_chars(span.iter().copied())));
@@ -812,49 +960,227 @@ impl Regex {
         Some(out)
     }
 
-    /// Run the Pike VM over `input`, returning the winning thread's capture
-    /// slots (`2 × (ngroups + 1)` positions) or `None` if no match.
-    fn run(&self, input: &[Ch]) -> Option<Vec<Option<usize>>> {
-        let nslots = 2 * (self.ngroups + 1);
+    /// Where the leftmost match begins and ends, as **byte** offsets into
+    /// `text`, or `None` if the pattern does not match.
+    ///
+    /// [`Regex::captures`] hands back the matched *bytes*, which answers "what
+    /// did it match" but not "where" — and `grep -o`, `sed`'s `s///` and awk's
+    /// `sub`/`gsub`/`match` all need the position, because they have to rebuild
+    /// the subject around the match.
+    #[must_use]
+    pub fn find(&self, text: BStr<'_>) -> Option<(usize, usize)> {
+        self.find_at(text, 0)
+    }
+
+    /// The leftmost match at or after byte offset `from`.
+    ///
+    /// `^` still means the start of `text`, not the start of the search — a
+    /// continued search is looking for the *next* match in one subject, not
+    /// matching a new subject that happens to begin at `from`. (POSIX spells
+    /// this `REG_NOTBOL`.) So `sed 's/^a//g'` removes one leading `a` and not
+    /// one per position, which is what every other implementation does.
+    ///
+    /// `from` is rounded forward to a character boundary, so a caller that
+    /// resumes from an arbitrary byte cannot start a match inside a character.
+    ///
+    /// Prefer [`Regex::find_iter`] for a scan: this decodes `text` on every
+    /// call, so stepping through a long subject with it is quadratic.
+    #[must_use]
+    pub fn find_at(&self, text: BStr<'_>, from: usize) -> Option<(usize, usize)> {
+        let scan = Scan::new(text);
+        let slots = self.run(&scan.chars, scan.char_index(from))?;
+        scan.span(slots.first().copied().flatten()?, slots.get(1).copied().flatten()?)
+    }
+
+    /// Every non-overlapping match, left to right, as byte offsets.
+    ///
+    /// Decodes `text` once and reuses it, which is the difference between a
+    /// linear `gsub` and a quadratic one. An *empty* match advances the scan by
+    /// one character rather than staying put, so a pattern that can match
+    /// nothing — `x*`, `()` — yields a match at each position and terminates.
+    pub fn find_iter(&self, text: BStr<'_>) -> Matches<'_> {
+        Matches {
+            re: self,
+            cur: Cursor::new(text),
+        }
+    }
+
+    /// Every non-overlapping match's capture groups, left to right, as byte
+    /// spans — [`Regex::find_iter`] for a caller that needs the groups.
+    ///
+    /// `sed`'s `s/\(a\)\(b\)/\2\1/g` needs both halves of this at once: where
+    /// each match sits in the subject, and where its groups sit inside it.
+    /// Getting them by calling [`Regex::capture_spans_at`] in a loop re-decodes
+    /// the subject for every match, which turns a linear substitution into a
+    /// quadratic one on exactly the files where it matters.
+    pub fn capture_spans_iter(&self, text: BStr<'_>) -> CaptureMatches<'_> {
+        CaptureMatches {
+            re: self,
+            cur: Cursor::new(text),
+        }
+    }
+
+    /// The leftmost match's capture groups as **byte** spans: index `0` is the
+    /// whole match, `i` is group `i`, `None` for a group that did not
+    /// participate.
+    ///
+    /// This is what a replacement text needs. `sed`'s `s/\(a*\)b/[\1]/` has to
+    /// splice group 1 into the output *and* know which bytes of the subject the
+    /// whole match consumed; [`Regex::captures`] gives the first and not the
+    /// second.
+    #[must_use]
+    pub fn capture_spans(&self, text: BStr<'_>) -> Option<Vec<Option<(usize, usize)>>> {
+        self.capture_spans_at(text, 0)
+    }
+
+    /// [`Regex::capture_spans`], resumed at byte offset `from`. `^` keeps
+    /// meaning the start of `text` — see [`Regex::find_at`].
+    #[must_use]
+    pub fn capture_spans_at(
+        &self,
+        text: BStr<'_>,
+        from: usize,
+    ) -> Option<Vec<Option<(usize, usize)>>> {
+        let scan = Scan::new(text);
+        let slots = self.run(&scan.chars, scan.char_index(from))?;
+        Some(self.spans_from_slots(&scan, &slots))
+    }
+
+    /// Turn a winning thread's character slots into byte spans, one per group.
+    fn spans_from_slots(&self, scan: &Scan, slots: &[Option<usize>]) -> Vec<Option<(usize, usize)>> {
+        let mut out = Vec::with_capacity(self.ngroups.saturating_add(1));
+        for g in 0..=self.ngroups {
+            let (open, close) = (g.saturating_mul(2), g.saturating_mul(2).saturating_add(1));
+            let span = match (slots.get(open).copied().flatten(), slots.get(close).copied().flatten())
+            {
+                (Some(s), Some(e)) => scan.span(s, e),
+                _ => None,
+            };
+            out.push(span);
+        }
+        out
+    }
+
+    /// The leftmost-longest match at or after character index `start`.
+    ///
+    /// POSIX requires the **longest** match among those that start leftmost,
+    /// and that is not what a priority-ordered Pike VM gives you: thread
+    /// priority answers `a|ab` against `ab` with `a`, because the first
+    /// alternative is tried first and wins as soon as it reaches `Match`. Perl
+    /// and the `regex` crate are defined that way; `grep`, `sed` and `awk` are
+    /// not, and a `grep -o 'a\|ab'` that printed `a` would be quietly wrong in
+    /// a way no test of ours had ever asked about.
+    ///
+    /// So the search is two passes over one program:
+    ///
+    /// 1. an unanchored, priority-ordered pass, stopped at the first `Match` —
+    ///    which is the *leftmost* start, since a thread that entered the
+    ///    pattern earlier outranks one that skipped further first;
+    /// 2. an anchored pass from that start which does *not* stop at `Match`,
+    ///    keeping the last one reached — the longest end.
+    ///
+    /// The second pass usually costs almost nothing: its threads are seeded at
+    /// one position, so it stops the moment they all die, which for most
+    /// patterns is a few characters in.
+    ///
+    /// Group captures within the chosen match stay priority-ordered (greedy),
+    /// which is where this stops short of full POSIX submatch rules — those
+    /// require longest-first at every level of nesting. GNU's engines do not
+    /// implement them either, and the utilities in this tree do not ask.
+    fn run(&self, input: &[Ch], start: usize) -> Option<Vec<Option<usize>>> {
+        let first = self.scan(input, start, 0, false)?;
+        let at = first.first().copied().flatten()?;
+        // `or(first)` is unreachable — the anchored pass repeats a match that
+        // was just found at exactly that position — and is written out rather
+        // than unwrapped so a future change to the prefix cannot turn a shorter
+        // answer into no answer at all.
+        self.scan(input, at, self.entry, true).or(Some(first))
+    }
+
+    /// One pass of the Pike VM: threads seeded at `seed_pc` and character index
+    /// `start`, returning the winning thread's capture slots (`2 × (ngroups +
+    /// 1)` positions). With `longest`, a thread reaching `Match` records its
+    /// slots and the pass continues, so a later — longer — match supersedes it;
+    /// without it the pass stops at the first, highest-priority `Match`.
+    fn scan(
+        &self,
+        input: &[Ch],
+        start: usize,
+        seed_pc: usize,
+        longest: bool,
+    ) -> Option<Vec<Option<usize>>> {
+        // Two slots — open and close — for every group plus the whole match.
+        let nslots = self.ngroups.saturating_add(1).saturating_mul(2);
         let mut clist = ThreadList::new(self.prog.len());
         let mut nlist = ThreadList::new(self.prog.len());
         let mut matched: Option<Vec<Option<usize>>> = None;
+        // Where the recorded match ends, so that among the threads reaching
+        // `Match` at one position the first — the highest-priority one — is the
+        // one kept, while a `Match` at a later position still supersedes it.
+        let mut matched_at: Option<usize> = None;
 
         let mut caps = vec![None; nslots];
-        self.add_thread(&mut clist, 0, 0, &mut caps, input);
+        // `start` past the end is not an error — it is a scan that has run off
+        // the subject, which `find_iter` does on its last step.
+        let start = start.min(input.len());
+        self.add_thread(&mut clist, seed_pc, start, &mut caps, input);
 
-        for sp in 0..=input.len() {
+        for sp in start..=input.len() {
             if clist.threads.is_empty() {
                 break;
             }
             let c = input.get(sp).copied();
             nlist.clear();
             let mut i = 0;
-            while i < clist.threads.len() {
-                let pc = clist.threads[i].pc;
-                match &self.prog[pc] {
+            // Indexed rather than iterated because the threads are consulted in
+            // priority order and the loop may stop early at `Match`; `get`
+            // rather than `[]` so the bound is a condition and not a panic.
+            while let Some(th) = clist.threads.get(i) {
+                let pc = th.pc;
+                // A `pc` past the end can only mean a compiler bug — every
+                // branch target is patched to a real instruction, and a program
+                // that ran out of budget is refused rather than returned. If one
+                // ever appeared, the thread dying is a wrong answer; the process
+                // dying is a wrong answer *and* an outage in five programs.
+                let Some(inst) = self.prog.get(pc) else {
+                    i = i.saturating_add(1);
+                    continue;
+                };
+                // The successor of a consuming instruction. Neither can
+                // overflow: `Char`/`Any`/`Class` are never the last instruction
+                // (`Match` is), and `sp` is an index into `input`.
+                let next = (pc.saturating_add(1), sp.saturating_add(1));
+                match inst {
                     Inst::Char(ch) if char_eq(c, *ch, self.ci) => {
-                        let mut caps = clist.threads[i].caps.clone();
-                        self.add_thread(&mut nlist, pc + 1, sp + 1, &mut caps, input);
+                        let mut caps = th.caps.clone();
+                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input);
                     }
                     Inst::Any if c.is_some() => {
-                        let mut caps = clist.threads[i].caps.clone();
-                        self.add_thread(&mut nlist, pc + 1, sp + 1, &mut caps, input);
+                        let mut caps = th.caps.clone();
+                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input);
                     }
                     Inst::Class(d) if c.is_some_and(|ch| d.matches_ci(ch, self.ci)) => {
-                        let mut caps = clist.threads[i].caps.clone();
-                        self.add_thread(&mut nlist, pc + 1, sp + 1, &mut caps, input);
+                        let mut caps = th.caps.clone();
+                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input);
                     }
                     Inst::Match => {
-                        // Highest-priority thread to reach Match wins; cut the
-                        // remaining (lower-priority) threads at this step.
-                        matched = Some(clist.threads[i].caps.clone());
-                        break;
+                        if matched_at.is_none_or(|at| sp > at) {
+                            matched = Some(th.caps.clone());
+                            matched_at = Some(sp);
+                        }
+                        if !longest {
+                            // Highest-priority thread to reach Match wins; cut
+                            // the remaining (lower-priority) threads here.
+                            break;
+                        }
+                        // Under `longest` the pass runs on: a lower-priority
+                        // thread at this step may still be consuming, and the
+                        // match it reaches later is the longer one.
                     }
                     // Epsilon instructions are expanded by `add_thread`.
                     _ => {}
                 }
-                i += 1;
+                i = i.saturating_add(1);
             }
             core::mem::swap(&mut clist, &mut nlist);
         }
@@ -872,11 +1198,26 @@ impl Regex {
         caps: &mut Vec<Option<usize>>,
         input: &[Ch],
     ) {
-        if list.seen[pc] {
+        // `seen` is sized to the program, so a `pc` it cannot index is one no
+        // instruction names — a compiler bug rather than an input. Declining to
+        // add the thread is the same answer as its dying immediately, and is
+        // reached by no pattern; see the matching note in [`Self::run`].
+        let Some(seen) = list.seen.get_mut(pc) else {
+            return;
+        };
+        if *seen {
             return;
         }
-        list.seen[pc] = true;
-        match &self.prog[pc] {
+        *seen = true;
+        let Some(inst) = self.prog.get(pc) else {
+            return;
+        };
+        // The instruction after this one. Every epsilon instruction below is
+        // followed by at least a `Match`, so this is always a real address; a
+        // saturated one would be rejected by the `get` at the top of the
+        // recursive call rather than indexing out of range.
+        let next = pc.saturating_add(1);
+        match inst {
             Inst::Jmp(x) => self.add_thread(list, *x, sp, caps, input),
             Inst::Split(x, y) => {
                 self.add_thread(list, *x, sp, caps, input);
@@ -888,19 +1229,19 @@ impl Regex {
                 if let Some(slot) = caps.get_mut(n) {
                     *slot = Some(sp);
                 }
-                self.add_thread(list, pc + 1, sp, caps, input);
+                self.add_thread(list, next, sp, caps, input);
                 if let Some(slot) = caps.get_mut(n) {
                     *slot = old;
                 }
             }
             Inst::AssertStart => {
                 if sp == 0 {
-                    self.add_thread(list, pc + 1, sp, caps, input);
+                    self.add_thread(list, next, sp, caps, input);
                 }
             }
             Inst::AssertEnd => {
                 if sp == input.len() {
-                    self.add_thread(list, pc + 1, sp, caps, input);
+                    self.add_thread(list, next, sp, caps, input);
                 }
             }
             // Consuming/terminal instruction — becomes a live thread.
@@ -909,6 +1250,163 @@ impl Regex {
                 caps: caps.clone(),
             }),
         }
+    }
+}
+
+/// A subject decoded once, with the map back to its bytes.
+///
+/// The engine counts in *characters* — that is what makes `.` match an
+/// undecodable byte as one thing rather than as however many bytes it spans —
+/// but every caller of this crate counts in bytes, because that is what it
+/// will slice the subject with. This is the translation, and it is built once
+/// per scan rather than once per match.
+struct Scan {
+    chars: Vec<Ch>,
+    /// Byte offset of each character, then the subject's length. Holding that
+    /// extra final entry is what makes `offs[s]..offs[e]` right for *every*
+    /// `s <= e <= chars.len()`, including a match that ends at the end.
+    offs: Vec<usize>,
+}
+
+impl Scan {
+    fn new(text: BStr<'_>) -> Scan {
+        let mut chars = Vec::new();
+        let mut offs = Vec::new();
+        for (at, c) in bytes::char_positions(text) {
+            offs.push(at);
+            chars.push(c);
+        }
+        offs.push(text.len());
+        Scan { chars, offs }
+    }
+
+    /// The character index at or after byte offset `at`.
+    ///
+    /// Rounding *forward* is what keeps a resumed search from starting inside a
+    /// character: a caller that computed `at` by adding a byte count can land
+    /// mid-character, and the alternative — rounding back — would let the scan
+    /// re-match text it had already consumed and loop.
+    fn char_index(&self, at: usize) -> usize {
+        self.offs.partition_point(|&o| o < at)
+    }
+
+    /// The bytes a character span covers, or `None` if either end is not a
+    /// character boundary this subject has.
+    fn span(&self, start: usize, end: usize) -> Option<(usize, usize)> {
+        Some((*self.offs.get(start)?, *self.offs.get(end)?))
+    }
+}
+
+/// Where a scan of one subject has got to. Shared by the two iterators so they
+/// cannot disagree about what "the next match" means.
+struct Cursor {
+    scan: Scan,
+    /// Character index the next search starts from.
+    next: usize,
+    /// Where the previous match ended, so an empty match butted against it can
+    /// be recognised and dropped.
+    last_end: Option<usize>,
+    done: bool,
+}
+
+impl Cursor {
+    fn new(text: BStr<'_>) -> Cursor {
+        Cursor {
+            scan: Scan::new(text),
+            next: 0,
+            last_end: None,
+            done: false,
+        }
+    }
+
+    /// Advance to the next match and return its capture slots.
+    fn step(&mut self, re: &Regex) -> Option<Vec<Option<usize>>> {
+        loop {
+            if self.done {
+                return None;
+            }
+            let Some(slots) = re.run(&self.scan.chars, self.next) else {
+                self.done = true;
+                return None;
+            };
+            let (start, end) = match (
+                slots.first().copied().flatten(),
+                slots.get(1).copied().flatten(),
+            ) {
+                (Some(s), Some(e)) => (s, e),
+                // A match that did not record its own extent cannot be stepped
+                // past, so continuing would return it for ever. It is
+                // unreachable — every program is wrapped in the
+                // `Save(0) … Save(1)` pair — and ending the scan is the one
+                // answer that cannot hang the caller.
+                _ => {
+                    self.done = true;
+                    return None;
+                }
+            };
+            if end > start {
+                self.next = end;
+                self.last_end = Some(end);
+                if self.next > self.scan.chars.len() {
+                    self.done = true;
+                }
+                return Some(slots);
+            }
+            // An empty match is at a position, not over one, so it would be
+            // found again at the same place. Stepping one character past it is
+            // what `sed 's/x*/-/g'` does: a replacement between every pair of
+            // characters, and then an end.
+            //
+            // But an empty match *touching the end of the previous match* is
+            // not a second place; it is the same place, reachable because the
+            // pattern can also match nothing. `s/a*/-/g` on `aaa` is `-`, not
+            // `--`, and `grep -o` agrees. Dropping it here rather than in each
+            // caller is what keeps them agreeing.
+            let butts_previous = self.last_end == Some(start);
+            self.next = start.saturating_add(1);
+            if self.next > self.scan.chars.len() {
+                self.done = true;
+            }
+            if butts_previous {
+                continue;
+            }
+            self.last_end = Some(end);
+            return Some(slots);
+        }
+    }
+}
+
+/// Every non-overlapping match of one pattern in one subject, as byte spans.
+/// Built by [`Regex::find_iter`].
+pub struct Matches<'r> {
+    re: &'r Regex,
+    cur: Cursor,
+}
+
+impl Iterator for Matches<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        let slots = self.cur.step(self.re)?;
+        let start = slots.first().copied().flatten()?;
+        let end = slots.get(1).copied().flatten()?;
+        self.cur.scan.span(start, end)
+    }
+}
+
+/// Every non-overlapping match's groups, as byte spans. Built by
+/// [`Regex::capture_spans_iter`].
+pub struct CaptureMatches<'r> {
+    re: &'r Regex,
+    cur: Cursor,
+}
+
+impl Iterator for CaptureMatches<'_> {
+    type Item = Vec<Option<(usize, usize)>>;
+
+    fn next(&mut self) -> Option<Vec<Option<(usize, usize)>>> {
+        let slots = self.cur.step(self.re)?;
+        Some(self.re.spans_from_slots(&self.cur.scan, &slots))
     }
 }
 
@@ -1162,5 +1660,212 @@ mod tests {
         assert!(compile(r"trailing\").is_err());
         assert!(compile("a{2,1}").is_err());
         assert!(compile("[[:bogus:]]").is_err());
+    }
+
+    /// Nested intervals multiply, and a 24-byte pattern can ask for 10⁹
+    /// instructions. This test is as much about *terminating* as about the
+    /// error: before [`MAX_PROG`] it would have run until the allocator gave
+    /// up. It is written with a deadline so a regression fails by name rather
+    /// than by hanging the suite.
+    #[test]
+    fn nested_intervals_are_refused_rather_than_expanded() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send([
+                compile("((a{1000}){1000}){1000}").is_err(),
+                compile("(a{1000}){1000}").is_err(),
+                compile("(a{500}){500}").is_err(),
+            ]);
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("compiling a nested interval did not finish: MAX_PROG is not bounding it");
+        assert_eq!(got, [true, true, true]);
+    }
+
+    /// The other half of the cap: a pattern anyone would actually write must
+    /// still compile. A limit that rejected `a{1000}b{1000}` would have traded
+    /// one failure mode for another.
+    #[test]
+    fn a_pattern_worth_writing_still_fits() {
+        assert!(compile("a{1000}b{1000}").is_ok());
+        assert!(compile("([0-9]{1,3}\\.){3}[0-9]{1,3}").is_ok());
+        assert!(compile(&"(ab|cd)*".repeat(200)).is_ok());
+        let re = Regex::new(b"(a{100}){10}").expect("10 * 100 copies is 1000 instructions");
+        assert!(re.is_match(&b"a".repeat(1000)));
+        assert!(!re.is_match(&b"a".repeat(999)));
+    }
+
+    #[test]
+    fn the_longest_match_wins_not_the_first_alternative() {
+        // POSIX is leftmost-*longest*; Perl and the `regex` crate are
+        // leftmost-first. Priority ordering alone answers these with the short
+        // arm, which is what `grep -o` and `sed` would then have printed.
+        let cap = |pat: &str, s: &str| {
+            compile(pat).unwrap().captures(s.as_bytes()).unwrap()[0].clone().unwrap()
+        };
+        assert_eq!(cap("a|ab", "ab"), b"ab");
+        assert_eq!(cap("ab|a", "ab"), b"ab");
+        assert_eq!(cap("a|ab|abc", "abcd"), b"abc");
+        assert_eq!(cap("(a|ab)(c|bcd)", "abcd"), b"abcd");
+        // Leftmost still beats longer: the match at 1 is not preferred to the
+        // one at 0 for being longer.
+        assert_eq!(compile("a|bb").unwrap().find(b"abb"), Some((0, 1)));
+        // And the rule reaches the scanning API, which is what actually feeds
+        // `grep -o`.
+        let spans: Vec<_> = compile("a|ab").unwrap().find_iter(b"abab").collect();
+        assert_eq!(spans, vec![(0, 2), (2, 4)]);
+    }
+
+    #[test]
+    fn a_longest_match_still_reports_its_groups() {
+        // The second pass re-runs the pattern, so the capture slots it hands
+        // back have to be the winning thread's, not the first pass's.
+        let re = compile("(a+)(b*)").unwrap();
+        let caps = re.captures(b"xaaabb").unwrap();
+        assert_eq!(caps[0].as_deref(), Some(&b"aaabb"[..]));
+        assert_eq!(caps[1].as_deref(), Some(&b"aaa"[..]));
+        assert_eq!(caps[2].as_deref(), Some(&b"bb"[..]));
+        assert_eq!(re.capture_spans(b"xaaabb").unwrap(), vec![
+            Some((1, 6)),
+            Some((1, 4)),
+            Some((4, 6)),
+        ]);
+    }
+
+    // ---- byte offsets ----------------------------------------------------
+    //
+    // `captures` answers "what did it match"; these answer "where", which is
+    // what `grep -o`, `sed`'s `s///` and awk's `sub`/`gsub` need in order to
+    // rebuild the subject around the match rather than just report it.
+
+    fn re(pat: &str) -> Regex {
+        Regex::new(pat.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn a_match_reports_the_bytes_it_covers() {
+        assert_eq!(re("b+").find(b"aabbbcc"), Some((2, 5)));
+        assert_eq!(re("^a").find(b"aab"), Some((0, 1)));
+        assert_eq!(re("c$").find(b"abc"), Some((2, 3)));
+        assert_eq!(re("z").find(b"abc"), None);
+        // The span is a slice of the subject, which is the whole point of
+        // returning it rather than the text.
+        let (s, e) = re("b.d").find(b"xxabcdyy").unwrap();
+        assert_eq!(&b"xxabcdyy"[s..e], b"bcd");
+    }
+
+    #[test]
+    fn an_offset_is_measured_in_bytes_not_characters() {
+        // é is two bytes, so a character count and a byte count disagree from
+        // the second character on — the bug this API exists to make impossible.
+        let hay = "aébé".as_bytes();
+        let (s, e) = re("b").find(hay).unwrap();
+        assert_eq!((s, e), (3, 4));
+        assert_eq!(&hay[s..e], b"b");
+        // And a match *of* a multi-byte character spans all of its bytes.
+        assert_eq!(re("é").find(hay), Some((1, 3)));
+    }
+
+    #[test]
+    fn a_resumed_search_still_anchors_to_the_start_of_the_subject() {
+        // POSIX spells this REG_NOTBOL. It is why `sed 's/^a//g'` strips one
+        // leading `a` rather than one at every position it resumes from.
+        let bol = re("^a");
+        assert_eq!(bol.find_at(b"aaa", 0), Some((0, 1)));
+        assert_eq!(bol.find_at(b"aaa", 1), None);
+        // The end anchor is the mirror image: still the end of the subject.
+        assert_eq!(re("a$").find_at(b"aaa", 1), Some((2, 3)));
+    }
+
+    #[test]
+    fn a_resume_point_inside_a_character_rounds_forward() {
+        // Landing mid-character is what a caller that adds byte counts does;
+        // rounding back would re-match text already consumed and loop.
+        let hay = "éab".as_bytes();
+        assert_eq!(re("a").find_at(hay, 1), Some((2, 3)));
+        assert_eq!(re("é").find_at(hay, 1), None, "the character at 0..2 is behind us");
+    }
+
+    #[test]
+    fn a_scan_yields_every_match_left_to_right() {
+        let hay = b"ab12cd345ef";
+        let spans: Vec<_> = re("[0-9]+").find_iter(hay).collect();
+        assert_eq!(spans, vec![(2, 4), (6, 9)]);
+        let texts: Vec<&[u8]> = spans.iter().map(|&(s, e)| &hay[s..e]).collect();
+        assert_eq!(texts, vec![&b"12"[..], &b"345"[..]]);
+    }
+
+    #[test]
+    fn a_scan_of_a_pattern_that_can_match_nothing_terminates() {
+        // `sed 's/x*/-/g'` on "axb" is "-a-b-": a match at each position the
+        // previous one did not already reach, and then a stop. A scan that did
+        // not step past an empty match would hang instead.
+        let spans: Vec<_> = re("x*").find_iter(b"axb").collect();
+        assert_eq!(spans, vec![(0, 0), (1, 2), (3, 3)]);
+        // (An *empty* pattern is a compile error here, as it is in glibc, so
+        // the pattern that matches nothing has to be spelled with a `*`.)
+        assert_eq!(re("z*").find_iter(b"ab").count(), 3);
+    }
+
+    #[test]
+    fn an_empty_match_touching_the_previous_one_is_not_a_second_match() {
+        // GNU agrees on both of these, and they are the same question:
+        //   $ echo aaa | sed 's/a*/-/g'   ->  -
+        //   $ echo aaa | grep -o 'a*'     ->  aaa
+        // After `a*` has consumed `aaa` there is an empty match available at
+        // offset 3, because `a*` also matches nothing. Reporting it would give
+        // `--` and a spurious second `grep -o` line.
+        assert_eq!(re("a*").find_iter(b"aaa").collect::<Vec<_>>(), vec![(0, 3)]);
+        // Only the *touching* empty match goes. `axa` reports the two runs and
+        // neither of the empty matches that sit against their ends — which is
+        // `sed 's/a*/-/g'` giving `-x-` and `grep -o 'a*'` giving two lines.
+        assert_eq!(re("a*").find_iter(b"axa").collect::<Vec<_>>(), vec![(0, 1), (2, 3)]);
+    }
+
+    #[test]
+    fn a_scan_does_not_overlap_its_own_matches() {
+        assert_eq!(re("aa").find_iter(b"aaaa").collect::<Vec<_>>(), vec![(0, 2), (2, 4)]);
+    }
+
+    #[test]
+    fn group_spans_locate_the_parts_of_a_match() {
+        let hay = b"key=value";
+        let spans = re("([a-z]+)=([a-z]+)").capture_spans(hay).unwrap();
+        assert_eq!(spans, vec![Some((0, 9)), Some((0, 3)), Some((4, 9))]);
+        // A group that did not participate has no span — as distinct from an
+        // empty one, which does.
+        let spans = re("(a)|(b)").capture_spans(b"b").unwrap();
+        assert_eq!(spans, vec![Some((0, 1)), None, Some((0, 1))]);
+        assert_eq!(re("(x*)y").capture_spans(b"y").unwrap()[1], Some((0, 0)));
+    }
+
+    #[test]
+    fn group_spans_are_reported_for_every_match_of_a_scan() {
+        let hay = b"a1 b22 c3";
+        let got: Vec<_> = re("([a-z])([0-9]+)")
+            .capture_spans_iter(hay)
+            .map(|g| (g[1].unwrap(), g[2].unwrap()))
+            .collect();
+        assert_eq!(got, vec![((0, 1), (1, 2)), ((3, 4), (4, 6)), ((7, 8), (8, 9))]);
+    }
+
+    #[test]
+    fn a_span_can_end_at_the_end_of_the_subject() {
+        // The off-by-one this API is easiest to get wrong at: the byte-offset
+        // table needs one entry more than there are characters.
+        assert_eq!(re("c$").find(b"abc"), Some((2, 3)));
+        assert_eq!(re("$").find(b"ab"), Some((2, 2)));
+        assert_eq!(re("x*").find(b""), Some((0, 0)));
+        assert_eq!(re("x*").find_iter(b"").collect::<Vec<_>>(), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn an_undecodable_byte_is_one_character_wide() {
+        // 0xFF begins no valid UTF-8 sequence, so it is its own character and
+        // a span must not split it or skip it.
+        let hay: &[u8] = &[b'a', 0xFF, b'b'];
+        assert_eq!(re("b").find(hay), Some((2, 3)));
+        assert_eq!(re("a.b").find(hay), Some((0, 3)));
     }
 }

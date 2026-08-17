@@ -13322,6 +13322,168 @@ today.
 `scripts/ctest-fixtures.py`'s stamp format (`version 1`). The detector it defers
 to is `scripts/stamp-ancestry.py` (lane A's).
 
+## §322 — One in-tree regex engine, shared as a crate, and BRE reaches it by translation
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** five programs in this tree match regular expressions — the shell's
+`[[ =~ ]]`, and `grep`, `sed`, `awk`, `expr`. The shell had a real engine; the
+other four searched for the pattern as a literal substring, so `grep '^posix'`
+found nothing and `sed 's/^/E:/'` changed nothing. The decision is *where the
+one real engine should live*: it moves out of the shell into a `userspace/ere`
+crate that all five use, rather than being copied, re-implemented, or replaced
+by a crate from crates.io. A second decision rides along: the four utilities
+mostly want POSIX **Basic** regular expressions, which the engine does not
+speak, and BRE is handled by **translating it to Extended** rather than by
+writing a second parser.
+
+### Why it had to be one engine and not four
+
+`[[ $f =~ ^a ]]` in a script and `grep '^a'` on the same file, on the same
+machine, giving different answers about whether the file starts with `a` is not
+a cosmetic inconsistency — it is the shell and the utilities disagreeing about
+what a pattern *means*, in a system where scripts routinely use both to ask the
+same question. Bracket expressions, anchors, interval syntax, the exact set of
+`[:classes:]`, whether `.` matches an undecodable byte: every one of those is a
+place two implementations drift, and none of them announces the drift.
+
+This is the same move `tzrules`, `yamldoc`, `textfmt`, `textfind` and `byteread`
+already made here, and the reasoning is the strongest instance of it. In each of
+those cases several consumers had grown a subtly-wrong copy of one component; in
+this case four of the five had not grown one at all, which is worse and was
+harder to see.
+
+### Options
+
+**A — Leave the four as they are.** *What changes:* nothing; `grep '^a'` keeps
+finding nothing. Rejected on sight. Recorded only because it is what the tree
+did for months without anyone noticing, and the reason is worth remembering:
+each program passed its own tests, because every test asserted the substring
+behaviour the program had.
+
+**B — Have `coreutils` depend on `oils`.** *What changes:* `grep` links the
+whole shell — lexer, parser, interpreter, job control — to get a regex.
+Rejected: the dependency edge points the wrong way (a utility should not depend
+on the shell that calls it), it drags osh's build time and binary size into
+every coreutil, and it makes any change to the shell a rebuild of `grep`.
+
+**C — A third-party regex crate (`regex`, `regex-lite`).** *What changes:*
+patterns follow Rust's regex dialect rather than POSIX's. Rejected on
+*semantics*, not on the dependency: `regex` implements Perl-ish syntax with
+leftmost-first alternation, and POSIX requires leftmost-**longest**; it has no
+BRE mode, no POSIX `[[:class:]]`-with-collation handling, and its `.` is defined
+over `char`, not over bytes-that-may-not-decode — which is exactly what this
+tree's path model requires, since a path admits every byte but `/` and NUL. We
+would have had to write a translation layer whose job was to hide a dialect
+mismatch, which is more subtle work than owning the engine. Adopting it would
+also mean a shell whose `[[ =~ ]]` silently changed behaviour.
+
+**D — Extract osh's engine into `userspace/ere` and depend on it from both.**
+*What changes:* one Pike VM, one character model, one answer to `[a-z]`.
+**Chosen.**
+
+### Why the extraction is safe to make
+
+The engine being moved is not a sketch: it is a Pike VM (Thompson NFA
+simulation) with captures, `O(len(input) × len(prog))` and immune to
+catastrophic backtracking, already defined over a byte-safe character model
+(`Ch` — a decoded scalar *or* one undecodable byte) and already carrying a test
+suite that checks it against what glibc accepts and rejects. The move is a
+`git mv` plus an import change.
+
+The character model went with it, and that is the load-bearing part: `osh`'s
+`bytes` module now **re-exports** `ere::ch` rather than defining its own `Ch`.
+Had it kept a copy, the shell and the utilities would have had two definitions
+of "what is one character" underneath one definition of "what does `.` match",
+which is the drift this exists to prevent, reintroduced one level down.
+
+### `posix`'s `regcomp`/`regexec` deliberately does *not* join
+
+`posix/src/regex.rs` stays a separate implementation. It is `no_std` with
+fixed-size buffers and a C ABI, and it answers to a different specification —
+POSIX's, byte for byte, including which error code comes back for which
+malformed pattern. Merging it would mean either giving `ere` a `no_std`
+fixed-buffer mode that no Rust caller wants, or giving the C ABI an allocator it
+must not need. Two implementations are correct here because they answer to two
+specifications; the four that were merged answered to one.
+
+*What this costs:* a C program and a Rust program on this machine could still
+disagree about a pattern. That is a real residual risk and is accepted, because
+the alternative degrades the component with the harder constraints. If it ever
+bites, the fix is a shared *test corpus* run against both, not a shared
+implementation.
+
+### BRE by translation, not by a second parser
+
+`grep`, `sed` and `expr` use Basic regular expressions unless told otherwise.
+BRE is **not** a subset of ERE — `a+b` is three literal characters in one and a
+repetition in the other, `\(x\)` groups in BRE and is literal in ERE, `*` is a
+literal where nothing precedes it — so the difference has to be handled
+somewhere.
+
+*Option:* a second parser producing the same AST. *What changes:* two parsers
+that must agree about everything except the handful of places they are supposed
+to differ.
+*Option, chosen:* `ere::bre::to_ere` rewrites the pattern and hands it to the
+one engine. *What changes:* one parser, and the BRE/ERE difference becomes a
+translation table a reader can check line by line.
+
+Two consequences of the choice, both deliberate:
+
+* **What the engine cannot express is refused by name, not mistranslated.**
+  Backreferences (`\1`–`\9`) cannot be evaluated by a Pike VM at all — that is
+  the price of the no-backtracking guarantee — and word boundaries (`\<`, `\>`,
+  `\b`, `\B`) are not in the engine. Left alone, both would have fallen through
+  the translator's escape rule and become *literals*: `\1` matching the digit
+  `1`, silently. They are errors instead. A pattern that is refused is a bug
+  report; a pattern that quietly matches the wrong thing is not.
+* **A backslash inside a bracket expression is doubled on the way out.** POSIX
+  says there are no escapes inside `[...]`, so a backslash there is a literal
+  backslash; the engine does have escapes there. Without the doubling, the
+  translation would change the meaning of a pattern that never asked for an
+  escape.
+
+### The cap that came with the move
+
+`MAX_REPEAT` bounded a single `{m,n}` at 1000, and its comment claimed that
+bounded compilation. It did not: intervals multiply under nesting, so
+`((a{1000}){1000}){1000}` asks for ~10⁹ instructions — tens of gigabytes — from
+24 bytes of pattern. `MAX_PROG` (65 536 instructions) now bounds the program
+itself, and the expansion loops test it so a refusal costs the cap rather than
+10⁹ iterations.
+
+*Why it belongs in this entry:* the sharing is what made it urgent. Inside the
+shell the pattern came from a script or a variable. `grep -f patterns.txt` and
+`sed -f script.sed` read the pattern from a **file** — it is now as much
+untrusted input as the subject is, in four more programs.
+
+### The correction: the engine was leftmost-*first* too
+
+Option C above was rejected partly because `regex` alternates leftmost-first
+where POSIX requires leftmost-**longest** — and then the extraction found that
+the engine being extracted did the same thing. A priority-ordered Pike VM stops
+at the first thread to reach `Match`, so `a|ab` against `ab` answered `a`. That
+is right for Perl and wrong for `grep`, and it was invisible: the shell's
+`[[ =~ ]]` only asks *whether* a pattern matched, so nothing in osh's suite
+could see which of two possible matches it had chosen. The four utilities do
+ask — `grep -o` prints it, `sed` replaces it — so the extraction would have
+shipped the defect into the programs where it is observable.
+
+The search is now two passes over one program: an unanchored priority-ordered
+pass to find the leftmost *start* (a thread that entered the pattern earlier
+outranks one that skipped further first, so the first `Match` is leftmost), then
+an anchored pass from that start which does not stop at `Match` and keeps the
+last one — the longest end. The second pass is seeded at a single position, so
+it ends as soon as its threads die; on the patterns anyone writes that is a few
+characters.
+
+*What it still does not do:* full POSIX **submatch** rules, which require
+longest-first at every level of nesting rather than only for the whole match.
+Group captures stay greedy-by-priority. GNU's engines do not implement the full
+rules either, and none of the five callers asks; recorded here so the gap is a
+known one rather than a surprise.
+
 ## §400 — Every GUI process finds its own UI font, lazily, from a compiled-in fallback list
 
 **Date:** 2026-08-14
@@ -17516,3 +17678,226 @@ it for pinning the reduction.
 
 `randrange/src/lib.rs`, a workspace member (not a default member — same
 rationale as `yamldoc`), `no_std` with no `alloc`.
+
+---
+
+## §323 — A calculator's runtime error abandons the top-level statement, and the session lives on
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** when `bc` is asked to divide by zero, three things could happen:
+it could print a complaint and keep going as if the division had produced
+something (it used to produce zero); it could quit; or it could throw away the
+one command that went wrong and read the next one. The third is what it does
+now. Concretely, `x = 1/0 + 5` used to leave `x` set to **5** — the division
+announced itself on stderr and then contributed a zero that the addition
+happily consumed. Now it leaves `x` untouched, prints `Runtime error: divide by
+zero`, and the next line of the script still runs.
+
+### What made the choice necessary
+
+Nothing in the old design *chose* the first behaviour; it fell out of the
+number type having no way to say "no answer". `BcNum::div` returned a `BcNum`,
+so when the divisor was zero it had to return *some* `BcNum`, and the only
+candidate was zero. Lifting the type into `bignum` as `Decimal` (§ the
+`known-issues.md` entry that started this work, and `userspace/bignum/src/decimal.rs`)
+changed the signature to `Result`, and a `Result` cannot be ignored. So the
+question "what should bc do about a runtime error?" had to be answered
+explicitly for the first time.
+
+There are three defensible answers and they are genuinely different products.
+
+| | *What changes* | Against it |
+|---|---|---|
+| **Poison the value** — keep returning a sentinel and let the expression finish | nothing observable changes; `1/0 + 5` is still `5` | the user is told about an error *and* handed a number computed from it. The diagnostic and the result disagree, and the result is the one that gets used |
+| **Quit on the first error** | `bc script.bc` stops at the bad line; nothing after it runs | one mistyped expression in the middle of a long script discards every result after it, including the ones already correct. Interactive bc would exit on a typo |
+| **Abandon the statement** (chosen) | the failing top-level statement produces nothing; the next one runs normally | the granularity is coarse — a division by zero on the last iteration of a loop discards the loop, not just the iteration |
+
+### Why the statement, and not something finer
+
+The obvious wish is to abandon less: fail the division, keep the loop. It
+cannot be done, and the reason is worth writing down because it will be asked
+again. An expression that failed has no value, so there is nothing to resume
+*with* — every enclosing expression is waiting on a number that does not exist.
+Recovery has to happen at a boundary where no value is owed, and in bc the
+nearest such boundary above an expression is the top-level statement. Anything
+between the two would require inventing a value, which is exactly the poisoned
+answer this decision rejects.
+
+That the unwind crosses function frames is a consequence, not a separate
+choice, and `call_func` is written so the frame is torn down on the failing
+path as well as the succeeding one. A `?` in the middle of that function would
+have left the callee's `auto` variables shadowing the caller's for the rest of
+the session — the error would have corrupted the state it was supposed to be
+protecting.
+
+### Why the math library still uses the fallible operations
+
+Every division in bc's `-l` library — the Taylor series for `sin`, `cos`,
+`exp`, `ln`, the `atan` series, the Bessel functions — divides by a loop
+counter or a constant that provably cannot be zero. A `div_nonzero` helper
+that returned a plain `Decimal` would be honest about that and would remove
+about forty `?`s.
+
+It is deliberately not used. "This divisor cannot be zero" is a claim about the
+series code, not about arithmetic, and the value of routing it through the
+fallible path is precisely what happens when the claim turns out to be false:
+the user sees `Runtime error: divide by zero` and the statement is abandoned,
+rather than a series quietly converging to the wrong number with no indication
+that anything happened. The `?`s are cheap; a silently wrong `sin` is not.
+
+### Where it lives
+
+`userspace/bc/src/main.rs`: `RuntimeError`, `type Eval = Result<Decimal,
+RuntimeError>`, and `run`, which is the single place a `RuntimeError` is ever
+printed. `userspace/bignum/src/decimal.rs` is where the fallibility originates.
+`dc` inherits this decision when its numeric core moves onto `Decimal`, since
+it is the same calculator with a different syntax.
+
+## §324 — `bc` and `dc` are one calculator with two syntaxes, so they share one numeric type
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** `dc` is a calculator that promised exact arithmetic on numbers of
+any size, but internally it used the same limited number format a pocket
+calculator uses — good for about seventeen digits, then it starts making digits
+up. Asked for 2 to the power of 200 it printed a sixty-one digit number whose
+last forty-four digits were fiction. `bc` (the same calculator with a different
+input syntax) had already been fixed. The decision was to have the two programs
+compute on *one shared implementation* rather than each carrying its own, so
+they cannot give different answers to the same question.
+
+### What was wrong
+
+`dc` stored every value as an `f64` (a "double" — the binary floating-point
+format hardware provides, holding about 17 significant decimal digits). Its own
+manual page advertised arbitrary precision. Concretely:
+
+| Expression | `dc` answered | The true value |
+|---|---|---|
+| `2 200 ^ p` | `1606938044258990` + 45 zeros | `…2202993782792835301376` |
+| `[d1-d1<F*]sF 30 lFx p` (30!) | a rounded approximation | `265252859812191058636308480000000` |
+| `20 k 1 3 / p` | 17 good digits, then noise | 20 exact digits |
+
+This is worse than a program that simply refuses: every wrong digit was
+presented with the same confidence as a right one.
+
+### The decision
+
+`dc`'s numeric core is now `bignum::Decimal` — the fixed-point decimal type
+`userspace/bc` was moved onto first. Not a copy of it; the same crate.
+
+*What changes:* every arithmetic answer is exact to the digit the user asked
+for, and any expression written in both syntaxes gives the same string.
+
+### The alternatives
+
+| Option | *What changes* | Against |
+|---|---|---|
+| Give `dc` its own bignum implementation | Same answers today | Two implementations of POSIX's scale rules drift. `bc` and `dc` are specified to agree; nothing would keep them agreeing except vigilance. |
+| Leave `dc` on `f64`, correct the documentation | `dc`'s manual stops lying | The program remains useless for the thing `dc` is *for*. `dc` exists because `expr` cannot do arbitrary precision. |
+| **Share `bignum::Decimal` (chosen)** | Exact answers; the two syntaxes provably agree | The shared type's bugs are now two programs' bugs — mitigated by the cross-check below. |
+
+The sharing paid for itself immediately. Moving `dc` onto the type surfaced
+three defects in it that `bc`'s own tests had not: the formatter trimmed
+trailing zeros (which made `scale` unobservable), the base-ten parser scored
+`F` as 22 rather than 15, and a non-decimal fraction kept an inflated scale.
+All three were `bc` bugs too, and all three are fixed in §324's companion
+commit. One implementation exercised by two front-ends finds more than two
+implementations exercised by one each.
+
+### Two decisions taken along the way
+
+**Comparisons put the top of the stack on the left.** `5 3 >a` asks whether
+3 — the value on top — exceeds 5. This reads backwards, and the previous
+implementation had it reversed. It is not a matter of taste: the two idioms
+every `dc` program is built from, `[d 1 - d 1 <F *] sF` (factorial) and
+`[1 + d 20 >L] sL` (count to twenty), terminate only under this reading. Under
+the reversed one they run exactly one pass, and 30! came out as 870.
+
+**A macro call in tail position replaces the current chunk rather than nesting.**
+`dc` has no loop construct; a loop is a macro that ends by invoking itself. If
+that invocation consumed a Rust stack frame, the number of iterations a `dc`
+program could run would be capped by the process stack — a 20000-iteration loop
+would abort the process rather than answer. Calls that are *not* in tail
+position still nest, and are bounded by an explicit depth limit that reports
+"too deep" instead of crashing.
+
+### Verification, and its limits
+
+There is no `bc` and no `dc` on the development machine, so the differential
+harness used for `sed`, `awk` and `expr` — run ours and the system's on the same
+input, compare — was not available. Two weaker checks stand in:
+
+- **`bc` against `dc`.** 22 expressions written in both syntaxes, covering
+  `2^200`, 50-place quotients, the scale rules for `*`, `%` and `^`, and base
+  conversion in both directions. All 22 agree exactly. This cannot catch a
+  misreading of POSIX that both inherit from the shared type, which is precisely
+  what it is weak against.
+- **Hand-computed expected values**, checked against an independent arbitrary-
+  precision implementation (Python) for the cases where a wrong answer would be
+  hard to spot: 2^4096 mod (10^30+1), 30!, sqrt(2) to thirty places.
+
+`known-issues.md` records the output details still unverified against a
+reference implementation — chiefly whether a value below one prints as `0.5` or
+as `.5`, where every traditional `bc` omits the leading zero and ours does not.
+
+---
+
+## §325 — The calculators are specified by a differential harness against GNU, not by our reading of POSIX
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** we had written `bc` and `dc` from POSIX plus memory of how the
+traditional tools behave, and tested them with unit tests we wrote at the same
+time. Those tests asserted the same beliefs the code did, so they could only
+ever confirm them. Once a real GNU `bc`/`dc` was found on the machine and a
+harness compared the two byte-for-byte, seven separate behaviours turned out to
+be wrong — all of them green under our own suite. The decision is that GNU's
+observed output, captured in `scripts/calc-diff.sh`, is now the specification
+for anything POSIX does not pin down, and that our unit tests are derived from
+it rather than from reasoning.
+
+**The alternatives**
+
+| | Spec from POSIX + our reading | Spec from a running GNU binary |
+|---|---|---|
+| Cost | none; it is what we were already doing | a harness (~250 lines) and a dependency on WSL to *run* it |
+| Catches a misreading of the standard | no — a misreading propagates identically into code and test | yes, and it did, seven times |
+| Covers what POSIX leaves undefined | no; those are pure guesses | yes; that is most of what it found |
+| Risk | agrees with itself forever while disagreeing with every script | encodes GNU's bugs as well as GNU's behaviour |
+
+**Why the second, despite the last row.** The things at stake are not
+mathematics, they are *punctuation*: whether a base-36 digit is written `Z` or
+` 35`, whether `x++` on its own line echoes, whether `1 0 /` leaves its operands
+on the stack. A script does not care which spelling is more principled; it
+cares that the spelling matches the one every other `bc` uses. Where GNU is
+arguably wrong — an unrecognised escape like `\v` silently swallowing both its
+characters is not a *good* rule — matching it is still correct, because a
+program that relied on the other behaviour would already be broken everywhere
+else. The one thing this must not do is import GNU's *arithmetic* bugs, and it
+cannot: the numeric results are independently checked against hand-computed
+values (§324), and the harness compares those too, so a disagreement about a
+number is a signal to investigate rather than to copy.
+
+**The narrower call inside it: where the line-length conversion lives.**
+`BC_LINE_LENGTH=10` makes GNU `bc` emit nine columns then `\`; `DC_LINE_LENGTH=10`
+makes GNU `dc` emit ten. Same source tarball, two arithmetics — `L - 2` against
+`L - 1`, and each stops wrapping at a different floor. `bignum::wrap_number`
+therefore takes a *chunk width*, not a line length, and each front-end owns the
+`wrap_chunk()` that derives one from its own environment variable. The
+alternative — a flag on `wrap_number` — would have put a `bool is_dc` in the
+numeric library, which is exactly the sort of parameter that later grows a third
+value and ends up encoding all of `dc` inside `bignum`. The field on each
+interpreter was renamed from `line_length` to `wrap_chunk` for the same reason:
+the old name is what made the off-by-one invisible for as long as it was.
+
+**What this obliges.** `scripts/calc-diff.sh` must be run after any change to
+how either program prints, and a deliberate divergence must be recorded as an
+`xfail_bc`/`xfail_dc` case with a comment saying why — a silent difference is
+indistinguishable from a regression. If GNU is ever unavailable the harness
+skips rather than fails, so it cannot become a build dependency; the unit tests
+it seeded stay behind and keep the measured values under test.

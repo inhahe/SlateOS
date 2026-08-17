@@ -3,3 +3,15 @@ name = "coreutils"
 version = "0.1.0"
 edition = "2024"
 description = "Coreutils for SlateOS (85 total)"
+
+[dependencies]
+# One regex engine for the utilities and the shell. `grep`, `sed`, `awk` and
+# `expr` each used to match regular expressions with `str::contains`, so a
+# bracket expression matched only a line that literally contained `[ax]` — and
+# `[[ $f =~ ^a ]]` in osh and `grep '^a'` gave different answers about one file.
+# See design-decisions.md §322.
+ere = { path = "../ere" }
+# One definition of an exact integer, shared with `bc`, `dc` and `genius-cli`.
+# GNU `expr` is arbitrary-precision — `expr 9223372036854775807 + 1` answers
+# 9223372036854775808 — and a shell script reaches those sizes by accident.
+bignum = { path = "../bignum" }

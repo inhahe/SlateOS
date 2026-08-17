@@ -15,6 +15,14 @@ path = "src/lib.rs"
 [dependencies]
 bstr = { version = "1.13.0", default-features = false, features = ["std"] }
 
+# The POSIX regex engine, shared with the coreutils. It was `src/ere.rs` here
+# until `grep`, `sed`, `awk` and `expr` were each found to be matching regular
+# expressions with `str::contains`; a shell's `[[ =~ ]]` and a `grep` on the
+# same machine disagreeing about what `[a-z]` matches is a real divergence, not
+# a cosmetic one. Same reasoning as `tzrules` below — and it carries the
+# character model (`ere::ch`) that `bytes` re-exports, for the same reason.
+ere = { path = "../ere" }
+
 # The POSIX `TZ`-string engine, shared verbatim with the libc (`posix`). osh
 # renders broken-down time itself — `printf '%(FMT)T'` and the `\D{…}` prompt
 # escapes never call `strftime` — so without a shared engine the shell and every

@@ -66974,6 +66974,20 @@ mod tests {
         DIR.with(|d| shell_path(d.path()))
     }
 
+    /// The `$PATH` a test shell searches: the ambient one, minus the two
+    /// directories cargo injects into it for the duration of a test run. See
+    /// [`crate::hostpath`] for why that matters and why the end-to-end tests
+    /// share this definition instead of growing one of their own.
+    ///
+    /// Binding it to a *shell variable* rather than mutating the process
+    /// environment is what makes it safe under the harness: libtest runs tests
+    /// on threads, and `std::env::set_var` is unsound while any other thread may
+    /// be reading the environment — which is why Rust 2024 made it `unsafe`. A
+    /// shell variable is per-shell and touches nothing shared.
+    fn harness_path() -> Str {
+        bytes::os_to_bytes(&crate::hostpath::host_path())
+    }
+
     /// A [`Shell`] rooted in this test's scratch directory — what every test
     /// here builds instead of a bare `Shell::new()`, which would leave the shell
     /// standing in the crate's source directory (see [`test_cwd`]).
@@ -66987,11 +67001,19 @@ mod tests {
     /// `seed_startup_dirs` does and the difference is observable: an
     /// unexported `$PWD` is `declare -- PWD=…` to `declare -p` and carries no
     /// letters for `${PWD@a}`, neither of which is what a real shell answers.
+    ///
+    /// `$PATH` is bound for a different reason — see [`harness_path`]. Binding
+    /// it also *removes* a fallback: without a `$PATH` of its own the shell
+    /// reads the process's, so a test's command lookup depended on the
+    /// harness's environment. Exported because a real shell's is, and because
+    /// a child that runs a lookup of its own must search the same list.
     fn new_shell() -> Shell {
         let mut sh = Shell::new();
         sh.cwd = test_cwd();
         sh.put_var("PWD".to_string(), sh.cwd.clone());
         sh.exported.insert("PWD".to_string());
+        sh.put_var("PATH".to_string(), harness_path());
+        sh.exported.insert("PATH".to_string());
         sh.refresh_dirstack();
         sh
     }
@@ -67022,6 +67044,40 @@ mod tests {
         // shells a test builds have to be able to see each other's files.
         assert_eq!(run("> made-by-an-earlier-shell").0, "");
         assert_eq!(run("echo made-by-an-earlier-shel*").0, "made-by-an-earlier-shell\n");
+    }
+
+    /// The harness's other contract: a test shell's `$PATH` reaches the host's
+    /// tools and not the build directory's (see [`harness_path`]).
+    ///
+    /// The failure this prevents is worse than silent — it is *intermittent by
+    /// build order*. `cargo test --workspace` builds ~200 SlateOS coreutils into
+    /// the directory cargo then prepends to `PATH`, so the same test binary
+    /// answers differently depending on whether anything else in the workspace
+    /// was compiled first. Asserting on the *shape* of the resolution rather
+    /// than on any one utility keeps this true for a utility added later.
+    #[test]
+    fn a_test_shell_resolves_commands_outside_the_build_directory() {
+        let (path, _) = run("printf '%s' \"$PATH\"");
+        assert!(!path.is_empty(), "the harness bound no $PATH at all");
+        let exe = std::env::current_exe().expect("current_exe");
+        let deps = exe.parent().expect("deps directory");
+        let profile = deps.parent().expect("profile directory");
+        let hay = path.replace('\\', "/").to_ascii_lowercase();
+        for dir in [deps, profile] {
+            let needle = dir.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+            assert!(
+                !hay.split([':', ';']).any(|e| e.trim_end_matches('/') == needle),
+                "cargo's {needle} is still on the test shell's $PATH"
+            );
+        }
+        // And the point of removing them: what a lookup actually finds is not a
+        // file in there. `command -v` answers the resolved path.
+        let (found, rc) = run("command -v cat");
+        if rc == 0 {
+            let found = found.trim().replace('\\', "/").to_ascii_lowercase();
+            let prof = profile.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+            assert!(!found.starts_with(&prof), "`cat` resolved into the build tree: {found}");
+        }
     }
 
     /// Run `src` through the *real* top-level driver ([`Shell::run_source_out`])
@@ -98449,9 +98505,11 @@ st=1
         assert_eq!(run("hash -p /bin/foo foo; PATH=/nowhere; hash").0, empty);
         assert_eq!(run("hash -p /bin/foo foo; PATH=$PATH; hash").0, empty);
         assert_eq!(run("hash -p /bin/foo foo; PATH+=:/nowhere; hash").0, empty);
-        // `unset` needs a `$PATH` to unset: with no environment imported the
-        // unit-test shell has none, and `unset` on a name that is not a
-        // variable looks for a *function* instead.
+        // `unset` needs a `$PATH` to unset — on a name that is not a variable
+        // it looks for a *function* instead. The harness binds one (see
+        // `harness_path`), so the assignment here is no longer load-bearing;
+        // it stays because the test is about the flush, and a `$PATH` whose
+        // value the test names is one whose flush the test can attribute.
         assert_eq!(run("PATH=/x; hash -p /bin/foo foo; unset PATH; hash").0, empty);
         assert_eq!(run("hash -p /bin/foo foo; declare PATH=/nowhere; hash").0, empty);
         // So does an assignment made as a command prefix, or inside a function.

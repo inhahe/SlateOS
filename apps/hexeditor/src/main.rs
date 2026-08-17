@@ -1467,6 +1467,19 @@ pub struct HexEditor {
     pub show_frequency: bool,
     /// Whether to show file info.
     pub show_file_info: bool,
+    /// Bytes held by the editor's clipboard, in the order they were copied.
+    ///
+    /// Raw bytes rather than the hex text, because the text is a *rendering*
+    /// of the bytes and not the other way round — a byte round-trips through
+    /// hex exactly, so keeping one field and deriving the other
+    /// ([`HexEditor::clipboard_hex`]) is the form that cannot drift out of
+    /// sync with itself.
+    pub clipboard: Vec<u8>,
+    /// Transient message shown in the status bar, e.g. `Copied 16 bytes`.
+    ///
+    /// Empty when there is nothing to say. Replaced by the next copy or paste
+    /// rather than expiring on a timer, since this app has no frame clock.
+    pub status_message: String,
 }
 
 impl HexEditor {
@@ -1485,7 +1498,66 @@ impl HexEditor {
             goto_text: String::new(),
             show_frequency: false,
             show_file_info: false,
+            clipboard: Vec::new(),
+            status_message: String::new(),
         }
+    }
+
+    // ========================================================================
+    // Clipboard
+    // ========================================================================
+
+    /// Copy the selection — or the byte under the cursor when nothing is
+    /// selected — into the editor clipboard.
+    ///
+    /// Copying nothing (an empty document) deliberately leaves the previous
+    /// clipboard alone rather than clearing it: a stray Ctrl+C should not be
+    /// able to destroy what the user copied a moment ago.
+    pub fn copy_selection(&mut self) {
+        let bytes = self.active_doc().copy_as_bytes();
+        if bytes.is_empty() {
+            self.status_message = "Nothing to copy".to_string();
+            return;
+        }
+        self.status_message = format!("Copied {} byte(s)", bytes.len());
+        self.clipboard = bytes;
+    }
+
+    /// Paste the editor clipboard at the cursor of the active document.
+    ///
+    /// Honours the document's edit mode: a read-only document is left alone
+    /// and the user is told why, rather than the key silently doing nothing.
+    pub fn paste_clipboard(&mut self) {
+        if self.clipboard.is_empty() {
+            self.status_message = "Clipboard is empty".to_string();
+            return;
+        }
+        if self.active_doc().edit_mode == EditMode::ReadOnly {
+            self.status_message = "Document is read-only".to_string();
+            return;
+        }
+        let bytes = std::mem::take(&mut self.clipboard);
+        self.active_doc_mut().paste_bytes(&bytes);
+        self.status_message = format!("Pasted {} byte(s)", bytes.len());
+        self.clipboard = bytes;
+    }
+
+    /// The clipboard rendered the way the hex column shows it: uppercase
+    /// pairs separated by single spaces.
+    ///
+    /// This is the form that would go to the *system* clipboard, so that a
+    /// paste into a text editor reads like a hex dump; [`HexDocument::paste_hex`]
+    /// is its inverse, for text arriving from outside this app.
+    #[must_use]
+    pub fn clipboard_hex(&self) -> String {
+        let mut s = String::with_capacity(self.clipboard.len().saturating_mul(3));
+        for (i, b) in self.clipboard.iter().enumerate() {
+            if i > 0 {
+                s.push(' ');
+            }
+            s.push_str(&format!("{b:02X}"));
+        }
+        s
     }
 
     /// Get a reference to the active document.
@@ -1520,8 +1592,15 @@ impl HexEditor {
     /// Close the tab at the given index.
     pub fn close_tab(&mut self, index: usize) {
         if self.documents.len() <= 1 {
-            // Don't close the last tab; replace with empty doc.
-            self.documents[0] = HexDocument::new();
+            // Don't close the last tab; replace it with an empty document.
+            // Written as first_mut/push rather than `documents[0] = …` because
+            // the field is `pub`: the "never empty" invariant is one the app
+            // maintains but callers can break, and a closing tab is the last
+            // place that should panic.
+            match self.documents.first_mut() {
+                Some(slot) => *slot = HexDocument::new(),
+                None => self.documents.push(HexDocument::new()),
+            }
             self.active_tab = 0;
             return;
         }
@@ -1613,12 +1692,11 @@ impl HexEditor {
                     return EventResult::Consumed;
                 }
                 Key::C => {
-                    // Copy — hex string.
-                    let _ = self.active_doc().copy_as_hex();
+                    self.copy_selection();
                     return EventResult::Consumed;
                 }
                 Key::V => {
-                    // Paste handled elsewhere (needs clipboard data).
+                    self.paste_clipboard();
                     return EventResult::Consumed;
                 }
                 Key::Tab => {
@@ -2662,6 +2740,26 @@ impl HexEditor {
                 max_width: Some(120.0),
                 overflow: TextOverflow::Ellipsis,
             });
+        }
+
+        // Transient message (copy/paste feedback). Sits after the selection
+        // field, and is bounded so it can never run into the file size on the
+        // right no matter how narrow the window is.
+        if !self.status_message.is_empty() {
+            let msg_x = sel_x + 130.0;
+            let msg_width = (self.window_width - 400.0 - msg_x).max(0.0);
+            if msg_width > 0.0 {
+                tree.push(RenderCommand::Text {
+                    x: msg_x,
+                    y: text_y,
+                    text: self.status_message.clone(),
+                    color: colors::SUBTEXT0,
+                    font_size: UI_FONT_SIZE,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(msg_width),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
         }
 
         // File size.
@@ -4039,6 +4137,154 @@ mod tests {
     fn test_paste_hex_invalid() {
         let mut doc = HexDocument::from_data(vec![0x00]);
         assert!(!doc.paste_hex("GGXX"));
+    }
+
+    // ====================================================================
+    // HexEditor — the clipboard the Ctrl+C/Ctrl+V keys drive
+    //
+    // The regression these guard: `Key::C` used to call `copy_as_hex()` and
+    // drop the result on the floor, and `Key::V` was an empty arm, so the
+    // "Copy/paste (hex string or raw bytes)" line in this module's docs
+    // described a feature that did nothing at all. Every test here goes
+    // through `handle_key`, not through the helpers, because the helpers were
+    // never the broken part.
+    // ====================================================================
+
+    fn ctrl(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            text: None,
+        }
+    }
+
+    #[test]
+    fn ctrl_c_puts_the_selection_on_the_clipboard() {
+        let mut app = HexEditor::new(1200.0, 800.0);
+        *app.active_doc_mut() = HexDocument::from_data(vec![0xAA, 0xBB, 0xCC, 0xDD]);
+        app.active_doc_mut().selection = Some(Selection::new(1, 2));
+
+        assert_eq!(app.handle_key(&ctrl(Key::C)), EventResult::Consumed);
+
+        assert_eq!(app.clipboard, vec![0xBB, 0xCC]);
+        assert_eq!(app.clipboard_hex(), "BB CC");
+        assert!(app.status_message.contains('2'), "{}", app.status_message);
+    }
+
+    #[test]
+    fn ctrl_c_with_no_selection_takes_the_byte_under_the_cursor() {
+        let mut app = HexEditor::new(1200.0, 800.0);
+        *app.active_doc_mut() = HexDocument::from_data(vec![0xAA, 0xBB, 0xCC]);
+        app.active_doc_mut().cursor = 2;
+
+        app.handle_key(&ctrl(Key::C));
+
+        assert_eq!(app.clipboard, vec![0xCC]);
+    }
+
+    #[test]
+    fn ctrl_v_inserts_the_clipboard_at_the_cursor() {
+        let mut app = HexEditor::new(1200.0, 800.0);
+        *app.active_doc_mut() = HexDocument::from_data(vec![0xAA, 0xDD]);
+        app.active_doc_mut().edit_mode = EditMode::Insert;
+        app.active_doc_mut().selection = Some(Selection::new(0, 0));
+
+        app.handle_key(&ctrl(Key::C));
+        app.active_doc_mut().selection = None;
+        app.active_doc_mut().cursor = 1;
+        assert_eq!(app.handle_key(&ctrl(Key::V)), EventResult::Consumed);
+
+        assert_eq!(app.active_doc().data, vec![0xAA, 0xAA, 0xDD]);
+    }
+
+    #[test]
+    fn a_paste_does_not_consume_the_clipboard() {
+        // Pasting twice is a normal thing to do; `paste_clipboard` takes the
+        // buffer out of `self` to satisfy the borrow checker, so this asserts
+        // it puts it back.
+        let mut app = HexEditor::new(1200.0, 800.0);
+        *app.active_doc_mut() = HexDocument::from_data(vec![0xAA]);
+        app.active_doc_mut().edit_mode = EditMode::Insert;
+
+        app.handle_key(&ctrl(Key::C));
+        app.handle_key(&ctrl(Key::V));
+        app.handle_key(&ctrl(Key::V));
+
+        assert_eq!(app.clipboard, vec![0xAA]);
+        assert_eq!(app.active_doc().data, vec![0xAA, 0xAA, 0xAA]);
+    }
+
+    #[test]
+    fn ctrl_v_on_a_read_only_document_says_so_instead_of_doing_nothing() {
+        let mut app = HexEditor::new(1200.0, 800.0);
+        *app.active_doc_mut() = HexDocument::from_data(vec![0xAA]);
+        app.handle_key(&ctrl(Key::C));
+        app.active_doc_mut().edit_mode = EditMode::ReadOnly;
+
+        app.handle_key(&ctrl(Key::V));
+
+        assert_eq!(app.active_doc().data, vec![0xAA], "read-only was edited");
+        assert!(
+            app.status_message.to_lowercase().contains("read-only"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn copying_nothing_leaves_the_previous_clipboard_intact() {
+        // A stray Ctrl+C in an empty tab must not destroy what was copied a
+        // moment ago in another one.
+        let mut app = HexEditor::new(1200.0, 800.0);
+        *app.active_doc_mut() = HexDocument::from_data(vec![0xAA, 0xBB]);
+        app.active_doc_mut().selection = Some(Selection::new(0, 1));
+        app.handle_key(&ctrl(Key::C));
+
+        *app.active_doc_mut() = HexDocument::new();
+        app.handle_key(&ctrl(Key::C));
+
+        assert_eq!(app.clipboard, vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn clipboard_hex_is_the_inverse_of_paste_hex() {
+        // The hex text is what a *system* clipboard would carry, so the two
+        // directions have to agree or a copy out and paste back would corrupt.
+        let mut app = HexEditor::new(1200.0, 800.0);
+        let payload = vec![0x00, 0x0F, 0x7F, 0x80, 0xFF];
+        *app.active_doc_mut() = HexDocument::from_data(payload.clone());
+        app.active_doc_mut().selection = Some(Selection::new(0, payload.len() - 1));
+        app.handle_key(&ctrl(Key::C));
+
+        let text = app.clipboard_hex();
+        assert_eq!(text, "00 0F 7F 80 FF");
+
+        let mut target = HexDocument::new();
+        target.edit_mode = EditMode::Insert;
+        assert!(target.paste_hex(&text));
+        assert_eq!(target.data, payload);
+    }
+
+    #[test]
+    fn the_status_bar_shows_the_copy_message() {
+        let mut app = HexEditor::new(1200.0, 800.0);
+        *app.active_doc_mut() = HexDocument::from_data(vec![0xAA]);
+        app.handle_key(&ctrl(Key::C));
+        // Guard against the vacuous pass: an empty message would match any
+        // other empty Text command in the bar.
+        assert!(!app.status_message.is_empty());
+
+        let mut tree = RenderTree::new();
+        app.render_status_bar(&mut tree);
+        let shown = tree
+            .commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if *text == app.status_message));
+        assert!(shown, "status message never reached the status bar");
     }
 
     #[test]

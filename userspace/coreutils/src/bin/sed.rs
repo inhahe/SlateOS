@@ -1,510 +1,1916 @@
-//! sed — stream editor.
+//! sed — the stream editor.
 //!
-//! Usage: sed [-n] [-e SCRIPT] [-i] [SCRIPT] [FILE...]
-//!   -n         suppress automatic printing of pattern space
-//!   -e SCRIPT  add SCRIPT to the commands
-//!   -i         edit files in place
+//! ```text
+//! sed [OPTION]... {SCRIPT} [FILE]...
+//! sed [OPTION]... -e SCRIPT... -f SCRIPTFILE... [FILE]...
+//! ```
 //!
-//! Supported commands:
-//!   s/PATTERN/REPLACEMENT/[g]  substitute
-//!   d                          delete pattern space
-//!   p                          print pattern space
-//!   q                          quit
-//!   N,M command                address range (line numbers)
-//!   /PATTERN/ command          address by regex match
+//! | | |
+//! |---|---|
+//! | `-n` | do not print the pattern space at the end of a cycle |
+//! | `-e S` | add S to the script; may be repeated |
+//! | `-f F` | add the contents of file F to the script |
+//! | `-i[SUF]` | edit each file in place, keeping a `SUF` backup if given |
+//! | `-E` / `-r` | patterns are Extended regular expressions |
+//! | `-s` | treat the files as separate streams rather than one |
+//! | `-z` | lines are separated by NUL rather than newline |
+//! | `-u` | accepted and ignored: this sed does not buffer between files |
+//! | `--` | end of options; what follows is a file |
+//!
+//! Exit status: 0 normally, 1 for a bad script or usage, 2 for a file that
+//! could not be read, or the status given to `q`.
+//!
+//! ## What this used to be
+//!
+//! Until `userspace/ere` existed, `sed` matched with `str::contains` plus a
+//! hand-rolled matcher that understood `.` and `*` and nothing else. `s/^/E:/`
+//! copied its input through unchanged — the shell's test suite caught that as a
+//! missing `E:` prefix and blamed the shell, which had in fact done everything
+//! right. There were no groups, no `\(…\)`, no bracket expressions, no
+//! alternation, no back-half of the command set (no hold space, no branching,
+//! no `y`, no `a`/`i`/`c`), and ranges did not track state across lines: `1,5d`
+//! deleted lines 1 and 5. See `design-decisions.md` §322.
+//!
+//! Patterns are POSIX **Basic** regular expressions, **Extended** under `-E`,
+//! matched by `ere` — the same engine `grep`, `awk`, `expr` and the shell's
+//! `[[ =~ ]]` use, so all five agree about what `[a-z]` means.
+//!
+//! ## Lines are bytes
+//!
+//! A path on this system may hold any byte but `/` and NUL, so a `sed` that
+//! insisted its input was UTF-8 could not edit a file listing. The pattern and
+//! hold spaces are `Vec<u8>` and input is read with `read_until`, so a line
+//! that is not text passes through unchanged rather than being replaced with
+//! U+FFFD.
+//!
+//! ## The trailing newline
+//!
+//! If the last line of the input has no newline, neither does the output — but
+//! `printf a | sed p` still prints `a\na`, because the newline is missing only
+//! from the *end of the output*, not from that line wherever it appears. That
+//! is why writing goes through [`Out`], which holds a newline back until it
+//! knows something follows it.
 
 use std::env;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process;
+use std::rc::Rc;
+
+use coreutils::errmsg::strerror;
+use ere::{Regex, bre};
+
+// ---------------------------------------------------------------- the script
+
+/// One address: a way of naming input lines.
+enum Addr {
+    /// A line number. `0` is not a line; it exists so `0,/re/` can end on the
+    /// very first line, which `1,/re/` cannot.
+    Line(usize),
+    /// The last line of the input.
+    Last,
+    /// A regular expression. `None` is the empty `//`, which means "whatever
+    /// pattern was matched last" and so can only be resolved while running.
+    Re(Option<Rc<Regex>>),
+    /// GNU's `first~step`.
+    Step(usize, usize),
+}
+
+/// The second half of a range, which may be relative to where the range began.
+enum EndAddr {
+    Addr(Addr),
+    /// `addr,+N` — N lines after the start.
+    Plus(usize),
+    /// `addr,~N` — on to the next line number that is a multiple of N.
+    Multiple(usize),
+}
+
+/// Which lines a command applies to.
+enum Sel {
+    Always,
+    One(Addr),
+    Range(Addr, EndAddr),
+}
+
+/// A piece of an `s` command's replacement text.
+enum Rep {
+    Lit(Vec<u8>),
+    /// `&` is group 0, `\1`–`\9` are the rest.
+    Group(usize),
+    Case(CaseOp),
+}
+
+/// GNU's case-folding escapes in a replacement.
+#[derive(Clone, Copy)]
+enum CaseOp {
+    /// `\u` / `\l` — the next character only.
+    OneUpper,
+    OneLower,
+    /// `\U` / `\L` — until `\E`.
+    RestUpper,
+    RestLower,
+    /// `\E`.
+    End,
+}
+
+struct Subst {
+    /// `None` for `s//…/`: the last pattern matched, resolved at run time.
+    re: Option<Rc<Regex>>,
+    repl: Vec<Rep>,
+    global: bool,
+    /// The `N` of `s/…/…/N`; 1 unless given. With `g`, the Nth match *onwards*.
+    occurrence: usize,
+    print: bool,
+    wfile: Option<usize>,
+}
+
+enum Action {
+    /// `{` — holds the index just past its matching `}`, so an address that
+    /// does not select can skip the whole block in one step.
+    Block(usize),
+    BlockEnd,
+    /// `:label` — a no-op that branches aim at.
+    Label,
+    /// `b`, `t`, `T`. The index is where to jump; `cmds.len()` ends the cycle.
+    Branch(usize),
+    BranchIfSub(usize),
+    BranchIfNoSub(usize),
+    Subst(Box<Subst>),
+    /// `y` — a whole byte table, so transliteration cannot fail on a byte that
+    /// is not a character.
+    Transliterate(Box<[u8; 256]>),
+    Delete,
+    DeleteFirstLine,
+    Print,
+    PrintFirstLine,
+    Next,
+    AppendNext,
+    Hold,
+    HoldAppend,
+    Get,
+    GetAppend,
+    Exchange,
+    LineNumber,
+    AppendText(Vec<u8>),
+    InsertText(Vec<u8>),
+    ChangeText(Vec<u8>),
+    ReadFile(String),
+    WriteFile(usize),
+    Quit {
+        code: i32,
+        print: bool,
+    },
+}
+
+struct Command {
+    sel: Sel,
+    negated: bool,
+    act: Action,
+}
+
+struct Script {
+    cmds: Vec<Command>,
+    wfiles: Vec<String>,
+    /// Set by a `#n` first line, which is POSIX's in-script spelling of `-n`.
+    suppress: bool,
+}
+
+// ---------------------------------------------------------------- the parser
+
+struct Parser<'a> {
+    s: &'a [u8],
+    i: usize,
+    ere: bool,
+    wfiles: Vec<String>,
+}
+
+impl Parser<'_> {
+    fn peek(&self) -> Option<u8> {
+        self.s.get(self.i).copied()
+    }
+
+    fn bump(&mut self) -> Option<u8> {
+        let c = self.peek()?;
+        self.i = self.i.saturating_add(1);
+        Some(c)
+    }
+
+    fn eat(&mut self, c: u8) -> bool {
+        if self.peek() == Some(c) {
+            self.i = self.i.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn skip_blank(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t')) {
+            self.i = self.i.saturating_add(1);
+        }
+    }
+
+    /// Skip whatever may sit between two commands.
+    fn skip_separators(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r' | b';')) {
+            self.i = self.i.saturating_add(1);
+        }
+    }
+
+    fn skip_to_eol(&mut self) {
+        while !matches!(self.peek(), None | Some(b'\n')) {
+            self.i = self.i.saturating_add(1);
+        }
+    }
+
+    fn number(&mut self) -> Result<usize, String> {
+        let start = self.i;
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+            self.i = self.i.saturating_add(1);
+        }
+        let digits = self.s.get(start..self.i).unwrap_or_default();
+        if digits.is_empty() {
+            return Err("expected a number".to_string());
+        }
+        let mut n: usize = 0;
+        for &d in digits {
+            n = n
+                .checked_mul(10)
+                .and_then(|x| x.checked_add(usize::from(d.wrapping_sub(b'0'))))
+                .ok_or_else(|| "line number is too large".to_string())?;
+        }
+        Ok(n)
+    }
+
+    /// Read up to the next unescaped `delim`.
+    ///
+    /// `re` selects how `\<delim>` is spelt on the way out: a replacement wants
+    /// the delimiter itself, but a *pattern* wants it neutralised, since a
+    /// delimiter such as `.` or `|` would otherwise become the metacharacter it
+    /// looks like. Every other escape is passed through untouched — this is not
+    /// the place that decides what `\w` means.
+    ///
+    /// `re` also turns on bracket-expression skipping, because `s/[/]/X/` is a
+    /// substitution of a slash and not an unterminated command: inside `[...]`
+    /// the delimiter is an ordinary character. A scanner that did not know
+    /// where brackets are would have to reject that script.
+    fn take_until(&mut self, delim: u8, re: bool, what: &str) -> Result<Vec<u8>, String> {
+        let unterminated = || format!("unterminated {what}");
+        let mut out = Vec::new();
+        loop {
+            let Some(c) = self.bump() else {
+                return Err(unterminated());
+            };
+            if c == delim {
+                return Ok(out);
+            }
+            if c == b'\n' {
+                return Err(unterminated());
+            }
+            if re && c == b'[' {
+                out.push(b'[');
+                self.take_bracket(&mut out).ok_or_else(unterminated)?;
+                continue;
+            }
+            if c != b'\\' {
+                out.push(c);
+                continue;
+            }
+            let Some(n) = self.bump() else {
+                return Err("a script may not end in a backslash".to_string());
+            };
+            if n == delim {
+                if re {
+                    out.extend_from_slice(&literal_for(delim));
+                } else {
+                    out.push(delim);
+                }
+            } else if n == b'\n' {
+                out.push(b'\n');
+            } else {
+                out.push(b'\\');
+                out.push(n);
+            }
+        }
+    }
+
+    /// Copy the rest of a bracket expression, `[` already consumed.
+    ///
+    /// Nothing inside is interpreted — not the delimiter, not a backslash,
+    /// which POSIX says is an ordinary character here. The only structure that
+    /// matters is where the expression *ends*, and that is what the two leading
+    /// special cases are about: `[]a]` and `[^]a]` hold a literal `]`.
+    fn take_bracket(&mut self, out: &mut Vec<u8>) -> Option<()> {
+        if self.peek() == Some(b'^') {
+            out.push(self.bump()?);
+        }
+        if self.peek() == Some(b']') {
+            out.push(self.bump()?);
+        }
+        loop {
+            let c = self.bump()?;
+            out.push(c);
+            if c == b']' {
+                return Some(());
+            }
+            // `[:alpha:]`, `[.ch.]` and `[=e=]` may contain a `]` of their own.
+            if c == b'[' && matches!(self.peek(), Some(b':' | b'.' | b'=')) {
+                let kind = self.bump()?;
+                out.push(kind);
+                loop {
+                    let x = self.bump()?;
+                    out.push(x);
+                    if x == kind && self.peek() == Some(b']') {
+                        out.push(self.bump()?);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// `I` after a pattern asks for case-insensitive matching.
+    fn re_flags(&mut self) -> Result<bool, String> {
+        let mut ci = false;
+        loop {
+            match self.peek() {
+                Some(b'I') => {
+                    self.i = self.i.saturating_add(1);
+                    ci = true;
+                }
+                // `M` makes `^`/`$` match at embedded newlines, which the
+                // engine cannot express. Refusing beats matching the wrong
+                // lines silently.
+                Some(b'M') => return Err("the `M' regex modifier is not supported".to_string()),
+                _ => return Ok(ci),
+            }
+        }
+    }
+
+    fn compile(&self, pat: &[u8], ci: bool) -> Result<Option<Rc<Regex>>, String> {
+        // An empty pattern is not an error: `s//X/` and `//d` re-use the last
+        // regular expression that was matched, which is a run-time value.
+        if pat.is_empty() {
+            return Ok(None);
+        }
+        let r = if self.ere {
+            Regex::new_flags(pat, ci)
+        } else {
+            bre::compile(pat, ci)
+        };
+        match r {
+            Ok(re) => Ok(Some(Rc::new(re))),
+            Err(e) => Err(String::from_utf8_lossy(&e.0).into_owned()),
+        }
+    }
+
+    fn parse_addr(&mut self) -> Result<Option<Addr>, String> {
+        match self.peek() {
+            Some(b'$') => {
+                self.i = self.i.saturating_add(1);
+                Ok(Some(Addr::Last))
+            }
+            Some(b'/') => {
+                self.i = self.i.saturating_add(1);
+                let pat = self.take_until(b'/', true, "address regex")?;
+                let ci = self.re_flags()?;
+                Ok(Some(Addr::Re(self.compile(&pat, ci)?)))
+            }
+            // `\cREc` — any delimiter, so a pattern full of slashes need not be
+            // written full of backslashes.
+            Some(b'\\') => {
+                self.i = self.i.saturating_add(1);
+                let d = self
+                    .bump()
+                    .ok_or_else(|| "expected a delimiter after `\\'".to_string())?;
+                let pat = self.take_until(d, true, "address regex")?;
+                let ci = self.re_flags()?;
+                Ok(Some(Addr::Re(self.compile(&pat, ci)?)))
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let n = self.number()?;
+                if self.eat(b'~') {
+                    let step = self.number()?;
+                    return Ok(Some(Addr::Step(n, step)));
+                }
+                Ok(Some(Addr::Line(n)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn parse_sel(&mut self) -> Result<Sel, String> {
+        let Some(a1) = self.parse_addr()? else {
+            return Ok(Sel::Always);
+        };
+        self.skip_blank();
+        if !self.eat(b',') {
+            return Ok(Sel::One(a1));
+        }
+        self.skip_blank();
+        let end = if self.eat(b'+') {
+            EndAddr::Plus(self.number()?)
+        } else if self.eat(b'~') {
+            EndAddr::Multiple(self.number()?)
+        } else {
+            let Some(a2) = self.parse_addr()? else {
+                return Err("expected an address after `,'".to_string());
+            };
+            EndAddr::Addr(a2)
+        };
+        Ok(Sel::Range(a1, end))
+    }
+
+    /// The text argument of `a`, `i` and `c`.
+    ///
+    /// Both spellings are accepted — POSIX's `a\` followed by the text on the
+    /// next line, and the one-liner `a text` every script actually uses.
+    fn parse_text(&mut self) -> Vec<u8> {
+        self.skip_blank();
+        if self.peek() == Some(b'\\') {
+            self.i = self.i.saturating_add(1);
+            self.eat(b'\n');
+            self.skip_blank();
+        }
+        let mut out = Vec::new();
+        while let Some(c) = self.peek() {
+            if c == b'\n' {
+                self.i = self.i.saturating_add(1);
+                break;
+            }
+            self.i = self.i.saturating_add(1);
+            if c == b'\\' {
+                match self.bump() {
+                    // A continued line: the newline is part of the text.
+                    Some(b'\n') => out.push(b'\n'),
+                    Some(n) => out.push(n),
+                    None => break,
+                }
+                continue;
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    /// A file name argument, which runs to the end of the line — a `;` in a
+    /// file name is a character in a file name.
+    fn parse_filename(&mut self) -> Result<String, String> {
+        self.skip_blank();
+        let start = self.i;
+        self.skip_to_eol();
+        let raw = self.s.get(start..self.i).unwrap_or_default();
+        if raw.is_empty() {
+            return Err("expected a file name".to_string());
+        }
+        String::from_utf8(raw.to_vec())
+            .map_err(|_| "file names given to sed must be text".to_string())
+    }
+
+    /// Intern a `w` target so the same file opened twice is one handle, and
+    /// two writes to it therefore append rather than truncate each other.
+    fn wfile(&mut self, path: String) -> usize {
+        if let Some(i) = self.wfiles.iter().position(|p| *p == path) {
+            return i;
+        }
+        self.wfiles.push(path);
+        self.wfiles.len().saturating_sub(1)
+    }
+
+    fn parse_label(&mut self) -> Vec<u8> {
+        self.skip_blank();
+        let start = self.i;
+        while !matches!(self.peek(), None | Some(b'\n' | b';' | b'}')) {
+            self.i = self.i.saturating_add(1);
+        }
+        let raw = self.s.get(start..self.i).unwrap_or_default();
+        raw.iter()
+            .rev()
+            .skip_while(|c| matches!(**c, b' ' | b'\t' | b'\r'))
+            .copied()
+            .collect::<Vec<u8>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+
+    fn parse_subst(&mut self) -> Result<Subst, String> {
+        let delim = self
+            .bump()
+            .ok_or_else(|| "`s' needs a delimiter".to_string())?;
+        if delim == b'\\' || delim == b'\n' {
+            return Err("`s' may not be delimited by a backslash or a newline".to_string());
+        }
+        let pat = self.take_until(delim, true, "`s' command")?;
+        let raw_repl = self.take_until(delim, false, "`s' command")?;
+
+        let mut global = false;
+        let mut occurrence = 0usize;
+        let mut print = false;
+        let mut ci = false;
+        let mut wfile = None;
+        loop {
+            match self.peek() {
+                Some(b'g') => {
+                    self.i = self.i.saturating_add(1);
+                    global = true;
+                }
+                Some(b'p') => {
+                    self.i = self.i.saturating_add(1);
+                    print = true;
+                }
+                Some(b'i' | b'I') => {
+                    self.i = self.i.saturating_add(1);
+                    ci = true;
+                }
+                Some(b'm' | b'M') => {
+                    return Err("the `M' flag of `s' is not supported".to_string());
+                }
+                Some(c) if c.is_ascii_digit() => {
+                    if occurrence != 0 {
+                        return Err("`s' takes only one number flag".to_string());
+                    }
+                    occurrence = self.number()?;
+                    if occurrence == 0 {
+                        return Err("`s' counts matches from 1".to_string());
+                    }
+                }
+                Some(b'w') => {
+                    self.i = self.i.saturating_add(1);
+                    let path = self.parse_filename()?;
+                    wfile = Some(self.wfile(path));
+                    break;
+                }
+                _ => break,
+            }
+        }
+
+        Ok(Subst {
+            re: self.compile(&pat, ci)?,
+            repl: parse_replacement(&raw_repl),
+            global,
+            occurrence: occurrence.max(1),
+            print,
+            wfile,
+        })
+    }
+
+    fn parse_transliterate(&mut self) -> Result<Box<[u8; 256]>, String> {
+        let delim = self
+            .bump()
+            .ok_or_else(|| "`y' needs a delimiter".to_string())?;
+        let from = unescape_y(&self.take_until(delim, false, "`y' command")?);
+        let to = unescape_y(&self.take_until(delim, false, "`y' command")?);
+        if from.len() != to.len() {
+            return Err("strings for `y' command are different lengths".to_string());
+        }
+        let mut table = Box::new([0u8; 256]);
+        for (i, slot) in table.iter_mut().enumerate() {
+            *slot = u8::try_from(i).unwrap_or(0);
+        }
+        for (f, t) in from.iter().zip(to.iter()) {
+            if let Some(slot) = table.get_mut(usize::from(*f)) {
+                *slot = *t;
+            }
+        }
+        Ok(table)
+    }
+}
+
+/// How to write `c` into a pattern so it stands for itself in both dialects.
+///
+/// Backslash-escaping works for the characters POSIX names as escapable, but
+/// `\+` and `\(` are *more* special in a BRE, not less, so those go inside a
+/// bracket expression instead — the one spelling that is literal everywhere.
+fn literal_for(c: u8) -> Vec<u8> {
+    match c {
+        b'.' | b'*' | b'[' | b']' | b'^' | b'$' | b'\\' => vec![b'\\', c],
+        b'+' | b'?' | b'(' | b')' | b'{' | b'}' | b'|' => vec![b'[', c, b']'],
+        _ => vec![c],
+    }
+}
+
+/// `y` takes text, not a pattern, so only the escapes that name a byte apply.
+fn unescape_y(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0usize;
+    while let Some(&c) = raw.get(i) {
+        i = i.saturating_add(1);
+        if c != b'\\' {
+            out.push(c);
+            continue;
+        }
+        match raw.get(i).copied() {
+            Some(b'n') => out.push(b'\n'),
+            Some(b't') => out.push(b'\t'),
+            Some(b'r') => out.push(b'\r'),
+            Some(b'\\') => out.push(b'\\'),
+            Some(other) => out.push(other),
+            None => out.push(b'\\'),
+        }
+        i = i.saturating_add(1);
+    }
+    out
+}
+
+fn parse_replacement(raw: &[u8]) -> Vec<Rep> {
+    let mut parts: Vec<Rep> = Vec::new();
+    let mut lit: Vec<u8> = Vec::new();
+    let flush = |lit: &mut Vec<u8>, parts: &mut Vec<Rep>| {
+        if !lit.is_empty() {
+            parts.push(Rep::Lit(std::mem::take(lit)));
+        }
+    };
+
+    let mut i = 0usize;
+    while let Some(&c) = raw.get(i) {
+        i = i.saturating_add(1);
+        if c == b'&' {
+            flush(&mut lit, &mut parts);
+            parts.push(Rep::Group(0));
+            continue;
+        }
+        if c != b'\\' {
+            lit.push(c);
+            continue;
+        }
+        let Some(&n) = raw.get(i) else {
+            lit.push(b'\\');
+            break;
+        };
+        i = i.saturating_add(1);
+        match n {
+            b'0'..=b'9' => {
+                flush(&mut lit, &mut parts);
+                parts.push(Rep::Group(usize::from(n.wrapping_sub(b'0'))));
+            }
+            b'n' => lit.push(b'\n'),
+            b't' => lit.push(b'\t'),
+            b'r' => lit.push(b'\r'),
+            b'a' => lit.push(0x07),
+            b'f' => lit.push(0x0c),
+            b'v' => lit.push(0x0b),
+            b'u' | b'l' | b'U' | b'L' | b'E' => {
+                flush(&mut lit, &mut parts);
+                parts.push(Rep::Case(match n {
+                    b'u' => CaseOp::OneUpper,
+                    b'l' => CaseOp::OneLower,
+                    b'U' => CaseOp::RestUpper,
+                    b'L' => CaseOp::RestLower,
+                    _ => CaseOp::End,
+                }));
+            }
+            // `\&`, `\\`, `\<newline>` and anything else: the character itself.
+            other => lit.push(other),
+        }
+    }
+    flush(&mut lit, &mut parts);
+    parts
+}
+
+/// Why a script would not compile.
+///
+/// `at` is the offset the parser had reached, which is what makes a diagnostic
+/// about a long one-liner usable; a failure with no position is one that is not
+/// about a place in the text — an unresolved label is about the script's shape.
+#[cfg_attr(test, derive(Debug))]
+struct ScriptError {
+    at: Option<usize>,
+    msg: String,
+    code: i32,
+}
+
+enum ScriptFail {
+    Syntax(String),
+    Label(String),
+}
+
+impl From<String> for ScriptFail {
+    fn from(msg: String) -> ScriptFail {
+        ScriptFail::Syntax(msg)
+    }
+}
+
+/// Compile a whole script.
+///
+/// The `-e` fragments and `-f` files are joined with newlines and parsed once,
+/// because a `{` may be opened in one fragment and closed in the next.
+fn compile_script(script: &[u8], ere: bool) -> Result<Script, ScriptError> {
+    let mut p = Parser {
+        s: script,
+        i: 0,
+        ere,
+        wfiles: Vec::new(),
+    };
+    match parse_body(&mut p, script) {
+        Ok(s) => Ok(s),
+        Err(ScriptFail::Syntax(msg)) => Err(ScriptError {
+            at: Some(p.i),
+            msg,
+            code: 1,
+        }),
+        // GNU reports an unresolvable label after parsing has finished, and
+        // gives it its own status. Matching that keeps a script that checks
+        // `$?` behaving the same under either sed.
+        Err(ScriptFail::Label(msg)) => Err(ScriptError {
+            at: None,
+            msg,
+            code: 4,
+        }),
+    }
+}
+
+fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
+    let mut cmds: Vec<Command> = Vec::new();
+    let mut open: Vec<usize> = Vec::new();
+    let mut labels: Vec<(Vec<u8>, usize)> = Vec::new();
+    let mut branches: Vec<(usize, Vec<u8>)> = Vec::new();
+
+    // POSIX: `#n` on the very first line is `-n`. A `#` anywhere else, and
+    // `#no` on the first line, are ordinary comments.
+    let mut suppress = false;
+    if script.starts_with(b"#n") && matches!(script.get(2), None | Some(b'\n')) {
+        suppress = true;
+        p.i = 2;
+    }
+
+    loop {
+        p.skip_separators();
+        match p.peek() {
+            None => break,
+            Some(b'#') => {
+                p.skip_to_eol();
+                continue;
+            }
+            Some(b'}') => {
+                p.i = p.i.saturating_add(1);
+                let start = open
+                    .pop()
+                    .ok_or_else(|| "unexpected `}'".to_string())?;
+                let here = cmds.len();
+                cmds.push(Command {
+                    sel: Sel::Always,
+                    negated: false,
+                    act: Action::BlockEnd,
+                });
+                if let Some(c) = cmds.get_mut(start) {
+                    c.act = Action::Block(here.saturating_add(1));
+                }
+                continue;
+            }
+            Some(_) => {}
+        }
+
+        let sel = p.parse_sel()?;
+        p.skip_blank();
+        let mut negated = false;
+        while p.eat(b'!') {
+            negated = !negated;
+            p.skip_blank();
+        }
+        let Some(c) = p.bump() else {
+            return Err(ScriptFail::Syntax("missing command".to_string()));
+        };
+        let here = cmds.len();
+        let act = match c {
+            b'{' => {
+                open.push(here);
+                Action::Block(0)
+            }
+            b'}' => return Err(ScriptFail::Syntax("unexpected `}'".to_string())),
+            b':' => {
+                let name = p.parse_label();
+                if name.is_empty() {
+                    return Err(ScriptFail::Syntax("`:' needs a label".to_string()));
+                }
+                labels.push((name, here));
+                Action::Label
+            }
+            b'b' | b't' | b'T' => {
+                let name = p.parse_label();
+                branches.push((here, name));
+                match c {
+                    b'b' => Action::Branch(0),
+                    b't' => Action::BranchIfSub(0),
+                    _ => Action::BranchIfNoSub(0),
+                }
+            }
+            b's' => Action::Subst(Box::new(p.parse_subst()?)),
+            b'y' => Action::Transliterate(p.parse_transliterate()?),
+            b'd' => Action::Delete,
+            b'D' => Action::DeleteFirstLine,
+            b'p' => Action::Print,
+            b'P' => Action::PrintFirstLine,
+            b'n' => Action::Next,
+            b'N' => Action::AppendNext,
+            b'h' => Action::Hold,
+            b'H' => Action::HoldAppend,
+            b'g' => Action::Get,
+            b'G' => Action::GetAppend,
+            b'x' => Action::Exchange,
+            b'=' => Action::LineNumber,
+            b'a' => Action::AppendText(p.parse_text()),
+            b'i' => Action::InsertText(p.parse_text()),
+            b'c' => Action::ChangeText(p.parse_text()),
+            b'r' => Action::ReadFile(p.parse_filename()?),
+            b'w' => {
+                let path = p.parse_filename()?;
+                Action::WriteFile(p.wfile(path))
+            }
+            b'q' | b'Q' => {
+                p.skip_blank();
+                let code = if p.peek().is_some_and(|d| d.is_ascii_digit()) {
+                    i32::try_from(p.number()?).unwrap_or(i32::MAX)
+                } else {
+                    0
+                };
+                Action::Quit {
+                    code,
+                    print: c == b'q',
+                }
+            }
+            other => {
+                return Err(ScriptFail::Syntax(format!(
+                    "unknown command: `{}'",
+                    other.escape_ascii()
+                )));
+            }
+        };
+        cmds.push(Command { sel, negated, act });
+    }
+
+    if !open.is_empty() {
+        return Err(ScriptFail::Syntax("unmatched `{'".to_string()));
+    }
+
+    let end = cmds.len();
+    for (at, name) in branches {
+        let target = if name.is_empty() {
+            end
+        } else {
+            *labels
+                .iter()
+                .find(|(l, _)| *l == name)
+                .map(|(_, i)| i)
+                .ok_or_else(|| {
+                    ScriptFail::Label(format!(
+                        "can't find label for jump to `{}'",
+                        String::from_utf8_lossy(&name)
+                    ))
+                })?
+        };
+        if let Some(cmd) = cmds.get_mut(at) {
+            cmd.act = match cmd.act {
+                Action::Branch(_) => Action::Branch(target),
+                Action::BranchIfSub(_) => Action::BranchIfSub(target),
+                _ => Action::BranchIfNoSub(target),
+            };
+        }
+    }
+
+    Ok(Script {
+        cmds,
+        wfiles: std::mem::take(&mut p.wfiles),
+        suppress,
+    })
+}
+
+// ----------------------------------------------------------------- the input
+
+struct Line {
+    bytes: Vec<u8>,
+    /// Whether the line ended with the separator, as opposed to end-of-file.
+    had_sep: bool,
+}
+
+/// The lines of a list of files, read as one stream.
+///
+/// It reads one line ahead, because `$` cannot be answered without knowing
+/// whether anything follows — and with several files that question crosses a
+/// file boundary.
+struct Input {
+    paths: Vec<String>,
+    next_path: usize,
+    cur: Option<Box<dyn BufRead>>,
+    peeked: Option<Line>,
+    sep: u8,
+    had_error: bool,
+}
+
+impl Input {
+    fn new(paths: Vec<String>, sep: u8) -> Input {
+        Input {
+            paths,
+            next_path: 0,
+            cur: None,
+            peeked: None,
+            sep,
+            had_error: false,
+        }
+    }
+
+    fn open_next(&mut self) -> bool {
+        while let Some(path) = self.paths.get(self.next_path) {
+            let path = path.clone();
+            self.next_path = self.next_path.saturating_add(1);
+            if path == "-" {
+                self.cur = Some(Box::new(BufReader::new(io::stdin())));
+                return true;
+            }
+            match File::open(&path) {
+                Ok(f) => {
+                    self.cur = Some(Box::new(BufReader::new(f)));
+                    return true;
+                }
+                Err(e) => {
+                    eprintln!("sed: can't read {path}: {}", strerror(&e));
+                    self.had_error = true;
+                }
+            }
+        }
+        false
+    }
+
+    fn fill(&mut self) {
+        if self.peeked.is_some() {
+            return;
+        }
+        loop {
+            if self.cur.is_none() && !self.open_next() {
+                return;
+            }
+            let Some(r) = self.cur.as_mut() else { return };
+            let mut buf = Vec::new();
+            match r.read_until(self.sep, &mut buf) {
+                Ok(0) => {
+                    self.cur = None;
+                }
+                Ok(_) => {
+                    let had_sep = buf.last() == Some(&self.sep);
+                    if had_sep {
+                        buf.pop();
+                    }
+                    self.peeked = Some(Line {
+                        bytes: buf,
+                        had_sep,
+                    });
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("sed: read error: {}", strerror(&e));
+                    self.had_error = true;
+                    self.cur = None;
+                }
+            }
+        }
+    }
+
+    fn next_line(&mut self) -> Option<Line> {
+        self.fill();
+        self.peeked.take()
+    }
+
+    /// Whether the line just handed out was the last one there will be.
+    fn at_end(&mut self) -> bool {
+        self.fill();
+        self.peeked.is_none()
+    }
+}
+
+// ---------------------------------------------------------------- the output
+
+/// A sink that holds a missing separator back.
+///
+/// The input's last line may have no newline, and then the output's last line
+/// must have none either — but any *earlier* copy of that same line does need
+/// one. Deciding at write time is impossible; deciding at the next write is
+/// exactly right, and costs one flag.
+struct Out<'a> {
+    w: &'a mut dyn Write,
+    sep: u8,
+    owed: bool,
+}
+
+impl Out<'_> {
+    fn line(&mut self, bytes: &[u8], sep: bool) -> io::Result<()> {
+        if self.owed {
+            self.w.write_all(&[self.sep])?;
+            self.owed = false;
+        }
+        self.w.write_all(bytes)?;
+        if sep {
+            self.w.write_all(&[self.sep])?;
+        } else {
+            self.owed = true;
+        }
+        Ok(())
+    }
+
+    fn raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.owed {
+            self.w.write_all(&[self.sep])?;
+            self.owed = false;
+        }
+        self.w.write_all(bytes)
+    }
+}
+
+// -------------------------------------------------------------- the executor
+
+/// What a run of the script decided about the current cycle.
+enum Flow {
+    /// Fell off the end: print the pattern space unless `-n`.
+    Normal,
+    /// `d` — the cycle ends with nothing printed.
+    Deleted,
+    /// `D` with an embedded newline — run the script again on what is left,
+    /// without reading a new line.
+    Restart,
+    Quit { code: i32, print: bool },
+}
+
+/// Text queued by `a` or `r`, emitted after the cycle's own output.
+enum Pending {
+    Text(Vec<u8>),
+    File(String),
+}
+
+struct WFile {
+    path: String,
+    file: Option<File>,
+    failed: bool,
+}
+
+struct RangeState {
+    active: bool,
+    /// For `addr,N`, `addr,+N` and `addr,~N`: the line the range closes on.
+    end_line: Option<usize>,
+}
+
+struct Exec {
+    pattern: Vec<u8>,
+    hold: Vec<u8>,
+    line_num: usize,
+    had_sep: bool,
+    sub_made: bool,
+    appends: Vec<Pending>,
+    last_re: Option<Rc<Regex>>,
+    ranges: Vec<RangeState>,
+    wfiles: Vec<WFile>,
+    suppress: bool,
+    had_error: bool,
+}
+
+impl Exec {
+    fn new(script: &Script, suppress: bool) -> Exec {
+        let mut ranges: Vec<RangeState> = Vec::with_capacity(script.cmds.len());
+        for cmd in &script.cmds {
+            // `0,/re/` is the one range that is open before any line is read;
+            // that is the whole point of it, and why a line number of 0 exists.
+            let (active, end_line) = match &cmd.sel {
+                Sel::Range(Addr::Line(0), end) => (
+                    true,
+                    match end {
+                        EndAddr::Addr(Addr::Line(n)) => Some(*n),
+                        _ => None,
+                    },
+                ),
+                _ => (false, None),
+            };
+            ranges.push(RangeState { active, end_line });
+        }
+        Exec {
+            pattern: Vec::new(),
+            hold: Vec::new(),
+            line_num: 0,
+            had_sep: true,
+            sub_made: false,
+            appends: Vec::new(),
+            last_re: None,
+            ranges,
+            wfiles: script
+                .wfiles
+                .iter()
+                .map(|p| WFile {
+                    path: p.clone(),
+                    file: None,
+                    failed: false,
+                })
+                .collect(),
+            suppress,
+            had_error: false,
+        }
+    }
+
+    fn fail(&mut self, msg: &str) {
+        eprintln!("sed: {msg}");
+        self.had_error = true;
+    }
+
+    /// Resolve `//` and record what was matched, so the next `//` can find it.
+    fn resolve(&mut self, r: Option<&Rc<Regex>>) -> Option<Rc<Regex>> {
+        let re = match r {
+            Some(x) => Rc::clone(x),
+            None => match &self.last_re {
+                Some(x) => Rc::clone(x),
+                None => {
+                    self.fail("no previous regular expression");
+                    return None;
+                }
+            },
+        };
+        self.last_re = Some(Rc::clone(&re));
+        Some(re)
+    }
+
+    fn addr_match(&mut self, a: &Addr, input: &mut Input) -> bool {
+        match a {
+            Addr::Line(n) => self.line_num == *n,
+            Addr::Last => input.at_end(),
+            Addr::Step(first, step) => {
+                if *step == 0 {
+                    self.line_num == *first
+                } else {
+                    self.line_num >= *first
+                        && self.line_num.saturating_sub(*first).is_multiple_of(*step)
+                }
+            }
+            Addr::Re(r) => match self.resolve(r.as_ref()) {
+                Some(re) => re.find(&self.pattern).is_some(),
+                None => false,
+            },
+        }
+    }
+
+    fn range_select(&mut self, pc: usize, a1: &Addr, a2: &EndAddr, input: &mut Input) -> bool {
+        if !self.ranges.get(pc).is_some_and(|r| r.active) {
+            if !self.addr_match(a1, input) {
+                return false;
+            }
+            // A range whose end is already behind us selects this line alone.
+            let end = match a2 {
+                EndAddr::Addr(Addr::Line(n)) => {
+                    if *n <= self.line_num {
+                        return true;
+                    }
+                    Some(*n)
+                }
+                EndAddr::Plus(0) => return true,
+                EndAddr::Plus(n) => Some(self.line_num.saturating_add(*n)),
+                EndAddr::Multiple(0) => return true,
+                // "on to the next line number that is a multiple of N" — the
+                // *next* one, so `4,~4` on five lines runs 4 to the end rather
+                // than stopping on the 4 it started on.
+                EndAddr::Multiple(n) => Some(
+                    self.line_num
+                        .checked_div(*n)
+                        .and_then(|q| q.checked_add(1))
+                        .and_then(|q| q.checked_mul(*n))
+                        .unwrap_or(usize::MAX),
+                ),
+                EndAddr::Addr(_) => None,
+            };
+            if let Some(r) = self.ranges.get_mut(pc) {
+                r.active = true;
+                r.end_line = end;
+            }
+            return true;
+        }
+
+        let close = match a2 {
+            EndAddr::Addr(Addr::Last) => input.at_end(),
+            EndAddr::Addr(Addr::Re(r)) => match self.resolve(r.as_ref()) {
+                Some(re) => re.find(&self.pattern).is_some(),
+                None => true,
+            },
+            EndAddr::Addr(Addr::Step(_, _)) => false,
+            _ => {
+                let end = self.ranges.get(pc).and_then(|r| r.end_line);
+                end.is_some_and(|e| self.line_num >= e)
+            }
+        };
+        if close && let Some(r) = self.ranges.get_mut(pc) {
+            r.active = false;
+            r.end_line = None;
+        }
+        true
+    }
+
+    fn selected(&mut self, pc: usize, cmd: &Command, input: &mut Input) -> bool {
+        let hit = match &cmd.sel {
+            Sel::Always => true,
+            Sel::One(a) => self.addr_match(a, input),
+            Sel::Range(a1, a2) => self.range_select(pc, a1, a2, input),
+        };
+        hit != cmd.negated
+    }
+
+    fn write_wfile(&mut self, idx: usize, bytes: &[u8], out: &mut Out<'_>) -> io::Result<()> {
+        let Some(w) = self.wfiles.get_mut(idx) else {
+            return Ok(());
+        };
+        if w.path == "/dev/stdout" {
+            return out.line(bytes, true);
+        }
+        if w.path == "/dev/stderr" {
+            let mut e = io::stderr();
+            e.write_all(bytes)?;
+            return e.write_all(b"\n");
+        }
+        if w.failed {
+            return Ok(());
+        }
+        if w.file.is_none() {
+            match File::create(&w.path) {
+                Ok(f) => w.file = Some(f),
+                Err(e) => {
+                    let msg = format!("couldn't open file {}: {}", w.path, strerror(&e));
+                    w.failed = true;
+                    self.fail(&msg);
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(f) = w.file.as_mut() {
+            f.write_all(bytes)?;
+            f.write_all(b"\n")?;
+        }
+        Ok(())
+    }
+
+    fn flush_appends(&mut self, out: &mut Out<'_>) -> io::Result<()> {
+        for p in std::mem::take(&mut self.appends) {
+            match p {
+                Pending::Text(t) => out.line(&t, true)?,
+                Pending::File(path) => {
+                    // GNU ignores a file it cannot read here: `r` is an
+                    // inclusion, and a missing one is not an error in a script
+                    // that may run before the file exists.
+                    let read = if path == "/dev/stdin" {
+                        let mut b = Vec::new();
+                        io::stdin().read_to_end(&mut b).map(|_| b)
+                    } else {
+                        fs::read(&path)
+                    };
+                    if let Ok(bytes) = read
+                        && !bytes.is_empty()
+                    {
+                        out.raw(&bytes)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply one `s` command; returns whether anything was replaced.
+    fn substitute(&mut self, sub: &Subst) -> bool {
+        let Some(re) = self.resolve(sub.re.as_ref()) else {
+            return false;
+        };
+        let hay = std::mem::take(&mut self.pattern);
+        let mut out: Vec<u8> = Vec::with_capacity(hay.len());
+        let mut last = 0usize;
+        let mut seen = 0usize;
+        let mut did = false;
+
+        for caps in re.capture_spans_iter(&hay) {
+            let Some((s, e)) = caps.first().copied().flatten() else {
+                break;
+            };
+            seen = seen.saturating_add(1);
+            let replace = if sub.global {
+                seen >= sub.occurrence
+            } else {
+                seen == sub.occurrence
+            };
+            if !replace {
+                continue;
+            }
+            out.extend_from_slice(hay.get(last..s).unwrap_or_default());
+            render(&sub.repl, &hay, &caps, &mut out);
+            last = e;
+            did = true;
+            if !sub.global {
+                break;
+            }
+        }
+        out.extend_from_slice(hay.get(last..).unwrap_or_default());
+        self.pattern = out;
+        did
+    }
+
+    #[allow(clippy::too_many_lines)] // One dispatch over sed's command set; splitting it would hide the table.
+    fn run(&mut self, cmds: &[Command], input: &mut Input, out: &mut Out<'_>) -> io::Result<Flow> {
+        let mut pc = 0usize;
+        while let Some(cmd) = cmds.get(pc) {
+            if !self.selected(pc, cmd, input) {
+                pc = match cmd.act {
+                    Action::Block(after) => after,
+                    _ => pc.saturating_add(1),
+                };
+                continue;
+            }
+            match &cmd.act {
+                Action::Block(_) | Action::BlockEnd | Action::Label => {}
+                Action::Branch(t) => {
+                    pc = *t;
+                    continue;
+                }
+                Action::BranchIfSub(t) => {
+                    if self.sub_made {
+                        self.sub_made = false;
+                        pc = *t;
+                        continue;
+                    }
+                }
+                Action::BranchIfNoSub(t) => {
+                    if self.sub_made {
+                        self.sub_made = false;
+                    } else {
+                        pc = *t;
+                        continue;
+                    }
+                }
+                Action::Subst(sub) => {
+                    if self.substitute(sub) {
+                        self.sub_made = true;
+                        if sub.print {
+                            out.line(&self.pattern.clone(), true)?;
+                        }
+                        if let Some(w) = sub.wfile {
+                            let bytes = self.pattern.clone();
+                            self.write_wfile(w, &bytes, out)?;
+                        }
+                    }
+                }
+                Action::Transliterate(table) => {
+                    for b in &mut self.pattern {
+                        *b = table.get(usize::from(*b)).copied().unwrap_or(*b);
+                    }
+                }
+                Action::Delete => return Ok(Flow::Deleted),
+                Action::DeleteFirstLine => {
+                    return Ok(match self.pattern.iter().position(|&b| b == b'\n') {
+                        Some(i) => {
+                            self.pattern.drain(..=i);
+                            Flow::Restart
+                        }
+                        None => Flow::Deleted,
+                    });
+                }
+                Action::Print => {
+                    let bytes = self.pattern.clone();
+                    out.line(&bytes, self.had_sep)?;
+                }
+                Action::PrintFirstLine => {
+                    let (bytes, sep) = match self.pattern.iter().position(|&b| b == b'\n') {
+                        Some(i) => (self.pattern.get(..i).unwrap_or_default().to_vec(), true),
+                        None => (self.pattern.clone(), self.had_sep),
+                    };
+                    out.line(&bytes, sep)?;
+                }
+                Action::Next => {
+                    if !self.suppress {
+                        let bytes = self.pattern.clone();
+                        out.line(&bytes, self.had_sep)?;
+                    }
+                    self.flush_appends(out)?;
+                    match input.next_line() {
+                        Some(l) => {
+                            self.pattern = l.bytes;
+                            self.had_sep = l.had_sep;
+                            self.line_num = self.line_num.saturating_add(1);
+                        }
+                        // No more input: sed stops, and the pattern space has
+                        // already been printed by this very command.
+                        None => {
+                            return Ok(Flow::Quit {
+                                code: 0,
+                                print: false,
+                            });
+                        }
+                    }
+                }
+                Action::AppendNext => {
+                    self.flush_appends(out)?;
+                    match input.next_line() {
+                        Some(l) => {
+                            self.pattern.push(b'\n');
+                            self.pattern.extend_from_slice(&l.bytes);
+                            self.had_sep = l.had_sep;
+                            self.line_num = self.line_num.saturating_add(1);
+                        }
+                        // GNU prints what it has rather than dropping it, which
+                        // is what makes `sed '$!N;s/\n/ /'` join pairs of lines
+                        // without losing an odd last one.
+                        None => {
+                            return Ok(Flow::Quit {
+                                code: 0,
+                                print: true,
+                            });
+                        }
+                    }
+                }
+                Action::Hold => self.hold.clone_from(&self.pattern),
+                Action::HoldAppend => {
+                    self.hold.push(b'\n');
+                    self.hold.extend_from_slice(&self.pattern);
+                }
+                Action::Get => self.pattern.clone_from(&self.hold),
+                Action::GetAppend => {
+                    self.pattern.push(b'\n');
+                    self.pattern.extend_from_slice(&self.hold);
+                }
+                Action::Exchange => std::mem::swap(&mut self.pattern, &mut self.hold),
+                Action::LineNumber => {
+                    let n = self.line_num.to_string();
+                    out.line(n.as_bytes(), true)?;
+                }
+                Action::AppendText(t) => self.appends.push(Pending::Text(t.clone())),
+                Action::InsertText(t) => out.line(t, true)?,
+                Action::ChangeText(t) => {
+                    // For a range, the text replaces the whole range and so is
+                    // written once, when the range closes — not once per line.
+                    let still_open = matches!(cmd.sel, Sel::Range(_, _))
+                        && self.ranges.get(pc).is_some_and(|r| r.active);
+                    if !still_open {
+                        out.line(t, true)?;
+                    }
+                    return Ok(Flow::Deleted);
+                }
+                Action::ReadFile(path) => self.appends.push(Pending::File(path.clone())),
+                Action::WriteFile(idx) => {
+                    let bytes = self.pattern.clone();
+                    self.write_wfile(*idx, &bytes, out)?;
+                }
+                Action::Quit { code, print } => {
+                    return Ok(Flow::Quit {
+                        code: *code,
+                        print: *print,
+                    });
+                }
+            }
+            pc = pc.saturating_add(1);
+        }
+        Ok(Flow::Normal)
+    }
+
+    /// Run the script over every line of `input`.
+    ///
+    /// Returns the status `q` asked for, if it did.
+    fn cycle(
+        &mut self,
+        cmds: &[Command],
+        input: &mut Input,
+        out: &mut Out<'_>,
+    ) -> io::Result<Option<i32>> {
+        while let Some(line) = input.next_line() {
+            self.pattern = line.bytes;
+            self.had_sep = line.had_sep;
+            self.line_num = self.line_num.saturating_add(1);
+            self.sub_made = false;
+
+            loop {
+                match self.run(cmds, input, out)? {
+                    Flow::Normal => {
+                        if !self.suppress {
+                            let bytes = std::mem::take(&mut self.pattern);
+                            out.line(&bytes, self.had_sep)?;
+                            self.pattern = bytes;
+                        }
+                        self.flush_appends(out)?;
+                        break;
+                    }
+                    Flow::Deleted => {
+                        self.flush_appends(out)?;
+                        break;
+                    }
+                    Flow::Restart => {
+                        self.flush_appends(out)?;
+                    }
+                    Flow::Quit { code, print } => {
+                        if print && !self.suppress {
+                            let bytes = std::mem::take(&mut self.pattern);
+                            out.line(&bytes, self.had_sep)?;
+                        }
+                        self.flush_appends(out)?;
+                        return Ok(Some(code));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Expand a replacement against one match.
+fn render(parts: &[Rep], hay: &[u8], caps: &[Option<(usize, usize)>], out: &mut Vec<u8>) {
+    let mut rest: Option<bool> = None;
+    let mut one: Option<bool> = None;
+    let push = |bytes: &[u8], out: &mut Vec<u8>, one: &mut Option<bool>, rest: &Option<bool>| {
+        for &b in bytes {
+            let b = if let Some(up) = one.take() {
+                if up {
+                    b.to_ascii_uppercase()
+                } else {
+                    b.to_ascii_lowercase()
+                }
+            } else {
+                match rest {
+                    Some(true) => b.to_ascii_uppercase(),
+                    Some(false) => b.to_ascii_lowercase(),
+                    None => b,
+                }
+            };
+            out.push(b);
+        }
+    };
+
+    for part in parts {
+        match part {
+            Rep::Lit(b) => push(b, out, &mut one, &rest),
+            Rep::Group(n) => {
+                // A group that did not participate contributes nothing — as
+                // distinct from an error, which is what a *nonexistent* group
+                // would be, and which the compiler cannot see here.
+                if let Some(Some((s, e))) = caps.get(*n) {
+                    let text = hay.get(*s..*e).unwrap_or_default().to_vec();
+                    push(&text, out, &mut one, &rest);
+                }
+            }
+            Rep::Case(op) => match op {
+                CaseOp::OneUpper => one = Some(true),
+                CaseOp::OneLower => one = Some(false),
+                CaseOp::RestUpper => {
+                    rest = Some(true);
+                    one = None;
+                }
+                CaseOp::RestLower => {
+                    rest = Some(false);
+                    one = None;
+                }
+                CaseOp::End => {
+                    rest = None;
+                    one = None;
+                }
+            },
+        }
+    }
+}
+
+// ------------------------------------------------------------------- the CLI
 
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct SedArgs {
     suppress: bool,
-    in_place: bool,
-    scripts: Vec<String>,
+    ere: bool,
+    separate: bool,
+    null_data: bool,
+    /// `Some(suffix)` for `-i`; an empty suffix means no backup.
+    in_place: Option<String>,
+    /// The `-e` fragments and `-f` files, in the order they were given.
+    script_parts: Vec<ScriptPart>,
     files: Vec<String>,
 }
 
-/// Parse sed's argv.  Recognises `-n`, `-i`, and `-e SCRIPT`.  The first
-/// bare argument (not a flag and not the value of `-e`) is treated as
-/// the script; any subsequent bare arguments are files.  Missing `-e`
-/// value is reported as an error.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum ScriptPart {
+    Text(String),
+    File(String),
+}
+
+/// Parse sed's argv.
+///
+/// The first bare argument is the script *only if* no `-e` or `-f` has been
+/// given; otherwise every bare argument is a file. That rule is why
+/// `sed -e p file` edits `file` rather than looking for a file called `p`.
 fn parse_args(args: &[String]) -> Result<SedArgs, String> {
     let mut out = SedArgs::default();
-    let mut saw_script = false;
-    let mut i: usize = 0;
+    let mut i = 0usize;
+    let mut no_more_options = false;
+    let mut have_script = false;
 
     while let Some(arg) = args.get(i) {
-        match arg.as_str() {
-            "-n" => out.suppress = true,
-            "-i" => out.in_place = true,
-            "-e" => {
-                i = i.saturating_add(1);
-                let v = args
-                    .get(i)
-                    .ok_or_else(|| "option -e requires an argument".to_string())?;
-                out.scripts.push(v.clone());
-                saw_script = true;
+        i = i.saturating_add(1);
+        let bytes = arg.as_bytes();
+
+        if no_more_options || bytes.first() != Some(&b'-') || arg == "-" {
+            if have_script {
+                out.files.push(arg.clone());
+            } else {
+                out.script_parts.push(ScriptPart::Text(arg.clone()));
+                have_script = true;
             }
-            other => {
-                if !saw_script && out.scripts.is_empty() {
-                    out.scripts.push(other.to_string());
-                    saw_script = true;
-                } else {
-                    out.files.push(other.to_string());
+            continue;
+        }
+
+        if arg == "--" {
+            no_more_options = true;
+            continue;
+        }
+
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, value) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (long, None),
+            };
+            match name {
+                "quiet" | "silent" => out.suppress = true,
+                "regexp-extended" => out.ere = true,
+                "separate" => out.separate = true,
+                "null-data" | "zero-terminated" => out.null_data = true,
+                "posix" | "unbuffered" | "debug" | "sandbox" | "follow-symlinks" => {}
+                "in-place" => {
+                    out.in_place = Some(value.unwrap_or("").to_string());
+                    out.separate = true;
                 }
+                "expression" => {
+                    let v = value.ok_or_else(|| "--expression needs a script".to_string())?;
+                    out.script_parts.push(ScriptPart::Text(v.to_string()));
+                    have_script = true;
+                }
+                "file" => {
+                    let v = value.ok_or_else(|| "--file needs a file name".to_string())?;
+                    out.script_parts.push(ScriptPart::File(v.to_string()));
+                    have_script = true;
+                }
+                "help" => return Err("help".to_string()),
+                other => return Err(format!("unrecognized option '--{other}'")),
+            }
+            continue;
+        }
+
+        // Short options bundle, and `-e`/`-f`/`-i` may carry their value in the
+        // same argument: `-ne p`, `-i.bak`, `-eS`.
+        let mut j = 1usize;
+        while let Some(&c) = bytes.get(j) {
+            j = j.saturating_add(1);
+            match c {
+                b'n' => out.suppress = true,
+                b'E' | b'r' => out.ere = true,
+                b's' => out.separate = true,
+                b'z' => out.null_data = true,
+                b'u' => {}
+                b'i' => {
+                    // Unlike `-e`, `-i` never takes the *next* argument: GNU
+                    // reads `-i backup` as an in-place edit of `backup`.
+                    let suffix = String::from_utf8_lossy(bytes.get(j..).unwrap_or_default());
+                    out.in_place = Some(suffix.into_owned());
+                    out.separate = true;
+                    j = bytes.len();
+                }
+                b'e' | b'f' => {
+                    let rest = bytes.get(j..).unwrap_or_default();
+                    let value = if rest.is_empty() {
+                        let v = args
+                            .get(i)
+                            .ok_or_else(|| format!("option -{} requires an argument", c as char))?
+                            .clone();
+                        i = i.saturating_add(1);
+                        v
+                    } else {
+                        String::from_utf8_lossy(rest).into_owned()
+                    };
+                    j = bytes.len();
+                    out.script_parts.push(if c == b'e' {
+                        ScriptPart::Text(value)
+                    } else {
+                        ScriptPart::File(value)
+                    });
+                    have_script = true;
+                }
+                other => return Err(format!("invalid option -- '{}'", other.escape_ascii())),
             }
         }
-        i = i.saturating_add(1);
     }
 
     Ok(out)
 }
 
+const USAGE: &str = "\
+Usage: sed [OPTION]... {script} [input-file]...
+
+  -n, --quiet, --silent    suppress automatic printing of pattern space
+  -e SCRIPT                add SCRIPT to the commands to be executed
+  -f FILE                  add the contents of FILE to the commands
+  -i[SUFFIX]               edit files in place (making a backup if SUFFIX)
+  -E, -r                   use extended regular expressions
+  -s                       consider files as separate rather than one stream
+  -z                       separate lines by NUL characters
+  -u                       accepted and ignored
+      --help               display this help and exit";
+
+/// Gather the script text from `-e` fragments and `-f` files.
+fn collect_script(parts: &[ScriptPart]) -> Result<Vec<u8>, String> {
+    let mut script: Vec<u8> = Vec::new();
+    for part in parts {
+        if !script.is_empty() {
+            script.push(b'\n');
+        }
+        match part {
+            ScriptPart::Text(t) => script.extend_from_slice(t.as_bytes()),
+            ScriptPart::File(path) => {
+                let bytes = if path == "-" {
+                    let mut b = Vec::new();
+                    io::stdin()
+                        .read_to_end(&mut b)
+                        .map(|_| b)
+                        .map_err(|e| format!("couldn't read -: {}", strerror(&e)))?
+                } else {
+                    fs::read(path).map_err(|e| format!("couldn't open file {path}: {}", strerror(&e)))?
+                };
+                script.extend_from_slice(&bytes);
+            }
+        }
+    }
+    Ok(script)
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    let mut parsed = match parse_args(&args) {
+    let parsed = match parse_args(&args) {
         Ok(p) => p,
+        Err(e) if e == "help" => {
+            println!("{USAGE}");
+            process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("sed: {e}");
+            eprintln!("{USAGE}");
+            process::exit(1);
+        }
+    };
+
+    if parsed.script_parts.is_empty() {
+        eprintln!("sed: no script specified");
+        eprintln!("{USAGE}");
+        process::exit(1);
+    }
+
+    let script_text = match collect_script(&parsed.script_parts) {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("sed: {e}");
             process::exit(1);
         }
     };
 
-    if parsed.scripts.is_empty() {
-        eprintln!("sed: no script specified");
-        process::exit(1);
-    }
-
-    let commands: Vec<SedCommand> = parsed.scripts.iter().flat_map(|s| parse_script(s)).collect();
-
-    if parsed.files.is_empty() {
-        parsed.files.push("-".to_string());
-    }
-
-    for path in &parsed.files {
-        if parsed.in_place && path != "-" {
-            let content = match fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("sed: {path}: {e}");
-                    continue;
-                }
-            };
-            let result = process_text(&content, &commands, parsed.suppress);
-            if let Err(e) = fs::write(path, &result) {
-                eprintln!("sed: {path}: {e}");
+    let script = match compile_script(&script_text, parsed.ere) {
+        Ok(s) => s,
+        Err(e) => {
+            match e.at {
+                Some(at) => eprintln!("sed: -e expression #1, char {at}: {}", e.msg),
+                None => eprintln!("sed: {}", e.msg),
             }
-        } else {
-            let reader: Box<dyn Read> = if path == "-" {
-                Box::new(io::stdin())
-            } else {
-                match fs::File::open(path) {
-                    Ok(f) => Box::new(f),
-                    Err(e) => {
-                        eprintln!("sed: {path}: {e}");
-                        continue;
-                    }
-                }
-            };
-
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
-            let buf = BufReader::new(reader);
-            let mut line_num: usize = 0;
-
-            for line_result in buf.lines() {
-                let line = match line_result {
-                    Ok(l) => l,
-                    Err(_) => break,
-                };
-                line_num = line_num.saturating_add(1);
-
-                let (output, should_quit) =
-                    process_line(&line, &commands, parsed.suppress, line_num);
-                if let Some(text) = output {
-                    let _ = writeln!(out, "{text}");
-                }
-                if should_quit {
-                    break;
-                }
-            }
+            process::exit(e.code);
         }
+    };
+
+    let suppress = parsed.suppress || script.suppress;
+    let sep = if parsed.null_data { 0 } else { b'\n' };
+    let mut files = parsed.files.clone();
+    if files.is_empty() {
+        files.push("-".to_string());
     }
+
+    let status = if let Some(suffix) = parsed.in_place.as_ref() {
+        run_in_place(&script, &files, suppress, sep, suffix)
+    } else if parsed.separate {
+        run_separate(&script, &files, suppress, sep)
+    } else {
+        run_joined(&script, &files, suppress, sep)
+    };
+    process::exit(status);
 }
 
-/// Run `commands` against `content` as a single string and return the
-/// resulting text.  Used by `-i` (in-place) mode and unit tests.
-fn process_text(content: &str, commands: &[SedCommand], suppress: bool) -> String {
-    let mut result = String::new();
-    for (i, line) in content.lines().enumerate() {
-        let (output, should_quit) =
-            process_line(line, commands, suppress, i.saturating_add(1));
-        if let Some(text) = output {
-            result.push_str(&text);
-            result.push('\n');
-        }
-        if should_quit {
-            break;
-        }
-    }
-    result
-}
-
-/// Apply each command in sequence to one input line.  Returns the
-/// possibly-modified line to emit (or None if the line was deleted /
-/// `-n` suppressed printing) and a quit flag.
-fn process_line(
-    line: &str,
-    commands: &[SedCommand],
+/// Wire one `Input` to one `Out` and run the script over it.
+fn run_one(
+    script: &Script,
+    input: &mut Input,
+    sink: &mut dyn Write,
     suppress: bool,
-    line_num: usize,
-) -> (Option<String>, bool) {
-    let mut pattern = line.to_string();
-    let mut deleted = false;
-    let mut printed = false;
-    let mut quit = false;
-
-    for cmd in commands {
-        if deleted || quit {
-            break;
+    sep: u8,
+) -> (Option<i32>, bool) {
+    let mut exec = Exec::new(script, suppress);
+    let mut out = Out {
+        w: sink,
+        sep,
+        owed: false,
+    };
+    let quit = match exec.cycle(&script.cmds, input, &mut out) {
+        Ok(q) => q,
+        Err(e) => {
+            // A closed pipe is how `sed … | head` ends, and is not a failure.
+            if e.kind() != io::ErrorKind::BrokenPipe {
+                eprintln!("sed: couldn't write: {}", strerror(&e));
+                return (Some(4), true);
+            }
+            None
         }
-        if !address_matches(&cmd.address, line_num, &pattern) {
+    };
+    (quit, exec.had_error)
+}
+
+/// All the files as one stream: line numbers and `$` run across them.
+fn run_joined(script: &Script, files: &[String], suppress: bool, sep: u8) -> i32 {
+    let stdout = io::stdout();
+    let mut sink = stdout.lock();
+    let mut input = Input::new(files.to_vec(), sep);
+    let (quit, exec_err) = run_one(script, &mut input, &mut sink, suppress, sep);
+    let _ = sink.flush();
+    status(quit, input.had_error || exec_err)
+}
+
+/// `-s`: each file starts again at line 1, and each has its own last line.
+fn run_separate(script: &Script, files: &[String], suppress: bool, sep: u8) -> i32 {
+    let stdout = io::stdout();
+    let mut sink = stdout.lock();
+    let mut bad = false;
+    for path in files {
+        let mut input = Input::new(vec![path.clone()], sep);
+        let (quit, exec_err) = run_one(script, &mut input, &mut sink, suppress, sep);
+        bad = bad || input.had_error || exec_err;
+        if let Some(code) = quit {
+            let _ = sink.flush();
+            return status(Some(code), bad);
+        }
+    }
+    let _ = sink.flush();
+    status(None, bad)
+}
+
+/// `-i`: the output of each file replaces it.
+///
+/// The result is built in memory and written once, so a script that fails
+/// part-way through does not leave the file half-edited.
+fn run_in_place(
+    script: &Script,
+    files: &[String],
+    suppress: bool,
+    sep: u8,
+    suffix: &str,
+) -> i32 {
+    let mut bad = false;
+    for path in files {
+        if path == "-" {
+            eprintln!("sed: no input files while in-place editing");
+            bad = true;
             continue;
         }
-
-        match &cmd.action {
-            Action::Substitute {
-                pattern: pat,
-                replacement,
-                global,
-            } => {
-                pattern = substitute(&pattern, pat, replacement, *global);
-            }
-            Action::Delete => {
-                deleted = true;
-            }
-            Action::Print => {
-                printed = true;
-            }
-            Action::Quit => {
-                quit = true;
-            }
-        }
-    }
-
-    let output = if deleted {
-        None
-    } else if printed || !suppress {
-        Some(pattern)
-    } else {
-        None
-    };
-
-    (output, quit)
-}
-
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-enum Address {
-    None,
-    Line(usize),
-    Pattern(String),
-    Range(Box<Address>, Box<Address>),
-}
-
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-enum Action {
-    Substitute {
-        pattern: String,
-        replacement: String,
-        global: bool,
-    },
-    Delete,
-    Print,
-    Quit,
-}
-
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-struct SedCommand {
-    address: Address,
-    action: Action,
-}
-
-fn parse_script(script: &str) -> Vec<SedCommand> {
-    let mut commands = Vec::new();
-
-    // Split on semicolons or newlines for multiple commands
-    for part in script.split([';', '\n']) {
-        let part = part.trim();
-        if part.is_empty() {
+        if let Err(e) = File::open(path) {
+            eprintln!("sed: can't read {path}: {}", strerror(&e));
+            bad = true;
             continue;
         }
-        if let Some(cmd) = parse_command(part) {
-            commands.push(cmd);
-        }
-    }
+        let mut buf: Vec<u8> = Vec::new();
+        let mut input = Input::new(vec![path.clone()], sep);
+        let (quit, exec_err) = run_one(script, &mut input, &mut buf, suppress, sep);
+        bad = bad || input.had_error || exec_err;
 
-    commands
-}
-
-fn parse_command(s: &str) -> Option<SedCommand> {
-    let bytes = s.as_bytes();
-    let mut pos = 0;
-
-    // Parse address
-    let (address, new_pos) = parse_address(s, pos);
-    pos = new_pos;
-
-    // Range: ADDR1,ADDR2 ACTION
-    if bytes.get(pos).copied() == Some(b',') {
-        pos = pos.saturating_add(1);
-        let (addr2, new_pos2) = parse_address(s, pos);
-        pos = new_pos2;
-        let address = Address::Range(Box::new(address), Box::new(addr2));
-        let action = parse_action(s.get(pos..).unwrap_or(""))?;
-        return Some(SedCommand { address, action });
-    }
-
-    let action = parse_action(s.get(pos..).unwrap_or(""))?;
-    Some(SedCommand { address, action })
-}
-
-fn parse_address(s: &str, mut pos: usize) -> (Address, usize) {
-    let bytes = s.as_bytes();
-
-    let Some(&first) = bytes.get(pos) else {
-        return (Address::None, pos);
-    };
-
-    // Line number address
-    if first.is_ascii_digit() {
-        let start = pos;
-        while bytes.get(pos).is_some_and(u8::is_ascii_digit) {
-            pos = pos.saturating_add(1);
-        }
-        let n: usize = s.get(start..pos).and_then(|x| x.parse().ok()).unwrap_or(0);
-        return (Address::Line(n), pos);
-    }
-
-    // Pattern address /regex/
-    if first == b'/' {
-        pos = pos.saturating_add(1);
-        let start = pos;
-        while let Some(&b) = bytes.get(pos) {
-            if b == b'/' {
-                break;
-            }
-            if b == b'\\' && bytes.get(pos.saturating_add(1)).is_some() {
-                pos = pos.saturating_add(1);
-            }
-            pos = pos.saturating_add(1);
-        }
-        let pattern = s.get(start..pos).unwrap_or("").to_string();
-        if bytes.get(pos).is_some() {
-            pos = pos.saturating_add(1); // skip closing /
-        }
-        return (Address::Pattern(pattern), pos);
-    }
-
-    (Address::None, pos)
-}
-
-fn parse_action(s: &str) -> Option<Action> {
-    let s = s.trim();
-    let first = *s.as_bytes().first()?;
-    match first {
-        b's' => {
-            // s/pattern/replacement/[flags]
-            let delim = *s.as_bytes().get(1)?;
-            let rest = s.get(2..).unwrap_or("");
-            let parts: Vec<&str> = split_delim(rest, delim as char);
-            if parts.len() < 2 {
-                return None;
-            }
-            let pat = parts.first().copied().unwrap_or("").to_string();
-            let repl = parts.get(1).copied().unwrap_or("").to_string();
-            let global = parts.get(2).is_some_and(|flags| flags.contains('g'));
-            Some(Action::Substitute {
-                pattern: pat,
-                replacement: repl,
-                global,
-            })
-        }
-        b'd' => Some(Action::Delete),
-        b'p' => Some(Action::Print),
-        b'q' => Some(Action::Quit),
-        _ => None,
-    }
-}
-
-fn split_delim(s: &str, delim: char) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let bytes = s.as_bytes();
-    let delim_byte = delim as u8;
-    let mut i = 0;
-
-    while let Some(&b) = bytes.get(i) {
-        if b == b'\\' && bytes.get(i.saturating_add(1)).is_some() {
-            i = i.saturating_add(2);
-            continue;
-        }
-        if b == delim_byte {
-            if let Some(piece) = s.get(start..i) {
-                parts.push(piece);
-            }
-            start = i.saturating_add(1);
-        }
-        i = i.saturating_add(1);
-    }
-    if let Some(piece) = s.get(start..) {
-        parts.push(piece);
-    }
-    parts
-}
-
-fn address_matches(addr: &Address, line_num: usize, line: &str) -> bool {
-    match addr {
-        Address::None => true,
-        Address::Line(n) => line_num == *n,
-        Address::Pattern(pat) => simple_regex_match(pat, line),
-        Address::Range(start, end) => {
-            // Note: proper range tracking requires state across lines.
-            // This simplified version matches lines that match either endpoint.
-            address_matches(start, line_num, line) || address_matches(end, line_num, line)
-        }
-    }
-}
-
-/// Simple regex match — supports literal chars, `.` (any), `*` (zero or more),
-/// `^` (start), `$` (end).
-fn simple_regex_match(pattern: &str, text: &str) -> bool {
-    if let Some(rest) = pattern.strip_prefix('^') {
-        return regex_match_at(rest, text, 0);
-    }
-    for i in 0..=text.chars().count() {
-        if regex_match_at(pattern, text, i) {
-            return true;
-        }
-    }
-    false
-}
-
-fn regex_match_at(pattern: &str, text: &str, start: usize) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let txt: Vec<char> = text.chars().collect();
-    regex_inner(&pat, &txt, 0, start)
-}
-
-fn regex_inner(pat: &[char], txt: &[char], pi: usize, ti: usize) -> bool {
-    if pi == pat.len() {
-        return true;
-    }
-
-    let p = match pat.get(pi) {
-        Some(&c) => c,
-        None => return true,
-    };
-
-    if p == '$' && pi.saturating_add(1) == pat.len() {
-        return ti == txt.len();
-    }
-
-    // Check for * quantifier following pat[pi]
-    if pat.get(pi.saturating_add(1)).copied() == Some('*') {
-        let mut t = ti;
-        loop {
-            if regex_inner(pat, txt, pi.saturating_add(2), t) {
-                return true;
-            }
-            let Some(&tc) = txt.get(t) else {
-                break;
-            };
-            if !char_matches(p, tc) {
-                break;
-            }
-            t = t.saturating_add(1);
-        }
-        return false;
-    }
-
-    let Some(&tc) = txt.get(ti) else {
-        return false;
-    };
-    if char_matches(p, tc) {
-        regex_inner(pat, txt, pi.saturating_add(1), ti.saturating_add(1))
-    } else {
-        false
-    }
-}
-
-fn char_matches(pat_char: char, text_char: char) -> bool {
-    pat_char == '.' || pat_char == text_char
-}
-
-/// Perform substitution using simple regex.
-fn substitute(text: &str, pattern: &str, replacement: &str, global: bool) -> String {
-    if global {
-        let mut result = String::new();
-        let chars: Vec<char> = text.chars().collect();
-        let mut i = 0;
-
-        while i < chars.len() {
-            if let Some(end) = find_match(pattern, text, i) {
-                result.push_str(replacement);
-                if end <= i {
-                    // Zero-width match: emit one char and advance to avoid infinite loop.
-                    if let Some(&c) = chars.get(i) {
-                        result.push(c);
-                    }
-                    i = i.saturating_add(1);
-                } else {
-                    i = end;
-                }
+        if !suffix.is_empty() {
+            // GNU puts the file name where a `*` is, and appends otherwise.
+            let backup = if suffix.contains('*') {
+                suffix.replace('*', path)
             } else {
-                if let Some(&c) = chars.get(i) {
-                    result.push(c);
-                }
-                i = i.saturating_add(1);
+                format!("{path}{suffix}")
+            };
+            if let Err(e) = fs::copy(path, &backup) {
+                eprintln!("sed: cannot back up {path}: {}", strerror(&e));
+                bad = true;
+                continue;
             }
         }
-        result
-    } else {
-        let chars: Vec<char> = text.chars().collect();
-        for i in 0..=chars.len() {
-            if let Some(end) = find_match(pattern, text, i) {
-                let mut result = String::new();
-                result.push_str(text.get(..byte_index(text, i)).unwrap_or(""));
-                result.push_str(replacement);
-                result.push_str(text.get(byte_index(text, end)..).unwrap_or(""));
-                return result;
-            }
+        if let Err(e) = fs::write(path, &buf) {
+            eprintln!("sed: couldn't write {path}: {}", strerror(&e));
+            bad = true;
         }
-        text.to_string()
-    }
-}
-
-fn find_match(pattern: &str, text: &str, start: usize) -> Option<usize> {
-    let txt: Vec<char> = text.chars().collect();
-    for end in start..=txt.len() {
-        let substr: String = txt.get(start..end)?.iter().collect();
-        if simple_regex_match(&format!("^{pattern}$"), &substr) {
-            return Some(end);
+        if let Some(code) = quit {
+            return status(Some(code), bad);
         }
     }
-    None
+    status(None, bad)
 }
 
-fn byte_index(s: &str, char_index: usize) -> usize {
-    s.char_indices()
-        .nth(char_index)
-        .map_or(s.len(), |(idx, _)| idx)
+fn status(quit: Option<i32>, bad: bool) -> i32 {
+    match quit {
+        Some(code) if code != 0 => code,
+        // An unreadable input file is status 2, as GNU has it — distinct from
+        // status 1, which means the script itself was wrong.
+        _ if bad => 2,
+        Some(code) => code,
+        None => 0,
+    }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::expect_used
+)]
 mod tests {
     use super::*;
 
@@ -512,291 +1918,416 @@ mod tests {
         items.iter().map(|x| (*x).to_string()).collect()
     }
 
+    /// Run a script over some text and return what it wrote.
+    fn run(script: &str, input: &str) -> String {
+        run_opts(script, input, false, false)
+    }
+
+    fn run_opts(script: &str, input: &str, suppress: bool, ere: bool) -> String {
+        let compiled = compile_script(script.as_bytes(), ere)
+            .unwrap_or_else(|e| panic!("compiling {script:?}: {}", e.msg));
+        let mut sink: Vec<u8> = Vec::new();
+        let mut inp = Input {
+            paths: Vec::new(),
+            next_path: 0,
+            cur: Some(Box::new(BufReader::new(io::Cursor::new(
+                input.as_bytes().to_vec(),
+            )))),
+            peeked: None,
+            sep: b'\n',
+            had_error: false,
+        };
+        run_one(
+            &compiled,
+            &mut inp,
+            &mut sink,
+            suppress || compiled.suppress,
+            b'\n',
+        );
+        String::from_utf8_lossy(&sink).into_owned()
+    }
+
+    // ---------------- the defect that started this ----------------
+
+    #[test]
+    fn an_anchored_substitution_actually_substitutes() {
+        // The shell's `builtin_diagnostics_honor_stderr_redirect` test ran
+        // `sed 's/^/E:/'` and got its input back unchanged, because `^` was
+        // matched with `str::contains`. This is that test, in one line.
+        assert_eq!(run("s/^/E:/", "oops\n"), "E:oops\n");
+        assert_eq!(run("s/$/!/", "hi\n"), "hi!\n");
+    }
+
+    #[test]
+    fn a_bracket_expression_is_a_set_not_a_string() {
+        assert_eq!(run("s/[abc]/X/g", "cabbage\n"), "XXXXXge\n");
+        assert_eq!(run("s/[^abc]/./g", "cabbage\n"), "cabba..\n");
+    }
+
+    #[test]
+    fn groups_and_backreferences_work() {
+        assert_eq!(
+            run(r"s/\(a*\)\(b*\)/[\2\1]/", "aaabb\n"),
+            "[bbaaa]\n"
+        );
+        assert_eq!(
+            run_opts("s/(a+)(b+)/[\\2\\1]/", "aaabb\n", false, true),
+            "[bbaaa]\n"
+        );
+    }
+
+    #[test]
+    fn a_basic_regular_expression_is_not_an_extended_one() {
+        // `a+b` is three literal characters in a BRE and a repetition in an
+        // ERE. A sed that had one parser for both would have to be wrong here.
+        assert_eq!(run("s/a+b/X/", "a+b\n"), "X\n");
+        assert_eq!(run_opts("s/a+b/X/", "aab\n", false, true), "X\n");
+    }
+
+    // ---------------- addresses ----------------
+
+    #[test]
+    fn a_range_covers_the_lines_between_its_ends() {
+        // The old sed selected the two *endpoints* of `1,3d` and nothing in
+        // between, because it kept no state across lines.
+        assert_eq!(run("2,4d", "1\n2\n3\n4\n5\n"), "1\n5\n");
+        assert_eq!(run_opts("/b/,/d/p", "a\nb\nc\nd\ne\n", true, false), "b\nc\nd\n");
+    }
+
+    #[test]
+    fn a_range_can_reopen() {
+        assert_eq!(
+            run_opts("/s/,/e/p", "s\nx\ne\nq\ns\ny\ne\n", true, false),
+            "s\nx\ne\ns\ny\ne\n"
+        );
+    }
+
+    #[test]
+    fn a_range_that_never_ends_runs_to_the_last_line() {
+        assert_eq!(run_opts("/c/,/zz/p", "a\nb\nc\nd\n", true, false), "c\nd\n");
+    }
+
+    #[test]
+    fn the_last_line_has_a_name() {
+        assert_eq!(run_opts("$p", "a\nb\nc\n", true, false), "c\n");
+        assert_eq!(run("$d", "a\nb\nc\n"), "a\nb\n");
+    }
+
+    #[test]
+    fn relative_and_stepped_ranges() {
+        assert_eq!(run_opts("2,+2p", "1\n2\n3\n4\n5\n", true, false), "2\n3\n4\n");
+        // `~4` runs to the *next* multiple of four, so starting on line 4 goes
+        // past it to line 8 — which this input never reaches.
+        assert_eq!(run_opts("2,~4p", "1\n2\n3\n4\n5\n", true, false), "2\n3\n4\n");
+        assert_eq!(run_opts("4,~4p", "1\n2\n3\n4\n5\n", true, false), "4\n5\n");
+        assert_eq!(run_opts("1~2p", "1\n2\n3\n4\n5\n", true, false), "1\n3\n5\n");
+    }
+
+    #[test]
+    fn a_range_starting_at_zero_can_end_on_the_first_line() {
+        // `1,/a/` cannot stop on line 1 — the end address is only looked at
+        // from the line after the start. `0,/a/` is the spelling that can.
+        assert_eq!(run_opts("0,/a/p", "a\nb\na\n", true, false), "a\n");
+        assert_eq!(run_opts("1,/a/p", "a\nb\na\n", true, false), "a\nb\na\n");
+    }
+
+    #[test]
+    fn an_address_can_be_negated() {
+        assert_eq!(run("2!d", "a\nb\nc\n"), "b\n");
+        assert_eq!(run_opts("/b/!p", "a\nb\nc\n", true, false), "a\nc\n");
+    }
+
+    #[test]
+    fn an_address_may_use_its_own_delimiter() {
+        assert_eq!(run_opts(r"\%/usr%p", "/usr\n/tmp\n", true, false), "/usr\n");
+    }
+
+    #[test]
+    fn an_address_can_ignore_case() {
+        assert_eq!(run_opts("/abc/Ip", "ABC\nxyz\n", true, false), "ABC\n");
+    }
+
+    // ---------------- substitution ----------------
+
+    #[test]
+    fn substitution_replaces_the_first_match_or_all_of_them() {
+        assert_eq!(run("s/o/0/", "foo boo\n"), "f0o boo\n");
+        assert_eq!(run("s/o/0/g", "foo boo\n"), "f00 b00\n");
+    }
+
+    #[test]
+    fn substitution_can_start_from_the_nth_match() {
+        assert_eq!(run("s/o/0/2", "foo boo\n"), "fo0 boo\n");
+        assert_eq!(run("s/o/0/2g", "foo boo\n"), "fo0 b00\n");
+    }
+
+    #[test]
+    fn an_empty_match_is_not_reported_twice_at_the_same_place() {
+        // `s/a*/-/g` on `aaa` is `-`, not `--`: after `a*` has taken the whole
+        // run there is an empty match available at the end, and it is the same
+        // position the previous match reached rather than a new one.
+        assert_eq!(run("s/a*/-/g", "aaa\n"), "-\n");
+        assert_eq!(run("s/x*/-/g", "axb\n"), "-a-b-\n");
+    }
+
+    #[test]
+    fn the_replacement_can_name_the_match_and_its_parts() {
+        assert_eq!(run("s/b*/[&]/", "bbc\n"), "[bb]c\n");
+        assert_eq!(run(r"s/b/[\&]/", "abc\n"), "a[&]c\n");
+        assert_eq!(run(r"s/\(a\)\(b\)/\2\1/", "ab\n"), "ba\n");
+    }
+
+    #[test]
+    fn the_replacement_understands_case_folding() {
+        assert_eq!(run(r"s/.*/\U&/", "shout\n"), "SHOUT\n");
+        assert_eq!(run(r"s/\(.\)\(.*\)/\u\1\2/", "word\n"), "Word\n");
+        assert_eq!(run(r"s/\(.*\)/\U\1\E!/", "hi\n"), "HI!\n");
+    }
+
+    #[test]
+    fn a_substitution_may_use_any_delimiter() {
+        assert_eq!(run("s|/usr|/opt|", "/usr/bin\n"), "/opt/bin\n");
+        // A delimiter that is also a metacharacter must not become one: with
+        // `.` as the delimiter, `\.` is a full stop and not "any character".
+        assert_eq!(run(r"s.a\.b.X.", "a.b\n"), "X\n");
+        assert_eq!(run(r"s.a\.b.X.", "axb\n"), "axb\n");
+    }
+
+    #[test]
+    fn an_empty_pattern_reuses_the_last_one() {
+        assert_eq!(run_opts("/foo/s//bar/", "a foo z\n", false, false), "a bar z\n");
+    }
+
+    #[test]
+    fn substitution_flags_p_and_i() {
+        assert_eq!(run_opts("s/a/X/p", "abc\n", true, false), "Xbc\n");
+        assert_eq!(run("s/ABC/x/I", "abc\n"), "x\n");
+    }
+
+    // ---------------- the rest of the command set ----------------
+
+    #[test]
+    fn print_and_delete() {
+        assert_eq!(run("p", "a\n"), "a\na\n");
+        assert_eq!(run("d", "a\nb\n"), "");
+    }
+
+    #[test]
+    fn the_hold_space_can_reverse_a_file() {
+        // `tac`, written in sed. It exercises hold, exchange, append and `$`.
+        assert_eq!(run_opts("1!G;h;$!d", "a\nb\nc\n", false, false), "c\nb\na\n");
+    }
+
+    #[test]
+    fn n_and_capital_n_read_ahead() {
+        assert_eq!(run(r"$!N;s/\n/ /", "a\nb\nc\nd\n"), "a b\nc d\n");
+        // An odd last line must still come out, which is why `N` at end of
+        // input prints rather than dropping the pattern space.
+        assert_eq!(run(r"N;s/\n/ /", "a\nb\nc\n"), "a b\nc\n");
+        assert_eq!(run_opts("n;p", "a\nb\nc\nd\n", true, false), "b\nd\n");
+    }
+
+    #[test]
+    fn capital_d_restarts_without_reading() {
+        // Squeeze runs of blank lines: the classic `D` idiom.
+        assert_eq!(
+            run("/^$/{N;/^\\n$/D}", "a\n\n\n\nb\n"),
+            "a\n\nb\n"
+        );
+    }
+
+    #[test]
+    fn branching_loops_until_no_substitution_is_left() {
+        // Turn every run of spaces into one, by looping.
+        assert_eq!(run(":a;s/  / /;ta", "a    b\n"), "a b\n");
+        assert_eq!(run("s/x/y/;T end;s/$/ (changed)/;:end", "x\nz\n"), "y (changed)\nz\n");
+    }
+
+    #[test]
+    fn a_block_groups_commands_under_one_address() {
+        assert_eq!(
+            run_opts("/b/{s/b/B/;p}", "a\nb\nc\n", true, false),
+            "B\n"
+        );
+        // An unselected block is skipped whole, not entered and re-tested.
+        assert_eq!(run("/zz/{s/a/X/;s/b/Y/}", "ab\n"), "ab\n");
+    }
+
+    #[test]
+    fn transliteration_maps_bytes() {
+        assert_eq!(run("y/abc/xyz/", "cab\n"), "zxy\n");
+        assert_eq!(run(r"y/a\n/\nA/", "a\n"), "\n\n");
+    }
+
+    #[test]
+    fn append_insert_and_change() {
+        assert_eq!(run("2i\\\nbefore", "a\nb\n"), "a\nbefore\nb\n");
+        assert_eq!(run("1a after", "a\nb\n"), "a\nafter\nb\n");
+        assert_eq!(run("2c\\\nnew", "a\nb\nc\n"), "a\nnew\nc\n");
+        // For a range, `c` writes its text once, when the range closes.
+        assert_eq!(run("1,2c\\\nnew", "a\nb\nc\n"), "new\nc\n");
+    }
+
+    #[test]
+    fn equals_prints_the_line_number() {
+        assert_eq!(run_opts("=", "a\nb\n", true, false), "1\n2\n");
+    }
+
+    #[test]
+    fn quit_stops_and_can_choose_a_status() {
+        assert_eq!(run("2q", "a\nb\nc\n"), "a\nb\n");
+        assert_eq!(run("2Q", "a\nb\nc\n"), "a\n");
+    }
+
+    #[test]
+    fn a_comment_and_the_hash_n_first_line() {
+        assert_eq!(run("# nothing\np", "a\n"), "a\na\n");
+        assert_eq!(run("#n\np", "a\n"), "a\n");
+        // `#no` is a comment, not the `-n` spelling.
+        assert_eq!(run("#no\np", "a\n"), "a\na\n");
+    }
+
+    // ---------------- bytes and newlines ----------------
+
+    #[test]
+    fn a_missing_final_newline_stays_missing() {
+        assert_eq!(run("p", "a"), "a\na");
+        assert_eq!(run("s/a/b/", "a"), "b");
+        assert_eq!(run("p", "a\n"), "a\na\n");
+    }
+
+    #[test]
+    fn a_line_that_is_not_text_passes_through() {
+        let compiled = compile_script(b"s/b/B/", false).unwrap();
+        let raw: Vec<u8> = vec![0xff, b'a', b'b', 0xfe, b'\n'];
+        let mut sink: Vec<u8> = Vec::new();
+        let mut inp = Input {
+            paths: Vec::new(),
+            next_path: 0,
+            cur: Some(Box::new(BufReader::new(io::Cursor::new(raw)))),
+            peeked: None,
+            sep: b'\n',
+            had_error: false,
+        };
+        run_one(&compiled, &mut inp, &mut sink, false, b'\n');
+        assert_eq!(sink, vec![0xff, b'a', b'B', 0xfe, b'\n']);
+    }
+
+    // ---------------- compile errors ----------------
+
+    #[test]
+    fn a_bad_script_is_refused_rather_than_guessed_at() {
+        assert!(compile_script(b"Z", false).is_err());
+        assert!(compile_script(b"s/a", false).is_err());
+        assert!(compile_script(b"{p", false).is_err());
+        assert!(compile_script(b"p}", false).is_err());
+        assert!(compile_script(b"b nowhere", false).is_err());
+        assert!(compile_script(b"y/ab/x/", false).is_err());
+        assert!(compile_script(b"s/[a/x/", false).is_err());
+    }
+
+    #[test]
+    fn a_good_script_compiles() {
+        for script in [
+            "s/a/b/",
+            "1,$s/a/b/g",
+            "/x/,/y/{s/a/b/;p}",
+            ":top;$!{N;btop}",
+            "s/a/b/w out.txt",
+            r"\,x,d",
+            "2{h;d}",
+        ] {
+            assert!(
+                compile_script(script.as_bytes(), false).is_ok(),
+                "{script} should compile"
+            );
+        }
+    }
+
     // ---------------- parse_args ----------------
 
     #[test]
-    fn parse_empty_args() {
-        let a = parse_args(&s(&[])).unwrap();
-        assert_eq!(a, SedArgs::default());
+    fn the_first_bare_argument_is_the_script_unless_e_gave_one() {
+        let a = parse_args(&s(&["s/a/b/", "in.txt"])).unwrap();
+        assert_eq!(a.script_parts, vec![ScriptPart::Text("s/a/b/".to_string())]);
+        assert_eq!(a.files, vec!["in.txt"]);
+
+        let a = parse_args(&s(&["-e", "p", "in.txt"])).unwrap();
+        assert_eq!(a.script_parts, vec![ScriptPart::Text("p".to_string())]);
+        assert_eq!(a.files, vec!["in.txt"]);
     }
 
     #[test]
-    fn parse_script_only() {
-        let a = parse_args(&s(&["s/a/b/"])).unwrap();
-        assert_eq!(a.scripts, vec!["s/a/b/"]);
-        assert!(a.files.is_empty());
-    }
-
-    #[test]
-    fn parse_script_and_file() {
-        let a = parse_args(&s(&["s/a/b/", "input.txt"])).unwrap();
-        assert_eq!(a.scripts, vec!["s/a/b/"]);
-        assert_eq!(a.files, vec!["input.txt"]);
-    }
-
-    #[test]
-    fn parse_dash_n_suppresses() {
-        let a = parse_args(&s(&["-n", "p"])).unwrap();
+    fn short_options_bundle() {
+        let a = parse_args(&s(&["-ne", "p", "f"])).unwrap();
         assert!(a.suppress);
-        assert_eq!(a.scripts, vec!["p"]);
+        assert_eq!(a.script_parts, vec![ScriptPart::Text("p".to_string())]);
+        assert_eq!(a.files, vec!["f"]);
     }
 
     #[test]
-    fn parse_dash_i_in_place() {
-        let a = parse_args(&s(&["-i", "s/a/b/", "file"])).unwrap();
-        assert!(a.in_place);
-        assert_eq!(a.scripts, vec!["s/a/b/"]);
-        assert_eq!(a.files, vec!["file"]);
+    fn a_value_may_be_attached_to_its_option() {
+        let a = parse_args(&s(&["-ep", "f"])).unwrap();
+        assert_eq!(a.script_parts, vec![ScriptPart::Text("p".to_string())]);
+        assert_eq!(a.files, vec!["f"]);
     }
 
     #[test]
-    fn parse_dash_e_consumes_next_arg() {
-        let a = parse_args(&s(&["-e", "s/a/b/", "-e", "p", "file"])).unwrap();
-        assert_eq!(a.scripts, vec!["s/a/b/", "p"]);
-        assert_eq!(a.files, vec!["file"]);
+    fn in_place_takes_its_suffix_attached_and_never_the_next_argument() {
+        let a = parse_args(&s(&["-i.bak", "s/a/b/", "f"])).unwrap();
+        assert_eq!(a.in_place, Some(".bak".to_string()));
+        assert!(a.separate);
+        assert_eq!(a.files, vec!["f"]);
+
+        // `-i backup` edits `backup`; it does not name a suffix.
+        let a = parse_args(&s(&["-i", "s/a/b/", "f"])).unwrap();
+        assert_eq!(a.in_place, Some(String::new()));
+        assert_eq!(a.files, vec!["f"]);
     }
 
     #[test]
-    fn parse_dash_e_missing_value_errors() {
-        let err = parse_args(&s(&["-e"])).unwrap_err();
-        assert!(err.contains("-e requires"));
+    fn extended_regular_expressions_have_two_spellings() {
+        assert!(parse_args(&s(&["-E", "p"])).unwrap().ere);
+        assert!(parse_args(&s(&["-r", "p"])).unwrap().ere);
+        assert!(parse_args(&s(&["--regexp-extended", "p"])).unwrap().ere);
     }
 
     #[test]
-    fn parse_multiple_files() {
-        let a = parse_args(&s(&["p", "a.txt", "b.txt", "c.txt"])).unwrap();
-        assert_eq!(a.files, vec!["a.txt", "b.txt", "c.txt"]);
-    }
-
-    // ---------------- parse_script / parse_command ----------------
-
-    #[test]
-    fn parse_script_single_substitute() {
-        let cmds = parse_script("s/foo/bar/");
-        assert_eq!(cmds.len(), 1);
-        if let Action::Substitute { pattern, replacement, global } = &cmds[0].action {
-            assert_eq!(pattern, "foo");
-            assert_eq!(replacement, "bar");
-            assert!(!global);
-        } else {
-            panic!("expected substitute, got {:?}", cmds[0].action);
-        }
+    fn long_options_may_carry_a_value() {
+        let a = parse_args(&s(&["--expression=p", "--in-place=.bak", "f"])).unwrap();
+        assert_eq!(a.script_parts, vec![ScriptPart::Text("p".to_string())]);
+        assert_eq!(a.in_place, Some(".bak".to_string()));
+        assert_eq!(a.files, vec!["f"]);
     }
 
     #[test]
-    fn parse_script_global_substitute() {
-        let cmds = parse_script("s/x/y/g");
-        if let Action::Substitute { global, .. } = &cmds[0].action {
-            assert!(*global);
-        } else {
-            panic!("expected substitute");
-        }
+    fn a_lone_dash_is_a_file_not_an_option() {
+        let a = parse_args(&s(&["p", "-"])).unwrap();
+        assert_eq!(a.files, vec!["-"]);
     }
 
     #[test]
-    fn parse_script_delete() {
-        let cmds = parse_script("d");
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0].action, Action::Delete);
+    fn double_dash_ends_the_options() {
+        let a = parse_args(&s(&["-n", "--", "p", "-weird"])).unwrap();
+        assert!(a.suppress);
+        assert_eq!(a.files, vec!["-weird"]);
     }
 
     #[test]
-    fn parse_script_print_quit() {
-        let cmds = parse_script("p");
-        assert_eq!(cmds[0].action, Action::Print);
-        let cmds = parse_script("q");
-        assert_eq!(cmds[0].action, Action::Quit);
+    fn an_unknown_option_is_reported() {
+        assert!(parse_args(&s(&["-Z", "p"])).is_err());
+        assert!(parse_args(&s(&["--nope"])).is_err());
+        assert!(parse_args(&s(&["-e"])).is_err());
     }
 
-    #[test]
-    fn parse_script_multiple_commands_semicolon() {
-        let cmds = parse_script("p;d");
-        assert_eq!(cmds.len(), 2);
-    }
+    // ---------------- exit status ----------------
 
     #[test]
-    fn parse_script_line_address() {
-        let cmds = parse_script("3d");
-        assert_eq!(cmds[0].address, Address::Line(3));
-        assert_eq!(cmds[0].action, Action::Delete);
-    }
-
-    #[test]
-    fn parse_script_regex_address() {
-        let cmds = parse_script("/foo/d");
-        assert_eq!(cmds[0].address, Address::Pattern("foo".to_string()));
-    }
-
-    #[test]
-    fn parse_script_range_address() {
-        let cmds = parse_script("1,5d");
-        if let Address::Range(start, end) = &cmds[0].address {
-            assert_eq!(**start, Address::Line(1));
-            assert_eq!(**end, Address::Line(5));
-        } else {
-            panic!("expected range");
-        }
-    }
-
-    #[test]
-    fn parse_script_garbage_ignored() {
-        let cmds = parse_script("Z");
-        assert!(cmds.is_empty());
-    }
-
-    // ---------------- split_delim ----------------
-
-    #[test]
-    fn split_delim_basic() {
-        assert_eq!(split_delim("a/b/c", '/'), vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn split_delim_empty_parts() {
-        assert_eq!(split_delim("//", '/'), vec!["", "", ""]);
-    }
-
-    #[test]
-    fn split_delim_escaped() {
-        // Backslash escapes the delimiter so it doesn't split.
-        let parts = split_delim(r"a\/b/c", '/');
-        assert_eq!(parts, vec![r"a\/b", "c"]);
-    }
-
-    // ---------------- simple_regex_match ----------------
-
-    #[test]
-    fn regex_literal_match() {
-        assert!(simple_regex_match("foo", "foobar"));
-        assert!(!simple_regex_match("foo", "bar"));
-    }
-
-    #[test]
-    fn regex_anchored_start() {
-        assert!(simple_regex_match("^foo", "foobar"));
-        assert!(!simple_regex_match("^foo", "barfoo"));
-    }
-
-    #[test]
-    fn regex_anchored_end() {
-        assert!(simple_regex_match("bar$", "foobar"));
-        assert!(!simple_regex_match("bar$", "barfoo"));
-    }
-
-    #[test]
-    fn regex_anchored_both() {
-        assert!(simple_regex_match("^foo$", "foo"));
-        assert!(!simple_regex_match("^foo$", "foobar"));
-    }
-
-    #[test]
-    fn regex_dot_any_char() {
-        assert!(simple_regex_match("a.c", "abc"));
-        assert!(simple_regex_match("a.c", "axc"));
-    }
-
-    #[test]
-    fn regex_star_zero_or_more() {
-        assert!(simple_regex_match("ab*c", "ac"));
-        assert!(simple_regex_match("ab*c", "abc"));
-        assert!(simple_regex_match("ab*c", "abbbbc"));
-    }
-
-    #[test]
-    fn regex_dot_star() {
-        assert!(simple_regex_match(".*", ""));
-        assert!(simple_regex_match(".*", "anything"));
-    }
-
-    // ---------------- substitute ----------------
-
-    #[test]
-    fn substitute_first_only() {
-        assert_eq!(substitute("foo foo foo", "foo", "bar", false), "bar foo foo");
-    }
-
-    #[test]
-    fn substitute_global() {
-        assert_eq!(substitute("foo foo foo", "foo", "bar", true), "bar bar bar");
-    }
-
-    #[test]
-    fn substitute_no_match() {
-        assert_eq!(substitute("hello", "xyz", "abc", true), "hello");
-    }
-
-    #[test]
-    fn substitute_empty_text() {
-        assert_eq!(substitute("", "foo", "bar", false), "");
-    }
-
-    // ---------------- process_line / process_text ----------------
-
-    #[test]
-    fn process_line_substitute_default_prints() {
-        let cmds = parse_script("s/a/b/");
-        let (out, quit) = process_line("ax", &cmds, false, 1);
-        assert_eq!(out, Some("bx".to_string()));
-        assert!(!quit);
-    }
-
-    #[test]
-    fn process_line_delete_returns_none() {
-        let cmds = parse_script("d");
-        let (out, quit) = process_line("anything", &cmds, false, 1);
-        assert_eq!(out, None);
-        assert!(!quit);
-    }
-
-    #[test]
-    fn process_line_quit_sets_flag() {
-        let cmds = parse_script("q");
-        let (_, quit) = process_line("x", &cmds, false, 1);
-        assert!(quit);
-    }
-
-    #[test]
-    fn process_line_suppress_only_prints_after_p() {
-        let cmds = parse_script("p");
-        let (out, _) = process_line("hi", &cmds, true, 1);
-        assert_eq!(out, Some("hi".to_string()));
-
-        let cmds = parse_script("s/a/b/");
-        let (out, _) = process_line("apple", &cmds, true, 1);
-        // -n suppresses default print; substitute doesn't toggle p.
-        assert_eq!(out, None);
-    }
-
-    #[test]
-    fn process_line_address_line_number() {
-        let cmds = parse_script("2d");
-        let (out1, _) = process_line("a", &cmds, false, 1);
-        let (out2, _) = process_line("b", &cmds, false, 2);
-        let (out3, _) = process_line("c", &cmds, false, 3);
-        assert_eq!(out1, Some("a".to_string()));
-        assert_eq!(out2, None);
-        assert_eq!(out3, Some("c".to_string()));
-    }
-
-    #[test]
-    fn process_text_substitute_each_line() {
-        let cmds = parse_script("s/o/0/g");
-        let out = process_text("foo\nbar\nfoo\n", &cmds, false);
-        assert_eq!(out, "f00\nbar\nf00\n");
-    }
-
-    #[test]
-    fn process_text_quit_stops_processing() {
-        let cmds = parse_script("2q");
-        let out = process_text("a\nb\nc\nd\n", &cmds, false);
-        // Line 1 prints, line 2 prints then quit fires before line 3.
-        assert_eq!(out, "a\nb\n");
-    }
-
-    #[test]
-    fn process_text_suppress_then_p_prints_pattern() {
-        let cmds = parse_script("p");
-        let out = process_text("x\ny\n", &cmds, true);
-        assert_eq!(out, "x\ny\n");
+    fn the_status_distinguishes_a_bad_file_from_a_bad_script() {
+        assert_eq!(status(None, false), 0);
+        assert_eq!(status(None, true), 2);
+        assert_eq!(status(Some(5), false), 5);
+        // `q5` is louder than "a file was missing", so it wins.
+        assert_eq!(status(Some(5), true), 5);
     }
 }

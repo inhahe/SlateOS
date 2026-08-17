@@ -2,5 +2,10 @@
 name = "bc"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS arbitrary-precision calculator"
+description = "SlateOS arbitrary-precision calculator (POSIX bc), computing on bignum::Decimal"
+
 [dependencies]
+bignum = { path = "../bignum" }
+
+[lints]
+workspace = true

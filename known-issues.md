@@ -26032,3 +26032,61 @@ different question: **which std functions are dangerous by default, and who
 calls them?** That question generalises, and `fs::write` is unlikely to be the
 only answer. `fs::rename` (silently overwrites) already produced two finds
 today; `create_dir_all` (succeeds on an existing directory) produced one.
+
+### UPDATE 2026-08-16 (2) — the remaining sites, and a correction
+
+The table above tiered five remaining `fs::write` sites and deferred the
+installer and backup ones on the grounds that they "write several related
+files that must be consistent with each other". Having actually read them,
+**that was wrong in both directions**, which is worth recording as-is rather
+than quietly editing: I over-rated one and badly under-rated the other.
+
+**Under-rated: the backup blob store.** Not in the table at all, because the
+grep that produced the table found `fs::write` and this site's worse half is
+`fs::copy`. `CasStore::has_blob` is `path.exists()` — existence *is* the
+deduplication test, with no hash check on that path. An interrupted store left
+a **truncated blob at the hash's own path**, and nothing ever rechecked it. So
+every subsequent backup containing that content deduplicated against the
+damaged copy and reported "already have it". A single interrupted write
+silently poisons that content for every future backup, in the one application
+whose entire purpose is that the data survives — and the user finds out at
+restore time, which is the worst possible moment. This was the most severe
+find of the whole sweep, and the tiering exercise nearly missed it because it
+was framed around one function name.
+
+**Over-rated: the backup manifest.** The claimed multi-file consistency
+problem does not exist, and the existing code is already correct: `list_backups`
+counts a directory as a backup only if `meta.json` is present *and* parses, and
+`meta.json` is written last. So an interrupted backup leaves a directory
+without a valid meta and is correctly ignored rather than offered as
+restorable. That is a well-chosen completion-marker design that nothing in the
+code called out. It is now documented at the call site as load-bearing, because
+an invariant that only survives while nobody reorders two adjacent lines should
+say so.
+
+**Converted since:** the two GRUB script writes (`update` overwrites a *working*
+boot entry; `install` leaves a partial shell script that `grub-mkconfig`
+executes without complaint), the backup restore write (it writes over a file
+the user still has, so an interruption destroyed the original *and* failed to
+supply the replacement), the schedule list, and both CAS store paths. New
+`safeio::copy_atomically` covers the copy case.
+
+**Still deliberately not converted:** `apps/indexer` (index is a cache — a
+corrupt one costs a re-scan), `apps/screenshot` (writes a new name; no previous
+version to destroy), `apps/explorer/src/thumbs.rs` (thumbnail cache). The
+reasoning in the original table stands for these three.
+
+**Windows gotcha, cost about ten minutes:** `File::sync_all` on a handle opened
+for *reading* fails with `ERROR_ACCESS_DENIED`. `copy_atomically` reopens the
+temporary to flush it, and doing so read-only made every copy fail. Reopened
+for write.
+
+**Lesson for the rest of the sweep — the one worth keeping.** Both errors above
+came from tiering by *severity of the file* rather than by *what the code does
+with the file*. The manifest looked scary and was fine; a blob-store `fs::copy`
+looked routine and was the worst bug found. The question that separates them is
+not "how important is this file" but **"does anything downstream treat this
+file's existence as a promise about its contents?"** Where the answer is yes —
+a content-addressed store, a lockfile, a completion marker, a cache keyed by
+hash — a partial write is not corruption of one file, it is a false promise
+that propagates. Grep for `.exists()` used as a guard.

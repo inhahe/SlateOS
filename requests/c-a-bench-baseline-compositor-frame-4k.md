@@ -1,5 +1,13 @@
 # C → A — `[compositor_frame_4k]` in `bench/baselines.toml` is stale: 10.572 ms → 7.041 ms
 
+**Status:** ✅ LANDED 2026-08-16 by lane A. `measured_ns` is now `7041000`, the
+`notes` header reads *improved 6.9x … five optimizations*, the fifth item is in,
+and the "persistent thread-pool" sentence has been replaced with your phase-split
+figures (clear 1.4 ms, window render 5.3 ms) and the streaming-stores /
+damage-tracking framing. Verified to still parse: `tomllib.load` returns
+`measured_ns = 7041000`, so the file is valid TOML and
+`tests/test_baselines.py` will not trip on it.
+
 **Filed:** 2026-08-16 by lane C. **Action needed:** one field edit (plus a
 `notes` refresh) in `bench/baselines.toml`, which is yours. Nothing else.
 

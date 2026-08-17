@@ -302,11 +302,12 @@ source        = "Lighter than channels — single atomic counter"
 [compositor_frame_4k]
 description   = "Full-desktop recomposite at 4K (3840x2160), 16 decorated windows w/ client content"
 target_ns     = 2000000        # 2 ms — must beat a 144Hz (6.9ms) and 60Hz (16.7ms) vsync budget
-measured_ns   = 10572000       # ~10.6 ms min, dev host, RELEASE build, 2026-07-02 (was 48.6ms -> 21.4ms -> 15.8ms -> 11.9ms -> 10.6ms)
+measured_ns   = 7041000        # ~7.0 ms min, dev host, RELEASE build, 2026-08-16 (was 48.6ms -> 21.4ms -> 15.8ms -> 11.9ms -> 10.6ms -> 7.0ms)
 source        = "cargo test -p compositor --target x86_64-pc-windows-gnu --release -- --ignored --nocapture bench_compose_frame_4k"
 notes         = """
-STILL OVER TARGET but improved 4.6x: ~10.6ms/frame (min) vs the 2ms budget \
-(48.6ms on 2026-07-01 -> 21.4ms -> 15.8ms -> 11.9ms -> 10.6ms on 2026-07-02). Four optimizations: \
+STILL OVER TARGET but improved 6.9x: ~7.0ms/frame (min) vs the 2ms budget \
+(48.6ms on 2026-07-01 -> 21.4ms -> 15.8ms -> 11.9ms -> 10.6ms on 2026-07-02 -> 7.0ms on \
+2026-08-16). Five optimizations: \
 (1) the row-wise fill_rect rewrite (opaque fills now use a single slice \
 memset per row via Framebuffer::fill_row_solid; translucent fills hoist the \
 alpha math out of the inner loop via blend_row) removed the per-pixel \
@@ -322,15 +323,26 @@ pixels hidden under windows; (4) parallel background clear — the desktop clear
 filled concurrently via std::thread::scope over disjoint chunks_mut slices \
 (fill_worker_count caps at 8 workers, falls back to single-thread below 1M px \
 or when available_parallelism can't be reported), so the background fill scales \
-with host cores. What remains is memory-bandwidth-bound: even \
-after both culls, this benchmark still issues millions of opaque u32 \
-stores/frame for the per-window opaque content (~124 MB written/frame worst \
-case); ~10.6ms => ~12 GB/s effective, near the ceiling for scalar \
-cache-polluting stores. The remaining per-window content draws are still \
-single-threaded; reaching 2ms for a *full* 16-window recomposite would require \
-SIMD non-temporal (streaming) stores + multithreaded window-render tiles (a \
-persistent thread-pool to avoid per-frame thread::scope spawn cost + a \
-RenderEngine band-view refactor). Tracked in known-issues.md (BENCH-COMPOSITOR-SLOW). \
+with host cores; (5) inter-window occlusion cull — windows were painted \
+back-to-front with no regard for what covered them, so every window's full \
+extent was drawn even where a higher window overwrote it. Each window's drawn \
+extent now has the opaque covers of the windows above it subtracted \
+(Rect::subtract / subtract_region, capped at 4 fragments, declining to an \
+unclipped draw past that), and it is redrawn once per surviving disjoint \
+fragment under Framebuffer::frame_clip. What remains is memory-bandwidth-bound: even \
+after all three culls, this benchmark still issues millions of opaque u32 \
+stores/frame for the per-window opaque content; ~7.0ms is close to the ceiling \
+for scalar cache-polluting stores. The remaining gap is now bandwidth, not \
+serialization: after the occlusion cull the background clear is 1.4ms and \
+window render 5.3ms of the 7.0ms frame (Compositor::bench_full_composite_phases \
+reports the split), where before the cull it was 1.5ms and 11.1ms. So a \
+persistent thread-pool over window-render tiles — the move the previous note \
+recommended — would now divide half as much work across cores, and the clear it \
+already parallelized was never more than 13% of the frame. SIMD non-temporal \
+(streaming) stores are the most promising remaining in-frame win, and are \
+*more* attractive than before because the frame is closer to pure bandwidth \
+now; the larger structural win is damage-tracked partial recomposite. \
+Tracked in known-issues.md (BENCH-COMPOSITOR-SLOW). \
 NOTE: in steady state the compositor does NOT full-recomposite every frame — \
 it uses damage-rect partial updates (only changed regions), which is the \
 real 144Hz-vsync mechanism; this benchmark deliberately measures the \

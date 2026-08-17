@@ -72,6 +72,7 @@ use crate::otl;
 use crate::script::ScriptTags;
 use crate::gvar;
 use crate::var;
+use crate::varstore;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -563,6 +564,20 @@ pub struct Face {
     /// read on demand, because a face varies thousands of glyphs and a run
     /// draws a few dozen.
     gvar: Option<gvar::Gvar>,
+    /// The per-glyph advance-width deltas from `HVAR`, on the same terms as
+    /// [`gvar`](Self::gvar): present only when `fvar` parsed and the store
+    /// agrees with it about the axis count.
+    ///
+    /// Without this a varied glyph is drawn at its varied shape but spaced at
+    /// its default width, which shows up as text growing progressively more
+    /// crowded (or gappier) along a line as a weight axis moves.
+    hvar: Option<varstore::Hvar>,
+    /// The face-wide metric deltas from `MVAR` — ascender, descender, line
+    /// gap, x-height, cap height and the underline.
+    ///
+    /// Distinct from `HVAR` in *what* it varies, identical in *how*: both are
+    /// an `ItemVariationStore` reached through a different index.
+    mvar: Option<varstore::Mvar>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -665,6 +680,8 @@ impl Face {
         let mut fvar = None;
         let mut avar = None;
         let mut gvar_span = None;
+        let mut hvar_span = None;
+        let mut mvar_span = None;
         let mut has_cff2 = false;
 
         for i in 0..usize::from(num_tables) {
@@ -702,6 +719,8 @@ impl Face {
                 b"fvar" => fvar = Some(span),
                 b"avar" => avar = Some(span),
                 b"gvar" => gvar_span = Some(span),
+                b"HVAR" => hvar_span = Some(span),
+                b"MVAR" => mvar_span = Some(span),
                 b"CFF2" => has_cff2 = true,
                 _ => {}
             }
@@ -823,6 +842,18 @@ impl Face {
             gvar_span.and_then(|span| gvar::Gvar::parse(&data, span, v.axes().len(), num_glyphs))
         });
 
+        // Gated on `variation_axes` for the same reason `gvar` is, and with an
+        // extra edge: an `ItemVariationStore` names its axes only by position,
+        // so a store read against the wrong axis count silently pairs axis *k*
+        // with a coordinate that meant a different axis. `VarStore::parse`
+        // refuses a count mismatch outright rather than reading it anyway.
+        let hvar = variation_axes.as_ref().and_then(|v| {
+            hvar_span.and_then(|span| varstore::Hvar::parse(&data, span.off, v.axes().len()))
+        });
+        let mvar = variation_axes.as_ref().and_then(|v| {
+            mvar_span.and_then(|span| varstore::Mvar::parse(&data, span.off, v.axes().len()))
+        });
+
         Ok(Self {
             metrics: FaceMetrics {
                 ascender,
@@ -848,6 +879,8 @@ impl Face {
             gsub_scripts,
             variation_axes,
             gvar,
+            hvar,
+            mvar,
             data,
         })
     }
@@ -1327,6 +1360,68 @@ impl Face {
             .checked_add(usize::from(idx).checked_mul(4).ok_or(SfntError::TooShort)?)
             .ok_or(SfntError::TooShort)?;
         u16_at(&self.data, off).ok_or(SfntError::MalformedTable("hmtx"))
+    }
+
+    /// Horizontal advance for a glyph at a variable-font instance, in font
+    /// units.
+    ///
+    /// The `hmtx` advance corrected by `HVAR`. Identical to
+    /// [`advance`](Self::advance) when the face does not vary, carries no
+    /// `HVAR`, or is asked for the default instance — the last because the
+    /// default instance's advance *is* what `hmtx` stores, so every delta is
+    /// zero there by construction.
+    ///
+    /// The result is clamped at zero rather than allowed to wrap: a negative
+    /// advance would drag the rest of the line backwards over the glyph, which
+    /// is a far more visible failure than one glyph being a shade too narrow.
+    ///
+    /// # Errors
+    ///
+    /// As [`advance`](Self::advance). An `HVAR` that names no row for this
+    /// glyph is *not* an error — it contributes zero, which is the common case
+    /// for a font's unmapped tail.
+    pub fn advance_at(&self, gid: u16, coords: &var::Coords) -> Result<u16, SfntError> {
+        let base = self.advance(gid)?;
+        let Some(hvar) = self.hvar.as_ref() else {
+            return Ok(base);
+        };
+        if coords.is_default() {
+            return Ok(base);
+        }
+        let delta = hvar.advance_delta(&self.data, gid, coords.as_slice());
+        Ok(u16::try_from(i32::from(base).saturating_add(i32::from(delta)).max(0)).unwrap_or(u16::MAX))
+    }
+
+    /// The correction `MVAR` applies to the face-wide metric `tag` at `coords`,
+    /// in font units.
+    ///
+    /// Zero when the face has no `MVAR`, does not carry that tag, or is at its
+    /// default instance. Tags are the four-byte names the `MVAR` specification
+    /// defines: `hasc`, `hdsc`, `hlgp`, `xhgt`, `cpht`, `undo` and so on.
+    #[must_use]
+    pub fn metric_delta(&self, tag: [u8; 4], coords: &var::Coords) -> i16 {
+        if coords.is_default() {
+            return 0;
+        }
+        self.mvar
+            .as_ref()
+            .map_or(0, |m| m.metric_delta(&self.data, tag, coords.as_slice()))
+    }
+
+    /// The face's vertical metrics at a variable-font instance.
+    ///
+    /// Only the three `hhea`-derived numbers vary through `MVAR`; the units
+    /// per em is a design constant and the maximum advance is a bound over the
+    /// whole face, which `MVAR` has no tag for.
+    #[must_use]
+    pub fn metrics_at(&self, coords: &var::Coords) -> FaceMetrics {
+        let mut m = self.metrics;
+        m.ascender = m.ascender.saturating_add(self.metric_delta(*b"hasc", coords));
+        m.descender = m
+            .descender
+            .saturating_add(self.metric_delta(*b"hdsc", coords));
+        m.line_gap = m.line_gap.saturating_add(self.metric_delta(*b"hlgp", coords));
+        m
     }
 
     /// How much to add to `left`'s advance when `right` follows it, in font

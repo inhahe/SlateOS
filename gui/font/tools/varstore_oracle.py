@@ -56,6 +56,26 @@ The two places the format invites a wrong reader
   does not constrain that axis. Reading it as "distance from zero", which is
   what the interpolation formula would give, multiplies every delta by zero and
   yields a store that never varies anything.
+
+Where this tool deliberately differs from the Rust
+--------------------------------------------------
+
+HarfBuzz's `VarRegionAxis::evaluate` returns **1.0** rather than interpolating
+for a *degenerate* region -- one with `start > peak`, `peak > end`, or a span
+that straddles zero with a non-zero peak. The Rust follows HarfBuzz there, for
+the reason §448 gives for following it everywhere else, and because `gvar`'s
+scalar already does.
+
+This tool does not, and says so rather than quietly matching: it implements the
+plain reading of the specification, so a face that provoked the difference would
+show up as a disagreement to be adjudicated rather than as silent agreement
+between two copies of one decision.
+
+Measured on this host: **0 degenerate region axes out of 199**, across every
+`HVAR`, `MVAR` and `GDEF` store on all 7 variable faces. So the two never
+actually differ here -- which also means the degenerate branch, like the null
+index map above, is unreachable from installed fonts and belongs in the
+synthetic fixture rather than in a host sweep.
 """
 
 import argparse

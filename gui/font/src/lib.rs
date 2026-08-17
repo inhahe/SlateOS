@@ -82,6 +82,7 @@ mod universal;
 mod universal_machine;
 mod universal_tables;
 pub mod var;
+mod varstore;
 mod would;
 
 use alloc::collections::BTreeMap;

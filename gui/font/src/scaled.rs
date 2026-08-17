@@ -342,7 +342,14 @@ impl ScaledFont {
     /// zeros in those fields in plenty of the faces that do have it. The
     /// outline is the ground truth and we already have a parser for it.
     fn derive_metrics(face: &Face, scale: f32, coords: &var::Coords) -> FontMetrics {
-        let fm = face.metrics();
+        // `metrics_at`, not `metrics`: `MVAR` moves the ascender, descender
+        // and line gap with the axes, and a line height that did not follow
+        // them would let a heavy instance's glyphs collide with the line
+        // above. Cap height and x-height are deliberately *not* taken from
+        // `MVAR` even though it has tags for them — they are measured off the
+        // varied outline below, which is ground truth rather than a
+        // declaration, exactly as the non-variable path does.
+        let fm = face.metrics_at(coords);
         let ascent = f32::from(fm.ascender) * scale;
         // `descender` is negative per spec; `FontMetrics::descent` is
         // positive-downward, so flip it.
@@ -354,7 +361,7 @@ impl ScaledFont {
 
         let cap_height = Self::glyph_top(face, 'H', scale, coords).unwrap_or(ascent * 0.7);
         let x_height = Self::glyph_top(face, 'x', scale, coords).unwrap_or(ascent * 0.5);
-        let average_advance = Self::average_advance(face, scale);
+        let average_advance = Self::average_advance(face, scale, coords);
 
         FontMetrics {
             ascent,
@@ -400,14 +407,16 @@ impl ScaledFont {
     /// Averaging over *every* glyph would be dominated by whatever exotica
     /// the face happens to include; averaging over lowercase Latin plus space
     /// is what a caller asking "how wide is a character, roughly" means.
-    fn average_advance(face: &Face, scale: f32) -> f32 {
+    fn average_advance(face: &Face, scale: f32, coords: &var::Coords) -> f32 {
         let mut total = 0.0_f32;
         let mut count = 0.0_f32;
         for ch in "abcdefghijklmnopqrstuvwxyz ".chars() {
             let Some(gid) = face.glyph_index(ch) else {
                 continue;
             };
-            let Ok(adv) = face.advance(gid) else { continue };
+            let Ok(adv) = face.advance_at(gid, coords) else {
+                continue;
+            };
             total += f32::from(adv);
             count += 1.0;
         }
@@ -497,15 +506,11 @@ impl ScaledFont {
 
     fn rasterize_glyph(&self, gid: u16) -> Result<Glyph, ScaledFontError> {
         let outline = self.face.outline_at(gid, &self.coords)?;
-        // The advance does *not* yet vary: it comes from `HVAR`, which every
-        // variable face on this host carries and which is the next step. Until
-        // then a varied glyph is drawn at its varied shape and spaced at its
-        // default width, which is visibly wrong only at the extremes of a
-        // weight axis — and is still better than the alternative of deriving it
-        // from `gvar`'s phantom points, which would give two sources of truth
-        // for one number before either has been checked against a real file.
-        // Tracked in `known-issues.md`.
-        let advance = f32::from(self.face.advance(gid)?) * self.scale;
+        // The advance varies through `HVAR`, not through `gvar`'s phantom
+        // points. Both know the number; letting two tables be the source of
+        // truth for one value is how a face ends up drawn at one width and
+        // spaced at another. See design-decisions §449.
+        let advance = f32::from(self.face.advance_at(gid, &self.coords)?) * self.scale;
         // Every rasterizer failure is swallowed, and deliberately: a glyph
         // whose outline is absurd or malformed still has to occupy its
         // advance, or every following glyph on the line shifts left. Draw
@@ -706,7 +711,11 @@ impl ScaledFont {
             |ch| {
                 self.face
                     .glyph_index(ch)
-                    .is_some_and(|gid| self.face.advance(gid).is_ok_and(|adv| adv == 0))
+                    .is_some_and(|gid| {
+                        self.face
+                            .advance_at(gid, &self.coords)
+                            .is_ok_and(|adv| adv == 0)
+                    })
             },
         );
         // Unicode variation sequences: two characters that name one glyph, and
@@ -1065,7 +1074,7 @@ impl ScaledFont {
             .collect();
         let advances: Vec<i32> = glyphs
             .iter()
-            .map(|g| i32::from(self.face.advance(g.gid).unwrap_or(0)))
+            .map(|g| i32::from(self.face.advance_at(g.gid, &self.coords).unwrap_or(0)))
             .collect();
         // `kept_at` says, glyph by glyph, that the positioning pass has already
         // had the last word on this mark's advance: it zeroed the mark *before*
@@ -1653,7 +1662,10 @@ impl ScaledFont {
                 // an accent in, and a letter whose ink overhangs its cell
                 // (an italic `f`) would otherwise drag the accent out with it.
                 origin.x_bearing = 0;
-                origin.width = self.face.advance(gid).map_or(0, i32::from);
+                origin.width = self
+                    .face
+                    .advance_at(gid, &self.coords)
+                    .map_or(0, i32::from);
                 origin
             });
             for i in base.saturating_add(1)..end {

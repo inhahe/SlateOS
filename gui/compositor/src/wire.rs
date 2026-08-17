@@ -482,7 +482,11 @@ impl Compositor {
 
 #[cfg(test)]
 mod tests {
+    // The defensive lints the workspace turns on are for production code: a
+    // test that indexes a fixed-size fixture, or unwraps a value it just
+    // constructed, is *asserting*. CLAUDE.md's lint policy says as much.
     #![allow(
+        clippy::arithmetic_side_effects,
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,

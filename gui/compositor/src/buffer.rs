@@ -302,7 +302,18 @@ impl SharedBuffer {
     }
 }
 
+// The defensive lints the workspace turns on are for production code: a test
+// that indexes a fixed-size fixture, or unwraps a value it just constructed,
+// is *asserting*, and rewriting that assertion as a `let else` only hides
+// which line failed. CLAUDE.md's lint policy says as much.
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 mod tests {
     use super::*;
 

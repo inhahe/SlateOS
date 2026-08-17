@@ -248,7 +248,9 @@ fn parse_long_options(args: &[Str], opts: &mut LongOptions) -> Result<usize, i32
 /// every argument intact all the way to `$1` (see known-issues
 /// TD-OILS-ARGV-PANICS-ON-NON-UTF8).
 fn os_argv() -> Vec<Str> {
-    std::env::args_os().map(|a| bytes::os_to_bytes(&a)).collect()
+    std::env::args_os()
+        .map(|a| bytes::os_to_bytes(&a))
+        .collect()
 }
 
 fn main() {
@@ -268,7 +270,9 @@ fn main() {
             2
         }),
         Err(e) => {
-            eprintln!("osh: warning: could not allocate interpreter stack ({e}); running with default stack");
+            eprintln!(
+                "osh: warning: could not allocate interpreter stack ({e}); running with default stack"
+            );
             run(&os_argv(), FALLBACK_STACK_SIZE)
         }
     };
@@ -677,7 +681,10 @@ fn repl(sh: &mut Shell) -> i32 {
             }
             read_lines = read_lines.saturating_add(1);
             let mut trimmed = line.as_slice();
-            while let Some(rest) = trimmed.strip_suffix(b"\n").or_else(|| trimmed.strip_suffix(b"\r")) {
+            while let Some(rest) = trimmed
+                .strip_suffix(b"\n")
+                .or_else(|| trimmed.strip_suffix(b"\r"))
+            {
                 trimmed = rest;
             }
             buffer.extend_from_slice(trimmed);
@@ -689,8 +696,7 @@ fn repl(sh: &mut Shell) -> i32 {
             // unquoted here-doc body, the rules differ) — and dropping the
             // backslash also merged the two physical lines into two separate
             // *commands*, since a bare newline was pushed in its place.
-            let trailing_backslashes =
-                trimmed.iter().rev().take_while(|&&b| b == b'\\').count();
+            let trailing_backslashes = trimmed.iter().rev().take_while(|&&b| b == b'\\').count();
             // If the command so far is only *incomplete* — an unterminated quote
             // or substitution, an unfinished `if`/`while`/`for`/`case`/`{`/`(`
             // compound command, or a line ending on `&&`/`||`/`|` — keep reading

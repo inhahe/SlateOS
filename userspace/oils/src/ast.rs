@@ -454,7 +454,11 @@ pub enum ArrayElem {
     /// `append` is set by the `[sub]+=value` spelling, which concatenates onto
     /// whatever the slot holds when the element is bound (or *adds* to it under
     /// the `-i` attribute) instead of replacing it.
-    Keyed { index: Word, value: Word, append: bool },
+    Keyed {
+        index: Word,
+        value: Word,
+        append: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -769,10 +773,7 @@ pub enum WordPart {
     /// the text does. Only this field tells the two apart afterwards, and
     /// without it [`crate::unparse::part_src`] prints back a byte the source
     /// never held, which every diagnostic naming the word then repeats.
-    DoubleQuoted {
-        parts: Vec<WordPart>,
-        closed: bool,
-    },
+    DoubleQuoted { parts: Vec<WordPart>, closed: bool },
     /// An array subscript that an **arithmetic** word expansion met in the word
     /// itself and expands *in place*, ahead of any second reading — bash's
     /// `expand_array_subscript` (subst.c:10836-10894), reached from
@@ -1226,10 +1227,7 @@ impl WordPart {
         hides_closer: &mut dyn FnMut(&'a [u8]) -> bool,
     ) -> Option<&'a Str> {
         // Helpers, so each arm below is a list of its own sub-words.
-        fn in_word<'a>(
-            w: &'a Word,
-            f: &mut dyn FnMut(&'a [u8]) -> bool,
-        ) -> Option<&'a Str> {
+        fn in_word<'a>(w: &'a Word, f: &mut dyn FnMut(&'a [u8]) -> bool) -> Option<&'a Str> {
             w.parts.iter().find_map(|p| p.first_scanned_arith(f))
         }
         fn in_opt<'a>(

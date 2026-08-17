@@ -603,7 +603,10 @@ fn shift_spans(nested: Vec<CmdSubSpan>, by: usize) -> impl Iterator<Item = CmdSu
     nested.into_iter().filter_map(move |s| {
         let start = s.range.start.checked_add(by)?;
         let end = s.range.end.checked_add(by)?;
-        Some(CmdSubSpan { range: start..end, ..s })
+        Some(CmdSubSpan {
+            range: start..end,
+            ..s
+        })
     })
 }
 
@@ -656,7 +659,11 @@ pub enum Seg {
     /// `closed` records that the source really wrote the mate — see
     /// [`Seg::Dq`]. It is meaningless, and always `true`, for the backslash
     /// spelling, which has no quotes to match.
-    Sq { text: Str, escaped: bool, closed: bool },
+    Sq {
+        text: Str,
+        escaped: bool,
+        closed: bool,
+    },
     /// Double-quoted run of fragments.
     ///
     /// The `bool` says whether the closing `"` was in the source. It normally
@@ -836,8 +843,27 @@ const COND_END: &[u8] = b"]]";
 /// may stand here at all is [`CmdPos::reserved_ok`], and what it leaves behind
 /// is [`RW_LEAVES_ACCEPTABLE`].
 const RESERVED_WORDS: &[&[u8]] = &[
-    b"if", b"then", b"else", b"elif", b"fi", b"case", b"esac", b"for", b"select", b"while",
-    b"until", b"do", b"done", b"in", b"function", b"time", b"{", b"}", b"!", b"[[", b"]]",
+    b"if",
+    b"then",
+    b"else",
+    b"elif",
+    b"fi",
+    b"case",
+    b"esac",
+    b"for",
+    b"select",
+    b"while",
+    b"until",
+    b"do",
+    b"done",
+    b"in",
+    b"function",
+    b"time",
+    b"{",
+    b"}",
+    b"!",
+    b"[[",
+    b"]]",
     b"coproc",
 ];
 
@@ -1737,7 +1763,10 @@ impl CaseScan {
             self.skip -= 1;
             return;
         }
-        if !matches!(c, ' ' | '\t' | '\n' | ';' | '&' | '|' | '<' | '>' | '(' | ')') {
+        if !matches!(
+            c,
+            ' ' | '\t' | '\n' | ';' | '&' | '|' | '<' | '>' | '(' | ')'
+        ) {
             self.push(c);
             return;
         }
@@ -1790,7 +1819,10 @@ impl CaseScan {
             // `<<` and `<<<` never arrive here: the here-document arm of
             // `read_balanced_body` consumes them and announces them itself.
             '<' | '>' => {
-                if matches!((c, n1), ('<', Some('&' | '>')) | ('>', Some('>' | '&' | '|'))) {
+                if matches!(
+                    (c, n1),
+                    ('<', Some('&' | '>')) | ('>', Some('>' | '&' | '|'))
+                ) {
                     self.skip = 1;
                 }
                 Ev::RedirOp
@@ -1805,9 +1837,10 @@ impl CaseScan {
     /// Whether an `(` at `depth` is a pattern's optional open, which takes no
     /// depth of its own because the pattern's `)` is what closes it.
     fn is_pattern_open(&mut self, depth: usize) -> bool {
-        let open = self.frames.last().is_some_and(|f| {
-            f.phase == CasePhase::Pattern && f.pat_start && f.depth == depth
-        });
+        let open = self
+            .frames
+            .last()
+            .is_some_and(|f| f.phase == CasePhase::Pattern && f.pat_start && f.depth == depth);
         if open {
             self.pattern_seen();
         }
@@ -1885,14 +1918,20 @@ impl Lexer {
     /// As [`Lexer::new`], but an unterminated here-document is an error rather
     /// than leniently accepted. See [`tokenize_spanned_strict`].
     fn strict_heredoc(src: BStr<'_>, opts: ParseOpts) -> Self {
-        Self { strict_heredoc_eof: true, ..Self::new(src, opts) }
+        Self {
+            strict_heredoc_eof: true,
+            ..Self::new(src, opts)
+        }
     }
 
     /// As [`Lexer::new`], but the stream is closed with the `)` that ends the
     /// enclosing substitution rather than with an implicit newline. See
     /// [`tokenize_paren_body`].
     fn paren_body(src: BStr<'_>, opts: ParseOpts) -> Self {
-        Self { paren_body: true, ..Self::new(src, opts) }
+        Self {
+            paren_body: true,
+            ..Self::new(src, opts)
+        }
     }
 
     /// As [`Lexer::new`], but over a text bash's reader *assembled*: the input
@@ -1913,17 +1952,26 @@ impl Lexer {
     /// own here-documents are gathered afresh, from the line after it, in
     /// `redir_stack` order. See [`Spanned::raws`].
     fn spliced(chars: Vec<Ch>, map: TextMap, from: usize, opts: ParseOpts) -> Self {
-        let mut lx = Self { chars, map, ..Self::new(b"", opts) };
+        let mut lx = Self {
+            chars,
+            map,
+            ..Self::new(b"", opts)
+        };
         let from = from.min(lx.chars.len());
         lx.pos = from;
         lx.iter_start = from;
         // `cur_line` counts the newlines since `iter_start`, so the base has to
         // be the physical line the cursor already stands on.
-        let before = lx.chars.get(..from).unwrap_or(&[]).iter().filter(|&&c| c == '\n').count();
+        let before = lx
+            .chars
+            .get(..from)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|&&c| c == '\n')
+            .count();
         lx.line = 1u32.saturating_add(u32::try_from(before).unwrap_or(u32::MAX));
         lx
     }
-
 }
 
 /// Shell source with its NUL bytes removed — what bash's reader hands the lexer.
@@ -1966,16 +2014,25 @@ pub struct ReadCtx {
 
 impl ReadCtx {
     /// Ordinary source, read by the parse and translated by it.
-    pub const SOURCE: Self = Self { unread: false, ansi_c: true };
+    pub const SOURCE: Self = Self {
+        unread: false,
+        ansi_c: true,
+    };
     /// A **pattern** (or replacement, subscript, substring bound) of a `${ … }`
     /// written in a here-document body: never parsed, but re-extracted by
     /// `extract_heredoc_dolbrace_string`, which translates it. See
     /// [`Lexer::ansi_c_quote`].
-    pub const HEREDOC_FRAGMENT: Self = Self { unread: true, ansi_c: true };
+    pub const HEREDOC_FRAGMENT: Self = Self {
+        unread: true,
+        ansi_c: true,
+    };
     /// A string that reached the expansion as a **value** — a here-document
     /// body, a `PS4`, a `${x@P}`, a runtime array subscript. No reader ran over
     /// it at all, at any depth.
-    pub const VALUE: Self = Self { unread: true, ansi_c: false };
+    pub const VALUE: Self = Self {
+        unread: true,
+        ansi_c: false,
+    };
 }
 
 /// Tokenize `src` into a token stream.
@@ -2267,7 +2324,12 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
     let mut toks = Vec::new();
     let mut marks = Marks::default();
     let res = lx.run_into(&mut toks, &mut marks);
-    let Marks { mut lines, starts: mut offsets, mut ends, .. } = marks;
+    let Marks {
+        mut lines,
+        starts: mut offsets,
+        mut ends,
+        ..
+    } = marks;
     // A here-document body is scanned out of order with respect to the line that
     // introduced it, so sort rather than assume the scan produced them in source
     // order; callers binary-search this list.
@@ -2439,7 +2501,10 @@ pub fn ends_in_continuation(src: BStr<'_>, opts: ParseOpts) -> bool {
     let Ok(bs) = u32::try_from(bs) else {
         return false;
     };
-    tokenize_deferred(src, opts).conts.binary_search(&bs).is_ok()
+    tokenize_deferred(src, opts)
+        .conts
+        .binary_search(&bs)
+        .is_ok()
 }
 
 /// Like [`tokenize_spanned`] but reports an unterminated here-document (its
@@ -2789,7 +2854,10 @@ impl TokSpan {
         if self.src == 0 {
             self
         } else {
-            Self { src: self.src.saturating_add(by), ..self }
+            Self {
+                src: self.src.saturating_add(by),
+                ..self
+            }
         }
     }
 }
@@ -2829,7 +2897,13 @@ struct TextMap {
 impl TextMap {
     /// A text that is nothing but `src` itself, read from its start.
     fn whole(src: u32) -> Self {
-        Self { segs: vec![TextSeg { at: 0, src, base: 0 }] }
+        Self {
+            segs: vec![TextSeg {
+                at: 0,
+                src,
+                base: 0,
+            }],
+        }
     }
 
     /// Which text the character at `off` was written in, and its offset there.
@@ -2854,12 +2928,19 @@ impl TextMap {
     /// lets one lex settle both, in `redir_stack` order.
     fn spliced(&self, word: usize, cut: usize, vlen: usize, src: u32) -> Self {
         let mut segs: Vec<TextSeg> = self.segs.iter().copied().filter(|s| s.at < word).collect();
-        segs.push(TextSeg { at: word, src, base: 0 });
+        segs.push(TextSeg {
+            at: word,
+            src,
+            base: 0,
+        });
         let moved = word.saturating_add(vlen);
         for (i, s) in self.segs.iter().enumerate() {
             // A segment runs until the next one begins; the last runs to the end
             // of the text, which is at or past `cut` whatever `cut` is.
-            let end = self.segs.get(i.saturating_add(1)).map_or(usize::MAX, |n| n.at);
+            let end = self
+                .segs
+                .get(i.saturating_add(1))
+                .map_or(usize::MAX, |n| n.at);
             if end <= cut {
                 // Wholly inside the word or behind it; the word is gone.
                 continue;
@@ -2886,7 +2967,10 @@ impl TextMap {
         if self.at(off).0 == 0 {
             return Some(off);
         }
-        self.segs.iter().find(|s| s.at >= off && s.src == 0).map(|s| s.at)
+        self.segs
+            .iter()
+            .find(|s| s.at >= off && s.src == 0)
+            .map(|s| s.at)
     }
 }
 
@@ -3319,7 +3403,11 @@ impl CmdPos {
         // A plain WORD, which is acceptable only as the name that follows
         // `function` or `coproc` (parse.y:5406-5412).
         let name = matches!(self.prev, Prev::Function | Prev::Coproc);
-        let prev = if was_cmd && assign { Prev::Assignment } else { Prev::Other };
+        let prev = if was_cmd && assign {
+            Prev::Assignment
+        } else {
+            Prev::Other
+        };
         self.set(prev, name, AfterPipe::No);
     }
 }
@@ -3454,7 +3542,9 @@ impl AliasScan {
 
     /// Whether `name` is `AL_BEINGEXPANDED` for a token starting at `off`.
     fn being_expanded(&self, name: &Str, off: usize) -> bool {
-        self.pushes.iter().any(|p| p.name == *name && p.start <= off && off < p.end)
+        self.pushes
+            .iter()
+            .any(|p| p.name == *name && p.start <= off && off < p.end)
     }
 
     /// Take `PST_ALEXPNEXT` from the pops that happened between the previous
@@ -3463,8 +3553,11 @@ impl AliasScan {
     /// does.
     fn pop_to(&mut self, off: usize) {
         let (prev, force) = (self.prev, &mut self.force);
-        if let Some(p) =
-            self.pushes.iter().filter(|p| p.end > prev && p.end <= off).max_by_key(|p| p.end)
+        if let Some(p) = self
+            .pushes
+            .iter()
+            .filter(|p| p.end > prev && p.end <= off)
+            .max_by_key(|p| p.end)
         {
             *force = p.expand_next;
         }
@@ -3481,7 +3574,9 @@ impl AliasScan {
 /// its own is renumbered by the caller's `LineMap`); the physical lines between
 /// the anchor and `off` are then counted in the text.
 fn line_at_input(text: &[Ch], starts: &[u32], lines: &[u32], off: usize) -> Option<u32> {
-    let k = starts.partition_point(|&s| (s as usize) < off).checked_sub(1)?;
+    let k = starts
+        .partition_point(|&s| (s as usize) < off)
+        .checked_sub(1)?;
     let anchor = *starts.get(k)? as usize;
     let span = text.get(anchor..off.saturating_sub(1)).unwrap_or(&[]);
     let n = u32::try_from(span.iter().filter(|&&c| c == '\n').count()).unwrap_or(0);
@@ -3556,9 +3651,12 @@ pub fn expand_aliases_tracked(
     // Back to the top of the line the resume point stands on, which is where
     // every re-lex begins: as far back as one needs to go, and as far back as
     // one may safely go. See [`Lexer::spliced`].
-    let head = text.get(..from).unwrap_or(&[]).iter().rposition(|&c| c == '\n').map_or(0, |i| {
-        i.saturating_add(1)
-    });
+    let head = text
+        .get(..from)
+        .unwrap_or(&[])
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map_or(0, |i| i.saturating_add(1));
     let mut st = AliasScan {
         pushes: Vec::new(),
         marks: Vec::new(),
@@ -3610,7 +3708,11 @@ pub fn expand_aliases_tracked(
                 // an alias word, because nothing there was spliced.
                 continue;
             }
-            let origin = if ssrc == 0 { st.take_input_at(soff, starts) } else { None };
+            let origin = if ssrc == 0 {
+                st.take_input_at(soff, starts)
+            } else {
+                None
+            };
             let at_cmd = st.force || out.pos.at_command();
             st.force = false;
             if at_cmd
@@ -3638,7 +3740,10 @@ pub fn expand_aliases_tracked(
             // inside a value leaves even the rest of the *calling* line numbered
             // from where the gather stopped — the calling line was fetched long
             // before, and nothing renumbers it on the way back.
-            let line = origin.and_then(|k| lines.get(k).copied()).unwrap_or(st.line).max(st.line);
+            let line = origin
+                .and_then(|k| lines.get(k).copied())
+                .unwrap_or(st.line)
+                .max(st.line);
             st.line = line;
             // A `$( … )` remembers the line its `)` sits on, in the numbering of
             // the text it was lexed from — and a spliced text is not the script.
@@ -3707,7 +3812,9 @@ pub fn expand_aliases_tracked(
         .iter()
         .zip(&view.warn_from)
         .filter_map(|(w, &from)| {
-            let (0, off) = view.map.at(from as usize) else { return None };
+            let (0, off) = view.map.at(from as usize) else {
+                return None;
+            };
             let mut w = w.clone();
             w.map_lines(|l| script_line(&view, text, starts, lines, l).unwrap_or(l));
             Some((u32::try_from(off).unwrap_or(u32::MAX), w))
@@ -3727,7 +3834,13 @@ pub fn expand_aliases_tracked(
 /// The 1-based line `line` of an assembled alias text, in the script's own
 /// numbering: the lines of a replacement value are not lines of the input, so a
 /// text with one spliced in counts more of them than the script has.
-fn script_line(view: &AliasView, text: &[Ch], starts: &[u32], lines: &[u32], line: u32) -> Option<u32> {
+fn script_line(
+    view: &AliasView,
+    text: &[Ch],
+    starts: &[u32],
+    lines: &[u32],
+    line: u32,
+) -> Option<u32> {
     let mut at = 0usize;
     for _ in 1..line {
         let i = view.text.get(at..)?.iter().position(|&c| c == '\n')?;
@@ -3736,7 +3849,9 @@ fn script_line(view: &AliasView, text: &[Ch], starts: &[u32], lines: &[u32], lin
     // A line that begins inside a value belongs to the input line the value
     // stands on, which is where the reader's own numbering has stayed.
     let real = view.map.real_at_or_after(at)?;
-    let (0, off) = view.map.at(real) else { return None };
+    let (0, off) = view.map.at(real) else {
+        return None;
+    };
     line_at_input(text, starts, lines, off.saturating_add(1))
 }
 
@@ -3758,7 +3873,10 @@ fn splice_alias(
     opts: ParseOpts,
 ) -> Option<AliasView> {
     let head = st.head;
-    let core::ops::Range { start: word, end: cut } = at;
+    let core::ops::Range {
+        start: word,
+        end: cut,
+    } = at;
     let mut text: Vec<Ch> = view.text.get(..word)?.to_vec();
     let vlen = bytes::chars(val).count();
     text.extend(bytes::chars(val));
@@ -3770,20 +3888,38 @@ fn splice_alias(
     // copy pushed back inside a replacement cannot be named in that table's terms.
     // The line freeze it also carries is applied by the lex that produced it, so
     // only the echoed text of a `((` written inside an alias value is affected.
-    let Spanned { toks, lines, starts, ends, raws, taken, warnings, warn_from, dparens: _ } =
-        Lexer::spliced(text.clone(), map.clone(), head, opts).run().ok()?;
+    let Spanned {
+        toks,
+        lines,
+        starts,
+        ends,
+        raws,
+        taken,
+        warnings,
+        warn_from,
+        dparens: _,
+    } = Lexer::spliced(text.clone(), map.clone(), head, opts)
+        .run()
+        .ok()?;
     // bash's `pop_string` restores the displaced line at the saved index, which
     // is what a diagnostic raised inside the value points back at.
     let (psrc, poff) = view.map.at(cut);
     out.bodies.push(AliasBody {
         text: val.to_vec(),
-        parent: TokSpan { src: psrc, end: u32::try_from(poff).unwrap_or(u32::MAX) },
+        parent: TokSpan {
+            src: psrc,
+            end: u32::try_from(poff).unwrap_or(u32::MAX),
+        },
     });
     // What the splice displaced moved along by the difference in length; what
     // stands in front of it did not move at all.
     let moved = word.saturating_add(vlen);
     let shift = |off: usize| {
-        if off <= word { off } else { moved.saturating_add(off.saturating_sub(cut)) }
+        if off <= word {
+            off
+        } else {
+            moved.saturating_add(off.saturating_sub(cut))
+        }
     };
     for p in &mut st.pushes {
         p.start = shift(p.start);
@@ -3798,7 +3934,18 @@ fn splice_alias(
         end: moved,
         expand_next: val.ends_with(b" ") || val.ends_with(b"\t"),
     });
-    Some(AliasView { toks, lines, starts, ends, raws, taken, warnings, warn_from, text, map })
+    Some(AliasView {
+        toks,
+        lines,
+        starts,
+        ends,
+        raws,
+        taken,
+        warnings,
+        warn_from,
+        text,
+        map,
+    })
 }
 
 /// Shift every source line recorded *inside* a token by `by` lines.
@@ -4262,7 +4409,10 @@ impl Lexer {
                     // reading it, and what the reader finds next is not input
                     // but the popped buffer's own NUL. See
                     // [`Lexer::take_nul_word`].
-                    self.nul_word = self.dparens.iter().any(|p| p.end.saturating_add(1) == self.pos);
+                    self.nul_word = self
+                        .dparens
+                        .iter()
+                        .any(|p| p.end.saturating_add(1) == self.pos);
                     // Before the collection below, so a here-document still
                     // pending from earlier on the line reads from *after* the
                     // bodies a `$( … )` on it already took, not from the top of
@@ -4825,7 +4975,12 @@ impl Lexer {
     /// itself, or the one that swallowed a here-doc body — belongs to the line
     /// it terminates rather than the one after it.
     fn stamp_lines(&mut self, out: &[Tok], marks: &mut Marks, start_line: u32, start_pos: usize) {
-        let Marks { lines, starts: offsets, ends, raws } = marks;
+        let Marks {
+            lines,
+            starts: offsets,
+            ends,
+            raws,
+        } = marks;
         let inner = self
             .chars
             .get(start_pos..self.pos.saturating_sub(1))
@@ -4889,7 +5044,9 @@ impl Lexer {
             .iter()
             .filter(|&&ch| ch == '\n')
             .count();
-        self.line = self.line.saturating_add(u32::try_from(consumed).unwrap_or(u32::MAX));
+        self.line = self
+            .line
+            .saturating_add(u32::try_from(consumed).unwrap_or(u32::MAX));
     }
 
     /// Try to lex an array assignment `name=( … )` / `name+=( … )` at the current
@@ -4925,10 +5082,7 @@ impl Lexer {
         };
         let append = self.peek() == Some('+');
         let eq_at = self.pos + usize::from(append);
-        if name.is_empty()
-            || self.at(eq_at) != Some('=')
-            || self.at(eq_at + 1) != Some('(')
-        {
+        if name.is_empty() || self.at(eq_at) != Some('=') || self.at(eq_at + 1) != Some('(') {
             self.pos = start;
             return Ok(None);
         }
@@ -5109,7 +5263,11 @@ impl Lexer {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
                     let (text, closed) = self.read_single_quote()?;
-                    segs.push(Seg::Sq { text, escaped: false, closed });
+                    segs.push(Seg::Sq {
+                        text,
+                        escaped: false,
+                        closed,
+                    });
                 }
                 '"' => {
                     flush_lit(&mut segs, &mut lit);
@@ -5212,7 +5370,11 @@ impl Lexer {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
                     let (text, closed) = self.read_single_quote()?;
-                    segs.push(Seg::Sq { text, escaped: false, closed });
+                    segs.push(Seg::Sq {
+                        text,
+                        escaped: false,
+                        closed,
+                    });
                 }
                 // …but bash's *parser* never read what lies between one and its
                 // mate. A `${ … }` is a grouping construct (`open != close`), so
@@ -5325,7 +5487,11 @@ impl Lexer {
                             if let Some(next) = next {
                                 // Quoted, so the character it protected is not
                                 // read again as a substitution or a quote.
-                                segs.push(Seg::Sq { text: next.to_str(), escaped: true, closed: true });
+                                segs.push(Seg::Sq {
+                                    text: next.to_str(),
+                                    escaped: true,
+                                    closed: true,
+                                });
                             }
                         }
                         // Not an escape: the backslash stands for itself, and the
@@ -5373,7 +5539,11 @@ impl Lexer {
                             // pattern back as written. Same rationale and
                             // representation as in `read_word_inner`.
                             flush_lit(&mut segs, &mut lit);
-                            segs.push(Seg::Sq { text: next.to_str(), escaped: true, closed: true });
+                            segs.push(Seg::Sq {
+                                text: next.to_str(),
+                                escaped: true,
+                                closed: true,
+                            });
                         }
                     }
                 }
@@ -5483,16 +5653,24 @@ impl Lexer {
                         && self.at(self.pos + 1) == Some('(') =>
                 {
                     flush_lit(&mut segs, &mut lit);
-                    let delim = if c == '<' { SubDelim::ProcIn } else { SubDelim::ProcOut };
+                    let delim = if c == '<' {
+                        SubDelim::ProcIn
+                    } else {
+                        SubDelim::ProcOut
+                    };
                     self.pos += 2;
                     let body = self.pos;
                     match self.read_subst_body(false) {
                         Ok(raw) => {
                             let close = self.cur_line();
-                            segs.push(Seg::CmdSub(raw, close, SubBody::Unread {
-                                closed: true,
-                                delim,
-                            }));
+                            segs.push(Seg::CmdSub(
+                                raw,
+                                close,
+                                SubBody::Unread {
+                                    closed: true,
+                                    delim,
+                                },
+                            ));
                         }
                         // No mate, and in unread text that is not this scan's
                         // failure either: `extract_command_subst` takes the
@@ -5503,10 +5681,14 @@ impl Lexer {
                             let src = self.slice(body, self.chars.len());
                             self.pos = self.chars.len();
                             let close = self.cur_line();
-                            segs.push(Seg::CmdSub(src, close, SubBody::Unread {
-                                closed: false,
-                                delim,
-                            }));
+                            segs.push(Seg::CmdSub(
+                                src,
+                                close,
+                                SubBody::Unread {
+                                    closed: false,
+                                    delim,
+                                },
+                            ));
                         }
                         Err(e) => return Err(e.at(self.eof_line())),
                     }
@@ -5570,7 +5752,11 @@ impl Lexer {
     /// on it, and naming it verbatim is still the most useful thing to say.
     fn take_operator(&mut self) -> Str {
         for op in OPERATOR_SPELLINGS {
-            if op.chars().enumerate().all(|(i, c)| self.at(self.pos.saturating_add(i)) == Some(c)) {
+            if op
+                .chars()
+                .enumerate()
+                .all(|(i, c)| self.at(self.pos.saturating_add(i)) == Some(c))
+            {
                 self.pos = self.pos.saturating_add(op.chars().count());
                 return op.as_bytes().to_vec();
             }
@@ -5743,7 +5929,9 @@ impl Lexer {
                 // Word level, and `read_token_word` pushes the `(` for a `<(`
                 // like any other (parse.y:5071), so the body's delimiter is that
                 // `(` and never an enclosing `"`.
-                let raw = self.read_subst_body(false).map_err(|e| e.at(self.eof_line()))?;
+                let raw = self
+                    .read_subst_body(false)
+                    .map_err(|e| e.at(self.eof_line()))?;
                 segs.push(Seg::ProcSub(input, raw, open_line, ProcRead::Eager));
                 continue;
             }
@@ -5757,7 +5945,11 @@ impl Lexer {
                     flush_lit(segs, &mut lit);
                     self.pos += 1;
                     let (text, closed) = self.read_single_quote()?;
-                    segs.push(Seg::Sq { text, escaped: false, closed });
+                    segs.push(Seg::Sq {
+                        text,
+                        escaped: false,
+                        closed,
+                    });
                 }
                 '"' => {
                     flush_lit(segs, &mut lit);
@@ -5809,7 +6001,11 @@ impl Lexer {
                             next.push_to(&mut lit);
                         } else {
                             flush_lit(segs, &mut lit);
-                            segs.push(Seg::Sq { text: next.to_str(), escaped: true, closed: true });
+                            segs.push(Seg::Sq {
+                                text: next.to_str(),
+                                escaped: true,
+                                closed: true,
+                            });
                         }
                     } else {
                         self.note_continuation();
@@ -5937,7 +6133,9 @@ impl Lexer {
                     // bash parsed each where it met it, so one that will not
                     // parse is reported instead of this. See
                     // [`LexError::eager_bodies`].
-                    return Err(eof_matching('"').at(open).eager_bodies(eager_bodies_in(&segs)));
+                    return Err(eof_matching('"')
+                        .at(open)
+                        .eager_bodies(eager_bodies_in(&segs)));
                 }
                 flush_lit(&mut segs, &mut lit);
                 return Ok((segs, false));
@@ -5964,7 +6162,11 @@ impl Lexer {
                         Some(n @ ('"' | '\\' | '$' | '`')) => {
                             self.pos += 1;
                             flush_lit(&mut segs, &mut lit);
-                            segs.push(Seg::Sq { text: one(n), escaped: true, closed: true });
+                            segs.push(Seg::Sq {
+                                text: one(n),
+                                escaped: true,
+                                closed: true,
+                            });
                         }
                         Some('\n') => {
                             self.pos += 1;
@@ -5988,16 +6190,24 @@ impl Lexer {
                 // `Shell::brace_scanned_subs_slice`.
                 '<' | '>' if self.brace_scan && self.at(self.pos + 1) == Some('(') => {
                     flush_lit(&mut segs, &mut lit);
-                    let delim = if c == '<' { SubDelim::ProcIn } else { SubDelim::ProcOut };
+                    let delim = if c == '<' {
+                        SubDelim::ProcIn
+                    } else {
+                        SubDelim::ProcOut
+                    };
                     self.pos += 2;
                     let body = self.pos;
                     match self.read_subst_body(false) {
                         Ok(raw) => {
                             let close = self.cur_line();
-                            segs.push(Seg::CmdSub(raw, close, SubBody::Unread {
-                                closed: true,
-                                delim,
-                            }));
+                            segs.push(Seg::CmdSub(
+                                raw,
+                                close,
+                                SubBody::Unread {
+                                    closed: true,
+                                    delim,
+                                },
+                            ));
                         }
                         // No mate, and in unread text that is not this scan's
                         // failure either: `extract_command_subst` takes the
@@ -6007,10 +6217,14 @@ impl Lexer {
                             let src = self.slice(body, self.chars.len());
                             self.pos = self.chars.len();
                             let close = self.cur_line();
-                            segs.push(Seg::CmdSub(src, close, SubBody::Unread {
-                                closed: false,
-                                delim,
-                            }));
+                            segs.push(Seg::CmdSub(
+                                src,
+                                close,
+                                SubBody::Unread {
+                                    closed: false,
+                                    delim,
+                                },
+                            ));
                         }
                         Err(e) => return Err(e.at(self.eof_line())),
                     }
@@ -6088,7 +6302,11 @@ impl Lexer {
                 // escapes processed (no expansion/splitting — like `'…'`).
                 self.pos += 1;
                 let s = self.read_ansi_c_quote()?;
-                Ok(Some(Seg::Sq { text: s, escaped: false, closed: true }))
+                Ok(Some(Seg::Sq {
+                    text: s,
+                    escaped: false,
+                    closed: true,
+                }))
             }
             Some('"') if quote_form => {
                 // `$"…"` — locale translation. We have no message catalogs, so
@@ -6109,8 +6327,9 @@ impl Lexer {
                 // `"…"` run in the body or in a body nested in that one, is
                 // this segment's, because it is this segment's raw text the
                 // leftover has to be carved out of.
-                let (raw, nested, spliced) =
-                    self.read_dollar_brace(in_dquote).map_err(|e| self.unread_eof(e, '}', dollar, true))?;
+                let (raw, nested, spliced) = self
+                    .read_dollar_brace(in_dquote)
+                    .map_err(|e| self.unread_eof(e, '}', dollar, true))?;
                 Ok(Some(Seg::ParamBraced(raw, open, nested, spliced)))
             }
             Some('[') => {
@@ -6228,7 +6447,10 @@ impl Lexer {
                             let src = self.slice(body, self.chars.len());
                             self.pos = self.chars.len();
                             let close = self.cur_line();
-                            let kind = SubBody::Unread { closed: false, delim: SubDelim::Dollar };
+                            let kind = SubBody::Unread {
+                                closed: false,
+                                delim: SubDelim::Dollar,
+                            };
                             return Ok(Some(Seg::CmdSub(src, close, kind)));
                         }
                         Err(e) => return Err(e.at(self.eof_line())),
@@ -6304,7 +6526,11 @@ impl Lexer {
             return e.unclosed(UnreadEof::CmdSub(src));
         }
         let src = self.slice(from, self.chars.len());
-        let what = Unclosed::BadSubst { close, src, text: self.whole_text() };
+        let what = Unclosed::BadSubst {
+            close,
+            src,
+            text: self.whole_text(),
+        };
         e.unclosed(UnreadEof::Subst(what))
     }
 
@@ -6319,9 +6545,14 @@ impl Lexer {
     fn unclosed_seg(&self, mut e: LexError) -> Result<Seg, LexError> {
         match e.unclosed.take().map(|b| *b) {
             Some(UnreadEof::Subst(u)) => Ok(Seg::Unclosed(u)),
-            Some(UnreadEof::CmdSub(src)) => {
-                Ok(Seg::CmdSub(src, self.cur_line(), SubBody::Unread { closed: false, delim: SubDelim::Dollar }))
-            }
+            Some(UnreadEof::CmdSub(src)) => Ok(Seg::CmdSub(
+                src,
+                self.cur_line(),
+                SubBody::Unread {
+                    closed: false,
+                    delim: SubDelim::Dollar,
+                },
+            )),
             None => Err(e),
         }
     }
@@ -6406,7 +6637,10 @@ impl Lexer {
     /// a parser ever read as a word. See [`Lexer::here_text`].
     fn subst_kind(&self) -> SubBody {
         if self.here_text {
-            SubBody::Unread { closed: true, delim: SubDelim::Dollar }
+            SubBody::Unread {
+                closed: true,
+                delim: SubDelim::Dollar,
+            }
         } else {
             SubBody::Eager
         }
@@ -6494,27 +6728,28 @@ impl Lexer {
         }
         let body_start = self.pos;
         let open_line = self.cur_line();
-        self.read_balanced_body(open, close, command, dq).map_err(|mut e| {
-            // Only an error that *is* the missing `)` — this scan's own
-            // end-of-input, or one already carrying a bail from a substitution
-            // inside it. An unterminated quote in the body is a different
-            // failure and bash reports it as one: `echo $(echo "x` names the
-            // `"`, because the nested parse's own lexer dies on it.
-            if e.bail.is_none() && !(e.line.is_none() && e.looking_for == Some(close)) {
-                return e;
-            }
-            let mut body = Str::new();
-            for cx in self.chars.get(body_start..).unwrap_or_default() {
-                cx.push_to(&mut body);
-            }
-            e.bail = Some(SubstBail { body, open_line });
-            // Whatever construct inside the body noticed the end of input first,
-            // this is now the `$( … )`'s failure, and bash reads *that* one with
-            // a real parse whose diagnostic is its own. Drop any claim an inner
-            // scan staked — see [`Unclosed`].
-            e.unclosed = None;
-            e
-        })
+        self.read_balanced_body(open, close, command, dq)
+            .map_err(|mut e| {
+                // Only an error that *is* the missing `)` — this scan's own
+                // end-of-input, or one already carrying a bail from a substitution
+                // inside it. An unterminated quote in the body is a different
+                // failure and bash reports it as one: `echo $(echo "x` names the
+                // `"`, because the nested parse's own lexer dies on it.
+                if e.bail.is_none() && !(e.line.is_none() && e.looking_for == Some(close)) {
+                    return e;
+                }
+                let mut body = Str::new();
+                for cx in self.chars.get(body_start..).unwrap_or_default() {
+                    cx.push_to(&mut body);
+                }
+                e.bail = Some(SubstBail { body, open_line });
+                // Whatever construct inside the body noticed the end of input first,
+                // this is now the `$( … )`'s failure, and bash reads *that* one with
+                // a real parse whose diagnostic is its own. Drop any claim an inner
+                // scan staked — see [`Unclosed`].
+                e.unclosed = None;
+                e
+            })
     }
 
     /// Consume one span in which a closing delimiter closes nothing: a quoted
@@ -6727,7 +6962,8 @@ impl Lexer {
                             };
                             let start = raw.len();
                             raw.extend_from_slice(b"$(");
-                            self.bare_splices.extend(shift_ranges(inner_splices, raw.len()));
+                            self.bare_splices
+                                .extend(shift_ranges(inner_splices, raw.len()));
                             raw.extend_from_slice(&inner);
                             raw.push(b')');
                             self.arith_comsubs.push(CmdSubSpan {
@@ -6812,7 +7048,9 @@ impl Lexer {
                 // `no closing `)' in $((1+$(echo` — the corpus case
                 // `an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`
                 // pins both spellings.
-                let inner = self.read_subst_body(dq).map_err(|e| e.at(self.eof_line()))?;
+                let inner = self
+                    .read_subst_body(dq)
+                    .map_err(|e| e.at(self.eof_line()))?;
                 // The parse is bash's, not ours to defer: `parse_dollar_word`
                 // runs `parse_comsub` here and now, and its failure is a syntax
                 // error in the *enclosing* unit — which is why
@@ -7248,7 +7486,10 @@ impl Lexer {
         if !raw.ends_with(b"\n") {
             raw.push(b'\n');
         }
-        self.hd_ahead = Some(HdAhead { pos: self.pos, line: self.fetched_line() });
+        self.hd_ahead = Some(HdAhead {
+            pos: self.pos,
+            line: self.fetched_line(),
+        });
         self.pos = resume;
         gathered
     }
@@ -7308,7 +7549,11 @@ impl Lexer {
                 if line.ends_with(b"\r") {
                     line.pop();
                 }
-                let content = if strip { strip_tabs(&line) } else { line.as_slice() };
+                let content = if strip {
+                    strip_tabs(&line)
+                } else {
+                    line.as_slice()
+                };
                 if content == delim.as_slice() {
                     break;
                 }
@@ -7650,8 +7895,7 @@ impl Lexer {
                                 // — which a here-document body does not have one
                                 // of. See [`Lexer::here_text`].
                                 let body = self.pos;
-                                let inner = match self
-                                    .read_subst_body(in_dquote && !self.here_text)
+                                let inner = match self.read_subst_body(in_dquote && !self.here_text)
                                 {
                                     Ok(inner) => inner,
                                     // A `$(` with no mate is not this scan's
@@ -8109,7 +8353,10 @@ impl Lexer {
         let resume = self.pos;
         let in_value = self.map.at(self.pos).0 != 0;
         if in_value {
-            let tail = self.map.real_at_or_after(self.pos).unwrap_or(self.chars.len());
+            let tail = self
+                .map
+                .real_at_or_after(self.pos)
+                .unwrap_or(self.chars.len());
             self.pos = self.raw.max(self.line_after(tail));
         }
         self.raw_from = self.pos;
@@ -8160,7 +8407,11 @@ impl Lexer {
                 if line.ends_with(b"\r") {
                     line.pop();
                 }
-                let content = if ph.strip { strip_tabs(&line) } else { line.as_slice() };
+                let content = if ph.strip {
+                    strip_tabs(&line)
+                } else {
+                    line.as_slice()
+                };
                 if content == ph.delim.as_slice() {
                     break;
                 }
@@ -8188,7 +8439,8 @@ impl Lexer {
             let taken = self.chars.get(from..self.pos).unwrap_or(&[]);
             let lines = taken.iter().filter(|&&c| c == '\n').count()
                 + usize::from(taken.last().is_some_and(|&c| c != '\n'));
-            self.heredoc_lines.push((ph.tok_index, u32::try_from(lines).unwrap_or(u32::MAX)));
+            self.heredoc_lines
+                .push((ph.tok_index, u32::try_from(lines).unwrap_or(u32::MAX)));
             let segs = scan_heredoc_segs(&body, ph.expand)?;
             if let Some(slot) = out.get_mut(ph.tok_index) {
                 *slot = Tok::HereDoc(segs, ph.delim.clone(), !ph.expand);
@@ -8226,7 +8478,9 @@ impl Lexer {
             .unwrap_or(&[])
             .iter()
             .position(|&c| c == '\n')
-            .map_or(self.chars.len(), |i| off.saturating_add(i).saturating_add(1))
+            .map_or(self.chars.len(), |i| {
+                off.saturating_add(i).saturating_add(1)
+            })
     }
 
     /// Read a `` ` … ` `` body, returning two things: the text to *parse*, with
@@ -8323,24 +8577,36 @@ fn flush_lit(segs: &mut Vec<Seg>, lit: &mut Str) {
 /// into for the same reason again (`echo "a$(fi)"x$(`).
 fn eager_bodies_in(segs: &[Seg]) -> Vec<EagerBody> {
     fn spans(v: &[CmdSubSpan], out: &mut Vec<EagerBody>) {
-        out.extend(v.iter().filter(|s| s.kind == SubBody::Eager).map(|s| EagerBody {
-            src: s.src.clone(),
-            line: s.close_line,
-            procsub: false,
-        }));
+        out.extend(
+            v.iter()
+                .filter(|s| s.kind == SubBody::Eager)
+                .map(|s| EagerBody {
+                    src: s.src.clone(),
+                    line: s.close_line,
+                    procsub: false,
+                }),
+        );
     }
     fn walk(segs: &[Seg], out: &mut Vec<EagerBody>) {
         for seg in segs {
             match seg {
                 Seg::CmdSub(raw, close, SubBody::Eager) => {
-                    out.push(EagerBody { src: raw.clone(), line: *close, procsub: false });
+                    out.push(EagerBody {
+                        src: raw.clone(),
+                        line: *close,
+                        procsub: false,
+                    });
                 }
                 // Only a body a parser read is parsed eagerly. One that reached
                 // the shell inside a value is parsed by the `${ … }` scan that
                 // finds it instead, later and elsewhere — see
                 // [`crate::ast::ProcSubBody`].
                 Seg::ProcSub(_, raw, open, ProcRead::Eager) => {
-                    out.push(EagerBody { src: raw.clone(), line: *open, procsub: true });
+                    out.push(EagerBody {
+                        src: raw.clone(),
+                        line: *open,
+                        procsub: true,
+                    });
                 }
                 Seg::ParamBraced(_, _, subs, _) | Seg::Arith(_, _, subs) => spans(subs, out),
                 Seg::Dq(inner, _) => walk(inner, out),
@@ -8386,7 +8652,11 @@ fn scan_heredoc_segs(body: BStr<'_>, expand: bool) -> Result<Vec<Seg>, LexError>
                         // literal run — but it also records the backslash, so
                         // `declare -f` can print the body back as written.
                         flush_lit(&mut segs, &mut lit);
-                        segs.push(Seg::Sq { text: one(n), escaped: true, closed: true });
+                        segs.push(Seg::Sq {
+                            text: one(n),
+                            escaped: true,
+                            closed: true,
+                        });
                     }
                     Some('\n') => {
                         lx.pos += 1;
@@ -8442,8 +8712,7 @@ mod tests {
 
     /// As [`tokenize`], with per-token line numbers.
     fn tokenize_spanned(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
-        super::tokenize_spanned(src.as_bytes(), ParseOpts::default())
-            .map(|s| (s.toks, s.lines))
+        super::tokenize_spanned(src.as_bytes(), ParseOpts::default()).map(|s| (s.toks, s.lines))
     }
 
     /// Tokenize and drop the terminating `Newline`, so a test that counts words
@@ -8479,7 +8748,13 @@ mod tests {
         assert_eq!(q("echo $(echo \"a 'b\n"), Some('"'));
         // Everything that is not a quote reports nothing, including the other
         // unclosed constructs and a plain incomplete compound command.
-        for src in ["echo $(x\n", "echo ${x\n", "if true; then\n", "echo x |\n", "echo x \\\n"] {
+        for src in [
+            "echo $(x\n",
+            "echo ${x\n",
+            "if true; then\n",
+            "echo x |\n",
+            "echo x \\\n",
+        ] {
             assert_eq!(q(src), None, "{src:?}");
         }
         // A complete line has no state to carry.
@@ -8535,7 +8810,17 @@ mod tests {
                 ],
                 "extglob off: {src}"
             );
-            let mut with = super::tokenize(src.as_bytes(), ParseOpts { extglob: true, posix: false, reread: false, tolerant: false }, ReadCtx::SOURCE).unwrap();
+            let mut with = super::tokenize(
+                src.as_bytes(),
+                ParseOpts {
+                    extglob: true,
+                    posix: false,
+                    reread: false,
+                    tolerant: false,
+                },
+                ReadCtx::SOURCE,
+            )
+            .unwrap();
             with.pop();
             assert_eq!(
                 with,
@@ -8619,10 +8904,7 @@ mod tests {
             .iter()
             .filter_map(|t| if let Tok::Op(o) = t { Some(*o) } else { None })
             .collect();
-        assert_eq!(
-            ops,
-            vec![Op::Pipe, Op::AndIf, Op::OrIf, Op::Semi, Op::Amp]
-        );
+        assert_eq!(ops, vec![Op::Pipe, Op::AndIf, Op::OrIf, Op::Semi, Op::Amp]);
     }
 
     #[test]
@@ -8715,8 +8997,13 @@ mod tests {
         // conditional `last_read_token` is frozen at `COND_START`, which is
         // not on the list, and no paren in there is ever arithmetic however
         // deeply nested.
-        let arith_count =
-            |src: &str| tokenize(src).unwrap().iter().filter(|t| matches!(t, Tok::ArithCmd(..))).count();
+        let arith_count = |src: &str| {
+            tokenize(src)
+                .unwrap()
+                .iter()
+                .filter(|t| matches!(t, Tok::ArithCmd(..)))
+                .count()
+        };
 
         for src in [
             "[[ ((( a ))) ]]",
@@ -8726,7 +9013,11 @@ mod tests {
             "[[ ((( 0 ))) || (( 1 )) ]]",
             "[[ (( a )) && (( b )) ]]",
         ] {
-            assert_eq!(arith_count(src), 0, "{src} must not lex an arithmetic command");
+            assert_eq!(
+                arith_count(src),
+                0,
+                "{src} must not lex an arithmetic command"
+            );
         }
 
         // `[[ ((( a ))) ]]` is three nested groups around one word.
@@ -8745,8 +9036,16 @@ mod tests {
 
         // The conditional's own nesting is what is tracked, so a `((` after
         // the `]]` is arithmetic again.
-        for src in ["[[ a ]] && ((1))", "((1))", "for ((i=0;i<2;i++)); do :; done"] {
-            assert_eq!(arith_count(src), 1, "{src} should lex one arithmetic command");
+        for src in [
+            "[[ a ]] && ((1))",
+            "((1))",
+            "for ((i=0;i<2;i++)); do :; done",
+        ] {
+            assert_eq!(
+                arith_count(src),
+                1,
+                "{src} should lex one arithmetic command"
+            );
         }
 
         // A command substitution written inside the conditional is its own
@@ -8756,14 +9055,22 @@ mod tests {
         // ends up as `[[ -n <word> ]]`.
         let toks = tokenize("[[ -n $( ((1)) ; echo hi ) ]]").unwrap();
         assert_eq!(arith_count("[[ -n $( ((1)) ; echo hi ) ]]"), 0);
-        assert_eq!(toks.len(), 5, "expected `[[ -n <word> ]]` + newline, got {toks:?}");
+        assert_eq!(
+            toks.len(),
+            5,
+            "expected `[[ -n <word> ]]` + newline, got {toks:?}"
+        );
         assert!(matches!(&toks[2], Tok::Word(s) if matches!(s[0], Seg::CmdSub(..))));
 
         // And a `((` where no command can start is still a plain `(` outside a
         // conditional, which the conditional's own freeze must not have
         // disturbed.
         for src in ["x=1 ((2))", "echo ((1))"] {
-            assert_eq!(arith_count(src), 0, "{src} must not lex an arithmetic command");
+            assert_eq!(
+                arith_count(src),
+                0,
+                "{src} must not lex an arithmetic command"
+            );
         }
     }
 
@@ -8774,8 +9081,13 @@ mod tests {
         // one was already acceptable, because `CHECK_FOR_RESERVED_WORD`
         // (parse.y:2994) is gated on the very same test. So the rule is
         // recursive and a table keyed on one token's spelling cannot express it.
-        let arith_count =
-            |src: &str| tokenize(src).unwrap().iter().filter(|t| matches!(t, Tok::ArithCmd(..))).count();
+        let arith_count = |src: &str| {
+            tokenize(src)
+                .unwrap()
+                .iter()
+                .filter(|t| matches!(t, Tok::ArithCmd(..)))
+                .count()
+        };
 
         // Where a reserved word may stand, it is one, and `((` is arithmetic.
         for src in [
@@ -8791,33 +9103,67 @@ mod tests {
             "echo a && ((1))",
             "( ((1)) )",
         ] {
-            assert_eq!(arith_count(src), 1, "{src} should lex one arithmetic command");
+            assert_eq!(
+                arith_count(src),
+                1,
+                "{src} should lex one arithmetic command"
+            );
         }
 
         // In an argument position the same spellings are plain words, so bash
         // hands back a single `(` — `echo do ((1))` is a syntax error near `('.
-        for w in ["do", "done", "fi", "then", "esac", "until", "time", "!", "{", "}", "if"] {
+        for w in [
+            "do", "done", "fi", "then", "esac", "until", "time", "!", "{", "}", "if",
+        ] {
             let src = format!("echo {w} ((1))");
-            assert_eq!(arith_count(&src), 0, "{src} must not lex an arithmetic command");
+            assert_eq!(
+                arith_count(&src),
+                0,
+                "{src} must not lex an arithmetic command"
+            );
         }
 
         // `]]` is `COND_END`, which *is* on bash's acceptable list — but only
         // when it closed a conditional. A word merely spelled `]]` is a word.
-        assert_eq!(arith_count("[[ a ]] ((1))"), 1, "`]]` closes a conditional, so `((` is arithmetic");
-        assert_eq!(arith_count("echo ]] ((1))"), 0, "a word spelled `]]` leaves a WORD behind");
+        assert_eq!(
+            arith_count("[[ a ]] ((1))"),
+            1,
+            "`]]` closes a conditional, so `((` is arithmetic"
+        );
+        assert_eq!(
+            arith_count("echo ]] ((1))"),
+            0,
+            "a word spelled `]]` leaves a WORD behind"
+        );
 
         // The two lookbehind cases: `reserved_word_acceptable`'s default branch
         // accepts a WORD whose predecessor was `function` or `coproc`
         // (parse.y:5406–5412), which is how a name reaches an arithmetic body.
-        assert_eq!(arith_count("function f ((1))"), 1, "the name after `function`");
+        assert_eq!(
+            arith_count("function f ((1))"),
+            1,
+            "the name after `function`"
+        );
         assert_eq!(arith_count("coproc c ((1))"), 1, "the name after `coproc`");
         // And they are one word deep, not a mode.
-        assert_eq!(arith_count("function f g ((1))"), 0, "only the first word after `function`");
+        assert_eq!(
+            arith_count("function f g ((1))"),
+            0,
+            "only the first word after `function`"
+        );
 
         // The words bash leaves off the list stay off it: after `case`, `in` or
         // `select` what follows is a pattern or a name.
-        for src in ["case x in ((p) echo hi;; esac", "for i in ((1))", "select i in ((1))"] {
-            assert_eq!(arith_count(src), 0, "{src} must not lex an arithmetic command");
+        for src in [
+            "case x in ((p) echo hi;; esac",
+            "for i in ((1))",
+            "select i in ((1))",
+        ] {
+            assert_eq!(
+                arith_count(src),
+                0,
+                "{src} must not lex an arithmetic command"
+            );
         }
     }
 
@@ -8842,7 +9188,11 @@ mod tests {
         assert_eq!(toks.len(), 2, "expected two words, got {toks:?}");
         // In *argument* position the subscript splits normally on the space.
         let toks = toks_of("echo h[a b]=v");
-        assert_eq!(toks.len(), 3, "argument-position subscript must split: {toks:?}");
+        assert_eq!(
+            toks.len(),
+            3,
+            "argument-position subscript must split: {toks:?}"
+        );
     }
 
     #[test]
@@ -8851,7 +9201,11 @@ mod tests {
         // even with unquoted interior spaces (bash tokenises `([ x ]=v)` as a
         // single subscript-value element). Regression for TD-OILS-ASSOC-KEY-TRIM.
         let toks = toks_of("m=([ x ]=v [y z]=w)");
-        assert_eq!(toks.len(), 1, "expected single ArrayAssign token, got {toks:?}");
+        assert_eq!(
+            toks.len(),
+            1,
+            "expected single ArrayAssign token, got {toks:?}"
+        );
         match &toks[0] {
             Tok::ArrayAssign { name, elems, .. } => {
                 assert_eq!(name, "m");
@@ -8865,7 +9219,11 @@ mod tests {
         let toks = tokenize("a=([a b])").unwrap();
         match &toks[0] {
             Tok::ArrayAssign { elems, .. } => {
-                assert_eq!(elems.len(), 1, "positional [a b] must be one element: {elems:?}");
+                assert_eq!(
+                    elems.len(),
+                    1,
+                    "positional [a b] must be one element: {elems:?}"
+                );
             }
             other => panic!("expected ArrayAssign, got {other:?}"),
         }
@@ -8920,7 +9278,9 @@ mod tests {
         let (toks, lines) = tokenize_spanned("cat <<EOF\nbody\nEOF\nlast").unwrap();
         let idx = toks
             .iter()
-            .position(|t| matches!(t, Tok::Word(segs) if segs.as_slice() == [Seg::Lit("last".into())]))
+            .position(
+                |t| matches!(t, Tok::Word(segs) if segs.as_slice() == [Seg::Lit("last".into())]),
+            )
             .expect("last word");
         assert_eq!(lines[idx], 4);
         // A double-quoted string with an embedded newline (physical lines 1-2);
@@ -9039,7 +9399,11 @@ mod tests {
         for (src, close, line) in cases {
             let err = tokenize(src).expect_err(&format!("{src:?} must not lex"));
             let want = format!("unexpected EOF while looking for matching `{close}'");
-            assert_eq!(crate::bytes::as_str(&err.msg), Some(want.as_str()), "{src:?}");
+            assert_eq!(
+                crate::bytes::as_str(&err.msg),
+                Some(want.as_str()),
+                "{src:?}"
+            );
             assert_eq!(err.line, Some(*line), "{src:?}");
         }
     }
@@ -9157,13 +9521,22 @@ mod tests {
             ("x=$(cat <<EOF\nbody\nEOF\n)", "cat <<EOF\nbody\nEOF\n"),
             // Now the `)` is *inside* the here-document's body, so it is body text
             // and the substitution runs on to the next one.
-            ("x=$(cat <<EOF\nbody\n); echo hi\nEOF\n)", "cat <<EOF\nbody\n); echo hi\nEOF\n"),
+            (
+                "x=$(cat <<EOF\nbody\n); echo hi\nEOF\n)",
+                "cat <<EOF\nbody\n); echo hi\nEOF\n",
+            ),
             // `<<-` and a quoted delimiter behave the same, and the delimiter word
             // must be copied *as written* so the re-lex draws the same conclusion
             // about expansion from it.
-            ("x=$(cat <<-\"EOF\"\n\t)\n\tEOF\n)", "cat <<-\"EOF\"\n\t)\n\tEOF\n"),
+            (
+                "x=$(cat <<-\"EOF\"\n\t)\n\tEOF\n)",
+                "cat <<-\"EOF\"\n\t)\n\tEOF\n",
+            ),
             // Two here-documents in one body, collected in order at the newline.
-            ("x=$(cat <<A <<B\n)\nA\n)\nB\n)", "cat <<A <<B\n)\nA\n)\nB\n"),
+            (
+                "x=$(cat <<A <<B\n)\nA\n)\nB\n)",
+                "cat <<A <<B\n)\nA\n)\nB\n",
+            ),
             // Places a `<<` can sit without being an operator. Each of these would
             // otherwise send the scan hunting for a delimiter that never comes and
             // swallow the rest of the input.
@@ -9187,7 +9560,9 @@ mod tests {
                 .iter()
                 .find_map(|t| match t {
                     Tok::Word(segs) => segs.iter().find_map(|s| match s {
-                        Seg::CmdSub(raw, _, SubBody::Eager) | Seg::ProcSub(_, raw, _, _) => Some(raw.clone()),
+                        Seg::CmdSub(raw, _, SubBody::Eager) | Seg::ProcSub(_, raw, _, _) => {
+                            Some(raw.clone())
+                        }
                         _ => None,
                     }),
                     _ => None,
@@ -9199,9 +9574,15 @@ mod tests {
         // bash reports the unmatched `)` — one line past the last, as it does for
         // every unterminated `$( … )`. The here-document warning is recorded too,
         // in the *enclosing* line numbers, and comes out first.
-        for src in ["x=$(cat <<EOF\nbody\n); echo hi", "cat <(cat <<EOF\nbody\n); echo hi"] {
+        for src in [
+            "x=$(cat <<EOF\nbody\n); echo hi",
+            "cat <(cat <<EOF\nbody\n); echo hi",
+        ] {
             let tk = tokenize_deferred(src.as_bytes(), ParseOpts::default());
-            let (e, line) = tk.err.as_ref().unwrap_or_else(|| panic!("{src:?} must fail"));
+            let (e, line) = tk
+                .err
+                .as_ref()
+                .unwrap_or_else(|| panic!("{src:?} must fail"));
             assert_eq!(e.msg, b"unexpected EOF while looking for matching `)'");
             assert_eq!(*line, 4, "{src:?}");
             assert_eq!(heredoc_eofs(&tk), vec![("EOF", 1, 3)], "{src:?}");
@@ -9225,8 +9606,14 @@ mod tests {
         ];
         for &(src, want_line, want_warnings) in last_line {
             let tk = tokenize_deferred(src.as_bytes(), ParseOpts::default());
-            let (e, line) = tk.err.as_ref().unwrap_or_else(|| panic!("{src:?} must fail"));
-            assert_eq!(e.msg, b"unexpected EOF while looking for matching `)'", "{src:?}");
+            let (e, line) = tk
+                .err
+                .as_ref()
+                .unwrap_or_else(|| panic!("{src:?} must fail"));
+            assert_eq!(
+                e.msg, b"unexpected EOF while looking for matching `)'",
+                "{src:?}"
+            );
             assert_eq!(*line, want_line, "{src:?}");
             assert_eq!(heredoc_eofs(&tk), want_warnings, "{src:?}");
         }
@@ -9263,7 +9650,10 @@ mod tests {
             // warning is blamed on line 3 — the reader was already there.
             (
                 "x=$(cat <<A) $(cat <<C); echo hi\naaa\nA\nccc\nC\n",
-                (&["cat <<A\naaa\nA\n", "cat <<C\nccc\nC\n"], &[(1, 1), (1, 3)]),
+                (
+                    &["cat <<A\naaa\nA\n", "cat <<C\nccc\nC\n"],
+                    &[(1, 1), (1, 3)],
+                ),
             ),
             // A nested substitution's here-document is fetched at the *nested*
             // `)`, which is where bash's one shared reader reaches it, and the
@@ -9300,8 +9690,7 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            let want: Vec<crate::bytes::Str> =
-                raws.iter().map(|r| r.as_bytes().to_vec()).collect();
+            let want: Vec<crate::bytes::Str> = raws.iter().map(|r| r.as_bytes().to_vec()).collect();
             assert_eq!(got, want, "{src:?}");
             let got: Vec<(usize, u32)> = tk
                 .warnings
@@ -9362,7 +9751,10 @@ mod tests {
             ),
             // A bare `;` does not end a clause body, so `esac` after one is still
             // the reserved word; `;&` and `;;&` do end one.
-            ("x=$(case b in b) echo B; esac)", "case b in b) echo B; esac"),
+            (
+                "x=$(case b in b) echo B; esac)",
+                "case b in b) echo B; esac",
+            ),
             (
                 "x=$(case b in b) echo B;& c) echo C;; esac)",
                 "case b in b) echo B;& c) echo C;; esac",
@@ -9381,14 +9773,20 @@ mod tests {
                 "case b in b) case c in c) echo d;; esac;; esac",
             ),
             // A group inside a clause body is still a group.
-            ("x=$(case b in b) (echo s);; esac)", "case b in b) (echo s);; esac"),
+            (
+                "x=$(case b in b) (echo s);; esac)",
+                "case b in b) (echo s);; esac",
+            ),
             // …and a `)` that is not the grammar's at all: quoted, or an extglob
             // pattern's, which closes itself.
             (
                 "x=$(case \")\" in \")\") echo p;; esac)",
                 "case \")\" in \")\") echo p;; esac",
             ),
-            ("x=$(case b in @(a|b)) echo X;; esac)", "case b in @(a|b)) echo X;; esac"),
+            (
+                "x=$(case b in @(a|b)) echo X;; esac)",
+                "case b in @(a|b)) echo X;; esac",
+            ),
             // Command position is what makes a word reserved: none of these three
             // `case`s is one, so the first `)` still closes the substitution.
             ("x=$(printf %s case in f); echo hi", "printf %s case in f"),
@@ -9400,7 +9798,10 @@ mod tests {
                 "case b in b) echo \"esac\";; esac",
             ),
             // Every place a command position arises has to be one.
-            ("x=$(true | case b in b) echo p;; esac)", "true | case b in b) echo p;; esac"),
+            (
+                "x=$(true | case b in b) echo p;; esac)",
+                "true | case b in b) echo p;; esac",
+            ),
             (
                 "x=$(for i in 1 2; do case $i in 1) echo o;; esac; done)",
                 "for i in 1 2; do case $i in 1) echo o;; esac; done",
@@ -9411,7 +9812,10 @@ mod tests {
             ),
             // Layout: the `in` and the patterns can be on their own lines, and a
             // comment can sit between them.
-            ("x=$(case b\nin\nb) echo B;;\nesac)", "case b\nin\nb) echo B;;\nesac"),
+            (
+                "x=$(case b\nin\nb) echo B;;\nesac)",
+                "case b\nin\nb) echo B;;\nesac",
+            ),
             (
                 "x=$(case b in # c\nb) echo B;; esac)",
                 "case b in # c\nb) echo B;; esac",
@@ -9423,10 +9827,18 @@ mod tests {
                 "case b in b) cat <<EOF\nhd\nEOF\n;; esac",
             ),
             // Process substitution reads its body the same way.
-            ("cat <(case b in b) echo B;; esac)", "case b in b) echo B;; esac"),
+            (
+                "cat <(case b in b) echo B;; esac)",
+                "case b in b) echo B;; esac",
+            ),
         ];
         // `@(a|b)` is only a pattern with `extglob` on.
-        let opts = ParseOpts { extglob: true, posix: false, reread: false, tolerant: false };
+        let opts = ParseOpts {
+            extglob: true,
+            posix: false,
+            reread: false,
+            tolerant: false,
+        };
         for (src, want) in bodies {
             let tk = tokenize_deferred(src.as_bytes(), opts);
             assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);
@@ -9435,7 +9847,9 @@ mod tests {
                 .iter()
                 .find_map(|t| match t {
                     Tok::Word(segs) => segs.iter().find_map(|s| match s {
-                        Seg::CmdSub(raw, _, SubBody::Eager) | Seg::ProcSub(_, raw, _, _) => Some(raw.clone()),
+                        Seg::CmdSub(raw, _, SubBody::Eager) | Seg::ProcSub(_, raw, _, _) => {
+                            Some(raw.clone())
+                        }
                         _ => None,
                     }),
                     _ => None,
@@ -9447,7 +9861,10 @@ mod tests {
         // bash's parser wanted `;;` or `esac`, so it goes *into* the body for the
         // body parse to name — which also makes the failure the substitution's
         // (exit 1) rather than the enclosing input's (exit 2).
-        let tk = tokenize_deferred("x=$(case b in b) echo B); echo hi".as_bytes(), ParseOpts::default());
+        let tk = tokenize_deferred(
+            "x=$(case b in b) echo B); echo hi".as_bytes(),
+            ParseOpts::default(),
+        );
         assert!(tk.err.is_none(), "{:?}", tk.err);
         let raw = tk
             .toks
@@ -9522,8 +9939,16 @@ mod tests {
         assert_eq!(
             m2.segs,
             vec![
-                TextSeg { at: 0, src: 2, base: 0 },
-                TextSeg { at: 2, src: 0, base: 2 },
+                TextSeg {
+                    at: 0,
+                    src: 2,
+                    base: 0
+                },
+                TextSeg {
+                    at: 2,
+                    src: 0,
+                    base: 2
+                },
             ]
         );
         assert_eq!(m2.at(0), (2, 0));
@@ -9598,7 +10023,10 @@ mod tests {
         let body = |src: &str, reread: bool| {
             let segs = super::lex_word_verbatim_opts(
                 src.as_bytes(),
-                ParseOpts { reread, ..ParseOpts::default() },
+                ParseOpts {
+                    reread,
+                    ..ParseOpts::default()
+                },
                 ReadCtx::SOURCE,
             )
             .expect("word lexes");
@@ -9659,13 +10087,20 @@ mod tests {
             None
         }
         let braced = |src: &str| {
-            let segs = super::lex_word_verbatim_opts(src.as_bytes(), ParseOpts::default(), ReadCtx::SOURCE)
-                .expect("word lexes");
+            let segs = super::lex_word_verbatim_opts(
+                src.as_bytes(),
+                ParseOpts::default(),
+                ReadCtx::SOURCE,
+            )
+            .expect("word lexes");
             first_braced(&segs).expect("a ${ … } in the word")
         };
         // Row three: the `:-` word is `DOLBRACE_WORD`, so the translation goes
         // in as it stands and the `}` it carries is text the scan wrote.
-        assert_eq!(braced(r#""${x:-$'a}b'}""#), ("x:-a}b".to_string(), vec![(3, 6)]));
+        assert_eq!(
+            braced(r#""${x:-$'a}b'}""#),
+            ("x:-a}b".to_string(), vec![(3, 6)])
+        );
         // The name is `DOLBRACE_PARAM`, which is the third row too.
         assert_eq!(braced(r#""${$'a}b'}""#), ("a}b".to_string(), vec![(0, 3)]));
         // Row two: past a `#` the state is `DOLBRACE_QUOTE`, so the
@@ -9679,10 +10114,16 @@ mod tests {
         // A splice anywhere inside is this segment's, because it is this
         // segment's raw text a leftover would have to be carved out of — and
         // the range moves with the body it was carved from.
-        assert_eq!(braced(r#""${a:-${b:-$'x}y'}}""#), ("a:-${b:-x}y}".to_string(), vec![(8, 11)]));
+        assert_eq!(
+            braced(r#""${a:-${b:-$'x}y'}}""#),
+            ("a:-${b:-x}y}".to_string(), vec![(8, 11)])
+        );
         // The recursion resets the state, so an inner `#` is row two on its
         // own account even where the outer body is row three.
-        assert_eq!(braced(r#""${a:-${b#$'x'}}""#), ("a:-${b#'x'}".to_string(), vec![]));
+        assert_eq!(
+            braced(r#""${a:-${b#$'x'}}""#),
+            ("a:-${b#'x'}".to_string(), vec![])
+        );
         // Two of them in one body, in order.
         assert_eq!(
             braced(r#""${x:-$'a'p$'b'}""#),
@@ -9701,8 +10142,7 @@ mod tests {
         // clippy's `single_range_in_vec_init` reads a one-element array of
         // `Range` as a mistyped slice index.
         fn kinds(src: &str, unread: &[(usize, usize)]) -> Vec<SubBody> {
-            let unread: Vec<core::ops::Range<usize>> =
-                unread.iter().map(|&(a, b)| a..b).collect();
+            let unread: Vec<core::ops::Range<usize>> = unread.iter().map(|&(a, b)| a..b).collect();
             super::lex_operand_in_dquote(src.as_bytes(), ReadCtx::SOURCE, &unread)
                 .expect("operand lexes")
                 .iter()
@@ -9716,7 +10156,10 @@ mod tests {
         // `$(echo Q)`, all nine bytes of it spliced.
         assert_eq!(
             kinds("$(echo Q)", &[(0, 9)]),
-            vec![SubBody::Unread { closed: true, delim: SubDelim::Dollar }]
+            vec![SubBody::Unread {
+                closed: true,
+                delim: SubDelim::Dollar
+            }]
         );
         // The same operand with no splice behind it is read where it stands.
         assert_eq!(kinds("$(echo Q)", &[]), vec![SubBody::Eager]);
@@ -9724,12 +10167,21 @@ mod tests {
         // it in the same operand keep their own answers.
         assert_eq!(
             kinds("$(a)$(b)", &[(4, 8)]),
-            vec![SubBody::Eager, SubBody::Unread { closed: true, delim: SubDelim::Dollar }],
+            vec![
+                SubBody::Eager,
+                SubBody::Unread {
+                    closed: true,
+                    delim: SubDelim::Dollar
+                }
+            ],
         );
         // A `' … '` run still speaks for what it covers, splices or none.
         assert_eq!(
             kinds("'$(a)'", &[]),
-            vec![SubBody::Unread { closed: true, delim: SubDelim::Dollar }]
+            vec![SubBody::Unread {
+                closed: true,
+                delim: SubDelim::Dollar
+            }]
         );
     }
 }

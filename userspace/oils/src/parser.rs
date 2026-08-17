@@ -26,27 +26,21 @@
 //! ([`syn`]/[`syn_at`], mirroring the lexer's), so a non-ASCII character or a
 //! stray byte reads as `'\0'` and matches no operator.
 
+use crate::assoc::AssocArray;
 use crate::ast::{
     AndOr, AndOrOp, ArithClause, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause,
-    CaseItem,
-    CaseTerm, CmdSubBody,
-    Command,
-    CondBinOp, CondBinary, CondClause, CondUnary, DeclArray,
-    CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, ItemSep, LineMap,
-    LoopClause,
-    ParamOp,
-    Pipeline, ProcSubBody, Program,
-    Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, SubDelim, SubshellClause,
-    Word, WordPart,
+    CaseItem, CaseTerm, CmdSubBody, Command, CondBinOp, CondBinary, CondClause, CondExpr,
+    CondUnary, DeclArray, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, ItemSep,
+    LineMap, LoopClause, ParamOp, Pipeline, ProcSubBody, Program, Redirect, RedirectOp,
+    ReplaceAnchor, SelectClause, SimpleCommand, SubDelim, SubshellClause, Word, WordPart,
 };
-use crate::assoc::AssocArray;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
-    AliasExpansion, CmdSubSpan, DparenCopy, HeredocEof, ParseOpts, Op, ProcRead, ReaderWarning, Seg, Spanned,
-    Tok, SubBody, SubOpen, TokSpan, Tokenized, UngatheredHeredoc,
-    expand_aliases_tracked,
-    tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
+    AliasExpansion, CmdSubSpan, DparenCopy, HeredocEof, Op, ParseOpts, ProcRead, ReaderWarning,
+    Seg, Spanned, SubBody, SubOpen, Tok, TokSpan, Tokenized, UngatheredHeredoc,
+    expand_aliases_tracked, tokenize_deferred, tokenize_paren_body, tokenize_spanned,
+    word_is_assignment,
 };
 use crate::wordscan::BraceEnd;
 use std::borrow::Cow;
@@ -290,7 +284,11 @@ impl ParseError {
     fn under(self, first: Self) -> Self {
         let lead = u32::try_from(first.msgs.len()).unwrap_or(u32::MAX);
         let mut line_at = first.line_at;
-        line_at.extend(self.line_at.iter().map(|&(i, l)| (i.saturating_add(lead), l)));
+        line_at.extend(
+            self.line_at
+                .iter()
+                .map(|&(i, l)| (i.saturating_add(lead), l)),
+        );
         let mut msgs = first.msgs;
         msgs.extend(self.msgs);
         Self {
@@ -460,7 +458,9 @@ fn resolve_subst_bail(e: crate::lexer::LexError, opts: ParseOpts) -> ParseError 
     {
         return err;
     }
-    let Some(bail) = e.bail.clone() else { return ParseError::from(e) };
+    let Some(bail) = e.bail.clone() else {
+        return ParseError::from(e);
+    };
     bail_body_error(&bail, opts).unwrap_or_else(|| ParseError::from(e))
 }
 
@@ -498,8 +498,14 @@ fn eager_body_error(subs: &[crate::lexer::EagerBody], opts: ParseOpts) -> Option
 /// `(`, so each step is a strictly shorter suffix of the input.
 fn bail_body_error(bail: &crate::lexer::SubstBail, opts: ParseOpts) -> Option<ParseError> {
     let base = bail.open_line.saturating_sub(1);
-    let Tokenized { toks: mut t, lines: mut l, ends, err, dparens, .. } =
-        crate::lexer::tokenize_deferred(&bail.body, opts);
+    let Tokenized {
+        toks: mut t,
+        lines: mut l,
+        ends,
+        err,
+        dparens,
+        ..
+    } = crate::lexer::tokenize_deferred(&bail.body, opts);
     // The body's line 1 is the line its `(` sits on, the two being on the same
     // physical line by construction.
     map_lines(&mut t, &mut l, &LineMap::Offset(base));
@@ -542,8 +548,13 @@ pub fn parse_opts(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError>
     // REPL's "is this line complete yet?" probes judge the same text the run
     // will parse (see [`crate::lexer::strip_nuls`]).
     let src = crate::lexer::strip_nuls(src);
-    let Spanned { toks, lines, ends, dparens, .. } =
-        tokenize_spanned(&src, opts).map_err(|e| resolve_subst_bail(e, opts))?;
+    let Spanned {
+        toks,
+        lines,
+        ends,
+        dparens,
+        ..
+    } = tokenize_spanned(&src, opts).map_err(|e| resolve_subst_bail(e, opts))?;
     parse_tokens(toks, lines, Spans::of(&src, ends, &dparens), opts)
 }
 
@@ -569,8 +580,13 @@ pub fn parse_procsub_body(
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
     let phys = LineMap::Offset(open_line.saturating_sub(1));
-    let Spanned { mut toks, mut lines, ends, dparens, .. } =
-        tokenize_paren_body(src, opts).map_err(|e| paren_body_lex_error(e, &phys))?;
+    let Spanned {
+        mut toks,
+        mut lines,
+        ends,
+        dparens,
+        ..
+    } = tokenize_paren_body(src, opts).map_err(|e| paren_body_lex_error(e, &phys))?;
     map_lines(&mut toks, &mut lines, &phys);
     parse_tokens_ending(toks, lines, Spans::of(src, ends, &dparens), opts, true)
         .map_err(ParseError::in_paren_body)
@@ -586,8 +602,14 @@ pub fn parse_procsub_body(
 /// Returns [`ParseError`] on a lexing or grammar error (including an
 /// unterminated here-document).
 pub fn parse_strict_heredoc(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError> {
-    let Spanned { toks, lines, ends, dparens, .. } =
-        crate::lexer::tokenize_spanned_strict(src, opts).map_err(|e| resolve_subst_bail(e, opts))?;
+    let Spanned {
+        toks,
+        lines,
+        ends,
+        dparens,
+        ..
+    } = crate::lexer::tokenize_spanned_strict(src, opts)
+        .map_err(|e| resolve_subst_bail(e, opts))?;
     parse_tokens(toks, lines, Spans::of(src, ends, &dparens), opts)
 }
 
@@ -600,8 +622,14 @@ pub fn parse_with_aliases(
     aliases: &AssocArray,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
-    let Spanned { toks, lines, starts, ends, dparens, .. } =
-        tokenize_spanned(src, opts).map_err(|e| resolve_subst_bail(e, opts))?;
+    let Spanned {
+        toks,
+        lines,
+        starts,
+        ends,
+        dparens,
+        ..
+    } = tokenize_spanned(src, opts).map_err(|e| resolve_subst_bail(e, opts))?;
     // An alias splices in tokens that were never written where they are being
     // read — but they *were* written somewhere, in the alias's own value, which
     // bash pushes onto the input and reports errors against. So the expansion
@@ -775,7 +803,11 @@ pub fn close_last_line(src: BStr<'_>, reader: InputKind) -> std::borrow::Cow<'_,
     // what it holds at end of input is the parity of the trailing run.
     let odd_backslash = src.iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 1;
     let mut owned = src.to_vec();
-    owned.push(if reader == InputKind::Str && odd_backslash { b'\\' } else { b'\n' });
+    owned.push(if reader == InputKind::Str && odd_backslash {
+        b'\\'
+    } else {
+        b'\n'
+    });
     std::borrow::Cow::Owned(owned)
 }
 
@@ -1122,7 +1154,10 @@ impl IncrementalParser {
     /// bash's reader would with the table it has *now*.
     fn rebuild(&mut self, aliases: Option<&AssocArray>) {
         if std::mem::take(&mut self.alias_gathered) {
-            let off = self.orig_offsets.get(self.pos).map_or(self.src.len(), |&o| o as usize);
+            let off = self
+                .orig_offsets
+                .get(self.pos)
+                .map_or(self.src.len(), |&o| o as usize);
             self.relex_tail_from(self.pos, off);
         }
         // Every pass settles one body, so the next looks only past it; without
@@ -1131,7 +1166,9 @@ impl IncrementalParser {
         let mut settled = 0usize;
         loop {
             self.rebuild_once(aliases);
-            let Some((body, end)) = self.unread_body(settled) else { return };
+            let Some((body, end)) = self.unread_body(settled) else {
+                return;
+            };
             // The line that introduced the body is already expanded and about to
             // be parsed, so it stays exactly as it is; its raw text now runs to
             // the end of the body, as it would for a `<<` the lexer gathered.
@@ -1214,8 +1251,11 @@ impl IncrementalParser {
                 warnings = x.warnings;
                 work.extend(x.toks);
                 work_lines.extend(x.lines);
-                work_origin
-                    .extend(x.origin.into_iter().map(|i| i.map(|i| i.saturating_add(self.pos))));
+                work_origin.extend(
+                    x.origin
+                        .into_iter()
+                        .map(|i| i.map(|i| i.saturating_add(self.pos))),
+                );
                 spans
             }
             _ => {
@@ -1225,7 +1265,10 @@ impl IncrementalParser {
                 let mut spans = Spans {
                     srcs: vec![self.src.clone()],
                     parents: Vec::new(),
-                    ends: rest_ends.iter().map(|&end| TokSpan { src: 0, end }).collect(),
+                    ends: rest_ends
+                        .iter()
+                        .map(|&end| TokSpan { src: 0, end })
+                        .collect(),
                     dparen_bases: Vec::new(),
                 };
                 spans.push_dparens(&self.orig_dparens);
@@ -1243,10 +1286,16 @@ impl IncrementalParser {
         // have rewritten — a stale offset there is possible in principle, but it
         // takes an alias that both spans a `;` and changes the alias state, and
         // a `!`-reference on the same unit.)
-        let shift = u32::try_from(spans.srcs.len()).unwrap_or(u32::MAX).saturating_sub(1);
+        let shift = u32::try_from(spans.srcs.len())
+            .unwrap_or(u32::MAX)
+            .saturating_sub(1);
         spans.srcs.extend(old.srcs.into_iter().skip(1));
-        spans.parents.extend(old.parents.iter().map(|&p| p.shifted(shift)));
-        spans.ends.splice(0..0, carried.iter().map(|&s| s.shifted(shift)));
+        spans
+            .parents
+            .extend(old.parents.iter().map(|&p| p.shifted(shift)));
+        spans
+            .ends
+            .splice(0..0, carried.iter().map(|&s| s.shifted(shift)));
         self.work_spans = spans;
         self.wpos = 0;
         self.last_aliases = Some(aliases.cloned());
@@ -1262,7 +1311,12 @@ impl IncrementalParser {
     fn relex_tail_from(&mut self, keep: usize, off: usize) {
         let off = off.min(self.src.len());
         let newlines = u32::try_from(
-            self.src.get(..off).unwrap_or(&[]).iter().filter(|&&c| c == '\n').count(),
+            self.src
+                .get(..off)
+                .unwrap_or(&[])
+                .iter()
+                .filter(|&&c| c == '\n')
+                .count(),
         )
         .unwrap_or(u32::MAX);
         let map = self.line_map.shifted(newlines);
@@ -1315,7 +1369,10 @@ impl IncrementalParser {
         self.rebase_dparens(off, delta, &dparens);
         self.pending_lex_err = err
             .map(|(e, line)| resolve_subst_bail(e, self.opts).or_line(line))
-            .map(|e| ParseError { line: e.line.map(|l| map.map(l)), ..e });
+            .map(|e| ParseError {
+                line: e.line.map(|l| map.map(l)),
+                ..e
+            });
         self.last_aliases = None;
     }
 
@@ -1382,7 +1439,9 @@ impl IncrementalParser {
             .iter()
             .filter(|&&c| c == '\n')
             .count();
-        let line = u32::try_from(newlines).unwrap_or(u32::MAX).saturating_add(1);
+        let line = u32::try_from(newlines)
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
         Some(RawLine {
             text: bytes::from_chars(self.src.get(start..end).unwrap_or(&[]).iter().copied()),
             line: self.line_map.map(line),
@@ -1436,8 +1495,11 @@ impl IncrementalParser {
             return;
         }
         let end = self.line_end(start);
-        let cut =
-            if self.src.get(end).is_some_and(|&c| c == '\n') { end.saturating_add(1) } else { end };
+        let cut = if self.src.get(end).is_some_and(|&c| c == '\n') {
+            end.saturating_add(1)
+        } else {
+            end
+        };
         self.src.drain(start..cut);
         self.relex_from(self.hist_cursor, opts);
         self.expand_cursor = start;
@@ -1535,8 +1597,7 @@ impl IncrementalParser {
     fn ungathered_warnings(&mut self, aliases: Option<&AssocArray>) {
         for u in std::mem::take(&mut self.orig_ungathered) {
             let off = (u.op_offset as usize).min(self.src.len());
-            let head: Str =
-                bytes::from_chars(self.src.get(..off).unwrap_or(&[]).iter().copied());
+            let head: Str = bytes::from_chars(self.src.get(..off).unwrap_or(&[]).iter().copied());
             let complete = match aliases {
                 Some(a) => parse_with_aliases(&head, a, self.opts).is_ok(),
                 None => parse_opts(&head, self.opts).is_ok(),
@@ -1578,7 +1639,9 @@ impl IncrementalParser {
     /// offset rather than its line number, so it is unaffected by the
     /// renumbering `line_map` applies.
     fn tok_line_text(&self, p: &Parser) -> Option<Str> {
-        let &Some(oi) = self.work_origin.get(p.pos)? else { return None };
+        let &Some(oi) = self.work_origin.get(p.pos)? else {
+            return None;
+        };
         let off = (*self.orig_offsets.get(oi)? as usize).min(self.src.len());
         let start = self
             .src
@@ -1724,8 +1787,16 @@ impl IncrementalParser {
             // Only for an error being stamped here: one that already names a
             // line was raised in a stream of its own (a `$( … )` body), where
             // the reduction never happens.
-            let gathered = if e.line.is_none() { self.heredoc_gather(&p) } else { 0 };
-            let at = if e.is_incomplete() { p.toks.len() } else { p.pos };
+            let gathered = if e.line.is_none() {
+                self.heredoc_gather(&p)
+            } else {
+                0
+            };
+            let at = if e.is_incomplete() {
+                p.toks.len()
+            } else {
+                p.pos
+            };
             let line = p.reader_line_at(at).saturating_add(gathered);
             // `read_a_line` (parse.y:2080) reads a here-document body into a
             // buffer of its own and never replaces `shell_input_line`, so the
@@ -1736,7 +1807,11 @@ impl IncrementalParser {
             // own — a `$( … )` body — which bash parses while still *scanning*,
             // before a `((` copy could have been pushed. See
             // [`Spans::echo_line_at_scan`].
-            let echo = if e.line.is_some() { p.reader_echo_at_scan() } else { p.reader_echo() };
+            let echo = if e.line.is_some() {
+                p.reader_echo_at_scan()
+            } else {
+                p.reader_echo()
+            };
             let echo = echo.or(pinned);
             e.or_line(line).or_echo(echo)
         });
@@ -1823,7 +1898,11 @@ impl IncrementalParser {
             let end = if lex_err_now {
                 u32::MAX
             } else {
-                next_orig.checked_sub(1).and_then(|i| self.orig_ends.get(i)).copied().unwrap_or(0)
+                next_orig
+                    .checked_sub(1)
+                    .and_then(|i| self.orig_ends.get(i))
+                    .copied()
+                    .unwrap_or(0)
             };
             let mut keep = Vec::new();
             for (off, h) in std::mem::take(&mut self.alias_warnings) {
@@ -1946,7 +2025,10 @@ impl IncrementalParser {
     /// first one.
     #[must_use]
     pub fn last_unit_end_line(&self) -> u32 {
-        self.pos.checked_sub(1).and_then(|i| self.orig_lines.get(i).copied()).unwrap_or(0)
+        self.pos
+            .checked_sub(1)
+            .and_then(|i| self.orig_lines.get(i).copied())
+            .unwrap_or(0)
     }
 
     /// The raw source the unit [`Self::next_unit`] last returned occupies,
@@ -2000,7 +2082,9 @@ impl IncrementalParser {
         let mut end = end_orig
             .checked_sub(1)
             .map_or(0, |last| {
-                self.orig_ends.get(last).map_or(self.src.len(), |&e| e as usize)
+                self.orig_ends
+                    .get(last)
+                    .map_or(self.src.len(), |&e| e as usize)
             })
             .min(self.src.len());
         if let Some(blame) = blame {
@@ -2083,7 +2167,10 @@ impl IncrementalParser {
         };
         // Anything left on the line after its last token can only be a comment:
         // every other run of source is a token.
-        let code_end = self.orig_ends.get(last).map_or(to, |&e| (e as usize).min(to));
+        let code_end = self
+            .orig_ends
+            .get(last)
+            .map_or(to, |&e| (e as usize).min(to));
         // Joined-away continuations do not count as leftover text: `echo a \`
         // followed by an empty line leaves a `\` after the last token that the
         // history never sees.
@@ -2091,7 +2178,13 @@ impl IncrementalParser {
         let heredoc = toks
             .iter()
             .any(|&i| matches!(self.orig.get(i), Some(Tok::Op(Op::DLess | Op::DLessDash))));
-        UnitLine { text, kind: UnitLineKind::Code, comment, heredoc, open: self.line_is_open(last) }
+        UnitLine {
+            text,
+            kind: UnitLineKind::Code,
+            comment,
+            heredoc,
+            open: self.line_is_open(last),
+        }
     }
 
     /// The source range `[from, to)` as the history should store it: with every
@@ -2236,7 +2329,11 @@ fn cmdsub_body_lines(src: BStr<'_>, close_line: u32) -> LineMap {
 /// `)` — would name the body's line 1 rather than the line it is written on.
 fn paren_body_lex_error(e: crate::lexer::LexError, phys: &LineMap) -> ParseError {
     let e = ParseError::from(e);
-    ParseError { line: e.line.map(|l| phys.map(l)), ..e }.in_paren_body()
+    ParseError {
+        line: e.line.map(|l| phys.map(l)),
+        ..e
+    }
+    .in_paren_body()
 }
 
 /// [`parse_cmdsub_body_unmarked`] from its tokens on, with the renumbering
@@ -2253,7 +2350,13 @@ fn parse_paren_body_mapped(
     phys: &LineMap,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
-    let Spanned { mut toks, mut lines, ends, dparens, .. } = spanned;
+    let Spanned {
+        mut toks,
+        mut lines,
+        ends,
+        dparens,
+        ..
+    } = spanned;
     map_lines(&mut toks, &mut lines, phys);
     let prog = parse_tokens_ending(toks, lines, Spans::of(src, ends, &dparens), opts, true)
         .map_err(|e| {
@@ -2318,7 +2421,13 @@ pub fn comsub_reprint_error(
             // error further up stops there instead; see
             // [`ComsubReprintError::stop_line`].
             let line_off = err.line.unwrap_or_else(|| newlines(src).saturating_add(1));
-            Some(ComsubReprintError { err, echo: true, line_off, stop_line: line_off, fatal })
+            Some(ComsubReprintError {
+                err,
+                echo: true,
+                line_off,
+                stop_line: line_off,
+                fatal,
+            })
         }
         // The body ran out with a construct still open, so bash's lexer did
         // *not* stop at the `)`: it swallowed it and read on into `tail`.
@@ -2348,17 +2457,35 @@ pub fn comsub_unclosed_error(src: BStr<'_>, opts: ParseOpts) -> ComsubReprintErr
             // The line named is the one the unclosed construct *opened* on, not
             // where the reader gave up — that ran the text out looking for the
             // closer. So the two numbers part company here.
-            return ComsubReprintError { err, echo: fatal, line_off, stop_line: u32::MAX, fatal };
+            return ComsubReprintError {
+                err,
+                echo: fatal,
+                line_off,
+                stop_line: u32::MAX,
+                fatal,
+            };
         }
     };
-    let Spanned { toks, lines, ends, dparens, .. } = spanned;
+    let Spanned {
+        toks,
+        lines,
+        ends,
+        dparens,
+        ..
+    } = spanned;
     match parse_tokens(toks, lines, Spans::of(src, ends, &dparens), opts) {
         // A grammar error found before the input ran out is named on its token
         // and echoed, exactly as in a body that did close.
         Err(e) if !e.is_incomplete() => {
             let line_off = e.line.unwrap_or_else(|| eof_line_off(src));
             let fatal = e.fatal;
-            ComsubReprintError { err: e, echo: true, line_off, stop_line: line_off, fatal }
+            ComsubReprintError {
+                err: e,
+                echo: true,
+                line_off,
+                stop_line: line_off,
+                fatal,
+            }
         }
         // Otherwise the read simply ran out with `shell_eof_token` outstanding —
         // whether the text was a complete command (`$(echo`) or not (`$(if`),
@@ -2382,15 +2509,15 @@ pub fn comsub_unclosed_error(src: BStr<'_>, opts: ParseOpts) -> ComsubReprintErr
 /// short.
 fn eof_line_off(s: BStr<'_>) -> u32 {
     let lines = newlines(s).saturating_add(1);
-    if s.last() == Some(&b'\n') { lines } else { lines.saturating_add(1) }
+    if s.last() == Some(&b'\n') {
+        lines
+    } else {
+        lines.saturating_add(1)
+    }
 }
 
 /// [`comsub_reprint_error`] for a re-print whose lex runs past the `)`.
-fn reprint_read_past_paren(
-    src: BStr<'_>,
-    tail: BStr<'_>,
-    opts: ParseOpts,
-) -> ComsubReprintError {
+fn reprint_read_past_paren(src: BStr<'_>, tail: BStr<'_>, opts: ParseOpts) -> ComsubReprintError {
     let combined = bfmt![src, b")", tail];
     let spanned = match tokenize_spanned(&combined, opts) {
         Ok(spanned) => spanned,
@@ -2413,17 +2540,37 @@ fn reprint_read_past_paren(
             let fatal = err.fatal;
             // As in [`comsub_unclosed_error`]: the opening line is named, but the
             // reader itself ran the text out.
-            return ComsubReprintError { err, echo: fatal, line_off, stop_line: u32::MAX, fatal };
+            return ComsubReprintError {
+                err,
+                echo: fatal,
+                line_off,
+                stop_line: u32::MAX,
+                fatal,
+            };
         }
     };
-    let Spanned { toks, lines, ends, dparens, .. } = spanned;
+    let Spanned {
+        toks,
+        lines,
+        ends,
+        dparens,
+        ..
+    } = spanned;
     match parse_tokens(toks, lines, Spans::of(&combined, ends, &dparens), opts) {
         // A grammar error found before the input ran out: bash names the token
         // and echoes the line, from `report_syntax_error`'s first branch.
         Err(e) if !e.is_incomplete() => {
-            let line_off = e.line.unwrap_or_else(|| newlines(&combined).saturating_add(1));
+            let line_off = e
+                .line
+                .unwrap_or_else(|| newlines(&combined).saturating_add(1));
             let fatal = e.fatal;
-            ComsubReprintError { err: e, echo: true, line_off, stop_line: line_off, fatal }
+            ComsubReprintError {
+                err: e,
+                echo: true,
+                line_off,
+                stop_line: line_off,
+                fatal,
+            }
         }
         // The text either parsed or merely ran out — but either way the `)` the
         // `comsub` production needs was consumed by something else and never
@@ -2521,7 +2668,9 @@ pub struct ComsubReprintError {
 /// raises at parse.y:6480.
 #[must_use]
 pub fn word_list_lex_error(src: BStr<'_>, opts: ParseOpts) -> Option<ParseError> {
-    tokenize_spanned(src, opts).err().map(|e| resolve_subst_bail(e, opts))
+    tokenize_spanned(src, opts)
+        .err()
+        .map(|e| resolve_subst_bail(e, opts))
 }
 
 /// The number of newlines in `s` — how far a reader that consumed all of it has
@@ -2690,12 +2839,19 @@ fn parse_tokens_ending(
     // body reports the substitution's closing `)`), and those still belong on
     // the last token's line.
     parsed.map_err(|e| {
-        let line =
-            if e.is_incomplete() { p.reader_line_at(p.toks.len()) } else { p.reader_line() };
+        let line = if e.is_incomplete() {
+            p.reader_line_at(p.toks.len())
+        } else {
+            p.reader_line()
+        };
         // See the same test in `IncrementalParser::parse_next`: an error already
         // carrying a line came from a `$( … )` body, which bash's scan parsed
         // before any `((` copy was pushed.
-        let echo = if e.line.is_some() { p.reader_echo_at_scan() } else { p.reader_echo() };
+        let echo = if e.line.is_some() {
+            p.reader_echo_at_scan()
+        } else {
+            p.reader_echo()
+        };
         e.or_line(line).or_echo(echo)
     })
 }
@@ -2825,7 +2981,10 @@ impl Spans {
         let mut s = Self {
             srcs: vec![bytes::chars(src).collect()],
             parents: Vec::new(),
-            ends: ends.into_iter().map(|end| TokSpan { src: 0, end }).collect(),
+            ends: ends
+                .into_iter()
+                .map(|end| TokSpan { src: 0, end })
+                .collect(),
             dparen_bases: Vec::new(),
         };
         s.push_dparens(dparens);
@@ -2975,8 +3134,11 @@ impl Spans {
         } else {
             at
         };
-        let start =
-            full.get(..line_at)?.iter().rposition(|&c| c == Ch::U('\n')).map_or(0, |n| n + 1);
+        let start = full
+            .get(..line_at)?
+            .iter()
+            .rposition(|&c| c == Ch::U('\n'))
+            .map_or(0, |n| n + 1);
         let end = full
             .get(start..)?
             .iter()
@@ -3002,7 +3164,11 @@ impl Spans {
         while i != token_end && is_error_space(t.get(i)) {
             i = i.saturating_add(1);
         }
-        let slice = if token_end > 0 { t.get(i..token_end)? } else { t.get(..1)? };
+        let slice = if token_end > 0 {
+            t.get(i..token_end)?
+        } else {
+            t.get(..1)?
+        };
         Some(bytes::from_chars(slice.iter().copied()))
     }
 
@@ -3173,10 +3339,22 @@ impl Spans {
                 m = m.saturating_add(1);
             }
             if m > 0 {
-                return Some((TokSpan { src: at.src, end: u32::try_from(j).ok()? }, m));
+                return Some((
+                    TokSpan {
+                        src: at.src,
+                        end: u32::try_from(j).ok()?,
+                    },
+                    m,
+                ));
             }
         }
-        Some((TokSpan { src: at.src, end: u32::try_from(i).ok()? }, n))
+        Some((
+            TokSpan {
+                src: at.src,
+                end: u32::try_from(i).ok()?,
+            },
+            n,
+        ))
     }
 
     /// Whether bash's `shell_input_line` is **empty** where the reader stopped
@@ -3255,7 +3433,10 @@ impl Spans {
     /// cut from; anything else unchanged. See [`Spans::dparen_bases`].
     fn before_the_push(&self, s: TokSpan) -> TokSpan {
         match self.dparen_bases.iter().find(|&&(src, _)| src == s.src) {
-            Some(&(_, base)) => TokSpan { src: 0, end: base.saturating_add(s.end) },
+            Some(&(_, base)) => TokSpan {
+                src: 0,
+                end: base.saturating_add(s.end),
+            },
             None => s,
         }
     }
@@ -3268,7 +3449,9 @@ impl Spans {
         }
         let t = self.text(stop.src)?;
         let keep = t.len() - t.iter().rev().take_while(|&&c| c == Ch::U('\n')).count();
-        Some(bytes::from_chars(t.get(..keep).unwrap_or(&[]).iter().copied()))
+        Some(bytes::from_chars(
+            t.get(..keep).unwrap_or(&[]).iter().copied(),
+        ))
     }
 }
 
@@ -3430,8 +3613,8 @@ fn is_error_delim(c: Option<&Ch>) -> bool {
 /// prints `]]` like any other word. Membership here says exactly that: a
 /// reserved word in command position, nothing more.
 const RESERVED: &[&str] = &[
-    "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "{", "}",
-    "!", "case", "esac", "select", "]]",
+    "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "{", "}", "!",
+    "case", "esac", "select", "]]",
 ];
 
 impl Parser {
@@ -3453,7 +3636,10 @@ impl Parser {
     /// The line the token at `at` sits on, falling back to [`Self::cur_line`]
     /// when the index is past the end.
     fn line_of(&self, at: usize) -> u32 {
-        self.lines.get(at).copied().unwrap_or_else(|| self.cur_line())
+        self.lines
+            .get(at)
+            .copied()
+            .unwrap_or_else(|| self.cur_line())
     }
 
     /// The line bash would *report* an error at the current token on: not the
@@ -3510,7 +3696,11 @@ impl Parser {
             // there is nothing to delete — never both, since the fetch that
             // follows a deletion is the deletion's own `goto restart_read` and
             // is not charged again.
-            let bump = if stowed { 0 } else { self.spans.pending_conts(last, r).max(1) };
+            let bump = if stowed {
+                0
+            } else {
+                self.spans.pending_conts(last, r).max(1)
+            };
             // …and one more when a `for`/`select` list swallowed the end-of-file
             // token as its `list_terminator`, so that the request being answered
             // here is the *second* one to run the buffer out.
@@ -3519,9 +3709,16 @@ impl Parser {
             // `( ( … ) )`: the copy bought one extra empty request, which shows
             // only where no real line answered it. See
             // [`crate::lexer::Tokenized::dparen_eof_floor`].
-            return self.reader_line_at(last).saturating_add(bump).max(self.eof_floor);
+            return self
+                .reader_line_at(last)
+                .saturating_add(bump)
+                .max(self.eof_floor);
         };
-        let line = self.lines.get(at).copied().unwrap_or_else(|| self.cur_line());
+        let line = self
+            .lines
+            .get(at)
+            .copied()
+            .unwrap_or_else(|| self.cur_line());
         line.saturating_add(self.spans.cont_lines(at, Reader::of(Some(tok))))
     }
 
@@ -3557,7 +3754,8 @@ impl Parser {
     /// bash's *scan*, so the echo is the one from before any `((` copy was
     /// pushed: see [`Spans::echo_line_at_scan`].
     fn echo_at(&self, at: usize) -> Option<Str> {
-        self.spans.echo_line_at_scan(at, Reader::of(self.toks.get(at)))
+        self.spans
+            .echo_line_at_scan(at, Reader::of(self.toks.get(at)))
     }
 
     fn bump(&mut self) -> Option<Tok> {
@@ -3583,7 +3781,10 @@ impl Parser {
         if let Some(Tok::Word(segs)) = self.peek()
             && let [Seg::Lit(s)] = segs.as_slice()
         {
-            return RESERVED.iter().find(|r| r.as_bytes() == s.as_slice()).copied();
+            return RESERVED
+                .iter()
+                .find(|r| r.as_bytes() == s.as_slice())
+                .copied();
         }
         None
     }
@@ -3692,7 +3893,12 @@ impl Parser {
             // and `)` (parse.y:5168–5181, 6572–6576). So `f() a=(1   2)` is
             // reported near `a=(1 2)` and `f() a=(  )` near `a=()`, while each
             // element keeps the spelling it was written with.
-            Some(Tok::ArrayAssign { name, index, append, elems }) => {
+            Some(Tok::ArrayAssign {
+                name,
+                index,
+                append,
+                elems,
+            }) => {
                 let mut out = name.as_bytes().to_vec();
                 if let Some(i) = index {
                     out.push(b'[');
@@ -3784,10 +3990,7 @@ impl Parser {
     }
 
     fn skip_separators(&mut self) {
-        while matches!(
-            self.peek(),
-            Some(Tok::Newline) | Some(Tok::Op(Op::Semi))
-        ) {
+        while matches!(self.peek(), Some(Tok::Newline) | Some(Tok::Op(Op::Semi))) {
             self.pos += 1;
         }
     }
@@ -3886,9 +4089,7 @@ impl Parser {
         if !had_sep {
             let at_terminator = self.peek().is_none()
                 || self.at_op(Op::RParen)
-                || self
-                    .reserved_here()
-                    .is_some_and(|w| stops.contains(&w));
+                || self.reserved_here().is_some_and(|w| stops.contains(&w));
             if !at_terminator {
                 return Err(self.unexpected_here());
             }
@@ -3958,7 +4159,9 @@ impl Parser {
                 // are only ever read in this position. `time` with nothing
                 // after it is untouched; that is the null-command form.
                 if self.opts.posix
-                    && self.bare_word_at(self.pos + 1).is_some_and(|w| w.starts_with(b"-"))
+                    && self
+                        .bare_word_at(self.pos + 1)
+                        .is_some_and(|w| w.starts_with(b"-"))
                 {
                     break;
                 }
@@ -3993,9 +4196,19 @@ impl Parser {
         // substitution's `)` rather than an implicit newline
         // ([`crate::lexer::tokenize_paren_body`]) — with a newline there, the
         // prefix would find a terminator bash does not give it.
-        if prefixed && matches!(self.peek(), None | Some(Tok::Newline) | Some(Tok::Op(Op::Semi))) {
+        if prefixed
+            && matches!(
+                self.peek(),
+                None | Some(Tok::Newline) | Some(Tok::Op(Op::Semi))
+            )
+        {
             let commands = vec![Command::Simple(SimpleCommand::default())];
-            return Ok(Pipeline { negated, timed, time_posix, commands });
+            return Ok(Pipeline {
+                negated,
+                timed,
+                time_posix,
+                commands,
+            });
         }
         let mut commands = vec![self.parse_command()?];
         loop {
@@ -4023,7 +4236,12 @@ impl Parser {
             self.skip_newlines();
             commands.push(self.parse_command()?);
         }
-        Ok(Pipeline { negated, timed, time_posix, commands })
+        Ok(Pipeline {
+            negated,
+            timed,
+            time_posix,
+            commands,
+        })
     }
 
     /// bash's `shell_command` production: every compound command, and nothing
@@ -4200,7 +4418,14 @@ impl Parser {
         while self.at_redirect_start() {
             redirects.push(self.parse_redirect()?);
         }
-        Ok(Command::Function(FunctionDef { name, definable, body, line, body_line, redirects }))
+        Ok(Command::Function(FunctionDef {
+            name,
+            definable,
+            body,
+            line,
+            body_line,
+            redirects,
+        }))
     }
 
     /// Parse a `coproc [NAME] command`. Grammar (matches bash):
@@ -4229,7 +4454,10 @@ impl Parser {
             self.pos += 1;
         }
         let body = self.parse_command()?;
-        Ok(Command::Coproc { name, body: Box::new(body) })
+        Ok(Command::Coproc {
+            name,
+            body: Box::new(body),
+        })
     }
 
     /// Whether the token at `idx` begins a compound command (`{`, `(`, `((`,
@@ -4429,7 +4657,9 @@ impl Parser {
             // models `$LINENO`). The only newlines the token spans are the ones
             // in the header, so counting those walks the line back.
             let nl = raw.iter().filter(|&&b| b == b'\n').count();
-            let line = self.cur_line().saturating_sub(u32::try_from(nl).unwrap_or(u32::MAX));
+            let line = self
+                .cur_line()
+                .saturating_sub(u32::try_from(nl).unwrap_or(u32::MAX));
             self.pos += 1;
             return self.parse_for_arith(&raw, line);
         }
@@ -4454,7 +4684,12 @@ impl Parser {
         self.expect_reserved("do")?;
         let body = self.parse_program(&["done"], false)?;
         self.expect_reserved("done")?;
-        Ok(Command::For(ForClause { var, words, body, line }))
+        Ok(Command::For(ForClause {
+            var,
+            words,
+            body,
+            line,
+        }))
     }
 
     /// Parse the `in …` word list shared by `for` and `select`, positioned at
@@ -4518,7 +4753,12 @@ impl Parser {
         self.expect_reserved("do")?;
         let body = self.parse_program(&["done"], false)?;
         self.expect_reserved("done")?;
-        Ok(Command::Select(SelectClause { var, words, body, line }))
+        Ok(Command::Select(SelectClause {
+            var,
+            words,
+            body,
+            line,
+        }))
     }
 
     /// Parse the body of a C-style `for (( init; cond; update ))` loop, given
@@ -4639,7 +4879,11 @@ impl Parser {
                 self.skip_newlines();
                 CaseTerm::Break
             };
-            items.push(CaseItem { patterns, body, term });
+            items.push(CaseItem {
+                patterns,
+                body,
+                term,
+            });
         }
         self.expect_reserved("esac")?;
         Ok(Command::Case(CaseClause { word, items, line }))
@@ -4816,7 +5060,10 @@ impl Parser {
         if i == 0 {
             return self.cur_line();
         }
-        self.lines.get(i - 1).copied().unwrap_or_else(|| self.cur_line())
+        self.lines
+            .get(i - 1)
+            .copied()
+            .unwrap_or_else(|| self.cur_line())
     }
 
     fn parse_cond_or(&mut self) -> Result<CondExpr, CondError> {
@@ -4892,7 +5139,10 @@ impl Parser {
                 // line then, since there is nothing to point at.
                 if self.peek().is_none() {
                     return Err(CondError::Cond {
-                        clauses: vec![(Some(open), b"unexpected token `EOF', expected `)'".to_vec())],
+                        clauses: vec![(
+                            Some(open),
+                            b"unexpected token `EOF', expected `)'".to_vec(),
+                        )],
                         tail: Some(b"syntax error: unexpected end of file".to_vec()),
                     });
                 }
@@ -5110,7 +5360,8 @@ impl Parser {
     /// token at `pos`, leaving `shell_input_line` empty. See
     /// [`Spans::reader_line_empty`].
     fn reader_line_empty_at(&self, pos: usize) -> bool {
-        self.spans.reader_line_empty(pos, Reader::of(self.toks.get(pos)))
+        self.spans
+            .reader_line_empty(pos, Reader::of(self.toks.get(pos)))
     }
 
     /// [`Parser::cond_sequel_at`] for the current position, with
@@ -5189,7 +5440,11 @@ impl Parser {
             return match pos {
                 CondPos::Primary => CondError::sequel(
                     at,
-                    &bfmt![b"unexpected token `", [0xFF].as_slice(), b"' in conditional command"],
+                    &bfmt![
+                        b"unexpected token `",
+                        [0xFF].as_slice(),
+                        b"' in conditional command"
+                    ],
                 ),
                 CondPos::Unary => CondError::sequel(
                     at,
@@ -5221,12 +5476,14 @@ impl Parser {
                 CondPos::Primary => {
                     CondError::new("unexpected token `EOF' in conditional command", eof)
                 }
-                CondPos::Unary => {
-                    CondError::new("unexpected argument `EOF' to conditional unary operator", eof)
-                }
-                CondPos::Binary => {
-                    CondError::new("unexpected argument `EOF' to conditional binary operator", eof)
-                }
+                CondPos::Unary => CondError::new(
+                    "unexpected argument `EOF' to conditional unary operator",
+                    eof,
+                ),
+                CondPos::Binary => CondError::new(
+                    "unexpected argument `EOF' to conditional binary operator",
+                    eof,
+                ),
             };
         }
         let tok = self.token_display();
@@ -5345,9 +5602,7 @@ impl Parser {
                     // rejected any reserved word standing there.
                     let segs = segs.clone();
                     // Assignment only valid before the first word.
-                    if !seen_word
-                        && let Some(a) = self.try_assignment(&segs)?
-                    {
+                    if !seen_word && let Some(a) = self.try_assignment(&segs)? {
                         self.pos += 1;
                         cmd.assignments.push(a);
                         continue;
@@ -5394,7 +5649,9 @@ impl Parser {
                     // see `Self::try_assignment` for why nothing in it is split
                     // or trimmed.
                     let index = match &index {
-                        Some(src) => Some(word_subscript_from_source(src, self.opts, Quoting::Bare)?),
+                        Some(src) => {
+                            Some(word_subscript_from_source(src, self.opts, Quoting::Bare)?)
+                        }
                         None => None,
                     };
                     let assign = Assignment {
@@ -5517,9 +5774,12 @@ impl Parser {
                 // substitution's operand in it is read with the quotes' rules —
                 // but by no parser, which is the other half of
                 // [`Quoting::Unread`].
-                let q = if quoted { Quoting::Bare } else { Quoting::Unread };
-                word_from_segs_in(&segs, self.opts, q)
-                    .map_err(|e| e.or_echo(self.echo_at(at)))?
+                let q = if quoted {
+                    Quoting::Bare
+                } else {
+                    Quoting::Unread
+                };
+                word_from_segs_in(&segs, self.opts, q).map_err(|e| e.or_echo(self.echo_at(at)))?
             }
             // A `<<`/`<<-` whose delimiter was read is *always* followed by the
             // `HereDoc` token carrying it — that is the lexer's contract. So an
@@ -5870,7 +6130,10 @@ fn attach_redirect(cmd: Command, redir: Redirect) -> Command {
             sc.redirects.push(redir);
             Command::Simple(sc)
         }
-        Command::Redirected { inner, mut redirects } => {
+        Command::Redirected {
+            inner,
+            mut redirects,
+        } => {
             redirects.push(redir);
             Command::Redirected { inner, redirects }
         }
@@ -6126,7 +6389,10 @@ fn segs_splice_past_the_brace(segs: &[Seg]) -> bool {
         // The splice only happens inside double quotes, so the scan that
         // decides where the expansion ends is the double-quoted one.
         Seg::ParamBraced(raw, _, _, spliced) if !spliced.is_empty() => {
-            matches!(crate::wordscan::expansion_body_len(raw, true), BraceEnd::Early(_))
+            matches!(
+                crate::wordscan::expansion_body_len(raw, true),
+                BraceEnd::Early(_)
+            )
         }
         Seg::Dq(inner, _) => segs_splice_past_the_brace(inner),
         _ => false,
@@ -6151,11 +6417,13 @@ fn word_expanded_from_its_text(word: Word, segs: &[Seg]) -> Word {
     let src = crate::unparse::word_src(&word);
     match src.iter().position(|&b| b == 0) {
         Some(nul) => Word {
-            parts: vec![WordPart::TokenText(src.get(..nul).unwrap_or_default().to_vec())],
+            parts: vec![WordPart::TokenText(
+                src.get(..nul).unwrap_or_default().to_vec(),
+            )],
         },
-        None if segs_splice_past_the_brace(segs) => {
-            Word { parts: vec![WordPart::TokenText(src)] }
-        }
+        None if segs_splice_past_the_brace(segs) => Word {
+            parts: vec![WordPart::TokenText(src)],
+        },
         None => word,
     }
 }
@@ -6198,7 +6466,10 @@ fn parse_arith_comsubs(
             SubOpen::Dollar => parse_cmdsub_body(&sub.src, sub.close_line, opts)?,
             SubOpen::Proc { open_line, .. } => parse_procsub_body(&sub.src, open_line, opts)?,
         };
-        out.push((sub.range.clone(), crate::unparse::comsub_reprint(sub.open.delim(), &prog)));
+        out.push((
+            sub.range.clone(),
+            crate::unparse::comsub_reprint(sub.open.delim(), &prog),
+        ));
     }
     Ok(out)
 }
@@ -6251,8 +6522,12 @@ fn arith_unread_subs(expr: &Str, nested: &[CmdSubSpan]) -> Vec<WordPart> {
         if s.range.start < at || s.range.end > expr.len() {
             continue;
         }
-        let SubBody::Unread { closed, .. } = s.kind else { continue };
-        parts.push(WordPart::Literal(expr.get(at..s.range.start).unwrap_or_default().to_vec()));
+        let SubBody::Unread { closed, .. } = s.kind else {
+            continue;
+        };
+        parts.push(WordPart::Literal(
+            expr.get(at..s.range.start).unwrap_or_default().to_vec(),
+        ));
         parts.push(WordPart::CommandSub {
             body: CmdSubBody::Unread {
                 // The spans this walk keeps are filtered to `SubOpen::Dollar`
@@ -6268,7 +6543,9 @@ fn arith_unread_subs(expr: &Str, nested: &[CmdSubSpan]) -> Vec<WordPart> {
         });
         at = s.range.end;
     }
-    parts.push(WordPart::Literal(expr.get(at..).unwrap_or_default().to_vec()));
+    parts.push(WordPart::Literal(
+        expr.get(at..).unwrap_or_default().to_vec(),
+    ));
     parts
 }
 
@@ -6294,12 +6571,17 @@ fn procsub_reprints(
 ) -> Result<Vec<(core::ops::Range<usize>, Str)>, ParseError> {
     let mut out = Vec::new();
     for sub in nested {
-        let SubOpen::Proc { open_line, .. } = sub.open else { continue };
+        let SubOpen::Proc { open_line, .. } = sub.open else {
+            continue;
+        };
         if sub.kind != SubBody::Eager {
             continue;
         }
         let prog = parse_procsub_body(&sub.src, open_line, opts)?;
-        out.push((sub.range.clone(), crate::unparse::comsub_reprint(sub.open.delim(), &prog)));
+        out.push((
+            sub.range.clone(),
+            crate::unparse::comsub_reprint(sub.open.delim(), &prog),
+        ));
     }
     Ok(out)
 }
@@ -6340,7 +6622,11 @@ fn splice_reprints_tracking<'a>(
         out.splice(range, rep);
         if new != old {
             let shift = |p: usize| {
-                if p <= at { p } else { (p + new).saturating_sub(old) }
+                if p <= at {
+                    p
+                } else {
+                    (p + new).saturating_sub(old)
+                }
             };
             for s in &mut moved {
                 *s = shift(s.start)..shift(s.end);
@@ -6447,7 +6733,11 @@ fn seg_to_parts(
 fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, ParseError> {
     Ok(match seg {
         Seg::Lit(s) => WordPart::Literal(s.clone()),
-        Seg::Sq { text, escaped, closed } => WordPart::SingleQuoted {
+        Seg::Sq {
+            text,
+            escaped,
+            closed,
+        } => WordPart::SingleQuoted {
             text: text.clone(),
             escaped: *escaped,
             closed: *closed,
@@ -6460,9 +6750,15 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
             for s in inner {
                 seg_to_parts(s, opts, Quoting::Dquote, &mut parts)?;
             }
-            WordPart::DoubleQuoted { parts, closed: *closed }
+            WordPart::DoubleQuoted {
+                parts,
+                closed: *closed,
+            }
         }
-        Seg::Param(n) => WordPart::Param { name: n.clone(), braced: false },
+        Seg::Param(n) => WordPart::Param {
+            name: n.clone(),
+            braced: false,
+        },
         Seg::Unclosed(u) => WordPart::Unclosed(u.clone()),
         // The body is lexed again in here, from its own line 1, so every
         // fragment of it has to be told the physical line it starts on — see
@@ -6486,7 +6782,10 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
             // build operand words the body's substitutions are parsed with
             // them, and parsing here as well would gather a nested
             // here-document twice; so this runs only where they are not.
-            if part.as_mut().map_or(true, |p| deferred_body_mut(p).is_some()) {
+            if part
+                .as_mut()
+                .map_or(true, |p| deferred_body_mut(p).is_some())
+            {
                 // bash splices the re-print into the `${ … }` body during the
                 // scan that produces it (parse.y:3929 → 3959), so a body kept
                 // as text carries the re-print rather than the source: both
@@ -6570,7 +6869,12 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                     // builds at expansion time (`${x@P}`, `PS4`), which bash
                     // reads once and never re-prints; see
                     // [`CmdSubBody::Parsed::tail`].
-                    CmdSubBody::Parsed { prog, src, close_line: *close_line, tail: None }
+                    CmdSubBody::Parsed {
+                        prog,
+                        src,
+                        close_line: *close_line,
+                        tail: None,
+                    }
                 }
             },
         },
@@ -6590,14 +6894,17 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
             // The remainder is filled by `unparse::attach_comsub_tails` once
             // the word is assembled — a segment cannot see its own siblings
             // from here. See [`crate::ast::WordPart::ArithSub::tail`].
-            WordPart::ArithSub { expr, bracket: *bracket, parts, tail: Str::new() }
+            WordPart::ArithSub {
+                expr,
+                bracket: *bracket,
+                parts,
+                tail: Str::new(),
+            }
         }
         Seg::ProcSub(input, raw, open_line, read) => WordPart::ProcSub {
             input: *input,
             body: match read {
-                ProcRead::Eager => {
-                    ProcSubBody::Parsed(parse_procsub_body(raw, *open_line, opts)?)
-                }
+                ProcRead::Eager => ProcSubBody::Parsed(parse_procsub_body(raw, *open_line, opts)?),
                 // Not parsed here: no parser read the text this was written in,
                 // so the read that finds it is the `${ … }` scan's, made later
                 // and from where a failure is `bad substitution` rather than a
@@ -6754,7 +7061,9 @@ fn arith_for_sections(chs: &[Ch]) -> Vec<Str> {
             // Always past `i`, so the scan cannot stall.
             i = skip_construct(chs, i).unwrap_or(i + 1);
         }
-        out.push(bytes::from_chars(chs.get(start..i).unwrap_or_default().iter().copied()));
+        out.push(bytes::from_chars(
+            chs.get(start..i).unwrap_or_default().iter().copied(),
+        ));
         if i >= chs.len() {
             return out;
         }
@@ -6873,8 +7182,7 @@ fn split_name_subscript(
         && syn_at(chs, i) == '['
         && let Some(close) = matching_subscript_close(chs, i)
     {
-        let inner =
-            bytes::from_chars(chs.get(i + 1..close).unwrap_or_default().iter().copied());
+        let inner = bytes::from_chars(chs.get(i + 1..close).unwrap_or_default().iter().copied());
         let index = match inner.as_slice() {
             b"@" => ArrayIndex::All,
             b"*" => ArrayIndex::Star,
@@ -6898,7 +7206,12 @@ fn split_name_subscript(
     }
     // A name has no newline in it, so the remainder starts on the body's own
     // line; only the subscript branch above can push it further down.
-    Ok(NameSubscript::Split(name, None, chs.get(i..).unwrap_or_default().to_vec(), line))
+    Ok(NameSubscript::Split(
+        name,
+        None,
+        chs.get(i..).unwrap_or_default().to_vec(),
+        line,
+    ))
 }
 
 /// Where the `:` that separates a slice's offset from its length is — bash's
@@ -6998,7 +7311,10 @@ fn parse_slice_bounds(
             rest.get(..idx).unwrap_or_default(),
             // The offset it follows may span lines — `${x:$(`/`echo 1`/`):2}` —
             // so the length's own line is counted past it, not assumed.
-            Some((rest.get(idx + 1..).unwrap_or_default(), frag_line(rest, idx + 1, line))),
+            Some((
+                rest.get(idx + 1..).unwrap_or_default(),
+                frag_line(rest, idx + 1, line),
+            )),
         ),
         None => (rest, None),
     };
@@ -7027,7 +7343,12 @@ fn parse_slice_bounds(
     let length = match len {
         Some((s, len_line)) => {
             let text = bytes::from_chars(s.iter().copied());
-            Some(Box::new(word_bound_from_source_at(&text, opts, q.as_pattern(), len_line)?))
+            Some(Box::new(word_bound_from_source_at(
+                &text,
+                opts,
+                q.as_pattern(),
+                len_line,
+            )?))
         }
         None => None,
     };
@@ -7125,7 +7446,10 @@ fn parse_braced_param_in(
     if let Some(after_hash) = raw.strip_prefix(b"#") {
         if after_hash.is_empty() {
             // `${#}` is the positional-parameter count — treat as `$#`.
-            return Ok(WordPart::Param { name: "#".into(), braced: true });
+            return Ok(WordPart::Param {
+                name: "#".into(),
+                braced: true,
+            });
         }
         // The length operator wants a *complete* parameter reference after the
         // `#` — nothing may be left over. When what follows is anything less,
@@ -7327,7 +7651,10 @@ fn parse_braced_param_in(
     // identifier.
     if matches!(name.as_str(), "#" | "?" | "-")
         && !rest.is_empty()
-        && !matches!(syn_at(&rest, 0), '#' | '%' | ':' | '-' | '=' | '?' | '+' | '/' | '@')
+        && !matches!(
+            syn_at(&rest, 0),
+            '#' | '%' | ':' | '-' | '=' | '?' | '+' | '/' | '@'
+        )
     {
         return Ok(WordPart::BadSubst(raw.to_vec()));
     }
@@ -7713,7 +8040,11 @@ fn parse_replace_pieces(
         // whole `$(echo a/b)aaa`. Doing this in the replacement half too is a
         // no-op on the bytes, and keeps the two halves scanned by one rule.
         if let Some(next) = skip_construct(body, i) {
-            let dst = if in_repl { &mut replacement } else { &mut pattern };
+            let dst = if in_repl {
+                &mut replacement
+            } else {
+                &mut pattern
+            };
             for &ch in body.get(i..next).unwrap_or_default() {
                 ch.push_to(dst);
             }
@@ -7793,7 +8124,12 @@ fn parse_bulk_op(
             Ok(Some(BulkOp::Trim {
                 suffix,
                 longest,
-                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, q.as_pattern(), line)?),
+                pattern: Box::new(word_verbatim_from_source_at(
+                    &pat,
+                    opts,
+                    q.as_pattern(),
+                    line,
+                )?),
             }))
         }
         '^' | ',' | '~' => {
@@ -7808,7 +8144,12 @@ fn parse_bulk_op(
             Ok(Some(BulkOp::Case {
                 mode,
                 all,
-                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, q.as_pattern(), line)?),
+                pattern: Box::new(word_verbatim_from_source_at(
+                    &pat,
+                    opts,
+                    q.as_pattern(),
+                    line,
+                )?),
             }))
         }
         '/' => {
@@ -7826,7 +8167,9 @@ fn parse_bulk_op(
         // left to the caller, which builds a `BulkOp::BadTransform` (bash
         // defers the empty/invalid case to expansion time — see below).
         '@' if rest.len() == 2 && is_valid_transform_op(syn_at(rest, 1)) => {
-            Ok(Some(BulkOp::Transform { op: syn_at(rest, 1) }))
+            Ok(Some(BulkOp::Transform {
+                op: syn_at(rest, 1),
+            }))
         }
         _ => Ok(None),
     }
@@ -7867,7 +8210,10 @@ fn bad_transform_operand(
 fn is_valid_transform_op(op: char) -> bool {
     // Bash's set (5.2): Q E P A a K k U u L. Note there is no lowercase-first
     // `@l` — `${x@l}` is a "bad substitution", so `l` is deliberately absent.
-    matches!(op, 'Q' | 'U' | 'u' | 'L' | 'E' | 'K' | 'k' | 'A' | 'a' | 'P')
+    matches!(
+        op,
+        'Q' | 'U' | 'u' | 'L' | 'E' | 'K' | 'k' | 'A' | 'a' | 'P'
+    )
 }
 
 /// Build a single [`Word`] from arbitrary source text (used for the argument of
@@ -7934,8 +8280,11 @@ fn verbatim_word_at(
     // consulted `extglob` or `posix` (it was handed `ParseOpts::default()`
     // outright), and neither flag is a shell option, so passing them through
     // changes nothing else.
-    let lex_opts =
-        ParseOpts { reread: opts.reread, tolerant: opts.tolerant, ..ParseOpts::default() };
+    let lex_opts = ParseOpts {
+        reread: opts.reread,
+        tolerant: opts.tolerant,
+        ..ParseOpts::default()
+    };
     let read = match frag {
         Frag::Word => crate::lexer::lex_word_verbatim_opts,
         Frag::Arith => crate::lexer::lex_subscript_verbatim,
@@ -8036,7 +8385,13 @@ fn attach_subscript_reads(
     let inner_q = q.as_unread();
     let mut any = false;
     for part in &mut w.parts {
-        let WordPart::SingleQuoted { text, escaped: false, parts, .. } = part else {
+        let WordPart::SingleQuoted {
+            text,
+            escaped: false,
+            parts,
+            ..
+        } = part
+        else {
             continue;
         };
         if text.is_empty() {
@@ -8048,7 +8403,10 @@ fn attach_subscript_reads(
         // Still arithmetic text: `Q_DOUBLE_QUOTES` merely switches the single
         // quote off, so a `<( … )` inside the run is no more performed than one
         // beside it.
-        let tolerant = ParseOpts { tolerant: true, ..opts };
+        let tolerant = ParseOpts {
+            tolerant: true,
+            ..opts
+        };
         *parts = Some(verbatim_word_at(text, tolerant, inner_q, line, Frag::Arith)?.parts);
         any = true;
     }
@@ -8109,7 +8467,10 @@ fn name_unclosed_after_the_fragment(w: &mut Word) {
         at = at.saturating_add(crate::unparse::part_src(p).len());
     }
     for (part, start) in w.parts.iter_mut().zip(starts) {
-        let WordPart::SingleQuoted { parts: Some(inner), .. } = part else {
+        let WordPart::SingleQuoted {
+            parts: Some(inner), ..
+        } = part
+        else {
             continue;
         };
         // Everything the fragment holds past the run's interior: its closing
@@ -8155,7 +8516,15 @@ pub(crate) fn word_tolerant_from_source_at(
     q: Quoting,
     line: u32,
 ) -> Result<Word, ParseError> {
-    word_verbatim_from_source_at(s, ParseOpts { tolerant: true, ..opts }, q, line)
+    word_verbatim_from_source_at(
+        s,
+        ParseOpts {
+            tolerant: true,
+            ..opts
+        },
+        q,
+        line,
+    )
 }
 
 /// Parse the *operand* of a substitution — the `w` of `${x:-w}`, `${x:=w}`,
@@ -8232,7 +8601,10 @@ pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Wo
 ///
 /// # Errors
 /// Returns [`ParseError`] on an unterminated substitution inside `s`.
-pub(crate) fn brace_scan_word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
+pub(crate) fn brace_scan_word_from_source(
+    s: BStr<'_>,
+    opts: ParseOpts,
+) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
@@ -8259,8 +8631,8 @@ fn word_replacement_from_source(
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let mut segs =
-        crate::lexer::lex_replacement_verbatim(s, q.read_ctx()).map_err(|e| ParseError::new(&e.msg))?;
+    let mut segs = crate::lexer::lex_replacement_verbatim(s, q.read_ctx())
+        .map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
@@ -8537,7 +8909,10 @@ impl From<ParseError> for CondError {
 impl CondError {
     /// A diagnostic with one clause of its own, reported wherever the enclosing
     /// error is, followed by `tail`.
-    fn new(clause: &(impl bytes::PushBytes + ?Sized), tail: &(impl bytes::PushBytes + ?Sized)) -> Self {
+    fn new(
+        clause: &(impl bytes::PushBytes + ?Sized),
+        tail: &(impl bytes::PushBytes + ?Sized),
+    ) -> Self {
         CondError::Cond {
             clauses: vec![(None, bfmt![clause])],
             tail: Some(bfmt![tail]),
@@ -8598,7 +8973,12 @@ impl CondError {
             msgs.push(tail);
         }
         // Never empty: every constructor gives at least a clause or a tail.
-        ParseError { msgs, line_at, bail_sequel, ..ParseError::new(b"") }
+        ParseError {
+            msgs,
+            line_at,
+            bail_sequel,
+            ..ParseError::new(b"")
+        }
     }
 }
 
@@ -8664,7 +9044,9 @@ fn raw_binop_from(s: BStr<'_>) -> Option<(RawBinOp, &'static str)> {
         ("-ot", RawBinOp::FileOlder),
         ("-ef", RawBinOp::SameFile),
     ];
-    OPS.iter().find(|(text, _)| text.as_bytes() == s).map(|&(text, op)| (op, text))
+    OPS.iter()
+        .find(|(text, _)| text.as_bytes() == s)
+        .map(|&(text, op)| (op, text))
 }
 
 #[cfg(test)]
@@ -8767,10 +9149,17 @@ mod tests {
 
         // The re-quoted rows hand the translation on as a C string, so no NUL
         // ever reaches the buffer and no word is cut.
-        for src in [r#"echo "${q#$'z\0z'}""#, r#"echo ${x:-$'a\0b'}"#, r#"echo x$'a\0b'y"#] {
+        for src in [
+            r#"echo "${q#$'z\0z'}""#,
+            r#"echo ${x:-$'a\0b'}"#,
+            r#"echo x$'a\0b'y"#,
+        ] {
             let w = words(src);
             assert!(
-                !w[1].parts.iter().any(|p| matches!(p, WordPart::TokenText(_))),
+                !w[1]
+                    .parts
+                    .iter()
+                    .any(|p| matches!(p, WordPart::TokenText(_))),
                 "{src} should not cut"
             );
         }
@@ -8817,7 +9206,10 @@ mod tests {
         for src in [r#"echo "${x:-$'ab'}""#, r#"echo "${x:-$'a{b'}""#] {
             let w = words(src);
             assert!(
-                !w[1].parts.iter().any(|p| matches!(p, WordPart::TokenText(_))),
+                !w[1]
+                    .parts
+                    .iter()
+                    .any(|p| matches!(p, WordPart::TokenText(_))),
                 "{src} should keep its tree"
             );
         }
@@ -8889,11 +9281,17 @@ mod tests {
         // An unclosed construct is the listing's own failure: a discard.
         assert_eq!(
             err(r#""${x:-a tail"#),
-            Some(("unexpected EOF while looking for matching `}'".into(), false))
+            Some((
+                "unexpected EOF while looking for matching `}'".into(),
+                false
+            ))
         );
         assert_eq!(
             err("one $(echo two"),
-            Some(("unexpected EOF while looking for matching `)'".into(), false))
+            Some((
+                "unexpected EOF while looking for matching `)'".into(),
+                false
+            ))
         );
 
         // An error found *inside* an unterminated `$( … )` is `parse_comsub`'s,
@@ -9004,7 +9402,10 @@ mod tests {
         for (src, want) in [
             // The baseline: no continuation. The `>` has nothing to redirect to,
             // and the newline it finds is the offending token on line 2.
-            ("echo 1\ncat >\n", (2, "syntax error near unexpected token `newline'")),
+            (
+                "echo 1\ncat >\n",
+                (2, "syntax error near unexpected token `newline'"),
+            ),
             // One continuation deletes that newline, so the error becomes an
             // end-of-file — reported one line further on for each deletion.
             ("echo 1\ncat >\\\n", (3, eof)),
@@ -9047,12 +9448,30 @@ mod tests {
             // A token the grammar rejects outright is blamed on the reader's line
             // too, so a continuation flush after it moves the blame even though
             // the token itself did not move.
-            ("echo 1\necho )\n", (2, "syntax error near unexpected token `)'")),
-            ("echo 1\necho )\\\n", (3, "syntax error near unexpected token `)'")),
-            ("echo 1\nesac\\\n", (3, "syntax error near unexpected token `esac'")),
-            ("echo 1\ndone\\\n", (3, "syntax error near unexpected token `done'")),
-            ("echo 1\nfi\\\n", (3, "syntax error near unexpected token `fi'")),
-            ("echo 1\necho a;;\\\n", (3, "syntax error near unexpected token `;;'")),
+            (
+                "echo 1\necho )\n",
+                (2, "syntax error near unexpected token `)'"),
+            ),
+            (
+                "echo 1\necho )\\\n",
+                (3, "syntax error near unexpected token `)'"),
+            ),
+            (
+                "echo 1\nesac\\\n",
+                (3, "syntax error near unexpected token `esac'"),
+            ),
+            (
+                "echo 1\ndone\\\n",
+                (3, "syntax error near unexpected token `done'"),
+            ),
+            (
+                "echo 1\nfi\\\n",
+                (3, "syntax error near unexpected token `fi'"),
+            ),
+            (
+                "echo 1\necho a;;\\\n",
+                (3, "syntax error near unexpected token `;;'"),
+            ),
         ] {
             let (line, msg) = err(src);
             assert_eq!((line, msg.as_str()), want, "src {src:?}");
@@ -9073,7 +9492,11 @@ mod tests {
             let mut ip = IncrementalParser::new(src.as_bytes(), 0, opts);
             while let Some(unit) = ip.next_unit(None, opts) {
                 let Err(e) = unit else { continue };
-                assert_eq!(emsg(&e), "syntax error: unexpected end of file", "src {src:?}");
+                assert_eq!(
+                    emsg(&e),
+                    "syntax error: unexpected end of file",
+                    "src {src:?}"
+                );
                 return e.line.unwrap_or(0);
             }
             panic!("{src:?} must fail");
@@ -9210,8 +9633,14 @@ mod tests {
         );
         // … while text written flush against the body drags in the tail of the
         // expression, back to the `;` inside it.
-        assert_eq!(err("for ((i=0;i<1;i++)x ; do :; done").0, format!("{near}`;i++)x'"));
-        assert_eq!(err("for ((i=0;i<1;i++)  ; do :; done").0, format!("{near}`;i++)'"));
+        assert_eq!(
+            err("for ((i=0;i<1;i++)x ; do :; done").0,
+            format!("{near}`;i++)x'")
+        );
+        assert_eq!(
+            err("for ((i=0;i<1;i++)  ; do :; done").0,
+            format!("{near}`;i++)'")
+        );
         assert_eq!(err("for ((1)  ; do :; done").0, format!("{near}`((1)'"));
         // The character read may be the end of the line. `shell_getc (0)` does
         // not fetch, so the reader is left at the NUL past the line it is on and
@@ -9222,7 +9651,10 @@ mod tests {
         assert_eq!(msg, format!("{near}`;i++)'"));
         assert_eq!(line, Some(1));
         assert_eq!(echo, None, "the shell's own input is echoed by line number");
-        assert_eq!(err("for ((i=0;i<1;i++)\\\n) ; do :; done").0, format!("{near}`;i++)\\'"));
+        assert_eq!(
+            err("for ((i=0;i<1;i++)\\\n) ; do :; done").0,
+            format!("{near}`;i++)\\'")
+        );
         // It is a whole-input failure, not a recoverable one: bison is holding
         // EOF and there is nothing to resume from.
         assert!(!parse("for ((1) )").expect_err("error").recoverable);
@@ -9249,10 +9681,22 @@ mod tests {
         }
         // Where a binary operator was expected, an operator is named …
         let want = "conditional binary operator expected\nsyntax error near ";
-        assert_eq!(err("[[ a ( b ]]"), format!("unexpected token `(', {want}`('"));
-        assert_eq!(err("[[ a ; b ]]"), format!("unexpected token `;', {want}`;'"));
-        assert_eq!(err("[[ a | b ]]"), format!("unexpected token `|', {want}`|'"));
-        assert_eq!(err("[[ a & b ]]"), format!("unexpected token `&', {want}`&'"));
+        assert_eq!(
+            err("[[ a ( b ]]"),
+            format!("unexpected token `(', {want}`('")
+        );
+        assert_eq!(
+            err("[[ a ; b ]]"),
+            format!("unexpected token `;', {want}`;'")
+        );
+        assert_eq!(
+            err("[[ a | b ]]"),
+            format!("unexpected token `|', {want}`|'")
+        );
+        assert_eq!(
+            err("[[ a & b ]]"),
+            format!("unexpected token `&', {want}`&'")
+        );
         // … while a word in the same place is only reported, never named.
         assert_eq!(err("[[ a b ]]"), format!("{want}`b'"));
         // Where the expression was already complete, the same split applies.
@@ -9261,7 +9705,10 @@ mod tests {
             err("[[ -n a ; b ]]"),
             format!("{stray}: unexpected token `;'\nsyntax error near `;'")
         );
-        assert_eq!(err("[[ -z x y ]]"), format!("{stray}\nsyntax error near `y'"));
+        assert_eq!(
+            err("[[ -z x y ]]"),
+            format!("{stray}\nsyntax error near `y'")
+        );
         // A compound operator names itself in full, but the `near' line prints
         // only what bash's backward scan reaches: it halts on `;', `|' or `&',
         // so `;;' shows `;' and `;&', `;;&', `|&' and `>&' all show `&'. An
@@ -9288,7 +9735,12 @@ mod tests {
         }
         // The tokens that may legitimately follow a finished operand are still
         // accepted rather than swept up by the operator rule.
-        for src in ["[[ a && b ]]", "[[ a || b ]]", "[[ ( a ) ]]", "[[ ( a || b ) ]]"] {
+        for src in [
+            "[[ a && b ]]",
+            "[[ a || b ]]",
+            "[[ ( a ) ]]",
+            "[[ ( a || b ) ]]",
+        ] {
             parse(src).unwrap_or_else(|e| panic!("{src}: {}", emsg(&e)));
         }
     }
@@ -9347,9 +9799,9 @@ mod tests {
         };
         // Quoted, escaped, expanded, an assignment, a tilde — all parse, and all
         // keep the spelling that will be refused at run time.
-        for name in
-            ["1x", "'a[0]'", "\"a[0]\"", "a=b", "a\\[0\\]", "''", "'a b'", "~", "a.b", "$v", "\\x"]
-        {
+        for name in [
+            "1x", "'a[0]'", "\"a[0]\"", "a=b", "a\\[0\\]", "''", "'a b'", "~", "a.b", "$v", "\\x",
+        ] {
             assert_eq!(var("for", name), name.to_string(), "for {name}");
             assert_eq!(var("select", name), name.to_string(), "select {name}");
         }
@@ -9432,7 +9884,10 @@ mod tests {
         assert_eq!(err("a ( b"), "syntax error near unexpected token `b'");
         assert_eq!(err("a (b)"), "syntax error near unexpected token `b'");
         assert_eq!(err("a ( ;"), "syntax error near unexpected token `;'");
-        assert_eq!(err("a (\nb"), "syntax error near unexpected token `newline'");
+        assert_eq!(
+            err("a (\nb"),
+            "syntax error near unexpected token `newline'"
+        );
         // The unit's own closing newline counts as the token that was found.
         assert_eq!(err("a ("), "syntax error near unexpected token `newline'");
         // `((` where no command can start is two `(` tokens, so the second one
@@ -9488,16 +9943,31 @@ mod tests {
         let err = |src: &str| String::from_utf8_lossy(&parse(src).unwrap_err().msg()).into_owned();
         // `]]` is `COND_END`, which is on bash's acceptable list, so the `((`
         // after a conditional is arithmetic and the grammar objects to *it*.
-        assert_eq!(err("[[ a ]] ((1))"), "syntax error near unexpected token `1'");
-        assert_eq!(err("[[ a ]] (( 1 + 1 ))"), "syntax error near unexpected token ` 1 + 1 '");
-        assert_eq!(err("[[ a ]] ((x = 1))"), "syntax error near unexpected token `x = 1'");
+        assert_eq!(
+            err("[[ a ]] ((1))"),
+            "syntax error near unexpected token `1'"
+        );
+        assert_eq!(
+            err("[[ a ]] (( 1 + 1 ))"),
+            "syntax error near unexpected token ` 1 + 1 '"
+        );
+        assert_eq!(
+            err("[[ a ]] ((x = 1))"),
+            "syntax error near unexpected token `x = 1'"
+        );
         assert_eq!(
             err("[[ a ]] (( $(echo 2) ))"),
             "syntax error near unexpected token ` $(echo 2) '"
         );
-        assert_eq!(err("[[ a ]] ((  ))"), "syntax error near unexpected token `  '");
+        assert_eq!(
+            err("[[ a ]] ((  ))"),
+            "syntax error near unexpected token `  '"
+        );
         // Where the `((` was not arithmetic, the paren is still the name.
-        assert_eq!(err("echo ]] ((1))"), "syntax error near unexpected token `('");
+        assert_eq!(
+            err("echo ]] ((1))"),
+            "syntax error near unexpected token `('"
+        );
         assert_eq!(err("echo ((1))"), "syntax error near unexpected token `('");
     }
 
@@ -9517,20 +9987,38 @@ mod tests {
         let err = |src: &str| String::from_utf8_lossy(&parse(src).unwrap_err().msg()).into_owned();
         // The value, not the spelling.
         assert_eq!(err("f() 007>x"), "syntax error near unexpected token `7'");
-        assert_eq!(err("f() 2>/dev/null"), "syntax error near unexpected token `2'");
+        assert_eq!(
+            err("f() 2>/dev/null"),
+            "syntax error near unexpected token `2'"
+        );
         assert_eq!(err("f() 12>&1"), "syntax error near unexpected token `12'");
         // The elements' own spellings, joined by exactly one space.
-        assert_eq!(err("f() a=(1   2)"), "syntax error near unexpected token `a=(1 2)'");
-        assert_eq!(err("f() a=(  )"), "syntax error near unexpected token `a=()'");
+        assert_eq!(
+            err("f() a=(1   2)"),
+            "syntax error near unexpected token `a=(1 2)'"
+        );
+        assert_eq!(
+            err("f() a=(  )"),
+            "syntax error near unexpected token `a=()'"
+        );
         assert_eq!(
             err("f() a=('x y' \"z\")"),
             "syntax error near unexpected token `a=('x y' \"z\")'"
         );
-        assert_eq!(err("f() a=([2]=v x)"), "syntax error near unexpected token `a=([2]=v x)'");
+        assert_eq!(
+            err("f() a=([2]=v x)"),
+            "syntax error near unexpected token `a=([2]=v x)'"
+        );
         // The name part is carried through whole: the subscript verbatim, and
         // the `+` of an append still ahead of the `=`.
-        assert_eq!(err("f() a+=(p)"), "syntax error near unexpected token `a+=(p)'");
-        assert_eq!(err("f() a[1+1]=(q)"), "syntax error near unexpected token `a[1+1]=(q)'");
+        assert_eq!(
+            err("f() a+=(p)"),
+            "syntax error near unexpected token `a+=(p)'"
+        );
+        assert_eq!(
+            err("f() a[1+1]=(q)"),
+            "syntax error near unexpected token `a[1+1]=(q)'"
+        );
         assert_eq!(
             err("f() a=($(echo h) ~/t)"),
             "syntax error near unexpected token `a=($(echo h) ~/t)'"
@@ -9557,13 +10045,21 @@ mod tests {
             (text(&f.name), f.definable)
         };
         // Not an identifier, but a perfectly good function name.
-        for name in ["my-func", "a.b", "1f", "a/b", "a,b", ".f", "f%", "[b]", "a[b]"] {
+        for name in [
+            "my-func", "a.b", "1f", "a/b", "a,b", ".f", "f%", "[b]", "a[b]",
+        ] {
             assert_eq!(def(&format!("{name}() {{ :; }}")), (name.to_string(), true));
         }
         // Quoted or expanded: parses, keeps the spelling, and is not definable.
         for name in ["\\f", "\"f\"", "'f'", "f\\g", "$x"] {
-            assert_eq!(def(&format!("{name}() {{ :; }}")), (name.to_string(), false));
-            assert_eq!(def(&format!("function {name} {{ :; }}")), (name.to_string(), false));
+            assert_eq!(
+                def(&format!("{name}() {{ :; }}")),
+                (name.to_string(), false)
+            );
+            assert_eq!(
+                def(&format!("function {name} {{ :; }}")),
+                (name.to_string(), false)
+            );
         }
         // An assignment word is not a WORD, so the POSIX form rejects it — but
         // the lexer only forms one at the start of a command, so the keyword
@@ -9643,8 +10139,14 @@ mod tests {
         // fragment. osh's parser now matches: the cursor already points at the
         // culprit, so each site defers to `unexpected_here`.
         for (src, want) in [
-            ("case x in ;& esac", "syntax error near unexpected token `;&'"),
-            ("case x in pat esac", "syntax error near unexpected token `esac'"),
+            (
+                "case x in ;& esac",
+                "syntax error near unexpected token `;&'",
+            ),
+            (
+                "case x in pat esac",
+                "syntax error near unexpected token `esac'",
+            ),
             ("case x in )", "syntax error near unexpected token `)'"),
             ("case ; in", "syntax error near unexpected token `;'"),
             ("case )", "syntax error near unexpected token `)'"),
@@ -9671,13 +10173,31 @@ mod tests {
         for (src, want) in [
             // The bug this pins: the `(` was counted as an *open* rather than
             // rejected, so the error only surfaced when the `;;` arrived.
-            ("case a in a) echo x( y;; esac", "syntax error near unexpected token `('"),
-            ("case a in a) echo x) y;; esac", "syntax error near unexpected token `)'"),
-            ("case a in a) { echo x; }( y;; esac", "syntax error near unexpected token `('"),
-            ("case a in a) { echo x; } ) ;; esac", "syntax error near unexpected token `)'"),
+            (
+                "case a in a) echo x( y;; esac",
+                "syntax error near unexpected token `('",
+            ),
+            (
+                "case a in a) echo x) y;; esac",
+                "syntax error near unexpected token `)'",
+            ),
+            (
+                "case a in a) { echo x; }( y;; esac",
+                "syntax error near unexpected token `('",
+            ),
+            (
+                "case a in a) { echo x; } ) ;; esac",
+                "syntax error near unexpected token `)'",
+            ),
             // Two *complete* commands abutting was accepted outright before.
-            ("case a in a) ( : ) ( : ) ;; esac", "syntax error near unexpected token `('"),
-            ("case a in a) { :; } { :; } ;; esac", "syntax error near unexpected token `{'"),
+            (
+                "case a in a) ( : ) ( : ) ;; esac",
+                "syntax error near unexpected token `('",
+            ),
+            (
+                "case a in a) { :; } { :; } ;; esac",
+                "syntax error near unexpected token `{'",
+            ),
             // Nested arms follow the same rule.
             (
                 "case a in a) case b in b) echo n( m;; esac;; esac",
@@ -9685,7 +10205,10 @@ mod tests {
             ),
             // `esac` after a simple command's word is an *argument*, not an
             // ender, so the `case` runs off the end of the input instead.
-            ("case a in a) echo x esac", "syntax error: unexpected end of file"),
+            (
+                "case a in a) echo x esac",
+                "syntax error: unexpected end of file",
+            ),
         ] {
             assert_eq!(emsg(&parse(src).unwrap_err()), want, "src {src:?}");
         }
@@ -9796,7 +10319,10 @@ mod tests {
                     panic!("expected a simple command for {src:?}");
                 };
                 let [WordPart::Literal(w)] = sc.words[0].parts.as_slice() else {
-                    panic!("expected one literal part for {src:?}, got {:?}", sc.words[0].parts);
+                    panic!(
+                        "expected one literal part for {src:?}, got {:?}",
+                        sc.words[0].parts
+                    );
                 };
                 assert_eq!(text(w), word, "src {src:?}");
             }
@@ -9963,9 +10489,8 @@ mod tests {
             // the reader ends it at EOF exactly as it would at `\n`.
             ("[[ x =~ ( ]]", ")", binary),
         ] {
-            let want = format!(
-                "1: unexpected EOF while looking for matching `{close}'\n2: {second}"
-            );
+            let want =
+                format!("1: unexpected EOF while looking for matching `{close}'\n2: {second}");
             assert_eq!(diag(src), want, "src {src:?}");
         }
         // A `$( … )` is scanned by a reader of its own, which has already taken
@@ -10065,7 +10590,9 @@ mod tests {
             // The three operand slots, each naming the token it was handed.
             (
                 "echo 1\n[[ a\\\n",
-                format!("4: unexpected token `EOF', conditional binary operator expected\n4: {eof}"),
+                format!(
+                    "4: unexpected token `EOF', conditional binary operator expected\n4: {eof}"
+                ),
             ),
             (
                 "echo 1\n[[ a ==\\\n",
@@ -10091,11 +10618,15 @@ mod tests {
             // the same group is numbered 3 with the continuation and 2 without.
             (
                 "echo 1\n[[ (\\\n",
-                format!("3: unexpected token `EOF' in conditional command\n3: expected `)'\n3: {eof}"),
+                format!(
+                    "3: unexpected token `EOF' in conditional command\n3: expected `)'\n3: {eof}"
+                ),
             ),
             (
                 "echo 1\n[[ (\n",
-                format!("3: unexpected token `EOF' in conditional command\n2: expected `)'\n3: {eof}"),
+                format!(
+                    "3: unexpected token `EOF' in conditional command\n2: expected `)'\n3: {eof}"
+                ),
             ),
             (
                 "echo 1\n[[ ( (\\\n",
@@ -10168,8 +10699,14 @@ mod tests {
                 "echo 1\n[[ a == b ;\\\n",
                 "2: syntax error in conditional expression: unexpected token `;'\n3: syntax error",
             ),
-            ("echo 1\n[[ -z x y\\\n", "2: syntax error in conditional expression\n3: syntax error"),
-            ("echo 1\n[[ a b\\\n", "3: conditional binary operator expected\n3: syntax error"),
+            (
+                "echo 1\n[[ -z x y\\\n",
+                "2: syntax error in conditional expression\n3: syntax error",
+            ),
+            (
+                "echo 1\n[[ a b\\\n",
+                "3: conditional binary operator expected\n3: syntax error",
+            ),
             // A group keeps its own `expected `)'` — that is a separate
             // `parser_error` from the frame that read the `(`, reported on the
             // `(`'s line and untouched by which branch the sequel takes.
@@ -10211,9 +10748,18 @@ mod tests {
             // `report_syntax_error`'s *first* branch, whose
             // `print_offending_line` is unconditional (parse.y:6262). So it
             // keeps both lines and simply echoes an empty one.
-            ("echo 1\n;;\\\n", "3: syntax error near unexpected token `;;'"),
-            ("echo 1\necho a; )\\\n", "3: syntax error near unexpected token `)'"),
-            ("echo 1\n[[ a == b ]] ;;\\\n", "3: syntax error near unexpected token `;;'"),
+            (
+                "echo 1\n;;\\\n",
+                "3: syntax error near unexpected token `;;'",
+            ),
+            (
+                "echo 1\necho a; )\\\n",
+                "3: syntax error near unexpected token `)'",
+            ),
+            (
+                "echo 1\n[[ a == b ]] ;;\\\n",
+                "3: syntax error near unexpected token `;;'",
+            ),
         ] {
             assert_eq!(diag(src), want, "src {src:?}");
         }
@@ -10239,7 +10785,10 @@ mod tests {
             let text: String = src.iter().map(|&b| char::from(b)).collect();
             diag(&text)
         };
-        assert_eq!(closed("[[ a b\\"), "2: conditional binary operator expected\n2: syntax error");
+        assert_eq!(
+            closed("[[ a b\\"),
+            "2: conditional binary operator expected\n2: syntax error"
+        );
         assert_eq!(
             closed("[[ a == b )\\"),
             "1: syntax error in conditional expression: unexpected token `)'\n1: syntax error near `)\\'"
@@ -10292,7 +10841,10 @@ mod tests {
                 "echo 1\n[[ a == b )\\\n\n",
                 "2: syntax error in conditional expression: unexpected token `)'\n3: syntax error near `\n'",
             ),
-            ("echo 1\n[[ a b\\\n\n", "3: conditional binary operator expected\n3: syntax error near `\n'"),
+            (
+                "echo 1\n[[ a b\\\n\n",
+                "3: conditional binary operator expected\n3: syntax error near `\n'",
+            ),
             (
                 "echo 1\n[[ ( a ;\\\n\n",
                 "3: unexpected token `;', conditional binary operator expected\n2: expected `)'\n3: syntax error near `\n'",
@@ -10562,9 +11114,13 @@ mod tests {
     /// stands on, one unit at a time.
     fn backtick_unit(src: &str, base_line: u32) -> Result<Program, ParseError> {
         let opts = ParseOpts::default();
-        IncrementalParser::new(src.as_bytes(), LineMap::Offset(base_line.saturating_sub(1)), opts)
-            .next_unit(None, opts)
-            .unwrap_or_else(|| Ok(Program { items: Vec::new() }))
+        IncrementalParser::new(
+            src.as_bytes(),
+            LineMap::Offset(base_line.saturating_sub(1)),
+            opts,
+        )
+        .next_unit(None, opts)
+        .unwrap_or_else(|| Ok(Program { items: Vec::new() }))
     }
 
     /// A `$( … )` body is closed by the substitution's `)`, which ends its list
@@ -10631,14 +11187,25 @@ mod tests {
         let src = "echo one\nx=$(echo a\necho b\nfor\necho d)\n";
         assert_eq!(parse(src).unwrap_err().line, Some(4));
         // The body's first line, and a body that opens on a line of its own.
-        assert_eq!(parse("echo one\nx=$(for\necho b)\n").unwrap_err().line, Some(2));
-        assert_eq!(parse("echo one\nx=$(\necho a\n\nfor\n)\n").unwrap_err().line, Some(5));
+        assert_eq!(
+            parse("echo one\nx=$(for\necho b)\n").unwrap_err().line,
+            Some(2)
+        );
+        assert_eq!(
+            parse("echo one\nx=$(\necho a\n\nfor\n)\n")
+                .unwrap_err()
+                .line,
+            Some(5)
+        );
         // A nested body is numbered against the outer body's physical lines,
         // not against its own first line.
         let nested = "echo one\nx=$(echo a\necho $(echo b\nfor\necho c)\necho d)\n";
         assert_eq!(parse(nested).unwrap_err().line, Some(4));
         // A process substitution body was always numbered this way.
-        assert_eq!(parse("echo one\ncat <(echo a\nfor\n)\n").unwrap_err().line, Some(3));
+        assert_eq!(
+            parse("echo one\ncat <(echo a\nfor\n)\n").unwrap_err().line,
+            Some(3)
+        );
     }
 
     /// A body whose `)` never arrives is parsed all the same, and its own error
@@ -10682,16 +11249,35 @@ mod tests {
         // A body that merely *ran out* is bash's `EOF_Reached` path, and there
         // the missing `)` is what stands: there is no token to blame, and one
         // would have to be invented to blame it.
-        for src in ["echo $(echo a", "echo $(", "echo $(a |", "echo $(!", "echo $(if true"] {
+        for src in [
+            "echo $(echo a",
+            "echo $(",
+            "echo $(a |",
+            "echo $(!",
+            "echo $(if true",
+        ] {
             let e = parse(src).unwrap_err();
-            assert_eq!(emsg(&e), "unexpected EOF while looking for matching `)'", "{src:?}");
+            assert_eq!(
+                emsg(&e),
+                "unexpected EOF while looking for matching `)'",
+                "{src:?}"
+            );
         }
         // An unterminated quote *inside* the body is that quote's error, since
         // the nested parse's own lexer is what dies on it.
         for (src, msg) in [
-            ("echo $(echo \"x", "unexpected EOF while looking for matching `\"'"),
-            ("echo $(echo 'x", "unexpected EOF while looking for matching `''"),
-            ("echo $(echo `fi", "unexpected EOF while looking for matching ``'"),
+            (
+                "echo $(echo \"x",
+                "unexpected EOF while looking for matching `\"'",
+            ),
+            (
+                "echo $(echo 'x",
+                "unexpected EOF while looking for matching `''",
+            ),
+            (
+                "echo $(echo `fi",
+                "unexpected EOF while looking for matching ``'",
+            ),
         ] {
             assert_eq!(emsg(&parse(src).unwrap_err()), msg, "{src:?}");
         }
@@ -10739,21 +11325,48 @@ mod tests {
         // expansion time, so nothing objects before the word runs out — and a
         // body that parses, or that merely ran out itself, says nothing either.
         for (src, msg) in [
-            ("echo \" `fi`", "unexpected EOF while looking for matching `\"'"),
-            ("echo \"abc", "unexpected EOF while looking for matching `\"'"),
-            ("echo \" $(echo ok)", "unexpected EOF while looking for matching `\"'"),
-            ("echo \" $(a |", "unexpected EOF while looking for matching `)'"),
-            ("echo \" $(echo ok) $(if", "unexpected EOF while looking for matching `)'"),
-            ("echo $(echo ok)x$(", "unexpected EOF while looking for matching `)'"),
-            ("echo `fi`x$(", "unexpected EOF while looking for matching `)'"),
+            (
+                "echo \" `fi`",
+                "unexpected EOF while looking for matching `\"'",
+            ),
+            (
+                "echo \"abc",
+                "unexpected EOF while looking for matching `\"'",
+            ),
+            (
+                "echo \" $(echo ok)",
+                "unexpected EOF while looking for matching `\"'",
+            ),
+            (
+                "echo \" $(a |",
+                "unexpected EOF while looking for matching `)'",
+            ),
+            (
+                "echo \" $(echo ok) $(if",
+                "unexpected EOF while looking for matching `)'",
+            ),
+            (
+                "echo $(echo ok)x$(",
+                "unexpected EOF while looking for matching `)'",
+            ),
+            (
+                "echo `fi`x$(",
+                "unexpected EOF while looking for matching `)'",
+            ),
         ] {
             assert_eq!(emsg(&parse(src).unwrap_err()), msg, "{src:?}");
         }
         // The body is numbered physically — which is what the two different
         // reference lines are for, the `)` for a `$( … )` and the `<(` for a
         // process substitution. Both land on the line `fi` is written on.
-        assert_eq!(parse("echo one\necho $(\nfi)x$(").unwrap_err().line, Some(3));
-        assert_eq!(parse("echo one\necho <(\nfi)x$(").unwrap_err().line, Some(3));
+        assert_eq!(
+            parse("echo one\necho $(\nfi)x$(").unwrap_err().line,
+            Some(3)
+        );
+        assert_eq!(
+            parse("echo one\necho <(\nfi)x$(").unwrap_err().line,
+            Some(3)
+        );
         // A body in an *earlier* word is not this mechanism's — that word
         // finished, so it is a token the parser reaches on its own. It needs
         // the shell's deferred tokenizer, which keeps a failing line's tokens,
@@ -10801,14 +11414,23 @@ mod tests {
         // delimiter stands — and which one that is still comes from where the
         // `${` was written, exactly as for a `$(` in the same place.
         for (src, msg) in [
-            ("echo \"${z:-<(fi}\"", "unexpected EOF while looking for matching `\"'"),
-            ("echo ${z:-<(echo hi}", "unexpected EOF while looking for matching `)'"),
+            (
+                "echo \"${z:-<(fi}\"",
+                "unexpected EOF while looking for matching `\"'",
+            ),
+            (
+                "echo ${z:-<(echo hi}",
+                "unexpected EOF while looking for matching `)'",
+            ),
         ] {
             assert_eq!(emsg(&parse(src).unwrap_err()), msg, "{src:?}");
         }
         // Numbered from the `<(`, and so landing on the physical line `fi` is
         // written on.
-        assert_eq!(parse("echo one\necho \"${z:-<(\nfi)}\"").unwrap_err().line, Some(3));
+        assert_eq!(
+            parse("echo one\necho \"${z:-<(\nfi)}\"").unwrap_err().line,
+            Some(3)
+        );
     }
 
     /// Having parsed it, whether bash *performs* it is one test:
@@ -10823,33 +11445,57 @@ mod tests {
     #[test]
     fn whether_a_brace_bodys_process_substitution_is_performed_is_the_quoting() {
         let opts = ParseOpts::default();
-        let live = |w: &Word| w.parts.iter().any(|p| matches!(p, WordPart::ProcSub { .. }));
+        let live = |w: &Word| {
+            w.parts
+                .iter()
+                .any(|p| matches!(p, WordPart::ProcSub { .. }))
+        };
         let show = |f: &[u8]| String::from_utf8_lossy(f).into_owned();
         // A pattern and a bare operand are read by the same scan, and it
         // performs.
-        for frag in [b"<(echo hi)".as_slice(), b"a<(echo hi)b", b"<(echo a)<(echo b)", b">(cat)"] {
+        for frag in [
+            b"<(echo hi)".as_slice(),
+            b"a<(echo hi)b",
+            b"<(echo a)<(echo b)",
+            b">(cat)",
+        ] {
             let w = verbatim_word_at(frag, opts, Quoting::Bare, 1, Frag::Word).unwrap();
             assert!(live(&w), "{}", show(frag));
         }
         // …and the replacement's own reader agrees, `\&` handling aside.
-        assert!(live(&word_replacement_from_source(b"<(echo hi)", opts, Quoting::Bare, 1).unwrap()));
+        assert!(live(
+            &word_replacement_from_source(b"<(echo hi)", opts, Quoting::Bare, 1).unwrap()
+        ));
         // The arithmetic fragments do not: `Q_DOUBLE_QUOTES|Q_ARITH` is exactly
         // what stops the read, so the evaluator meets the characters and its
         // error names them.
-        assert!(!live(&verbatim_word_at(b"<(echo 1)", opts, Quoting::Bare, 1, Frag::Arith).unwrap()));
-        assert!(!live(&word_subscript_from_source(b"<(echo 1)", opts, Quoting::Bare).unwrap()));
+        assert!(!live(
+            &verbatim_word_at(b"<(echo 1)", opts, Quoting::Bare, 1, Frag::Arith).unwrap()
+        ));
+        assert!(!live(
+            &word_subscript_from_source(b"<(echo 1)", opts, Quoting::Bare).unwrap()
+        ));
         // A substring bound is the other arithmetic fragment, and now reaches
         // the very same reader — it used to be tokenized, which is what made it
         // the one context that disagreed with the subscript beside it.
         let bound: Vec<Ch> = bytes::chars(b"<(echo 1)").collect();
         assert!(!live(
-            &parse_slice_bounds(&bound, opts, Quoting::Bare, 1).unwrap().unwrap().offset
+            &parse_slice_bounds(&bound, opts, Quoting::Bare, 1)
+                .unwrap()
+                .unwrap()
+                .offset
         ));
         // A double-quoted operand keeps the characters. So does a quoted run
         // inside a *bare* one — the quotes are what the test is about, not
         // which fragment it is.
-        assert!(!live(&operand_from_source(b"<(echo hi)", opts, Quoting::Dquote, 1, &[]).unwrap()));
-        for frag in [b"\"<(echo hi)\"".as_slice(), b"'<(echo hi)'", b"\\<\\(echo hi\\)"] {
+        assert!(!live(
+            &operand_from_source(b"<(echo hi)", opts, Quoting::Dquote, 1, &[]).unwrap()
+        ));
+        for frag in [
+            b"\"<(echo hi)\"".as_slice(),
+            b"'<(echo hi)'",
+            b"\\<\\(echo hi\\)",
+        ] {
             let w = verbatim_word_at(frag, opts, Quoting::Bare, 1, Frag::Word).unwrap();
             assert!(!live(&w), "{}", show(frag));
         }
@@ -10938,7 +11584,12 @@ mod tests {
         // but not for an ordinary one; `ParseError::fatal` is what carries that
         // apart. A backtick body is not marked: bash defers parsing it to
         // expansion time, so its failure never reaches the reader at all.
-        for src in ["echo $( ! )", "cat <( ! )", "cat >(for)", "echo $( echo $(if) )"] {
+        for src in [
+            "echo $( ! )",
+            "cat <( ! )",
+            "cat >(for)",
+            "echo $( echo $(if) )",
+        ] {
             assert!(parse(src).unwrap_err().fatal, "{src}");
         }
         for src in ["for", "echo a | | b", "echo )", "if true"] {
@@ -10966,7 +11617,9 @@ mod tests {
         assert!(p.timed);
         assert!(!p.time_posix);
         // The `time` word is consumed, so the body is just `echo hi`.
-        let Command::Simple(sc) = &p.commands[0] else { panic!() };
+        let Command::Simple(sc) = &p.commands[0] else {
+            panic!()
+        };
         assert_eq!(sc.words[0].parts.len(), 1);
 
         let prog = parse("time -p sleep 0 | cat").unwrap();
@@ -11004,8 +11657,10 @@ mod tests {
     #[test]
     fn cond_expression() {
         let prog = parse("[[ $x == foo ]]").unwrap();
-        let Command::Cond(CondClause { expr: CondExpr::Binary(_, op, _), .. }) =
-            &prog.items[0].list.first.commands[0]
+        let Command::Cond(CondClause {
+            expr: CondExpr::Binary(_, op, _),
+            ..
+        }) = &prog.items[0].list.first.commands[0]
         else {
             panic!("expected cond binary");
         };
@@ -11021,8 +11676,10 @@ mod tests {
     fn cond_operator_keeps_its_spelling() {
         let binop = |src: &str| {
             let prog = parse(src).unwrap();
-            let Command::Cond(CondClause { expr: CondExpr::Binary(_, op, _), .. }) =
-                &prog.items[0].list.first.commands[0]
+            let Command::Cond(CondClause {
+                expr: CondExpr::Binary(_, op, _),
+                ..
+            }) = &prog.items[0].list.first.commands[0]
             else {
                 panic!("expected cond binary");
             };
@@ -11035,8 +11692,10 @@ mod tests {
 
         let unop = |src: &str| {
             let prog = parse(src).unwrap();
-            let Command::Cond(CondClause { expr: CondExpr::Unary(op, _), .. }) =
-                &prog.items[0].list.first.commands[0]
+            let Command::Cond(CondClause {
+                expr: CondExpr::Unary(op, _),
+                ..
+            }) = &prog.items[0].list.first.commands[0]
             else {
                 panic!("expected cond unary");
             };
@@ -11050,7 +11709,9 @@ mod tests {
         assert_eq!(unop("[[ -n f ]]"), "-n");
         // The whole `test`/`[` set parses here too, which is the property that
         // sharing one table buys: these used to be syntax errors in `[[ ]]`.
-        for op in ["-a", "-b", "-c", "-g", "-k", "-p", "-u", "-G", "-N", "-O", "-R", "-S"] {
+        for op in [
+            "-a", "-b", "-c", "-g", "-k", "-p", "-u", "-G", "-N", "-O", "-R", "-S",
+        ] {
             assert_eq!(unop(&format!("[[ {op} f ]]")), op);
         }
     }
@@ -11059,8 +11720,10 @@ mod tests {
     fn cond_logical_precedence() {
         // `||` binds looser than `&&`: a || b && c parses as a || (b && c).
         let prog = parse("[[ 1 -eq 1 || 2 -eq 2 && 3 -eq 3 ]]").unwrap();
-        let Command::Cond(CondClause { expr: CondExpr::Or(_, right), .. }) =
-            &prog.items[0].list.first.commands[0]
+        let Command::Cond(CondClause {
+            expr: CondExpr::Or(_, right),
+            ..
+        }) = &prog.items[0].list.first.commands[0]
         else {
             panic!("expected top-level Or");
         };
@@ -11072,7 +11735,10 @@ mod tests {
         let prog = parse("[[ $x =~ foo ]]").unwrap();
         assert!(matches!(
             prog.items[0].list.first.commands[0],
-            Command::Cond(CondClause { expr: CondExpr::Regex(_, _), .. })
+            Command::Cond(CondClause {
+                expr: CondExpr::Regex(_, _),
+                ..
+            })
         ));
     }
 
@@ -11083,8 +11749,10 @@ mod tests {
     fn cond_regex_group_spans_blanks_and_operators() {
         let regex_of = |src: &str| -> String {
             let prog = parse(src).unwrap_or_else(|e| panic!("{src}: {}", emsg(&e)));
-            let Command::Cond(CondClause { expr: CondExpr::Regex(_, rhs), .. }) =
-                &prog.items[0].list.first.commands[0]
+            let Command::Cond(CondClause {
+                expr: CondExpr::Regex(_, rhs),
+                ..
+            }) = &prog.items[0].list.first.commands[0]
             else {
                 panic!("{src}: expected a regex conditional");
             };

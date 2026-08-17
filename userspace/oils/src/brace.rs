@@ -136,10 +136,18 @@ fn match_brace(atoms: &[Atom], open: usize) -> Option<BraceMatch> {
                 depth -= 1;
                 if depth == 0 {
                     if !commas.is_empty() {
-                        return Some(BraceMatch { open, close: j, commas });
+                        return Some(BraceMatch {
+                            open,
+                            close: j,
+                            commas,
+                        });
                     }
                     if sequence_of(&atoms[open + 1..j]).is_some() {
-                        return Some(BraceMatch { open, close: j, commas: Vec::new() });
+                        return Some(BraceMatch {
+                            open,
+                            close: j,
+                            commas: Vec::new(),
+                        });
                     }
                     return None;
                 }
@@ -194,7 +202,11 @@ fn sequence_of(body: &[Atom]) -> Option<Vec<Vec<Atom>>> {
         let step = if incr == 0 { 1 } else { incr.unsigned_abs() };
         let pad = pad_width(segs[0], segs[1]);
         let nums = int_range(start, end, i64::try_from(step).unwrap_or(i64::MAX).max(1));
-        return Some(nums.into_iter().map(|n| str_to_atoms(&format_int(n, pad))).collect());
+        return Some(
+            nums.into_iter()
+                .map(|n| str_to_atoms(&format_int(n, pad)))
+                .collect(),
+        );
     }
 
     // Single-character sequence (`{a..e}`, `{Z..A}`).
@@ -256,7 +268,11 @@ fn pad_width(a: &str, b: &str) -> usize {
     // signed zero, which is why the signed form wants one more character.
     let asks = |s: &str| {
         let n = s.len();
-        if (n > 1 && s.starts_with('0')) || (n > 2 && s.starts_with("-0")) { n } else { 0 }
+        if (n > 1 && s.starts_with('0')) || (n > 2 && s.starts_with("-0")) {
+            n
+        } else {
+            0
+        }
     };
     asks(a).max(asks(b))
 }
@@ -319,7 +335,11 @@ fn char_range(start: u32, end: u32, step: u32) -> Vec<u32> {
 /// fill-and-align spelling such as `{:0>N}` would not (it would pad *before*
 /// the sign, giving `0-1`).
 fn format_int(n: i64, width: usize) -> String {
-    if width == 0 { n.to_string() } else { format!("{n:0width$}") }
+    if width == 0 {
+        n.to_string()
+    } else {
+        format!("{n:0width$}")
+    }
 }
 
 fn str_to_atoms(s: &str) -> Vec<Atom> {
@@ -377,15 +397,18 @@ mod tests {
         assert_eq!(expand("{-01..01}"), vec!["-01", "000", "001"]);
         assert_eq!(expand("{-001..1}"), vec!["-001", "0000", "0001"]);
         assert_eq!(expand("{01..-1}"), vec!["01", "00", "-1"]);
-        assert_eq!(expand("{0..-05}"), vec![
-            "000", "-01", "-02", "-03", "-04", "-05"
-        ]);
-        assert_eq!(expand("{-05..05..2}"), vec![
-            "-05", "-03", "-01", "001", "003", "005"
-        ]);
-        assert_eq!(expand("{010..-010..5}"), vec![
-            "0010", "0005", "0000", "-005", "-010"
-        ]);
+        assert_eq!(
+            expand("{0..-05}"),
+            vec!["000", "-01", "-02", "-03", "-04", "-05"]
+        );
+        assert_eq!(
+            expand("{-05..05..2}"),
+            vec!["-05", "-03", "-01", "001", "003", "005"]
+        );
+        assert_eq!(
+            expand("{010..-010..5}"),
+            vec!["0010", "0005", "0000", "-005", "-010"]
+        );
         // Being negative is not itself a request for padding: `-1` asks for
         // nothing, so the width comes from `01` alone and `-1` stays two wide.
         assert_eq!(expand("{-1..01}"), vec!["-1", "00", "01"]);

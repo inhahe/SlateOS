@@ -494,7 +494,9 @@ impl Maps {
         let all = self.root(root);
         let mut out = Vec::new();
         for (i, (seq, target)) in all.iter().enumerate() {
-            let Some(rest) = seq.strip_prefix(prefix) else { continue };
+            let Some(rest) = seq.strip_prefix(prefix) else {
+                continue;
+            };
             // A view is named by a prefix that is itself a key, so the prefix
             // alone is not one of the view's own bindings.
             if rest.is_empty() && !prefix.is_empty() {
@@ -504,7 +506,11 @@ impl Maps {
                 .checked_sub(1)
                 .and_then(|p| all.get(p))
                 .is_some_and(|(before, _)| before.starts_with(seq));
-            out.push(Entry { seq: rest, is_prefix, target });
+            out.push(Entry {
+                seq: rest,
+                is_prefix,
+                target,
+            });
         }
         out
     }
@@ -578,7 +584,10 @@ impl Maps {
     /// variable — which no caller here can ask for, since the only way to name
     /// one is through [`Maps::set_var`], which rejects the unknown.
     fn var(&self, name: &str) -> &[u8] {
-        self.vars.iter().find(|(n, _)| *n == name).map_or(&[][..], |(_, v)| v.as_slice())
+        self.vars
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(&[][..], |(_, v)| v.as_slice())
     }
 
     /// Whether a boolean variable is on.
@@ -628,7 +637,11 @@ impl Maps {
     /// shows `"\M-\C-t"`).
     #[must_use]
     pub fn meta(&self) -> Meta {
-        if self.var_on("convert-meta") { Meta::Prefix } else { Meta::Literal }
+        if self.var_on("convert-meta") {
+            Meta::Prefix
+        } else {
+            Meta::Literal
+        }
     }
 
     /// Apply a `set NAME VALUE`, as readline's `rl_variable_bind` does.
@@ -660,7 +673,9 @@ impl Maps {
         // it is one, which is what the capture holds: no boolean is ever
         // anything but `on` or `off`, and no other variable is either.
         let boolean = matches!(
-            crate::bind_tables::VARIABLES.iter().find(|(n, _)| n.as_bytes() == name),
+            crate::bind_tables::VARIABLES
+                .iter()
+                .find(|(n, _)| n.as_bytes() == name),
             Some((_, "on" | "off"))
         );
         let new: Vec<u8> = match name {
@@ -938,10 +953,15 @@ fn version_arg(s: &[u8]) -> u32 {
     let num = |b: &[u8]| -> u32 {
         b.iter()
             .take_while(|c| c.is_ascii_digit())
-            .fold(0u32, |a, c| a.saturating_mul(10).saturating_add(u32::from(c - b'0')))
+            .fold(0u32, |a, c| {
+                a.saturating_mul(10).saturating_add(u32::from(c - b'0'))
+            })
     };
     let (major, minor) = match s.iter().position(|&b| b == b'.') {
-        Some(i) => (s.get(..i).unwrap_or(&[]), s.get(i.saturating_add(1)..).unwrap_or(&[])),
+        Some(i) => (
+            s.get(..i).unwrap_or(&[]),
+            s.get(i.saturating_add(1)..).unwrap_or(&[]),
+        ),
         None => (s, &[][..]),
     };
     num(major).saturating_mul(10).saturating_add(num(minor))
@@ -996,7 +1016,10 @@ impl Maps {
             let short = term.split(|&b| b == b'-').next().unwrap_or(term);
             return want == term || want == short;
         }
-        if args.get(..7).is_some_and(|w| w.eq_ignore_ascii_case(b"version")) {
+        if args
+            .get(..7)
+            .is_some_and(|w| w.eq_ignore_ascii_case(b"version"))
+        {
             return version_test(args);
         }
         args.eq_ignore_ascii_case(b"bash")
@@ -1264,7 +1287,10 @@ mod tests {
     fn a_bound_prefix_sorts_after_its_own_continuations() {
         let mut seqs: Vec<&[u8]> = vec![b"\x19", b"\x14", b"\x14Z", b"\x14A", b"\x1bb"];
         seqs.sort_by(|a, b| cmp_seq(a, b));
-        assert_eq!(seqs, vec![&b"\x14A"[..], b"\x14Z", b"\x14", b"\x19", b"\x1bb"]);
+        assert_eq!(
+            seqs,
+            vec![&b"\x14A"[..], b"\x14Z", b"\x14", b"\x19", b"\x1bb"]
+        );
     }
 
     #[test]
@@ -1286,7 +1312,11 @@ mod tests {
         assert_eq!(decode(br"\M-y", false), vec![0xf9]);
         for spec in [r"\ey", r"\033y"] {
             for cm in [true, false] {
-                assert_eq!(decode(spec.as_bytes(), cm), vec![0x1b, b'y'], "{spec} cm={cm}");
+                assert_eq!(
+                    decode(spec.as_bytes(), cm),
+                    vec![0x1b, b'y'],
+                    "{spec} cm={cm}"
+                );
             }
         }
         // The two modifiers commute: both are gathered as flags and applied
@@ -1363,7 +1393,9 @@ mod tests {
             let live: Vec<String> = maps
                 .entries(name)
                 .iter()
-                .map(|e| String::from_utf8_lossy(&encode(e.seq, e.is_prefix, Meta::Prefix)).into_owned())
+                .map(|e| {
+                    String::from_utf8_lossy(&encode(e.seq, e.is_prefix, Meta::Prefix)).into_owned()
+                })
                 .collect();
             let mut want: Vec<String> = captured
                 .bindings
@@ -1398,9 +1430,22 @@ mod tests {
         // through the child leaves the parent's own bindings alone.
         let mut child = maps.clone();
         child.unbind_function("emacs-meta", "yank");
-        assert_eq!(child.entries("emacs").iter().filter(|e| *e.target == yank).count(), 1);
+        assert_eq!(
+            child
+                .entries("emacs")
+                .iter()
+                .filter(|e| *e.target == yank)
+                .count(),
+            1
+        );
         maps.unbind_function("emacs", "yank");
-        assert_eq!(maps.entries("emacs").iter().filter(|e| *e.target == yank).count(), 0);
+        assert_eq!(
+            maps.entries("emacs")
+                .iter()
+                .filter(|e| *e.target == yank)
+                .count(),
+            0
+        );
     }
 
     /// A prefix that is bound in its own right keeps its binding, and gets the
@@ -1412,7 +1457,9 @@ mod tests {
             m.entries("emacs")
                 .iter()
                 .filter(|e| matches!(e.target, Target::Macro(_)))
-                .map(|e| String::from_utf8_lossy(&encode(e.seq, e.is_prefix, Meta::Literal)).into_owned())
+                .map(|e| {
+                    String::from_utf8_lossy(&encode(e.seq, e.is_prefix, Meta::Literal)).into_owned()
+                })
                 .collect()
         };
         maps.bind("emacs", &[0x14], Target::Macro(b"pfx".to_vec()));
@@ -1449,16 +1496,28 @@ mod tests {
         assert_eq!(bound(r#""\C-t"   yank"#), ("\\C-t".into(), "yank".into()));
         assert_eq!(bound("Control-w: yank"), ("\\C-w".into(), "yank".into()));
         // The space came first, so the colon is what the target starts with.
-        assert_eq!(bound(r#""\C-t" : yank"#), ("\\C-t".into(), "(unbind)".into()));
+        assert_eq!(
+            bound(r#""\C-t" : yank"#),
+            ("\\C-t".into(), "(unbind)".into())
+        );
         // So is nothing at all, and so is a name readline does not know.
         assert_eq!(bound(r#""\C-t": "#), ("\\C-t".into(), "(unbind)".into()));
-        assert_eq!(bound(r#""\C-t": nosuchfunc"#), ("\\C-t".into(), "(unbind)".into()));
+        assert_eq!(
+            bound(r#""\C-t": nosuchfunc"#),
+            ("\\C-t".into(), "(unbind)".into())
+        );
         // The target ends at the first whitespace, so trailing space is not
         // part of the name.
         assert_eq!(bound(r#""\C-t": yank   "#), ("\\C-t".into(), "yank".into()));
         // Either quote makes a macro, and its text is decoded like a sequence.
-        assert_eq!(bound(r#""\C-j": "hi""#), ("\\C-j".into(), "macro hi".into()));
-        assert_eq!(bound(r#""\C-j": 'hi'"#), ("\\C-j".into(), "macro hi".into()));
+        assert_eq!(
+            bound(r#""\C-j": "hi""#),
+            ("\\C-j".into(), "macro hi".into())
+        );
+        assert_eq!(
+            bound(r#""\C-j": 'hi'"#),
+            ("\\C-j".into(), "macro hi".into())
+        );
         // An alias resolves to the one function it names — to that group's
         // representative, whichever of the names that is, so that binding
         // through either name is a binding a listing finds under both.
@@ -1498,14 +1557,17 @@ mod tests {
             maps.entries("emacs")
                 .iter()
                 .filter(|e| matches!(e.target, Target::Function("yank")))
-                .map(|e| String::from_utf8_lossy(&encode(e.seq, e.is_prefix, maps.meta())).into_owned())
+                .map(|e| {
+                    String::from_utf8_lossy(&encode(e.seq, e.is_prefix, maps.meta())).into_owned()
+                })
                 .collect()
         };
         let mut maps = super::Maps::seeded();
         // The seeded default is *off* (readline's eight-bit set, which is the
         // one every locale but `C`/`POSIX` gets — see `VARIABLES`), so the
         // conversion this test is about has to be asked for.
-        maps.set_var(b"convert-meta", b"on").expect("convert-meta is a variable");
+        maps.set_var(b"convert-meta", b"on")
+            .expect("convert-meta is a variable");
         maps.unbind_function("emacs", "yank");
         maps.bind("emacs", &[0xf4], Target::Function("yank"));
         assert_eq!(listed(&maps), vec!["\\M-t"]);
@@ -1515,7 +1577,8 @@ mod tests {
         assert_eq!(listed(&maps), vec!["\\M-t"]);
         // With the conversion off the byte stays a byte — and is printed in
         // octal, the escape sub-map being the only thing that prints `\M-`.
-        maps.set_var(b"convert-meta", b"off").expect("convert-meta is a variable");
+        maps.set_var(b"convert-meta", b"off")
+            .expect("convert-meta is a variable");
         maps.unbind_function("emacs", "yank");
         maps.bind("emacs", &[0xf4], Target::Function("yank"));
         assert_eq!(listed(&maps), vec!["\\364"]);
@@ -1528,11 +1591,19 @@ mod tests {
     fn a_variable_takes_the_value_readline_would_have_stored() {
         let mut maps = super::Maps::seeded();
         let get = |m: &super::Maps, n: &str| String::from_utf8_lossy(m.var(n)).into_owned();
-        for (given, want) in [("1", "on"), ("On", "on"), ("", "on"), ("whatever", "off"), ("0", "off")] {
-            maps.set_var(b"expand-tilde", given.as_bytes()).expect("a boolean");
+        for (given, want) in [
+            ("1", "on"),
+            ("On", "on"),
+            ("", "on"),
+            ("whatever", "off"),
+            ("0", "off"),
+        ] {
+            maps.set_var(b"expand-tilde", given.as_bytes())
+                .expect("a boolean");
             assert_eq!(get(&maps, "expand-tilde"), want, "set expand-tilde {given}");
         }
-        maps.set_var(b"comment-begin", b";;").expect("a string variable");
+        maps.set_var(b"comment-begin", b";;")
+            .expect("a string variable");
         assert_eq!(get(&maps, "comment-begin"), ";;");
         // A keymap name is canonicalised, and an impossible one is refused
         // without disturbing what was there.
@@ -1541,9 +1612,11 @@ mod tests {
         assert!(maps.set_var(b"keymap", b"nosuchmap").is_err());
         assert_eq!(maps.keymap(), "vi");
         // `editing-mode` is the keymap under another name: vi starts insert.
-        maps.set_var(b"editing-mode", b"vi").expect("an editing mode");
+        maps.set_var(b"editing-mode", b"vi")
+            .expect("an editing mode");
         assert_eq!(maps.keymap(), "vi-insert");
-        maps.set_var(b"editing-mode", b"emacs").expect("an editing mode");
+        maps.set_var(b"editing-mode", b"emacs")
+            .expect("an editing mode");
         assert_eq!(maps.keymap(), "emacs");
         assert!(maps.set_var(b"editing-mode", b"sideways").is_err());
         assert_eq!(maps.keymap(), "emacs");
@@ -1557,7 +1630,11 @@ mod tests {
             super::Operand::Nothing => "nothing".to_string(),
             super::Operand::Error(e) => String::from_utf8_lossy(&e).into_owned(),
             super::Operand::Set(n, v) => {
-                format!("set {} {}", String::from_utf8_lossy(&n), String::from_utf8_lossy(&v))
+                format!(
+                    "set {} {}",
+                    String::from_utf8_lossy(&n),
+                    String::from_utf8_lossy(&v)
+                )
             }
             super::Operand::Bind(..) => "bind".to_string(),
         };
@@ -1593,7 +1670,9 @@ mod tests {
             .entries("emacs")
             .iter()
             .filter(|e| matches!(e.target, Target::Function("yank")))
-            .map(|e| String::from_utf8_lossy(&encode(e.seq, e.is_prefix, Meta::Prefix)).into_owned())
+            .map(|e| {
+                String::from_utf8_lossy(&encode(e.seq, e.is_prefix, Meta::Prefix)).into_owned()
+            })
             .collect();
         let errs = errs
             .iter()
@@ -1615,7 +1694,10 @@ mod tests {
     #[test]
     fn a_false_conditional_hides_everything_down_to_its_own_endif() {
         assert_eq!(added("$if Bash\n\"\\C-t\": yank\n$endif\n"), ["\\C-t"]);
-        assert_eq!(added("$if nosuchapp\n\"\\C-t\": yank\n$endif\n"), [] as [&str; 0]);
+        assert_eq!(
+            added("$if nosuchapp\n\"\\C-t\": yank\n$endif\n"),
+            [] as [&str; 0]
+        );
         // The inner `$if` is true on its own and still contributes nothing.
         assert_eq!(
             added("$if nosuchapp\n$if Bash\n\"\\C-t\": yank\n$endif\n\"\\C-e\": yank\n$endif\n"),
@@ -1643,13 +1725,31 @@ mod tests {
         // is no `application=` form, so that whole string is just a name that
         // is not `bash` (measured).
         assert_eq!(added("$if BaSh\n\"\\C-t\": yank\n$endif\n"), ["\\C-t"]);
-        assert_eq!(added("$if application=bash\n\"\\C-t\": yank\n$endif\n"), [] as [&str; 0]);
-        assert_eq!(added("$if mode=emacs\n\"\\C-t\": yank\n$endif\n"), ["\\C-t"]);
-        assert_eq!(added("$if mode=vi\n\"\\C-t\": yank\n$endif\n"), [] as [&str; 0]);
+        assert_eq!(
+            added("$if application=bash\n\"\\C-t\": yank\n$endif\n"),
+            [] as [&str; 0]
+        );
+        assert_eq!(
+            added("$if mode=emacs\n\"\\C-t\": yank\n$endif\n"),
+            ["\\C-t"]
+        );
+        assert_eq!(
+            added("$if mode=vi\n\"\\C-t\": yank\n$endif\n"),
+            [] as [&str; 0]
+        );
         // The terminal matches in full and up to the first `-`.
-        assert_eq!(added("$if term=xterm-256color\n\"\\C-t\": yank\n$endif\n"), ["\\C-t"]);
-        assert_eq!(added("$if term=xterm\n\"\\C-t\": yank\n$endif\n"), ["\\C-t"]);
-        assert_eq!(added("$if term=xter\n\"\\C-t\": yank\n$endif\n"), [] as [&str; 0]);
+        assert_eq!(
+            added("$if term=xterm-256color\n\"\\C-t\": yank\n$endif\n"),
+            ["\\C-t"]
+        );
+        assert_eq!(
+            added("$if term=xterm\n\"\\C-t\": yank\n$endif\n"),
+            ["\\C-t"]
+        );
+        assert_eq!(
+            added("$if term=xter\n\"\\C-t\": yank\n$endif\n"),
+            [] as [&str; 0]
+        );
         // 8.2, against every operator. A bare major number is `major.0`.
         for (test, want) in [
             ("version >= 4.0", true),

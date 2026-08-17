@@ -209,7 +209,10 @@ pub(crate) fn decode_escape(chars: &mut Cursor<'_>, out: &mut Str, mode: EscapeM
         b'\'' | b'"' | b'?' if mode.ansi_c_family() => out.push(c),
         b'c' => match mode {
             EscapeMode::PrintfB | EscapeMode::EchoE => {
-                return Decoded { stop: true, bad: None };
+                return Decoded {
+                    stop: true,
+                    bad: None,
+                };
             }
             // printf's FORMAT string has no `\c` at all.
             EscapeMode::PrintfFormat => out.extend_from_slice(b"\\c"),
@@ -221,7 +224,10 @@ pub(crate) fn decode_escape(chars: &mut Cursor<'_>, out: &mut Str, mode: EscapeM
             None => {
                 out.extend_from_slice(b"\\x");
                 if mode.reports_bad_escape() {
-                    return Decoded { stop: false, bad: Some("missing hex digit for \\x") };
+                    return Decoded {
+                        stop: false,
+                        bad: Some("missing hex digit for \\x"),
+                    };
                 }
             }
         },
@@ -240,7 +246,10 @@ pub(crate) fn decode_escape(chars: &mut Cursor<'_>, out: &mut Str, mode: EscapeM
                         } else {
                             "missing unicode digit for \\U"
                         };
-                        return Decoded { stop: false, bad: Some(msg) };
+                        return Decoded {
+                            stop: false,
+                            bad: Some(msg),
+                        };
                     }
                 }
             }
@@ -355,10 +364,18 @@ pub(crate) fn unescape_echo(s: &[u8], mode: EscapeMode) -> EchoUnescaped {
             bad.push((text.len(), msg));
         }
         if d.stop {
-            return EchoUnescaped { text, stopped: true, bad };
+            return EchoUnescaped {
+                text,
+                stopped: true,
+                bad,
+            };
         }
     }
-    EchoUnescaped { text, stopped: false, bad }
+    EchoUnescaped {
+        text,
+        stopped: false,
+        bad,
+    }
 }
 
 #[cfg(test)]
@@ -367,7 +384,10 @@ mod tests {
     use crate::bytes::Str;
 
     fn hex(s: &[u8]) -> String {
-        s.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+        s.iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn echo_b(s: &[u8]) -> Str {

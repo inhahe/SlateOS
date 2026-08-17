@@ -22,6 +22,7 @@
 //! (design-decisions.md, "osh's string layer is UTF-8, full stop").
 
 use charwidth::char_width;
+use coreutils::filekind;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{quote, quotef_os};
 use std::ffi::OsString;
@@ -603,61 +604,48 @@ impl Stat {
 /// that `File` drop would close standard input in the middle of a program that
 /// is about to read it, so the handle is wrapped in `ManuallyDrop`.
 fn stdin_stat() -> Stat {
+    // `filekind::regular`, not `Metadata::is_file`, and the reason is the host:
+    // on Windows `is_file` means "not a directory and not a symlink", so a pipe
+    // answers *yes* and reports a length of however many bytes happen to be
+    // buffered in it — which would make `printf 'a b\nc\n' | wc` pad to 1 where
+    // GNU pads to 7. The three-valued answer is what is needed here rather than
+    // the boolean, because `Failed` and `Other` differ by six columns.
+    let Some(file) = borrowed_stdin() else {
+        return Stat::Failed;
+    };
+    match filekind::regular(&file) {
+        None => Stat::Failed,
+        Some(false) => Stat::Other,
+        Some(true) => Stat::of(file.metadata()),
+    }
+}
+
+/// Standard input as a `File` that will not close it.
+///
+/// `File::from_raw_fd` takes ownership, and letting that `File` drop would close
+/// standard input in the middle of a program that is about to read it — hence
+/// the `ManuallyDrop`. Nothing is read through the returned handle, so it cannot
+/// disturb the stream position either.
+fn borrowed_stdin() -> Option<std::mem::ManuallyDrop<File>> {
     #[cfg(unix)]
     {
         use std::os::fd::{AsRawFd, FromRawFd};
         let fd = io::stdin().as_raw_fd();
         // SAFETY: `fd` is standard input, which the runtime keeps open for the
-        // whole process, and `ManuallyDrop` prevents the `File` from closing
-        // it. Nothing is read through this handle, so it cannot disturb the
-        // stream position either.
-        let file = unsafe { std::mem::ManuallyDrop::new(File::from_raw_fd(fd)) };
-        Stat::of(file.metadata())
+        // whole process, and `ManuallyDrop` prevents the `File` from closing it.
+        Some(unsafe { std::mem::ManuallyDrop::new(File::from_raw_fd(fd)) })
     }
-    // Windows is the host test build only — SlateOS is `cfg(unix)` — but it has
-    // to give the same answers, because the differential harness runs it.
-    //
-    // `Metadata::is_file` cannot be asked here: on Windows it means "not a
-    // directory and not a symlink", so a pipe answers *yes*. Measured, an MSYS
-    // pipe reports `FILE_ATTRIBUTE_NORMAL` and a length of however many bytes
-    // happen to be buffered in it — which would make `printf 'a b\nc\n' | wc`
-    // pad to 1 where GNU pads to 7. `GetFileType` is the honest analogue of
-    // `S_ISREG` and so is asked first; only a `FILE_TYPE_DISK` handle is worth
-    // taking a length from.
     #[cfg(all(not(unix), windows))]
     {
         use std::os::windows::io::{AsRawHandle, FromRawHandle};
-
-        const FILE_TYPE_UNKNOWN: u32 = 0;
-        const FILE_TYPE_DISK: u32 = 1;
-
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetFileType(handle: *mut core::ffi::c_void) -> u32;
-        }
-
         let handle = io::stdin().as_raw_handle();
-        // SAFETY: `handle` is standard input's handle, which the runtime keeps
-        // open for the whole process. `GetFileType` reads the handle's type and
-        // has no other effect — in particular it does not consume input.
-        match unsafe { GetFileType(handle) } {
-            // Not a failure of `GetFileType` itself, but a handle it cannot
-            // classify is one nothing can be concluded from; `fstat` failing is
-            // the closest thing, and it is the conservative answer.
-            FILE_TYPE_UNKNOWN => Stat::Failed,
-            FILE_TYPE_DISK => {
-                // SAFETY: as above — a borrowed standard-input handle, kept
-                // from being closed by `ManuallyDrop`.
-                let file = unsafe { std::mem::ManuallyDrop::new(File::from_raw_handle(handle)) };
-                Stat::of(file.metadata())
-            }
-            // `FILE_TYPE_CHAR` (a console, `NUL`) and `FILE_TYPE_PIPE`.
-            _ => Stat::Other,
-        }
+        // SAFETY: as above — standard input's handle, which the runtime keeps
+        // open for the whole process, kept from being closed by `ManuallyDrop`.
+        Some(unsafe { std::mem::ManuallyDrop::new(File::from_raw_handle(handle)) })
     }
     #[cfg(all(not(unix), not(windows)))]
     {
-        Stat::Failed
+        None
     }
 }
 

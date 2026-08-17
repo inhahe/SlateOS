@@ -252,7 +252,10 @@ impl EParser {
     }
 
     fn peek_ascii_at(&self, off: usize) -> Option<char> {
-        self.chars.get(self.pos.saturating_add(off)).copied().and_then(Ch::as_ascii)
+        self.chars
+            .get(self.pos.saturating_add(off))
+            .copied()
+            .and_then(Ch::as_ascii)
     }
 
     fn parse(&mut self) -> Result<Node, EreError> {
@@ -407,7 +410,9 @@ impl EParser {
         {
             // Both bounds are decimal digits the scan just accepted, so this
             // one message really is text.
-            return Err(EreError(format!("invalid interval {{{min},{n}}}").into_bytes()));
+            return Err(EreError(
+                format!("invalid interval {{{min},{n}}}").into_bytes(),
+            ));
         }
         Ok((min, max))
     }
@@ -421,7 +426,12 @@ impl EParser {
             return None;
         }
         // Every character in the span was just tested `is_ascii_digit`.
-        let s: String = self.chars.get(start..self.pos)?.iter().filter_map(|c| c.as_ascii()).collect();
+        let s: String = self
+            .chars
+            .get(start..self.pos)?
+            .iter()
+            .filter_map(|c| c.as_ascii())
+            .collect();
         s.parse::<usize>().ok()
     }
 
@@ -949,7 +959,10 @@ impl Regex {
             // the slots are read with `get`, so even a saturated index is a
             // missing capture rather than a panic.
             let (open, close) = (g.saturating_mul(2), g.saturating_mul(2).saturating_add(1));
-            match (slots.get(open).copied().flatten(), slots.get(close).copied().flatten()) {
+            match (
+                slots.get(open).copied().flatten(),
+                slots.get(close).copied().flatten(),
+            ) {
                 (Some(s), Some(e)) if s <= e && e <= chars.len() => {
                     let span = chars.get(s..e).unwrap_or_default();
                     out.push(Some(bytes::from_chars(span.iter().copied())));
@@ -989,7 +1002,10 @@ impl Regex {
     pub fn find_at(&self, text: BStr<'_>, from: usize) -> Option<(usize, usize)> {
         let scan = Scan::new(text);
         let slots = self.run(&scan.chars, scan.char_index(from))?;
-        scan.span(slots.first().copied().flatten()?, slots.get(1).copied().flatten()?)
+        scan.span(
+            slots.first().copied().flatten()?,
+            slots.get(1).copied().flatten()?,
+        )
     }
 
     /// Every non-overlapping match, left to right, as byte offsets.
@@ -1047,12 +1063,18 @@ impl Regex {
     }
 
     /// Turn a winning thread's character slots into byte spans, one per group.
-    fn spans_from_slots(&self, scan: &Scan, slots: &[Option<usize>]) -> Vec<Option<(usize, usize)>> {
+    fn spans_from_slots(
+        &self,
+        scan: &Scan,
+        slots: &[Option<usize>],
+    ) -> Vec<Option<(usize, usize)>> {
         let mut out = Vec::with_capacity(self.ngroups.saturating_add(1));
         for g in 0..=self.ngroups {
             let (open, close) = (g.saturating_mul(2), g.saturating_mul(2).saturating_add(1));
-            let span = match (slots.get(open).copied().flatten(), slots.get(close).copied().flatten())
-            {
+            let span = match (
+                slots.get(open).copied().flatten(),
+                slots.get(close).copied().flatten(),
+            ) {
                 (Some(s), Some(e)) => scan.span(s, e),
                 _ => None,
             };
@@ -1423,7 +1445,9 @@ mod tests {
     }
 
     fn mi(pat: &str, s: &str) -> bool {
-        Regex::new_flags(pat.as_bytes(), true).unwrap().is_match(s.as_bytes())
+        Regex::new_flags(pat.as_bytes(), true)
+            .unwrap()
+            .is_match(s.as_bytes())
     }
 
     /// [`Regex::new`] over a text pattern, for the cases that only ask whether
@@ -1649,7 +1673,10 @@ mod tests {
 
         // A capture hands back the bytes, not an approximation of them — this
         // is what reaches `BASH_REMATCH`.
-        let caps = Regex::new(b"^a(.+)b$").unwrap().captures(b"a\xff\xfeb").unwrap();
+        let caps = Regex::new(b"^a(.+)b$")
+            .unwrap()
+            .captures(b"a\xff\xfeb")
+            .unwrap();
         assert_eq!(caps[1].as_deref(), Some(&b"\xff\xfe"[..]));
     }
 
@@ -1702,7 +1729,9 @@ mod tests {
         // leftmost-first. Priority ordering alone answers these with the short
         // arm, which is what `grep -o` and `sed` would then have printed.
         let cap = |pat: &str, s: &str| {
-            compile(pat).unwrap().captures(s.as_bytes()).unwrap()[0].clone().unwrap()
+            compile(pat).unwrap().captures(s.as_bytes()).unwrap()[0]
+                .clone()
+                .unwrap()
         };
         assert_eq!(cap("a|ab", "ab"), b"ab");
         assert_eq!(cap("ab|a", "ab"), b"ab");
@@ -1726,11 +1755,10 @@ mod tests {
         assert_eq!(caps[0].as_deref(), Some(&b"aaabb"[..]));
         assert_eq!(caps[1].as_deref(), Some(&b"aaa"[..]));
         assert_eq!(caps[2].as_deref(), Some(&b"bb"[..]));
-        assert_eq!(re.capture_spans(b"xaaabb").unwrap(), vec![
-            Some((1, 6)),
-            Some((1, 4)),
-            Some((4, 6)),
-        ]);
+        assert_eq!(
+            re.capture_spans(b"xaaabb").unwrap(),
+            vec![Some((1, 6)), Some((1, 4)), Some((4, 6)),]
+        );
     }
 
     // ---- byte offsets ----------------------------------------------------
@@ -1784,7 +1812,11 @@ mod tests {
         // rounding back would re-match text already consumed and loop.
         let hay = "éab".as_bytes();
         assert_eq!(re("a").find_at(hay, 1), Some((2, 3)));
-        assert_eq!(re("é").find_at(hay, 1), None, "the character at 0..2 is behind us");
+        assert_eq!(
+            re("é").find_at(hay, 1),
+            None,
+            "the character at 0..2 is behind us"
+        );
     }
 
     #[test]
@@ -1820,12 +1852,18 @@ mod tests {
         // Only the *touching* empty match goes. `axa` reports the two runs and
         // neither of the empty matches that sit against their ends — which is
         // `sed 's/a*/-/g'` giving `-x-` and `grep -o 'a*'` giving two lines.
-        assert_eq!(re("a*").find_iter(b"axa").collect::<Vec<_>>(), vec![(0, 1), (2, 3)]);
+        assert_eq!(
+            re("a*").find_iter(b"axa").collect::<Vec<_>>(),
+            vec![(0, 1), (2, 3)]
+        );
     }
 
     #[test]
     fn a_scan_does_not_overlap_its_own_matches() {
-        assert_eq!(re("aa").find_iter(b"aaaa").collect::<Vec<_>>(), vec![(0, 2), (2, 4)]);
+        assert_eq!(
+            re("aa").find_iter(b"aaaa").collect::<Vec<_>>(),
+            vec![(0, 2), (2, 4)]
+        );
     }
 
     #[test]
@@ -1847,7 +1885,10 @@ mod tests {
             .capture_spans_iter(hay)
             .map(|g| (g[1].unwrap(), g[2].unwrap()))
             .collect();
-        assert_eq!(got, vec![((0, 1), (1, 2)), ((3, 4), (4, 6)), ((7, 8), (8, 9))]);
+        assert_eq!(
+            got,
+            vec![((0, 1), (1, 2)), ((3, 4), (4, 6)), ((7, 8), (8, 9))]
+        );
     }
 
     #[test]

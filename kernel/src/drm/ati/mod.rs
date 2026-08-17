@@ -44,8 +44,11 @@
 //!   not establish.
 //! - [`aperture`] — BAR0 mapping: the video memory itself, so the CPU can put
 //!   pixels in it. Impure, and validated the same way.
+//! - [`backend`] — the above assembled into a DRM device: the state that
+//!   outlives a single call, and the entry points [`crate::drm`] dispatches to.
 
 pub mod aperture;
+pub mod backend;
 pub mod mmio;
 pub mod modeset;
 pub mod regs;
@@ -150,32 +153,57 @@ pub fn self_test() -> KernelResult<()> {
 /// distinction that matters is preserved in the log: "no device" and "device
 /// present but its registers disagree with the register map" say different
 /// things, and the second is a bug in [`regs`] that a silent skip would hide.
-pub fn probe_hardware() {
-    match mmio::probe() {
+pub fn probe_hardware() -> Option<backend::AtiBackend> {
+    let dev = match mmio::probe() {
         Ok(None) => {
             serial_println!("[ati] No supported ATI display device present");
-        }
-        Ok(Some(dev)) => {
-            if let Err(e) = mmio::verify(&dev) {
-                serial_println!(
-                    "[ati] WARNING: register-map verification failed: {:?} — offsets in regs.rs are suspect",
-                    e
-                );
-                // A card whose register map does not read back correctly is the
-                // last thing that should be handed a mode-set: every write would
-                // land somewhere other than intended.
-                return;
-            }
-            serial_println!(
-                "[ati] {} register map verified against hardware",
-                dev.info.name
-            );
-            exercise_modeset(&dev);
+            return None;
         }
         Err(e) => {
             serial_println!("[ati] WARNING: probe failed: {:?}", e);
+            return None;
         }
+        Ok(Some(dev)) => dev,
+    };
+
+    if let Err(e) = mmio::verify(&dev) {
+        serial_println!(
+            "[ati] WARNING: register-map verification failed: {:?} — offsets in regs.rs are suspect",
+            e
+        );
+        // A card whose register map does not read back correctly is the last
+        // thing that should be handed a mode-set: every write would land
+        // somewhere other than intended. Nor is it registered — a DRM device
+        // whose registers are not where the driver thinks is worse than no
+        // device, because something will try to display on it.
+        return None;
     }
+    serial_println!(
+        "[ati] {} register map verified against hardware",
+        dev.info.name
+    );
+
+    // SAFETY: `dev.vram_phys` is BAR0 as this card's own config space reports
+    // it, and this is the only place an `AtiBackend` — and so the only place a
+    // `VramAperture` over that BAR — is constructed. `drm::init` calls this
+    // once.
+    let mut backend = match unsafe { backend::AtiBackend::new(dev) } {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[ati] WARNING: could not map VRAM aperture: {e:?} — not registering");
+            return None;
+        }
+    };
+    serial_println!(
+        "[ati]   VRAM aperture mapped: {} MiB at {:#x} (cacheable={})",
+        backend.aperture().len() / (1024 * 1024),
+        backend.aperture().phys(),
+        backend.aperture().is_cached()
+    );
+
+    exercise_modeset(&mut backend);
+    backend.report();
+    Some(backend)
 }
 
 /// Program a mode onto the card and confirm the registers hold it.
@@ -200,8 +228,8 @@ pub fn probe_hardware() {
 /// to paint: the aperture is mapped uncacheable for want of a write-combining
 /// page attribute, so 1.2 MB of pixels is a few tens of milliseconds and 1080p
 /// would be seconds. See [`aperture`]'s module documentation.
-fn exercise_modeset(dev: &mmio::AtiDevice) {
-    if dev.owns_console() {
+fn exercise_modeset(backend: &mut backend::AtiBackend) {
+    if backend.owns_console() {
         serial_println!(
             "[ati]   SKIP mode-set: this card holds the console framebuffer, leaving it alone"
         );
@@ -213,7 +241,7 @@ fn exercise_modeset(dev: &mmio::AtiDevice) {
         return;
     };
 
-    if let Err(e) = drive_display(dev, mode) {
+    if let Err(e) = drive_display(backend, mode) {
         serial_println!("[ati]   WARNING: display exercise failed: {e:?}");
     }
 }
@@ -241,28 +269,11 @@ const BAND_COLOURS: [u32; 3] = [0x00FF_0000, 0x0000_FF00, 0x0000_00FF];
 /// specific: a mapping failure means BAR0 is not where config space says, an
 /// allocation failure means the card reported less memory than a 640x480
 /// buffer, and a readback mismatch means the aperture is mapped but not backed.
-fn drive_display(dev: &mmio::AtiDevice, mode: &timing::ModeTiming) -> KernelResult<()> {
+fn drive_display(backend: &mut backend::AtiBackend, mode: &timing::ModeTiming) -> KernelResult<()> {
     const FORMAT: crate::drm::mode::PixelFormat = crate::drm::mode::PixelFormat::Xrgb8888;
 
-    // SAFETY: `vram_phys` is BAR0 as the device's own config space reports it,
-    // so it names device memory rather than RAM, and this is the only
-    // `VramAperture` created for it — `probe_hardware` runs once from
-    // `drm::init`.
-    let ap = unsafe { aperture::VramAperture::map(dev.vram_phys, u64::from(dev.vram_bytes))? };
-    serial_println!(
-        "[ati]   VRAM aperture mapped: {} MiB at {:#x} (cacheable={})",
-        ap.len() / (1024 * 1024),
-        ap.phys(),
-        ap.is_cached()
-    );
-
-    // The allocator is sized from the *mapped* length, never the card's
-    // reported VRAM. An allocator that knew about memory the CPU cannot reach
-    // would eventually return an offset outside the mapping, producing a
-    // framebuffer the CRTC scans out as garbage and the driver cannot write to
-    // — with both halves looking correct in isolation.
-    let total = u32::try_from(ap.len()).map_err(|_| KernelError::InvalidArgument)?;
-    let mut pool = vram::VramAllocator::new(total)?;
+    let total =
+        u32::try_from(backend.aperture().len()).map_err(|_| KernelError::InvalidArgument)?;
 
     // Plan once at offset zero to learn how large the scanout buffer must be,
     // then allocate, then plan again at the offset actually obtained. The first
@@ -270,36 +281,40 @@ fn drive_display(dev: &mmio::AtiDevice, mode: &timing::ModeTiming) -> KernelResu
     // here, and duplicating it is how the allocation and the CRTC come to
     // disagree about how big a framebuffer is.
     let sizing = modeset::ModeSetPlan::new(mode, FORMAT, 0, total)?;
-    let front = pool.alloc(sizing.size_bytes, modeset::SCANOUT_ALIGN)?;
-    let back = pool.alloc(sizing.size_bytes, modeset::SCANOUT_ALIGN)?;
+    let front = backend
+        .pool_mut()
+        .alloc(sizing.size_bytes, modeset::SCANOUT_ALIGN)?;
+    let back = backend
+        .pool_mut()
+        .alloc(sizing.size_bytes, modeset::SCANOUT_ALIGN)?;
     serial_println!(
         "[ati]   Allocated two {} B scanout buffers at VRAM +{:#x} and +{:#x} ({} B free)",
         sizing.size_bytes,
         front,
         back,
-        pool.free_bytes()
+        backend.pool_mut().free_bytes()
     );
 
     // Paint the two buffers with the same three bands in different orders, so
     // that a flip which does not take effect is visible: if the displayed
     // buffer never changed, the two would be indistinguishable.
-    paint_bands(&ap, front, &sizing, BAND_COLOURS)?;
+    paint_bands(backend.aperture(), front, &sizing, BAND_COLOURS)?;
     paint_bands(
-        &ap,
+        backend.aperture(),
         back,
         &sizing,
         [BAND_COLOURS[2], BAND_COLOURS[0], BAND_COLOURS[1]],
     )?;
-    verify_bands(&ap, front, &sizing, BAND_COLOURS)?;
+    verify_bands(backend.aperture(), front, &sizing, BAND_COLOURS)?;
     serial_println!(
         "[ati]   Painted and read back 3 colour bands in each buffer — BAR0 is real video memory"
     );
 
     // Mode-set onto the front buffer.
     let plan = modeset::ModeSetPlan::new(mode, FORMAT, front, total)?;
-    modeset::apply(&dev.mmio, &plan)?;
-    modeset::verify_applied(&dev.mmio, &plan)?;
-    let displayed = modeset::scanout_offset(&dev.mmio)?;
+    modeset::apply(&backend.device().mmio, &plan)?;
+    modeset::verify_applied(&backend.device().mmio, &plan)?;
+    let displayed = modeset::scanout_offset(&backend.device().mmio)?;
     if displayed != front {
         serial_println!(
             "[ati]   FAIL: CRTC_OFFSET reads {:#x}, wrote {:#x}",
@@ -317,8 +332,8 @@ fn drive_display(dev: &mmio::AtiDevice, mode: &timing::ModeTiming) -> KernelResu
     );
 
     // Page flip to the back buffer: one register write, no copy.
-    modeset::page_flip(&dev.mmio, back)?;
-    let displayed = modeset::scanout_offset(&dev.mmio)?;
+    modeset::page_flip(&backend.device().mmio, back)?;
+    let displayed = modeset::scanout_offset(&backend.device().mmio)?;
     if displayed != back {
         serial_println!(
             "[ati]   FAIL: after flip, CRTC_OFFSET reads {:#x}, wrote {:#x}",
@@ -328,15 +343,38 @@ fn drive_display(dev: &mmio::AtiDevice, mode: &timing::ModeTiming) -> KernelResu
         return Err(KernelError::CorruptedData);
     }
     verify_bands(
-        &ap,
+        backend.aperture(),
         back,
         &sizing,
         [BAND_COLOURS[2], BAND_COLOURS[0], BAND_COLOURS[1]],
     )?;
     serial_println!("[ati]   Page-flipped to +{back:#x} and confirmed — scanout base is live");
 
+    // Stop the CRTC before giving the memory back. It is still scanning the
+    // back buffer, and freeing a run the display engine is actively reading
+    // means the next allocation gets painted underneath a live scanout. That
+    // is the exact hazard `AtiBackend::gem_destroy` refuses with `DeviceBusy`,
+    // and this exercise does not get an exemption from it.
+    //
+    // It also makes the backend's own bookkeeping true: it was constructed
+    // believing no mode is programmed and nothing is being scanned out, and
+    // after this that is the case, so the first real page flip correctly
+    // performs a full mode-set rather than assuming a timing it never wrote.
+    modeset::disable(&backend.device().mmio)?;
+    // Read it back: "I wrote the disable bit" and "the CRTC is off" are
+    // different claims, and only the second one makes freeing the buffers safe.
+    let gen_cntl = backend.device().mmio.read32(regs::CRTC_GEN_CNTL)?;
+    if gen_cntl & regs::CRTC_EN != 0 {
+        serial_println!(
+            "[ati]   FAIL: CRTC still enabled after disable (CRTC_GEN_CNTL={gen_cntl:#010x})"
+        );
+        return Err(KernelError::CorruptedData);
+    }
+    serial_println!("[ati]   CRTC disabled and confirmed — scanout buffers safe to release");
+
     // Release both, and check the card came back whole. A driver that leaks its
     // scanout buffers works perfectly until the resolution changes a few times.
+    let pool = backend.pool_mut();
     pool.free(front, sizing.size_bytes)?;
     pool.free(back, sizing.size_bytes)?;
     pool.check_invariants()?;

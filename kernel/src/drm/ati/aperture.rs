@@ -227,6 +227,39 @@ impl VramAperture {
         self.cached
     }
 
+    /// A raw pointer to `len` bytes at `offset`, for callers that must write
+    /// pixels in bulk rather than through [`Self::write32`].
+    ///
+    /// This is the one place the aperture hands out unchecked access, and it is
+    /// bounds-checked *here* precisely because nothing downstream can be: once
+    /// a caller has the pointer, this type has no further say. The range is
+    /// verified whole, so a pointer that comes back covers `len` mapped bytes.
+    ///
+    /// The memory is uncacheable, so ordinary stores through the pointer reach
+    /// the card in program order and no flush is needed — but callers should
+    /// still go through [`Self::flush`] before pointing the CRTC at the result,
+    /// since [`Self::is_cached`] may say otherwise on a machine where the
+    /// mapping was already established with different attributes.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` if `len` is zero or the range is not wholly inside the
+    /// mapping.
+    pub fn ptr_at(&self, offset: u32, len: u32) -> KernelResult<*mut u8> {
+        if len == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let end = u64::from(offset)
+            .checked_add(u64::from(len))
+            .ok_or(KernelError::InvalidArgument)?;
+        if end > self.len {
+            return Err(KernelError::InvalidArgument);
+        }
+        // SAFETY: `offset` is inside the mapping — `offset + len <= self.len`
+        // and `len >= 1` — so the result is an address this handle has mapped.
+        Ok(unsafe { self.base.add(offset as usize) })
+    }
+
     /// Write one 32-bit pixel at a byte offset.
     ///
     /// # Errors

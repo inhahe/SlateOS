@@ -214,6 +214,37 @@ pub fn page_flip(mmio: &AtiMmio, offset: u32) -> KernelResult<()> {
     mmio.write32(regs::CRTC_OFFSET, offset)
 }
 
+/// Stop the CRTC scanning out, and blank the output.
+///
+/// The counterpart to [`apply`], and the thing a driver owes its allocator: a
+/// CRTC left enabled keeps reading whichever VRAM offset it was last given,
+/// whether or not that memory is still allocated. Free the buffer without this
+/// and the display engine is reading a run the suballocator now considers
+/// available — so the next allocation is painted underneath a live scanout,
+/// which is a flickering image of unrelated data and a bug whose cause is two
+/// subsystems away from its symptom.
+///
+/// Both `CRTC_EN` and `CRTC_DISPLAY_DIS` are used, as in [`apply`]'s first
+/// step: clearing the enable stops the fetch, and setting display-disable
+/// blanks the DAC so the monitor sees a clean loss of signal rather than
+/// whatever the last line held.
+///
+/// # Errors
+///
+/// Propagates the register accesses.
+pub fn disable(mmio: &AtiMmio) -> KernelResult<()> {
+    let gen_cntl = mmio.read32(regs::CRTC_GEN_CNTL)?;
+    mmio.write32(
+        regs::CRTC_GEN_CNTL,
+        (gen_cntl & !regs::CRTC_EN) | regs::CRTC_DISPLAY_DIS,
+    )?;
+    let ext = mmio.read32(regs::CRTC_EXT_CNTL)?;
+    mmio.write32(
+        regs::CRTC_EXT_CNTL,
+        (ext & !regs::CRTC_CRT_ON) | regs::CRTC_DISPLAY_DIS,
+    )
+}
+
 /// The scanout base the CRTC is currently reading from.
 ///
 /// # Errors

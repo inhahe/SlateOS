@@ -1,9 +1,9 @@
 //! GEM (Graphics Execution Manager) buffer objects.
 //!
-//! A GEM object is a GPU memory allocation.  For now, all buffers
-//! live in system RAM (allocated via the frame allocator).  When real
-//! GPU drivers with dedicated VRAM are added, the GEM allocator will
-//! manage VRAM address space as well.
+//! A GEM object is a GPU memory allocation. Where those bytes actually live
+//! depends on the driver holding the object, and the two cases are genuinely
+//! different kinds of memory rather than two addresses for the same kind — see
+//! [`GemBacking`].
 //!
 //! ## Handle Namespace
 //!
@@ -41,6 +41,47 @@ pub fn alloc_handle() -> u32 {
     NEXT_HANDLE.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Where a GEM object's bytes actually live.
+///
+/// ## Why this is an enum and not a pointer
+///
+/// The two variants are not two ways of naming the same storage; they differ
+/// in who may free them, how the CPU reaches them, and whether they are
+/// contiguous. Collapsing them into one representation — a `Vec<PhysFrame>`
+/// that happens to hold BAR addresses for the VRAM case — is a corruption bug
+/// waiting to be written, because [`GemObject::free_backing`] hands frames to
+/// the buddy allocator. Doing that with card memory does not leak, it gives
+/// the system allocator addresses that were never RAM, and the damage surfaces
+/// arbitrarily far away from the driver that caused it.
+///
+/// Keeping the distinction in the type means every consumer of the backing has
+/// to say which case it can handle, and the compiler asks. That is the point.
+pub enum GemBacking {
+    /// 16 KiB frames from the buddy allocator, reachable through the HHDM.
+    ///
+    /// Discontiguous in general: a buffer larger than one frame is a list of
+    /// unrelated frames, which is why every consumer walks it per row rather
+    /// than treating the first address as a base.
+    SystemRam(Vec<PhysFrame>),
+    /// A run of a display card's own video memory.
+    ///
+    /// `offset` is in bytes from the base of VRAM — the same origin the CRTC's
+    /// scanout register and the card's VRAM suballocator use, so the value can
+    /// be handed to the hardware without conversion. `len` is the reservation,
+    /// which the owning driver needs in order to give it back.
+    ///
+    /// There is no [`PhysFrame`] here on purpose. These bytes are behind a PCI
+    /// BAR, are not in the frame allocator's map, and are reachable only
+    /// through the mapping the owning driver holds — so they are that driver's
+    /// to hand out and its to reclaim, and nobody else's.
+    Vram {
+        /// Byte offset from the base of the card's video memory.
+        offset: u32,
+        /// Length of the reservation, in bytes.
+        len: u32,
+    },
+}
+
 /// A GPU buffer object.
 pub struct GemObject {
     /// Per-device handle (userspace-visible identifier).
@@ -49,12 +90,8 @@ pub struct GemObject {
     pub id: DrmObjectId,
     /// Total size in bytes.
     pub size: usize,
-    /// Backing physical frames.
-    ///
-    /// For system-RAM buffers, these are standard 16 KiB frames from
-    /// the buddy allocator.  For VRAM buffers (future), this would be
-    /// VRAM page descriptors.
-    pub phys_frames: Vec<PhysFrame>,
+    /// Where the bytes live, and who owns them.
+    pub backing: GemBacking,
     /// Pixel format (if this buffer is intended as a framebuffer).
     pub format: PixelFormat,
     /// Width in pixels.
@@ -127,12 +164,70 @@ impl GemObject {
             handle,
             id,
             size,
-            phys_frames,
+            backing: GemBacking::SystemRam(phys_frames),
             format,
             width,
             height,
             pitch,
         })
+    }
+
+    /// Describe a buffer that lives in a display card's video memory.
+    ///
+    /// Allocates nothing: the caller's VRAM suballocator has already reserved
+    /// `offset..offset + len`, and this only records that fact. Nor does it
+    /// zero the buffer — the caller holds the only mapping of the aperture, so
+    /// it is the only code that *can*, and doing it there keeps the one slow
+    /// uncached pass over the pixels in the driver that knows how slow it is.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` if the reservation is empty or too small for
+    /// `height` rows of `pitch` bytes. Checked here rather than trusted
+    /// because the consequence of a short reservation is a CRTC scanning out
+    /// past the end of it, which is another buffer's pixels or none at all.
+    pub fn from_vram(
+        dev_id_alloc: &dyn Fn() -> DrmObjectId,
+        offset: u32,
+        len: u32,
+        width: u32,
+        height: u32,
+        pitch: u32,
+        format: PixelFormat,
+    ) -> KernelResult<Self> {
+        let size = (pitch as usize)
+            .checked_mul(height as usize)
+            .ok_or(KernelError::InvalidArgument)?;
+        if size == 0 || len == 0 || (len as usize) < size {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(Self {
+            handle: alloc_handle(),
+            id: dev_id_alloc(),
+            size,
+            backing: GemBacking::Vram { offset, len },
+            format,
+            width,
+            height,
+            pitch,
+        })
+    }
+
+    /// The system-RAM frames backing this object.
+    ///
+    /// # Errors
+    ///
+    /// `NotSupported` for a VRAM-resident object. That is not a gap to be
+    /// filled in later: such an object has no frames, because its bytes are on
+    /// the card and are reachable only through the owning driver's aperture.
+    /// Callers that walk frames are asking for something that does not exist,
+    /// and an error says so where an empty slice would quietly read as "a
+    /// zero-byte buffer".
+    pub fn ram_frames(&self) -> KernelResult<&[PhysFrame]> {
+        match &self.backing {
+            GemBacking::SystemRam(frames) => Ok(frames),
+            GemBacking::Vram { .. } => Err(KernelError::NotSupported),
+        }
     }
 
     /// Get a kernel-virtual pointer to the buffer's first byte.
@@ -144,8 +239,17 @@ impl GemObject {
     /// the first frame is directly accessible through this pointer.
     /// For buffers within one frame, this is the entire buffer.
     /// For multi-frame buffers, callers must handle frame boundaries.
+    ///
+    /// # Errors
+    ///
+    /// `NotSupported` for a VRAM-resident object — ask the owning driver's
+    /// `gem_mmap` instead, which is the only code holding a mapping of the
+    /// card's aperture.
     pub fn virt_addr(&self) -> KernelResult<*mut u8> {
-        let first = self.phys_frames.first().ok_or(KernelError::InternalError)?;
+        let first = self
+            .ram_frames()?
+            .first()
+            .ok_or(KernelError::InternalError)?;
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
         let virt = first
             .addr()
@@ -154,13 +258,29 @@ impl GemObject {
         Ok(virt as *mut u8)
     }
 
-    /// Free all backing physical frames.
-    pub fn free_backing(&mut self) {
-        for pf in self.phys_frames.drain(..) {
-            // SAFETY: We allocated these frames in alloc_2d and own them.
-            unsafe {
-                let _ = frame::free_frame(pf);
+    /// Free system-RAM backing, returning the frames to the buddy allocator.
+    ///
+    /// # Errors
+    ///
+    /// `NotSupported` for a VRAM-resident object, whose reservation belongs to
+    /// the owning driver's suballocator. Refusing is the whole reason
+    /// [`GemBacking`] is a type: freeing card memory *through here* would push
+    /// BAR addresses into the system frame allocator, which is silent
+    /// corruption rather than a leak. A driver that holds VRAM objects must
+    /// release them in its own `gem_destroy`; if this error is ever seen, one
+    /// forgot.
+    pub fn free_backing(&mut self) -> KernelResult<()> {
+        match &mut self.backing {
+            GemBacking::SystemRam(frames) => {
+                for pf in frames.drain(..) {
+                    // SAFETY: We allocated these frames in alloc_2d and own them.
+                    unsafe {
+                        let _ = frame::free_frame(pf);
+                    }
+                }
+                Ok(())
             }
+            GemBacking::Vram { .. } => Err(KernelError::NotSupported),
         }
     }
 }

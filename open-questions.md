@@ -401,12 +401,27 @@ end of the word that is, and about what happens in between.
 | **B. Switch to visual** (Windows edit controls, and what ICU's `ubidi` API is built to support) | The caret always moves one step in the direction of the arrow, and never jumps. Holding Right walks the caret smoothly across the line, but the *text position* it is at can go backwards, so typing after several presses inserts earlier in the sentence than the previous press did. |
 | **C. Both, on a setting** | A preference the user sets, defaulting to one of the above. Costs a setting nobody knows how to answer, and doubles the number of behaviours every future text widget has to be correct in. |
 
-**What is already built either way.** The hard part is done: the shaping engine
-already knows, for every character, where it is drawn and which direction it
-runs, and the caret already carries the extra bit ("which side of a direction
-boundary am I on") that either answer needs. Both options are a small amount of
-code on top of that. This is a question about which behaviour is right, not
-about which is affordable.
+**What is already built either way — updated 2026-08-17: option B is now written
+and tested, and is one line per widget away from being switched on.** The
+shaping engine knows where every character is drawn and which way it runs; on
+top of that there are now `caret_left`/`caret_right` functions that take a caret
+and hand back the next caret position *to the left or right on the screen*, with
+tests covering a mixed-direction line, an Arabic ligature crossed as one unit,
+and the pixel round-trip. Nothing calls them. Answering "B" is a one-line change
+in each of three text widgets; answering "A" deletes nothing, because those
+functions are also what mouse selection and any future screen-order feature
+want. **So this question is now purely about which behaviour is right.**
+
+**One thing measured while building it, which strengthens the case that this had
+to be asked rather than guessed.** The extra bit the caret carries ("which side
+of a direction boundary am I on") turned out not to be a nicety. A text box that
+remembers only the caret's *position in the string* between keypresses, and
+works the rest out fresh each time, does not merely land on the wrong side of a
+boundary — it **skips the entire right-to-left word in a single press**. So a
+half-hearted "B" — switching the arrow keys without also making the widgets
+remember that bit — would be *worse* than today's behaviour, not better. That
+groundwork has been done now regardless of the answer, so the choice is no
+longer between "A" and "a risky B".
 
 **My recommendation: B, visual.** The reason is what the key is called. Users
 press "right arrow" while looking at the screen, and an arrow key that sometimes
@@ -424,11 +439,15 @@ constant in Hebrew or Arabic text. It gets harder to change later only in the
 sense that more text widgets will have been written against whichever answer is
 in force.
 
-**Where it bites:** `gui/font/src/shape.rs` (`ShapedRun::x_of`, `offset_at`,
-and the per-glyph bidi levels a visual walk would use), `gui/toolkit/src/text.rs`
-(`TextCursor`), and the arrow-key handling in `guitk::widget::TextInput`,
-`guitk::modal::InputDialog` and `apps/editor`. Tracked in `known-issues.md` →
-`TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`.
+**Where it bites:** `gui/font/src/shape.rs` (`ShapedRun::caret_left` /
+`caret_right`, built 2026-08-17), `gui/toolkit/src/text.rs` (`TextCursor` and
+its `caret_left`/`caret_right` wrappers), and the arrow-key handling in
+`guitk::widget::TextInput` and `guitk::modal::InputDialog` — each of which
+carries a comment marked `C-Q2` naming the exact line to change. `apps/editor`
+is **not** covered by either answer: it draws its caret and scrolls sideways in
+a way that assumes screen order equals reading order, so it needs its own,
+larger fix first (`known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL`).
+Tracked in `known-issues.md` → `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`.
 
 ## C-Q3 — [C] `CLAUDE.md` tells all three lanes to publish finished work through one shared folder, and two of them collided in it today. Change the instruction? — Status: OPEN
 
@@ -625,6 +644,90 @@ it emits; `quotef`/`quoteaf` are unaffected), `userspace/coreutils/src/getopt.rs
 `scripts/quote-probe.py`, which was run under `LC_ALL=C` and would need
 re-running under `C.UTF-8`. First observed by `scripts/wc-diff.sh`, where three
 cases are marked `xfail` with the reason `quote-marks-under-a-utf8-locale`.
+
+## Q49 — [A] We cannot run, or even switch on, a graphics driver for any AMD card made in the last 20 years. Write one anyway, buy hardware, or say we don't support them? — Status: OPEN
+
+**In short:** The plan says the OS should have a driver for AMD graphics cards.
+It turns out there is no way to *try one out*: the emulator we develop against
+doesn't imitate any recent AMD card, and this PC has an NVIDIA card in it. So
+such a driver could be written, but never started even once — no picture, no
+error, nothing to tell us whether any of it works. The emulator does faithfully
+imitate two *very old* AMD cards, and I've written a driver for those, which
+really does run. The question is what to do about the modern ones: write code we
+can't test, get hardware so we can test it, or state plainly that this OS drives
+AMD cards through the generic fallback only.
+
+**Some terms.** *QEMU* is the emulator we boot the OS in for every test.
+*Passthrough* means handing a real graphics card straight to the emulated OS,
+which needs a spare card physically in the machine. *Mode-setting* is the step
+that tells a monitor which resolution and refresh rate to display — the part
+that turns the screen on. *virtio-gpu* is a "pretend" graphics card that only
+exists inside emulators; it works well there and does not exist on real
+hardware. The *bootloader framebuffer* is a plain block of pixels the boot
+firmware hands us: it always works, but the resolution is fixed at boot and
+cannot be changed, and there is no acceleration of any kind.
+
+**What is already settled and not in question.** The old-card driver is done
+and running (`design-decisions.md` §217). Its timing arithmetic is shared with
+the newer chips, so none of it is wasted whichever way this goes. Writing it
+immediately caught a genuine bug that a never-run driver would have kept
+forever. This question is *only* about whether to chase modern AMD cards, and
+if so how.
+
+**Option A — leave it: old AMD cards, virtio-gpu, and the bootloader
+framebuffer are the supported set.**
+*What changes:* nothing today. On a real PC with a modern AMD card, the desktop
+still appears — at whatever resolution the firmware picked, unchangeable, with
+all drawing done by the CPU.
+- *For:* every line of graphics code we have stays code we have actually run.
+  No effort is spent on something we cannot check.
+- *Against:* the OS then doesn't really support the graphics hardware in a large
+  share of desktop PCs, and the plan document says it should.
+
+**Option B — write the modern driver blind, from documentation only.**
+*What changes:* the roadmap item gets ticked; behaviour on real hardware is
+unknown and stays unknown.
+- *For:* it is what the plan literally asks for, and AMD publish thorough
+  documentation.
+- *Against:* I think this is actively worse than doing nothing. A modern card
+  needs firmware loading and a long power-up sequence before it will display
+  anything, and there is no way to discover which step we got wrong — the whole
+  thing either works or produces a black screen, with no clue in between. Worse,
+  the roadmap would then claim AMD support that nobody has ever seen work, which
+  is a claim we'd have to un-make later.
+
+**Option C — put an AMD card in the machine (or a second PC), then write it
+against real hardware.**
+*What changes:* the driver becomes as testable as everything else. Costs money
+and physical setup; a spare graphics card, and passthrough also wants the card
+to be one the host isn't using for its own display.
+- *For:* the only option that ends with a *tested* modern driver. It would also
+  unblock testing every other real-hardware path we currently can't reach.
+- *Against:* real money and real setup work, for one subsystem. And it only
+  covers whichever card we buy.
+
+**Option D — do the mode-setting half blind, skip the rest.**
+*What changes:* on modern AMD hardware, the resolution might become changeable;
+acceleration still wouldn't exist.
+- *For:* mode-setting is the most valuable half and the most likely to be right
+  from documentation.
+- *Against:* on modern cards mode-setting is downstream of the same firmware
+  load and power-up sequence as everything else, so it isn't actually the
+  separable half it is on the old chips. This mostly gets option B's problems
+  for half the benefit.
+
+**Recommendation: A now, C if you want real-hardware support at some point.**
+A is honest and costs nothing; C is the only path to a driver we could stand
+behind. I'd avoid B outright — I would rather the roadmap say we don't support
+these cards than say we do on the strength of code nobody has ever run. But C is
+a spending decision and a hardware decision, which is yours and not mine.
+
+**If this is never answered:** nothing breaks and nothing worsens. The OS keeps
+displaying through virtio-gpu in the emulator and the bootloader framebuffer on
+real machines. The only standing cost is that roadmap §3.1 stays open and the
+plan document keeps asking for something we have decided nothing about. There is
+no time pressure and no drift.
+
 
 ---
 

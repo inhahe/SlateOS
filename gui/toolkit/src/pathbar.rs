@@ -420,11 +420,15 @@ impl PathBar {
             self.selection_anchor = Some(self.cursor.byte);
         }
 
-        if self.cursor.byte > 0 {
-            // Move back one character (handle UTF-8).
-            let s = &self.edit_text[..self.cursor.byte];
+        // Backwards through the string, which on a path holding a right-to-left
+        // directory name is not leftwards on the screen. Deliberate and
+        // unresolved: `open-questions.md` → C-Q2. `text::caret_left` is the
+        // visual alternative, built and tested, and switching is calling it
+        // here instead — but not without an answer.
+        if self.cursor.byte() > 0 {
+            let s = &self.edit_text[..self.cursor.byte()];
             if let Some(ch) = s.chars().next_back() {
-                self.cursor = (self.cursor.byte - ch.len_utf8()).into();
+                self.cursor = (self.cursor.byte() - ch.len_utf8()).into();
             }
         }
     }
@@ -440,10 +444,11 @@ impl PathBar {
             self.selection_anchor = Some(self.cursor.byte);
         }
 
-        if self.cursor.byte < self.edit_text.len() {
-            let s = &self.edit_text[self.cursor.byte..];
+        // Logical, for the reason given in `move_cursor_left` above.
+        if self.cursor.byte() < self.edit_text.len() {
+            let s = &self.edit_text[self.cursor.byte()..];
             if let Some(ch) = s.chars().next() {
-                self.cursor = (self.cursor.byte + ch.len_utf8()).into();
+                self.cursor = (self.cursor.byte() + ch.len_utf8()).into();
             }
         }
     }

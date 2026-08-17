@@ -923,9 +923,28 @@ Roadmap:
   `remove` (`GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES`, fixed in
   `guitk::widget::TextInput`, `guitk::modal::InputDialog` and `apps/editor`,
   which additionally needed `snap_to_boundary` for a column carried between
-  lines). Still open, and wanting its own entry: arrow keys move in *logical*
-  order, so a caret crossing a direction boundary jumps across the screen
-  rather than stepping. Vello itself waits on `[A]`'s GPU driver.
+  lines). **Stepping a caret by the screen is now built but deliberately not
+  wired to the arrow keys** (2026-08-17,
+  `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`, §452): `caret_left`/`caret_right`
+  step through the drawn slots, so a caret crossing a direction boundary steps
+  across it instead of teleporting to the far side and back — but *whether the
+  arrow keys should do that* is a user-visible policy with two defensible
+  answers (Windows/ICU move visually; macOS, GTK and Qt move logically), so it
+  is the operator's call and is queued as **C-Q2**. The arrows still step by the
+  string, each site carries a comment naming the one line that flips it, and the
+  tests are named to say they pin a *policy* rather than a truth. That work
+  found the affinity to be a prerequisite in a stronger sense than expected — a
+  cursor rebuilt from its byte offset each keypress skips an entire
+  right-to-left run in *one* press, so `TextInput` and `InputDialog`, recorded
+  above as needing no affinity because they never draw one, had to carry a
+  `TextCursor` as soon as they had to move; that conversion was made now, since
+  without it answering C-Q2 "visual" later would give something worse than the
+  status quo rather than better. Left out on purpose:
+  `apps/editor`, which places its caret at `measure(prefix)` and scrolls
+  horizontally by *slicing the line at a byte offset* — and the visible part of
+  a bidirectional line is not the shaping of a substring of it, so that is a
+  model change rather than a substitution (`TD-EDITOR-IS-NOT-BIDIRECTIONAL`).
+  Vello itself waits on `[A]`'s GPU driver.
   **Variable fonts are done** (§448, §449, §450, §451): all four steps
   `TD-FONT-DOES-NOT-READ-VARIATION-STORES` mandates have
   landed: `gui/font/src/var.rs` reads `fvar`/`avar` and turns "weight 600" into
@@ -5666,7 +5685,20 @@ _Port ext4 first. Don't write a custom filesystem._
 _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a graphical desktop._
 
 ### 3.1 GPU drivers
-- [ ] `[A]` Port AMDGPU driver (open source, well-documented — first priority)
+- [-] `[A]` Port AMDGPU driver (open source, well-documented — first priority)
+  - **Modern GCN/RDNA is untestable by any available route** — QEMU emulates no
+    modern AMD part and the dev machine has an NVIDIA GPU. Blocked on an
+    operator decision: `open-questions.md` Q49. Rationale: `design-decisions.md` §217.
+  - [x] ATI/AMD legacy display block (R100 / Rage 128) — QEMU `ati-vga` emulates
+        this faithfully, so it is the one AMD-family engine that can be run.
+    - [x] `drm/ati/regs.rs` — register map; CRTC timing packing (8-pixel character
+          units, bias-by-one totals, split sync-start, character-denominated sync
+          width); `PixWidth` format mapping; pitch encoding. Pure, no MMIO.
+    - [x] `drm/ati/timing.rs` — `ModeTiming` (full sync edges + polarity, which
+          `DrmMode` does not carry); 5-entry VESA DMT table; exact-match lookup.
+    - [x] `drm/ati/tests.rs` — boot-time self-test: hand-computed register values
+          for all 5 DMT modes, each encoding quirk isolated, every rejection path.
+    - [ ] MMIO probe + `DrmBackend::Ati`, validated against QEMU `ati-vga`.
 - [ ] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
 - [ ] `[A]` NVIDIA: defer until open-source driver matures, or use Linux compat layer later
 

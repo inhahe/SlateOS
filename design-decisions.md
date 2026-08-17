@@ -18116,6 +18116,112 @@ called proved.
 
 ---
 
+## §452 — A caret slot is named by the character just crossed, so pixels round-trip and byte offsets need not
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** when text on one line runs both ways -- an English sentence with
+a Hebrew word in it -- there are places where the caret can sit that have *two*
+correct byte positions in the text, because the end of the English and the end
+of the Hebrew are the same spot on the screen. Something has to decide which of
+the two a step-by-the-screen reports. The decision is: report the boundary
+belonging to the character just moved past. The consequence is that stepping
+left and then right returns the caret to the same *pixel* every time, but the
+byte number it reports may come back as the other of that spot's two names.
+
+**Scope — what this does and does not settle.** It settles the *convention* of
+the step-by-the-screen primitives, `ShapedRun::caret_left`/`caret_right` and
+their toolkit wrappers, which are built, tested and merged. It does **not**
+decide whether the arrow keys call them. That is a separate, user-visible policy
+question — visual motion (Windows, ICU) versus logical motion (macOS, GTK, Qt) —
+and it is the operator's, filed as `open-questions.md` → **C-Q2** and still
+unanswered. The arrow keys in every toolkit widget therefore still step by the
+string; the primitives sit ready behind a one-line change per site. This entry
+is the decision that had to be made *in order to build them*, not a decision to
+use them.
+
+### The problem
+
+Stepping a caret by the screen (`known-issues.md` ->
+`TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`) walks it through the *drawn*
+order of clusters rather than the byte order. n drawn clusters make n+1 gaps.
+Every gap between two clusters read in *opposite* directions is one position on
+the screen with two names in the string: the trailing edge of the cluster on
+its left and the trailing edge of the cluster on its right are the same pixels
+and different offsets. `Affinity` exists to hold that distinction, but it does
+not decide the question -- something has to say *which* name a step produces.
+
+Take `ab` + a right-to-left `HR` + `cd`, drawn `a b R H c d`. The gap between
+`b` and `R` is byte 2 as "after `b`" and byte 2 as "after `H`" -- here the same
+number, but the *affinity* differs, and at other boundaries the numbers differ
+too.
+
+The affinity is not a refinement, it is load-bearing: a caret rebuilt from its
+byte offset alone on each press does not land on the wrong side of the boundary,
+it steps over the entire right-to-left run in one press. On this exact string a
+rightward walk that discards the affinity visits 1, 2, 7, 8 and never enters the
+Hebrew. `gui/toolkit/src/text.rs` pins that as a test asserting the *broken*
+sequence, so the requirement cannot be regressed quietly.
+
+### The options
+
+**A. Name the boundary by the character just crossed.** Moving right from slot
+k returns the right edge of `clusters[k]`; moving left from slot k returns the
+left edge of `clusters[k-1]`.
+
+*What changes:* the reported byte offset always describes the character the
+caret just moved past.
+
+**B. Name it by the character about to be crossed** -- the mirror.
+
+*What changes:* the reported offset describes the character the *next* press
+will move over.
+
+**C. Canonicalise: always report the lower offset, or always the
+logically-first reading.**
+
+*What changes:* every gap has exactly one name, and a step and its reverse
+return the identical `(offset, affinity)` pair.
+
+### The decision, and why
+
+**A**, which is what every established implementation does (ICU, HarfBuzz's
+sample caret code, and the behaviour of both major browsers' contenteditable).
+
+**Against C, which looks the most appealing.** Canonicalising buys exact
+`(offset, affinity)` round-tripping, but it buys it by throwing away the only
+information that makes the *next* step correct. A caret canonicalised to "after
+`b`" at a boundary cannot know it arrived there by crossing `H` leftwards, so
+the following press steps by `b`'s direction instead of `H`'s and the walk
+becomes non-reversible -- exactly the teleporting the whole change exists to
+remove. Round-tripping the pair is the wrong property to optimise for; the pair
+is an encoding, the *place* is the thing.
+
+**What A costs, stated plainly:** `caret_right` then `caret_left` returns to the
+same pixel but may report the other of the boundary's two names. This is not a
+bug to be fixed later and it is not hidden: the round-trip tests at both layers
+assert on **x**, with a comment saying why, and the same rule is written into
+the doc comments of `caret_left`/`caret_right`. A caller comparing two carets
+for "same place" must compare drawn positions, not offsets -- which is also why
+`TextCursor` is deliberately not `Ord` (see the note in
+`TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL`).
+
+**Between A and B** there is no correctness difference -- they are mirror
+images and both round-trip in pixels. A is chosen for conformance: a user who
+has used any other text field expects the offset to describe what was just
+passed, and matching the platforms is worth more than any argument from first
+principles here.
+
+### Where it lives
+
+`gui/font/src/shape.rs`: `VisualCluster`, `ShapedRun::caret_left`,
+`ShapedRun::caret_right`, `slot_of_caret`. `gui/toolkit/src/text.rs` wraps
+them without adding policy. No caller invokes them yet -- see the scope note
+above and C-Q2.
+
+---
+
 ## §323 — A calculator's runtime error abandons the top-level statement, and the session lives on
 
 **Date:** 2026-08-16
@@ -18406,3 +18512,84 @@ pass. The `SET_CREDENTIALS` exemption is the one to revisit first: no grant site
 confers it today, so both readings still fit, and lane A asked that it stay
 id-agnostic until a real grant site settles it
 (`requests/a-b-resource-id-zero-names-the-class.md`).
+
+---
+
+## §217 — The AMD GPU driver targets the 25-year-old R100/Rage 128, because it is the only AMD display engine this project can actually execute
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** The design spec asks for an AMD graphics driver. The obvious
+reading is a modern one — the GCN/RDNA chips in machines people own today. But
+there is no way to *run* such a driver here: the emulator we test in (QEMU) does
+not pretend to be any modern AMD chip, and the development machine has an NVIDIA
+card in it. So a modern driver would be written entirely by guesswork and never
+once executed. QEMU *does* emulate two ancient AMD/ATI chips faithfully, so the
+driver targets those instead. It is real code that really runs, and the display
+part of the newer chips is a direct descendant of it, so this is groundwork for
+a modern port rather than a detour away from one.
+
+### Context
+
+Roadmap §3.1 calls for an AMDGPU driver. Before writing any of it I checked what
+could be tested, and the answer bounds the whole task:
+
+| Route | Available? |
+|---|---|
+| QEMU emulating a GCN/RDNA part | No — QEMU emulates no modern AMD GPU at all. |
+| Real AMD hardware on the dev machine | No — the machine has an NVIDIA RTX 4090. |
+| PCI passthrough of an AMD card | No card to pass through. |
+| QEMU `ati-vga` (Rage 128 Pro `0x5046`, RV100 `0x5159`) | **Yes** — real MMIO registers, real CRTC timing registers, EDID over i2c-ddc, hardware cursor, 2D acceleration. |
+
+A modern AMDGPU port is therefore not merely hard to test; it is untestable by
+any route available. Every register offset, every bitfield, every ordering
+constraint in it would rest on documentation alone, and nothing would ever
+contradict a mistake.
+
+### Decision
+
+Write the driver against the R100/Rage 128 display block, structured so the
+arithmetic is separable from the bus access:
+
+- `kernel/src/drm/ati/regs.rs` and `timing.rs` are **pure** — register packing
+  and CRTC timing computation, no MMIO. These run in a boot-time self-test on
+  every boot, on any machine, present hardware or not.
+- MMIO probing and `DrmBackend` integration sit on top, validated against
+  QEMU's `ati-vga` rather than by assertion.
+
+### Alternatives considered
+
+**Write a modern AMDGPU driver blind.** It is what the spec literally asks for,
+and it would look like progress. Rejected: an unexecuted display driver is not a
+driver. The failure mode is not that it has bugs — it is that nothing about it
+is known, including whether it initialises at all, and the appearance of a
+completed roadmap item would actively mislead. A modern port also needs
+atombios parsing, a full power/clock-gating bring-up and firmware loading, none
+of which can be stubbed honestly without hardware to say what the stub got wrong.
+
+**Do no AMD driver and rely on virtio-gpu.** Honest, and virtio-gpu already
+works. Rejected as the *whole* answer: it leaves the driver stack with no native
+mode-setting path at all, so the CRTC timing arithmetic — the part that is hard,
+and that every future native driver needs — stays unwritten and unexercised.
+
+**Target Intel instead.** QEMU has no Intel GPU emulation either, so this trades
+one untestable target for another.
+
+### Consequences
+
+- The arithmetic that decides *what* to write to a CRTC — 8-pixel character
+  units, bias-by-one totals, split sync-start fields, character-denominated sync
+  widths — is exercised on every boot and is shared with the later R300/R500
+  parts. Writing it caught a real bug immediately: the sync-width field is
+  denominated in characters, not pixels, and a pixel-denominated encoder
+  overflows its 6-bit field on 640x480@60, the most universally supported mode
+  there is. That bug was found by hand-computing the expected register values
+  for the mode table — exactly the check a blind port cannot perform.
+- Nothing here advances support for GPUs anyone currently owns. That gap is a
+  question for the operator, not a decision for me to make silently; it is filed
+  in `open-questions.md`.
+- If AMD hardware or passthrough later becomes available, this layer is the
+  foundation a modern port extends rather than work to throw away — the display
+  block's structure is inherited, and the pure/MMIO split is what makes the new
+  registers testable in turn.

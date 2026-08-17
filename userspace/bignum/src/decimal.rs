@@ -37,7 +37,7 @@
 //! handing back a plausible number the program keeps computing with. A division
 //! by zero has to arrive at the interpreter as something it can refuse.
 
-use crate::{digit_to_char, BigInt};
+use crate::{BigInt, digit_to_char};
 
 /// Why an operation could not produce a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +99,11 @@ impl Ord for Decimal {
         let magnitude = a.digits.cmp_mag(&b.digits).cmp(&0);
         // Both are the same sign at this point, so a larger magnitude is the
         // larger number when positive and the smaller when negative.
-        if a.digits.negative { magnitude.reverse() } else { magnitude }
+        if a.digits.negative {
+            magnitude.reverse()
+        } else {
+            magnitude
+        }
     }
 }
 
@@ -121,19 +125,28 @@ impl Decimal {
     /// Zero, at scale 0.
     #[must_use]
     pub fn zero() -> Self {
-        Self { digits: BigInt::zero(), scale: 0 }
+        Self {
+            digits: BigInt::zero(),
+            scale: 0,
+        }
     }
 
     /// One, at scale 0.
     #[must_use]
     pub fn one() -> Self {
-        Self { digits: BigInt::one(), scale: 0 }
+        Self {
+            digits: BigInt::one(),
+            scale: 0,
+        }
     }
 
     /// An integer, at scale 0.
     #[must_use]
     pub fn from_i64(v: i64) -> Self {
-        Self { digits: BigInt::from_i64(v), scale: 0 }
+        Self {
+            digits: BigInt::from_i64(v),
+            scale: 0,
+        }
     }
 
     /// Whether the value is zero, at any scale.
@@ -178,7 +191,10 @@ impl Decimal {
             return self.clone();
         }
         if let Some(grow) = new_scale.checked_sub(self.scale) {
-            return Self { digits: self.digits.shift_left_decimal(grow), scale: new_scale };
+            return Self {
+                digits: self.digits.shift_left_decimal(grow),
+                scale: new_scale,
+            };
         }
         let shrink = self.scale.saturating_sub(new_scale);
         // Discarding more digits than the mantissa has leaves zero, and saying
@@ -188,38 +204,89 @@ impl Decimal {
         // saturates to `usize::MAX`). Every limb holds at most nine digits, so
         // `limbs.len() * 9` is an upper bound that needs no counting.
         if shrink >= self.digits.limbs.len().saturating_mul(crate::LIMB_DIGITS) {
-            return Self { digits: BigInt::zero(), scale: new_scale };
+            return Self {
+                digits: BigInt::zero(),
+                scale: new_scale,
+            };
         }
         let divisor = ten_to_the(shrink);
         let (q, _) = self.digits.divmod(&divisor);
-        Self { digits: q, scale: new_scale }
+        Self {
+            digits: q,
+            scale: new_scale,
+        }
     }
 
     /// Sum. The result carries the larger of the two scales, which is exact.
     #[must_use]
     pub fn add(&self, other: &Self) -> Self {
         let s = self.scale.max(other.scale);
-        Self { digits: self.rescale(s).digits.add(&other.rescale(s).digits), scale: s }
+        Self {
+            digits: self.rescale(s).digits.add(&other.rescale(s).digits),
+            scale: s,
+        }
     }
 
     /// Difference. The result carries the larger of the two scales.
     #[must_use]
     pub fn sub(&self, other: &Self) -> Self {
         let s = self.scale.max(other.scale);
-        Self { digits: self.rescale(s).digits.sub(&other.rescale(s).digits), scale: s }
+        Self {
+            digits: self.rescale(s).digits.sub(&other.rescale(s).digits),
+            scale: s,
+        }
+    }
+
+    /// The exact product, keeping every digit: scale `a + b`.
+    ///
+    /// This is the primitive the other products are built from. It never
+    /// truncates, so a caller that truncates afterwards loses digits only where
+    /// it meant to.
+    #[must_use]
+    pub fn mul_exact(&self, other: &Self) -> Self {
+        Self {
+            digits: self.digits.mul(&other.digits),
+            scale: self.scale.saturating_add(other.scale),
+        }
     }
 
     /// Product, truncated to `result_scale`.
     ///
     /// The full product is formed first and only then truncated, so no
     /// intermediate digit is lost that could have affected a kept one.
+    ///
+    /// This is the *explicit-scale* product. It is **not** what `bc`'s and
+    /// `dc`'s `*` operator does — see [`Decimal::multiply`], which applies
+    /// POSIX's scale rule instead. Use this one only when the caller genuinely
+    /// knows the scale it wants.
     #[must_use]
     pub fn mul(&self, other: &Self, result_scale: usize) -> Self {
-        let full = Self {
-            digits: self.digits.mul(&other.digits),
-            scale: self.scale.saturating_add(other.scale),
-        };
-        full.rescale(result_scale)
+        self.mul_exact(other).rescale(result_scale)
+    }
+
+    /// The scale POSIX gives a product: `min(a + b, max(scale, a, b))`.
+    ///
+    /// The rule is not the obvious "truncate to `scale`", and the difference is
+    /// visible at the very first example anyone tries: with `scale = 0`,
+    /// `1.5 * 1.5` is **2.2**, not `2`. A product keeps enough digits to be
+    /// worth having even when the user has asked for no fractional digits at
+    /// all, because `scale` governs *division*, where digits must be invented,
+    /// rather than multiplication, where they are already there. The `min` then
+    /// stops it keeping digits the operands never had.
+    #[must_use]
+    pub fn product_scale(&self, other: &Self, scale: usize) -> usize {
+        let exact = self.scale.saturating_add(other.scale);
+        exact.min(scale.max(self.scale).max(other.scale))
+    }
+
+    /// The `*` of `bc` and `dc`: the product at POSIX's scale for it.
+    ///
+    /// `scale` is the calculator's `scale` (`bc`) or `k` (`dc`) register, not
+    /// the scale of the result; [`Decimal::product_scale`] derives that.
+    #[must_use]
+    pub fn multiply(&self, other: &Self, scale: usize) -> Self {
+        self.mul_exact(other)
+            .rescale(self.product_scale(other, scale))
     }
 
     /// Quotient, truncated to `result_scale`.
@@ -235,9 +302,16 @@ impl Decimal {
         // want have to exist in the dividend *before* it happens. Scaling up by
         // the divisor's own scale as well cancels the divisor's denominator.
         let needed = result_scale.saturating_add(other.scale);
-        let a = if needed > self.scale { self.rescale(needed) } else { self.clone() };
+        let a = if needed > self.scale {
+            self.rescale(needed)
+        } else {
+            self.clone()
+        };
         let (q, _) = a.digits.divmod(&other.digits);
-        let quotient = Self { digits: q, scale: a.scale.saturating_sub(other.scale) };
+        let quotient = Self {
+            digits: q,
+            scale: a.scale.saturating_sub(other.scale),
+        };
         Ok(quotient.rescale(result_scale))
     }
 
@@ -245,29 +319,46 @@ impl Decimal {
     /// truncated to `result_scale` — which is `bc`'s definition, not the one
     /// that assumes an integer quotient.
     ///
+    /// The `q * other` step is *exact*. Truncating it, as an earlier version
+    /// did, breaks the identity the definition exists to state: the remainder
+    /// would no longer be what is left over, and `a % b` could come back
+    /// larger than `b`.
+    ///
     /// # Errors
     ///
     /// [`DecimalError::DivideByZero`] if `other` is zero.
     pub fn modulo(&self, other: &Self, result_scale: usize) -> Result<Self, DecimalError> {
         let q = self.div(other, result_scale)?;
-        Ok(self.sub(&q.mul(other, result_scale)))
+        Ok(self.sub(&q.mul_exact(other)))
     }
 
-    /// `self` raised to an integer power, truncated to `result_scale`.
+    /// `self` raised to an integer power.
     ///
     /// A fractional exponent is truncated to an integer first, because that is
     /// all `^` is defined for in `bc` and `dc`; a real power belongs to the
     /// math library, which builds it from `exp` and `ln`.
     ///
+    /// `scale` is the calculator's `scale`/`k` register. For a non-negative
+    /// exponent the result's scale is POSIX's `min(scale(a) * b, max(scale,
+    /// scale(a)))`, and for a negative one it is `scale`, since that case is a
+    /// division.
+    ///
+    /// Every squaring is **exact**. Truncating them to the result scale, as an
+    /// earlier version did, made `1.5 ^ 2` answer `2` at `scale = 0`: the first
+    /// squaring threw away the `.25` before anything could ask for it. The cost
+    /// is that a fractional base with a large exponent builds a genuinely large
+    /// intermediate — but that is the size of the exact answer, and truncating
+    /// early buys speed by being wrong.
+    ///
     /// # Errors
     ///
     /// [`DecimalError::DivideByZero`] if the exponent is negative and `self` is
     /// zero, since that is `1/0`.
-    pub fn pow(&self, exp: &Self, result_scale: usize) -> Result<Self, DecimalError> {
+    pub fn pow(&self, exp: &Self, scale: usize) -> Result<Self, DecimalError> {
         let e = exp.rescale(0);
         if e.is_negative() {
-            let magnitude = self.pow(&e.negate(), result_scale)?;
-            return Self::one().div(&magnitude, result_scale);
+            let magnitude = self.pow(&e.negate(), scale)?;
+            return Self::one().div(&magnitude, scale);
         }
         if e.is_zero() {
             // Including 0^0, which bc and dc both answer as 1.
@@ -277,17 +368,25 @@ impl Decimal {
         // multiplications rather than a million of them.
         let mut result = Self::one();
         let mut base = self.clone();
-        let mut exponent = e.digits;
+        let mut exponent = e.digits.clone();
         let two = BigInt::from_i64(2);
         while !exponent.is_zero() {
             let (half, rem) = exponent.divmod(&two);
             if !rem.is_zero() {
-                result = result.mul(&base, result_scale);
+                result = result.mul_exact(&base);
             }
-            base = base.mul(&base, result_scale);
             exponent = half;
+            // The last squaring is never used, and for a large exponent it is
+            // the most expensive one in the loop.
+            if !exponent.is_zero() {
+                base = base.mul_exact(&base);
+            }
         }
-        Ok(result.rescale(result_scale))
+        // `scale(a) * b`, saturating: the product only has to be *at least* the
+        // target for the `min` to pick the other side, so a saturated value is
+        // as good as the true one here.
+        let exact = self.scale.saturating_mul(e.digits.to_usize_saturating());
+        Ok(result.rescale(exact.min(scale.max(self.scale))))
     }
 
     /// Square root, truncated to `result_scale`.
@@ -307,7 +406,10 @@ impl Decimal {
         // couple so the truncation at the end cannot eat a digit we promised.
         let extra = result_scale.saturating_mul(2).saturating_add(2);
         let scaled = self.rescale(self.scale.saturating_add(extra));
-        let root = Self { digits: scaled.digits.isqrt(), scale: scaled.scale.div_ceil(2) };
+        let root = Self {
+            digits: scaled.digits.isqrt(),
+            scale: scaled.scale.div_ceil(2),
+        };
         Ok(root.rescale(result_scale))
     }
 
@@ -356,7 +458,10 @@ impl Decimal {
         let mut digits = BigInt::from_str_radix(&format!("{int_part}{frac_part}"), ibase);
         digits.negative = negative;
         digits.normalize();
-        Self { digits, scale: frac_part.len() }
+        Self {
+            digits,
+            scale: frac_part.len(),
+        }
     }
 
     /// Render for output in the given base.
@@ -454,6 +559,103 @@ mod tests {
     /// `a op b` at `scale`, rendered — the shape most of these tests want.
     fn div(a: &str, b: &str, scale: usize) -> String {
         d(a).div(&d(b), scale).unwrap().format_base10()
+    }
+
+    /// `a * b` at the calculator's `scale`, by POSIX's rule for `*`.
+    fn multiply(a: &str, b: &str, scale: usize) -> String {
+        d(a).multiply(&d(b), scale).format_base10()
+    }
+
+    /// `a ^ b` at the calculator's `scale`.
+    fn pow(a: &str, b: &str, scale: usize) -> String {
+        d(a).pow(&d(b), scale).unwrap().format_base10()
+    }
+
+    #[test]
+    fn a_product_keeps_digits_that_scale_zero_would_seem_to_forbid() {
+        // POSIX gives a product the scale min(a + b, max(scale, a, b)), so
+        // `scale = 0` does *not* make multiplication integer: `scale` governs
+        // division, where digits have to be invented. GNU bc answers 2.2 here.
+        assert_eq!(multiply("1.5", "1.5", 0), "2.2");
+        assert_eq!(multiply("1.5", "1.5", 10), "2.25");
+        // The min stops it inventing digits the operands never had.
+        assert_eq!(multiply("2", "3", 10), "6");
+        assert_eq!(multiply("0.5", "4", 10), "2");
+    }
+
+    #[test]
+    fn a_product_at_a_high_scale_is_the_exact_one() {
+        assert_eq!(multiply("0.001", "0.001", 10), "0.000001");
+        assert_eq!(multiply("1.11", "1.11", 4), "1.2321");
+        // Cut short by the operands' own scales, not by `scale`.
+        assert_eq!(multiply("1.11", "1.11", 1), "1.23");
+    }
+
+    #[test]
+    fn a_power_squares_exactly_before_it_truncates() {
+        // The bug this pins: truncating each squaring to the result scale made
+        // `1.5 ^ 2` answer 2, because the .25 was discarded by the squaring
+        // itself rather than by the truncation at the end.
+        assert_eq!(pow("1.5", "2", 0), "2.2");
+        assert_eq!(pow("1.5", "2", 10), "2.25");
+        assert_eq!(pow("1.1", "3", 10), "1.331");
+        assert_eq!(pow("2", "10", 0), "1024");
+        // Square-and-multiply must agree with the schoolbook answer on an
+        // exponent whose binary form exercises both branches of the loop.
+        assert_eq!(pow("1.1", "5", 10), "1.61051");
+    }
+
+    #[test]
+    fn a_power_of_zero_or_a_negative_exponent_behaves() {
+        assert_eq!(pow("7", "0", 5), "1");
+        assert_eq!(pow("0", "0", 5), "1");
+        assert_eq!(pow("2", "-3", 5), "0.125");
+        assert_eq!(pow("0", "5", 5), "0");
+        assert_eq!(
+            d("0").pow(&d("-1"), 5).unwrap_err(),
+            DecimalError::DivideByZero
+        );
+    }
+
+    #[test]
+    fn a_remainder_is_what_is_actually_left_over() {
+        // `a % b == a - (a/b)*b` has to hold exactly, or the remainder is not
+        // the remainder. Truncating the product made it fail: the answer could
+        // come back larger than the divisor.
+        for (a, b, scale) in [
+            ("17", "5", 0),
+            ("17.5", "5", 0),
+            ("1", "3", 5),
+            ("-17", "5", 0),
+            ("0.001", "0.3", 4),
+        ] {
+            let (x, y) = (d(a), d(b));
+            let q = x.div(&y, scale).unwrap();
+            let r = x.modulo(&y, scale).unwrap();
+            assert_eq!(
+                q.mul_exact(&y).add(&r),
+                x,
+                "q*b + r != a for {a} % {b} at scale {scale}"
+            );
+        }
+        assert_eq!(d("17").modulo(&d("5"), 0).unwrap().format_base10(), "2");
+        assert_eq!(
+            d("1").modulo(&d("3"), 5).unwrap().format_base10(),
+            "0.00001"
+        );
+    }
+
+    #[test]
+    fn a_bigint_converts_to_usize_or_saturates() {
+        assert_eq!(BigInt::from_i64(0).to_usize_saturating(), 0);
+        assert_eq!(
+            BigInt::from_i64(1_000_000_007).to_usize_saturating(),
+            1_000_000_007
+        );
+        // Sign is dropped, as documented.
+        assert_eq!(BigInt::from_i64(-42).to_usize_saturating(), 42);
+        let huge = BigInt::from_i64(10).pow(&BigInt::from_i64(40));
+        assert_eq!(huge.to_usize_saturating(), usize::MAX);
     }
 
     #[test]
@@ -557,7 +759,10 @@ mod tests {
     #[test]
     fn powers_use_square_and_multiply_and_stay_exact() {
         assert_eq!(d("2").pow(&d("10"), 0).unwrap().format_base10(), "1024");
-        assert_eq!(d("2").pow(&d("64"), 0).unwrap().format_base10(), "18446744073709551616");
+        assert_eq!(
+            d("2").pow(&d("64"), 0).unwrap().format_base10(),
+            "18446744073709551616"
+        );
         assert_eq!(d("1.5").pow(&d("2"), 2).unwrap().format_base10(), "2.25");
     }
 
@@ -580,7 +785,13 @@ mod tests {
         assert_eq!(d("2").sqrt(5).unwrap().format_base10(), "1.41421");
         assert_eq!(d("4").sqrt(0).unwrap().format_base10(), "2");
         assert_eq!(d("0").sqrt(5).unwrap().format_base10(), "0");
-        assert_eq!(d("10000000000000000000000").sqrt(0).unwrap().format_base10(), "100000000000");
+        assert_eq!(
+            d("10000000000000000000000")
+                .sqrt(0)
+                .unwrap()
+                .format_base10(),
+            "100000000000"
+        );
     }
 
     #[test]
@@ -675,7 +886,10 @@ mod tests {
     fn a_huge_scale_does_not_overflow_the_scale_arithmetic() {
         // The scale is a usize and these add; saturating rather than wrapping
         // is what keeps a preposterous request slow instead of wrong.
-        let a = Decimal { digits: BigInt::one(), scale: usize::MAX };
+        let a = Decimal {
+            digits: BigInt::one(),
+            scale: usize::MAX,
+        };
         assert!(a.mul(&a, 0).is_zero());
     }
 }

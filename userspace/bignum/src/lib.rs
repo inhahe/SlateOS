@@ -144,6 +144,31 @@ impl BigInt {
         }
     }
 
+    /// The magnitude as a `usize`, or `usize::MAX` if it does not fit.
+    ///
+    /// The sign is dropped, so callers that care must check it themselves.
+    /// Saturating rather than returning an `Option` is deliberate: every caller
+    /// here is asking a question where "bigger than anything we can represent"
+    /// and "the largest value" lead to the same behaviour — a loop bound that
+    /// will never be reached, a scale that will be clamped, a repeat count that
+    /// exhausts the machine either way. An `Option` would push a `None` arm on
+    /// each of them whose only sensible body is `usize::MAX`.
+    #[must_use]
+    pub fn to_usize_saturating(&self) -> usize {
+        let mut acc: usize = 0;
+        // Most significant limb first, so the first overflow ends it.
+        for &limb in self.limbs.iter().rev() {
+            acc = match acc
+                .checked_mul(LIMB_BASE as usize)
+                .and_then(|shifted| shifted.checked_add(limb as usize))
+            {
+                Some(v) => v,
+                None => return usize::MAX,
+            };
+        }
+        acc
+    }
+
     /// Remove leading zero limbs, keeping at least one.
     pub fn normalize(&mut self) {
         while self.limbs.len() > 1 && self.limbs.last() == Some(&0) {
@@ -407,7 +432,8 @@ impl BigInt {
         // The two limbs below the top, used to refine the estimate. Reading a
         // missing one as zero is correct: the divisor has at least two limbs
         // here, and a shorter dividend prefix really is zero-extended.
-        let v_second = v.limbs
+        let v_second = v
+            .limbs
             .len()
             .checked_sub(2)
             .map_or(0, |k| limb(&v.limbs, k));
@@ -846,8 +872,12 @@ mod tests {
         // Not floor division: -7/2 is -3, not -4. `expr` and `bc` both promise
         // C's rule, and the remainder has to agree with it or `a/b*b + a%b`
         // stops equalling `a`.
-        for (a, b, q, r) in [("7", "2", "3", "1"), ("-7", "2", "-3", "-1"),
-                             ("7", "-2", "-3", "1"), ("-7", "-2", "3", "-1")] {
+        for (a, b, q, r) in [
+            ("7", "2", "3", "1"),
+            ("-7", "2", "-3", "-1"),
+            ("7", "-2", "-3", "1"),
+            ("-7", "-2", "3", "-1"),
+        ] {
             let (qq, rr) = BigInt::from_str(a).divmod(&BigInt::from_str(b));
             assert_eq!(qq.to_string_base10(), q, "{a} / {b}");
             assert_eq!(rr.to_string_base10(), r, "{a} % {b}");
@@ -909,7 +939,14 @@ mod tests {
             }
             s.truncate(n);
             // A leading zero would make the value narrower than intended.
-            s.replace_range(0..1, "1234567890".get(n % 10..).unwrap_or("9").get(..1).unwrap_or("9"));
+            s.replace_range(
+                0..1,
+                "1234567890"
+                    .get(n % 10..)
+                    .unwrap_or("9")
+                    .get(..1)
+                    .unwrap_or("9"),
+            );
             s
         };
 
@@ -958,11 +995,15 @@ mod tests {
         // Base 10^9 means limb boundaries fall every nine digits; a carry that
         // is dropped at one of them is the classic bignum bug.
         let a = BigInt::from_str("999999999999999999999999999");
-        assert_eq!(a.add(&BigInt::from_str("1")).to_string_base10(),
-                   "1000000000000000000000000000");
-        assert_eq!(BigInt::from_str("1000000000000000000000000000")
-                       .sub(&BigInt::from_str("1"))
-                       .to_string_base10(),
-                   "999999999999999999999999999");
+        assert_eq!(
+            a.add(&BigInt::from_str("1")).to_string_base10(),
+            "1000000000000000000000000000"
+        );
+        assert_eq!(
+            BigInt::from_str("1000000000000000000000000000")
+                .sub(&BigInt::from_str("1"))
+                .to_string_base10(),
+            "999999999999999999999999999"
+        );
     }
 }

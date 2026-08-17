@@ -1485,7 +1485,11 @@ impl Interpreter {
         Ok(match op {
             BinOp::Add => a.add(b),
             BinOp::Sub => a.sub(b),
-            BinOp::Mul => a.mul(b, scale),
+            // `multiply`, not `mul`: POSIX gives a product the scale
+            // min(a + b, max(scale, a, b)), so `scale = 0; 1.5 * 1.5` is 2.2
+            // rather than 2. `scale` governs division, where digits have to be
+            // invented, not multiplication, where they are already there.
+            BinOp::Mul => a.multiply(b, scale),
             BinOp::Div => a.div(b, scale)?,
             BinOp::Mod => a.modulo(b, scale)?,
             BinOp::Pow => a.pow(b, scale)?,

@@ -433,6 +433,11 @@ impl Decimal {
     /// Anything unparseable is zero rather than an error, matching the
     /// calculators' lexers, which have already decided the token is a number
     /// before this is reached.
+    ///
+    /// A fractional part in a base other than ten is *divided down* rather than
+    /// simply counted: with `ibase = 16`, `.8` is eight sixteenths — `0.5` —
+    /// and not `0.8`. Treating the fractional digit count as a decimal scale,
+    /// which an earlier version did, is only correct when the base is ten.
     #[must_use]
     pub fn parse(s: &str, ibase: u32) -> Self {
         let s = s.trim();
@@ -455,13 +460,92 @@ impl Decimal {
             None => (body, ""),
         };
 
-        let mut digits = BigInt::from_str_radix(&format!("{int_part}{frac_part}"), ibase);
-        digits.negative = negative;
-        digits.normalize();
-        Self {
-            digits,
-            scale: frac_part.len(),
+        let sign = |mut d: BigInt| {
+            d.negative = negative;
+            d.normalize();
+            d
+        };
+
+        if ibase == 10 {
+            return Self {
+                digits: sign(BigInt::from_str_radix(
+                    &format!("{int_part}{frac_part}"),
+                    ibase,
+                )),
+                scale: frac_part.len(),
+            };
         }
+
+        let integer = Self {
+            digits: BigInt::from_str_radix(int_part, ibase),
+            scale: 0,
+        };
+        if frac_part.is_empty() {
+            return Self {
+                digits: sign(integer.digits),
+                scale: 0,
+            };
+        }
+
+        // The fraction is `frac / ibase^len`. How many decimal places that
+        // needs to be *exact* is `len * log2(ibase)` whenever the base is a
+        // power of two — 16^-1 is 0.0625, four places for one hex digit — and
+        // for a base that is not, no finite number of them is enough and this
+        // is a truncation. Erring high is safe because `trim_scale` below drops
+        // whatever places the division did not actually need — without it the
+        // over-estimate would be *printed*, and `16i .8 p` would answer
+        // `.5000` instead of `.5`.
+        let places_per_digit = usize::try_from(ibase.next_power_of_two().trailing_zeros())
+            .unwrap_or(1)
+            .max(1);
+        let scale = frac_part.len().saturating_mul(places_per_digit);
+        let numerator = Self {
+            digits: BigInt::from_str_radix(frac_part, ibase),
+            scale: 0,
+        };
+        let denominator = Self {
+            digits: BigInt::from_i64(i64::from(ibase)).pow(&BigInt::from_i64(
+                i64::try_from(frac_part.len()).unwrap_or(i64::MAX),
+            )),
+            scale: 0,
+        };
+        // The divisor is a power of the base and the base is at least two, so
+        // it cannot be zero and this cannot fail; zero is nonetheless the right
+        // answer if it somehow did.
+        let fraction = numerator.div(&denominator, scale).unwrap_or_else(|_| Self {
+            digits: BigInt::zero(),
+            scale,
+        });
+        let total = integer.add(&fraction).trim_scale();
+        Self {
+            digits: sign(total.digits),
+            scale: total.scale,
+        }
+    }
+
+    /// Drop fractional places that hold nothing, without changing the value.
+    ///
+    /// This is *not* something to reach for after arithmetic. `bc` defines the
+    /// scale of a result exactly, so `scale=20; 1/2` has twenty places and
+    /// printing nineteen of them as `.5` would be wrong. It exists for the one
+    /// case where the scale is an artefact rather than a decision: reading a
+    /// fraction in a non-decimal base computes at an upper bound on the places
+    /// the value could need, and the bound is usually loose.
+    #[must_use]
+    pub fn trim_scale(&self) -> Self {
+        if self.scale == 0 {
+            return self.clone();
+        }
+        if self.digits.is_zero() {
+            return Self {
+                digits: BigInt::zero(),
+                scale: 0,
+            };
+        }
+        let text = self.digits.to_string_base10();
+        let kept = text.len().saturating_sub(text.trim_end_matches('0').len());
+        // Never trim past the point: the integer digits are not ours to touch.
+        self.rescale(self.scale.saturating_sub(kept.min(self.scale)))
     }
 
     /// Render for output in the given base.
@@ -492,7 +576,15 @@ impl Decimal {
         result
     }
 
-    /// Render in base ten, with trailing fractional zeros removed.
+    /// Render in base ten with exactly [`Decimal::scale`] fractional digits.
+    ///
+    /// The trailing zeros are not noise to be tidied away — they are the whole
+    /// observable meaning of `scale`. `bc`'s `scale=20; 1/2` is defined to
+    /// produce twenty fractional digits and prints `.50000000000000000000`;
+    /// `dc`'s `1.50 p` echoes `1.50` because that is the scale the literal was
+    /// written with. A formatter that trimmed them would make `k` untestable
+    /// and would silently disagree with every other `bc` about the one thing
+    /// `bc` exists to control.
     #[must_use]
     pub fn format_base10(&self) -> String {
         if self.scale == 0 {
@@ -515,19 +607,26 @@ impl Decimal {
             }
         };
 
-        let frac_trimmed = frac_part.trim_end_matches('0');
-        let prefix = if negative { "-" } else { "" };
-        if frac_trimmed.is_empty() {
-            format!("{prefix}{int_part}")
-        } else {
-            format!("{prefix}{int_part}.{frac_trimmed}")
+        // A zero prints as `0`, not `-0.000`: `negate` keeps no negative zero,
+        // but a mantissa of zero with a scale still has fractional places, and
+        // both calculators print plain `0` for it.
+        if self.digits.is_zero() {
+            return "0".to_string();
         }
+        let prefix = if negative { "-" } else { "" };
+        format!("{prefix}{int_part}.{frac_part}")
     }
 
-    /// How many significant digits the mantissa has — `bc`'s `length`.
+    /// How many digits the number is written with — `bc`'s `length`, `dc`'s `Z`.
+    ///
+    /// The mantissa's digit count alone is not the answer: `0.001` has a
+    /// one-digit mantissa but is written with three digits, which is what both
+    /// calculators report. Taking the larger of the two counts covers that case
+    /// without disturbing `1.001`, where the mantissa is already the longer.
     #[must_use]
     pub fn length(&self) -> usize {
-        self.digits.to_string_base10().trim_start_matches('-').len()
+        let mantissa = self.digits.to_string_base10().trim_start_matches('-').len();
+        mantissa.max(self.scale)
     }
 
     /// Whether the value is too small to be distinguished from zero at
@@ -580,7 +679,10 @@ mod tests {
         assert_eq!(multiply("1.5", "1.5", 10), "2.25");
         // The min stops it inventing digits the operands never had.
         assert_eq!(multiply("2", "3", 10), "6");
-        assert_eq!(multiply("0.5", "4", 10), "2");
+        // One place, because `0.5` had one and the product rule keeps the
+        // larger of the operands' scales -- the digit is a zero, and it is
+        // still printed.
+        assert_eq!(multiply("0.5", "4", 10), "2.0");
     }
 
     #[test]
@@ -609,7 +711,7 @@ mod tests {
     fn a_power_of_zero_or_a_negative_exponent_behaves() {
         assert_eq!(pow("7", "0", 5), "1");
         assert_eq!(pow("0", "0", 5), "1");
-        assert_eq!(pow("2", "-3", 5), "0.125");
+        assert_eq!(pow("2", "-3", 5), "0.12500");
         assert_eq!(pow("0", "5", 5), "0");
         assert_eq!(
             d("0").pow(&d("-1"), 5).unwrap_err(),
@@ -643,6 +745,38 @@ mod tests {
             d("1").modulo(&d("3"), 5).unwrap().format_base10(),
             "0.00001"
         );
+    }
+
+    #[test]
+    fn length_counts_the_digits_the_number_is_written_with() {
+        assert_eq!(d("12345").length(), 5);
+        assert_eq!(d("1.001").length(), 4);
+        assert_eq!(d("100").length(), 3);
+        assert_eq!(d("0.5").length(), 1);
+        // The case the mantissa count gets wrong: the leading zeros are digits.
+        assert_eq!(d("0.001").length(), 3);
+        assert_eq!(d("-0.001").length(), 3);
+    }
+
+    #[test]
+    fn a_fraction_in_another_base_is_divided_down_not_counted() {
+        // Hex .8 is eight sixteenths. Counting the digit as a decimal place
+        // made it 0.8, which is 0.3 out on the very first hex fraction anyone
+        // would type.
+        assert_eq!(Decimal::parse(".8", 16).format_base10(), "0.5");
+        assert_eq!(Decimal::parse("A.8", 16).format_base10(), "10.5");
+        assert_eq!(Decimal::parse(".1", 16).format_base10(), "0.0625");
+        assert_eq!(Decimal::parse(".01", 16).format_base10(), "0.00390625");
+        assert_eq!(Decimal::parse(".1", 2).format_base10(), "0.5");
+        assert_eq!(Decimal::parse("1.1", 2).format_base10(), "1.5");
+        assert_eq!(Decimal::parse(".4", 8).format_base10(), "0.5");
+        assert_eq!(Decimal::parse("-.8", 16).format_base10(), "-0.5");
+        // Base ten is unchanged, including its exact scale.
+        assert_eq!(Decimal::parse(".8", 10).format_base10(), "0.8");
+        assert_eq!(Decimal::parse("1.250", 10).scale, 3);
+        // Integers in any base are unaffected.
+        assert_eq!(Decimal::parse("FF", 16).format_base10(), "255");
+        assert_eq!(Decimal::parse("-FF", 16).format_base10(), "-255");
     }
 
     #[test]
@@ -727,15 +861,15 @@ mod tests {
     fn division_carries_the_requested_number_of_digits() {
         assert_eq!(div("1", "3", 5), "0.33333");
         assert_eq!(div("2", "3", 5), "0.66666");
-        assert_eq!(div("10", "4", 2), "2.5");
+        assert_eq!(div("10", "4", 2), "2.50");
         assert_eq!(div("1", "8", 3), "0.125");
     }
 
     #[test]
     fn division_by_a_fraction_cancels_the_divisors_scale() {
-        assert_eq!(div("1", "0.5", 2), "2");
+        assert_eq!(div("1", "0.5", 2), "2.00");
         assert_eq!(div("1", "0.001", 0), "1000");
-        assert_eq!(div("0.001", "0.001", 3), "1");
+        assert_eq!(div("0.001", "0.001", 3), "1.000");
     }
 
     #[test]
@@ -770,7 +904,7 @@ mod tests {
     fn a_zero_exponent_is_one_and_a_negative_one_inverts() {
         assert_eq!(d("7").pow(&d("0"), 0).unwrap().format_base10(), "1");
         assert_eq!(d("0").pow(&d("0"), 0).unwrap().format_base10(), "1");
-        assert_eq!(d("2").pow(&d("-2"), 3).unwrap().format_base10(), "0.25");
+        assert_eq!(d("2").pow(&d("-2"), 3).unwrap().format_base10(), "0.250");
         // 1/0 reached through the exponent is still a division by zero.
         assert_eq!(d("0").pow(&d("-1"), 3), Err(DecimalError::DivideByZero));
     }
@@ -805,7 +939,7 @@ mod tests {
     fn rescaling_down_truncates_toward_zero_on_both_signs() {
         assert_eq!(d("1.99").rescale(0).format_base10(), "1");
         assert_eq!(d("-1.99").rescale(0).format_base10(), "-1");
-        assert_eq!(d("1.5").rescale(4).format_base10(), "1.5");
+        assert_eq!(d("1.5").rescale(4).format_base10(), "1.5000");
         assert_eq!(d("1.5").rescale(4).scale, 4);
     }
 
@@ -837,11 +971,42 @@ mod tests {
     }
 
     #[test]
-    fn formatting_drops_trailing_zeros_but_keeps_the_value() {
-        assert_eq!(d("1.500").format_base10(), "1.5");
-        assert_eq!(d("1.000").format_base10(), "1");
+    fn formatting_keeps_every_place_the_scale_claims() {
+        // The trailing zeros are the scale, and the scale is what `bc`'s `k`
+        // and `dc`'s `k` exist to set; a formatter that tidied them away would
+        // make the setting unobservable.
+        assert_eq!(d("1.500").format_base10(), "1.500");
+        assert_eq!(d("1.000").format_base10(), "1.000");
+        assert_eq!(d("-0.500").format_base10(), "-0.500");
+        // Zero is the one exception: it prints as `0` at any scale, which is
+        // what both calculators do rather than `0.000`.
         assert_eq!(d("0.000").format_base10(), "0");
-        assert_eq!(d("-0.500").format_base10(), "-0.5");
+        assert_eq!(d("0").format_base10(), "0");
+    }
+
+    #[test]
+    fn a_scale_that_is_an_artefact_rather_than_a_decision_is_trimmed() {
+        // Reading `.8` in base sixteen computes at an upper bound of four
+        // decimal places, but the value needs one. The bound must not be
+        // printed: `16i .8 p` answers `.5`, not `.5000`.
+        assert_eq!(Decimal::parse(".8", 16).format_base10(), "0.5");
+        assert_eq!(Decimal::parse(".4", 16).format_base10(), "0.25");
+        assert_eq!(Decimal::parse(".1", 2).format_base10(), "0.5");
+        // A base-ten literal is a decision, not an artefact, and keeps its
+        // places -- which is why `trim_scale` is not applied to that path.
+        assert_eq!(Decimal::parse("1.50", 10).format_base10(), "1.50");
+    }
+
+    #[test]
+    fn letters_are_worth_ten_to_fifteen_in_every_input_base() {
+        // POSIX: "the characters A-F shall represent the values 10-15,
+        // respectively, regardless of the input base". The base-ten fast path
+        // subtracts `b'0'` blind, so it scored `F` as 22 and read `FF` as 242.
+        assert_eq!(Decimal::parse("F", 10).format_base10(), "15");
+        assert_eq!(Decimal::parse("FF", 10).format_base10(), "165");
+        assert_eq!(Decimal::parse("A", 10).format_base10(), "10");
+        assert_eq!(Decimal::parse("FF", 16).format_base10(), "255");
+        assert_eq!(Decimal::parse("10", 10).format_base10(), "10");
     }
 
     #[test]
@@ -849,7 +1014,7 @@ mod tests {
         // The fractional digits are shorter than the scale here, so the
         // padding is what stops 0.001 rendering as 0.1.
         assert_eq!(d("0.001").format_base10(), "0.001");
-        assert_eq!(div("1", "1000", 5), "0.001");
+        assert_eq!(div("1", "1000", 5), "0.00100");
     }
 
     #[test]

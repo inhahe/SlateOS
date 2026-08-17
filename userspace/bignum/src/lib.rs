@@ -563,8 +563,14 @@ impl BigInt {
             return Self::zero();
         }
 
-        // For base 10, parse groups of LIMB_DIGITS directly.
-        if radix == 10 {
+        // For base 10, parse groups of LIMB_DIGITS directly — but only when
+        // every character really is a decimal digit. `A`-`F` are worth 10-15
+        // in *any* input base (POSIX dc: "the characters A-F shall represent
+        // the values 10-15, respectively, regardless of the input base"), and
+        // the group-of-nine loop below subtracts `b'0'` blind, so it would
+        // score `F` as 22 and read `FF` as 242. The general path knows the
+        // letters; send anything with one down it.
+        if radix == 10 && digits.bytes().all(|b| b.is_ascii_digit()) {
             let bytes = digits.as_bytes();
             let mut limbs = Vec::new();
             // Nine digits at a time from the least significant end — the whole

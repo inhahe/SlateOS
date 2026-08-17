@@ -28474,12 +28474,13 @@ phrase in it, which markdown and comment text make entirely plausible.
 
 ## C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE (lane C, 2026-08-17)
 
-**Status: OPEN, but 33.0x recovered — root-caused 2026-08-17 and two fixes
-landed the same day. Shaping now costs ~1.6 us/character where it cost ~64.
-That is still ~1.6x above this crate's own floor and an order of magnitude off
-HarfBuzz, so the entry stays open; what remains is named under "What is left"
-below. Both named continuations of the fix are now done, so the next step is a
-fresh measurement rather than a fresh guess.**
+**Status: OPEN, but ~33x recovered — root-caused 2026-08-17 and three fixes
+landed the same day. Shaping now costs ~1.5 us/character where it cost ~64,
+and a 1,000-character line is 1.4 ms where it was 64 ms. That is still an
+order of magnitude off HarfBuzz, so the entry stays open — but it is no longer
+a cliff, and the editor work it was blocking can proceed. What remains is
+named under "What is left" below; the next step is a fresh measurement rather
+than a fresh guess.**
 
 **What.** `ScaledFont::shape` cost **~64 microseconds per character** on a
 real outline face, and the cost was *linear* in the string — so it was a huge
@@ -28647,27 +28648,78 @@ microsecond figure, so it survives a debug build, a loaded machine and slower
 hardware without going so loose it stops catching anything. It measures 54x in
 release and ~150x in debug today; the bug sat at 1400-2200x.
 
-**What is left.** The A/B above puts the floor — everything except `GSUB` — at
-**80.3 us** for 80 characters, and shaping now costs 129.3 us. `GSUB` is
-therefore down from ~98% of the cost to roughly **38%** of it (~49 us over the
-floor), and the remaining headroom against that floor is ~1.6x. Both of the
-continuations this entry originally named are done, so:
+**The phase breakdown, measured directly.** Once `GSUB` stopped dwarfing
+everything, the coarse A/B stopped being a useful guide, so `shape_with` was
+temporarily instrumented to time each pass and the medians taken over 51
+shapings of 80 characters (release build):
 
-1. **Re-measure before doing anything else.** The A/B split that produced the
-   98.1% figure was taken when `GSUB` dwarfed everything; it is stale as a
-   guide to what to attack next, and the two halves are now within 2x of each
-   other. Re-run the environment-gated A/B in `ScaledFont::shape_with`
-   (`gui/font/src/scaled.rs:677`) first.
-2. **Then attribute the floor.** The remaining passes (`byte_levels`,
-   `joining::forms`, `script::runs`, `hangul::preprocess`, `advance_at`) are
-   all linear with no obvious per-character table walk, and the 80.3 us floor
-   is the budget they share. Which of them dominates is not yet known and
-   **should not be guessed at** — this entry's original `cmap` hypothesis is
-   the cautionary tale: it survived a careful reading of the code and was
-   killed only by measurement.
-3. Further `GSUB` work is possible but is no longer the obvious lever. The
-   remaining ~49 us buys at most 1.6x even if it went to zero, where the floor
-   is now the larger of the two shares.
+| phase | median | share |
+|---|---:|---:|
+| `gsub` (`substitute_runs`) | 89.1 us | **55.3%** |
+| `gpos` (`position_segments`) | 32.0 us | **19.9%** |
+| `norm` (`norm::pieces`) | 14.2 us | 8.8% |
+| `advances` (`advance_at` per glyph) | 10.2 us | 6.3% |
+| `glyphbuild` (the `SubGlyph` loop) | 7.4 us | 4.6% |
+| `pre+script` (hangul, uvs, levels, `script::runs`) | 4.2 us | 2.6% |
+| `joining::forms` | 2.2 us | 1.4% |
+| `tail` (kerning, reorder, mark synthesis) | 1.5 us | 0.9% |
+| `byte_levels` | 0.3 us | 0.2% |
+| total | 161.1 us | |
+
+The total exceeds the uninstrumented 129.3 us by the instrument's own cost, so
+read the **shares**, not the absolute figures.
+
+Two warnings for whoever re-takes this, both learned the hard way here:
+
+* **Print once, at the end.** The first version of the instrument `eprintln!`ed
+  per phase and reported 490 us for a 129 us shape, giving four unrelated
+  phases the same ~38 us — that was the cost of a line into a captured stderr,
+  not the work. It was caught only because the uniformity looked wrong.
+* **The old A/B's "`GPOS` is ~0%" was an artefact of scale**, not an error: 32
+  us inside a 4,272 us shape really does round to nothing. A share measured
+  against a dominant term says nothing about what happens once that term is
+  gone.
+
+**The third fix: the same digests, in `GPOS`.** The 19.9% above is what
+justified it; the entry had previously declined it in a comment, for want of
+exactly this evidence. `Positioning::apply` builds a run digest **once** — a
+positioning pass never changes which glyphs exist, so unlike `gsub` it needs
+no dirty flag and the summary is exact for every lookup — and skips any lookup
+that cannot intersect it. `run_lookup` then skips an excluded glyph *before*
+consulting the skipper, since the digest is three shifts against a glyph id
+already in hand where `Skipper::considers` reads the glyph's `GDEF` class, and
+`at` filters the subtables as `gsub`'s `admitting` does.
+
+| chars | after per-subtable | after `GPOS` | gain |
+|---:|---:|---:|---:|
+| 80 | 129.3 us | 129.8 us | (noise) |
+| 200 | 372.8 us | 303.1 us | 1.23x |
+| 1,000 | 1,895 us | 1,400 us | 1.35x |
+| 5,000 | 10,293 us | 7,555 us | 1.36x |
+| 20,000 | 41,981 us | 30,015 us | 1.40x |
+
+At 80 characters the change is inside the run-to-run noise — the built-in
+control moved 2.4 -> 2.8 us over the same pair of runs, and at 1,000 characters
+it moved 29.7 -> 13.9 us in a code path neither fix touches, which is the
+honest measure of how stable these medians are. The gain is real from 200
+characters up, where the run is long enough for the per-glyph work to dominate
+the fixed costs.
+
+**What is left.** Both continuations this entry originally named are done, and
+so is the `GPOS` one the re-measurement turned up. What remains:
+
+1. **Re-take the phase breakdown.** The table above predates the `GPOS` fix, so
+   `gpos`'s 19.9% is now smaller and every other share correspondingly larger.
+   The patch that produces it is small and is described above; do not attack
+   anything on the strength of the stale table.
+2. **The likely next items, from that table:** `norm::pieces` at 8.8% and the
+   `advances` loop at 6.3%. The latter is one `advance_at` per glyph — an
+   `hmtx` read plus a variation-store lookup — and is a plain caching
+   candidate. Neither is confirmed; **do not guess** — this entry's original
+   `cmap` hypothesis survived a careful reading of the code and was killed only
+   by measurement.
+3. `GSUB` remains the largest single item at ~55% and is not exhausted, but it
+   has now had two rounds of work and the next one will be harder than either.
 
 **How this was found.** Scoping `TD-EDITOR-IS-NOT-BIDIRECTIONAL`, whose item 3
 asks whether shape-whole-line-and-clip is affordable. The measurement that was
@@ -28683,16 +28735,28 @@ shaping only the ~200 characters that fit on screen:
 
 | line length | whole | visible window | ratio |
 |---:|---:|---:|---:|
-| 200 | 519.9 us | 554.3 us | 0.9x |
-| 1,000 | 3,142 us | 523.3 us | 6.0x |
-| 5,000 | 15,287 us | 598.1 us | 25.6x |
-| 20,000 | 74,308 us | 595.9 us | 124.7x |
+| 200 | 295.2 us | 297.1 us | 1.0x |
+| 1,000 | 1,497 us | 296.7 us | 5.0x |
+| 5,000 | 7,916 us | 314.2 us | 25.2x |
+| 20,000 | 31,659 us | 294.1 us | 107.6x |
+
+(Re-taken after all three fixes. The shape of the answer is unchanged from the
+one-fix figures it replaces — 0.9x/6.0x/25.6x/124.7x — because both columns
+sped up together: the ratio is a property of the line lengths, not of how fast
+shaping is.)
 
 **The answer did not flip: byte-slicing is still worth its complexity**, but
 the reason is now honest rather than a symptom. Below ~200 characters the
 window costs the same as the whole line, so slicing buys nothing and the
 simpler code is free. From ~1,000 characters up it is the difference between
-0.5 ms and 3 ms *per line*, and a 50-line screen of 1,000-character lines is
-157 ms whole against 26 ms sliced. Revisit only if `GSUB` reaches the 80 us
-floor named above, which would move the whole-line 1,000-char figure to
-roughly 1 ms and make the tradeoff genuinely close.
+0.3 ms and 1.5 ms *per line*, and a 50-line screen of 1,000-character lines is
+75 ms whole against 15 ms sliced.
+
+**What this settles for the editor work.** Whole-line shaping is required by
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL` items 3 and 4 regardless — once colour is a
+per-glyph attribute the renderer needs the whole line shaped anyway — so the
+question was never "slice or not", it was "is the whole-line cost bearable
+behind a cache". At 1.5 ms for a 1,000-character line and 0.3 ms for a typical
+one, **it is**: a cache keyed on document revision pays that once per edit
+rather than once per frame, and an edit is a human keystroke. That is item (b)
+of that entry, and it is now unblocked.

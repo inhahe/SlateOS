@@ -52,6 +52,7 @@
 
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{quote, quotef_os};
+use coreutils::xnum;
 use ere::{Regex, bre};
 use std::ffi::OsString;
 use std::fs::File;
@@ -669,17 +670,29 @@ fn set_section_delimiter(value: &[u8], slot: &mut Vec<u8>) {
 /// `head -n 1K` is not, because `nl` passes `""` where `head` passes `"bkKmM…"`.
 ///
 /// Out of range produces one of *two* sentences, each the `strerror` of the
-/// errno gnulib sets — and the split is by **direction, not by which limit was
-/// hit**: `errno = min <= tnum ? EOVERFLOW : ERANGE`. So a value above the
-/// caller's own ceiling reads the same as one that overflowed `intmax_t`, while
-/// only a value below the floor gets `ERANGE`:
+/// errno gnulib sets, and which one is decided by a heuristic on the **value**
+/// rather than on the limit that was violated:
+/// `errno = (tnum < INT_MIN / 2 || INT_MAX / 2 < tnum) ? EOVERFLOW : ERANGE`.
+/// So a modest out-of-range value reads as `ERANGE` no matter which end it fell
+/// off, and a wild one reads as `EOVERFLOW` even when it fell off the *near*
+/// end:
 ///
 /// | argument | message tail |
 /// |---|---|
-/// | `-w 0`, `-w -1` (below the caller's floor) | `: Numerical result out of range` |
+/// | `-w 0`, `-w -1`, `-l -5` (out of range but small) | `: Numerical result out of range` |
 /// | `-w 2147483648` (above the caller's ceiling) | `: Value too large for defined data type` |
+/// | `-l -3000000000` (below the floor, but past `INT_MIN / 2`) | `: Value too large for defined data type` |
 /// | `-v 99999999999999999999` (beyond `intmax_t`) | `: Value too large for defined data type` |
 /// | `-v abc` (not a number at all) | none |
+///
+/// That third row is why this is now a two-line adapter over
+/// [`coreutils::xnum`] rather than the parser it used to be. The hand-written
+/// version encoded an *older* gnulib rule — `errno = min <= tnum ? EOVERFLOW :
+/// ERANGE` — which agrees with 9.4's on every case the harness happened to
+/// carry and disagrees on `nl -l -3000000000`, where it said `Numerical result
+/// out of range` and GNU says `Value too large`. Two partial copies of one
+/// gnulib function disagreeing in exactly the place no one thought to test is
+/// the reason `xnum` exists.
 fn xdectoimax(
     value: &[u8],
     min: i64,
@@ -687,57 +700,9 @@ fn xdectoimax(
     what: &str,
     deferred: &Deferred,
 ) -> Result<i64, getopt::Error> {
-    let refuse = |tail: &str| deferred.fatal(format!("{what}: {}{tail}", quote(value)));
-
-    let mut at = 0usize;
-    while matches!(
-        value.get(at),
-        Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
-    ) {
-        at = at.saturating_add(1);
-    }
-    let negative = match value.get(at) {
-        Some(b'-') => {
-            at = at.saturating_add(1);
-            true
-        }
-        Some(b'+') => {
-            at = at.saturating_add(1);
-            false
-        }
-        _ => false,
-    };
-    let digits = value.get(at..).unwrap_or_default();
-    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
-        return Err(refuse(""));
-    }
-
-    // Accumulate as i128 so that "beyond intmax_t" is distinguishable from
-    // "outside the caller's range", which are two different messages. A number
-    // too long even for i128 is still an overflow, so the fold saturates rather
-    // than wrapping.
-    let mut acc: i128 = 0;
-    for &d in digits {
-        acc = acc
-            .saturating_mul(10)
-            .saturating_add(i128::from(d.saturating_sub(b'0')));
-        if acc > i128::from(i64::MAX).saturating_add(1) {
-            return Err(refuse(": Value too large for defined data type"));
-        }
-    }
-    if negative {
-        acc = -acc;
-    }
-    let Ok(n) = i64::try_from(acc) else {
-        return Err(refuse(": Value too large for defined data type"));
-    };
-    if n < min {
-        return Err(refuse(": Numerical result out of range"));
-    }
-    if n > max {
-        return Err(refuse(": Value too large for defined data type"));
-    }
-    Ok(n)
+    // `Some(b"")` — an empty suffix *list*, which is not the same as `None`:
+    // `None` is gnulib's `NULL`, meaning "accept and ignore any trailing text".
+    xnum::xdectoimax(value, min, max, Some(b""), what).map_err(|m| deferred.fatal(m))
 }
 
 /// A line reader that keeps the terminator, the way gnulib's `readlinebuffer`
@@ -1426,8 +1391,9 @@ mod tests {
     }
 
     #[test]
-    fn the_two_out_of_range_messages_split_by_direction_not_by_limit() {
-        // Below the floor is the only case that says "out of range"…
+    fn the_two_out_of_range_messages_split_by_magnitude_not_by_limit() {
+        // A *small* out-of-range value says "out of range", whichever end it
+        // fell off…
         assert_eq!(
             err(&["-w", "0"]),
             "invalid line number field width: '0': Numerical result out of range"
@@ -1436,7 +1402,25 @@ mod tests {
             err(&["-w", "-1"]),
             "invalid line number field width: '-1': Numerical result out of range"
         );
-        // …and above the ceiling says the same thing whether the ceiling is the
+        assert_eq!(
+            err(&["-l", "-5"]),
+            "invalid line number of blank lines: '-5': Numerical result out of range"
+        );
+        // …but a value past `INT_MIN / 2` says "value too large" even though it
+        // fell off the *floor*, because gnulib picks the sentence by the value
+        // and not by the limit. This is the case the hand-written parser this
+        // replaced got wrong: it said "out of range" here, and GNU does not.
+        assert_eq!(
+            err(&["-l", "-3000000000"]),
+            "invalid line number of blank lines: '-3000000000': \
+             Value too large for defined data type"
+        );
+        assert_eq!(
+            err(&["-w", "-3000000000"]),
+            "invalid line number field width: '-3000000000': \
+             Value too large for defined data type"
+        );
+        // Above the ceiling says the same thing whether the ceiling is the
         // caller's `INT_MAX` or `intmax_t` itself.
         assert_eq!(
             err(&["-w", "2147483648"]),

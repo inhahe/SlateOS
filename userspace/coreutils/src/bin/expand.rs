@@ -810,11 +810,20 @@ mod tests {
     }
 
     #[test]
-    fn a_long_option_needs_its_argument_attached() {
+    fn a_long_option_is_missing_its_argument_only_when_nothing_follows() {
+        // This test used to assert that `--tabs 4` *itself* was the missing
+        // argument — the wrong belief that shipped a bug. A required argument
+        // is missing only when there is no next word at all.
         assert_eq!(
-            refuse(&["--tabs", "4"]),
+            refuse(&["--tabs"]),
             ["option '--tabs' requires an argument"]
         );
+        assert_eq!(
+            refuse(&["-i", "--tabs"]),
+            ["option '--tabs' requires an argument"]
+        );
+        // The converse still holds: an option that takes *no* argument rejects
+        // one written with `=`.
         assert_eq!(
             refuse(&["--initial=4"]),
             ["option '--initial' doesn't allow an argument"]

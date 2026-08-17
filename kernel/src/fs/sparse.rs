@@ -41,6 +41,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -128,7 +129,7 @@ struct SparseEntry {
 }
 
 /// Sparse file tracking table.
-static SPARSE_TABLE: spin::Mutex<Vec<SparseEntry>> = spin::Mutex::new(Vec::new());
+static SPARSE_TABLE: PreemptSpinMutex<Vec<SparseEntry>> = PreemptSpinMutex::named(Vec::new(), b"SPARSE_TABLE");
 
 /// Statistics.
 static PUNCH_COUNT: AtomicU64 = AtomicU64::new(0);

@@ -46,6 +46,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -139,16 +140,16 @@ pub struct DeviceTrimInfo {
 // ---------------------------------------------------------------------------
 
 /// Current operating mode.
-static MODE: spin::Mutex<TrimMode> = spin::Mutex::new(TrimMode::Periodic);
+static MODE: PreemptSpinMutex<TrimMode> = PreemptSpinMutex::named(TrimMode::Periodic, b"MODE");
 
 /// Periodic interval in nanoseconds.
 static PERIOD_NS: AtomicU64 = AtomicU64::new(DEFAULT_PERIOD_NS);
 
 /// Pending discard queue.
-static DISCARD_QUEUE: spin::Mutex<Vec<DiscardRange>> = spin::Mutex::new(Vec::new());
+static DISCARD_QUEUE: PreemptSpinMutex<Vec<DiscardRange>> = PreemptSpinMutex::named(Vec::new(), b"DISCARD_QUEUE");
 
 /// Registered device capabilities.
-static DEVICE_INFO: spin::Mutex<Vec<DeviceTrimInfo>> = spin::Mutex::new(Vec::new());
+static DEVICE_INFO: PreemptSpinMutex<Vec<DeviceTrimInfo>> = PreemptSpinMutex::named(Vec::new(), b"DEVICE_INFO");
 
 /// Last flush timestamp.
 static LAST_FLUSH_NS: AtomicU64 = AtomicU64::new(0);

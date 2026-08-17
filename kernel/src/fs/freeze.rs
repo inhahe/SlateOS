@@ -40,6 +40,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -114,7 +115,7 @@ pub struct FreezeStatus {
 // ---------------------------------------------------------------------------
 
 /// Frozen filesystem table.
-static FROZEN_TABLE: spin::Mutex<Vec<FrozenEntry>> = spin::Mutex::new(Vec::new());
+static FROZEN_TABLE: PreemptSpinMutex<Vec<FrozenEntry>> = PreemptSpinMutex::named(Vec::new(), b"FROZEN_TABLE");
 
 /// Statistics.
 static FREEZE_COUNT: AtomicU64 = AtomicU64::new(0);

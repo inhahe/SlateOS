@@ -50,6 +50,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -92,7 +93,7 @@ struct DioPathEntry {
 // ---------------------------------------------------------------------------
 
 /// Paths registered for automatic direct I/O.
-static DIO_PATHS: spin::Mutex<Vec<DioPathEntry>> = spin::Mutex::new(Vec::new());
+static DIO_PATHS: PreemptSpinMutex<Vec<DioPathEntry>> = PreemptSpinMutex::named(Vec::new(), b"DIO_PATHS");
 
 /// Statistics.
 static DIO_READ_COUNT: AtomicU64 = AtomicU64::new(0);

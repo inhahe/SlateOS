@@ -39,6 +39,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -123,7 +124,7 @@ static SKIP_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Per-mount overrides (limited capacity, behind a spinlock since
 /// modifications are rare and only happen during mount/remount).
-static MOUNT_OVERRIDES: spin::Mutex<Vec<MountOverride>> = spin::Mutex::new(Vec::new());
+static MOUNT_OVERRIDES: PreemptSpinMutex<Vec<MountOverride>> = PreemptSpinMutex::named(Vec::new(), b"MOUNT_OVERRIDES");
 
 /// 24 hours in nanoseconds.
 const DAY_NS: u64 = 24 * 60 * 60 * 1_000_000_000;

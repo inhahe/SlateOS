@@ -45,6 +45,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::fs::fileinfo::{self, FieldValue, FileInfo};
 use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -124,10 +125,10 @@ pub struct FieldStat {
 // ---------------------------------------------------------------------------
 
 /// The index: list of indexed files.
-static INDEX: spin::Mutex<Vec<IndexedFile>> = spin::Mutex::new(Vec::new());
+static INDEX: PreemptSpinMutex<Vec<IndexedFile>> = PreemptSpinMutex::named(Vec::new(), b"INDEX");
 
 /// Known field names with labels.
-static FIELD_NAMES: spin::Mutex<Vec<(String, String)>> = spin::Mutex::new(Vec::new());
+static FIELD_NAMES: PreemptSpinMutex<Vec<(String, String)>> = PreemptSpinMutex::named(Vec::new(), b"FIELD_NAMES");
 
 /// Statistics.
 static BUILD_COUNT: AtomicU64 = AtomicU64::new(0);

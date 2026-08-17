@@ -12279,13 +12279,197 @@ per-lock triage (NOT a blind sed):
 
 **Rollout progress (running checklist):**
 - [x] `PreemptSpinMutex` primitive + self-tests (Test 5/6), boot-green (03cccdd5f).
-- [ ] Convert `fs/*.rs` cold leaf config/stat stores → `PreemptSpinMutex`, in
-  reviewable batches, boot-test + wedge-soak between batches (~230 files).
+- [x] Convert `fs/*.rs` cold leaf config/stat stores → `PreemptSpinMutex`.
+  **DONE 2026-08-17** — 35 lock sites across 21 files; `kernel/src/fs` now holds
+  zero raw `spin::Mutex`. See the [A] note below.
 - [ ] Route core-FS contended locks → `crate::sync::Mutex` (lockdep), triage the
   lock-ordering reports that surface.
-- [ ] Sweep non-fs subsystem raw locks (`net/`, `ipc/`, drivers) per the same
-  triage.
+- [-] Sweep non-fs subsystem raw locks (`net/`, `ipc/`, drivers) per the same
+  triage. **Partially triaged 2026-08-17** (see [A]); 53 sites across 38 files
+  remain, conversion not started.
 - [ ] Final full wedge-soak (switch-off + switch-on) clean.
+
+**[A] 2026-08-17 — the `fs/` batch is finished, and auditing it first found
+three real bugs that a blind import swap would have preserved.**
+
+*Scale, measured rather than estimated.* The checklist above feared "~230
+files". A counted inventory found **88 raw-lock sites across 59 files**
+kernel-wide, of which `fs/` held **35 across 21 files**. Those 35 are now
+`PreemptSpinMutex` and `kernel/src/fs` contains no raw `spin::Mutex` at all.
+The old estimate counted files *touched by* the fs conversion, not files still
+holding a raw lock.
+
+*A caution about that inventory, because the first version of it was wrong.*
+Counting `static NAME: Mutex<…>` alone **undercounts**, and it undercounted
+here by 13 sites and 9 whole files. A raw lock is not always a static:
+`mm/heap.rs` holds its as a struct *field* (`inner: Mutex<HeapInner>`), and
+others are `Mutex::new` bindings. `ahci`, `nvme`, `audio_mixer`, `hrtimer`,
+`sched/kchannel`, `sched/priority_rr`, `sched/waitqueue`, `virtio/gpu` and
+`virtio/sound` are invisible to a static-only scan and appear only when struct
+fields and constructor calls are counted too. Any future batch must scan for
+all three shapes, and must resolve `use spin::Mutex` vs `use crate::sync::Mutex`
+per file — a bare `Mutex<…>` means different things in different files.
+
+*`named`, not `new`.* Every converted site uses `PreemptSpinMutex::named(v,
+b"NAME")`. `new` leaves the diagnostic name as `?`, and these are precisely the
+locks a silent wedge would otherwise hide in — converting a lock for its
+self-reporting and then leaving it anonymous would throw away half the benefit
+this sweep is being done for (see B-FORKEXEC-BOOT-HANG's static audit).
+
+*Three genuine defects, found by auditing critical sections before converting.*
+The conversion is advertised as a mechanical import swap, and it is — but
+"is this lock actually a leaf?" has to be answered per lock, and answering it
+turned up three places calling the VFS while holding a raw spinlock:
+
+| Site | Was |
+|---|---|
+| `fs/bookmarks.rs::validate` | `Vfs::metadata` once **per bookmark** under `BOOKMARKS` |
+| `fs/thumbcache.rs::get` | `Vfs::metadata` under `CACHE` |
+| `fs/fileops.rs::create` | `Vfs::metadata` once **per source** under `OPERATIONS` |
+
+`Vfs::metadata` walks the mount table, takes filesystem locks of its own and can
+block on the backing device, so each of these held a leaf lock across an
+unbounded I/O path *and* put its acquisition order ahead of the VFS's. All three
+now snapshot under the lock and call out unlocked — the shape `freeze::freeze`
+and `fileops::undo` already used in the same directory, which is what made it
+obvious these three were oversights rather than deliberate.
+
+Two follow-on fixes fell out of the restructure:
+
+- **`thumbcache::get` never invalidated a stale entry.** The comment said
+  "Source changed — invalidate" and the code only returned `None`. The entry
+  stayed cached, so every later lookup of that path re-failed validation and
+  re-paid the metadata call, with its bytes still counted in `MEMORY_USED`,
+  until LRU happened to evict it. It is now actually removed and its bytes
+  returned.
+- **`fileops::create`'s admission check had to be re-tested under the lock.**
+  With the metadata walk hoisted out, the early `MAX_OPERATIONS` check no longer
+  runs under the lock the operation is pushed under, so another caller could
+  take the last slot in between. The early check is now advisory and a binding
+  re-check guards the push; the id is allocated only after admission is certain,
+  so a rejected create burns no id.
+
+*The bug hid behind an empty test.* `thumbcache`'s `test_store_and_get` never
+called `get()` — it asserted `count() == 1`, explained in a comment that
+validation would fail, then asserted `count() == 1` again. The validation path
+had no coverage at all, which is why a stale entry could be left behind
+indefinitely without a test noticing. `test_get_validation` now covers all three
+outcomes against a real file under `/tmp`: source unreadable (trust it — an
+unreadable source must not be mistaken for a changed one), source changed (miss
+**and** evict **and** `memory_used()` returns to its prior value), source
+unchanged (hit). The third case is not redundant: the restructure introduced a
+window in which the entry can be evicted between the unlocked metadata call and
+the re-acquire, so "a matching stamp still hits" is a claim the old single-lock
+code did not have to make and the new code does.
+
+*And the new test did not run either — the first boot proved nothing.* The
+boot after this conversion passed, and the pass was **worthless as evidence**:
+grepping the serial log for the expected `[thumbcache]` line found nothing,
+because `fs::thumbcache::self_test` had no caller anywhere in the tree. Checking
+the rest of the batch found the same thing for **all 21** converted modules —
+every one had a `self_test()` already written, and not one was reachable from
+the boot path. The conversion would have shipped with literally zero automated
+coverage while appearing green. All 21 are now called from `main.rs`, next to
+the `locale`/`timezone` pair that a previous session wired up for exactly this
+reason, with the same note attached: *a test that never runs is not a test.*
+This is the third time this trap has been hit here (`bytestr::self_test`,
+lockdep Test 11, now these), so the rule is worth stating flatly: **a green boot
+only certifies what the serial log can be shown to contain.** Verify the
+expected output is present; never infer that a test passed from the absence of
+a failure.
+
+Wiring them in then exposed a second gap of the same kind: of the three
+restructured critical sections, `fileops::create` was covered (its "create
+operation" case) and `thumbcache::get` now is, but **`bookmarks::validate` had
+no test whatsoever** — the very function that was doing a `Vfs::metadata` walk
+per bookmark under the lock. `test_validate` now covers both outcomes (a
+resolvable and an unresolvable path), matched **by name rather than by
+position**, and asserts the snapshot neither drops nor duplicates entries —
+which is the specific way a snapshot-then-call-unlocked rewrite can go wrong.
+
+It is not confined to this batch, and the wider problem is logged separately
+as [B] below: ~60 more `fs/` self-tests have no caller at all, and a further
+~230 are reachable only by typing a `kshell` subcommand, i.e. never in CI.
+
+*Partial triage of the remainder.* This was a read-only pass over the **statics**
+only, so it is a starting point for the next batch, not a complete map — the
+struct-field and `Mutex::new` sites called out above are **not** yet triaged.
+
+- **Clean leaves, safe to convert:** `ac97`, `audio_history`, `cap/request`,
+  `hda`, `iommu`, `iommu_remap`, `klog`, `xhci`, `proc/signal`, and `net/httpd`'s
+  `LISTENER`/`TLS_LISTENER`.
+- **Need individual design work, not a batch swap:** `tlb.rs::SHOOTDOWN_LOCK`
+  (held across an IPI broadcast — preempt-disabling it is desirable but it is a
+  cross-CPU protocol, not a leaf); `workqueue.rs::worker_entry` (the only
+  sleep-under-lock hit in the whole sweep, and it wraps its lock in
+  `without_interrupts`); `rcu.rs::CALLBACKS` (reachable from too many contexts).
+- **Staying raw, correctly:** `mm/heap.rs` (lockdep cannot allocate under the
+  allocator's own lock), `serial.rs` (the printer lockdep prints through),
+  `bench.rs`'s `RAW`, which is deliberately the uninstrumented control that
+  `lock_tracked_nested` measures against, and the two sites inside `sync.rs`
+  itself, which are the primitives `Mutex`/`PreemptSpinMutex` are built out of.
+
+*A note on the audit method.* The scope approximation was deliberately
+conservative — guard binding to end of enclosing function — so it over-reported:
+`fileops::undo`, `freeze::freeze`, `fileops::move_item` and `httpd::tick` all
+flagged and all turned out to drop the guard before calling out (`let listener =
+*LISTENER.lock();` drops its temporary at the end of the statement). That noise
+is the price of the same over-reporting that surfaced the three real defects; a
+tighter heuristic would have produced a cleaner report and missed them.
+
+*Verification.* `cargo build -p kernel` clean (zero warnings). `cargo clippy -p
+kernel` exit 0, with no new warnings attributable to the conversion or the
+hoists (`fileops` 0 hits, `bookmarks`' 7 all predate this change). Boot test **PASSED** (clean streak 5) — and, this time, verifiably: the serial log contains `[thumbcache]   get_validation: ok`, `[bookmarks]   validate: ok` and self-test output from all 21 converted modules, with zero `self-test failed` warnings.
+
+**[B] 2026-08-17 — most `fs/` self-tests are never executed. TECH DEBT, open.**
+
+Found while checking why [A]'s new test produced no serial output. `fs/` has
+**433** modules defining a `pub fn self_test()` (excluding `mod.rs`/`tests.rs`).
+Counted before [A] wired its 21:
+
+| Category | Before [A] | After [A] | Runs unattended? |
+|---|---|---|---|
+| Called from `main.rs` | 144 | 165 | yes, every boot |
+| Reachable only via a `kshell` subcommand | 230 | 230 | **no** — needs a human to type it |
+| No caller anywhere in the tree | 59 | 38 | **no** — dead code |
+
+So **two thirds of `fs/`'s self-tests never run** unless someone sits at the
+kernel shell and invokes them by hand, which no CI path does.
+
+The 38 with no caller are the serious ones: they are dead code that the
+compiler keeps alive only because they are `pub`, so they rot silently and
+nothing detects it. `thumbcache` was in this set, and its `test_store_and_get`
+had degenerated into a test that asserts the same thing twice and never calls
+the function it names — which is precisely how the stale-entry leak in [A]
+survived. Expect more of the same in the rest of the set.
+
+The remaining 38, in full, so the next session need not re-derive them:
+`archive`, `backup`, `batch`, `changetrack`, `contextmenu`, `cpufreq`,
+`cputopo`, `dedup`, `deskicons`, `dirsync`, `diskio`, `encrypt`, `fcompress`,
+`fileselect`, `filetype`, `fswalk`, `health`, `ioprio`, `iso9660`, `linkcheck`,
+`openwith`, `policy`, `powerwake`, `properties`, `readdir_plus`, `reclaim`,
+`search`, `sidebar`, `snapshot`, `splice`, `statusbar`, `sysctlfs`, `sysuptime`,
+`tags`, `thermal`, `transaction`, `undelete`, `usage`. (The 21 from [A] were in
+this set too and are now wired.)
+
+*The proper fix is not 60 more hand-written call sites.* `main.rs` already
+carries several hundred lines of copy-pasted `if let Err(e) = fs::x::self_test()`,
+which is how the gap opened in the first place: adding a module and forgetting
+the call site is silent, and nothing anywhere asserts the two lists agree. What
+is wanted is a registry — a `linkme`/`inventory`-style distributed slice, or a
+declarative macro that emits both the call and the registry entry — so that
+defining a self-test *is* registering it and the failure mode becomes impossible
+rather than merely unlikely. `selftest.rs` already has a `TestSuite` table with
+the right shape (`name`, `description`, `run`, `category`); it is populated by
+hand and has drifted from `main.rs` in the same way. Unifying the two behind one
+registry is the actual task.
+
+*Interim guard, cheaper than the registry and worth doing first:* a build-time
+or boot-time check that every `pub fn self_test` in `fs/` is reachable from the
+registry, failing loudly when it is not. Without it this list will regrow.
+
+Not fixed here because it is a much larger change than the lock sweep it was
+found inside, and mixing them would make both unreviewable.
 
 **Superseded reactive strategy (kept for context):** the armed hang soak
 (`scripts/wedge-soak.sh`) reliably reproduces these under stress; each catch names

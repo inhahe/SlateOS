@@ -28492,7 +28492,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 13 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 14 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -29081,6 +29081,61 @@ Reproducing the diagnostic would mean reproducing a double free, so the case is
 an xfail in the harness with the reasoning attached, alongside the two host
 xfails (a directory operand, which a Windows `File::open` refuses outright) and
 the four `--help`/`--version` ones.
+
+### Progress (appended 2026-08-17, `join`)
+
+`join` is the fourteenth (`scripts/join-diff.sh`: 303 passed, 0 differed, 5
+differ on purpose — again **zero differences on the harness's first run**; 107
+differ when pointed at MSYS2's `join`, which is the harness proving it still
+discriminates). Like
+`comm` it runs under `C` end to end, and for the same reason
+(`hard_LC_COLLATE ? xmemcoll : memcmp`); unlike `comm` the collation decides not
+only the order but *which lines pair*, so a UTF-8 run would have been certifying
+a coincidence twice over. The shipped version knew six options and only as
+separate words (`-a 1` yes, `-a1` no, `-t:` no, `-12` no), reported everything
+else as `join: unknown option: -i`, and was wrong in four ways that changed
+answers rather than diagnostics: `-o auto` was parsed and ignored, `-e`'s filler
+was substituted *before* the comparison so it decided which lines paired, an
+unpairable line was reprinted as its fields rejoined (moving the join field out
+of first position), and input was read with `BufRead::lines` so `\r\n` lost its
+`\r` and one non-UTF-8 byte ended the run. Five things worth carrying forward:
+
+- **An operand can stop being an operand.** `join`'s optstring begins with `-`,
+  which is `getopt_long`'s RETURN_IN_ORDER mode: operands are *not* permuted to
+  the end. `join` uses that to support the obsolescent `-j1 N` / `-j2 N` / `-o
+  LIST LIST` spellings by *retroactively reinterpreting* an earlier operand once
+  a third one arrives — two slots plus a four-valued status each, and a shift.
+  The visible consequence is that `join -o 1.1 A B C` says
+  `invalid file number in field spec: 'A'`: the name it blames was never an
+  operand. An implementation that counted operands at the end instead would
+  blame `C`, agree with GNU on every ordinary command line, and be wrong here.
+  `Parse::add_file_name` is that machine transcribed verbatim, including the
+  `prev_optc_status` carry that makes `-o X Y` extend the list.
+- **The default order check is armed by an unpairable line, not by a descent** —
+  the same trap as `comm`, and worth restating because the two utilities are
+  usually converted apart. `join dis.txt dis.txt` over thoroughly unsorted input
+  is silent and exits 0.
+- **`%.*s` stops at a NUL, and that is observable.** The disorder warning prints
+  the offending line with `printf ("%s:%ju: is not sorted: %.*s", …)`. The
+  length is computed by stripping one trailing `'\n'` — the literal newline, not
+  `-z`'s delimiter — and capping at `INT_MAX`, but `%.*s` then truncates again
+  at the first NUL. Under `-z` every record ends in one and most contain
+  newlines, so the warning shows a fragment. Reproducing the length arithmetic
+  alone passes every ASCII test and fails `-z --check-order`.
+- **Two upstream statements are dead, and transcribing them faithfully would
+  have been the bug.** Both tail blocks contain `if (seq_other.count) seen_
+  unpairable = true;`, and the merge loop above them only exits when one of the
+  two counts is zero — so in each block the other count is provably zero. They
+  are documented in `join()` as not transcribed. Copying C without checking
+  reachability is how a transcription acquires behaviour the original never had.
+- **A field that is absent and a field that is empty are the same field.**
+  `keycmp` gives an out-of-range join field length 0 and sorts length 0 before
+  everything, so `-1 99999999999999999999 A B` (clamped to `PTRDIFF_MAX`, not
+  refused) makes every line of `A` unpairable and prints nothing, status 0. The
+  clamp itself needed `xstrtoimax`'s three-state result reimplemented: no digits
+  and digits-then-junk are both `INVALID`, clean overflow is `OVERFLOW` and is
+  *accepted*, so `-1 -9223372036854775808` is an error while
+  `-1 -9223372036854775809` is not.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 

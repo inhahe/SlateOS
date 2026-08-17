@@ -46,15 +46,49 @@
 //! form, which is always finite, and rounds that. `printf`'s ties therefore
 //! break to even against the true value rather than against an approximation.
 //!
-//! One measured divergence is deliberate and documented rather than fixed:
-//! glibc sets `ERANGE` for a **hexadecimal** literal that is subnormal *and*
-//! inexact (`0x3p-16446`) but not for one that is merely subnormal
-//! (`0x1p-16444`) or even subnormal and inexact by many bits
-//! (`0x1.0000000000000001p-16400`). No rule fits all three; this module flags
-//! a hex literal only when it overflows to infinity or flushes a nonzero value
-//! to zero. For **decimal** literals the rule is glibc's own and exact: any
-//! result that lands in the subnormal range is a range error, which is why GNU
-//! `seq 1e-4932` refuses its operand.
+//! `ERANGE` follows IEEE's underflow, which is *tininess and inexactness
+//! together* — so an exactly representable subnormal is not flagged at all,
+//! and a value below the smallest normal that nonetheless rounds up to it *is*.
+//! Both halves were measured rather than assumed: `0x5p-16445` (an exact
+//! subnormal) is clean while `0x5.00000000000000001p-16445` is flagged, and the
+//! exact 16 446-digit decimal expansion of 2^-16445 is clean while every short
+//! decimal near it is flagged. That second measurement is why this is not the
+//! rule an earlier draft of this file used, which was "any subnormal".
+//!
+//! Tininess is judged *after* rounding where the question can arise — a value
+//! below the smallest normal that would reach it by rounding at full precision
+//! is not tiny, so `0x1.ffffffffffffffffp-16383` is not flagged while
+//! `0x1.fffffffffffffffep-16383`, which differs only in the bit that turns that
+//! rounding from "stay" into "carry", is.
+//!
+//! ## Subnormals lose a bit, because glibc's do
+//!
+//! glibc's software conversion is **not correctly rounded in the subnormal
+//! range**, and neither is this one. When the answer is tiny, glibc shifts the
+//! 64-bit mantissa down onto the subnormal grid *before* rounding it, and in
+//! doing so folds the bits below the mantissa's round bit into a sticky flag
+//! and then **overwrites the round bit itself**. Exactly one bit is deleted,
+//! in exactly the place where a tie is decided. Measured:
+//!
+//! | literal | glibc |
+//! |---|---|
+//! | `0x1.4p-16444` (exactly 2.5 subnormal ulps) | 2 ulps, `ERANGE` |
+//! | `0x1.4000000000000001p-16444` (2.5 ulps + one bit at position 64) | 2 ulps, `ERANGE` |
+//! | `0x1.40000000000000001p-16444` (the same bit one place lower) | 3 ulps, `ERANGE` |
+//!
+//! The second literal is larger than the third and yet rounds down where the
+//! third rounds up, which no correctly-rounded conversion can do: in the second
+//! the bit that distinguishes them is the deleted one, and in the third it has
+//! moved a place lower, where it survives as sticky. An earlier draft of this
+//! file rounded correctly and recorded the difference as a known divergence;
+//! that was the wrong trade. Correct rounding here is better arithmetic and a
+//! worse `seq` — the claim the module makes is that an operand reads as the
+//! value GNU read from it — and, worse, it is *unmeasurable*, since the
+//! differential harness would have to skip every subnormal case to stay green.
+//! The algorithm, quoted from `strtod_l.c`, is in `round_strtod`.
+//!
+//! This applies to conversion only. x87 `fadd` and `fmul` round once, in
+//! hardware, so `+` and `*` round once too.
 
 use crate::bignat::Nat;
 use std::cell::RefCell;
@@ -150,14 +184,6 @@ impl ExtF80 {
         round(false, u128::from(v), 0, false)
     }
 
-    /// `-self`. The sign bit flips even for zero and NaN.
-    pub fn neg(self) -> Self {
-        ExtF80 {
-            neg: !self.neg,
-            ..self
-        }
-    }
-
     /// The value as `m * 2^e` with `m` a 64-bit integer. Meaningless for
     /// infinities and NaNs, which callers exclude first.
     fn decompose(self) -> (u64, i32) {
@@ -169,8 +195,7 @@ impl ExtF80 {
     }
 
     /// `self * other`, rounded to nearest with ties to even.
-    #[must_use]
-    pub fn mul(self, other: Self) -> Self {
+    fn mul_impl(self, other: Self) -> Self {
         if self.is_nan() || other.is_nan() {
             return ExtF80::NAN;
         }
@@ -197,9 +222,8 @@ impl ExtF80 {
     }
 
     /// `self + other`, rounded to nearest with ties to even.
-    #[must_use]
     #[allow(clippy::similar_names)]
-    pub fn add(self, other: Self) -> Self {
+    fn add_impl(self, other: Self) -> Self {
         if self.is_nan() || other.is_nan() {
             return ExtF80::NAN;
         }
@@ -309,17 +333,85 @@ impl ExtF80 {
     }
 }
 
+// The three arithmetic operations are operators rather than inherent methods so
+// that `first + step` in a sequence loop reads as arithmetic. `PartialEq` and
+// `PartialOrd` are deliberately *not* derived alongside them: NaN makes both
+// partial, and a derived `PartialEq` would compare the stored bits, which says
+// `+0 != -0` and `NaN == NaN`. [`ExtF80::eq_value`] and [`ExtF80::partial_cmp`]
+// are the value comparisons, and their names say they are not the bit ones.
+
+impl std::ops::Neg for ExtF80 {
+    type Output = Self;
+    /// The sign bit flips even for zero and NaN.
+    fn neg(self) -> Self {
+        ExtF80 {
+            neg: !self.neg,
+            ..self
+        }
+    }
+}
+
+impl std::ops::Mul for ExtF80 {
+    type Output = Self;
+    fn mul(self, other: Self) -> Self {
+        self.mul_impl(other)
+    }
+}
+
+impl std::ops::Add for ExtF80 {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        self.add_impl(other)
+    }
+}
+
+/// One rounding's result, with the two facts IEEE needs to decide whether an
+/// underflow happened.
+#[derive(Clone, Copy)]
+struct Rounded {
+    value: ExtF80,
+    /// The exact value was below the smallest normal — judged *before* the
+    /// rounding, which is what the standard calls detecting tininess before
+    /// rounding, and what glibc does. A value just under the smallest normal
+    /// that rounds up to it is still tiny, and glibc still reports it.
+    tiny: bool,
+    /// Something was lost. Exactness is the other half of underflow: a
+    /// subnormal that is exactly representable is a perfectly good answer and
+    /// glibc does not complain about it. Measured with an exact 16 446-digit
+    /// decimal expansion of 2^-16445, which glibc reads with no `ERANGE`.
+    inexact: bool,
+}
+
+impl Rounded {
+    /// Whether `strtold` would set `ERANGE`: overflow to infinity, or an
+    /// underflow, which is tininess *and* inexactness together.
+    fn range_error(self) -> bool {
+        self.value.is_infinite() || (self.tiny && self.inexact)
+    }
+}
+
 /// Assemble `sig * 2^exp2`, plus a positive infinitesimal when `sticky`, into
 /// the nearest representable value, ties to even.
 ///
 /// This is the only place a value is rounded, so it is the only place the
 /// subnormal and overflow boundaries are decided.
 fn round(neg: bool, sig: u128, exp2: i32, sticky: bool) -> ExtF80 {
+    round_detail(neg, sig, exp2, sticky).value
+}
+
+/// [`round`], also saying whether the answer underflowed.
+fn round_detail(neg: bool, sig: u128, exp2: i32, sticky: bool) -> Rounded {
     if sig == 0 {
-        // A pure sticky bit is an infinitesimal, which rounds to zero.
-        return ExtF80 {
-            neg,
-            ..ExtF80::ZERO
+        // A pure sticky bit is an infinitesimal, which rounds to zero — and an
+        // infinitesimal is as tiny and as inexact as a value gets. An exact
+        // zero, with no sticky bit, is neither.
+        return Rounded {
+            value: ExtF80 {
+                neg,
+                ..ExtF80::ZERO
+            },
+            tiny: sticky,
+            inexact: sticky,
         };
     }
     let bits = 128 - sig.leading_zeros() as i32;
@@ -327,20 +419,25 @@ fn round(neg: bool, sig: u128, exp2: i32, sticky: bool) -> ExtF80 {
     let normal_shift = bits - 64;
     // ...unless that lands below the subnormal floor, where the exponent is
     // pinned and precision is given up instead.
-    let shift = if exp2 + normal_shift < SUBNORMAL_EXP {
+    let tiny = exp2 + normal_shift < SUBNORMAL_EXP;
+    let shift = if tiny {
         SUBNORMAL_EXP - exp2
     } else {
         normal_shift
     };
 
-    let (mut m, guard, mut sticky) = if shift > 0 {
+    let (mut m, guard, sticky) = if shift > 0 {
         #[allow(clippy::cast_sign_loss)]
         let s = shift as u32;
         if s >= 128 {
             // Everything, including the rounding bit, is below the floor.
-            return ExtF80 {
-                neg,
-                ..ExtF80::ZERO
+            return Rounded {
+                value: ExtF80 {
+                    neg,
+                    ..ExtF80::ZERO
+                },
+                tiny: true,
+                inexact: true,
             };
         }
         let guard = (sig >> (s - 1)) & 1 == 1;
@@ -352,36 +449,48 @@ fn round(neg: bool, sig: u128, exp2: i32, sticky: bool) -> ExtF80 {
         (sig << (-shift) as u32, false, sticky)
     };
     let mut e = exp2 + shift;
+    let inexact = guard || sticky;
 
     if guard && (sticky || m & 1 == 1) {
         m += 1;
     }
-    sticky = false;
-    let _ = sticky;
     if m >> 64 != 0 {
         m >>= 1;
         e += 1;
     }
 
+    #[allow(clippy::cast_possible_truncation)]
+    Rounded {
+        value: assemble(neg, m as u64, e),
+        tiny,
+        inexact,
+    }
+}
+
+/// Build `m * 2^exp2`, with `m` at most 64 bits and `exp2` no lower than
+/// [`SUBNORMAL_EXP`]; an exponent past the top of the range becomes an infinity.
+///
+/// This is where a rounded significand becomes a value, and the only place the
+/// stored form's two encodings — explicit integer bit set for a normal, clear
+/// for a subnormal with a pinned exponent — are written.
+fn assemble(neg: bool, m: u64, exp2: i32) -> ExtF80 {
     if m == 0 {
         return ExtF80 {
             neg,
             ..ExtF80::ZERO
         };
     }
-    #[allow(clippy::cast_possible_truncation)]
-    let m = m as u64;
     if m >> 63 == 0 {
-        // Still under the integer bit, so this is a subnormal and `e` is pinned
-        // at the floor by construction above.
-        debug_assert_eq!(e, SUBNORMAL_EXP);
+        // Still under the integer bit, so this is a subnormal and the exponent
+        // is pinned at the floor by whoever shifted it there.
+        debug_assert_eq!(exp2, SUBNORMAL_EXP);
         return ExtF80 {
             neg,
             exp: 0,
             sig: m,
         };
     }
-    let biased = e + 63 + BIAS;
+    let biased = exp2 + 63 + BIAS;
     if biased > i32::from(MAX_BIASED) {
         return ExtF80 {
             neg,
@@ -397,6 +506,157 @@ fn round(neg: bool, sig: u128, exp2: i32, sticky: bool) -> ExtF80 {
     }
 }
 
+/// [`round_detail`]'s job, done the way glibc's `strtold` does it — which is
+/// **not** correct rounding once the answer is subnormal.
+///
+/// ## What glibc does
+///
+/// `stdlib/strtod_l.c`'s `round_and_return` receives a mantissa already
+/// *truncated* to 64 bits, plus the single bit below it (`round_limb` /
+/// `round_bit`) and a flag for everything below that (`more_bits`). If the
+/// exponent is in range it rounds once, half to even, and that is ordinary
+/// correct rounding. If the exponent is below the smallest normal it first
+/// shifts the mantissa down onto the subnormal grid, and does so like this:
+///
+/// ```c
+/// more_bits |= (round_limb & ((((mp_limb_t) 1) << round_bit) - 1)) != 0;
+/// ...
+/// round_limb = retval[0];
+/// round_bit = shift - 1;
+/// (void) __mpn_rshift (retval, retval, RETURN_LIMB_SIZE, shift);
+/// ```
+///
+/// The bits *below* the old round bit are folded into the sticky flag, and then
+/// `round_limb` is overwritten. **The old round bit itself is dropped.** The
+/// rounding that follows sees a value that has lost exactly one bit, in exactly
+/// the place where a tie is decided. Measured, on glibc 2.39:
+///
+/// ```text
+/// 0x1.4000000000000001p-16444  ->  0x0.000000000000002p-16385
+/// 0x1.40000000000000001p-16444 ->  0x0.000000000000003p-16385
+/// ```
+///
+/// The first literal is the *larger* of the two and yet rounds *down* where the
+/// second rounds up, which no correctly-rounded conversion can do. In the first,
+/// the bit that distinguishes them is the dropped one; in the second it has
+/// moved one place lower, where it survives as sticky and pushes the rounding up.
+///
+/// ## Tininess is judged after rounding, when it can be
+///
+/// A value below the smallest normal that would reach it by rounding *at normal
+/// precision* is not tiny, and so does not underflow — glibc's
+/// `TININESS_AFTER_ROUNDING`, which x86 sets, applied in the one case where the
+/// question can arise, a shift of one bit. Hence the measured pair
+///
+/// ```text
+/// 0x1.fffffffffffffffep-16383  ERANGE      both round up to the smallest normal
+/// 0x1.ffffffffffffffffp-16383  no ERANGE
+/// ```
+///
+/// where the second differs from the first only in a bit that turns the
+/// normal-precision rounding from "stay" into "carry".
+///
+/// ## Why we reproduce all of this rather than improve on it
+///
+/// Correct rounding here would be better arithmetic and a worse `seq`. The claim
+/// this module makes is that an operand reads as the value GNU read from it; a
+/// one-ulp improvement in the last subnormal is still a difference, and one no
+/// user asked for. It would also be *unmeasurable*: the differential harness
+/// would have to skip every subnormal case to stay green, and those are the
+/// cases most worth measuring.
+///
+/// x87 *arithmetic* does none of this — `fadd` and `fmul` round once, correctly,
+/// in hardware. So `+` and `*` keep using
+/// [`round_detail`], and only the parsing paths come through here.
+fn round_strtod(neg: bool, sig: u128, exp2: i32, sticky: bool) -> Rounded {
+    let zero = |tiny| Rounded {
+        value: ExtF80 {
+            neg,
+            ..ExtF80::ZERO
+        },
+        tiny,
+        inexact: tiny,
+    };
+    if sig == 0 {
+        // A pure sticky bit is an infinitesimal: as tiny and as inexact as a
+        // value gets. An exact zero is neither.
+        return zero(sticky);
+    }
+
+    // Truncate to the 64-bit mantissa glibc holds, keeping the bit just below
+    // it (`half`) and a flag for everything under that (`more`) separately —
+    // the subnormal path treats the two differently, which is the whole point.
+    let bits = 128 - sig.leading_zeros() as i32;
+    let up = bits - 64;
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let (m64, e1, half, more) = if up > 0 {
+        let s = up as u32;
+        let half = (sig >> (s - 1)) & 1 == 1;
+        let below = s - 1;
+        let more = sticky || (below > 0 && sig & ((1u128 << below) - 1) != 0);
+        ((sig >> s) as u64, exp2 + up, half, more)
+    } else {
+        ((sig << (-up) as u32) as u64, exp2 + up, false, sticky)
+    };
+
+    if e1 >= SUBNORMAL_EXP {
+        // In range: one rounding, half to even, against the bit below the
+        // mantissa. This much is ordinary and correct.
+        let mut m = u128::from(m64);
+        let mut e = e1;
+        if half && (more || m & 1 == 1) {
+            m += 1;
+            if m >> 64 != 0 {
+                // The carry landed in a 65th bit; the bit it drops is zero,
+                // since a significand that carried is a power of two.
+                m >>= 1;
+                e += 1;
+            }
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        return Rounded {
+            value: assemble(neg, m as u64, e),
+            tiny: false,
+            inexact: half || more,
+        };
+    }
+
+    // Below the smallest normal. Shift onto the subnormal grid, and note what
+    // does *not* happen: `half` is not folded into `more`. It is dropped.
+    let shift = SUBNORMAL_EXP - e1;
+    if shift > 64 {
+        // glibc's `underflow_value`: not even the round bit reaches the grid,
+        // and it returns a signed zero without rounding at all.
+        return zero(true);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let s = shift as u32;
+    let m = u128::from(m64);
+    let guard = (m >> (s - 1)) & 1 == 1;
+    let lost = s > 1 && m & ((1u128 << (s - 1)) - 1) != 0;
+    let sticky = more || lost;
+
+    // `TININESS_AFTER_ROUNDING`. A one-bit shift is the only case where a
+    // rounding at normal precision could carry the value back up to the
+    // smallest normal, and a value that would do so is not tiny — it is a
+    // normal number that happened to be written from below.
+    let tiny = !(shift == 1 && half && (more || m64 & 1 == 1) && m64 == u64::MAX);
+
+    let mut q = m >> s;
+    if guard && (sticky || q & 1 == 1) {
+        q += 1;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Rounded {
+        // A subnormal that rounds up into the integer bit becomes the smallest
+        // normal, which `assemble` reads off the significand rather than being
+        // told, so the carry needs no special case here.
+        value: assemble(neg, q as u64, SUBNORMAL_EXP),
+        tiny,
+        inexact: guard || sticky,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------
@@ -409,8 +669,9 @@ pub struct Scanned {
     /// Bytes consumed. Zero means "no conversion could be performed", which is
     /// `strtold` returning `endptr == nptr`.
     pub consumed: usize,
-    /// glibc's `ERANGE`. See the module documentation for the one hexadecimal
-    /// case where this deliberately differs.
+    /// glibc's `ERANGE`: overflow to infinity, or underflow, which is tininess
+    /// and inexactness together. See the module documentation for the one
+    /// subnormal case where this deliberately differs.
     pub range_error: bool,
 }
 
@@ -603,9 +864,11 @@ fn scan_decimal(s: &[u8], at: usize, neg: bool) -> Scanned {
 /// Turn the collected digits and a power of ten into the nearest value, and say
 /// whether glibc would call it a range error.
 ///
-/// The decimal rule is glibc's: **any** result in the subnormal range is a
-/// range error, whether or not a bit was lost. That is why `seq 1e-4932`, a
-/// perfectly ordinary-looking operand, is refused.
+/// A subnormal is a range error only when it is also *inexact* — see
+/// [`Rounded::range_error`]. In practice a decimal numeral short enough to type
+/// is essentially never an exact subnormal, so `seq 1e-4932`, a perfectly
+/// ordinary-looking operand, is refused; but the rule really is inexactness and
+/// not subnormality, and an exact one is accepted.
 fn decimal_value(neg: bool, digits: &[u8], exp10: i64) -> (ExtF80, bool) {
     let lead = digits.iter().position(|&c| c != b'0');
     let Some(lead) = lead else {
@@ -654,11 +917,8 @@ fn decimal_value(neg: bool, digits: &[u8], exp10: i64) -> (ExtF80, bool) {
     } else {
         (d, Nat::pow(10, (-exp10) as u32))
     };
-    let value = quotient_to_float(neg, &num, &den);
-
-    let overflowed = value.is_infinite();
-    let flushed = value.is_zero();
-    (value, overflowed || flushed || value.is_subnormal())
+    let got = quotient_to_float(neg, &num, &den);
+    (got.value, got.range_error())
 }
 
 /// Round `num / den` — both exact, `den` nonzero — to the nearest value.
@@ -666,11 +926,15 @@ fn decimal_value(neg: bool, digits: &[u8], exp10: i64) -> (ExtF80, bool) {
 /// The numerator is shifted so the quotient is 65 bits before dividing, which
 /// is what keeps the cost linear: algorithm D pays per quotient limb, and three
 /// limbs is all that is ever asked for. The remainder then *is* the sticky bit.
-fn quotient_to_float(neg: bool, num: &Nat, den: &Nat) -> ExtF80 {
+fn quotient_to_float(neg: bool, num: &Nat, den: &Nat) -> Rounded {
     if num.is_zero() {
-        return ExtF80 {
-            neg,
-            ..ExtF80::ZERO
+        return Rounded {
+            value: ExtF80 {
+                neg,
+                ..ExtF80::ZERO
+            },
+            tiny: false,
+            inexact: false,
         };
     }
     let want = 65_i64;
@@ -689,7 +953,7 @@ fn quotient_to_float(neg: bool, num: &Nat, den: &Nat) -> ExtF80 {
         sig = (sig << 1) | u128::from(q.bit(i));
     }
     #[allow(clippy::cast_possible_truncation)]
-    round(neg, sig, -(shift as i32), sticky)
+    round_strtod(neg, sig, -(shift as i32), sticky)
 }
 
 /// The `0x` numeral path. `at` points just past the `0x`.
@@ -751,14 +1015,11 @@ fn scan_hex(s: &[u8], at: usize, neg: bool) -> Scanned {
     }
     let clamped = exp2.clamp(-EXPONENT_GUARD * 8, EXPONENT_GUARD * 8);
     #[allow(clippy::cast_possible_truncation)]
-    let value = round(neg, sig, clamped as i32, sticky);
-    // See the module documentation: a hex literal is flagged only when it left
-    // the representable range entirely, not merely when it landed subnormal.
-    let range_error = value.is_infinite() || value.is_zero();
+    let got = round_strtod(neg, sig, clamped as i32, sticky);
     Scanned {
-        value,
+        value: got.value,
         consumed: i,
-        range_error,
+        range_error: got.range_error(),
     }
 }
 
@@ -785,9 +1046,12 @@ pub fn xstrtold(s: &[u8]) -> Option<ExtF80> {
 
 /// One `printf` conversion for a `long double` argument.
 ///
-/// Built by the caller rather than parsed here, because the utilities that need
-/// it also need to *reject* the spellings they do not implement, with their own
-/// wording; `seq -f %d` is `seq`'s diagnostic, not this module's.
+/// A caller may build one field by field — `seq` does, for the format it
+/// invents when none was given — or read one out of a format string with
+/// [`Spec::parse`]. `parse` deliberately only answers *whether* a directive is
+/// one of these and what it says; a caller that must also explain a rejection
+/// does its own scan first, because `seq -f %d`'s wording is `seq`'s and not
+/// this module's.
 #[derive(Clone, Copy, Debug)]
 pub struct Spec {
     /// `-`: pad on the right instead of the left.
@@ -841,6 +1105,89 @@ impl Spec {
             conv: b'g',
             ..Spec::fixed(0)
         }
+    }
+
+    /// Read one directive — `%`, flags, width, precision, an optional length
+    /// modifier, a conversion — and say how many bytes it took.
+    ///
+    /// `bytes` must begin at the `%`. `None` means this is not a floating point
+    /// directive, which covers `%%` and `%d` alike; the caller decides what to
+    /// say about that.
+    ///
+    /// The width is never `*`: a `long double` conversion here takes exactly one
+    /// argument and there is no argument list to draw a width from, so a `*`
+    /// falls out as an unknown conversion, which is what glibc's own callers in
+    /// `seq` and `printf` report.
+    ///
+    /// A width that does not fit a `usize` is clamped rather than refused.
+    /// glibc's own limit is `INT_MAX` and every value at or above it is equally
+    /// unprintable, so the distinction is not observable in the output — only
+    /// in whether the program dies before writing anything, and it does not.
+    #[must_use]
+    pub fn parse(bytes: &[u8]) -> Option<(Self, usize)> {
+        let mut i = 1;
+        if bytes.first() != Some(&b'%') {
+            return None;
+        }
+        let mut spec = Spec {
+            minus: false,
+            plus: false,
+            space: false,
+            hash: false,
+            zero: false,
+            width: 0,
+            precision: None,
+            conv: 0,
+        };
+        // Flags may repeat and may come in any order. `'` is the grouping flag:
+        // glibc accepts it and, in the C locale, does nothing with it.
+        while let Some(&c) = bytes.get(i) {
+            match c {
+                b'-' => spec.minus = true,
+                b'+' => spec.plus = true,
+                b' ' => spec.space = true,
+                b'#' => spec.hash = true,
+                b'0' => spec.zero = true,
+                b'\'' => {}
+                _ => break,
+            }
+            i += 1;
+        }
+        let start = i;
+        while matches!(bytes.get(i), Some(c) if c.is_ascii_digit()) {
+            i += 1;
+        }
+        for &c in bytes.get(start..i)? {
+            spec.width = spec
+                .width
+                .saturating_mul(10)
+                .saturating_add(usize::from(c - b'0'));
+        }
+        if bytes.get(i) == Some(&b'.') {
+            i += 1;
+            let start = i;
+            while matches!(bytes.get(i), Some(c) if c.is_ascii_digit()) {
+                i += 1;
+            }
+            // A bare `.` is a precision of zero, not a missing precision.
+            let mut p: usize = 0;
+            for &c in bytes.get(start..i)? {
+                p = p.saturating_mul(10).saturating_add(usize::from(c - b'0'));
+            }
+            spec.precision = Some(p);
+        }
+        // `L` is the only length modifier that means anything for these
+        // conversions, and it is optional: the value is a `long double` either
+        // way, because that is the only kind of number we hold.
+        if bytes.get(i) == Some(&b'L') {
+            i += 1;
+        }
+        let conv = *bytes.get(i)?;
+        if !b"efgaEFGA".contains(&conv) {
+            return None;
+        }
+        spec.conv = conv;
+        Some((spec, i + 1))
     }
 }
 
@@ -1185,56 +1532,20 @@ mod tests {
         xstrtold(s.as_bytes()).unwrap()
     }
 
+    /// [`p`], without gnulib's refusal of a nonzero range error — for the cases
+    /// whose whole point is that they underflow.
+    fn pr(s: &str) -> ExtF80 {
+        let got = strtold(s.as_bytes());
+        assert_eq!(got.consumed, s.len(), "not a whole numeral: {s}");
+        got.value
+    }
+
     fn f(fmt: &str, v: ExtF80) -> String {
-        // A tiny spec parser, for tests only, so the cases below can be written
-        // the way they were measured from C.
-        let b = fmt.as_bytes();
-        assert_eq!(b[0], b'%');
-        let mut i = 1;
-        let mut spec = Spec {
-            minus: false,
-            plus: false,
-            space: false,
-            hash: false,
-            zero: false,
-            width: 0,
-            precision: None,
-            conv: b'f',
-        };
-        while i < b.len() {
-            match b[i] {
-                b'-' => spec.minus = true,
-                b'+' => spec.plus = true,
-                b' ' => spec.space = true,
-                b'#' => spec.hash = true,
-                b'0' => spec.zero = true,
-                _ => break,
-            }
-            i += 1;
-        }
-        let start = i;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i > start {
-            spec.width = fmt[start..i].parse().unwrap();
-        }
-        if i < b.len() && b[i] == b'.' {
-            i += 1;
-            let start = i;
-            while i < b.len() && b[i].is_ascii_digit() {
-                i += 1;
-            }
-            spec.precision = Some(if i > start {
-                fmt[start..i].parse().unwrap()
-            } else {
-                0
-            });
-        }
-        if i < b.len() && b[i] == b'L' {
-            i += 1;
-        }
-        spec.conv = b[i];
+        // The cases below are written the way they were measured from C, so the
+        // helper reads a whole directive -- with the shipped parser, which is
+        // the one `seq -f` will use, rather than a test-only imitation of it.
+        let (spec, used) = Spec::parse(fmt.as_bytes()).expect("a float directive");
+        assert_eq!(used, fmt.len(), "trailing text in {fmt}");
         render(&spec, v)
     }
 
@@ -1357,6 +1668,55 @@ mod tests {
     }
 
     #[test]
+    fn subnormals_are_rounded_the_way_glibc_rounds_them() {
+        // The pair that proves a bit is being deleted. The first literal is the
+        // larger of the two and rounds *down* where the second rounds up, which
+        // no correctly-rounded conversion can do: the bit that separates them
+        // sits exactly where the subnormal shift overwrites the round bit,
+        // while in the second it has moved a place lower and survives as
+        // sticky. See `round_strtod`.
+        assert_eq!(
+            f("%La", pr("0x1.4000000000000001p-16444")),
+            "0x0.000000000000002p-16385"
+        );
+        assert_eq!(
+            f("%La", pr("0x1.40000000000000001p-16444")),
+            "0x0.000000000000003p-16385"
+        );
+        // The exact tie itself, which goes to even.
+        assert_eq!(f("%La", pr("0x1.4p-16444")), "0x0.000000000000002p-16385");
+
+        // Tininess is judged after rounding at full precision, so a value that
+        // reaches the smallest normal there never underflows -- even though the
+        // digits it came from were below it.
+        assert!(!strtold(b"0x1.ffffffffffffffffp-16383").range_error);
+        assert!(strtold(b"0x1.fffffffffffffffep-16383").range_error);
+        // ...and an exactly representable subnormal is not a range error at
+        // all, because underflow is tininess *and* inexactness together.
+        assert!(!strtold(b"0x1.fffffffffffffffcp-16383").range_error);
+        assert!(!strtold(b"0x1p-16445").range_error);
+        assert!(!strtold(b"0x2p-16446").range_error);
+        // `0x3p-16446` is a half-step, which the grid cannot hold, so the same
+        // literal one bit finer *is* a range error even though it is tiny by
+        // the same amount. Inexactness, not magnitude, is what is being asked.
+        assert!(strtold(b"0x3p-16446").range_error);
+        // The decimal side of the same boundary, one digit apart.
+        assert!(!strtold(b"3.3621031431120935062e-4932").range_error);
+        assert!(strtold(b"3.3621031431120935061e-4932").range_error);
+        assert_eq!(
+            f("%La", pr("3.3621031431120935061e-4932")),
+            "0x8p-16385",
+            "the second rounding carries it back up to the smallest normal"
+        );
+
+        // Below the floor entirely: everything, including the round bit, is
+        // shifted off, and the answer is a signed zero.
+        assert!(strtold(b"0x1p-16500").range_error);
+        assert_eq!(f("%La", pr("0x1p-16500")), "0x0p+0");
+        assert_eq!(f("%La", pr("-0x1p-16500")), "-0x0p+0");
+    }
+
+    #[test]
     fn zero_keeps_its_sign() {
         assert_eq!(f("%.0Lf", p("-0")), "-0");
         assert_eq!(f("%Lg", p("-0")), "-0");
@@ -1371,10 +1731,10 @@ mod tests {
     fn addition_and_multiplication_are_exact_where_they_can_be() {
         let a = p("1");
         let b = p("2");
-        assert_eq!(f("%.0Lf", a.add(b)), "3");
-        assert_eq!(f("%.0Lf", a.mul(b)), "2");
+        assert_eq!(f("%.0Lf", a + b), "3");
+        assert_eq!(f("%.0Lf", a * b), "2");
         let big = p("18446744073709551615");
-        assert_eq!(f("%.0Lf", big.add(ExtF80::ONE)), "18446744073709551616");
+        assert_eq!(f("%.0Lf", big + ExtF80::ONE), "18446744073709551616");
     }
 
     #[test]
@@ -1382,9 +1742,9 @@ mod tests {
         // 2^64 + 1 is not representable; it rounds to 2^64 (even), while
         // 2^64 + 3 rounds up to 2^64 + 4.
         let two64 = p("18446744073709551616");
-        assert_eq!(f("%.0Lf", two64.add(ExtF80::ONE)), "18446744073709551616");
+        assert_eq!(f("%.0Lf", two64 + ExtF80::ONE), "18446744073709551616");
         assert_eq!(
-            f("%.0Lf", two64.add(ExtF80::from_u32(3))),
+            f("%.0Lf", two64 + ExtF80::from_u32(3)),
             "18446744073709551620"
         );
     }
@@ -1392,39 +1752,39 @@ mod tests {
     #[test]
     fn cancellation_is_exact() {
         let a = p("1");
-        assert!(a.add(a.neg()).is_zero());
+        assert!((a + -a).is_zero());
         // x + (-x) is +0 under round-to-nearest, even for a negative x.
-        assert!(!a.neg().add(a).sign_bit());
-        assert!(p("-0").add(p("-0")).sign_bit());
-        assert!(!p("-0").add(p("0")).sign_bit());
+        assert!(!(-a + a).sign_bit());
+        assert!((p("-0") + p("-0")).sign_bit());
+        assert!(!(p("-0") + p("0")).sign_bit());
     }
 
     #[test]
     fn adding_something_far_smaller_still_rounds() {
         let one = ExtF80::ONE;
         // 2^-64 is half an ulp of 1.0, so it ties and rounds to even: 1.0.
-        assert!(one.add(p("0x1p-64")).eq_value(one));
+        assert!((one + p("0x1p-64")).eq_value(one));
         // Anything more tips it up.
-        assert!(!one.add(p("0x1.8p-64")).eq_value(one));
+        assert!(!(one + p("0x1.8p-64")).eq_value(one));
         // And 2^-65 is below the halfway point.
-        assert!(one.add(p("0x1p-65")).eq_value(one));
+        assert!((one + p("0x1p-65")).eq_value(one));
     }
 
     #[test]
     fn infinities_and_nans_behave() {
         let inf = ExtF80::INFINITY;
-        assert!(inf.add(inf).is_infinite());
-        assert!(inf.add(inf.neg()).is_nan());
-        assert!(inf.mul(ExtF80::ZERO).is_nan());
-        assert!(inf.mul(p("2")).is_infinite());
-        assert!(ExtF80::NAN.add(ExtF80::ONE).is_nan());
+        assert!((inf + inf).is_infinite());
+        assert!((inf + -inf).is_nan());
+        assert!((inf * ExtF80::ZERO).is_nan());
+        assert!((inf * p("2")).is_infinite());
+        assert!((ExtF80::NAN + ExtF80::ONE).is_nan());
         assert_eq!(ExtF80::NAN.partial_cmp(ExtF80::ONE), None);
     }
 
     #[test]
     fn overflow_reaches_infinity() {
         let huge = p("1e4932");
-        assert!(huge.mul(p("1000")).is_infinite());
+        assert!((huge * p("1000")).is_infinite());
     }
 
     #[test]
@@ -1462,7 +1822,7 @@ mod tests {
 
     #[test]
     fn a_third_matches_glibc_to_the_last_digit() {
-        let third = ExtF80::ONE.mul(p("0x5.5555555555555558p-4"));
+        let third = ExtF80::ONE * p("0x5.5555555555555558p-4");
         let _ = third;
         // Computed the way `seq` would reach it is not possible without
         // division, so use the exact literal glibc prints for 1.0L/3.0L.
@@ -1574,13 +1934,13 @@ mod tests {
         assert_eq!(f("%La", inf), "inf");
         assert_eq!(f("%LF", inf), "INF");
         assert_eq!(f("%LA", inf), "INF");
-        assert_eq!(f("%Lf", inf.neg()), "-inf");
+        assert_eq!(f("%Lf", -inf), "-inf");
         assert_eq!(f("%10Lf", inf), "       inf");
         assert_eq!(f("%-10Lf", inf), "inf       ");
         assert_eq!(f("%010Lf", inf), "       inf");
         assert_eq!(f("%+Lf", inf), "+inf");
         assert_eq!(f("%Lf", ExtF80::NAN), "nan");
-        assert_eq!(f("%Lf", ExtF80::NAN.neg()), "-nan");
+        assert_eq!(f("%Lf", -ExtF80::NAN), "-nan");
     }
 
     #[test]

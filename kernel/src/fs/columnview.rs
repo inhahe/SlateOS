@@ -41,6 +41,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -172,9 +173,9 @@ pub enum SortDir {
 
 static COMPUTE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-static COLUMN_DEFS: spin::Mutex<Vec<ColumnDef>> = spin::Mutex::new(Vec::new());
-static USER_PREFS: spin::Mutex<Vec<ColumnPref>> = spin::Mutex::new(Vec::new());
-static INITIALIZED: spin::Mutex<bool> = spin::Mutex::new(false);
+static COLUMN_DEFS: PreemptSpinMutex<Vec<ColumnDef>> = PreemptSpinMutex::named(Vec::new(), b"COLUMN_DEFS");
+static USER_PREFS: PreemptSpinMutex<Vec<ColumnPref>> = PreemptSpinMutex::named(Vec::new(), b"USER_PREFS");
+static INITIALIZED: PreemptSpinMutex<bool> = PreemptSpinMutex::named(false, b"INITIALIZED");
 
 // ---------------------------------------------------------------------------
 // Initialization

@@ -45,6 +45,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -167,7 +168,7 @@ static FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
 static GEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-static CUSTOM_GENERATORS: spin::Mutex<Vec<CustomGenerator>> = spin::Mutex::new(Vec::new());
+static CUSTOM_GENERATORS: PreemptSpinMutex<Vec<CustomGenerator>> = PreemptSpinMutex::named(Vec::new(), b"CUSTOM_GENERATORS");
 
 // ---------------------------------------------------------------------------
 // Public API

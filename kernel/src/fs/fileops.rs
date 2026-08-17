@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -259,7 +260,7 @@ static TOTAL_COMPLETED: AtomicU64 = AtomicU64::new(0);
 static TOTAL_CANCELLED: AtomicU64 = AtomicU64::new(0);
 static TOTAL_BYTES_MOVED: AtomicU64 = AtomicU64::new(0);
 
-static OPERATIONS: spin::Mutex<Vec<FileOperation>> = spin::Mutex::new(Vec::new());
+static OPERATIONS: PreemptSpinMutex<Vec<FileOperation>> = PreemptSpinMutex::named(Vec::new(), b"OPERATIONS");
 
 // ---------------------------------------------------------------------------
 // Conflict resolution helpers
@@ -331,16 +332,24 @@ pub fn create(
         return Err(KernelError::InvalidArgument);
     }
 
-    let mut ops = OPERATIONS.lock();
-    let active = ops.iter().filter(|o| o.state == OpState::Running).count();
-    if active >= MAX_OPERATIONS {
-        return Err(KernelError::WouldBlock);
+    // Early admission check, so an over-quota caller is rejected before paying
+    // for the metadata walk below. It is only advisory — the binding check is
+    // the re-check under the lock the operation is actually pushed under.
+    {
+        let ops = OPERATIONS.lock();
+        if ops.iter().filter(|o| o.state == OpState::Running).count() >= MAX_OPERATIONS {
+            return Err(KernelError::WouldBlock);
+        }
     }
 
-    let id = OP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let now = crate::timekeeping::clock_monotonic();
 
-    // Build item list from sources.
+    // Build item list from sources, with NO lock held. `Vfs::metadata` walks the
+    // mount table, takes filesystem locks of its own and can block on the
+    // backing device; running it once per source inside OPERATIONS' critical
+    // section held a leaf lock across an unbounded I/O path — for an
+    // arbitrarily long `sources` list — and put its acquisition order ahead of
+    // the VFS's.
     let mut items = Vec::new();
     let mut total_bytes: u64 = 0;
 
@@ -382,6 +391,16 @@ pub fn create(
         if items.len() == 1 { "" } else { "s" },
         dest
     );
+
+    let mut ops = OPERATIONS.lock();
+    // Binding admission check. The metadata walk above ran unlocked, so another
+    // caller may have taken the last slot since the early check; without
+    // re-testing here MAX_OPERATIONS would be exceedable. The id is allocated
+    // only once admission is certain, so a rejected create burns no id.
+    if ops.iter().filter(|o| o.state == OpState::Running).count() >= MAX_OPERATIONS {
+        return Err(KernelError::WouldBlock);
+    }
+    let id = OP_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     let op = FileOperation {
         id,

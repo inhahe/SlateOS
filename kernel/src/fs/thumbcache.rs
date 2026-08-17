@@ -30,7 +30,7 @@
 //! - Cache key: (path, mtime_ns, size) triple for validation.
 //! - Generation is done by the caller (compositor/image decoder);
 //!   this module only manages the cache storage.
-//! - Thread-safe via spin::Mutex.
+//! - Thread-safe via `PreemptSpinMutex` (a preempt-disabling leaf lock).
 
 #![allow(dead_code)]
 
@@ -41,6 +41,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::error::KernelResult;
 use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -152,7 +153,7 @@ struct CacheEntry {
 // ---------------------------------------------------------------------------
 
 /// Thumbnail cache.
-static CACHE: spin::Mutex<Vec<CacheEntry>> = spin::Mutex::new(Vec::new());
+static CACHE: PreemptSpinMutex<Vec<CacheEntry>> = PreemptSpinMutex::named(Vec::new(), b"CACHE");
 
 /// Current memory usage.
 static MEMORY_USED: AtomicU64 = AtomicU64::new(0);
@@ -174,23 +175,59 @@ static EVICT_COUNT: AtomicU64 = AtomicU64::new(0);
 pub fn get(path: impl AsRef<Path>, size: ThumbSize) -> Option<CachedThumb> {
     let path = path.as_ref();
     let now = crate::timekeeping::clock_monotonic();
-    let mut cache = CACHE.lock();
 
-    // Find matching entry.
-    let entry = cache
-        .iter_mut()
-        .find(|e| e.path.as_path() == path && e.size == size)?;
+    // Phase 1 — read the candidate's validation stamp, then drop the lock.
+    let (source_mtime_ns, source_size) = {
+        let cache = CACHE.lock();
+        let entry = cache
+            .iter()
+            .find(|e| e.path.as_path() == path && e.size == size)?;
+        (entry.thumb.source_mtime_ns, entry.thumb.source_size)
+    };
 
-    // Validate: check if source file changed.
+    // Phase 2 — validate against the source with NO lock held. `Vfs::metadata`
+    // walks the mount table, takes filesystem locks of its own and can block on
+    // the backing device; running it inside CACHE's critical section would hold
+    // a leaf lock across an unbounded I/O path and put its acquisition order
+    // ahead of the VFS's. A metadata *error* is treated as "cannot tell" and
+    // leaves the entry trusted, which is the original behaviour.
     if let Ok(meta) = crate::fs::Vfs::metadata(path) {
-        if meta.modified_ns != entry.thumb.source_mtime_ns || meta.size != entry.thumb.source_size {
-            // Source changed — invalidate.
+        if meta.modified_ns != source_mtime_ns || meta.size != source_size {
+            // Source changed. Actually drop the stale entry rather than merely
+            // reporting a miss: leaving it in place made every future lookup of
+            // this path re-fail validation (and re-pay the metadata call) until
+            // LRU happened to evict it, and its bytes stayed counted in
+            // MEMORY_USED the whole time.
+            let mut cache = CACHE.lock();
+            cache.retain(|e| {
+                if e.path.as_path() == path
+                    && e.size == size
+                    && e.thumb.source_mtime_ns == source_mtime_ns
+                    && e.thumb.source_size == source_size
+                {
+                    MEMORY_USED.fetch_sub(e.thumb.data.len() as u64, Ordering::Relaxed);
+                    false
+                } else {
+                    true
+                }
+            });
             MISS_COUNT.fetch_add(1, Ordering::Relaxed);
             return None;
         }
     }
 
-    // Cache hit — update LRU timestamp.
+    // Phase 3 — re-acquire and stamp the LRU. The entry can have been evicted
+    // or replaced in the window above, so re-find it *and* require the same
+    // validation stamp: we must never hand back a thumbnail we did not
+    // validate. A vanished entry is reported as a plain miss, exactly like the
+    // phase-1 not-found path.
+    let mut cache = CACHE.lock();
+    let entry = cache.iter_mut().find(|e| {
+        e.path.as_path() == path
+            && e.size == size
+            && e.thumb.source_mtime_ns == source_mtime_ns
+            && e.thumb.source_size == source_size
+    })?;
     entry.thumb.last_access_ns = now;
     HIT_COUNT.fetch_add(1, Ordering::Relaxed);
     Some(entry.thumb.clone())
@@ -400,12 +437,13 @@ pub fn self_test() -> KernelResult<()> {
 
     test_thumb_size();
     test_store_and_get();
+    test_get_validation();
     test_invalidate();
     test_is_thumbnailable();
     test_memory_tracking();
     test_lru_eviction();
 
-    serial_println!("[thumbcache] Self-test passed (6 tests).");
+    serial_println!("[thumbcache] Self-test passed (7 tests).");
     Ok(())
 }
 
@@ -438,6 +476,70 @@ fn test_store_and_get() {
     clear();
     assert_eq!(count(), 0);
     serial_println!("[thumbcache]   store_and_get: ok");
+}
+
+/// Exercise `get()`'s three phases against a *real* file.
+///
+/// `test_store_and_get` above never calls `get()` at all — it asserts
+/// `count() == 1` twice with nothing in between — so the validation path had no
+/// coverage, which is how the stale-entry leak below survived. This covers all
+/// three outcomes: source unreadable (trust), source changed (miss + evict),
+/// source unchanged (hit).
+#[allow(clippy::expect_used)] // Tests panic on unexpected state.
+fn test_get_validation() {
+    clear();
+
+    // 1. Source does not exist -> `Vfs::metadata` errors -> "cannot tell", so
+    //    the entry stays trusted and is returned. An unreadable source must
+    //    never be mistaken for a changed one.
+    store("/no/such/file.png", ThumbSize::Small, 8, 8, vec![0u8; 64], 1000, 5000)
+        .expect("store missing-source thumb");
+    assert_eq!(count(), 1);
+    assert!(
+        get("/no/such/file.png", ThumbSize::Small).is_some(),
+        "an unreadable source must leave the cached thumb trusted"
+    );
+    assert_eq!(count(), 1, "an unreadable source must not evict");
+
+    clear();
+    let _ = crate::fs::Vfs::mkdir("/tmp/thumb_test");
+    crate::fs::Vfs::write_file("/tmp/thumb_test/img.png", b"real contents").expect("write source");
+
+    // 2. Source changed -> miss, AND the stale entry is dropped with its bytes
+    //    returned to the memory accounting. Before the fix the entry was left
+    //    in place, so every later lookup re-failed validation (re-paying the
+    //    metadata call) and its bytes stayed counted until LRU evicted it.
+    let before = memory_used();
+    store("/tmp/thumb_test/img.png", ThumbSize::Small, 8, 8, vec![0u8; 128], 1, 1)
+        .expect("store stale thumb");
+    assert_eq!(memory_used(), before.saturating_add(128));
+    assert!(
+        get("/tmp/thumb_test/img.png", ThumbSize::Small).is_none(),
+        "a changed source must miss"
+    );
+    assert_eq!(count(), 0, "a stale entry must be dropped, not just reported as a miss");
+    assert_eq!(memory_used(), before, "dropping a stale entry must return its bytes");
+
+    // 3. Source unchanged -> hit, and the entry survives the drop/re-acquire
+    //    that phases 2 and 3 do around the unlocked metadata call.
+    let meta = crate::fs::Vfs::metadata("/tmp/thumb_test/img.png").expect("metadata");
+    store(
+        "/tmp/thumb_test/img.png",
+        ThumbSize::Small,
+        8,
+        8,
+        vec![7u8; 64],
+        meta.modified_ns,
+        meta.size,
+    )
+    .expect("store fresh thumb");
+    let hit = get("/tmp/thumb_test/img.png", ThumbSize::Small).expect("a matching stamp must hit");
+    assert_eq!(hit.data.len(), 64);
+    assert_eq!(count(), 1, "a hit must not evict");
+
+    clear();
+    let _ = crate::fs::Vfs::remove("/tmp/thumb_test/img.png");
+    serial_println!("[thumbcache]   get_validation: ok");
 }
 
 fn test_invalidate() {

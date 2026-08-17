@@ -12279,13 +12279,197 @@ per-lock triage (NOT a blind sed):
 
 **Rollout progress (running checklist):**
 - [x] `PreemptSpinMutex` primitive + self-tests (Test 5/6), boot-green (03cccdd5f).
-- [ ] Convert `fs/*.rs` cold leaf config/stat stores → `PreemptSpinMutex`, in
-  reviewable batches, boot-test + wedge-soak between batches (~230 files).
+- [x] Convert `fs/*.rs` cold leaf config/stat stores → `PreemptSpinMutex`.
+  **DONE 2026-08-17** — 35 lock sites across 21 files; `kernel/src/fs` now holds
+  zero raw `spin::Mutex`. See the [A] note below.
 - [ ] Route core-FS contended locks → `crate::sync::Mutex` (lockdep), triage the
   lock-ordering reports that surface.
-- [ ] Sweep non-fs subsystem raw locks (`net/`, `ipc/`, drivers) per the same
-  triage.
+- [-] Sweep non-fs subsystem raw locks (`net/`, `ipc/`, drivers) per the same
+  triage. **Partially triaged 2026-08-17** (see [A]); 53 sites across 38 files
+  remain, conversion not started.
 - [ ] Final full wedge-soak (switch-off + switch-on) clean.
+
+**[A] 2026-08-17 — the `fs/` batch is finished, and auditing it first found
+three real bugs that a blind import swap would have preserved.**
+
+*Scale, measured rather than estimated.* The checklist above feared "~230
+files". A counted inventory found **88 raw-lock sites across 59 files**
+kernel-wide, of which `fs/` held **35 across 21 files**. Those 35 are now
+`PreemptSpinMutex` and `kernel/src/fs` contains no raw `spin::Mutex` at all.
+The old estimate counted files *touched by* the fs conversion, not files still
+holding a raw lock.
+
+*A caution about that inventory, because the first version of it was wrong.*
+Counting `static NAME: Mutex<…>` alone **undercounts**, and it undercounted
+here by 13 sites and 9 whole files. A raw lock is not always a static:
+`mm/heap.rs` holds its as a struct *field* (`inner: Mutex<HeapInner>`), and
+others are `Mutex::new` bindings. `ahci`, `nvme`, `audio_mixer`, `hrtimer`,
+`sched/kchannel`, `sched/priority_rr`, `sched/waitqueue`, `virtio/gpu` and
+`virtio/sound` are invisible to a static-only scan and appear only when struct
+fields and constructor calls are counted too. Any future batch must scan for
+all three shapes, and must resolve `use spin::Mutex` vs `use crate::sync::Mutex`
+per file — a bare `Mutex<…>` means different things in different files.
+
+*`named`, not `new`.* Every converted site uses `PreemptSpinMutex::named(v,
+b"NAME")`. `new` leaves the diagnostic name as `?`, and these are precisely the
+locks a silent wedge would otherwise hide in — converting a lock for its
+self-reporting and then leaving it anonymous would throw away half the benefit
+this sweep is being done for (see B-FORKEXEC-BOOT-HANG's static audit).
+
+*Three genuine defects, found by auditing critical sections before converting.*
+The conversion is advertised as a mechanical import swap, and it is — but
+"is this lock actually a leaf?" has to be answered per lock, and answering it
+turned up three places calling the VFS while holding a raw spinlock:
+
+| Site | Was |
+|---|---|
+| `fs/bookmarks.rs::validate` | `Vfs::metadata` once **per bookmark** under `BOOKMARKS` |
+| `fs/thumbcache.rs::get` | `Vfs::metadata` under `CACHE` |
+| `fs/fileops.rs::create` | `Vfs::metadata` once **per source** under `OPERATIONS` |
+
+`Vfs::metadata` walks the mount table, takes filesystem locks of its own and can
+block on the backing device, so each of these held a leaf lock across an
+unbounded I/O path *and* put its acquisition order ahead of the VFS's. All three
+now snapshot under the lock and call out unlocked — the shape `freeze::freeze`
+and `fileops::undo` already used in the same directory, which is what made it
+obvious these three were oversights rather than deliberate.
+
+Two follow-on fixes fell out of the restructure:
+
+- **`thumbcache::get` never invalidated a stale entry.** The comment said
+  "Source changed — invalidate" and the code only returned `None`. The entry
+  stayed cached, so every later lookup of that path re-failed validation and
+  re-paid the metadata call, with its bytes still counted in `MEMORY_USED`,
+  until LRU happened to evict it. It is now actually removed and its bytes
+  returned.
+- **`fileops::create`'s admission check had to be re-tested under the lock.**
+  With the metadata walk hoisted out, the early `MAX_OPERATIONS` check no longer
+  runs under the lock the operation is pushed under, so another caller could
+  take the last slot in between. The early check is now advisory and a binding
+  re-check guards the push; the id is allocated only after admission is certain,
+  so a rejected create burns no id.
+
+*The bug hid behind an empty test.* `thumbcache`'s `test_store_and_get` never
+called `get()` — it asserted `count() == 1`, explained in a comment that
+validation would fail, then asserted `count() == 1` again. The validation path
+had no coverage at all, which is why a stale entry could be left behind
+indefinitely without a test noticing. `test_get_validation` now covers all three
+outcomes against a real file under `/tmp`: source unreadable (trust it — an
+unreadable source must not be mistaken for a changed one), source changed (miss
+**and** evict **and** `memory_used()` returns to its prior value), source
+unchanged (hit). The third case is not redundant: the restructure introduced a
+window in which the entry can be evicted between the unlocked metadata call and
+the re-acquire, so "a matching stamp still hits" is a claim the old single-lock
+code did not have to make and the new code does.
+
+*And the new test did not run either — the first boot proved nothing.* The
+boot after this conversion passed, and the pass was **worthless as evidence**:
+grepping the serial log for the expected `[thumbcache]` line found nothing,
+because `fs::thumbcache::self_test` had no caller anywhere in the tree. Checking
+the rest of the batch found the same thing for **all 21** converted modules —
+every one had a `self_test()` already written, and not one was reachable from
+the boot path. The conversion would have shipped with literally zero automated
+coverage while appearing green. All 21 are now called from `main.rs`, next to
+the `locale`/`timezone` pair that a previous session wired up for exactly this
+reason, with the same note attached: *a test that never runs is not a test.*
+This is the third time this trap has been hit here (`bytestr::self_test`,
+lockdep Test 11, now these), so the rule is worth stating flatly: **a green boot
+only certifies what the serial log can be shown to contain.** Verify the
+expected output is present; never infer that a test passed from the absence of
+a failure.
+
+Wiring them in then exposed a second gap of the same kind: of the three
+restructured critical sections, `fileops::create` was covered (its "create
+operation" case) and `thumbcache::get` now is, but **`bookmarks::validate` had
+no test whatsoever** — the very function that was doing a `Vfs::metadata` walk
+per bookmark under the lock. `test_validate` now covers both outcomes (a
+resolvable and an unresolvable path), matched **by name rather than by
+position**, and asserts the snapshot neither drops nor duplicates entries —
+which is the specific way a snapshot-then-call-unlocked rewrite can go wrong.
+
+It is not confined to this batch, and the wider problem is logged separately
+as [B] below: ~60 more `fs/` self-tests have no caller at all, and a further
+~230 are reachable only by typing a `kshell` subcommand, i.e. never in CI.
+
+*Partial triage of the remainder.* This was a read-only pass over the **statics**
+only, so it is a starting point for the next batch, not a complete map — the
+struct-field and `Mutex::new` sites called out above are **not** yet triaged.
+
+- **Clean leaves, safe to convert:** `ac97`, `audio_history`, `cap/request`,
+  `hda`, `iommu`, `iommu_remap`, `klog`, `xhci`, `proc/signal`, and `net/httpd`'s
+  `LISTENER`/`TLS_LISTENER`.
+- **Need individual design work, not a batch swap:** `tlb.rs::SHOOTDOWN_LOCK`
+  (held across an IPI broadcast — preempt-disabling it is desirable but it is a
+  cross-CPU protocol, not a leaf); `workqueue.rs::worker_entry` (the only
+  sleep-under-lock hit in the whole sweep, and it wraps its lock in
+  `without_interrupts`); `rcu.rs::CALLBACKS` (reachable from too many contexts).
+- **Staying raw, correctly:** `mm/heap.rs` (lockdep cannot allocate under the
+  allocator's own lock), `serial.rs` (the printer lockdep prints through),
+  `bench.rs`'s `RAW`, which is deliberately the uninstrumented control that
+  `lock_tracked_nested` measures against, and the two sites inside `sync.rs`
+  itself, which are the primitives `Mutex`/`PreemptSpinMutex` are built out of.
+
+*A note on the audit method.* The scope approximation was deliberately
+conservative — guard binding to end of enclosing function — so it over-reported:
+`fileops::undo`, `freeze::freeze`, `fileops::move_item` and `httpd::tick` all
+flagged and all turned out to drop the guard before calling out (`let listener =
+*LISTENER.lock();` drops its temporary at the end of the statement). That noise
+is the price of the same over-reporting that surfaced the three real defects; a
+tighter heuristic would have produced a cleaner report and missed them.
+
+*Verification.* `cargo build -p kernel` clean (zero warnings). `cargo clippy -p
+kernel` exit 0, with no new warnings attributable to the conversion or the
+hoists (`fileops` 0 hits, `bookmarks`' 7 all predate this change). Boot test **PASSED** (clean streak 5) — and, this time, verifiably: the serial log contains `[thumbcache]   get_validation: ok`, `[bookmarks]   validate: ok` and self-test output from all 21 converted modules, with zero `self-test failed` warnings.
+
+**[B] 2026-08-17 — most `fs/` self-tests are never executed. TECH DEBT, open.**
+
+Found while checking why [A]'s new test produced no serial output. `fs/` has
+**433** modules defining a `pub fn self_test()` (excluding `mod.rs`/`tests.rs`).
+Counted before [A] wired its 21:
+
+| Category | Before [A] | After [A] | Runs unattended? |
+|---|---|---|---|
+| Called from `main.rs` | 144 | 165 | yes, every boot |
+| Reachable only via a `kshell` subcommand | 230 | 230 | **no** — needs a human to type it |
+| No caller anywhere in the tree | 59 | 38 | **no** — dead code |
+
+So **two thirds of `fs/`'s self-tests never run** unless someone sits at the
+kernel shell and invokes them by hand, which no CI path does.
+
+The 38 with no caller are the serious ones: they are dead code that the
+compiler keeps alive only because they are `pub`, so they rot silently and
+nothing detects it. `thumbcache` was in this set, and its `test_store_and_get`
+had degenerated into a test that asserts the same thing twice and never calls
+the function it names — which is precisely how the stale-entry leak in [A]
+survived. Expect more of the same in the rest of the set.
+
+The remaining 38, in full, so the next session need not re-derive them:
+`archive`, `backup`, `batch`, `changetrack`, `contextmenu`, `cpufreq`,
+`cputopo`, `dedup`, `deskicons`, `dirsync`, `diskio`, `encrypt`, `fcompress`,
+`fileselect`, `filetype`, `fswalk`, `health`, `ioprio`, `iso9660`, `linkcheck`,
+`openwith`, `policy`, `powerwake`, `properties`, `readdir_plus`, `reclaim`,
+`search`, `sidebar`, `snapshot`, `splice`, `statusbar`, `sysctlfs`, `sysuptime`,
+`tags`, `thermal`, `transaction`, `undelete`, `usage`. (The 21 from [A] were in
+this set too and are now wired.)
+
+*The proper fix is not 60 more hand-written call sites.* `main.rs` already
+carries several hundred lines of copy-pasted `if let Err(e) = fs::x::self_test()`,
+which is how the gap opened in the first place: adding a module and forgetting
+the call site is silent, and nothing anywhere asserts the two lists agree. What
+is wanted is a registry — a `linkme`/`inventory`-style distributed slice, or a
+declarative macro that emits both the call and the registry entry — so that
+defining a self-test *is* registering it and the failure mode becomes impossible
+rather than merely unlikely. `selftest.rs` already has a `TestSuite` table with
+the right shape (`name`, `description`, `run`, `category`); it is populated by
+hand and has drifted from `main.rs` in the same way. Unifying the two behind one
+registry is the actual task.
+
+*Interim guard, cheaper than the registry and worth doing first:* a build-time
+or boot-time check that every `pub fn self_test` in `fs/` is reachable from the
+registry, failing loudly when it is not. Without it this list will regrow.
+
+Not fixed here because it is a much larger change than the lock sweep it was
+found inside, and mixing them would make both unreviewable.
 
 **Superseded reactive strategy (kept for context):** the armed hang soak
 (`scripts/wedge-soak.sh`) reliably reproduces these under stress; each catch names
@@ -30514,3 +30698,172 @@ rate with no ceiling.
 deleting an eleven-day-old write-once log is safe, but do not delete a `.output`
 file for a task that may still be running — read the task list first. Files
 under `-mtime +7` are unambiguously dead.
+
+## A-VFS-READ-256-STEPPED-3X-WITH-BYTE-IDENTICAL-VFS-SOURCE (lane A, 2026-08-17)
+
+**Status: RESOLVED 2026-08-17 — not a regression. A QEMU/TCG code-layout
+artifact, the same mechanism as
+`A-CRYPTO-BENCHMARKS-STEPPED-58-PERCENT-WITH-BYTE-IDENTICAL-CRYPTO-SOURCE`
+one day earlier. No kernel change is warranted and the range must NOT be
+bisected. Not a boot failure; every boot in the investigation was green.**
+
+**In short:** a benchmark that times reading a 256-byte file got three times
+slower between two commits, even though not one line of the file-reading code
+changed. The cause is where the compiler happened to place that code in
+memory: QEMU (which runs the OS in software, not on real hardware) charges a
+penalty when a hot loop sits across a 4 KiB address boundary, and four such
+loops in one function landed on boundaries this time that had not before.
+Nothing about the OS got slower; the measuring instrument did. There is
+nothing to fix and nothing to bisect.
+
+**What happened.** `vfs_read_256` sat at ~9000-10000 ns across 40 release runs
+spanning dozens of commits, then read 30714 and 32763 on the two runs of
+`5570b6b38` (lane A's merge of `origin/main`, carrying the Q24 leaf-lock sweep
+`bc6664149`). A 3x step on the VFS read path is exactly the shape of a real
+lock regression, which is why it held the merge to `main`.
+
+**The paired A/B that settled it.** Three alternating pairs, one rootfs image,
+one host, `--no-build` on both sides so only the kernel ELF was swapped
+(`53cb74578` = the parent, `5570b6b38` = HEAD):
+
+| pair | parent binary | HEAD binary | ratio |
+|---|---|---|---|
+| 2 | 36960 cycles (9950 ns), split 0% | 120710 cycles (32545 ns), split 0% | 3.27x |
+| 3 | 63208 cycles (17020 ns), split 7% | 110938 cycles (29878 ns), split 0% | 1.76x |
+| 4 | 39748 cycles (10694 ns), split 0% | 122154 cycles (32935 ns), split 0% | 3.07x |
+
+`split 0%` means first-half and second-half medians agreed to the printed
+digit — this is deterministic *within* each run, not a tail. Pair 3's parent
+run is the one contaminated sample on the parent side (17020 ns is above its
+own historical range); the two clean parent runs land on the historical ~10000
+ns baseline.
+
+**The mechanism, found in seconds by `scripts/straddle-check.py --compare`:**
+
+```
+STRADDLE GAINED (expect these to be SLOWER):
+  Vfs::read_file_resolved   2221 B  ffffffff80309533 -> ffffffff8030db73
+  Vfs::read_file_resolved   1819 B  ffffffff803095f8 -> ffffffff8030dc38
+  Vfs::read_file_resolved   1668 B  ffffffff80309682 -> ffffffff8030dcc2
+  Vfs::read_file_resolved   1568 B  ffffffff80309682 -> ffffffff8030dcc2
+  ...
+STRADDLE LOST (expect these to be FASTER):
+  ProcFs::read_file         8 loops
+  page_cache::get_or_fill   3 loops
+recompiled (code changed, straddle not comparable): 0
+only in new: 0    only in old: 0
+PAGE CROSSINGS: + Vfs::fill_file_page 0 -> 1,  + Vfs::read_file_resolved 0 -> 1
+```
+
+`Vfs::read_file_resolved` is precisely the function `vfs_read_256` measures,
+and it gained **four** straddling loops at once.
+`B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x` measures a single straddle at ~1.7x;
+four compounding is consistent with the observed 3.0-3.3x.
+
+**The five evidence lines the crypto precedent asks for, all satisfied:**
+
+1. **Byte-identical source.** `git diff --stat 53cb74578 HEAD -- kernel/src/fs/vfs.rs
+   kernel/src/mm/page_cache.rs kernel/src/bench.rs kernel/src/net/ipv6.rs` is
+   **empty**. The tool agrees independently and without being told:
+   `recompiled: 0`, meaning every function it compared had the identical loop
+   signature in both binaries and only its *address* moved.
+2. **Exact function-to-benchmark mapping.** The gained straddles are in the
+   measured function itself. And the control is built in: `vfs_write_256`
+   exercises the same VFS, the same `fs.lock()`, the same converted leaf locks
+   — and is **flat** (parent 113172/114579/116799 ns, HEAD
+   119795/111638/121059), because the *write* path gained no straddles. A lock
+   regression from Q24 could not have missed the write path.
+3. **Magnitude matches the known per-straddle cost.** Four loops x ~1.7x each.
+4. **Binary-dependent, not host-dependent.** Established by the alternating A/B
+   above on one image and one host: the parent binary is fast every time it is
+   loaded and the HEAD binary is slow every time, interleaved on the same
+   machine within minutes of each other.
+5. **Movements in both directions.** Median-of-3 vs median-of-3 over the 86
+   benchmarks common to all six runs: **median ratio 1.005**, 5 benchmarks
+   above 1.25x and 3 below 0.80x. A real slowdown moves one direction; a layout
+   re-roll moves both. Each of the extremes checks out mechanically:
+
+   | benchmark | ratio | straddle-check says |
+   |---|---|---|
+   | `vfs_read_256` | 3.04x | `Vfs::read_file_resolved` +4 loops |
+   | `page_fault` | 1.64x | `handle_page_fault` +2 loops (784 B, 688 B), 0 lost |
+   | `vfs_throughput_16k_read` | 1.45x | same read path |
+   | `heap_raw_alloc_free_512` | 0.71x | `KernelHeap as GlobalAlloc::alloc` **lost** a 542 B loop |
+   | `heap_alloc_free_64` | 0.72x | same |
+   | `heap_raw_alloc_free_4096` | 0.73x | same |
+
+**The bench harness's own instrument now agrees.** With the A/B records
+labelled by the binary they measured, `mode_structure()` returns
+`mode-structured` on `vfs_read_256`: 11 commits have been measured more than
+once, **zero of them straddle the split**, 9 sit below it and 2 above (and
+those 2 — `5570b6b38` and `f61bc4e71` — are the same binary). Per that
+function's own docstring, a split that separates *binaries* is a property of
+the compiled image, and "bisecting for a guilty commit is the wrong tool".
+
+**It still passes.** `vfs_read_256`'s target is 200000 ns. The worst clean
+measurement in the whole investigation is 32935 ns — 16% of budget. Nothing is
+over target.
+
+### A finding that was chased and then WITHDRAWN — `net_ipv6_parse`
+
+Recorded because the withdrawal is the more transferable lesson.
+
+`net_ipv6_parse` had read 80-82 ns across thirteen runs, then **120 ns in both**
+of the first two HEAD runs, with `split 1st=448 2nd=448 (0%)` — two runs, two
+identical numbers, zero within-run split. That looks airtight and it is not.
+Static analysis then refused to support it: `Ipv6Packet::parse` is `0x1b8` =
+440 bytes with the *identical* mangled hash `hc6fd05157676c159` in both
+binaries, crosses **zero** page boundaries in each, and the measured loop sits
+at the same offset in both (`run_all+0x1d4df`, spanning `0x97` bytes), neither
+straddling. That left a real +144-cycle cost with no mechanism.
+
+So it was sampled instead of published. Final tally of `min` cycles:
+
+| binary | samples |
+|---|---|
+| parent `53cb74578` | 304, 294, 300, 310 |
+| HEAD `5570b6b38` | 448, 448, 368, **306, 296, 306** |
+
+The last three HEAD samples are indistinguishable from the parent, and at the
+ns level the paired A/B reads parent 79/80/83 vs HEAD 82/79/82 — flat. The 448s
+belonged to the pre-repack image and transient host state, and a rootfs image
+cannot change an in-kernel pure-compute benchmark, so it was host state all
+along. **No regression. Do not re-open this on the strength of the two 448s.**
+
+**Lessons, in the order they cost time:**
+
+- **Two agreeing samples are not a replication.** `split 0%` proves a run was
+  internally consistent, which is a statement about that run's host conditions,
+  not about the binary. `net_ipv6_parse` produced `448/448 (0%)` twice and was
+  still noise. When a step has no mechanism, take more samples before writing
+  it down.
+- **Run the straddle check FIRST.** The crypto entry ends with exactly this
+  advice — *"The straddle check should have run **first**: seconds, no boot."*
+  — and it was not followed here. It would have named `Vfs::read_file_resolved`
+  in under a second, before any of the boots, the scratch worktree, the
+  13m49s release rebuild, or the rootfs repack.
+- **A/B by swapping the ELF, not by checking out the tree.** `--no-build` with
+  the two kernel binaries copied over
+  `target/x86_64-unknown-none/release/kernel` in turn holds the rootfs, the
+  host and the harness fixed, and takes ~4 minutes per side. Checking out the
+  parent worktree instead cost a 15-minute checkout and a 14-minute rebuild,
+  and changed the rootfs underneath the comparison.
+- **`bench/history.jsonl` records which BINARY was measured.** A swapped-ELF run
+  filed under the checked-out tree's commit is a false record: it poisons the
+  `level_shifts` baseline (`comparable_records` filters by host, profile and
+  deliberate host-load — *not* by contamination or by commit), and it makes
+  `mode_structure` report `run-noise` because one commit's repeats then straddle
+  the split. The eight A/B runs here carry a `note` field saying so, and the
+  four control runs carry `commit: 53cb74578`. Do the same for any future
+  swapped-ELF comparison; `boot-history.jsonl` has a `label` field
+  (`BOOT_LABEL`) for it.
+
+**Also disproved along the way**, so nobody re-derives them: an atime write on
+the read path (only procfs/kshell/self_test call it); memfs root-directory
+growth (`vfs_readdir` moved 1.5%); the lockdep class-table scan
+(`lock_uncontended` 282/278 vs a 259-306 historical range); the heap and frame
+allocators (all normal); and a suspected fourth VFS-under-spinlock bug in
+`kernel/src/net/httpd.rs`. That last one is a **confirmed false positive** and
+must not be "fixed": line 1536 is `let doc_root = *DOC_ROOT.lock();`, which
+copies the `&str` out and drops the temporary guard at the semicolon, so no
+lock is held across the `Vfs::stat` calls at 1541/1548.

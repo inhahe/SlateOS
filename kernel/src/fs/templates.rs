@@ -32,6 +32,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -141,8 +142,8 @@ static TEMPLATE_COUNTER: AtomicU64 = AtomicU64::new(100);
 static CREATE_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
 
-static TEMPLATES: spin::Mutex<Vec<Template>> = spin::Mutex::new(Vec::new());
-static INITIALIZED: spin::Mutex<bool> = spin::Mutex::new(false);
+static TEMPLATES: PreemptSpinMutex<Vec<Template>> = PreemptSpinMutex::named(Vec::new(), b"TEMPLATES");
+static INITIALIZED: PreemptSpinMutex<bool> = PreemptSpinMutex::named(false, b"INITIALIZED");
 
 // ---------------------------------------------------------------------------
 // Initialization

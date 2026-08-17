@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -250,7 +251,7 @@ static OP_MAX_NS: [AtomicU64; NUM_OPS] = [
 ];
 
 /// Hot path tracking (uses a mutex since it allocates).
-static HOT_PATHS: spin::Mutex<Option<BTreeMap<String, u64>>> = spin::Mutex::new(None);
+static HOT_PATHS: PreemptSpinMutex<Option<BTreeMap<String, u64>>> = PreemptSpinMutex::named(None, b"HOT_PATHS");
 
 static PROFILE_ENABLED: AtomicU64 = AtomicU64::new(0);
 static PROFILE_START_NS: AtomicU64 = AtomicU64::new(0);

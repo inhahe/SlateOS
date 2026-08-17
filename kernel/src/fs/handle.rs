@@ -13,7 +13,7 @@
 //!
 //! ## Thread Safety
 //!
-//! The open-file table is behind a `spin::Mutex`.  Individual file
+//! The open-file table is behind a `crate::sync::Mutex`.  Individual file
 //! positions are mutated under this lock — this is acceptable for
 //! early development but should move to per-handle locks or lock-free
 //! structures on the hot path.

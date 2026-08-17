@@ -4771,6 +4771,78 @@ extern "C" fn kernel_main() -> ! {
     fs::locale::init_defaults();
     fs::timezone::init_defaults();
 
+    // The 21 modules converted to `PreemptSpinMutex` by the Q24 leaf-lock
+    // sweep (see known-issues.md). Every one of them already had a
+    // `self_test()` and not one of them was called from anywhere, so the
+    // conversion would otherwise have shipped with zero boot coverage --
+    // the same "a test that never runs is not a test" trap as locale and
+    // timezone above. These also exercise the three critical sections that
+    // were restructured to stop calling the VFS under a raw spinlock
+    // (`bookmarks::validate`, `thumbcache::get`, `fileops::create`).
+    if let Err(e) = fs::atime::self_test() {
+        serial_println!("WARNING: atime self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::bookmarks::self_test() {
+        serial_println!("WARNING: bookmarks self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::clipboard::self_test() {
+        serial_println!("WARNING: clipboard self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::columnview::self_test() {
+        serial_println!("WARNING: column view self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::directio::self_test() {
+        serial_println!("WARNING: direct I/O self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::dragdrop::self_test() {
+        serial_println!("WARNING: drag-and-drop self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::fileinfo::self_test() {
+        serial_println!("WARNING: fileinfo self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::fileops::self_test() {
+        serial_println!("WARNING: file operations self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::findex::self_test() {
+        serial_println!("WARNING: findex self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::freeze::self_test() {
+        serial_println!("WARNING: fs freeze self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::fstrim::self_test() {
+        serial_println!("WARNING: fstrim self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::pathbar::self_test() {
+        serial_println!("WARNING: pathbar self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::prefetch::self_test() {
+        serial_println!("WARNING: prefetch self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::preview::self_test() {
+        serial_println!("WARNING: preview self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::profile::self_test() {
+        serial_println!("WARNING: fs profile self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::recent::self_test() {
+        serial_println!("WARNING: recent files self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::sealing::self_test() {
+        serial_println!("WARNING: file sealing self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::sparse::self_test() {
+        serial_println!("WARNING: sparse files self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::templates::self_test() {
+        serial_println!("WARNING: templates self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::thumbcache::self_test() {
+        serial_println!("WARNING: thumbnail cache self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::viewstate::self_test() {
+        serial_println!("WARNING: viewstate self-test failed: {:?}", e);
+    }
+
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {
         serial_println!("WARNING: SHA-256 self-test failed: {:?}", e);

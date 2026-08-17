@@ -1438,6 +1438,16 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::btrfs::self_test() {
         serial_println!("WARNING: Btrfs self-test failed: {:?}", e);
     }
+    // F2FS read self-test, also in RAM. The hard parts here are the ones no
+    // amount of parsing care can substitute for reading correctly: which of
+    // the two checkpoint packs is current, which of the two NAT copies the
+    // checkpoint's bitmap selects, and whether the checkpoint's own NAT
+    // journal overrides both. The synthetic volume attaches a decoy to each
+    // of the three, so a driver that gets one wrong fails a check instead of
+    // returning plausible bytes from the wrong block.
+    if let Err(e) = fs::f2fs::self_test() {
+        serial_println!("WARNING: F2FS self-test failed: {:?}", e);
+    }
     // devfs self-test (validates device file operations).
     if let Err(e) = fs::devfs::self_test() {
         serial_println!("WARNING: DevFs self-test failed: {:?}", e);

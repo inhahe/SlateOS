@@ -8113,6 +8113,7 @@ pub fn sys_fs_mount(args: &SyscallArgs) -> SyscallResult {
         // succeeds either way and writes fail per-operation.
         "ntfs" | "ntfs3" => crate::fs::ntfs::mount(source, target),
         "btrfs" => crate::fs::btrfs::mount(source, target),
+        "f2fs" => crate::fs::f2fs::mount(source, target),
         "devfs" | "dev" => crate::fs::devfs::mount(target),
         "proc" | "procfs" => crate::fs::procfs::mount(target),
         "sysfs" | "sys" => crate::fs::sysfs::mount(target),

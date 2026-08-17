@@ -1209,7 +1209,7 @@ _When a program hits an **unhandled language-level exception** (our SEH-style mo
 - [ ] ISO 9660 (optical media)
 - [-] Later: NTFS read/write support — read side done 2026-08-16 (`kernel/src/fs/ntfs/`); write side deferred behind `$LogFile` journalling, `design-decisions.md` §210
 - [ ] Later: Btrfs port (CoW, snapshots, checksums)
-- [ ] Later: F2FS port (SSD optimization)
+- [-] Later: F2FS port (SSD optimization) - read side done 2026-08-16 (kernel/src/fs/f2fs/, design-decisions.md 216); write side deliberately not started
 
 _No database-as-filesystem. Queryable indexed metadata (Phase 6.2) covers the practical use cases. Atomic write transactions are a separate feature. No full relational model._
 
@@ -3240,7 +3240,7 @@ _Operator note (2026-06-14): a true VM-backed Linux environment, in the spirit o
 ### 6.2 Additional Filesystems
 
 - [ ] Port Btrfs (CoW, snapshots, checksums)
-- [ ] Port F2FS (SSD optimization)
+- [-] Port F2FS (SSD optimization) - read side done 2026-08-16 (kernel/src/fs/f2fs/, design-decisions.md 216); write side deliberately not started
 - [-] NTFS read/write support — read side done 2026-08-16 (`kernel/src/fs/ntfs/`: fixups, MFT records, runlists, `$ATTRIBUTE_LIST`, the `$I30` B+ tree, full `FileSystem` impl, self-test over a synthetic in-RAM volume); write side deferred behind `$LogFile`, `design-decisions.md` §210
 - [ ] Queryable file metadata / indexed attributes (BeOS BFS-inspired)
 

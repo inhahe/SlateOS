@@ -1444,7 +1444,16 @@ impl RecycleBin {
         Ok(id)
     }
 
-    /// Restore a recycled item back to its original location.
+    /// Restore a recycled item, returning where it actually landed.
+    ///
+    /// **The return value is the path to show the user**, not
+    /// `entry.original_path`: if something else now occupies the original path,
+    /// the item is restored beside it under a `name (2)` variant rather than on
+    /// top of it. Restoring used to call [`move_path`] straight at the original
+    /// path, and `fs::rename` replaces its destination without a word — so
+    /// deleting `report.docx`, writing a new `report.docx`, then restoring the
+    /// old one from the bin destroyed the new one. It did not go to the bin
+    /// either; there was nothing left to recover.
     pub fn restore(&self, entry_id: &str) -> io::Result<PathBuf> {
         let entry = self.read_entry(entry_id)?;
         let data_path = self.root.join(entry_id).join("data");
@@ -1454,14 +1463,42 @@ impl RecycleBin {
             fs::create_dir_all(parent)?;
         }
 
-        move_path(&data_path, &entry.original_path)?;
+        // The gap between this check and the move is a race that `std` alone
+        // cannot close — there is no "rename only if the destination is free".
+        // The same tradeoff is documented on the engine's own conflict handling
+        // above; narrowing it needs a platform primitive we do not have here.
+        let dest = if entry.original_path.exists() {
+            resolve_rename(&entry.original_path)
+        } else {
+            entry.original_path.clone()
+        };
 
-        // Clean up the entry directory.
+        move_path(&data_path, &dest)?;
+
+        // Clean up the entry directory. Reported rather than ignored: a
+        // `meta.txt` that survives its `data` leaves an entry that `list` still
+        // shows and `restore` can no longer satisfy, and the user's only clue
+        // would be the failure of a restore they try much later.
         let entry_dir = self.root.join(entry_id);
-        let _ = fs::remove_file(entry_dir.join("meta.txt"));
-        let _ = fs::remove_dir(&entry_dir);
+        for path in [entry_dir.join("meta.txt"), entry_dir.clone()] {
+            let removed = if path == entry_dir {
+                fs::remove_dir(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            if let Err(e) = removed
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!(
+                    "warning: restored {} but could not clear its recycle bin entry {}: {}",
+                    dest.display(),
+                    path.display(),
+                    e
+                );
+            }
+        }
 
-        Ok(entry.original_path)
+        Ok(dest)
     }
 
     /// List all items in the recycle bin.
@@ -2320,6 +2357,96 @@ mod tests {
         assert_eq!(restored, file_path);
         assert!(file_path.exists());
         assert_eq!(read_file(&file_path), "important data");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Delete a file, make a new one with the same name, then restore the old
+    /// one from the bin. The new file must survive.
+    ///
+    /// It did not. `restore` moved the recycled data straight onto
+    /// `entry.original_path`, and `fs::rename` replaces its destination
+    /// silently — so the newer file was destroyed by an action the user
+    /// understands as *recovering* a file, and it did not go to the bin either.
+    #[test]
+    fn restoring_over_a_newer_file_of_the_same_name_keeps_both() {
+        let dir = temp_dir("restore_conflict");
+        let bin_root = dir.join("bin");
+        let file_path = dir.join("report.docx");
+        write_file(&file_path, "the old draft");
+
+        let bin = RecycleBin::new(bin_root, Duration::from_secs(86400));
+        let id = bin.recycle(&file_path).expect("recycle");
+        assert!(!file_path.exists());
+
+        // The user moves on and writes a new file under the same name.
+        write_file(&file_path, "the new draft");
+
+        let restored = bin.restore(&id).expect("restore");
+
+        assert_eq!(
+            read_file(&file_path),
+            "the new draft",
+            "restoring must never overwrite a file the user made since"
+        );
+        assert_ne!(
+            restored, file_path,
+            "the restored copy has to land somewhere else, and say where"
+        );
+        assert_eq!(
+            read_file(&restored),
+            "the old draft",
+            "and the recycled contents must be what landed there"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The unoccupied case must be untouched: a restore with nothing in the
+    /// way still goes back to exactly where it came from, under its own name.
+    #[test]
+    fn restoring_to_a_free_path_uses_the_original_name() {
+        let dir = temp_dir("restore_free");
+        let bin_root = dir.join("bin");
+        let file_path = dir.join("notes.txt");
+        write_file(&file_path, "notes");
+
+        let bin = RecycleBin::new(bin_root, Duration::from_secs(86400));
+        let id = bin.recycle(&file_path).expect("recycle");
+        let restored = bin.restore(&id).expect("restore");
+
+        assert_eq!(restored, file_path, "no conflict, no renaming");
+        assert_eq!(read_file(&file_path), "notes");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A directory in the way is the same hazard with more to lose: the old
+    /// code's `move_path` fell back to `copy_tree`, which merges into an
+    /// existing directory and overwrites the same-named files inside it.
+    #[test]
+    fn restoring_a_directory_does_not_merge_into_one_that_is_in_the_way() {
+        let dir = temp_dir("restore_dir_conflict");
+        let bin_root = dir.join("bin");
+        let src_dir = dir.join("project");
+        fs::create_dir_all(&src_dir).expect("project");
+        write_file(&src_dir.join("main.rs"), "the old source");
+
+        let bin = RecycleBin::new(bin_root, Duration::from_secs(86400));
+        let id = bin.recycle(&src_dir).expect("recycle");
+
+        // A new, unrelated `project/` with a file of the same name.
+        fs::create_dir_all(&src_dir).expect("new project");
+        write_file(&src_dir.join("main.rs"), "the new source");
+
+        let restored = bin.restore(&id).expect("restore");
+
+        assert_eq!(
+            read_file(&src_dir.join("main.rs")),
+            "the new source",
+            "the directory in the way must not be merged into"
+        );
+        assert_eq!(read_file(&restored.join("main.rs")), "the old source");
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -203,18 +203,19 @@ pub fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
 
             // Bonus for word boundary match (start, after space/dash/underscore)
             let at_boundary = ti == 0
-                || target_lower.get(ti.saturating_sub(1)).is_some_and(|&prev| {
-                    prev == ' ' || prev == '-' || prev == '_'
-                });
+                || target_lower
+                    .get(ti.saturating_sub(1))
+                    .is_some_and(|&prev| prev == ' ' || prev == '-' || prev == '_');
             if at_boundary {
                 score = score.saturating_add(10);
             }
 
             // Bonus for consecutive matches
             if let Some(prev) = prev_match_idx
-                && ti == prev + 1 {
-                    score = score.saturating_add(5);
-                }
+                && ti == prev + 1
+            {
+                score = score.saturating_add(5);
+            }
 
             prev_match_idx = Some(ti);
             qi += 1;
@@ -455,11 +456,12 @@ impl LauncherState {
             Key::Tab => {
                 // Autocomplete: fill query with selected item's name
                 if let Some(scored) = self.results.get(self.selected_index)
-                    && let Some(entry) = self.apps.get(scored.db_index) {
-                        self.query = entry.name.clone();
-                        self.cursor = self.query.len();
-                        self.update_results();
-                    }
+                    && let Some(entry) = self.apps.get(scored.db_index)
+                {
+                    self.query = entry.name.clone();
+                    self.cursor = self.query.len();
+                    self.update_results();
+                }
                 return LauncherAction::None;
             }
 
@@ -526,8 +528,14 @@ impl LauncherState {
             }
 
             // Ctrl+1..8: launch Nth result directly
-            Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4
-            | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8
+            Key::Num1
+            | Key::Num2
+            | Key::Num3
+            | Key::Num4
+            | Key::Num5
+            | Key::Num6
+            | Key::Num7
+            | Key::Num8
                 if event.modifiers.ctrl =>
             {
                 let idx = match event.key {
@@ -553,12 +561,13 @@ impl LauncherState {
 
         // Text input: if the event carries a printable character, insert it
         if let Some(ch) = event.text
-            && !ch.is_control() {
-                self.query.insert(self.cursor, ch);
-                self.cursor += ch.len_utf8();
-                self.selected_index = 0;
-                self.update_results();
-            }
+            && !ch.is_control()
+        {
+            self.query.insert(self.cursor, ch);
+            self.cursor += ch.len_utf8();
+            self.selected_index = 0;
+            self.update_results();
+        }
 
         LauncherAction::None
     }
@@ -629,7 +638,8 @@ impl LauncherState {
         }
 
         // Sort descending by score
-        self.results.sort_by_key(|r| std::cmp::Reverse(r.total_score));
+        self.results
+            .sort_by_key(|r| std::cmp::Reverse(r.total_score));
 
         // Truncate to max visible
         self.results.truncate(MAX_RESULTS);
@@ -754,11 +764,20 @@ impl LauncherState {
             });
         }
 
-        // Cursor indicator (simple vertical line approximation)
-        // Approximate cursor x position based on character count * avg width
-        let approx_char_width = INPUT_FONT_SIZE * 0.55;
-        let cursor_chars = self.query[..self.cursor].chars().count() as f32;
-        let cursor_x = 12.0 + cursor_chars * approx_char_width;
+        // Where the text before the caret actually ends, in the face it is
+        // drawn in. This was `chars * (INPUT_FONT_SIZE * 0.55)`: a guessed
+        // average advance applied to *proportional* text, so the caret sat left
+        // of the query after any run of wide letters and right of it after a
+        // run of narrow ones — visibly wrong on a word as ordinary as "will".
+        // `0.55` is not a fixable constant, because no single number is right
+        // for a face whose whole purpose is that its characters differ.
+        //
+        // `get` rather than `[..cursor]`: the caret is a byte offset, and
+        // slicing a `str` off a character boundary aborts the process. A caret
+        // that is momentarily inconsistent should draw at the left edge, not
+        // take the desktop's launcher down.
+        let before = self.query.get(..self.cursor).unwrap_or("");
+        let cursor_x = 12.0 + text::measure(before, INPUT_FONT_SIZE, FontWeightHint::Regular);
         cmds.push(RenderCommand::Line {
             x1: cursor_x,
             y1: (INPUT_HEIGHT - PADDING) / 2.0 - INPUT_FONT_SIZE / 2.0 + 2.0,
@@ -820,7 +839,11 @@ impl LauncherState {
                 x: text_x,
                 y: row_y + 8.0,
                 text: entry.name.clone(),
-                color: if is_selected { theme::TEXT } else { theme::SUBTEXT1 },
+                color: if is_selected {
+                    theme::TEXT
+                } else {
+                    theme::SUBTEXT1
+                },
                 font_size: NAME_FONT_SIZE,
                 font_weight: if is_selected {
                     FontWeightHint::Bold
@@ -925,7 +948,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Terminal".to_string(),
             description: "Command-line terminal emulator".to_string(),
             executable_path: "/usr/bin/terminal".to_string(),
-            keywords: vec!["shell".into(), "console".into(), "bash".into(), "cli".into()],
+            keywords: vec![
+                "shell".into(),
+                "console".into(),
+                "bash".into(),
+                "cli".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -933,7 +961,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Text Editor".to_string(),
             description: "Plain text and code editor".to_string(),
             executable_path: "/usr/bin/editor".to_string(),
-            keywords: vec!["edit".into(), "code".into(), "write".into(), "notepad".into()],
+            keywords: vec![
+                "edit".into(),
+                "code".into(),
+                "write".into(),
+                "notepad".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -941,7 +974,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "File Explorer".to_string(),
             description: "Browse and manage files".to_string(),
             executable_path: "/usr/bin/explorer".to_string(),
-            keywords: vec!["files".into(), "browse".into(), "folder".into(), "directory".into()],
+            keywords: vec![
+                "files".into(),
+                "browse".into(),
+                "folder".into(),
+                "directory".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -965,7 +1003,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "System Info".to_string(),
             description: "Hardware and OS information".to_string(),
             executable_path: "/usr/bin/sysinfo".to_string(),
-            keywords: vec!["hardware".into(), "info".into(), "about".into(), "specs".into()],
+            keywords: vec![
+                "hardware".into(),
+                "info".into(),
+                "about".into(),
+                "specs".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -973,7 +1016,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Process Explorer".to_string(),
             description: "View and manage running processes".to_string(),
             executable_path: "/usr/bin/procexplorer".to_string(),
-            keywords: vec!["task".into(), "manager".into(), "processes".into(), "kill".into()],
+            keywords: vec![
+                "task".into(),
+                "manager".into(),
+                "processes".into(),
+                "kill".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -981,7 +1029,13 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Image Viewer".to_string(),
             description: "View images and photos".to_string(),
             executable_path: "/usr/bin/imageviewer".to_string(),
-            keywords: vec!["photo".into(), "picture".into(), "gallery".into(), "png".into(), "jpg".into()],
+            keywords: vec![
+                "photo".into(),
+                "picture".into(),
+                "gallery".into(),
+                "png".into(),
+                "jpg".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -997,7 +1051,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Screenshot".to_string(),
             description: "Capture screen area or window".to_string(),
             executable_path: "/usr/bin/screenshot".to_string(),
-            keywords: vec!["capture".into(), "snip".into(), "screen".into(), "grab".into()],
+            keywords: vec![
+                "capture".into(),
+                "snip".into(),
+                "screen".into(),
+                "grab".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -1047,7 +1106,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Display Settings".to_string(),
             description: "Resolution, scaling, and monitors".to_string(),
             executable_path: "/usr/bin/settings --display".to_string(),
-            keywords: vec!["monitor".into(), "resolution".into(), "screen".into(), "dpi".into()],
+            keywords: vec![
+                "monitor".into(),
+                "resolution".into(),
+                "screen".into(),
+                "dpi".into(),
+            ],
             category: Category::Setting,
             launch_count: 0,
         },
@@ -1055,7 +1119,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Network Settings".to_string(),
             description: "Wi-Fi, Ethernet, and VPN configuration".to_string(),
             executable_path: "/usr/bin/settings --network".to_string(),
-            keywords: vec!["wifi".into(), "ethernet".into(), "vpn".into(), "internet".into()],
+            keywords: vec![
+                "wifi".into(),
+                "ethernet".into(),
+                "vpn".into(),
+                "internet".into(),
+            ],
             category: Category::Setting,
             launch_count: 0,
         },
@@ -1063,7 +1132,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Sound Settings".to_string(),
             description: "Audio input/output and volume".to_string(),
             executable_path: "/usr/bin/settings --sound".to_string(),
-            keywords: vec!["audio".into(), "volume".into(), "speaker".into(), "microphone".into()],
+            keywords: vec![
+                "audio".into(),
+                "volume".into(),
+                "speaker".into(),
+                "microphone".into(),
+            ],
             category: Category::Setting,
             launch_count: 0,
         },
@@ -1093,6 +1167,66 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The caret has to sit where the query text ends, and the query is drawn
+    /// in the *proportional* UI face. It used to be placed at
+    /// `chars * (INPUT_FONT_SIZE * 0.55)` — a guessed average advance — so it
+    /// landed left of the text after wide letters and right of it after narrow
+    /// ones. No constant can be right here: a proportional face exists
+    /// precisely because its characters do not share a width.
+    #[test]
+    fn the_caret_sits_where_the_query_text_ends() {
+        let caret_x = |query: &str| {
+            let mut state = LauncherState::new(1280.0, 800.0);
+            state.visible = true;
+            state.query = query.to_owned();
+            state.cursor = query.len();
+            state
+                .render()
+                .into_iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Line { x1, x2, color, .. }
+                        if (x1 - x2).abs() < f32::EPSILON && color == theme::BLUE =>
+                    {
+                        Some(x1)
+                    }
+                    _ => None,
+                })
+                .expect("the launcher draws a caret")
+        };
+
+        for query in ["WWW", "iii", "will", "Wii", "documents"] {
+            let expected = 12.0 + text::measure(query, INPUT_FONT_SIZE, FontWeightHint::Regular);
+            let actual = caret_x(query);
+            assert!(
+                (actual - expected).abs() < 0.01,
+                "caret for {query:?} at {actual}, text ends at {expected}"
+            );
+        }
+
+        // The claim with teeth: the old guess is *not* this answer. If these
+        // agreed for narrow and wide text alike the face would be monospace and
+        // this test would be asserting nothing.
+        let narrow = caret_x("iii");
+        let wide = caret_x("WWW");
+        assert!(
+            wide > narrow * 1.5,
+            "three W measure {wide} and three i measure {narrow} — one guessed \
+             average would have put both at the same place"
+        );
+    }
+
+    /// A caret byte offset off a character boundary must not abort the process.
+    /// `self.query[..self.cursor]` on a `String` panics there, and this is a
+    /// launcher: it is drawn while the user is mid-keystroke.
+    #[test]
+    fn a_caret_off_a_character_boundary_draws_rather_than_panicking() {
+        let mut state = LauncherState::new(1280.0, 800.0);
+        state.visible = true;
+        state.query = "é".to_owned();
+        state.cursor = 1;
+        assert!(!state.render().is_empty());
+    }
 
     // --- Fuzzy matcher tests ---
 
@@ -1452,7 +1586,10 @@ mod tests {
     fn test_launcher_render_when_hidden() {
         let launcher = LauncherState::new(1920.0, 1080.0);
         let cmds = launcher.render();
-        assert!(cmds.is_empty(), "Hidden launcher should produce no commands");
+        assert!(
+            cmds.is_empty(),
+            "Hidden launcher should produce no commands"
+        );
     }
 
     #[test]

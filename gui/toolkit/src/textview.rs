@@ -96,15 +96,19 @@ fn default_rich_line_height(font_size: f32) -> f32 {
     crate::text::line_height(font_size, FontWeightHint::Regular)
 }
 
-/// How many grid cells `text` occupies.
-///
-/// Characters, not bytes. `str::len` was used here, which meant a line
-/// containing so much as one accented letter pushed every span after it to the
-/// right and left its selection highlight and underline behind the glyphs they
-/// belong to — the grid only ever looked right for pure ASCII.
-fn columns(text: &str) -> f32 {
-    text.chars().count() as f32
-}
+// There used to be a `columns()` here — `text.chars().count() as f32` — and
+// everything [`SimpleTextView`] placed against the text was that times
+// `config.char_width`. It replaced a `str::len()`, which counted UTF-8 bytes
+// and pushed every span after a non-ASCII one to the right; counting characters
+// fixed that and left a subtler version of the same error in place, because a
+// character count is equal to the drawn width only where every character
+// advances the cell width. A tab does not — one `char`, four cells — and this
+// view expands no tabs, so a tab-indented line put every mark three cells left
+// of its text per level of indentation.
+//
+// Positions against real text are now measured; see
+// `SimpleTextView::column_offsets`. `config.char_width` survives for the
+// line-number gutter, which is sized to hold digits and holds nothing else.
 
 // ---------------------------------------------------------------------------
 // Text position and selection
@@ -684,26 +688,129 @@ impl SimpleTextView {
         self.clamp_scroll();
     }
 
+    /// Weight a span is drawn in, so that measuring it asks the same question
+    /// the renderer will answer.
+    fn span_weight(span: &StyledSpan) -> FontWeightHint {
+        if span.style.bold {
+            FontWeightHint::Bold
+        } else {
+            FontWeightHint::Regular
+        }
+    }
+
+    /// Width of `text` as this view will draw it.
+    fn measure(&self, text: &str, weight: FontWeightHint) -> f32 {
+        crate::text::measure_in(text, self.config.font_size, weight, FontFamily::Mono)
+    }
+
+    /// x of every column boundary on `line`, relative to the text area's left
+    /// edge: `offsets[c]` is where column `c` starts, and the last entry is
+    /// where the line ends. Always at least one element.
+    ///
+    /// # Why this is measured rather than `col as f32 * char_width`
+    ///
+    /// Multiplying by a cell width assumes every character advances that width.
+    /// That is what "monospace" means for Latin text and is not true of the
+    /// text a log or a terminal view actually receives. **A tab is the case
+    /// that matters**: it is one `char`, and the face draws it four cells wide.
+    /// This view does no tab expansion of its own, so before this method
+    /// existed the first tab on a line put the selection band, the search
+    /// highlight and the caret three cells left of the text they belong to, and
+    /// each further tab moved them another three. Wide (CJK) glyphs and
+    /// zero-width combining marks break the same assumption in the other two
+    /// directions.
+    ///
+    /// Each span is measured in the weight it is drawn in, because a bold span
+    /// on a face whose bold is not metric-compatible advances differently — and
+    /// a view that highlights matches in bold would then mis-place everything
+    /// after the first match, which is exactly the text the user is looking at.
+    ///
+    /// # Cost
+    ///
+    /// One measurement per character, not per prefix. Measuring prefixes would
+    /// be the obviously-safe thing — it is what the renderer literally does with
+    /// the run — but it is quadratic in the line length, and this view holds log
+    /// and terminal output where a 500-character line is unremarkable: 125 000
+    /// shapings per line per frame against 500. The crate keeps a
+    /// `text::shaping_cost` instrument precisely because this cost is not
+    /// theoretical.
+    ///
+    /// Accumulating per-character advances is only equal to the prefix widths if
+    /// measurement is additive, i.e. if the face does no kerning across a pair.
+    /// It is, on this font stack, and `simple_view_advances_are_additive` is the
+    /// test that says so — so that if a kerning face ever arrives, this decision
+    /// fails loudly here rather than showing up as a caret that drifts a
+    /// fraction of a pixel per character on one face and not another.
+    fn column_offsets(&self, line: usize) -> Vec<f32> {
+        let mut offsets = vec![0.0_f32];
+        let Some(spans) = self.lines.get(line) else {
+            return offsets;
+        };
+        let mut x = 0.0_f32;
+        let mut buf = [0_u8; 4];
+        for span in spans {
+            let weight = Self::span_weight(span);
+            for ch in span.text.chars() {
+                x += self.measure(ch.encode_utf8(&mut buf), weight);
+                offsets.push(x);
+            }
+        }
+        offsets
+    }
+
+    /// x of column `col` on `line`, relative to the text area's left edge.
+    ///
+    /// A column past the end of the line clamps to the end, which is what a
+    /// selection running through a short line means.
+    fn col_x(&self, line: usize, col: usize) -> f32 {
+        let offsets = self.column_offsets(line);
+        offsets
+            .get(col)
+            .or_else(|| offsets.last())
+            .copied()
+            .unwrap_or(0.0)
+    }
+
     /// Convert pixel coordinates to a text position.
     fn hit_test(&self, x: f32, y: f32) -> TextPosition {
         let gutter = self.gutter_width();
         let text_x = (x - gutter).max(0.0);
-        let col = (text_x / self.config.char_width) as usize;
         let line_in_view = (y / self.config.line_height) as usize;
         let line = (self.scroll_offset + line_in_view).min(self.lines.len().saturating_sub(1));
 
-        // Clamp column to line length
-        let line_len = self.line_char_count(line);
-        let col = col.min(line_len);
-
+        // The inverse of `column_offsets`, and deliberately written as one:
+        // dividing by a cell width would disagree with the placement of every
+        // mark this view draws the moment the line holds a tab, so a click
+        // would select from a different column than the caret was shown at.
+        //
+        // The boundary chosen is the *nearest* one, not the one to the left:
+        // clicking the right half of a character puts the caret after it, which
+        // is what every text field does and what makes click-and-drag over a
+        // whole word possible without overshooting.
+        let offsets = self.column_offsets(line);
+        let mut col = 0;
+        let mut best = f32::INFINITY;
+        for (c, &ox) in offsets.iter().enumerate() {
+            let d = (ox - text_x).abs();
+            if d < best {
+                best = d;
+                col = c;
+            }
+        }
         TextPosition::new(line, col)
     }
 
     /// Get character count of a line.
+    ///
+    /// Characters, not bytes. This was `s.text.len()`, which is UTF-8 bytes, so
+    /// on any line holding a non-ASCII character the clamp that keeps a
+    /// selection inside the line let it run past the end — while everything
+    /// that *drew* the selection counted characters. The two halves of one
+    /// model disagreeing is the failure this whole module keeps rediscovering.
     fn line_char_count(&self, line: usize) -> usize {
         self.lines
             .get(line)
-            .map(|spans| spans.iter().map(|s| s.text.len()).sum())
+            .map(|spans| spans.iter().map(|s| s.text.chars().count()).sum())
             .unwrap_or(0)
     }
 
@@ -1026,6 +1133,17 @@ impl SimpleTextView {
 
             let y = view_line as f32 * self.config.line_height;
 
+            // Once per line, then shared by the selection band and every search
+            // highlight on it. Recomputing it per mark would measure the line
+            // again for each, which on a screen where a search has matched
+            // several times per line is the difference between one pass over the
+            // visible text and a dozen.
+            let mut offsets: Option<Vec<f32>> = None;
+            let mut col_x = |view: &Self, col: usize| -> f32 {
+                let o = offsets.get_or_insert_with(|| view.column_offsets(line_idx));
+                o.get(col).or_else(|| o.last()).copied().unwrap_or(0.0)
+            };
+
             // Line number
             if self.config.show_line_numbers {
                 let num_str = format!("{}", line_idx + 1);
@@ -1060,8 +1178,8 @@ impl SimpleTextView {
                     line_len
                 };
                 if sel_start < sel_end {
-                    let x1 = gutter_w + sel_start as f32 * self.config.char_width;
-                    let x2 = gutter_w + sel_end as f32 * self.config.char_width;
+                    let x1 = gutter_w + col_x(self, sel_start);
+                    let x2 = gutter_w + col_x(self, sel_end);
                     tree.fill_rect(x1, y, x2 - x1, self.config.line_height, SELECTION_COLOR);
                 }
             }
@@ -1074,8 +1192,8 @@ impl SimpleTextView {
                     } else {
                         SEARCH_MATCH_COLOR
                     };
-                    let x1 = gutter_w + ms as f32 * self.config.char_width;
-                    let x2 = gutter_w + me as f32 * self.config.char_width;
+                    let x1 = gutter_w + col_x(self, ms);
+                    let x2 = gutter_w + col_x(self, me);
                     tree.fill_rect(x1, y, x2 - x1, self.config.line_height, color);
                 }
             }
@@ -1085,15 +1203,14 @@ impl SimpleTextView {
             if let Some(spans) = self.lines.get(line_idx) {
                 for span in spans {
                     let fg = resolve_span_fg(&span.style);
-                    let weight = if span.style.bold {
-                        FontWeightHint::Bold
-                    } else {
-                        FontWeightHint::Regular
-                    };
+                    let weight = Self::span_weight(span);
+                    // What this span will be drawn as. A nominal column count
+                    // times a cell width is equal to it only where every
+                    // character advances one cell — see `column_offsets`.
+                    let span_width = self.measure(&span.text, weight);
 
                     // Background color
                     if let Some(bg) = resolve_span_bg(&span.style) {
-                        let span_width = columns(&span.text) * self.config.char_width;
                         tree.fill_rect(x, y, span_width, self.config.line_height, bg);
                     }
 
@@ -1110,7 +1227,6 @@ impl SimpleTextView {
 
                     // Underline
                     if span.style.underline {
-                        let span_width = columns(&span.text) * self.config.char_width;
                         let underline_y = y + self.config.line_height - 2.0;
                         tree.push(RenderCommand::Line {
                             x1: x,
@@ -1122,7 +1238,7 @@ impl SimpleTextView {
                         });
                     }
 
-                    x += columns(&span.text) * self.config.char_width;
+                    x += span_width;
                 }
             }
         }
@@ -3015,13 +3131,107 @@ mod tests {
         );
     }
 
+    /// A column boundary is where the drawn text actually reaches, not where a
+    /// cell count says it should. Bytes were the first version of this bug and
+    /// a character count the second; a tab is the case the second still got
+    /// wrong, and tab-indented output is most of what a log view receives.
     #[test]
-    fn test_simple_view_columns_count_characters_not_bytes() {
-        // The grid is the right model for terminal output, but a cell is one
-        // character wide, not one byte: `str::len` shifted every span after a
-        // non-ASCII one to the right.
-        assert_eq!(columns("abc"), columns("ééé"));
-        assert_eq!(columns(""), 0.0);
+    fn simple_view_column_offsets_are_measured_not_counted() {
+        let mut view = SimpleTextView::new(400.0, 200.0);
+        view.set_text("\tab");
+        let offsets = view.column_offsets(0);
+        assert_eq!(offsets.len(), 4, "three characters have four boundaries");
+        assert_eq!(offsets[0], 0.0);
+
+        let cell = view.config.char_width;
+        assert!(
+            offsets[1] > cell * 1.5,
+            "a tab reaches {} against a {cell} cell — if a tab really is one \
+             cell wide on this face, this test has stopped testing anything",
+            offsets[1]
+        );
+        // Monotonic, so a selection from any column to any later one has a
+        // non-negative width — a rectangle drawn backwards is invisible.
+        for pair in offsets.windows(2) {
+            assert!(pair[1] >= pair[0], "offsets went backwards: {offsets:?}");
+        }
+        // The last boundary is where the line ends, which is what the drawn run
+        // measures — this is the equality the pen and the marks now share.
+        let drawn = crate::text::measure_in(
+            "\tab",
+            view.config.font_size,
+            FontWeightHint::Regular,
+            FontFamily::Mono,
+        );
+        assert!((offsets[3] - drawn).abs() < 0.01);
+    }
+
+    /// A click has to name the column the caret was drawn at. Before the
+    /// offsets were measured, `hit_test` divided by a cell width while the
+    /// caret was placed by counting cells, so on a tab-indented line clicking
+    /// directly on a character selected from several columns away.
+    #[test]
+    fn simple_view_hit_test_inverts_the_placement_it_draws() {
+        let mut view = SimpleTextView::new(400.0, 200.0);
+        view.set_text("\tabc");
+        for col in 0..=4 {
+            let x = view.col_x(0, col);
+            let hit = view.hit_test(x, 0.0);
+            assert_eq!(
+                hit.col, col,
+                "column {col} is drawn at x={x} but a click there reports {}",
+                hit.col
+            );
+        }
+    }
+
+    /// The premise `column_offsets` rests on, stated so it fails here first.
+    ///
+    /// It accumulates one advance per character rather than measuring each
+    /// prefix, because measuring prefixes is quadratic in the line length and
+    /// this view holds log output. That is only the same answer if measurement
+    /// is additive — if the face applies no kerning across a character pair.
+    /// It does not, on this font stack. If a face that does ever arrives, this
+    /// test breaks and names the reason, rather than the caret quietly drifting
+    /// a fraction of a pixel per character on one face and not another.
+    #[test]
+    fn simple_view_advances_are_additive() {
+        let m = |s: &str| {
+            crate::text::measure_in(
+                s,
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+                FontFamily::Mono,
+            )
+        };
+        for (a, b) in [
+            ("A", "V"),
+            ("T", "o"),
+            ("f", "i"),
+            ("r", "n"),
+            ("\t", "x"),
+            ("é", "é"),
+        ] {
+            let joined = format!("{a}{b}");
+            assert!(
+                (m(&joined) - (m(a) + m(b))).abs() < 0.01,
+                "{a:?}+{b:?} measures {} but the parts sum to {} — this face \
+                 kerns, so `column_offsets` must go back to measuring prefixes",
+                m(&joined),
+                m(a) + m(b)
+            );
+        }
+    }
+
+    /// A line's length is in characters, because everything that draws against
+    /// it is. It was `str::len()` — bytes — so the clamp meant to keep a
+    /// selection inside a line let it run past the end of any line holding a
+    /// non-ASCII character.
+    #[test]
+    fn simple_view_line_length_is_characters_not_bytes() {
+        let mut view = SimpleTextView::new(400.0, 200.0);
+        view.set_text("ééé");
+        assert_eq!(view.line_char_count(0), 3, "three characters, six bytes");
     }
 
     #[test]

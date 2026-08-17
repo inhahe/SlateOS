@@ -27602,3 +27602,54 @@ to move onto it together — an ordering that disagrees between `sort` and `join
 silently breaks `join`, which requires both inputs sorted *the same way*.
 `scripts/sort-diff.sh` pins `LC_ALL=C` so the harness compares like with like;
 when a locale layer lands, that pin is the first thing to revisit.
+
+## TD-COREUTILS-DIAGNOSTICS-DO-NOT-QUOTE-FILE-NAMES (lane B, 2026-08-16) — **open**
+
+**In short:** When a coreutil complains about a file, it prints the file's name
+raw. GNU wraps the name in quotes. That sounds cosmetic and mostly is — until
+the name contains a space, a quote, or a newline, all of which our filesystem
+allows (paths may hold any byte but `/` and NUL). A name with a newline in it
+can then *forge a second line of output*, which is a real problem for anything
+reading a tool's diagnostics.
+
+Compare, for a file that does not exist:
+
+```
+GNU:   sort: cannot read: 'no such': No such file or directory
+ours:  sort: cannot read: no such: No such file or directory
+```
+
+and for one whose name holds a tab:
+
+```
+GNU:   sort: cannot read: 'no'$'\t''such': No such file or directory
+ours:  sort: cannot read: no<TAB>such: No such file or directory
+```
+
+**GNU uses two different styles and the difference is deliberate.** They come
+from gnulib's `quotearg`:
+
+| Helper | Style | Used for | `no such` becomes |
+|---|---|---|---|
+| `quote()` | `locale_quoting_style` (C locale) | option arguments, key specs, tab characters | `'no such'` |
+| `quotef()` | `shell_escape_quoting_style` | file names | `'no such'`, but `no'such` → `"no'such"` and a tab → `'no'$'\t''such'` |
+
+`quotef`'s output is *shell-pasteable*, which is the point: a user who sees a
+diagnostic about a file wants to be able to copy the name into a command. That
+is why the two styles differ on a name containing a `'`.
+
+**Where it lives.** Everywhere. This is not a `sort` defect — `sort` was simply
+the first tool measured against GNU closely enough to notice. Every one of the
+85 coreutils binaries formats file names into diagnostics with a bare `{}` or
+`to_string_lossy()`.
+
+**The proper fix** is a shared `quotearg` module in
+`userspace/coreutils/src/lib.rs` implementing both styles faithfully, plus a
+sweep of the binaries to route file names through `quotef` and option arguments
+through `quote`. It is mechanical but wide, and it wants its own differential
+harness (a fixture directory of names holding a space, a quote, a backslash, a
+tab, a newline and a high byte, run through both implementations) — because
+this is exactly the class of defect where reading the code proves nothing.
+
+Until then, `sort`'s `show()` is a plain lossy conversion, marked with a comment
+pointing here so the next reader does not mistake it for a considered choice.

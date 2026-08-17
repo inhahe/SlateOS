@@ -415,6 +415,86 @@ run_case -V bytes.txt
 run_case -k1,1 bytes.txt
 run_stdin '\xff\n\xfe\n' -r
 
+
+# --- option parsing, stderr text included -----------------------------------
+#
+# Everywhere else this script compares only *whether* stderr was loud, because
+# the wording of an I/O error comes from the host's error table. Option
+# diagnostics are different: they are ours to get right, and they are the whole
+# of what a mistyped command line produces. So this section compares the text.
+#
+# It exists because a battery of these found five real defects at once: long
+# options did not take a value from the next argument (`--key 2` was refused),
+# did not accept unambiguous abbreviations (`--rev` was refused), reported the
+# wrong wording for four different mistakes, exited 2 where GNU exits 1 for a
+# bad argument *to* an option, and were missing `--sort`, `--files0-from`,
+# `--random-sort` and `--debug` from the table entirely — so `--d`, which GNU
+# calls ambiguous, silently resolved to `--dictionary-order`.
+run_msg() {
+  local o_err g_err o_rc g_rc
+  o_err=$(mktemp); g_err=$(mktemp)
+  printf 'a\n' | "$OURS_ABS" "$@" >/dev/null 2>"$o_err"; o_rc=$?
+  printf 'a\n' | "$GNU" "$@" >/dev/null 2>"$g_err"; g_rc=$?
+  if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_err" "$g_err"; then
+    AGREED=yes
+  else
+    AGREED=no
+    REPORT=$(printf '  ours (rc=%s): %s\n  gnu  (rc=%s): %s' \
+      "$o_rc" "$(tr '\n' '|' <"$o_err")" "$g_rc" "$(tr '\n' '|' <"$g_err")")
+  fi
+  rm -f "$o_err" "$g_err"
+  report "sort $* [stderr]"
+}
+
+# Abbreviation: unambiguous ones resolve, ambiguous ones are refused, and an
+# exact match wins even when it is a prefix of a longer option.
+run_msg --rev
+run_msg --r
+run_msg --d
+run_msg --c
+run_msg --che
+run_msg --k
+run_msg --m
+run_msg --s
+run_msg --u
+run_msg --i
+run_msg --z
+run_msg --b
+run_msg --h
+run_msg --v
+run_msg --n
+run_msg --g
+# The four option diagnostics, in the one shape GNU uses for all of them.
+run_msg --bogus
+run_msg -x
+run_msg --rev=x
+run_msg --key
+run_msg -k
+run_msg -o
+run_msg --output
+run_msg --sort
+# argmatch: a bad argument *to* an option lists the valid ones and exits 1.
+run_msg --sort=bogus
+run_msg --check=bogus
+# `--files0-from` and its refusals.
+run_msg --files0-from=no-such-list
+printf 'sorted.txt\0' > names0
+printf 'sorted.txt\0\0sorted.txt\0' > names0-empty
+: > names0-none
+run_case --files0-from=names0
+run_msg --files0-from=names0-empty
+run_msg --files0-from=names0-none
+run_msg --files0-from=names0 sorted.txt
+# A value may be written either way round.
+run_stdin 'b 1\na 2\n' --key 2
+run_stdin 'b 1\na 2\n' --key=2
+run_stdin '10\n9\n' --sort numeric
+run_stdin '10\n9\n' --sort=numeric
+run_stdin 'a\nb\n' --field-separator , -k1
+# `--check` takes an *optional* value, so it never reaches for the next
+# argument: this checks, and leaves `quiet` an operand that does not exist.
+run_msg --check quiet
+
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then
   printf ' (%d of which no longer do)' "$xpass"

@@ -282,6 +282,20 @@ pub enum RequestBody {
     /// process with two windows had no way to say which one the text cursor
     /// belonged to.
     SetCursor { window: u64, shape: CursorShape },
+    /// Enter or leave fullscreen: the window owns the whole display, with no
+    /// decorations, and the compositor may scan it out directly.
+    ///
+    /// Separate from [`Maximize`](Self::Maximize) because they are different
+    /// states with different restore geometry — a maximized window keeps its
+    /// title bar and respects panel reservations, a fullscreen one does not —
+    /// and a client toggling one must not disturb the other.
+    SetFullscreen { window: u64, enable: bool },
+    /// Set whole-window opacity, from 0.0 (invisible) to 1.0 (opaque).
+    ///
+    /// Uniform over the window *including its decorations*, which is what makes
+    /// it different from [`WindowSpec::transparent`]: that one says the client
+    /// paints its own background and the compositor should not undercoat it.
+    SetOpacity { window: u64, opacity: f32 },
     /// Ask about the display. Answered with [`ResponseBody::DisplayInfo`].
     GetDisplayInfo,
 }
@@ -300,6 +314,8 @@ enum RequestTag {
     SetVisible = 0x09,
     SetCursor = 0x0A,
     GetDisplayInfo = 0x0B,
+    SetFullscreen = 0x0C,
+    SetOpacity = 0x0D,
 }
 
 impl RequestTag {
@@ -316,6 +332,8 @@ impl RequestTag {
             0x09 => Self::SetVisible,
             0x0A => Self::SetCursor,
             0x0B => Self::GetDisplayInfo,
+            0x0C => Self::SetFullscreen,
+            0x0D => Self::SetOpacity,
             _ => return None,
         })
     }
@@ -516,6 +534,16 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::SetCursor as u8);
             write_u64(out, *window);
             out.push(shape.to_byte());
+        }
+        RequestBody::SetFullscreen { window, enable } => {
+            out.push(RequestTag::SetFullscreen as u8);
+            write_u64(out, *window);
+            out.push(u8::from(*enable));
+        }
+        RequestBody::SetOpacity { window, opacity } => {
+            out.push(RequestTag::SetOpacity as u8);
+            write_u64(out, *window);
+            write_f32(out, *opacity);
         }
         RequestBody::GetDisplayInfo => out.push(RequestTag::GetDisplayInfo as u8),
     }
@@ -722,6 +750,20 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 shape: CursorShape::from_byte(b).ok_or(DecodeError::BadCursorShape(b))?,
             }
         }
+        RequestTag::SetFullscreen => {
+            let window = r.read_u64()?;
+            RequestBody::SetFullscreen {
+                window,
+                enable: read_bool(r)?,
+            }
+        }
+        RequestTag::SetOpacity => {
+            let window = r.read_u64()?;
+            RequestBody::SetOpacity {
+                window,
+                opacity: r.read_f32()?,
+            }
+        }
         RequestTag::GetDisplayInfo => RequestBody::GetDisplayInfo,
     })
 }
@@ -853,6 +895,20 @@ mod tests {
                 },
             ),
             Request::new(11, RequestBody::GetDisplayInfo),
+            Request::new(
+                12,
+                RequestBody::SetFullscreen {
+                    window: 7,
+                    enable: true,
+                },
+            ),
+            Request::new(
+                13,
+                RequestBody::SetOpacity {
+                    window: 7,
+                    opacity: 0.25,
+                },
+            ),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
     }

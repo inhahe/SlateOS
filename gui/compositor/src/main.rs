@@ -65,6 +65,11 @@ mod buffer;
 pub use buffer::{BufferFormat, SharedBuffer};
 mod keymap;
 pub use keymap::{ModifierState, key_for_scancode};
+// The front end that turns a byte stream from a client into compositor calls
+// and compositor events back into bytes. Everything above this line works in
+// terms of typed requests; `wire` is the only place that parses frames.
+mod wire;
+pub use wire::{ClientLink, WireError};
 // Remote draw-command streaming uses the shared `guiremote` crate's scene
 // protocol (multi-window deltas built on its single-window RenderCommand wire
 // codec), rather than a compositor-local duplicate.
@@ -142,6 +147,17 @@ impl WindowId {
     /// Get the raw numeric value.
     pub fn raw(self) -> u64 {
         self.0
+    }
+
+    /// Reconstitute an id from the number a client sent back over the wire.
+    ///
+    /// Deliberately not `From<u64>`: this is not a conversion, it is the point
+    /// where an untrusted number is *claimed* to name a window. Nothing here
+    /// checks that it does — every use is followed by a lookup that returns
+    /// [`CompositorError::WindowNotFound`] if it does not, and the ugly name is
+    /// there to make sure a caller notices it must do that.
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
     }
 }
 
@@ -1674,6 +1690,25 @@ pub enum EventNotification {
     FocusGained { window_id: WindowId },
     /// Window lost keyboard focus.
     FocusLost { window_id: WindowId },
+}
+
+impl EventNotification {
+    /// The window this notification is addressed to.
+    ///
+    /// Every notification has one — an event with no addressee would be an
+    /// event nobody can be told about — and the wire front end needs it to
+    /// decide which client's connection the event goes down. Without that,
+    /// every client would be sent every other client's keystrokes.
+    pub const fn window_id(&self) -> WindowId {
+        match self {
+            Self::KeyEvent { window_id, .. }
+            | Self::MouseEvent { window_id, .. }
+            | Self::WindowClose { window_id }
+            | Self::WindowResized { window_id, .. }
+            | Self::FocusGained { window_id }
+            | Self::FocusLost { window_id } => *window_id,
+        }
+    }
 }
 
 /// Translate one compositor notification into the wire event a client receives.

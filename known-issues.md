@@ -30004,7 +30004,8 @@ cost of a mismatch is small.
     (`create`, `set_title`, `run`) rather than reaching around them.
 
 - **(f) Give the compositor a wire front end — found while finishing (d½), and
-  it blocks (e).** The compositor has `handle_request(CompositorRequest) ->
+  it blocks (e).** — **DONE 2026-08-17**, in the three parts described at the
+  end of this item. The compositor has `handle_request(CompositorRequest) ->
   CompositorResponse` and `drain_notifications()`, and **nothing that decodes
   or encodes a frame on the request path**: no `CREQ` → `CompositorRequest`, no
   `CompositorResponse` → `CRSP`, no `SURF` → `submit_render`. `drain_input_frame`
@@ -30029,6 +30030,57 @@ cost of a mismatch is small.
   `oswindow` used to have cannot represent the same set — `Help` existed only
   in `oswindow`'s, `NotAllowed` only in the compositor's. `oswindow`'s is gone;
   the compositor's should become `guiremote`'s.
+
+  **What landed, in the order the work forced.** The question this step posed —
+  widen `CompositorRequest`, widen `RequestBody`, or accept a lossy edge — was
+  answered *both*: each side gained what the other had, because a lossy edge
+  here means a client asking for an undecorated window and silently getting a
+  title bar, and a defect that only shows up as pixels is the worst kind to
+  leave in a protocol.
+
+  * **(f1) The compositor honours the whole `WindowSpec`** (commit
+    `83d408c7d`). It previously stored title, width and height and dropped
+    position, decorations, resizability, transparency and both size limits.
+    Storing them was the small half; the real defect was that
+    `TITLE_BAR_HEIGHT`/`BORDER_WIDTH` were read *directly* in six `Window`
+    helpers, in `detect_border_drag`, in `maximize_window` and again in
+    `render_title_bar`, so "undecorated" could only ever have been honoured
+    where someone remembered to check. They are now behind
+    `Window::frame_insets()`/`shadow_extent()`, which return zeroes for an
+    undecorated or fullscreen window, and every consumer derives from those —
+    so hit testing, damage, drag detection and painting agree by construction.
+    Button rectangles became `Option<Rect>` (an empty rect contains no point
+    only by accident of arithmetic) and are placed by *slot*, so a
+    non-resizable window's minimise button moves up into the missing maximise
+    button's place rather than leaving a dead patch of title bar.
+    `clamp_size` puts a hard 100×50 floor beneath any client minimum and
+    resolves a contradictory `max < min` in favour of the minimum, so a client
+    cannot strand a window too small to grab. `transparent` and `opacity` are
+    kept distinct: the first skips the opaque white client-area undercoat that
+    would otherwise defeat the request, the second fades the whole window
+    including its frame. 13 tests.
+  * **(f2) One `CursorShape`, stored per window** (commit `f4f2db88d`). The
+    compositor's enum is deleted in favour of the wire's, which fixes the
+    `Help`/`NotAllowed` mismatch above, and the shape is stored on the
+    `Window`. This found a live bug: `handle_request`'s `SetCursor` arm was
+    `SetCursor { cursor, .. }` — it discarded the window id and wrote the
+    *global* cursor, so any client could repaint the desktop's cursor from
+    anywhere, including while the pointer was over another application.
+    `cursor_at(x, y)` now resolves it in the same order the user perceives:
+    a resize border wins, then the client area's own shape, then the frame's
+    arrow.
+  * **(f3) The front end itself** — `gui/compositor/src/wire.rs`, plus
+    `RequestBody::SetFullscreen`/`SetOpacity` and
+    `CompositorRequest::SetVisible` to close the last gaps between the two
+    enums. `Compositor::serve(&mut ClientLink)` decodes whatever a client has
+    sent — `CREQ` and `SURF` interleaved on one connection, in any framing,
+    including one byte per read — dispatches it, and queues the replies;
+    `route_input` writes each pending event to the link that owns its window.
+    The design decision that carried the most weight is in
+    `design-decisions.md` §458: **a link owns the windows opened over it**, and
+    that set both routes input and authorises every request naming a window.
+    15 tests here; 31 across the three parts, and the compositor suite went
+    from 105 to 136.
 
 - **(e) Wire `apps/editor` to it** as the first real client, calling
   `ensure_cursor_visible` and `ensure_caret_visible_horizontally` after any

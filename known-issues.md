@@ -27867,7 +27867,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 2 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -27900,3 +27900,42 @@ to it. The module is the deliverable; converting all 84 is mechanical after it.
 option without the shared module is another hand-written parser to convert. The
 current behaviour is safe — it refuses valid commands rather than
 mis-interpreting them — so nothing is at risk except compatibility.
+
+### Progress (appended 2026-08-16)
+
+The module landed as `userspace/coreutils/src/getopt.rs`
+(`ebb72b9a3`, `8492d4d78`), and `sort` and `cat` (`8956816e4`) call it. Every
+row of the table above now behaves as glibc does, verified by `cat-diff.sh`'s
+new `run_getopt` section — 15 option cases compared to glibc for stdout,
+stderr *and* status, 95 passed / 0 differed.
+
+Two things measured during the conversion changed the module's shape, and both
+are traps for the remaining 83:
+
+- **The usage exit status is per-utility, not a constant.** Measured across 28
+  utilities it is **1** for almost all of them and **2** only for `ls`, `sort`
+  and `grep` — the three that already gave 1 a meaning (`sort -c` found the
+  input unsorted; `grep` matched nothing). The draft module hardcoded sort's 2,
+  which would have silently changed `cat`'s exit status. It is now
+  `Program::new(name, usage_status)`, and `Program::new` has no default because
+  the value that would be wrong is not the rare one. **Measure it per utility:**
+  `<util> --zzz-bogus; echo $?`.
+- **`argmatch` overrides that status to 1 for everybody.** In the same program,
+  `ls --zzz` is 2 but `ls --sort=zzz` is 1. The module encodes this; a caller
+  cannot get it wrong.
+
+Also measured: a utility's *own* usage errors (`sort -k0`) take its usage status
+but carry **no** `Try '… --help'` referral — only getopt's and argmatch's do.
+That is `Program::usage()`, separate from the getopt sentences.
+
+**Converting the next utility** is two measurements and a mechanical edit:
+
+1. `<util> --=x` under glibc — an empty prefix matches everything, so the
+   ambiguity list prints the whole `struct option[]` **in declaration order**,
+   which is the order the `LONG_OPTIONS` table must copy (the order is
+   observable output, not an implementation detail).
+2. `<util> --zzz-bogus; echo $?` — the usage status.
+3. Replace the hand parser with `Program::resolve_long` / `argmatch`, and check
+   for the `other as char` bug while there: both `sort` and `cat` had it, and it
+   reports an option nobody typed (0xC3 rendered as `Ã`, then re-encoded as two
+   bytes). Iterate short-option bytes, not chars.

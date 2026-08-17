@@ -2180,6 +2180,9 @@ version = "0.1.0"
 [[package]]
 name = "dc"
 version = "0.1.0"
+dependencies = [
+ "bignum",
+]
 
 [[package]]
 name = "dconf-cli"

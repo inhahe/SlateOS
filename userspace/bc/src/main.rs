@@ -2038,7 +2038,16 @@ fn main() {
 
     // Interactive/pipe mode.
     let stdin = io::stdin();
-    let is_tty = std::env::var("TERM").is_ok();
+    // Whether input is a terminal, not whether the *environment* looks like
+    // one. `TERM` is inherited by every child of a terminal session, pipes
+    // included, so the previous probe said "interactive" for
+    // `echo 1+1 | bc` -- and the banner went into the caller's captured
+    // output, ahead of the answer. `$(echo 1+1 | bc)` is the single most
+    // common way this program is used.
+    let is_tty = {
+        use std::io::IsTerminal;
+        stdin.is_terminal()
+    };
 
     if !quiet && is_tty {
         println!("bc 1.0 (Slate OS)");
@@ -2348,9 +2357,12 @@ mod tests {
 
     #[test]
     fn test_exp_of_zero() {
+        // Exact, but still reported to the ten places `scale` asked for: the
+        // library's final step is a division, and a division has exactly
+        // `scale` places whether or not the last of them are zero.
         let output = capture_output_ml("scale=10\ne(0)");
         assert!(!output.is_empty());
-        assert_eq!(output[0], "1");
+        assert_eq!(output[0], "1.0000000000");
     }
 
     #[test]
@@ -2538,7 +2550,9 @@ s
 
     #[test]
     fn test_negative_exponent() {
+        // A negative exponent is `1/(a^|b|)`, a division, so the result has
+        // exactly `scale` places -- `.125` padded to five, not trimmed to three.
         let output = capture_output("scale=5\n2^-3");
-        assert_eq!(output, vec!["0.125"]);
+        assert_eq!(output, vec!["0.12500"]);
     }
 }

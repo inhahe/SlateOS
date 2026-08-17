@@ -105,12 +105,18 @@ pub fn encode_scene_frame(frame: &SceneFrame) -> Vec<u8> {
 
     // Counts saturate to u32::MAX on overflow rather than silently truncating;
     // the decode side rejects any count above MAX_WINDOWS_PER_FRAME anyway.
-    crate::write_u32(&mut out, u32::try_from(frame.removed.len()).unwrap_or(u32::MAX));
+    crate::write_u32(
+        &mut out,
+        u32::try_from(frame.removed.len()).unwrap_or(u32::MAX),
+    );
     for &id in &frame.removed {
         crate::write_u64(&mut out, id);
     }
 
-    crate::write_u32(&mut out, u32::try_from(frame.windows.len()).unwrap_or(u32::MAX));
+    crate::write_u32(
+        &mut out,
+        u32::try_from(frame.windows.len()).unwrap_or(u32::MAX),
+    );
     for win in &frame.windows {
         crate::write_u64(&mut out, win.id);
         // Window coordinates are signed; encode the raw two's-complement bits.
@@ -422,10 +428,7 @@ mod tests {
         assert_eq!(back.windows[0].x, -10);
         assert_eq!(back.windows[0].y, 20);
         assert!((back.windows[0].opacity - 0.75).abs() < f32::EPSILON);
-        assert_tree_eq(
-            back.windows[0].commands.as_ref().unwrap(),
-            &sample_tree(),
-        );
+        assert_tree_eq(back.windows[0].commands.as_ref().unwrap(), &sample_tree());
         assert!(back.windows[1].commands.is_none());
     }
 
@@ -582,7 +585,10 @@ mod tests {
 
         let f0 = session.build_frame(10, 10, &snaps);
         let v0 = apply_scene_frame(&BTreeMap::new(), &f0);
-        assert_eq!(v0.get(&1).map(|t| t.commands.len()), Some(tree.commands.len()));
+        assert_eq!(
+            v0.get(&1).map(|t| t.commands.len()),
+            Some(tree.commands.len())
+        );
 
         let f1 = session.build_frame(10, 10, &snaps);
         assert!(f1.windows[0].commands.is_none());

@@ -57,7 +57,10 @@ fn trees_eq(a: &RenderTree, b: &RenderTree) -> bool {
 }
 
 /// Build z-ordered snapshots that borrow from the server's window map.
-fn snapshots<'a>(order: &[u64], windows: &'a BTreeMap<u64, ServerWindow>) -> Vec<WindowSnapshot<'a>> {
+fn snapshots<'a>(
+    order: &[u64],
+    windows: &'a BTreeMap<u64, ServerWindow>,
+) -> Vec<WindowSnapshot<'a>> {
     order
         .iter()
         .filter_map(|id| {
@@ -109,9 +112,9 @@ fn remote_session_reconstructs_full_scene_across_deltas() {
 
     // The transport: encode on the server, decode on the viewer.
     let roundtrip = |session: &mut SceneSession,
-                         order: &[u64],
-                         server: &BTreeMap<u64, ServerWindow>,
-                         viewer: &mut BTreeMap<u64, RenderTree>|
+                     order: &[u64],
+                     server: &BTreeMap<u64, ServerWindow>,
+                     viewer: &mut BTreeMap<u64, RenderTree>|
      -> usize {
         let snaps = snapshots(order, server);
         let frame = session.build_frame(display.0, display.1, &snaps);

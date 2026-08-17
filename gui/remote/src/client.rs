@@ -331,8 +331,8 @@ mod tests {
     use guitk::event::{Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
 
     use super::*;
-    use crate::input::encode_input_frame;
     use crate::decode_frame;
+    use crate::input::encode_input_frame;
 
     /// A transport whose input is scripted and whose output is kept for
     /// inspection. `chunks` lets a test hand over a frame in pieces, which is
@@ -523,7 +523,11 @@ mod tests {
         c.tick(&mut app).unwrap(); // first paint
         c.tick(&mut app).unwrap();
         assert_eq!(app.seen.len(), 10, "every event must be delivered");
-        assert_eq!(app.renders.len(), 2, "one first paint, one coalesced redraw");
+        assert_eq!(
+            app.renders.len(),
+            2,
+            "one first paint, one coalesced redraw"
+        );
     }
 
     #[test]

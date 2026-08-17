@@ -579,7 +579,9 @@ fn decode_optional_char(r: &mut Reader<'_>) -> Result<Option<char>, DecodeError>
             // Surrogates and out-of-range values are rejected rather than
             // replaced: silently substituting U+FFFD would insert a character
             // the user never typed into whatever document is focused.
-            char::from_u32(raw).map(Some).ok_or(DecodeError::BadChar(raw))
+            char::from_u32(raw)
+                .map(Some)
+                .ok_or(DecodeError::BadChar(raw))
         }
         other => Err(DecodeError::BadTag(other)),
     }
@@ -736,7 +738,11 @@ mod tests {
                 },
                 30,
             );
-            assert_eq!(roundtrip(std::slice::from_ref(&ev)), vec![ev], "char {ch:?}");
+            assert_eq!(
+                roundtrip(std::slice::from_ref(&ev)),
+                vec![ev],
+                "char {ch:?}"
+            );
         }
     }
 
@@ -830,7 +836,10 @@ mod tests {
     fn reserved_flag_bits_are_rejected() {
         let mut bytes = encode_input_frame(&[]);
         bytes[5] = 0x80;
-        assert_eq!(decode_input_frame(&bytes), Err(DecodeError::ReservedFlags(0x80)));
+        assert_eq!(
+            decode_input_frame(&bytes),
+            Err(DecodeError::ReservedFlags(0x80))
+        );
     }
 
     #[test]
@@ -903,13 +912,19 @@ mod tests {
     fn an_unassigned_modifier_bit_is_rejected_not_ignored() {
         // A frame from a future compositor that added AltGr must not silently
         // arrive as the same chord without it.
-        assert_eq!(decode_modifiers(0x10), Err(DecodeError::ReservedFlags(0x10)));
-        assert_eq!(decode_modifiers(MOD_KNOWN).unwrap(), Modifiers {
-            shift: true,
-            ctrl: true,
-            alt: true,
-            super_key: true,
-        });
+        assert_eq!(
+            decode_modifiers(0x10),
+            Err(DecodeError::ReservedFlags(0x10))
+        );
+        assert_eq!(
+            decode_modifiers(MOD_KNOWN).unwrap(),
+            Modifiers {
+                shift: true,
+                ctrl: true,
+                alt: true,
+                super_key: true,
+            }
+        );
     }
 
     #[test]
@@ -929,7 +944,10 @@ mod tests {
         let ch_at = INPUT_HEADER_LEN + 8 + 1 + 1 + 1 + 1 + 1;
         // A lone surrogate: valid UTF-16, never a Rust `char`.
         bytes[ch_at..ch_at + 4].copy_from_slice(&0xD800u32.to_le_bytes());
-        assert_eq!(decode_input_frame(&bytes), Err(DecodeError::BadChar(0xD800)));
+        assert_eq!(
+            decode_input_frame(&bytes),
+            Err(DecodeError::BadChar(0xD800))
+        );
     }
 
     #[test]

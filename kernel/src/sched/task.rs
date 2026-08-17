@@ -22,6 +22,7 @@
 //! ```
 
 use super::fpu::FpuState;
+use alloc::boxed::Box;
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table;
@@ -612,15 +613,33 @@ pub struct Task {
     /// allocation (idle tasks, AP idle tasks) or is externally provided.
     pub kstack_slot: Option<usize>,
 
-    /// Saved FPU/SSE state (x87 + XMM0-XMM15).
+    /// Saved FPU/SSE/AVX state (x87 + XMM/YMM/ZMM).
     ///
-    /// Saved by `fxsave64` on switch-out, restored by `fxrstor64` on
-    /// switch-in.  Initialized to a clean default state (all registers
-    /// zeroed, FCW=0x037F, MXCSR=0x1F80) for new tasks.
+    /// Saved by `xsave64`/`fxsave64` on switch-out, restored by
+    /// `xrstor64`/`fxrstor64` on switch-in.  Initialized to a clean default
+    /// state (all registers zeroed, FCW=0x037F, MXCSR=0x1F80) for new tasks.
     ///
-    /// 512 bytes, 16-byte aligned.  Placed last in the struct to avoid
-    /// padding between smaller fields.
-    pub fpu_state: FpuState,
+    /// **Boxed deliberately.**  The save area is 4096 bytes; embedding it by
+    /// value made `Task` a ~4.4 KiB type, and *every by-value move of a `Task`
+    /// then cost a 4 KiB memcpy through a stack temporary*.  In an unoptimised
+    /// build none of those moves are elided, and the spawn path performs
+    /// several of them in a row (`FpuState::new_default` ->
+    /// `Ok(Self { .. })` -> `Result<Task, _>` -> `Box::new(new_task)`).
+    /// Measured with `build/stackframes.py` on the debug kernel, that chain
+    /// claimed 40640 bytes of a 64 KiB task stack across three frames, which
+    /// is what caused the intermittent stack-canary halts recorded in
+    /// `known-issues.md` as
+    /// `A-INTERMITTENT-STACK-CANARY-HALT-AT-REAP-TIME`.
+    ///
+    /// Behind a `Box`, `Task` is a few hundred bytes and its moves are free.
+    /// The cost is one extra pointer indirection when the context switch takes
+    /// `&raw mut *t.fpu_state` — negligible next to the XSAVE it is about to
+    /// perform — and one small allocation per task, next to the 64 KiB stack
+    /// each task already allocates.
+    ///
+    /// Boxing also stops `FpuState`'s `align(64)` propagating to `Task`, which
+    /// was forcing every stack frame holding one to be 64-byte aligned.
+    pub fpu_state: Box<FpuState>,
 }
 
 impl Task {
@@ -891,7 +910,7 @@ impl Task {
             cgroup_id: crate::cgroup::ROOT_CGROUP,
             net_ns: crate::netns::ROOT_NS,
             kstack_slot: None,
-            fpu_state: FpuState::new_default(),
+            fpu_state: FpuState::new_default_boxed(),
         }
     }
 
@@ -973,7 +992,7 @@ impl Task {
             cgroup_id: crate::cgroup::ROOT_CGROUP,
             net_ns: crate::netns::ROOT_NS,
             kstack_slot: None,
-            fpu_state: FpuState::new_default(),
+            fpu_state: FpuState::new_default_boxed(),
         }
     }
 
@@ -1123,7 +1142,7 @@ impl Task {
             cgroup_id: crate::cgroup::ROOT_CGROUP,
             net_ns: crate::netns::ROOT_NS,
             kstack_slot,
-            fpu_state: FpuState::new_default(),
+            fpu_state: FpuState::new_default_boxed(),
         })
     }
 

@@ -5935,12 +5935,12 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                             }
                             SwitchKind::Uncounted => {}
                         }
-                        (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
+                        (&raw mut t.context, &raw mut *t.fpu_state, t.pml4_phys)
                     });
                     let new_data = s.tasks.get(&ready_id).map(|t| {
                         (
                             &raw const t.context,
-                            &raw const t.fpu_state,
+                            &raw const *t.fpu_state,
                             t.pml4_phys,
                             t.stack_bottom,
                             t.fs_base,
@@ -6175,12 +6175,12 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 }
                 SwitchKind::Uncounted => {}
             }
-            (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
+            (&raw mut t.context, &raw mut *t.fpu_state, t.pml4_phys)
         });
         let new_data = state.tasks.get(&next_id).map(|t| {
             (
                 &raw const t.context,
-                &raw const t.fpu_state,
+                &raw const *t.fpu_state,
                 t.pml4_phys,
                 t.stack_bottom,
                 t.fs_base,

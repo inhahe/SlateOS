@@ -6238,6 +6238,30 @@ fn wake_jc_waiters(waiters: crate::proc::pcb::JcWaiters) {
 /// Records the stop and wakes the parent's waiters *before* parking the
 /// current thread, so a tracing parent observes the stop without having to
 /// wait for this thread to be resumed.
+///
+/// # The self-stop park is two-phase, and must stay that way
+///
+/// Waking the parent before parking creates a lost-wakeup race, because the
+/// parent's usual response to "your child stopped" is to send `SIGCONT`, and
+/// `sched::resume` does nothing to a thread that is not yet `Suspended`. The
+/// losing interleaving is:
+///
+/// 1. this thread records the stop and wakes the parent;
+/// 2. the parent wakes, observes the stop, and sends `SIGCONT`;
+/// 3. `continue_process` calls `sched::resume` on a thread that is still
+///    `Running` — a no-op, and the wakeup is gone;
+/// 4. this thread finally parks, and nothing will ever resume it.
+///
+/// Observed in the wild: boot #19's `ctest-jobctl` failure logged
+/// `stopped by signal 20` -> `continued` -> `Suspended task 131`, i.e. the
+/// suspend committing *after* the continue had already come and gone.
+///
+/// The order cannot simply be inverted — the parent genuinely must be able to
+/// observe the stop without waiting for this thread to be resumed, which is
+/// the whole point of `WUNTRACED`. So instead the park is split:
+/// [`sched::suspend_pending`] publishes the `Suspended` state up front, making
+/// a racing `resume` effective, and [`sched::park_if_suspended`] only actually
+/// yields if no resume arrived in between.
 fn stop_process_for_signal(
     pid: crate::proc::pcb::ProcessId,
     sig: u32,
@@ -6257,6 +6281,14 @@ fn stop_process_for_signal(
         }
     }
 
+    // Phase 1 of the self-stop park: commit this thread to Suspended *before*
+    // anyone is told about the stop, so that a SIGCONT racing in below finds a
+    // suspended thread to resume rather than a running one to ignore. The
+    // thread keeps executing until phase 2. See this function's doc comment.
+    if let Some(t) = self_thread {
+        sched::suspend_pending(t);
+    }
+
     // Mark stopped and wake parent observers. If the process vanished
     // between the signal check and here, there is nothing to record.
     if let Ok(waiters) = pcb::record_jc_stopped(pid, sig) {
@@ -6265,10 +6297,12 @@ fn stop_process_for_signal(
 
     serial_println!("[signal] Process {} stopped by signal {}", pid, sig);
 
-    // Finally park the current thread (self-stop only). Returns when a
-    // SIGCONT resumes us via `continue_process`.
-    if let Some(t) = self_thread {
-        sched::suspend(t);
+    // Phase 2: actually park, unless a SIGCONT already resumed us in the
+    // window above — in which case this returns immediately and the thread
+    // carries on, which is the correct outcome for a continue that overtook
+    // its own stop. Otherwise this returns once `continue_process` resumes us.
+    if self_thread.is_some() {
+        sched::park_if_suspended();
     }
 }
 

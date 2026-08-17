@@ -3930,8 +3930,30 @@ pub fn migrate_tasks_from_cpu(cpu: usize) -> usize {
 /// Returns `true` if the task was suspended, `false` if it was
 /// already Suspended, Dead, or not found.
 pub fn suspend(task_id: TaskId) -> bool {
-    let current = load_current_task();
+    if !mark_suspended(task_id) {
+        return false;
+    }
 
+    // If we just suspended the current task, yield to another task.
+    // Self-suspension is a voluntary context switch.
+    if task_id == load_current_task() {
+        schedule_inner(false, SwitchKind::Voluntary);
+    }
+
+    true
+}
+
+/// Commit a task to the [`Suspended`] state **without** yielding, even when it
+/// is the current task.
+///
+/// This is the marking half of [`suspend`]. Splitting it out exists to close a
+/// lost-wakeup race in job-control self-stops, where the thread that is about
+/// to park must first publish that intent to anyone who might resume it. See
+/// [`park_if_suspended`] for the other half and the full explanation.
+///
+/// Returns `true` if the task was transitioned, `false` if it was already
+/// Suspended, Dead, or not found.
+fn mark_suspended(task_id: TaskId) -> bool {
     {
         let mut state = SCHED.lock();
         let Some(task) = state.tasks.get_mut(&task_id) else {
@@ -3970,12 +3992,74 @@ pub fn suspend(task_id: TaskId) -> bool {
     // above, so reporting it here is both accurate and correctly ordered.
     serial_println!("[sched] Suspended task {}", task_id);
 
-    // If we just suspended the current task, yield to another task.
-    // Self-suspension is a voluntary context switch.
-    if task_id == current {
-        schedule_inner(false, SwitchKind::Voluntary);
+    true
+}
+
+/// Mark `task_id` Suspended without parking it, so that a [`resume`] arriving
+/// from another thread has something to act on.
+///
+/// Pair this with [`park_if_suspended`] on the same thread. Between the two
+/// calls the task is "logically suspended but still executing": it holds the
+/// CPU, but its scheduler state already says Suspended, so a concurrent
+/// `resume` takes effect (flipping it back to Ready and enqueuing it) instead
+/// of being silently dropped.
+///
+/// This exists because [`resume`] is a no-op on a task that is not Suspended.
+/// A thread that announces "I am stopping" to another process *before* parking
+/// itself therefore has a window in which the wakeup it is waiting for can
+/// arrive and be discarded — after which it parks forever. Job-control
+/// self-stops must announce first (the parent's `waitpid` has to observe the
+/// stop, and it cannot wait for a thread that is about to park), so the
+/// announcement and the park cannot simply be reordered.
+pub fn suspend_pending(task_id: TaskId) -> bool {
+    mark_suspended(task_id)
+}
+
+/// Park the current task, but only if it is still [`Suspended`].
+///
+/// The second half of [`suspend_pending`]. If a `resume` landed in the window
+/// between the two calls, the task is Ready (and already enqueued) and this
+/// returns `false` without yielding — the resume "cancels" the pending park,
+/// which is exactly the wanted `SIGCONT`-beat-`SIGSTOP` semantics.
+///
+/// The residual window between this check and the context switch inside
+/// `schedule_inner` is the same one [`suspend`] has always had; this split does
+/// not widen it, and narrows the lost-wakeup window from "everything the caller
+/// does after announcing the stop" down to that minimum.
+pub fn park_if_suspended() -> bool {
+    let current = load_current_task();
+
+    {
+        let mut state = SCHED.lock();
+        let Some(task) = state.tasks.get_mut(&current) else {
+            return false;
+        };
+        match task.state {
+            TaskState::Suspended => {}
+            TaskState::Ready => {
+                // A resume beat us here. It moved the task to Ready and put it
+                // in a run queue on the assumption that it was parked — but it
+                // never parked, because *we are executing it right now*.
+                //
+                // Leaving it queued would publish a task that is already on a
+                // CPU: another CPU could pick it and run the same task
+                // concurrently with this one. So undo the enqueue and restore
+                // Running, which is the state the task has in fact been in the
+                // whole time. The resume still "took effect" in the sense that
+                // matters — we return false and the caller does not park.
+                let prio = task.effective_priority();
+                let cpu = task.last_cpu;
+                PER_CPU_SCHED.dequeue(current, prio, cpu);
+                task.state = TaskState::Running;
+                return false;
+            }
+            // Dead (killed while we were announcing the stop) or anything
+            // else: not ours to park.
+            _ => return false,
+        }
     }
 
+    schedule_inner(false, SwitchKind::Voluntary);
     true
 }
 
@@ -6351,6 +6435,7 @@ pub fn self_test() -> KernelResult<()> {
     test_cooperative_scheduling()?;
     test_kill_and_reap()?;
     test_suspend_resume()?;
+    test_two_phase_self_suspend()?;
     test_set_priority()?;
     test_interactive_detection()?;
     test_time_slice_config()?;
@@ -7035,6 +7120,89 @@ fn test_suspend_resume() -> KernelResult<()> {
     }
 
     serial_println!("[sched]   Suspend/resume: OK");
+    Ok(())
+}
+
+/// Test 2b: the two-phase self-suspend must let a resume cancel a pending park.
+///
+/// This is a regression test for a lost-wakeup race in job-control stops. A
+/// thread performing a self-stop has to tell its parent it stopped *before* it
+/// parks (the parent's `waitpid` cannot wait for a thread that is about to
+/// park), which leaves a window where the parent's `SIGCONT` arrives while the
+/// thread is still Running. `resume` is a no-op on a Running task, so the
+/// wakeup used to be discarded and the child then parked forever. Boot #19's
+/// `ctest-jobctl` failure logged exactly that: `stopped by signal 20` ->
+/// `continued` -> `Suspended task 131`.
+///
+/// The race is reproduced deterministically here by simply calling `resume` in
+/// the window on purpose — no second CPU or timing luck required, which is the
+/// whole reason to test it at this level rather than through the ring-3
+/// fixture that found it.
+fn test_two_phase_self_suspend() -> KernelResult<()> {
+    let current = load_current_task();
+    let cpu = crate::smp::current_cpu_index();
+    let queued_before = PER_CPU_SCHED.queue_length(cpu);
+
+    // Phase 1: publish the intent. The task must be Suspended even though it
+    // is demonstrably still executing — that is the point: a concurrent
+    // `resume` needs something to act on.
+    if !suspend_pending(current) {
+        serial_println!("[sched]   FAIL: suspend_pending returned false for the current task");
+        return Err(KernelError::InternalError);
+    }
+    {
+        let state = SCHED.lock();
+        if let Some(task) = state.tasks.get(&current)
+            && task.state != TaskState::Suspended
+        {
+            serial_println!(
+                "[sched]   FAIL: after suspend_pending, expected Suspended, got {:?}",
+                task.state
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // The racing SIGCONT. Before the fix this returned false (the task was
+    // still Running) and the wakeup vanished.
+    if !resume(current) {
+        serial_println!("[sched]   FAIL: resume did not observe the pending suspend");
+        return Err(KernelError::InternalError);
+    }
+
+    // Phase 2 must decline to park. If it parked here the self-test would hang
+    // outright — there is no one left to resume it.
+    if park_if_suspended() {
+        serial_println!("[sched]   FAIL: parked despite a resume arriving first");
+        return Err(KernelError::InternalError);
+    }
+
+    // ...and it must have undone the enqueue. A task that is running on this
+    // CPU must not also be sitting in a run queue, or another CPU could pick
+    // it up and run the same task twice.
+    {
+        let state = SCHED.lock();
+        if let Some(task) = state.tasks.get(&current)
+            && task.state != TaskState::Running
+        {
+            serial_println!(
+                "[sched]   FAIL: after a cancelled park, expected Running, got {:?}",
+                task.state
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    let queued_after = PER_CPU_SCHED.queue_length(cpu);
+    if queued_after != queued_before {
+        serial_println!(
+            "[sched]   FAIL: cancelled park left the running task queued ({} -> {})",
+            queued_before,
+            queued_after
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[sched]   Two-phase self-suspend (resume cancels the park): OK");
     Ok(())
 }
 

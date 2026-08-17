@@ -30008,6 +30008,79 @@ second lock while holding a first, so the per-nested-acquire cost is measured
 directly instead of being inferred from whichever unrelated benchmark happens
 to take nested locks.
 
+### A-LOCKDEP-RECORD-EDGE-WAS-A-LINEAR-SCAN — FOLLOW-UP 2026-08-17 — `page_fault_anonymous` recovered on its own; there was no regression
+
+**In short:** the benchmark went back to normal by itself. Boot #18 measured
+`page_fault_anonymous` at **2105ns**, inside the 2057-2158ns band it held for
+eight consecutive runs before the excursion — on a kernel whose page-fault code
+is **identical** to the one that measured 4138ns a run earlier. Nothing was
+fixed in between. The question the CORRECTION above left open ("still unknown,
+and it is probably not code") is now answered as far as it can be: **there was
+no code regression here.**
+
+**The series, in full.** Each row is one recorded run:
+
+| Commit | `page_fault` | Note |
+|---|---|---|
+| `602fc62e0` | 2062, 2084 | |
+| `86a923fe1` | 2076 | |
+| `9ecef3188` | 2057, 2139 | |
+| `d542299e2` | 2097, 2158 | |
+| `7342d57ea` | **3510** | diff vs previous is *two bench JSONL files* |
+| `78affced4` | **4333, 4978** | the +6365-line merge |
+| `e3ae7bae1` | **4138** | `record_edge` made O(1) — barely moved |
+| `71fa87ab7` | **2105** | recovered; **no kernel file changed** |
+| `71fa87ab7` | **2110** | A/A control, byte-identical binary |
+
+**Why the last two rows settle it.** `git diff --stat e3ae7bae1 origin/main --
+kernel/` is *empty*: the merge that preceded the recovery touched `gui/`,
+`apps/` and shared documents, and not one file under `kernel/`. The only
+kernel-side change between 4138ns and 2105ns is inside `lockdep::self_test` —
+a test that runs once at boot and cannot be reached from the page-fault path.
+It is dead code with respect to what was measured. A benchmark that halves
+across a change it cannot observe is not measuring that change.
+
+The A/A control then rules out the other explanation. Re-running the *same*
+tree produced 2110ns against 2105ns — **0.2% apart**. `kernel/build.rs` emits
+no `cargo:rustc-env`, no git hash and no timestamp, so the rebuild is
+reproducible and this really is the same binary twice. Therefore:
+
+| Reading | Predicts | Verdict |
+|---|---|---|
+| Run-to-run noise | same binary lands in either band | **ruled out** — 2105 vs 2110 |
+| Code layout under TCG | the band is a property of the build | consistent with everything |
+
+Layout also matches this harness's own precedent,
+`A-CRYPTO-BENCHMARKS-STEPPED-58-PERCENT-WITH-BYTE-IDENTICAL-CRYPTO-SOURCE`
+("code layout under TCG. Not a regression."). Under TCG a translation block
+ends at a guest page boundary, so a hot loop whose backward branch straddles a
+4 KiB boundary pays a dispatcher round-trip per iteration — ~1.7x on this
+project, against ~2x here.
+
+**The one loose end.** Layout cannot explain the *first* step
+(`d542299e2` 2158 -> `7342d57ea` 3510), whose commit changes only
+`bench/boot-history.jsonl` and `bench/history.jsonl`. If the kernel there was
+byte-identical then its layout did not move either, so that step is something
+else — most likely host interference, which this harness cannot see
+(`B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING`). Worth noting that boot #18 was
+flagged `RUN CONTAMINATED` on wall time (178s vs a 132s median) while producing
+the *fast* number: the contamination flag and the direction of the error are
+not correlated the way one would assume.
+
+**Action: none, and none is warranted.** No page-fault code changed in the
+window and the value is back to baseline. What did come out of the
+investigation is in the entry above and stands on its own: a real class-table
+overflow (138 classes against a 128 cap, so 10 lock classes went untracked), an
+O(1) `record_edge`, a fixed double-report race, and a complete `has_cycle`.
+
+**The reusable lesson.** The harness printed this metric's own range —
+`0-7274ns`, median 2834ns over 8 runs — on every run of the investigation. That
+spread is wider than the "regression" that was chased through an entire
+implementation. The rule that would have saved the effort: **before attributing
+a movement to a change, check whether the metric's own same-binary spread
+already covers it.** It is the same test that correctly dismissed
+`isr_latency`, applied one metric to the left.
+
 ## TD-SPANS-ARE-LAID-OUT-END-TO-END (lane C, 2026-08-17)
 
 **What.** Three more places have the defect `TD-EDITOR-IS-NOT-BIDIRECTIONAL`
@@ -30134,3 +30207,84 @@ deleted — it is a compact tour of the model's API.
 *defect* (nothing is wrong with what exists; it is only unreachable). Not
 urgent for correctness, but it should come before more model features are
 added, so that what is added is shaped by a real caller.
+
+## A-JOB-CONTROL-SELF-STOP-LOST-A-RACING-SIGCONT (lane A, 2026-08-17) - **fixed**
+
+**In short:** when a program stopped itself for job control (what a shell does
+on Ctrl-Z), it told its parent "I have stopped" *before* it actually went to
+sleep. If the parent answered "carry on" in that gap, the wake-up was thrown
+away, because the kernel's resume call quietly does nothing to a thread that is
+not asleep yet. The program then went to sleep with nobody left to wake it, and
+hung forever.
+
+**Where:** `kernel/src/syscall/handlers.rs` `stop_process_for_signal`, and
+`kernel/src/sched/mod.rs` `suspend`/`resume`.
+
+**How it was found.** Boot #19's ring-3 fixture `ctest-jobctl` failed with
+`expected Zombie, got Some(Running)`. The serial log gives the interleaving
+directly:
+
+```
+[signal] Process 164 stopped by signal 20
+[signal] Process 164 continued
+[sched] Suspended task 131
+```
+
+The suspend commits *after* the continue has already come and gone. Note the
+fixture's own failure message had pre-enumerated the three possible causes
+("the parent parked in waitpid() for a stop the child never reported ... the
+child still suspended because SIGCONT never resumed it ..."), which is what
+made the log ordering legible at a glance. Diagnostics that name their own
+candidate causes pay for themselves.
+
+**Why it existed.** The ordering was deliberate and the doc comment said so:
+the parent's `waitpid` must be able to observe the stop *without* waiting for
+the stopping thread to be resumed — that is what `WUNTRACED` means. So the
+announcement genuinely has to precede the park. But `sched::resume` returns
+early unless the target is already `Suspended`, so anything that arrives in the
+window between announcement and park is silently discarded. The losing
+interleaving:
+
+1. the child records the stop and wakes the parent;
+2. the parent wakes, observes the stop, sends `SIGCONT`;
+3. `continue_process` calls `sched::resume` on a thread that is still
+   `Running` — a no-op, and the wakeup is gone;
+4. the child parks, and nothing will ever resume it.
+
+**Frequency.** Intermittent — 4 `SELFTEST_FAIL`s in 50 recorded boots, and the
+immediately preceding boot passed on a byte-identical binary. This is the
+failure mode that is easiest to dismiss as flakiness and most expensive to
+leave in: it is a real hang, it just needs the scheduler to interleave two
+threads a particular way.
+
+**The fix: a two-phase park.** Reordering is not available (see above), so the
+park was split so that the *intent* to sleep is published before the
+announcement:
+
+* `sched::suspend_pending(tid)` commits the task to `Suspended` **without**
+  yielding. The thread keeps running, but its scheduler state now says
+  Suspended, so a concurrent `resume` takes effect instead of being dropped.
+* `sched::park_if_suspended()` yields only if the task is *still* Suspended. If
+  a resume landed in the window, it returns without parking — a `SIGCONT` that
+  overtakes its own `SIGSTOP` correctly leaves the process running.
+
+`sched::suspend` is now these two composed, so the single-call path is
+unchanged for every other caller.
+
+**The subtlety that the fix had to handle.** When a resume wins the race it
+does not merely flip the state — it also *enqueues* the task, on the assumption
+that a Suspended task is parked. But this task never parked; it is executing
+right now. Returning from `park_if_suspended` while it sits in a run queue
+would publish a task that is already on a CPU, and another CPU could pick it up
+and run the same task concurrently. So the cancel path dequeues it and restores
+`Running`. This is the kind of bug the original would have traded for, and it
+is worth stating explicitly because "resume cancels the park" sounds complete
+and is not.
+
+**Test.** `sched::test_two_phase_self_suspend` (self-test 2b) reproduces the
+race deterministically by calling `resume` inside the window on purpose — no
+second CPU and no timing luck needed — then asserts all three properties: the
+resume is observed, the park is declined, and the task is left `Running` and
+**not** queued (checked via `queue_length`, so the dequeue is actually
+verified rather than assumed). Testing it at this level rather than through the
+ring-3 fixture is the point: the fixture found the bug once in fifty boots.

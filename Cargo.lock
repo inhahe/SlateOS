@@ -1922,6 +1922,10 @@ version = "0.1.0"
 [[package]]
 name = "credentials"
 version = "0.1.0"
+dependencies = [
+ "randrange",
+ "sha2",
+]
 
 [[package]]
 name = "credmanager"
@@ -9396,6 +9400,10 @@ version = "0.1.0"
 
 [[package]]
 name = "sfwbar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sha2"
 version = "0.1.0"
 
 [[package]]

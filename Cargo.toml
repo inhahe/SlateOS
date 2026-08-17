@@ -55,6 +55,18 @@ members = [
     # Same member-not-exclude rationale as `yamldoc`; like `textfind` it needs no
     # `alloc`, since everything returns a scalar or shuffles the caller's slice.
     "randrange",
+    # Shared no_std SHA-256. Twenty-six files in this tree had grown their own
+    # copy — the same round constants, the same eight initial words, the same
+    # message schedule, pasted twenty-six times across all three lanes. Every
+    # copy is correct today, which is twenty-six pieces of luck rather than one
+    # piece of design: a SHA-256 with one wrong constant still returns
+    # thirty-two plausible-looking bytes, so the failure mode is silent, and it
+    # is silent in exactly the places that matter (password verifiers, backup
+    # manifests, the package store's content addresses). Same
+    # member-not-exclude rationale as `yamldoc`; needs no `alloc` at all, which
+    # matters more here than for the others because the kernel,
+    # `kernel/build.rs` and the bare-metal services are among the callers.
+    "sha2",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

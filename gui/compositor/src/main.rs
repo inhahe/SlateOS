@@ -70,6 +70,11 @@ pub use keymap::{ModifierState, key_for_scancode};
 // terms of typed requests; `wire` is the only place that parses frames.
 mod wire;
 pub use wire::{ClientLink, WireError};
+// The listening front end that owns the sockets `wire` deliberately does not.
+// `wire` is the translation, `server` is the plumbing; keeping them apart is
+// what lets the translation be tested without a network.
+mod server;
+pub use server::{Disconnect, Server, ServerStats};
 // Remote draw-command streaming uses the shared `guiremote` crate's scene
 // protocol (multi-window deltas built on its single-window RenderCommand wire
 // codec), rather than a compositor-local duplicate.
@@ -4733,84 +4738,61 @@ impl Compositor {
 // Main entry point
 // ---------------------------------------------------------------------------
 
+/// Start the display server and serve clients until it is killed.
+///
+/// The address comes from the first argument, or from `SLATE_DISPLAY`, or from
+/// `guiremote::socket::DEFAULT_DISPLAY` — in that order, so a second display
+/// can be started on one machine without touching the environment of the first.
+///
+/// What this used to be is worth recording: it created one window, drew a blue
+/// rectangle into it, composited once, and then looped forever composing frames
+/// nobody could connect to, with a comment saying a real loop would poll for
+/// IPC. Every part of the compositor beneath it was real and none of it was
+/// reachable. That demo is not deleted: it is now a test
+/// (`the_demo_scene_still_composites`), because it is a compact tour of the
+/// API, and being a test means it is actually run.
 fn main() {
-    // Initialize the compositor with a default 1920x1080 display at 60 Hz.
+    let addr = match std::env::args().nth(1) {
+        Some(explicit) => explicit,
+        None => match guiremote::socket::display_addr() {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("compositor: {e}");
+                std::process::exit(2);
+            }
+        },
+    };
+
     let mut compositor = match Compositor::new(1920, 1080, 60) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("compositor: failed to initialize: {}", e);
+            eprintln!("compositor: failed to initialize: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut server = match Server::bind(&addr) {
+        Ok(s) => s,
+        Err(e) => {
+            // Overwhelmingly this is "address already in use", which means a
+            // compositor is already serving this display. Said plainly, because
+            // the raw errno reads like a fault in this program.
+            eprintln!("compositor: cannot listen on {addr}: {e}");
+            eprintln!("  If a compositor is already running on that address, either stop it or");
+            eprintln!("  start this one elsewhere: `compositor 127.0.0.1:7374`.");
             std::process::exit(1);
         }
     };
 
     eprintln!("compositor: initialized (1920x1080 @ 60Hz)");
-    eprintln!("compositor: waiting for client connections...");
-
-    // Main compositor event loop.
-    // In production, this would:
-    // 1. Poll for IPC messages (client requests) via Slate OS channels
-    // 2. Poll for input events from the input driver
-    // 3. Compose frames at the display refresh rate
-    // 4. Send event notifications back to clients
-    //
-    // For now, we demonstrate the API with a simple test scenario.
-    let window_id = compositor.create_window("Welcome to Slate OS".to_string(), 640, 480, 1);
-
-    // Submit some test render commands.
-    let mut tree = RenderTree::new();
-    tree.fill_rect(10.0, 10.0, 200.0, 40.0, Color::BLUE);
-    tree.text(
-        20.0,
-        20.0,
-        "Hello from Slate OS Compositor!",
-        Color::WHITE,
-        14.0,
-    );
-    tree.fill_rect(10.0, 60.0, 620.0, 1.0, Color::LIGHT_GRAY);
-
-    if let Err(e) = compositor.submit_render(window_id, tree.commands) {
-        eprintln!("compositor: failed to submit render: {}", e);
+    match server.local_addr() {
+        Ok(bound) => eprintln!("compositor: listening on {bound}"),
+        Err(e) => eprintln!("compositor: listening, but cannot name the address: {e}"),
     }
 
-    // Compose and display the initial frame.
-    compositor.compose_frame();
-
-    eprintln!(
-        "compositor: frame composited ({}us, {} windows)",
-        compositor.frame_stats().last_frame_time_us,
-        compositor.window_count(),
-    );
-
-    // In production, we would enter the real event loop here. For now, the
-    // compositor has demonstrated its full API is operational.
-    // The event loop stub:
-    loop {
-        // 1. Receive input events (stub: none available yet).
-        // 2. Process any IPC requests from clients.
-        // 3. Compose frame if needed.
-        let composed = compositor.compose_frame();
-        if composed {
-            // Present the frame to display hardware.
-            let _buffer = compositor.front_buffer();
-            // In production: write buffer to framebuffer device or DRM plane.
-        }
-
-        // 4. Drain input events as an encoded frame and send them onward.
-        //
-        // The encoding half is now real — `drain_input_frame` produces the
-        // exact bytes a client decodes with `guiremote::decode_input_frame`.
-        // What is still missing is the transport underneath: each window needs
-        // a channel to the process that owns it. Until that exists the frame is
-        // built and dropped, which is a strictly better place to be stuck than
-        // the previous stub — the translation is written and tested, so wiring
-        // a transport is a plumbing change rather than a design one.
-        if let Some(frame) = compositor.drain_input_frame() {
-            let _ = frame;
-        }
-
-        // 5. Sleep until next frame or input event.
-        // In production: use an event-driven approach (poll/epoll equivalent).
-        std::thread::sleep(Duration::from_millis(16));
+    if let Err(e) = server.run(&mut compositor) {
+        eprintln!("compositor: the listening socket failed: {e}");
+        std::process::exit(1);
     }
 }
 
@@ -4821,6 +4803,35 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `main` used to do, kept because it is a compact tour of the API:
+    /// a window, a picture in it, and a composited frame.
+    #[test]
+    fn the_demo_scene_still_composites() {
+        let mut compositor = Compositor::new(1920, 1080, 60).expect("compositor");
+        let window_id = compositor.create_window("Welcome to Slate OS".to_string(), 640, 480, 1);
+
+        let mut tree = RenderTree::new();
+        tree.fill_rect(10.0, 10.0, 200.0, 40.0, Color::BLUE);
+        tree.text(
+            20.0,
+            20.0,
+            "Hello from Slate OS Compositor!",
+            Color::WHITE,
+            14.0,
+        );
+        tree.fill_rect(10.0, 60.0, 620.0, 1.0, Color::LIGHT_GRAY);
+        compositor
+            .submit_render(window_id, tree.commands)
+            .expect("submit");
+
+        assert!(compositor.compose_frame(), "nothing was drawn");
+        assert_eq!(compositor.window_count(), 1);
+        assert!(
+            compositor.frame_stats().last_frame_time_us > 0,
+            "the frame took no measurable time, so it did no work"
+        );
+    }
 
     #[test]
     fn test_window_id_uniqueness() {

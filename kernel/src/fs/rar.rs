@@ -478,19 +478,12 @@ fn push_le32(out: &mut Vec<u8>, val: u32) {
 }
 
 /// CRC32 (ISO 3309 / ITU-T V.42 polynomial 0xEDB88320) for RAR headers.
+///
+/// Forwards to the one table-driven implementation in [`crate::crypto`]; this
+/// was its own bit-at-a-time loop until F2FS needed a seeded variant and the
+/// duplicates were consolidated.
 fn crc32_rar(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
+    crate::crypto::crc32(data)
 }
 
 /// Run RAR module self-tests.

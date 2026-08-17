@@ -140,6 +140,7 @@ pub mod escape;
 pub mod eventlog;
 pub mod ext4;
 pub mod eyeprotect;
+pub mod f2fs;
 pub mod faceunlock;
 pub mod fat;
 pub mod fcomment;

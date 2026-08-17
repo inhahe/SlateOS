@@ -559,6 +559,136 @@ pub fn self_test_crc32c() -> Result<(), crate::error::KernelError> {
 }
 
 // ===========================================================================
+// CRC-32 (ISO 3309 / IEEE 802.3) — a *different* polynomial from CRC32C
+// ===========================================================================
+
+/// CRC-32 lookup table for the reflected IEEE polynomial 0xEDB88320
+/// (bit-reversed 0x04C11DB7).
+///
+/// This is the CRC of gzip, ZIP, PNG, Ethernet, RAR, 7-Zip and F2FS — *not*
+/// the Castagnoli CRC32C above, which uses 0x82F63B78 and produces entirely
+/// different values. The two are easy to confuse and impossible to confuse
+/// safely: a checksum computed with the wrong one verifies against nothing.
+const CRC32_TABLE: [u32; 256] = {
+    const POLY: u32 = 0xEDB8_8320;
+    let mut table = [0u32; 256];
+    let mut i = 0u32;
+    while i < 256 {
+        let mut crc = i;
+        let mut bit = 0;
+        while bit < 8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ POLY;
+            } else {
+                crc >>= 1;
+            }
+            bit += 1;
+        }
+        table[i as usize] = crc;
+        i += 1;
+    }
+    table
+};
+
+/// Compute CRC-32 (ISO 3309 / IEEE 802.3) over a byte slice.
+///
+/// Initial value `!0`, final value inverted — the conventional framing, so
+/// this matches what `gzip -l`, `unzip -v` and Python's `zlib.crc32` report.
+///
+/// # Examples
+///
+/// ```ignore
+/// assert_eq!(crc32(b"123456789"), 0xCBF43926);
+/// ```
+pub fn crc32(data: &[u8]) -> u32 {
+    crc32_seed(!0u32, data)
+}
+
+/// Compute CRC-32 with a custom initial seed, inverting the result.
+///
+/// Chains with [`crc32_raw`]: feed a raw accumulator in, get a finished CRC
+/// out, so a checksum over a discontiguous byte range can be computed in
+/// pieces without materialising the concatenation.
+pub fn crc32_seed(seed: u32, data: &[u8]) -> u32 {
+    crc32_raw(seed, data) ^ !0u32
+}
+
+/// Compute CRC-32 without the final inversion.
+///
+/// Returns the bare accumulator. Two callers need this rather than [`crc32`]:
+/// anyone chaining a CRC across separate slices, and F2FS — whose metadata
+/// checksums are Linux's `crc32_le()` seeded with the F2FS magic and with
+/// *neither* inversion applied, so the conventional framing would produce a
+/// value that is wrong by exactly `!0` on both ends.
+pub fn crc32_raw(seed: u32, data: &[u8]) -> u32 {
+    let mut crc = seed;
+    for &byte in data {
+        let idx = ((crc ^ u32::from(byte)) & 0xFF) as usize;
+        // The index is masked to 8 bits, so it is always in range; `get` here
+        // would force a `KernelResult` on a function that cannot fail.
+        #[allow(clippy::indexing_slicing)]
+        {
+            crc = CRC32_TABLE[idx] ^ (crc >> 8);
+        }
+    }
+    crc
+}
+
+/// Self-test for CRC-32 (ISO 3309).
+///
+/// # Errors
+///
+/// [`crate::error::KernelError::InternalError`] if any vector mismatches.
+pub fn self_test_crc32() -> Result<(), crate::error::KernelError> {
+    crate::serial_println!("[crypto] Running CRC-32 (ISO 3309) self-test...");
+
+    // The standard check value. Every reflected-IEEE implementation agrees on
+    // it, which is what makes it the right vector to guard the table against a
+    // transcription error in the polynomial.
+    let check = crc32(b"123456789");
+    if check != 0xCBF4_3926 {
+        crate::serial_println!(
+            "[crypto]   FAIL: CRC32(\"123456789\") = {:#010X}, expected 0xCBF43926",
+            check
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // The empty input must be 0, not `!0`: it proves both inversions are
+    // applied and that they are applied in the right order.
+    if crc32(b"") != 0 {
+        crate::serial_println!("[crypto]   FAIL: CRC32(\"\") is not zero");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Chaining across a split must equal the one-shot value, which is the
+    // property F2FS's checkpoint checksum depends on — it covers the block in
+    // two pieces, skipping the four bytes that hold the checksum itself.
+    let chained = crc32_seed(crc32_raw(!0u32, b"1234"), b"56789");
+    if chained != 0xCBF4_3926 {
+        crate::serial_println!(
+            "[crypto]   FAIL: chained CRC32 = {:#010X}, expected 0xCBF43926",
+            chained
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // CRC-32 and CRC32C must not agree on a non-trivial input. A single
+    // mistyped constant that made one table equal the other would leave every
+    // vector above passing while silently checksumming F2FS with Castagnoli.
+    if crc32(b"123456789") == crc32c(b"123456789") {
+        crate::serial_println!("[crypto]   FAIL: CRC-32 and CRC32C agree — same table?");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    crate::serial_println!(
+        "[crypto] CRC-32 self-test passed (check value {:#010X}).",
+        check
+    );
+    Ok(())
+}
+
+// ===========================================================================
 // HMAC-SHA256 (RFC 2104)
 // ===========================================================================
 

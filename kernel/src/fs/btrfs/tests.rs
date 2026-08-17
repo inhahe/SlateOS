@@ -1898,15 +1898,94 @@ fn test_volume(c: &mut Checks) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 fn test_corruption(c: &mut Checks) -> KernelResult<()> {
+    // Which side of the mount a fault surfaces on is now a property of *where*
+    // the damage is, and both sides are worth asserting.
+    //
+    // The mount descends the FS tree as far as the root directory's inode
+    // (`open_source`'s step 6) — deliberately, because a mount that succeeds on
+    // a volume with no reachable root reports the fault later, from an
+    // unrelated call, where it cannot be attributed to the volume that caused
+    // it. Leaf A holds `INO_ROOT`, so damage there is now a *mount* failure.
+    // Leaf B is reached only on demand, so damage there must still surface on
+    // first use and must leave the rest of the volume working — which is the
+    // property the lazy descent has to keep, and which the leaf-B cases below
+    // exist to pin.
+
+    // --- damage on the mount path: leaf A and the node above it -------------
+
     // A block whose bytes were altered without re-sealing fails its checksum.
-    // The FS tree is not touched during mount, so this surfaces on first use —
-    // which is itself worth asserting: a lazily-read tree must not be assumed
-    // validated by the mount having succeeded.
     let mut flipped = build_image()?;
     flip(&mut flipped, phys_of(LOG_FS_LEAF_A)?.saturating_add(200));
-    let mut fs = mount_image(flipped)?;
     c.check_err(
-        fs.readdir(Path::new("/")),
+        mount_image(flipped),
+        KernelError::IoError,
+        "a corrupt leaf on the root's path fails its checksum at mount",
+    );
+
+    // A block that is valid and current but is not the one we followed a
+    // pointer to. A checksum cannot see this; `bytenr` can.
+    let mut displaced = build_image()?;
+    patch_block(&mut displaced, LOG_FS_LEAF_A, 48, &LOG_FS_LEAF_B.to_le_bytes())?;
+    c.check_err(
+        mount_image(displaced),
+        KernelError::IoError,
+        "a block that disagrees about its own address is refused",
+    );
+
+    // A corrupt item count would otherwise make every slot read an
+    // out-of-bounds index.
+    let mut overfull = build_image()?;
+    patch_block(&mut overfull, LOG_FS_LEAF_A, 96, &10_000u32.to_le_bytes())?;
+    c.check_err(
+        mount_image(overfull),
+        KernelError::InvalidArgument,
+        "an item count that cannot fit the block is refused",
+    );
+
+    // A level beyond BTRFS_MAX_LEVEL would drive an unbounded descent.
+    let mut deep = build_image()?;
+    patch_block(&mut deep, LOG_FS_NODE, 100, &[200u8])?;
+    c.check_err(
+        mount_image(deep),
+        KernelError::InvalidArgument,
+        "an absurd tree level is refused",
+    );
+
+    // A root that reads perfectly and is genuinely the one the `ROOT_ITEM`
+    // names, but whose mode says regular file. Every structural check passes:
+    // the block checksums, knows its address, carries the right generation,
+    // and the item is exactly where the key says. Only a check on the root's
+    // *type* catches it. Item 0 of leaf A is `(INO_ROOT, INODE_ITEM, 0)` — the
+    // lowest key, so its 160-byte payload sits highest in the block — and
+    // `mode` is 52 bytes into that payload.
+    let mut wrong_type = build_image()?;
+    patch_block(
+        &mut wrong_type,
+        LOG_FS_LEAF_A,
+        NODESIZE.saturating_sub(160).saturating_add(52),
+        &0o100_644u32.to_le_bytes(),
+    )?;
+    c.check_err(
+        mount_image(wrong_type),
+        KernelError::CorruptedData,
+        "a root inode that is not a directory fails the mount",
+    );
+
+    // --- damage off the mount path: leaf B ----------------------------------
+
+    // The same checksum fault, one leaf over. This is the assertion the
+    // mount-time descent must not have cost us: a lazily-read tree is not
+    // assumed validated by the mount having succeeded, and one bad leaf does
+    // not take the volume down.
+    let mut flipped_b = build_image()?;
+    flip(&mut flipped_b, phys_of(LOG_FS_LEAF_B)?.saturating_add(200));
+    let mut fs = mount_image(flipped_b)?;
+    c.check(
+        fs.readdir(Path::new("/")).is_ok(),
+        "a corrupt leaf off the mount path still mounts",
+    );
+    c.check_err(
+        fs.read_file(Path::new("/sub/data.bin")),
         KernelError::IoError,
         "a corrupt FS leaf fails its checksum on first use",
     );
@@ -1923,38 +2002,6 @@ fn test_corruption(c: &mut Checks) -> KernelResult<()> {
     c.check(
         fs.read_file(Path::new("/sub/data.bin")) == Err(KernelError::IoError),
         "a stale-but-valid block is refused on its generation",
-    );
-
-    // A block that is valid and current but is not the one we followed a
-    // pointer to. A checksum cannot see this; `bytenr` can.
-    let mut displaced = build_image()?;
-    patch_block(&mut displaced, LOG_FS_LEAF_A, 48, &LOG_FS_LEAF_B.to_le_bytes())?;
-    let mut fs = mount_image(displaced)?;
-    c.check_err(
-        fs.readdir(Path::new("/")),
-        KernelError::IoError,
-        "a block that disagrees about its own address is refused",
-    );
-
-    // A corrupt item count would otherwise make every slot read an
-    // out-of-bounds index.
-    let mut overfull = build_image()?;
-    patch_block(&mut overfull, LOG_FS_LEAF_A, 96, &10_000u32.to_le_bytes())?;
-    let mut fs = mount_image(overfull)?;
-    c.check_err(
-        fs.readdir(Path::new("/")),
-        KernelError::InvalidArgument,
-        "an item count that cannot fit the block is refused",
-    );
-
-    // A level beyond BTRFS_MAX_LEVEL would drive an unbounded descent.
-    let mut deep = build_image()?;
-    patch_block(&mut deep, LOG_FS_NODE, 100, &[200u8])?;
-    let mut fs = mount_image(deep)?;
-    c.check_err(
-        fs.readdir(Path::new("/")),
-        KernelError::InvalidArgument,
-        "an absurd tree level is refused",
     );
 
     // A device too short to hold the metadata it points at.

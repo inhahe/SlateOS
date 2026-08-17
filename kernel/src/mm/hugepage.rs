@@ -152,6 +152,20 @@ pub unsafe fn map_huge_2m(
         return Err(KernelError::InvalidAddress);
     }
 
+    // Reject a caller-supplied bit 7, because at this level it does not mean
+    // what the caller thinks. On a 4 KiB PTE bit 7 is the `PAT` bit, the high
+    // bit of the memory-type slot index — it is how `PageFlags::WRITE_THROUGH`
+    // selects slot 7 (see `crate::mm::pat`). On a PDE it is the page-size bit,
+    // which we set ourselves just below, and the memory type's high bit moves
+    // to bit 12. So a `WRITE_THROUGH` flag set arriving here would not produce
+    // a write-through huge page; it would produce an uncacheable one, and
+    // nothing would say so. Refusing is the only honest answer available
+    // without a separate huge-page memory-type encoding, which nothing needs
+    // yet.
+    if flags.contains(PageFlags::HUGE_PAGE) {
+        return Err(KernelError::InvalidArgument);
+    }
+
     let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
     let user = virt.is_user();
 

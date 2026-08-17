@@ -29012,3 +29012,133 @@ and after, at a fixed resolution; the whole point is the ratio. If it is not a
 clear multiple, the PAT entry is not actually being selected — which is easy to
 get wrong silently, since a wrong index just yields a different valid memory
 type rather than a fault.
+
+
+### TD-NO-WRITE-COMBINING -- UPDATE 2026-08-17 -- implemented as `kernel/src/mm/pat.rs`; the speed *ratio* this entry asks for is not yet measured
+
+`mm::pat` now programs `IA32_PAT` to Linux's layout on the BSP (`init`) and on
+every AP (`init_ap`), `PageFlags::WRITE_COMBINING` selects slot 1, and
+`drm/ati/aperture.rs` maps BAR0 with it. Rationale, the alternatives, and the
+argument for why no *existing* mapping changes meaning: `design-decisions.md`
+§219. Validated by boot #11 (PASS, 493 s).
+
+Two corrections to the plan sketched above, both discovered by doing it:
+
+1. **The bit-7 collision was handled by not relying on bit 7 for WC.** The
+   sketch offered "confine `WC` to 4 KiB leaves or handle the collision
+   explicitly". Slot 1 needs no `PAT` bit at all, so `WRITE_COMBINING` is
+   `PWT` alone and never collides. Bit 7 is now used only by
+   `PageFlags::WRITE_THROUGH`, which moved to slot 7 to vacate slot 1 -- one
+   caller in the whole kernel (`mm::dma::alloc_for_user`), which asks by name.
+   `mm::hugepage::map_huge_2m` additionally rejects any flag set carrying bit 7
+   outright, so a `WRITE_THROUGH` request reaching a huge-page mapper returns
+   `InvalidArgument` instead of silently producing an *uncacheable* huge page.
+2. **"Power-on meanings" is not what the kernel actually inherits.** The first
+   boot logged the pre-existing table as `0x0000010500070406` -- slots 4-7 are
+   `WP, WC, UC, UC`, where the architectural power-on table says
+   `WB, WT, UC-, UC`. The firmware/bootloader had already rewritten half of it.
+   The claim that matters survives (slots 0-3 *were* at their power-on values,
+   and those are the only slots any live mapping selects), but any future
+   reasoning of the form "the other entries are at their power-on values" is
+   unsound on this boot path. `mm::pat::init` now saves the value it read before
+   overwriting it, and `memory_type_of` decodes against *that* when `init` has
+   not run, rather than against a specification the machine contradicts.
+
+**Still open, and the reason this entry is not closed.** The acceptance test
+this entry itself specifies -- "time a full-screen fill through the aperture
+before and after; the whole point is the ratio" -- has not been run. What is
+verified so far is weaker, and the difference is exactly the failure mode the
+entry warned about:
+
+* `mm::pat::self_test` confirms the MSR reads back as programmed, and that the
+  four named `PageFlags` constants still decode to `WB`/`WC`/`WT`/`UC` through
+  the table in force. That proves the *table* is right and the *flags* select
+  the slots we think they do.
+* It does **not** prove the CPU is combining. A wrong index yields a different
+  valid memory type rather than a fault, and `UC` and `WC` are
+  indistinguishable from any decode-side check -- both report "writes do not
+  linger", which is why `Aperture::flush` skips `clflush` for both.
+
+The measurement to add: time a full-screen fill through the WC aperture and
+through an uncached mapping of the *same* BAR in the same boot, and report the
+ratio. Doing both in one boot avoids comparing against a number from a different
+build, and a ratio near 1.0 is then unambiguous evidence that slot 1 is not
+being selected -- the exact silent failure this entry predicted.
+
+### BUG-BOOT-SPINLOCK-STALL-UNNAMED -- an intermittent boot hang reports `lock '?'` and `cpu 0 holds 0 lock(s)`, because lockdep is not yet enabled when the self-test battery runs -- 2026-08-17 -- OPEN (flaky; the diagnostic gap is the actionable part)
+
+**Observed.** Boot #10 of the lane-A tree (2026-08-17, tree at `8fd6813e1`)
+never reached `BOOT_OK`; `run-timeout` killed it at 1444 s, past the kernel's
+own 827 s deadline. Serial froze after
+`[spawn] Running link()/linkat no-follow symlink test (kernel, ext4 /mnt)...`
+with:
+
+```
+[sync] *** SPINLOCK STALL *** lock '?' still not acquired after ~30s of spinning
+       (cpu 0, task 0, 46170112 iters).
+[sync]   lock '?' holder: task 0 == spinner -- RECURSIVE self-deadlock
+[lockdep]   cpu 0 holds 0 lock(s):
+[liveness] cpu0: ... preempt_disable_depth=4 last_rip=0xffffffff804ca584
+```
+
+then three `SYSTEM HANG` reports and silence. **Not a regression, and not that
+test:** the immediately following boot (#11, identical kernel source plus the
+`mm::pat` work) passed `link()/linkat no-follow: OK` and went on to reach
+`BOOT_OK` in 493 s. Boot history at the time: 42 boots, 37 clean.
+
+**The actionable finding is the diagnostic, not the deadlock.** Two lines of
+that dump contradict each other, and working out which one lies is the whole
+content of this entry:
+
+* `sync::report_spin_stall` compares the lock's recorded `owner` against the
+  spinning task id. Both were 0, so it printed "RECURSIVE self-deadlock".
+* `lockdep::dump_held_locks(0)` printed **zero** held locks -- which, if lockdep
+  were running, would mean cpu 0 does *not* hold the lock, making the line above
+  false.
+
+lockdep was **not** running. `lockdep::lock_acquire` returns immediately unless
+`ENABLED` is set, and `ENABLED` is set only by `lockdep::init()`, which is called
+at `kernel/src/main.rs:5374` -- whereas the ring-3 self-test battery begins at
+`main.rs:1510` ("Step 21: Enable hardware interrupts -- BEFORE the ring-3
+self-test battery") and runs to roughly 4790. Confirmation from the serial log:
+`lockdep::init()`'s banner (`Lock order validator enabled`) appears **zero**
+times in all 1.29 MB of boot #10's output, and the only `[lockdep]` line in the
+entire log is the misleading "holds 0 lock(s)" from the stall report itself.
+
+So the most deadlock-prone phase of boot -- several thousand lines of self-tests
+exercising ext4, spawn, signals and the VFS -- runs with the lock-order
+validator switched off, and the phase after it, which is mostly idle, runs with
+it on. Worse, `dump_held_locks` prints a confident "0 lock(s)" when disabled
+rather than "lockdep disabled", so the dump actively misleads a reader into
+ruling out the correct explanation.
+
+**What was lost by that.** `lockdep::lock_acquire` already contains a precise
+detector for exactly this failure: it walks the per-CPU held stack and, on
+finding the same lock class already held, reports a re-entrant acquisition of the
+*same instance* immediately -- with the class name, and *before* the 30 s stall
+detector would fire (its own comment says as much). Had it been enabled, boot
+#10 would have produced a named lock and a located report instead of `lock '?'`
+and a 29-frame unsymbolized backtrace.
+
+**Proper fix, in two parts.**
+
+1. **Move `lockdep::init()` ahead of the self-test battery** (before
+   `main.rs:1510`). Its stated prerequisite -- "Must be after SMP init so
+   `current_cpu_index()` works on all CPUs" -- does not hold:
+   `smp::current_cpu_index` returns `BSP_CPU_INDEX` whenever `SMP_INITIALIZED`
+   is clear, which is the correct answer while only the BSP is running. Expect
+   this to surface real lock-order findings from paths that have never been
+   validated; those are the point, not an objection.
+2. **Make `dump_held_locks` say when it is disabled**, so a dump can never again
+   claim "0 lock(s)" on the strength of not having looked.
+
+Also worth doing, and cheaper: the stalled lock printed `'?'` because
+`sync::Mutex::new` defaults its name to `b"?"`. Naming the mutexes reachable from
+the self-test battery (`Mutex::named`) would make the stall detector's output
+usable on its own, without lockdep.
+
+**Reproducing.** Loop `python scripts/run-timeout.py --poll 60 1800
+./scripts/boot-test.sh`; roughly 1 boot in 8 was non-clean at the time of
+writing. Before treating a single failure at any one self-test as a regression,
+re-run -- and check whether the freeze point moves, which is what distinguishes
+this from a deterministic deadlock in the test the log happens to stop at.

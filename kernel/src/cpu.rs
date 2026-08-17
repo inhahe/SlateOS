@@ -855,6 +855,10 @@ pub struct CpuFeatures {
     pub tsc: bool,
     /// APIC on-chip.
     pub apic: bool,
+    /// Page Attribute Table: the `IA32_PAT` MSR selects a page's memory type
+    /// from the `PAT`/`PCD`/`PWT` PTE bits.  Required to obtain
+    /// write-combining memory, which no fixed MTRR arrangement provides.
+    pub pat: bool,
 
     // --- CPUID leaf 7, subleaf 0, EBX ---
     /// AVX2 — 256-bit integer SIMD.
@@ -967,6 +971,7 @@ impl CpuFeatures {
             sse2: false,
             tsc: false,
             apic: false,
+            pat: false,
             avx2: false,
             bmi1: false,
             bmi2: false,
@@ -1037,6 +1042,7 @@ pub fn detect_features() {
     f.sse2 = edx1 & (1 << 26) != 0;
     f.tsc = edx1 & (1 << 4) != 0;
     f.apic = edx1 & (1 << 9) != 0;
+    f.pat = edx1 & (1 << 16) != 0;
 
     // --- Leaf 7, subleaf 0: structured extended features ---
     let max_leaf = cpuid_max_leaf();

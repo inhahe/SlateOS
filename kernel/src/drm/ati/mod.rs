@@ -194,10 +194,16 @@ pub fn probe_hardware() -> Option<backend::AtiBackend> {
             return None;
         }
     };
+    // Log the memory type by name rather than the `is_cached()` predicate it
+    // was derived from. "cacheable=false" is true of an uncached mapping and of
+    // a write-combining one, so it cannot answer the only question a reader has
+    // here — whether the PAT slot this mapping selected actually combines, or
+    // whether `mm::pat::init` declined and left it merely uncached.
     serial_println!(
-        "[ati]   VRAM aperture mapped: {} MiB at {:#x} (cacheable={})",
+        "[ati]   VRAM aperture mapped: {} MiB at {:#x} (memory type {}, writes may linger: {})",
         backend.aperture().len() / (1024 * 1024),
         backend.aperture().phys(),
+        backend.aperture().memory_type().name(),
         backend.aperture().is_cached()
     );
 
@@ -224,10 +230,14 @@ pub fn probe_hardware() -> Option<backend::AtiBackend> {
 ///
 /// The mode chosen is 640x480@60 — the smallest in the DMT table, so it fits in
 /// any VRAM a supported part could have, and the one mode whose acceptance is
-/// least interesting to be wrong about. It is also the largest that is *cheap*
-/// to paint: the aperture is mapped uncacheable for want of a write-combining
-/// page attribute, so 1.2 MB of pixels is a few tens of milliseconds and 1080p
-/// would be seconds. See [`aperture`]'s module documentation.
+/// least interesting to be wrong about. It is also the cheapest
+/// to paint, which mattered more than it now does: the aperture used to be
+/// mapped uncacheable for want of a write-combining page attribute, so 1.2 MB
+/// of pixels was a few tens of milliseconds and 1080p would have been seconds.
+/// `mm::pat` supplies write-combining now, so that margin is much wider — but
+/// 640x480 is still the mode a supported part is least likely to reject, which
+/// is the reason that survives. See [`aperture`]'s module documentation for
+/// what the mapping is today.
 fn exercise_modeset(backend: &mut backend::AtiBackend) {
     if backend.owns_console() {
         serial_println!(

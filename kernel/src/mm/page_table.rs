@@ -145,11 +145,43 @@ impl PageFlags {
     pub const USER_ACCESSIBLE: Self = Self(1 << 2);
 
     /// Write-through caching policy.
+    ///
+    /// This is PAT slot 7 (`PAT=1, PCD=1, PWT=1`), **not** the `PWT`-alone
+    /// encoding it looks like it should be. [`crate::mm::pat`] reprograms
+    /// slot 1 from write-through to write-combining, following Linux, and
+    /// relocates write-through here — so the bare `PWT` bit no longer means
+    /// what its name suggests. Ask for the memory type by this constant and
+    /// the relocation is invisible; hard-code `1 << 3` and you silently get
+    /// write-combining, which is more weakly ordered.
+    ///
+    /// Only valid on 4 KiB leaf entries: bit 7 is the `PAT` bit at PT level
+    /// but the page-size bit at PD/PDPT level, where this combination would
+    /// instead create a huge page. See [`Self::HUGE_PAGE`].
     #[allow(dead_code)] // Used by DMA and MMIO mapping.
-    pub const WRITE_THROUGH: Self = Self(1 << 3);
+    pub const WRITE_THROUGH: Self = Self((1 << 7) | (1 << 4) | (1 << 3));
+
+    /// Write-combining: stores are gathered in a fill buffer and pushed out
+    /// as whole cache-line bursts.
+    ///
+    /// The memory type a framebuffer or other write-mostly device aperture
+    /// wants — correct (the device sees the bytes, unlike writeback) and
+    /// several times faster than uncached for sequential stores.
+    ///
+    /// This is PAT slot 1 (`PWT` alone), which only means write-combining
+    /// after [`crate::mm::pat::init`] has run. Before that — or on a CPU
+    /// without PAT — the slot keeps its power-on write-through meaning, so a
+    /// mapping made with this flag is still *correct*, merely not faster.
+    /// [`crate::mm::pat::write_combining_available`] distinguishes the two.
+    ///
+    /// Only valid on 4 KiB leaf entries, as for [`Self::WRITE_THROUGH`].
+    pub const WRITE_COMBINING: Self = Self(1 << 3);
 
     /// Disable caching entirely.  Used for memory-mapped I/O regions
     /// where reads must hit the device, not a stale cache line.
+    ///
+    /// PAT slot 2 (`PCD` alone), which is `UC-` both at power-on and in the
+    /// layout [`crate::mm::pat`] programs — so every MMIO mapping in the
+    /// kernel keeps its memory type across that change.
     pub const NO_CACHE: Self = Self(1 << 4);
 
     /// Set by the CPU on any read or write.  Not cleared automatically.
@@ -164,6 +196,14 @@ impl PageFlags {
 
     /// Page size bit: at PD level creates a 2 MiB page, at PDPT level
     /// creates a 1 GiB page.  Not valid at PT or PML4 level.
+    ///
+    /// Bit 7 is overloaded by the architecture: at PT level it is not the
+    /// page-size bit at all but the `PAT` bit, the high bit of the memory-type
+    /// slot index (which on a huge entry moves to bit 12). That is why
+    /// [`Self::WRITE_THROUGH`] — which sets it — is documented as 4 KiB-only,
+    /// and why [`crate::mm::hugepage::map_huge_2m`] refuses a flag set
+    /// containing this bit rather than silently producing a huge page with the
+    /// wrong memory type.
     pub const HUGE_PAGE: Self = Self(1 << 7);
 
     /// Global page: not flushed from TLB when CR3 is changed.  Used

@@ -944,6 +944,11 @@ extern "C" fn ap_entry() -> ! {
     // Enable SMEP/UMIP on this AP (each CPU has its own CR4).
     // SMAP is intentionally not enabled until user access paths are instrumented.
     crate::smep_smap::init_ap();
+    // Every CPU must hold the same IA32_PAT: a PTE stores only a slot
+    // index, so a core still on the power-on layout would read a
+    // write-combining page as write-through.  The disagreement only
+    // shows up once a thread migrates, which is the worst way to find it.
+    crate::mm::pat::init_ap();
 
     // Enable Spectre mitigations on this AP (each CPU has its own MSRs).
     // Replicates BSP's IA32_SPEC_CTRL and issues IBPB.

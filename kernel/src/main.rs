@@ -546,6 +546,13 @@ extern "C" fn kernel_main() -> ! {
     // Enable SMEP/SMAP — hardware protection against kernel accidentally
     // accessing or executing user-space memory.  Critical for security.
     smep_smap::init();
+    // Program IA32_PAT so a write-combining memory type exists at all.  Must
+    // run before anything maps memory write-through or write-combining, since
+    // it changes what PAT slot 1 means (write-through -> write-combining) and
+    // relocates write-through to slot 7.  Nothing has mapped either yet at
+    // this point: the frame allocator has not handed out a page and no driver
+    // has mapped a BAR.
+    mm::pat::init();
     // Spectre/Meltdown mitigations — enable IBRS, STIBP, SSBD based on
     // CPU capabilities.  Issues initial IBPB to flush stale predictions.
     spectre::init();
@@ -686,6 +693,17 @@ extern "C" fn kernel_main() -> ! {
     // Verify page table operations work (translate HHDM, map/unmap).
     if let Err(e) = mm::page_table::self_test() {
         serial_println!("FATAL: Page table self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Verify IA32_PAT reads back as programmed and that the PageFlags memory
+    // types decode to what the rest of the kernel assumes.  Fatal: a wrong
+    // PAT silently changes the memory type of every MMIO and framebuffer
+    // mapping, which is not a failure any later test would attribute
+    // correctly.  Runs here because page_table::self_test has just proven the
+    // mapping machinery this depends on.
+    if let Err(e) = mm::pat::self_test() {
+        serial_println!("FATAL: PAT self-test failed: {}", e);
         cpu::halt_loop();
     }
 

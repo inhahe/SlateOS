@@ -16,25 +16,26 @@
 //! nothing in common, and would make a stray write into the register file
 //! indistinguishable from a stray write into a framebuffer.
 //!
-//! ## Caching, and why this is slower than it should be
+//! ## Caching
 //!
-//! The aperture is mapped `NO_CACHE` (uncacheable). That is *correct* — every
-//! store reaches memory before the next one starts, so what the CRTC scans out
-//! is always what was written — and it is *slow*, because each store is a
-//! separate bus transaction rather than part of a burst.
+//! The aperture is mapped **write-combining**: the CPU gathers consecutive
+//! stores in a fill buffer and pushes them out as whole cache-line bursts,
+//! which is what the long sequential runs of a framebuffer paint produce. It
+//! is both correct — nothing lingers in a cache line the CRTC cannot see, and
+//! [`VramAperture::flush`] fences before handing the buffer to the display
+//! engine — and several times faster than the uncacheable mapping this used to
+//! take.
 //!
-//! The right memory type for a framebuffer is write-combining, which batches
-//! stores into full cache-line bursts and is typically several times faster for
-//! the sequential writes a framebuffer gets. This kernel cannot ask for it yet:
-//! selecting write-combining needs a page-attribute-table entry programmed to
-//! `WC`, and nothing programs the PAT MSR. Until that exists, uncacheable is
-//! the honest choice — the alternatives are write-through, which is no faster
-//! for writes, and writeback, which would leave pixels sitting in a cache the
-//! CRTC cannot see.
+//! Write-combining is only a memory type at all because [`crate::mm::pat`]
+//! programs the `IA32_PAT` MSR at boot; the power-on table has no `WC` entry.
+//! If that did not run — a CPU without PAT — the same PTE bits keep their
+//! power-on meaning of write-through, which is still *correct* for a
+//! framebuffer and merely no faster than uncached. So this mapping degrades in
+//! speed and never in correctness, and [`VramAperture::memory_type`] reports
+//! which of the two was obtained rather than leaving it to be inferred.
 //!
-//! This is why the boot-time exercise draws at 640x480 and not at 1080p: 1.2 MB
-//! of uncached stores is a few tens of milliseconds, and 8 MB would be seconds.
-//! See the PAT entry in `known-issues.md`.
+//! Writeback is the one type that would be wrong, and it is the one type this
+//! never asks for.
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{FRAME_SIZE, PhysFrame};
@@ -92,6 +93,14 @@ pub struct VramAperture {
     /// controller, will never see. [`VramAperture::flush`] is what closes that
     /// gap, and it needs to know whether there is a gap to close.
     cached: bool,
+    /// The memory type the mapping actually ended up with.
+    ///
+    /// Kept alongside `cached` rather than replacing it because they answer
+    /// different questions: this one is "what did we get", which belongs in a
+    /// log, and `cached` is "must `flush` do work", which is a hot-path
+    /// predicate. Deriving the second from the first at every call would put a
+    /// match in the flush path to re-answer a question settled at map time.
+    mem_type: crate::mm::pat::MemoryType,
 }
 
 // SAFETY: `VramAperture` is a handle to a PCI BAR. The pointer addresses device
@@ -143,7 +152,13 @@ impl VramAperture {
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
         let virt = phys.wrapping_add(hhdm);
         let pml4 = page_table::cr3_to_pml4(page_table::read_cr3());
-        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
+        // Write-combining, not uncacheable: this is a framebuffer, and the
+        // whole difference between a usable one and a 640x480 one is whether
+        // sequential stores cross the bus in cache-line bursts. Correctness is
+        // unaffected either way -- neither type lets a store linger in a cache
+        // line the CRTC cannot see -- so this is a pure speed choice with a
+        // safe fallback: without `mm::pat` these same bits mean write-through.
+        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::WRITE_COMBINING;
 
         let frames = usize::try_from(frames).map_err(|_| KernelError::InvalidArgument)?;
         let mut preexisting = 0u32;
@@ -182,19 +197,21 @@ impl VramAperture {
         // were already mapped" from an unknown into a known: if the flags in
         // force permit caching, `flush` has work to do, and if they do not, it
         // does not.
-        let cached = match page_table::translate_flags(pml4, VirtAddr::new(virt)) {
-            Some(f) => !f.contains(PageFlags::NO_CACHE),
+        let mem_type = match page_table::translate_flags(pml4, VirtAddr::new(virt)) {
+            Some(f) => crate::mm::pat::memory_type_of(f),
             None => {
                 // Nothing is mapped at the base at all, so the aperture is
                 // unusable — reads would fault rather than return pixels.
                 return Err(KernelError::NotSupported);
             }
         };
+        let cached = mem_type.writes_may_linger();
         if preexisting > 0 {
             serial_println!(
-                "[ati]   note: {} of {} VRAM frames were already mapped (cacheable={})",
+                "[ati]   note: {} of {} VRAM frames were already mapped (type={}, writes may linger={})",
                 preexisting,
                 frames,
+                mem_type.name(),
                 cached
             );
         }
@@ -204,6 +221,7 @@ impl VramAperture {
             phys,
             len,
             cached,
+            mem_type,
         })
     }
 
@@ -220,11 +238,27 @@ impl VramAperture {
         self.len
     }
 
-    /// Whether the mapping turned out to be cacheable. Diagnostic; see the
-    /// field of the same name.
+    /// Whether writes through this mapping can sit in a cache the display
+    /// engine cannot see — i.e. whether [`Self::flush`] has real work to do.
+    ///
+    /// False for every memory type this driver asks for. It is not
+    /// unconditionally false because the mapping may have been made by someone
+    /// else first; see the `cached` field.
     #[must_use]
     pub const fn is_cached(&self) -> bool {
         self.cached
+    }
+
+    /// The memory type the mapping actually obtained.
+    ///
+    /// Worth reporting rather than assuming: the driver asks for
+    /// write-combining, but gets write-through on a CPU where
+    /// [`crate::mm::pat`] could not program the table, and could in principle
+    /// get something else entirely if the range was already mapped by another
+    /// subsystem. All of those are correct; only one of them is fast.
+    #[must_use]
+    pub const fn memory_type(&self) -> crate::mm::pat::MemoryType {
+        self.mem_type
     }
 
     /// A raw pointer to `len` bytes at `offset`, for callers that must write
@@ -235,9 +269,10 @@ impl VramAperture {
     /// a caller has the pointer, this type has no further say. The range is
     /// verified whole, so a pointer that comes back covers `len` mapped bytes.
     ///
-    /// The memory is uncacheable, so ordinary stores through the pointer reach
-    /// the card in program order and no flush is needed — but callers should
-    /// still go through [`Self::flush`] before pointing the CRTC at the result,
+    /// The memory is write-combining, so stores through the pointer may be
+    /// gathered and reordered in a fill buffer rather than reaching the card
+    /// one at a time — which is the point, and is why callers must go through
+    /// [`Self::flush`] before pointing the CRTC at the result,
     /// since [`Self::is_cached`] may say otherwise on a machine where the
     /// mapping was already established with different attributes.
     ///
@@ -345,17 +380,25 @@ impl VramAperture {
 
     /// Make previously written bytes visible to the card's scanout engine.
     ///
-    /// A no-op when the mapping is uncacheable, which is the normal case: an
-    /// uncached store is already in memory by the time the next instruction
-    /// runs. It is not a no-op when [`Self::is_cached`] is true, and that case
-    /// is exactly why this method exists rather than the driver assuming its
-    /// request for `NO_CACHE` was granted — the CRTC reads through the memory
-    /// controller and never sees a dirty cache line, so pixels written into one
-    /// simply do not appear.
+    /// Two separate hazards, handled by the two halves of this method.
     ///
-    /// The fence is unconditional. On uncacheable memory it costs nothing worth
-    /// counting, and it is what orders these stores before the `CRTC_OFFSET`
-    /// write that tells the card to start reading them.
+    /// **The fence, which is unconditional and now load-bearing.** The mapping
+    /// is write-combining, so stores sit in a fill buffer and reach the card in
+    /// bursts, at a time of the CPU's choosing and not necessarily in program
+    /// order. `sfence` drains them. Pointing the CRTC at a buffer whose last
+    /// rows are still in a fill buffer displays a torn frame, and the
+    /// `CRTC_OFFSET` write that does the pointing is itself a store that must
+    /// not be allowed to overtake the pixels. This was cheap insurance when the
+    /// aperture was uncacheable — an uncached store is in memory by the time
+    /// the next instruction runs — but under write-combining it is what makes
+    /// the mapping safe to use at all.
+    ///
+    /// **The write-back loop, which is conditional and normally skipped.** Only
+    /// a mapping that turned out cacheable — see [`Self::is_cached`], which
+    /// reports what the page tables actually say rather than what was requested
+    /// — can hold pixels in a dirty cache line. The CRTC reads through the
+    /// memory controller and never sees one, so those pixels simply do not
+    /// appear. `clflush` is how they are made to.
     ///
     /// # Errors
     ///

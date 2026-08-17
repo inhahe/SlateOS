@@ -13,10 +13,21 @@
 
 use std::process::{Command, Stdio};
 
+/// One definition, shared with the in-process tests rather than copied — see
+/// the module's own docs.
+#[path = "../src/hostpath.rs"]
+mod hostpath;
+
 /// Run the built `osh` binary with `-c script`, its stdout and stderr on
 /// separate pipes, and return `(stdout, stderr)`.
+///
+/// The child gets the *host's* `PATH`: these scripts pipe through `sed`, and
+/// cargo has put ~200 SlateOS coreutils on the search path ahead of the real
+/// ones. A shell variable cannot reach a child process, so the cleaning is done
+/// on the `Command` (`hostpath::scrub`).
 fn run_osh(script: &str) -> (String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_osh"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osh"));
+    let out = hostpath::scrub(&mut cmd)
         .args(["-c", script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

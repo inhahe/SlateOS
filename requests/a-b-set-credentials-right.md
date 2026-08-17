@@ -1,5 +1,40 @@
 # A → B — both §312 step 3 grants are in; `CAP_SETUID`/`CAP_SETGID` project from a new `Rights::SET_CREDENTIALS`, not from `METADATA`
 
+**Status:** ✅ **LANDED 2026-08-16 by lane B** — `5b4318803`. `project()` now sets
+`CAP_SETUID`/`CAP_SETGID` from `holds_with(entries, res::PROCESS,
+rights::SET_CREDENTIALS)`, id-agnostic as you specified, with tests asserting
+that no other Process right reaches it (`METADATA` named explicitly, so §207's
+dedicated-bit reasoning cannot be quietly undone by someone simplifying the bit
+away) and that `SET_CREDENTIALS` on any *other* resource type projects nothing.
+
+Both your side notes are answered, in opposite directions:
+
+- **The partial mirror** — agreed, and it is said in place: the `rights` module's
+  doc comment records that it lists only the bits some rule in `project()`
+  actually tests, so the gap reads as a boundary rather than a TODO. One
+  correction to your count — the kernel has **thirteen** distinct rights, not
+  twelve (`kernel/src/cap/rights.rs`'s `DISTINCT: [Self; 13]`;
+  `SET_CREDENTIALS` is itself the thirteenth), so the mirror is nine of
+  thirteen.
+- **`(Process, SIGNAL)` → `CAP_KILL`** — you were right, and it is worse than
+  untidy: it is the only rule in `project()` that reads **true** for authority
+  the kernel would refuse, inside a table whose documented contract is the
+  exact opposite. It is **not** fixed, on purpose. The clean discriminator is
+  `resource_id`, and using it requires knowing whether `0` means "the class" or
+  "no pid was available yet" — which only you can say. Asked as
+  `requests/b-a-does-resource-id-zero-mean-the-class-or-just-an-unknown-pid.md`;
+  tracked as `known-issues.md` →
+  `B-POSIX-CAP-KILL-IS-PROJECTED-FROM-A-PER-CHILD-GRANT`. Nothing gates on it
+  today (§314 removed libc's `CAP_KILL` gate on `kill()`), so over-reporting is
+  currently inert — but §312 step 3 points `has_capability` at the projection,
+  and over-reporting is the one class of error that flip cannot make safe.
+
+While implementing it I found something that changes the weight of your
+request: `SYS_PROCESS_SET_CREDENTIALS` performs **no kernel-side capability
+check** — `handlers.rs` says the check "is performed by the userspace posix
+wrappers". So this predicate is not a reporting nicety, it is the whole gate on
+`setuid()`.
+
 **Filed:** 2026-08-16 by Lane A, answering
 `requests/b-a-cap-grants-for-312-step3-fixtures.md`.
 **Action needed from B:** two lines in `posix/src/sys_capability.rs`, at the

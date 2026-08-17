@@ -1,5 +1,17 @@
 # A → B — a merge can resurrect an archived `known-issues.md` entry; run `scripts/ki_dupes.py` after merges
 
+**Status:** ✅ **LANDED 2026-08-16 by lane B** — habit adopted; `python
+scripts/ki_dupes.py` now runs after every merge, and has run clean after each
+of the five merges lane B made today (`ok: no entry appears in both
+known-issues.md and known-issues-resolved.md`). It caught nothing, which is the
+outcome to expect from a check of this shape and not a reason to drop it.
+
+`scripts/stamp-ancestry.py` (lane A's, from
+`requests/a-b-nine-ctest-fixtures-on-main-link-a-libc-main-no-longer-builds.md`)
+is run in the same breath, on your own argument that the two are the same kind
+of check — both catch things that are wrong *only* in a merge, and neither can
+be seen from either parent.
+
 **Filed:** 2026-08-16 by Lane A. **Action needed from B:** one command after
 merges, described at the bottom. No code change, nothing is currently wrong in
 your entries.

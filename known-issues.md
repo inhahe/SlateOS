@@ -25250,6 +25250,448 @@ rewritten post-checkout, which is precisely why the durable fix belongs in the
 hash rule and not in git configuration — and why the fix works for any future
 tool that does the same thing without anyone having to notice.
 
+## B-THE-OILS-TESTS-RESOLVED-`grep`/`sed`/`cat`-FROM-THE-CARGO-BUILD-DIRECTORY (lane B, 2026-08-16) — ✅ **FIXED** (`378c71b37`, `051ee45e7`)
+
+**In short:** the shell's test suite passed or failed depending on *what else
+had been built* in the same tree. Cargo puts the build directory on the
+program-search path before it runs a test, and that directory holds ~200
+SlateOS coreutils — so a shell test that piped through `grep` ran *our* `grep`,
+whose regular-expression support was a substring search. `cargo test -p oils`
+was green and `cargo test --workspace` was red, from the same commit and the
+same test binary.
+
+Reported by lane C in
+`requests/c-b-workspace-test-red-slateos-coreutils-shadow-host.md`, and it was
+urgent: cargo stops at the first failing test binary, so `osh` failing meant
+every crate after it alphabetically — `p` through `z` — went untested on every
+workspace run anyone did.
+
+### Why it happens
+
+Before running a test binary, cargo prepends `target/<triple>/<profile>/deps`
+and the profile directory above it to the platform's dynamic-library search
+variable, which on Windows is `PATH` — so that a test can find the shared
+libraries its crate links against. It is not trying to stage executables; on
+this workspace the same directory simply *is* where every coreutil lands.
+
+So the shadowing is conditional on build order. `cargo test -p oils` in a clean
+tree builds no coreutils and the tests find the host's tools. `cargo test
+--workspace`, or any run after a `cargo build`, does not.
+
+### Why the tests are right to want the host's tools
+
+The tools these tests reach for are **scaffolding, and the scaffolding has to be
+the reference implementation.** They are differential tests against bash's
+documented behaviour: `set -o | grep '^posix'` is a question about `set -o`, and
+when it fails it must be because `set -o` is wrong. A `grep` of our own in that
+position turns every gap in our coreutils into a shell-test failure filed
+against the shell — the defect misattributed, and the real one hidden behind it.
+
+That is why fixing the harness is not hiding the bug. The coreutils gaps it
+uncovered are real and are fixed where they live; see
+`B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains` below.
+
+### The fix
+
+`userspace/oils/src/hostpath.rs`. It derives the two injected directories from
+`std::env::current_exe()` — `…/deps/<test binary>`, so its parent and
+grandparent — rather than matching on path shape, which keeps it working under
+a custom `--target-dir`, another profile, or a different triple. It then strikes
+them out of the ambient `PATH`.
+
+Two suites need it and they reach the child differently:
+
+| suite | how the shell is created | how the path reaches it |
+|---|---|---|
+| `src/interp.rs`'s `#[cfg(test)]` | a `Shell` in this process | bound as the shell **variable** `PATH` in `new_shell()` |
+| `tests/*.rs` | the real `osh` binary, spawned | `Command::env("PATH", …)`, via `hostpath::scrub` |
+
+The in-process half deliberately does **not** mutate the process environment:
+libtest runs every test on a thread, and `std::env::set_var` is unsound while
+another thread may be reading the environment — which is why Rust 2024 made it
+`unsafe`. A shell variable is per-shell and touches nothing shared. The
+end-to-end half cannot use a shell variable at all, because a child inherits the
+*process* environment; that is why the first commit fixed only the unit tests
+and `redirect_dup`'s `{ … | sed 's/^/piped: /'; } 2>&1` stayed red.
+
+`hostpath.rs` lives in `src/` and is declared `#[cfg(test)]` by `lib.rs`, while
+each integration test pulls the same file in with
+`#[path = "../src/hostpath.rs"]`. One definition serves both suites and none of
+it reaches the shipped shell — a `tests/common/mod.rs` would have served only
+the second, and a `pub` module only by shipping test scaffolding.
+
+### What guards it
+
+`a_test_shell_resolves_commands_outside_the_build_directory` (in `interp.rs`)
+asserts that neither injected directory is on the test shell's `$PATH` and that
+`command -v cat` does not resolve into the build tree. `hostpath`'s own three
+tests assert the same of the `OsString`, and — the other half, which is easy to
+forget — that *nothing else* was dropped: a scrub that removed too much would
+fail every test that needs a real `sed`, for a reason of its own making.
+
+### The general shape, for whoever hits this next
+
+**A test suite whose result depends on what else is in the build directory is
+not testing the code.** Any crate here that shells out to a program by name has
+the same exposure — the build directory is on the search path for the whole
+workspace, not just for `oils`. If you write such a test, take `hostpath` with
+it rather than re-deriving it.
+
+## B-`dc`-CLAIMS-ARBITRARY-PRECISION-AND-COMPUTES-IN-`f64` (lane B, 2026-08-16) — **fixed 2026-08-16** (`62bd49957`, `2ccf4029a`; see `design-decisions.md` §324)
+
+**Resolution:** `dc`'s numeric core is `bignum::Decimal`, the same type `bc`
+computes on. `2 200 ^ p` prints all sixty-one digits exactly; 30! via the
+standard factorial macro is exact; 22 expressions written in both syntaxes were
+run through both programs and agree digit for digit. The two "fix during the
+lift" items below were both done: `div`/`modulo`/`sqrt` return
+`Result<_, DecimalError>` and no longer print-and-return-zero, and the parse and
+format paths were hardened along with the rest of the crate under
+`[lints] workspace = true` — which `bc` and `dc` had *both* been missing from
+their manifests, so 31 defensive-lint warnings had never been reported for `bc`.
+
+Moving `dc` onto the shared type immediately found three defects in it that
+`bc`'s tests had not: the formatter trimmed trailing fractional zeros (making
+`scale` unobservable — `5k 1 10 /` and `1k 1 10 /` printed the same string), the
+base-ten parser scored `F` as 22 instead of 15 (so `FF` read as 242), and a
+fraction read in a non-decimal base kept an inflated scale. Those were `bc` bugs
+too. A fourth, in `dc` itself and inherited from the `f64` version: the
+comparison commands were reversed, which turned every `dc` loop into a single
+pass (30! answered 870). See the follow-on entry below for what remains
+unverified.
+
+**Original report follows.**
+
+
+
+**In short:** `dc` is the desk calculator whose entire reason to exist is exact
+arithmetic on numbers too big for a machine word. Its own first line of
+documentation says "arbitrary-precision integers". It computes in `f64`, a
+64-bit floating-point number that carries about 15–16 decimal digits. So it is
+silently wrong above roughly 9,000,000,000,000,000, and wrong in the ordinary
+way floating point is wrong below that — `0.1 + 0.2` is not `0.3`.
+
+**Where:** `userspace/dc/src/main.rs` — `Value::Number(f64)` (line 17),
+`as_number` (22), `format_number` (37, which casts to `i64` and gives up
+entirely past `1e15`), `pop_number` (125), and `mod_pow(base as i64, …)` (259).
+
+**How it shows:** `echo "99999999999999999999 99999999999999999999 * p" | dc`
+should print the exact 40-digit product. `dc` is also the traditional back end
+for `bc` — historically `bc` was a preprocessor that emitted `dc` — so the two
+disagreeing about `1/3` at a given scale is a contradiction inside one tree.
+
+**The proper fix, and it is already most-built:** `userspace/bc` has exactly the
+right type — `BcNum`, a fixed-point decimal holding a `bignum::BigInt` mantissa
+and a decimal `scale` (bc/src/main.rs:31–345, ~315 lines). It should be lifted
+into the `bignum` crate as `Decimal`, the same move `BigInt` itself just made
+and for the identical reason: `bc` and `dc` are one calculator with two
+syntaxes, and a shared type is what stops them disagreeing. Then `dc`'s numeric
+core is rewritten on it.
+
+Two things to fix *during* the lift rather than after, since both are in the
+code being moved:
+
+* `div`, `modulo` and `sqrt` handle a bad argument by `eprintln!`-ing and
+  **returning zero** — a library type writing to stderr and then answering with
+  a plausible number. Division by zero has to reach the interpreter as a value
+  it can refuse, not as a `0` the program keeps computing with.
+* The parse and format paths index and slice strings directly (`body[..dot_pos]`,
+  `abs_s[1..]`, `q.limbs[0]`) and add scales unchecked. `BigInt` was hardened
+  against exactly this in `98cb065d0`; the decimal layer on top of it was not.
+
+**Note on verification:** the differential harnesses that settled `grep`, `sed`,
+`awk`, `expr` and `cat` are not available here — this host has neither GNU `dc`
+nor GNU `bc`, and no package manager to add them. The substitute is a
+cross-check between our own `bc` and our own `dc`, which is genuinely
+informative *because* they are two independent front ends that must agree, plus
+unit tests asserting exact values computed by hand. It is weaker than a
+differential run and should be labelled as such wherever the result is claimed.
+
+**Until then** `dc` is quietly wrong rather than loudly broken, which is the bad
+kind: a script that uses it for big-integer work gets a rounded answer with no
+diagnostic. Nothing in the tree depends on `dc` yet, so it is not blocking.
+
+---
+
+## B-CALCULATOR-OUTPUT-DETAILS-NEVER-CHECKED-AGAINST-A-REAL-`bc` (lane B, 2026-08-16) — **open**
+
+**In short:** our `bc` and `dc` now compute the right *numbers* — that part is
+tested against hand-computed values and against each other. What is not verified
+is how they *write* those numbers down, because this machine has no real `bc` or
+`dc` to compare against. Three formatting details were decided from memory of
+what the traditional tools do. Two have since been changed to match that memory;
+the third is still a guess. If any is wrong, every script that reads our
+calculators' output parses something slightly different from what it expects.
+
+**Where:** `userspace/bignum/src/decimal.rs` — `format_base10`, `format` and
+`wrap_number`.
+
+**The three:**
+
+| Detail | Ours prints | Traditional `bc`/`dc` print | State |
+|---|---|---|---|
+| A value below one | `.5` | `.5` (no leading zero) | ✅ **changed to match** (`a1625db82`). Acted on documentary evidence: that `bc` omits the leading zero is a recurring surprise wherever shell scripting is discussed, which is only possible if it does omit it. |
+| Line length | wrapped at 70 columns with a trailing `\` | same | ✅ **implemented.** `BC_LINE_LENGTH`/`DC_LINE_LENGTH` override it, `0` disables it, and strings are never wrapped. Verified by reassembling `2^1000` from the emitted lines. |
+| Zero at a non-zero scale | `0` | `0` believed; possibly `.000` | ⚠️ **still a guess.** The only one left. |
+
+**Why the leading zero mattered enough to change on memory alone:**
+`$(echo "scale=2;1/2" | bc)` yields `.50` on every traditional implementation,
+and a script that does `[ "$x" = ".50" ]`, or that feeds the value back to a
+tool with a stricter number parser, breaks on `0.50`. It was made as its own
+commit so it can be reverted alone if a real `bc` ever contradicts it.
+
+**What is left here is the zero-at-scale question**, which is much lower stakes:
+it only shows up for an exact zero result at a non-zero `scale`, and both
+candidate spellings parse back as zero. It is recorded rather than guessed at
+because guessing twice from the same unreliable source is how a systematic error
+gets in.
+
+**`dc`'s `a` command is now implemented** (was listed here as the last gap):
+the top of the stack becomes a one-byte string — a number contributes its
+low-order byte, a string its first. Implementing it forced `dc`'s strings to
+become byte strings rather than `String`, which also fixed a separate bug found
+on the way: `dc` read its script files with `read_to_string`, so a script
+holding a non-UTF-8 byte in a string literal was refused before its first
+command ran. Every POSIX `dc` command is now present.
+
+**The proper fix** is a differential harness, which needs a real `bc`/`dc` on
+the development host — the same thing that settled `grep`, `sed`, `awk`, `expr`
+and `cat`. Note that the `bc`↔`dc` cross-check used in the meantime *cannot*
+substitute for it here: both front-ends format through the same `Decimal`, so a
+formatting misreading is inherited by both and they agree with each other while
+both being wrong.
+
+**Until then** the numbers are right and one detail of the punctuation around
+them may not be. Nothing in the tree consumes `bc` or `dc` output yet, so this
+is not blocking; it becomes blocking the moment a shell script does arithmetic
+through them.
+
+---
+
+## B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-`str::contains` (lane B, 2026-08-16) — ✅ **FIXED 2026-08-16** (engine `bed21ae38`; `grep` `bb12be713`, `sed`, `awk`, `expr` `cd9e23600`, `cat` `de06e53e3`)
+
+**In short:** `grep`, `sed`, `awk` and `expr` did not implement regular
+expressions. They searched for the pattern as a *literal substring*. So
+`grep '^posix'` found nothing at all, `sed 's/^/E:/'` copied its input through
+unchanged, and `grep '[ax]'` matched only a line that literally contained the
+four characters `[ax]`. Every one of those looks like the program working,
+which is how the whole family passed its own test suites: each test asserted the
+substring behaviour it had. All four now use the `ere` crate and are checked
+against the host's GNU tools; what is left under this heading is `cat`, which
+is here only because it was found in the same sweep.
+
+Found while fixing
+`B-THE-OILS-TESTS-RESOLVED-grep/sed/cat-FROM-THE-CARGO-BUILD-DIRECTORY` above —
+the shell's tests had been running these instead of the host's tools, and what
+they were failing on was this.
+
+### The state of it
+
+| caller | wants | has |
+|---|---|---|
+| `osh`'s `[[ =~ ]]` | ERE | a real ERE engine (now the `ere` crate) |
+| `grep` | BRE, and ERE under `-E` | ✅ `ere` (`bb12be713`) |
+| `sed` | BRE | ✅ `ere` (rewritten whole; see below) |
+| `awk`'s `/re/` and `~` | ERE | ✅ `ere` (rewritten whole; see below) |
+| `expr`'s `:` | BRE anchored at the start | ✅ `ere` (rewritten whole; see below) |
+
+It is not four bugs; it is **one missing component, absent four times** — and
+the component already existed, inside the shell.
+
+**Correction (2026-08-16):** the `expr` row of this table said `str::contains`,
+which was *generous*. `expr` had no `:` operator at all — nor `match`, `substr`
+or `index` — so the basename idiom `expr "$path" : '.*/\(.*\)'` was not a wrong
+answer, it was `syntax error`. The entry was written by reading the other three
+callers and assuming the fourth failed the same way. Recording a bug as milder
+than it is costs more than not recording it, because the entry then argues
+against looking.
+
+### What has landed
+
+`userspace/ere` (`bed21ae38`): osh's engine moved out to a crate, plus `ch` (the
+character model) and `bre` (Basic REs translated to Extended). The shell now
+depends on it rather than owning it, so the shell and the utilities cannot drift
+about what `[a-z]` means. Two things worth knowing before using it:
+
+* **BRE is not a subset of ERE.** `a+b` is three literal characters in BRE and a
+  repetition in ERE; `\(x\)` groups in BRE and is literal in ERE; `*` is a
+  literal where nothing precedes it. `ere::bre::compile` is the one translator.
+* **Backreferences (`\1`) and word boundaries (`\<`, `\b`) are refused, by
+  name.** A Pike VM cannot express a backreference, and quietly turning `\1`
+  into a literal `1` would be a wrong answer rather than an error. If a caller
+  genuinely needs them, that is a separate design decision, not a patch.
+
+### What is left
+
+Rewrite the four callers on it. Each is its own task and each is more than a
+one-line substitution, because the missing regex is not the only thing missing:
+
+* ~~**`grep`** — BRE by default, ERE under `-E`, literal under `-F`. Its argument
+  parser also errors on `-q`, on `--`, and on every option it does not know
+  (`-w -x -l -L -h -H -o -e -f -s -m`), which is why lane C saw `rc=2` from
+  invocations that should have worked.~~ **Done, `bb12be713`.**
+* ~~**`sed`** — BRE in both addresses and `s///`. `regex_match_at` goes.~~
+  **Done.** It was not a rewiring in the end but a rewrite: the old `sed` also
+  had no ranges (`1,5d` deleted lines 1 and 5), no hold space worth the name,
+  and `String`-typed lines. Verified differentially against the host's GNU
+  `sed` — `scripts/sed-diff.sh`, **88 of 89 cases byte-identical** on stdout and
+  exit status. The one difference is the backreference gap below.
+* ~~**`awk`** — ERE for `/re/`, `~`, `!~`, and for `split`/`sub`/`gsub`/`match`.~~
+  **Done.** Also a rewrite rather than a rewiring, and much the larger one: the
+  old `awk` was a line filter with an awk-shaped command line. It had no
+  variables — not even `NR` — no assignment, no `if`, no loops, no arrays, no
+  user functions, no `printf`, no `getline`, no output redirection and no range
+  patterns; and its condition evaluator's fall-through was `true`, so a pattern
+  it could not parse (which was most of them) silently matched every line. What
+  is there now is POSIX's grammar and POSIX's semantics in eight modules under
+  `userspace/coreutils/src/bin/awk/`, including the strnum rule, the lazy
+  `$0`/field duality, and a static array-versus-scalar pass (arrays pass by
+  reference, so `function fill(a){a[1]="x"}` has to be resolved before the run,
+  not during it). Verified differentially against the host's GNU `awk --posix` —
+  `scripts/awk-diff.sh`, **112 of 121 cases byte-identical** on stdout and exit
+  status, and the other nine differ deliberately: four are character-versus-byte
+  counting, two are `printf` edge cases, and three are diagnostics we raise
+  before the program runs where gawk raises them when first reached. The reasons
+  are recorded in the script and in `awk/main.rs`, and the script fails if one
+  of them ever stops being true.
+* ~~**`expr`** — BRE anchored at the start, with the POSIX `:` return rule (the
+  first group if there is one, else the match length).~~ **Done, `cd9e23600`.**
+  A rewrite, and for the same reason as the other two: the regex was not the
+  only thing missing. There was no `:`, `match`, `substr` or `index` at all; the
+  arithmetic was `i64` and would wrap or abort where GNU is
+  arbitrary-precision; a non-numeric operand became a silent `0` via
+  `unwrap_or(0)` instead of a diagnostic; and the comparison level did not loop,
+  so `expr 1 = 1 = 1` was a syntax error. What is there now is the whole
+  grammar — seven looping, left-associative precedence levels over byte
+  strings — with `:` on `ere::bre` and the arithmetic on the new `bignum` crate.
+
+  Anchoring is worth writing down, because the obvious implementation is wrong:
+  `:` is anchored by checking that the leftmost match *begins at offset 0*, not
+  by splicing a `^` onto the pattern. The check is exact only because the engine
+  is leftmost-longest; the splice would break `^a|b`, where it would anchor the
+  first branch alone.
+
+  Verified differentially against the host's GNU `expr` — `scripts/expr-diff.sh`,
+  **156 of 156 cases byte-identical** on stdout and exit status, plus two
+  recorded divergences the script *requires* to keep diverging (a backreference
+  needs a backtracking matcher; `a**` is refused where GNU folds it to `a*`).
+  The cases it took to find GNU's corners are the value here: `expr '' '|' ''`
+  prints `0`, not an empty line; `+0` is true and `-0` is false, because null is
+  exactly `^-?0+$` or empty; `index` searches for any character of a *set*; and
+  `:` binds tighter than `*`.
+* ~~**`cat`**, separately: `-v` and `-A` are missing, and an unknown option is
+  treated as a filename and **exits 0**, so a typo silently succeeds.~~
+  **Done, `de06e53e3`.** The missing options were the least of it, and this
+  entry understated it in the same way the `expr` row did. `cat` exited **0 on
+  every path**, including a file it could not open, so `cat "$f" > out || die`
+  never fired. And `-n` read through `BufRead::lines()`, which is UTF-8 and
+  `String`: on a file that is not valid UTF-8 it stopped at the first bad byte,
+  and on a CRLF file it **silently deleted the CR**. That last one is `cat`
+  failing at the only thing it does — its correctness condition is byte-for-byte
+  identity — and no option list mentions it.
+
+  Now: `-A -b -e -E -n -s -t -T -u -v` and the long forms, lines split with
+  `read_until` and copied as bytes, filenames carried as `OsString` from
+  `args_os` to `File::open`, and diagnostics through `coreutils::errmsg`.
+  `scripts/cat-diff.sh` compares **80 of 80** command lines against the host's
+  GNU `cat` — as hex dumps, because `$(...)` strips the trailing newlines and
+  eats the NULs that are exactly what is at issue here.
+
+### What the sweep turned out to be about
+
+Four of the five were rewrites, not rewirings, and the pattern is worth naming
+because it will recur in the rest of the coreutils. **The missing regex was
+never the whole bug; it was the part of the bug that was legible.** Underneath
+it, in each program, was the same shape: a plausible-looking implementation of
+a *subset*, with the rest of the specification simply absent, and a test suite
+that asserted the subset. `sed` had no ranges. `awk` had no variables — not
+`NR` — and its condition evaluator fell through to `true`. `expr` had no `:`,
+no `match`, no `substr`, no `index`, and `i64` arithmetic. `cat` exited 0 on
+every path and corrupted CRLF files under `-n`.
+
+Two consequences for how the remaining utilities get audited:
+
+* **A unit test cannot find this class of bug, because it is written from the
+  same belief as the code.** Every one of these programs passed its own tests.
+  What found the bugs was the differential harness: `scripts/{sed,awk,expr,cat}-diff.sh`
+  run the real GNU tool beside ours on identical input and compare bytes, which
+  is the one check that does not consult our opinion. Any coreutil claiming to
+  match a POSIX tool should acquire one before it is called done.
+* **A bug entry that describes the *symptom you noticed* will understate the
+  defect.** This entry's `expr` and `cat` rows were both written by reading the
+  neighbours and assuming the same failure, and both were milder than the truth
+  — `expr`'s `:` was recorded as a substring search when there was no `:` at
+  all. An entry that overstates how well something works is worse than no entry,
+  because it argues against going to look.
+
+### One thing already fixed in passing
+
+The engine bounded a single `{m,n}` at 1000 and nothing else — but intervals
+multiply under nesting, so `((a{1000}){1000}){1000}` asked for ~10⁹
+instructions, tens of gigabytes, from a 24-byte pattern. `MAX_PROG` now bounds
+the compiled program. This mattered more the moment the engine became shared:
+`grep -f patterns.txt` and `sed -f script.sed` read the pattern from a **file**,
+so it is as much untrusted input as the subject is.
+
+### Why not a third-party regex crate
+
+`posix/src/regex.rs` stays a separate implementation on purpose — it is
+`no_std`, fixed-buffer, C-ABI, and answers to POSIX's error codes byte for byte.
+For the Rust programs, see `design-decisions.md` §322.
+
+## B-BACKREFERENCES-ARE-REFUSED-SO-SOME-CLASSIC-ONE-LINERS-FAIL (lane B, 2026-08-16) — **open**
+
+**In short:** a backreference is the part of a pattern that says "and here the
+*same text* again" — `\(.*\)\n\1` means "some text, a newline, then that exact
+text once more". Our regex engine cannot express one, so it refuses the pattern
+with an error instead of matching. GNU accepts it. The visible effect is that a
+few well-known `sed`/`grep` one-liners — most famously the `sed` spelling of
+`uniq` — print an error and exit non-zero where on Linux they would work.
+
+```
+$ printf 'x\nx\ny\n' | sed '$!N;/^\(.*\)\n\1$/!P;D'
+sed: -e expression #1, char 18: backreference \1 is not supported     # ours, rc=1
+x                                                                     # GNU,  rc=0
+y
+```
+
+This is the one case out of 89 in `scripts/sed-diff.sh` that does not match GNU,
+and `grep '\(a\)\1'` fails the same way.
+
+### Why it is refused rather than wrong
+
+`userspace/ere` is a Pike VM (a Thompson NFA simulation): it advances *all*
+alternatives of the pattern through the subject in one left-to-right pass, so it
+costs `O(len(input) × len(pattern))` and cannot be made to backtrack into
+catastrophic time — that immunity is why it was chosen (`design-decisions.md`
+§322). But the same property is why a backreference is impossible: matching one
+requires re-comparing against text an *earlier* alternative captured, and in a
+simulation where every alternative advances together there is no single "the"
+capture to compare against. So this is not an unfinished feature; it is the
+shape of the engine.
+
+Refusing by name is deliberate. Silently treating `\1` as a literal `1` would
+turn a pattern that cannot be answered into one that is answered *wrongly*, and
+a wrong match in `sed` edits the user's file.
+
+### The proper fix
+
+What glibc does: keep the Pike VM for everything, and add a **backtracking
+matcher used only for patterns that contain `\1`–`\9`**. The compiler already
+knows at parse time whether a pattern has one, so the choice is made once, per
+pattern, not per input line — and every pattern that does not use a
+backreference keeps today's linear guarantee untouched.
+
+It is a real tradeoff and wants its own `design-decisions.md` entry before it is
+built, because it reintroduces exponential blowup for exactly the patterns that
+take the fallback, and `grep -f` / `sed -f` read patterns from files. The
+mitigations are the usual ones — a step budget that aborts the match with an
+error rather than hanging, and the existing `MAX_PROG` bound on program size.
+
+**Until then** the behaviour is safe: it is loud, it is specific about which
+construct it cannot do, and it exits non-zero. Nothing silently produces a wrong
+answer. What it costs is GNU compatibility for a small, well-known family of
+scripts.
+
 ---
 
 ## A-SET-CREDENTIALS-IS-GATED-ONLY-IN-USERSPACE (lane A, 2026-08-16)

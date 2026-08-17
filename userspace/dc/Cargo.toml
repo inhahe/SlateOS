@@ -2,5 +2,10 @@
 name = "dc"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS dc - desk calculator (reverse polish)"
+description = "SlateOS dc - desk calculator (reverse polish), computing on bignum::Decimal"
+
 [dependencies]
+bignum = { path = "../bignum" }
+
+[lints]
+workspace = true

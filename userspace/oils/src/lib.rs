@@ -28,9 +28,21 @@ pub mod bind_keys;
 pub mod bind_tables;
 pub mod brace;
 pub mod bytes;
-pub mod ere;
+/// The regex engine `[[ str =~ re ]]` matches with. It was a module here until
+/// `grep`, `sed`, `awk` and `expr` each turned out to be matching regular
+/// expressions with `str::contains`; it is now the `ere` crate, so the shell
+/// and the utilities cannot disagree about what a pattern means. Re-exported
+/// under its old path because that is still where a reader of osh looks.
+pub use ::ere;
 pub(crate) mod escape;
 pub mod histexpand;
+/// Test scaffolding: the `$PATH` a test may search, with the two directories
+/// cargo injects struck out. Compiled only for the in-process tests; the
+/// end-to-end tests in `tests/` pull the same file in with `#[path]` rather
+/// than link it, so none of it reaches the shipped shell. See the module docs
+/// for why one definition has to serve both.
+#[cfg(test)]
+pub(crate) mod hostpath;
 pub mod interp;
 pub mod lexer;
 pub mod parser;

@@ -738,6 +738,9 @@ version = "0.1.0"
 [[package]]
 name = "bc"
 version = "0.1.0"
+dependencies = [
+ "bignum",
+]
 
 [[package]]
 name = "bc-cli"
@@ -820,6 +823,10 @@ version = "0.1.0"
 
 [[package]]
 name = "bigeye-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bignum"
 version = "0.1.0"
 
 [[package]]
@@ -1843,6 +1850,10 @@ version = "0.1.0"
 [[package]]
 name = "coreutils"
 version = "0.1.0"
+dependencies = [
+ "bignum",
+ "ere",
+]
 
 [[package]]
 name = "coriolis-cli"
@@ -2170,6 +2181,9 @@ version = "0.1.0"
 [[package]]
 name = "dc"
 version = "0.1.0"
+dependencies = [
+ "bignum",
+]
 
 [[package]]
 name = "dconf-cli"
@@ -2846,6 +2860,13 @@ version = "0.1.0"
 [[package]]
 name = "epicgames-cli"
 version = "0.1.0"
+
+[[package]]
+name = "ere"
+version = "0.1.0"
+dependencies = [
+ "bstr",
+]
 
 [[package]]
 name = "erlang-cli"
@@ -7230,6 +7251,7 @@ name = "oils"
 version = "0.1.0"
 dependencies = [
  "bstr",
+ "ere",
  "tzrules",
 ]
 

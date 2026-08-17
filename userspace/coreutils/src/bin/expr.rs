@@ -129,7 +129,11 @@ fn main() {
     }
 
     let mut out = std::io::stdout().lock();
-    if out.write_all(&value).and_then(|()| out.write_all(b"\n")).is_err() {
+    if out
+        .write_all(&value)
+        .and_then(|()| out.write_all(b"\n"))
+        .is_err()
+    {
         // Nothing left to say it on; GNU's exit 3 is "an error occurred".
         process::exit(3);
     }
@@ -602,7 +606,10 @@ mod tests {
     /// shell script reaches by adding one to a file offset.
     #[test]
     fn arithmetic_is_exact_past_the_range_of_i64() {
-        assert_eq!(eval(&["9223372036854775807", "+", "1"]), "9223372036854775808");
+        assert_eq!(
+            eval(&["9223372036854775807", "+", "1"]),
+            "9223372036854775808"
+        );
         assert_eq!(
             eval(&["99999999999999999999", "*", "99999999999999999999"]),
             "9999999999999999999800000000000000000001"

@@ -136,11 +136,7 @@ fn format_into_bytes(format: &str, arguments: &[String]) -> Vec<u8> {
 }
 
 fn arg_str(args: &[String], index: usize) -> &str {
-    if index < args.len() {
-        &args[index]
-    } else {
-        ""
-    }
+    if index < args.len() { &args[index] } else { "" }
 }
 
 #[cfg(test)]

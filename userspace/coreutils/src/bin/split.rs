@@ -179,10 +179,11 @@ fn split_by_lines(reader: Box<dyn Read>, prefix: &str, lines_per_file: usize, su
         }
 
         if let Some(ref mut w) = writer
-            && writeln!(w, "{line}").is_err() {
-                eprintln!("split: write error");
-                process::exit(1);
-            }
+            && writeln!(w, "{line}").is_err()
+        {
+            eprintln!("split: write error");
+            process::exit(1);
+        }
 
         line_count += 1;
         if line_count >= lines_per_file {
@@ -235,10 +236,11 @@ fn split_by_bytes(reader: Box<dyn Read>, prefix: &str, bytes_per_file: u64, suff
             let chunk = remaining_in_file.min(n - offset);
 
             if let Some(ref mut w) = writer
-                && w.write_all(&buffer[offset..offset + chunk]).is_err() {
-                    eprintln!("split: write error");
-                    process::exit(1);
-                }
+                && w.write_all(&buffer[offset..offset + chunk]).is_err()
+            {
+                eprintln!("split: write error");
+                process::exit(1);
+            }
 
             bytes_written += chunk as u64;
             offset += chunk;

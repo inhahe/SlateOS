@@ -196,7 +196,10 @@ fn renice_target(
         return Err("failed to set priority (permission denied or no such process)".to_string());
     }
 
-    println!("{}: old priority -> new priority {clamped}", target_label(which, who));
+    println!(
+        "{}: old priority -> new priority {clamped}",
+        target_label(which, who)
+    );
     Ok(())
 }
 

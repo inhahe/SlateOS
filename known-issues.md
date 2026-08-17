@@ -27655,3 +27655,136 @@ enforcement — it would catch a *new* call site, which no counter test can, sin
 a test can only assert about code someone thought to test. Still worth filing as
 a cross-lane request if the workspace lint table's owner wants it; the counters
 do not preclude it.
+
+## B-`sort`-HAD-THREE-FLAGS-AND-GOT-ALL-THREE-WRONG (lane B, 2026-08-16) — ✅ **FIXED 2026-08-16**
+
+`userspace/coreutils/src/bin/sort.rs` was 341 lines and accepted `-r`, `-n` and
+`-u`. No `-k`, so there was no way to sort on a column — which is most of what
+`sort` is used for — and no `-t`, `-b`, `-f`, `-d`, `-i`, `-g`, `-h`, `-M`,
+`-V`, `-s`, `-m`, `-c`, `-C`, `-z`, `-o`, or the obsolete `+POS -POS` form.
+The three flags it did have were each wrong in a way that produced a **plausible
+answer rather than an error**, which is the failure mode that matters here:
+
+| | |
+|---|---|
+| lines read with `BufRead::lines()` | one non-UTF-8 byte anywhere in the input aborted the run with a diagnostic. Our paths may hold any byte but `/` and NUL, so `find \| sort` was one odd filename away from failing. |
+| `-n` parsed to `f64` | every pair of 20-digit identifiers agreeing in their first 17 digits tied, and then fell to the line comparison — so they came out in *lexicographic* order while claiming to be numeric. |
+| `-u` deduplicated whole lines | `sort -nu` on `1` and `1.0` printed both. `-u` means unique *by the key*; those are one number. |
+
+**Why unit tests could not have found this, and what did.** `sort` is the worst
+case for tests-written-beside-the-code: every wrong answer is still a
+permutation of the input, so it reads perfectly and asserts cleanly against
+whatever the author believed. The rewrite was therefore driven by
+`scripts/sort-diff.sh`, which runs GNU coreutils 8.32 (natively on PATH) and our
+binary over ~225 cases and compares **hex-dumped stdout, exit status, and
+whether stderr was loud**. Key *extents* — the one thing output comparison
+cannot show — were measured with `sort --debug`, which underlines the key.
+
+**What the harness found that the author had wrong**, each a case where the code
+was written from a confident and incorrect memory of GNU:
+
+- **`-g` did not read hex.** `-g` goes through C's `strtod`, which accepts
+  `0x10` as 16 (and `inf`/`nan`). Ours read 0.
+- **`-h` mis-ranked zeros and negatives.** GNU's `find_unit_order` gives a
+  zero-valued number order 0 *whatever its suffix* — so `0K` < `900` — and a
+  negative number a negative order. Ours ranked `0K` above `900`.
+- **`-k2,2r` did nothing.** GNU has **two different** inheritance predicates:
+  the key-inherits-the-globals test *includes* `reverse`, so `-k2,2r` inherits
+  nothing else; the should-the-globals-become-a-whole-line-key test *excludes*
+  it, so `-r` alone makes no key. Collapsing them into one predicate is the
+  obvious simplification and it is wrong in both directions.
+- **`-V` is a *file name* comparison, not a version-string one.** It is
+  gnulib's `filevercmp`: empty name first, then `.`, then `..`, then every dot
+  file ahead of every non-dot file, then the **file suffix**
+  (`(\.[A-Za-z~][A-Za-z0-9~]*)*$`) is cut off and the stems compared, with the
+  full names compared only on a tie. That is why `a.b` sorts before `a-b`
+  despite `-` being the lower byte, and it is what makes `ls | sort -V` behave.
+- **`-m` is a real k-way merge, not a re-sort.** On unsorted input the two
+  differ, and GNU's answer is the merge's.
+- **`limfield` puts both the trailing-blank skip and the `+ echar` advance
+  inside `if (echar != 0)`.** Probing `sort --debug -k1,1b` on `" a b"` returns
+  `" a"`, which settles it; the natural transcription extends the key past the
+  trailing blanks.
+
+**State: 225/225 cases byte-identical to GNU**, 33 unit tests, `sort` now a
+four-module binary (`main.rs`, `keydef.rs`, `order.rs`).
+
+### Remaining limitations (deliberate, documented in the module docs)
+
+- **`-R`/`--random-sort` is refused with an explicit message** rather than
+  answered wrongly. It needs a keyed hash (GNU uses one seeded from
+  `--random-source`), and a wrong random order is indistinguishable from a
+  right one, so a loud refusal is the only honest option until the hash exists.
+- **`--debug` is not implemented** (exit 2, unknown option). It is a
+  developer-facing aid; the harness uses the *host's* `sort --debug`.
+- **`-S`, `-T`, `--parallel`, `--buffer-size`, `--temporary-directory`,
+  `--compress-program`, `--batch-size` are accepted and ignored.** They tune an
+  external merge sort we do not have: everything is sorted in memory. That is a
+  real limit for inputs larger than RAM, not a cosmetic one.
+
+### TD-SORT-C-LOCALE-ONLY-COLLATION — the one that is not `sort`'s to fix
+
+**In short:** `sort` compares text one byte at a time and knows only English
+month names. In English that is nearly always the order you wanted; in a
+language with accents it is not — `é` sorts after `z` instead of next to `e`,
+because its bytes are numerically larger. The fix does not belong in `sort`: the
+system has no collation tables (the per-language rules for which letter comes
+before which) for anything to consult.
+
+This is not a `sort` defect and must not be "fixed" inside it. When SlateOS
+grows a locale layer, `sort`, `ls`, `join`, `comm`, `uniq` and `look` all need
+to move onto it together — an ordering that disagrees between `sort` and `join`
+silently breaks `join`, which requires both inputs sorted *the same way*.
+`scripts/sort-diff.sh` pins `LC_ALL=C` so the harness compares like with like;
+when a locale layer lands, that pin is the first thing to revisit.
+
+## TD-COREUTILS-DIAGNOSTICS-DO-NOT-QUOTE-FILE-NAMES (lane B, 2026-08-16) — **open**
+
+**In short:** When a coreutil complains about a file, it prints the file's name
+raw. GNU wraps the name in quotes. That sounds cosmetic and mostly is — until
+the name contains a space, a quote, or a newline, all of which our filesystem
+allows (paths may hold any byte but `/` and NUL). A name with a newline in it
+can then *forge a second line of output*, which is a real problem for anything
+reading a tool's diagnostics.
+
+Compare, for a file that does not exist:
+
+```
+GNU:   sort: cannot read: 'no such': No such file or directory
+ours:  sort: cannot read: no such: No such file or directory
+```
+
+and for one whose name holds a tab:
+
+```
+GNU:   sort: cannot read: 'no'$'\t''such': No such file or directory
+ours:  sort: cannot read: no<TAB>such: No such file or directory
+```
+
+**GNU uses two different styles and the difference is deliberate.** They come
+from gnulib's `quotearg`:
+
+| Helper | Style | Used for | `no such` becomes |
+|---|---|---|---|
+| `quote()` | `locale_quoting_style` (C locale) | option arguments, key specs, tab characters | `'no such'` |
+| `quotef()` | `shell_escape_quoting_style` | file names | `'no such'`, but `no'such` → `"no'such"` and a tab → `'no'$'\t''such'` |
+
+`quotef`'s output is *shell-pasteable*, which is the point: a user who sees a
+diagnostic about a file wants to be able to copy the name into a command. That
+is why the two styles differ on a name containing a `'`.
+
+**Where it lives.** Everywhere. This is not a `sort` defect — `sort` was simply
+the first tool measured against GNU closely enough to notice. Every one of the
+85 coreutils binaries formats file names into diagnostics with a bare `{}` or
+`to_string_lossy()`.
+
+**The proper fix** is a shared `quotearg` module in
+`userspace/coreutils/src/lib.rs` implementing both styles faithfully, plus a
+sweep of the binaries to route file names through `quotef` and option arguments
+through `quote`. It is mechanical but wide, and it wants its own differential
+harness (a fixture directory of names holding a space, a quote, a backslash, a
+tab, a newline and a high byte, run through both implementations) — because
+this is exactly the class of defect where reading the code proves nothing.
+
+Until then, `sort`'s `show()` is a plain lossy conversion, marked with a comment
+pointing here so the next reader does not mistake it for a considered choice.

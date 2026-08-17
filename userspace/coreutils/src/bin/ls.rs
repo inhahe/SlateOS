@@ -55,7 +55,11 @@ fn parse_args(args: &[String]) -> LsArgs {
         }
     }
 
-    LsArgs { opts, paths, unknown }
+    LsArgs {
+        opts,
+        paths,
+        unknown,
+    }
 }
 
 /// True if `name` should be hidden under the current `all` flag.  Names
@@ -290,7 +294,11 @@ mod tests {
 
     #[test]
     fn sort_key_preserves_ordering() {
-        let mut names = vec!["banana".to_string(), "Apple".to_string(), "cherry".to_string()];
+        let mut names = vec![
+            "banana".to_string(),
+            "Apple".to_string(),
+            "cherry".to_string(),
+        ];
         names.sort_by_key(|n| sort_key(n));
         assert_eq!(names, vec!["Apple", "banana", "cherry"]);
     }

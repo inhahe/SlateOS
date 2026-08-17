@@ -138,7 +138,11 @@ mod tests {
     fn hard_break_into_three_chunks() {
         assert_eq!(
             fold_line("aaaaabbbbbccccc", 5, false),
-            vec!["aaaaa".to_string(), "bbbbb".to_string(), "ccccc".to_string()]
+            vec![
+                "aaaaa".to_string(),
+                "bbbbb".to_string(),
+                "ccccc".to_string()
+            ]
         );
     }
 

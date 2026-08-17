@@ -176,10 +176,7 @@ mod tests {
     #[test]
     fn leading_only_affects_leading_spaces() {
         // Spaces in the middle of the line are not touched.
-        assert_eq!(
-            convert_leading_spaces("        a   b", 8),
-            "\ta   b"
-        );
+        assert_eq!(convert_leading_spaces("        a   b", 8), "\ta   b");
     }
 
     #[test]

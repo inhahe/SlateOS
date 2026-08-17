@@ -471,9 +471,7 @@ fn long_division_decimal(a: &str, b: &str) -> (String, String) {
         };
 
         // How many times does b go into remainder?
-        let q_digit = if rem_str.len() < b.len()
-            || (rem_str.len() == b.len() && rem_str < b)
-        {
+        let q_digit = if rem_str.len() < b.len() || (rem_str.len() == b.len() && rem_str < b) {
             0u8
         } else {
             // Use the leading digits of remainder to estimate.
@@ -494,8 +492,16 @@ fn long_division_decimal(a: &str, b: &str) -> (String, String) {
     let r = remainder.trim_start_matches('0');
 
     (
-        if q.is_empty() { "0".to_string() } else { q.to_string() },
-        if r.is_empty() { "0".to_string() } else { r.to_string() },
+        if q.is_empty() {
+            "0".to_string()
+        } else {
+            q.to_string()
+        },
+        if r.is_empty() {
+            "0".to_string()
+        } else {
+            r.to_string()
+        },
     )
 }
 
@@ -1199,10 +1205,7 @@ impl Parser {
                 self.advance();
                 let mut exprs = Vec::new();
                 loop {
-                    if matches!(
-                        self.peek(),
-                        Token::Newline | Token::Semicolon | Token::Eof
-                    ) {
+                    if matches!(self.peek(), Token::Newline | Token::Semicolon | Token::Eof) {
                         break;
                     }
                     if let Some(e) = self.parse_expr() {
@@ -1646,7 +1649,11 @@ impl Interpreter {
             "ibase" => BigDecimal::parse(&self.ibase.to_string()).unwrap_or_else(BigDecimal::zero),
             "obase" => BigDecimal::parse(&self.obase.to_string()).unwrap_or_else(BigDecimal::zero),
             "last" | "." => self.last.clone(),
-            _ => self.variables.get(name).cloned().unwrap_or_else(BigDecimal::zero),
+            _ => self
+                .variables
+                .get(name)
+                .cloned()
+                .unwrap_or_else(BigDecimal::zero),
         }
     }
 
@@ -1687,36 +1694,34 @@ impl Interpreter {
         match stmt {
             Stmt::Empty => ControlFlow::None,
 
-            Stmt::Expr(expr) => {
-                match expr {
-                    Expr::PrintExpr(exprs) => {
-                        let stdout = io::stdout();
-                        let mut out = stdout.lock();
-                        for e in exprs {
-                            let val = self.eval(e);
-                            let _ = write!(out, "{}", val.to_string_with_scale(self.scale));
-                        }
-                        let _ = writeln!(out);
-                        ControlFlow::None
+            Stmt::Expr(expr) => match expr {
+                Expr::PrintExpr(exprs) => {
+                    let stdout = io::stdout();
+                    let mut out = stdout.lock();
+                    for e in exprs {
+                        let val = self.eval(e);
+                        let _ = write!(out, "{}", val.to_string_with_scale(self.scale));
                     }
-                    Expr::FuncCall(name, _) if name == "quit" => ControlFlow::Quit,
-                    Expr::Assign(_, _)
-                    | Expr::CompoundAssign(_, _, _)
-                    | Expr::PreIncrement(_)
-                    | Expr::PreDecrement(_)
-                    | Expr::PostIncrement(_)
-                    | Expr::PostDecrement(_) => {
-                        self.eval(expr);
-                        ControlFlow::None
-                    }
-                    _ => {
-                        let val = self.eval(expr);
-                        self.last = val.clone();
-                        println!("{}", val.to_string_with_scale(self.scale));
-                        ControlFlow::None
-                    }
+                    let _ = writeln!(out);
+                    ControlFlow::None
                 }
-            }
+                Expr::FuncCall(name, _) if name == "quit" => ControlFlow::Quit,
+                Expr::Assign(_, _)
+                | Expr::CompoundAssign(_, _, _)
+                | Expr::PreIncrement(_)
+                | Expr::PreDecrement(_)
+                | Expr::PostIncrement(_)
+                | Expr::PostDecrement(_) => {
+                    self.eval(expr);
+                    ControlFlow::None
+                }
+                _ => {
+                    let val = self.eval(expr);
+                    self.last = val.clone();
+                    println!("{}", val.to_string_with_scale(self.scale));
+                    ControlFlow::None
+                }
+            },
 
             Stmt::If(cond, then_body, else_body) => {
                 let cond_val = self.eval(cond);
@@ -1852,50 +1857,43 @@ impl Interpreter {
                 current
             }
 
-            Expr::FuncCall(name, args) => {
-                match name.as_str() {
-                    "sqrt" => {
-                        if args.is_empty() {
-                            eprintln!("bc: sqrt requires an argument");
-                            return BigDecimal::zero();
-                        }
-                        let v = self.eval(&args[0]);
-                        bd_sqrt(&v, self.scale).unwrap_or_else(|| {
-                            eprintln!("bc: square root of negative number");
-                            BigDecimal::zero()
-                        })
+            Expr::FuncCall(name, args) => match name.as_str() {
+                "sqrt" => {
+                    if args.is_empty() {
+                        eprintln!("bc: sqrt requires an argument");
+                        return BigDecimal::zero();
                     }
-                    "length" => {
-                        if args.is_empty() {
-                            return BigDecimal::zero();
-                        }
-                        let v = self.eval(&args[0]);
-                        let s = v.to_string_with_scale(v.scale);
-                        let digits: usize = s
-                            .chars()
-                            .filter(|c| c.is_ascii_digit())
-                            .count();
-                        BigDecimal::parse(&digits.to_string())
-                            .unwrap_or_else(BigDecimal::zero)
-                    }
-                    "scale" => {
-                        if args.is_empty() {
-                            return BigDecimal::parse(&self.scale.to_string())
-                                .unwrap_or_else(BigDecimal::zero);
-                        }
-                        let v = self.eval(&args[0]);
-                        BigDecimal::parse(&v.scale.to_string())
-                            .unwrap_or_else(BigDecimal::zero)
-                    }
-                    "quit" => {
-                        process::exit(0);
-                    }
-                    _ => {
-                        eprintln!("bc: undefined function: {name}");
+                    let v = self.eval(&args[0]);
+                    bd_sqrt(&v, self.scale).unwrap_or_else(|| {
+                        eprintln!("bc: square root of negative number");
                         BigDecimal::zero()
-                    }
+                    })
                 }
-            }
+                "length" => {
+                    if args.is_empty() {
+                        return BigDecimal::zero();
+                    }
+                    let v = self.eval(&args[0]);
+                    let s = v.to_string_with_scale(v.scale);
+                    let digits: usize = s.chars().filter(|c| c.is_ascii_digit()).count();
+                    BigDecimal::parse(&digits.to_string()).unwrap_or_else(BigDecimal::zero)
+                }
+                "scale" => {
+                    if args.is_empty() {
+                        return BigDecimal::parse(&self.scale.to_string())
+                            .unwrap_or_else(BigDecimal::zero);
+                    }
+                    let v = self.eval(&args[0]);
+                    BigDecimal::parse(&v.scale.to_string()).unwrap_or_else(BigDecimal::zero)
+                }
+                "quit" => {
+                    process::exit(0);
+                }
+                _ => {
+                    eprintln!("bc: undefined function: {name}");
+                    BigDecimal::zero()
+                }
+            },
 
             Expr::PrintExpr(exprs) => {
                 let stdout = io::stdout();
@@ -1982,7 +1980,11 @@ fn parse_args(args: &[String]) -> Result<BcArgs, String> {
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    let BcArgs { quiet, math_lib, files } = match parse_args(&args) {
+    let BcArgs {
+        quiet,
+        math_lib,
+        files,
+    } = match parse_args(&args) {
         Ok(p) => p,
         Err(msg) => {
             eprintln!("bc: {msg}");
@@ -2058,7 +2060,9 @@ fn run_input(interp: &mut Interpreter, input: &str) -> bool {
     let stmts = parser.parse_program();
 
     for stmt in &stmts {
-        if let ControlFlow::Quit = interp.run_stmt(stmt) { return true }
+        if let ControlFlow::Quit = interp.run_stmt(stmt) {
+            return true;
+        }
     }
     false
 }
@@ -2321,10 +2325,7 @@ mod tests {
     #[test]
     fn sub_borrow_across_limb_boundary() {
         // 10^9 - 1 forces a borrow into the next limb on subtraction.
-        assert_eq!(
-            show(&bd_sub(&bd("1000000000"), &bd("1")), 0),
-            "999999999"
-        );
+        assert_eq!(show(&bd_sub(&bd("1000000000"), &bd("1")), 0), "999999999");
     }
 
     // ---------- bd_mul ----------

@@ -83,9 +83,7 @@ fn format_timestamp() -> String {
             // Calculate year/month/day from days since epoch (1970-01-01).
             let (year, month, day) = days_to_date(days);
 
-            format!(
-                "{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}"
-            )
+            format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}")
         }
         Err(_) => "1970-01-01T00:00:00".to_string(),
     }
@@ -107,7 +105,16 @@ fn days_to_date(mut days: u64) -> (u64, u64, u64) {
     let month_days: [u64; 12] = [
         31,
         if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
 
     let mut month = 0;
@@ -209,7 +216,11 @@ fn main() {
         for line in reader.lines() {
             match line {
                 Ok(msg) => {
-                    let _ = writeln!(out, "{}", format_log_line(pri, &timestamp, &parsed.tag, &msg));
+                    let _ = writeln!(
+                        out,
+                        "{}",
+                        format_log_line(pri, &timestamp, &parsed.tag, &msg)
+                    );
                 }
                 Err(e) => {
                     eprintln!("logger: {e}");
@@ -219,7 +230,11 @@ fn main() {
         }
     } else {
         let msg = parsed.message_parts.join(" ");
-        let _ = writeln!(out, "{}", format_log_line(pri, &timestamp, &parsed.tag, &msg));
+        let _ = writeln!(
+            out,
+            "{}",
+            format_log_line(pri, &timestamp, &parsed.tag, &msg)
+        );
     }
 }
 

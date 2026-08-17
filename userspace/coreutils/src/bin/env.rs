@@ -18,7 +18,9 @@ fn main() {
             for (name, value) in &env_vars {
                 // SAFETY: single-threaded at this point — no other threads
                 // are reading the environment concurrently.
-                unsafe { env::set_var(name, value); }
+                unsafe {
+                    env::set_var(name, value);
+                }
             }
             for (key, value) in env::vars() {
                 println!("{key}={value}");
@@ -66,7 +68,10 @@ fn parse_assignments(args: &[String]) -> (Vec<(String, String)>, Option<usize>) 
                 // Safe slicing: eq_pos came from find(), so the +1 boundary is
                 // always within bounds of `arg`.
                 let name = arg.get(..eq_pos).unwrap_or("").to_string();
-                let value = arg.get(eq_pos.saturating_add(1)..).unwrap_or("").to_string();
+                let value = arg
+                    .get(eq_pos.saturating_add(1)..)
+                    .unwrap_or("")
+                    .to_string();
                 env_vars.push((name, value));
             }
         } else {

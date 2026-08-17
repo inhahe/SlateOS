@@ -66,7 +66,10 @@ fn main() {
     }
 
     let dest = parsed.paths.last().cloned().unwrap_or_default();
-    let sources = parsed.paths.get(..parsed.paths.len().saturating_sub(1)).unwrap_or(&[]);
+    let sources = parsed
+        .paths
+        .get(..parsed.paths.len().saturating_sub(1))
+        .unwrap_or(&[]);
     let dest_path = PathBuf::from(&dest);
     let dest_is_dir = dest_path.is_dir();
 

@@ -135,10 +135,18 @@ pub fn compare(a: &Value, b: &Value, convfmt: &[u8]) -> Option<std::cmp::Orderin
 #[must_use]
 pub fn num_to_str(n: f64, fmt: &[u8]) -> Str {
     if n.is_nan() {
-        return if n.is_sign_negative() { b"-nan".to_vec() } else { b"nan".to_vec() };
+        return if n.is_sign_negative() {
+            b"-nan".to_vec()
+        } else {
+            b"nan".to_vec()
+        };
     }
     if n.is_infinite() {
-        return if n < 0.0 { b"-inf".to_vec() } else { b"inf".to_vec() };
+        return if n < 0.0 {
+            b"-inf".to_vec()
+        } else {
+            b"inf".to_vec()
+        };
     }
     if n == n.trunc() && n.abs() < 1e18 {
         // The cast is exact: the guard above put `n` inside i64's range and
@@ -220,7 +228,12 @@ fn trim_blanks(s: &[u8]) -> &[u8] {
     while matches!(s.get(a), Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)) {
         a = a.saturating_add(1);
     }
-    while b > a && matches!(s.get(b.saturating_sub(1)), Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)) {
+    while b > a
+        && matches!(
+            s.get(b.saturating_sub(1)),
+            Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+        )
+    {
         b = b.saturating_sub(1);
     }
     s.get(a..b).unwrap_or_default()
@@ -241,17 +254,29 @@ mod tests {
     #[test]
     fn a_field_that_looks_numeric_compares_as_a_number() {
         // The rule the whole enum exists for.
-        assert_eq!(compare(&iv(" 10 "), &Value::Num(10.0), b"%.6g"), Some(Ordering::Equal));
+        assert_eq!(
+            compare(&iv(" 10 "), &Value::Num(10.0), b"%.6g"),
+            Some(Ordering::Equal)
+        );
         // …but against a string literal it is text, so the blanks count.
-        assert_ne!(compare(&iv(" 10 "), &sv("10"), b"%.6g"), Some(Ordering::Equal));
+        assert_ne!(
+            compare(&iv(" 10 "), &sv("10"), b"%.6g"),
+            Some(Ordering::Equal)
+        );
     }
 
     #[test]
     fn a_program_literal_is_never_a_strnum() {
         // `"007" == 7` is false: one side is a literal, so this is text.
-        assert_ne!(compare(&sv("007"), &Value::Num(7.0), b"%.6g"), Some(Ordering::Equal));
+        assert_ne!(
+            compare(&sv("007"), &Value::Num(7.0), b"%.6g"),
+            Some(Ordering::Equal)
+        );
         // The same characters from input do compare equal.
-        assert_eq!(compare(&iv("007"), &Value::Num(7.0), b"%.6g"), Some(Ordering::Equal));
+        assert_eq!(
+            compare(&iv("007"), &Value::Num(7.0), b"%.6g"),
+            Some(Ordering::Equal)
+        );
     }
 
     #[test]

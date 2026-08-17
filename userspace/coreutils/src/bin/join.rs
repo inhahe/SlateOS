@@ -23,11 +23,11 @@ use std::process;
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Options {
-    field1: usize,       // 0-indexed join field for FILE1
-    field2: usize,       // 0-indexed join field for FILE2
+    field1: usize, // 0-indexed join field for FILE1
+    field2: usize, // 0-indexed join field for FILE2
     separator: Option<char>,
-    unpair1: bool,       // -a 1: print unpairable lines from FILE1
-    unpair2: bool,       // -a 2: print unpairable lines from FILE2
+    unpair1: bool,                            // -a 1: print unpairable lines from FILE1
+    unpair2: bool,                            // -a 2: print unpairable lines from FILE2
     output_spec: Option<Vec<(usize, usize)>>, // (file_num 1|2, field 0-indexed)
     empty: String,
 }
@@ -47,12 +47,7 @@ fn get_field<'a>(fields: &[&'a str], index: usize, empty: &'a str) -> &'a str {
     }
 }
 
-fn output_line(
-    fields1: &[&str],
-    fields2: &[&str],
-    opts: &Options,
-    out: &mut impl Write,
-) {
+fn output_line(fields1: &[&str], fields2: &[&str], opts: &Options, out: &mut impl Write) {
     let sep = match opts.separator {
         Some(c) => c.to_string(),
         None => " ".to_string(),
@@ -88,12 +83,7 @@ fn output_line(
     }
 }
 
-fn output_unpaired(
-    fields: &[&str],
-    file_num: usize,
-    opts: &Options,
-    out: &mut impl Write,
-) {
+fn output_unpaired(fields: &[&str], file_num: usize, opts: &Options, out: &mut impl Write) {
     let sep = match opts.separator {
         Some(c) => c.to_string(),
         None => " ".to_string(),
@@ -176,8 +166,12 @@ fn parse_args(args: &[String]) -> Result<(Options, Vec<String>), String> {
         match arg.as_str() {
             "-1" => {
                 i = i.saturating_add(1);
-                let v = args.get(i).ok_or_else(|| "option -1 requires an argument".to_string())?;
-                let n = v.parse::<usize>().map_err(|_| format!("invalid field number: {v}"))?;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| "option -1 requires an argument".to_string())?;
+                let n = v
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid field number: {v}"))?;
                 if n == 0 {
                     return Err(format!("invalid field number: {v}"));
                 }
@@ -185,8 +179,12 @@ fn parse_args(args: &[String]) -> Result<(Options, Vec<String>), String> {
             }
             "-2" => {
                 i = i.saturating_add(1);
-                let v = args.get(i).ok_or_else(|| "option -2 requires an argument".to_string())?;
-                let n = v.parse::<usize>().map_err(|_| format!("invalid field number: {v}"))?;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| "option -2 requires an argument".to_string())?;
+                let n = v
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid field number: {v}"))?;
                 if n == 0 {
                     return Err(format!("invalid field number: {v}"));
                 }
@@ -194,12 +192,16 @@ fn parse_args(args: &[String]) -> Result<(Options, Vec<String>), String> {
             }
             "-t" => {
                 i = i.saturating_add(1);
-                let v = args.get(i).ok_or_else(|| "option -t requires an argument".to_string())?;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| "option -t requires an argument".to_string())?;
                 opts.separator = v.chars().next();
             }
             "-a" => {
                 i = i.saturating_add(1);
-                let v = args.get(i).ok_or_else(|| "option -a requires an argument".to_string())?;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| "option -a requires an argument".to_string())?;
                 match v.as_str() {
                     "1" => opts.unpair1 = true,
                     "2" => opts.unpair2 = true,
@@ -208,15 +210,20 @@ fn parse_args(args: &[String]) -> Result<(Options, Vec<String>), String> {
             }
             "-o" => {
                 i = i.saturating_add(1);
-                let v = args.get(i).ok_or_else(|| "option -o requires an argument".to_string())?;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| "option -o requires an argument".to_string())?;
                 if v != "auto" {
-                    let spec = parse_output_spec(v).ok_or_else(|| format!("invalid output format: {v}"))?;
+                    let spec = parse_output_spec(v)
+                        .ok_or_else(|| format!("invalid output format: {v}"))?;
                     opts.output_spec = Some(spec);
                 }
             }
             "-e" => {
                 i = i.saturating_add(1);
-                let v = args.get(i).ok_or_else(|| "option -e requires an argument".to_string())?;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| "option -e requires an argument".to_string())?;
                 opts.empty = v.clone();
             }
             other if other.starts_with('-') && other.len() > 1 => {

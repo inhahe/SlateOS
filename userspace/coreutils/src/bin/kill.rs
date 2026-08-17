@@ -50,7 +50,10 @@ fn resolve_signal(token: &str) -> Option<i32> {
     }
     let name = token.strip_prefix("SIG").unwrap_or(token).to_uppercase();
     let name_alt = token.to_uppercase();
-    let name_alt = name_alt.strip_prefix("SIG").unwrap_or(&name_alt).to_string();
+    let name_alt = name_alt
+        .strip_prefix("SIG")
+        .unwrap_or(&name_alt)
+        .to_string();
     SIGNALS
         .iter()
         .find(|&&(_, n)| n == name || n == name_alt)

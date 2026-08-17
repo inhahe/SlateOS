@@ -21,12 +21,12 @@
 
 use crate::ast::{
     BinOp, Builtin, CmpOp, Expr, GetlineSrc, Lvalue, Pattern, Program, RedirMode, Redirect, Stmt,
-    VarRef, V_ARGC, V_ARGV, V_CONVFMT, V_ENVIRON, V_FILENAME, V_FNR, V_FS, V_NF, V_NR, V_OFMT,
-    V_OFS, V_ORS, V_RLENGTH, V_RS, V_RSTART, V_SUBSEP,
+    V_ARGC, V_ARGV, V_CONVFMT, V_ENVIRON, V_FILENAME, V_FNR, V_FS, V_NF, V_NR, V_OFMT, V_OFS,
+    V_ORS, V_RLENGTH, V_RS, V_RSTART, V_SUBSEP, VarRef,
 };
 use crate::io::{Inputs, Outputs, Records, Rs};
-use crate::value::{compare, num_to_str, Str, Value};
-use ere::{ch, Regex};
+use crate::value::{Str, Value, compare, num_to_str};
+use ere::{Regex, ch};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Read;
@@ -96,7 +96,12 @@ struct Fields {
 
 impl Fields {
     fn new() -> Fields {
-        Fields { record: Str::new(), fields: Vec::new(), split_valid: true, record_valid: true }
+        Fields {
+            record: Str::new(),
+            fields: Vec::new(),
+            split_valid: true,
+            record_valid: true,
+        }
     }
 }
 
@@ -211,7 +216,9 @@ impl Interp {
         }
         // ARGC counts ARGV[0] ("awk") as well as the operands, so a program that
         // loops `for (i = 1; i < ARGC; i++)` sees exactly the file arguments.
-        let argc = u32::try_from(argv.len()).unwrap_or(u32::MAX).saturating_add(1);
+        let argc = u32::try_from(argv.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
         it.set_global(V_ARGC, Value::Num(f64::from(argc)));
         // Seed the generator the way awk does: deterministically, so a program
         // that never calls `srand` gives the same answers on every run.
@@ -234,7 +241,9 @@ impl Interp {
             return Ok(());
         };
         if matches!(self.globals.get(slot), Some(Cell::Arr(_))) {
-            return Err(format!("{name} is an array and cannot be assigned on the command line"));
+            return Err(format!(
+                "{name} is an array and cannot be assigned on the command line"
+            ));
         }
         // Through `set_var`, not `set_global`: `-F:` and `-v RS=;` have to take
         // effect, and it is `set_var` that recompiles the splitter when `FS` or
@@ -277,7 +286,9 @@ impl Interp {
 
     fn main_loop(&mut self) -> R<()> {
         loop {
-            let Some(rec) = self.next_main_record()? else { return Ok(()) };
+            let Some(rec) = self.next_main_record()? else {
+                return Ok(());
+            };
             self.bump(V_NR);
             self.bump(V_FNR);
             self.set_record(rec);
@@ -368,7 +379,7 @@ impl Interp {
                         return Err(Fatal(format!(
                             "read error: {}",
                             coreutils::errmsg::strerror(&e)
-                        )))
+                        )));
                     }
                 }
             }
@@ -513,7 +524,12 @@ impl Interp {
                 }
                 Ok(Flow::Normal)
             }
-            Stmt::For { init, cond, step, body } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
                 if let Some(i) = init {
                     self.exec(i)?;
                 }
@@ -844,7 +860,11 @@ impl Interp {
                     self.ensure_split();
                     let n = val.to_num();
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let n = if n < 0.0 { 0usize } else { (n as usize).min(16_000_000) };
+                    let n = if n < 0.0 {
+                        0usize
+                    } else {
+                        (n as usize).min(16_000_000)
+                    };
                     self.f.fields.resize(n, Str::new());
                     self.f.record_valid = false;
                     self.f.split_valid = true;
@@ -1036,7 +1056,12 @@ impl Interp {
             return Err(Fatal(format!("function {}: recursion too deep", func.name)));
         }
 
-        let is_array = self.prog.param_is_array.get(slot).cloned().unwrap_or_default();
+        let is_array = self
+            .prog
+            .param_is_array
+            .get(slot)
+            .cloned()
+            .unwrap_or_default();
         let mut frame: Vec<Cell> = Vec::with_capacity(func.params.len());
         for i in 0..func.params.len() {
             let wants_array = is_array.get(i).copied().unwrap_or(false);
@@ -1208,7 +1233,11 @@ impl Interp {
                     Some(e) => round_half_up(self.eval(e)?.to_num()),
                 };
                 let lo = m.max(1.0);
-                let end = if n.is_infinite() { f64::INFINITY } else { lo + n };
+                let end = if n.is_infinite() {
+                    f64::INFINITY
+                } else {
+                    lo + n
+                };
                 #[allow(clippy::cast_precision_loss)]
                 let hi = if end.is_infinite() {
                     (len as f64) + 1.0
@@ -1221,7 +1250,10 @@ impl Interp {
                     return Ok(Value::str(Str::new()));
                 }
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let (a, bnd) = ((lo as usize).saturating_sub(1), (hi as usize).saturating_sub(1));
+                let (a, bnd) = (
+                    (lo as usize).saturating_sub(1),
+                    (hi as usize).saturating_sub(1),
+                );
                 let mut out = Str::new();
                 for c in chars.get(a..bnd).unwrap_or_default() {
                     c.push_to(&mut out);
@@ -1239,7 +1271,9 @@ impl Interp {
                 let sv = self.eval_arg(args, 0)?;
                 let s = self.to_str(&sv).as_ref().clone();
                 let Some(Expr::Get(Lvalue::Var(arr))) = args.get(1) else {
-                    return Err(Fatal("split: the second argument must be an array".to_string()));
+                    return Err(Fatal(
+                        "split: the second argument must be an array".to_string(),
+                    ));
                 };
                 let arr = *arr;
                 let fs = match args.get(2) {
@@ -1264,7 +1298,9 @@ impl Interp {
                         m.insert(key, Value::from_input(p.clone()));
                     }
                 }
-                Ok(Value::Num(f64::from(u32::try_from(parts.len()).unwrap_or(u32::MAX))))
+                Ok(Value::Num(f64::from(
+                    u32::try_from(parts.len()).unwrap_or(u32::MAX),
+                )))
             }
             Builtin::Sub | Builtin::Gsub => self.substitute(b == Builtin::Gsub, args),
             Builtin::Match => {
@@ -1331,7 +1367,11 @@ impl Interp {
                 let s = self.to_str(&v);
                 let mut out = Str::new();
                 for c in ch::chars(&s) {
-                    let mapped = if b == Builtin::Tolower { c.to_lowercase() } else { c.to_uppercase() };
+                    let mapped = if b == Builtin::Tolower {
+                        c.to_lowercase()
+                    } else {
+                        c.to_uppercase()
+                    };
                     for m in mapped {
                         m.push_to(&mut out);
                     }
@@ -1402,7 +1442,7 @@ impl Interp {
                 return Err(Fatal(
                     "sub: the third argument must be a variable, a field or an array element"
                         .to_string(),
-                ))
+                ));
             }
         };
         let sv = self.load(&target)?;
@@ -1517,7 +1557,11 @@ fn split_with(fs: &Fs, text: &[u8], paragraph_mode: bool) -> Vec<Str> {
             if paragraph_mode {
                 return out
                     .into_iter()
-                    .flat_map(|p| p.split(|b| *b == b'\n').map(<[u8]>::to_vec).collect::<Vec<_>>())
+                    .flat_map(|p| {
+                        p.split(|b| *b == b'\n')
+                            .map(<[u8]>::to_vec)
+                            .collect::<Vec<_>>()
+                    })
                     .collect();
             }
             out
@@ -1658,7 +1702,9 @@ pub fn command_assignment(arg: &[u8]) -> Option<(String, Str)> {
     if name.is_empty() {
         return None;
     }
-    let first_ok = name.first().is_some_and(|c| *c == b'_' || c.is_ascii_alphabetic());
+    let first_ok = name
+        .first()
+        .is_some_and(|c| *c == b'_' || c.is_ascii_alphabetic());
     if !first_ok || !name.iter().all(|c| *c == b'_' || c.is_ascii_alphanumeric()) {
         return None;
     }
@@ -1701,7 +1747,9 @@ pub fn unescape(s: &[u8]) -> Str {
                 while k < 3 {
                     match s.get(i) {
                         Some(d @ b'0'..=b'7') => {
-                            v = v.saturating_mul(8).saturating_add(u32::from(d.wrapping_sub(b'0')));
+                            v = v
+                                .saturating_mul(8)
+                                .saturating_add(u32::from(d.wrapping_sub(b'0')));
                             i = i.saturating_add(1);
                             k = k.saturating_add(1);
                         }

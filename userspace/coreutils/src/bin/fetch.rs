@@ -151,16 +151,23 @@ impl ParsedUrl {
 // Base64 encoder (for basic auth)
 // ---------------------------------------------------------------------------
 
-const BASE64_CHARS: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn base64_encode(input: &[u8]) -> String {
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut i = 0;
     while i < input.len() {
         let b0 = input[i] as u32;
-        let b1 = if i + 1 < input.len() { input[i + 1] as u32 } else { 0 };
-        let b2 = if i + 2 < input.len() { input[i + 2] as u32 } else { 0 };
+        let b1 = if i + 1 < input.len() {
+            input[i + 1] as u32
+        } else {
+            0
+        };
+        let b2 = if i + 2 < input.len() {
+            input[i + 2] as u32
+        } else {
+            0
+        };
 
         let triple = (b0 << 16) | (b1 << 8) | b2;
 
@@ -419,10 +426,7 @@ fn read_fixed_body(
     Ok(body)
 }
 
-fn read_chunked_body(
-    conn: &mut net::Connection,
-    initial: &[u8],
-) -> Result<Vec<u8>, String> {
+fn read_chunked_body(conn: &mut net::Connection, initial: &[u8]) -> Result<Vec<u8>, String> {
     // Accumulate all remaining data, then parse chunks.
     let mut raw = Vec::from(initial);
     let mut buf = [0u8; 8192];
@@ -466,7 +470,11 @@ fn read_chunked_body(
                     body.extend_from_slice(&raw[data_start..data_end]);
                 }
                 // Advance past chunk data + \r\n.
-                let advance = if raw.len() >= needed { needed } else { raw.len() };
+                let advance = if raw.len() >= needed {
+                    needed
+                } else {
+                    raw.len()
+                };
                 raw = raw[advance..].to_vec();
             }
             ChunkParse::Invalid(msg) => {
@@ -504,10 +512,7 @@ fn try_parse_chunk(data: &[u8]) -> ChunkParse {
     }
 }
 
-fn read_until_close(
-    conn: &mut net::Connection,
-    initial: &[u8],
-) -> Result<Vec<u8>, String> {
+fn read_until_close(conn: &mut net::Connection, initial: &[u8]) -> Result<Vec<u8>, String> {
     let mut body = Vec::from(initial);
     let mut buf = [0u8; 8192];
     loop {
@@ -578,7 +583,10 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
         let request_method = if config.head_only { "HEAD" } else { &method };
 
         if config.verbose {
-            eprintln!("> {request_method} {} HTTP/1.1", current_url.request_target());
+            eprintln!(
+                "> {request_method} {} HTTP/1.1",
+                current_url.request_target()
+            );
             eprintln!("> Host: {}", current_url.host);
             for (name, value) in &config.headers {
                 eprintln!("> {name}: {value}");
@@ -595,15 +603,20 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
         );
 
         // Connect.
-        let mut conn =
-            match net::Connection::connect(&current_url.host, current_url.port, config.timeout_secs)
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("fetch: connection to {}:{} failed: {e}", current_url.host, current_url.port);
-                    return EXIT_CONN_ERROR;
-                }
-            };
+        let mut conn = match net::Connection::connect(
+            &current_url.host,
+            current_url.port,
+            config.timeout_secs,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "fetch: connection to {}:{} failed: {e}",
+                    current_url.host, current_url.port
+                );
+                return EXIT_CONN_ERROR;
+            }
+        };
 
         // Send request.
         if let Err(e) = conn.send_all(request.as_bytes()) {
@@ -621,7 +634,10 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
         };
 
         if config.verbose {
-            eprintln!("< HTTP/1.1 {} {}", response.status_code, response.status_text);
+            eprintln!(
+                "< HTTP/1.1 {} {}",
+                response.status_code, response.status_text
+            );
             for (name, value) in &response.headers {
                 eprintln!("< {name}: {value}");
             }
@@ -629,10 +645,7 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
         }
 
         // Check for redirect.
-        let is_redirect = matches!(
-            response.status_code,
-            301 | 302 | 303 | 307 | 308
-        );
+        let is_redirect = matches!(response.status_code, 301 | 302 | 303 | 307 | 308);
 
         if is_redirect && redirects_remaining > 0 {
             if let Some(location) = response.location() {
@@ -657,10 +670,7 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
                 }
             }
         } else if is_redirect && redirects_remaining == 0 && config.follow_redirects {
-            eprintln!(
-                "fetch: too many redirects (max {})",
-                config.max_redirects
-            );
+            eprintln!("fetch: too many redirects (max {})", config.max_redirects);
             return EXIT_HTTP_ERROR;
         }
 
@@ -724,7 +734,10 @@ fn resolve_redirect(base: &ParsedUrl, location: &str) -> String {
             Some(idx) => &base.path[..=idx],
             None => "/",
         };
-        format!("{}://{}:{}{}{}", base.scheme, base.host, base.port, dir, location)
+        format!(
+            "{}://{}:{}{}{}",
+            base.scheme, base.host, base.port, dir, location
+        )
     }
 }
 
@@ -851,7 +864,9 @@ fn parse_header_arg(raw: &str) -> Result<(String, String), String> {
             }
             Ok((name, value))
         }
-        None => Err(format!("invalid header format (expected \"Name: Value\"): {raw}")),
+        None => Err(format!(
+            "invalid header format (expected \"Name: Value\"): {raw}"
+        )),
     }
 }
 
@@ -1025,8 +1040,10 @@ mod tests {
     #[test]
     fn parse_args_header_collects_multiple() {
         let c = cfg(&[
-            "-H", "Accept: application/json",
-            "-H", "X-Custom: 42",
+            "-H",
+            "Accept: application/json",
+            "-H",
+            "X-Custom: 42",
             "http://x/",
         ]);
         assert_eq!(
@@ -1464,19 +1481,13 @@ mod tests {
     #[test]
     fn redirect_absolute_url_used_verbatim() {
         let base = ParsedUrl::parse("http://a.com/x").unwrap();
-        assert_eq!(
-            resolve_redirect(&base, "http://b.com/y"),
-            "http://b.com/y"
-        );
+        assert_eq!(resolve_redirect(&base, "http://b.com/y"), "http://b.com/y");
     }
 
     #[test]
     fn redirect_absolute_path_keeps_origin() {
         let base = ParsedUrl::parse("http://a.com/x").unwrap();
-        assert_eq!(
-            resolve_redirect(&base, "/new"),
-            "http://a.com:80/new"
-        );
+        assert_eq!(resolve_redirect(&base, "/new"), "http://a.com:80/new");
     }
 
     #[test]

@@ -57,7 +57,12 @@ fn main() {
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let mut total = Counts { lines: 0, words: 0, bytes: 0, chars: 0 };
+    let mut total = Counts {
+        lines: 0,
+        words: 0,
+        bytes: 0,
+        chars: 0,
+    };
 
     for path in &files {
         let mut reader: Box<dyn Read> = if path == "-" {
@@ -84,11 +89,15 @@ fn main() {
         total.bytes += counts.bytes;
         total.chars += counts.chars;
 
-        print_counts(&mut out, &counts, path, show_lines, show_words, show_bytes, show_chars);
+        print_counts(
+            &mut out, &counts, path, show_lines, show_words, show_bytes, show_chars,
+        );
     }
 
     if files.len() > 1 {
-        print_counts(&mut out, &total, "total", show_lines, show_words, show_bytes, show_chars);
+        print_counts(
+            &mut out, &total, "total", show_lines, show_words, show_bytes, show_chars,
+        );
     }
 }
 
@@ -112,7 +121,12 @@ fn count_data(data: &[u8]) -> Counts {
     let text = String::from_utf8_lossy(data);
     let chars = text.chars().count();
 
-    Counts { lines, words, bytes, chars }
+    Counts {
+        lines,
+        words,
+        bytes,
+        chars,
+    }
 }
 
 fn print_counts(
@@ -124,10 +138,18 @@ fn print_counts(
     bytes: bool,
     chars: bool,
 ) {
-    if lines { let _ = write!(out, "{:>7} ", c.lines); }
-    if words { let _ = write!(out, "{:>7} ", c.words); }
-    if bytes { let _ = write!(out, "{:>7} ", c.bytes); }
-    if chars { let _ = write!(out, "{:>7} ", c.chars); }
+    if lines {
+        let _ = write!(out, "{:>7} ", c.lines);
+    }
+    if words {
+        let _ = write!(out, "{:>7} ", c.words);
+    }
+    if bytes {
+        let _ = write!(out, "{:>7} ", c.bytes);
+    }
+    if chars {
+        let _ = write!(out, "{:>7} ", c.chars);
+    }
     let _ = writeln!(out, "{name}");
 }
 
@@ -234,7 +256,12 @@ mod tests {
 
     #[test]
     fn print_counts_all_columns() {
-        let c = Counts { lines: 3, words: 12, bytes: 50, chars: 50 };
+        let c = Counts {
+            lines: 3,
+            words: 12,
+            bytes: 50,
+            chars: 50,
+        };
         let mut buf = Vec::new();
         print_counts(&mut buf, &c, "file.txt", true, true, true, true);
         let s = String::from_utf8(buf).unwrap();
@@ -247,7 +274,12 @@ mod tests {
 
     #[test]
     fn print_counts_only_lines() {
-        let c = Counts { lines: 42, words: 0, bytes: 0, chars: 0 };
+        let c = Counts {
+            lines: 42,
+            words: 0,
+            bytes: 0,
+            chars: 0,
+        };
         let mut buf = Vec::new();
         print_counts(&mut buf, &c, "x", true, false, false, false);
         let s = String::from_utf8(buf).unwrap();
@@ -256,7 +288,12 @@ mod tests {
 
     #[test]
     fn print_counts_total_label() {
-        let c = Counts { lines: 100, words: 200, bytes: 300, chars: 300 };
+        let c = Counts {
+            lines: 100,
+            words: 200,
+            bytes: 300,
+            chars: 300,
+        };
         let mut buf = Vec::new();
         print_counts(&mut buf, &c, "total", true, true, true, false);
         let s = String::from_utf8(buf).unwrap();

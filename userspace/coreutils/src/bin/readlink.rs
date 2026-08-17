@@ -60,7 +60,10 @@ fn parse_args(args: &[String]) -> ReadlinkArgs {
             files.push(arg.clone());
         }
     }
-    ReadlinkArgs { canonicalize, files }
+    ReadlinkArgs {
+        canonicalize,
+        files,
+    }
 }
 
 #[cfg(test)]

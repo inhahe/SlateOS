@@ -207,7 +207,11 @@ fn main() -> ExitCode {
         failed = true;
     }
 
-    if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// An I/O failure, and which side of the copy it happened on.
@@ -218,15 +222,25 @@ struct Failure {
 
 impl Failure {
     fn read(error: io::Error) -> Self {
-        Self { error, on_write: false }
+        Self {
+            error,
+            on_write: false,
+        }
     }
     fn write(error: io::Error) -> Self {
-        Self { error, on_write: true }
+        Self {
+            error,
+            on_write: true,
+        }
     }
     /// What to name in the diagnostic: the file for a read, the output for a
     /// write, since naming the input file for a full disk misdirects the reader.
     fn subject(&self, path: &OsString) -> String {
-        if self.on_write { "write error".to_string() } else { path.to_string_lossy().into_owned() }
+        if self.on_write {
+            "write error".to_string()
+        } else {
+            path.to_string_lossy().into_owned()
+        }
     }
 }
 
@@ -244,7 +258,10 @@ impl Default for Numbering {
     /// Line numbers start at one, so this is not a derive: a derived `Default`
     /// would start at zero and every number would be one short.
     fn default() -> Self {
-        Self { next: 1, in_blank_run: false }
+        Self {
+            next: 1,
+            in_blank_run: false,
+        }
     }
 }
 
@@ -285,7 +302,11 @@ fn copy_lines(
         // load-bearing: `-E` marks the newline, so a line without one is
         // written without a `$`, and `cat` must not invent the terminator.
         let terminated = line.last() == Some(&b'\n');
-        let body = if terminated { line.get(..line.len().saturating_sub(1)) } else { line.get(..) };
+        let body = if terminated {
+            line.get(..line.len().saturating_sub(1))
+        } else {
+            line.get(..)
+        };
         let body = body.unwrap_or(&[]);
         let blank = body.is_empty();
 
@@ -598,10 +619,18 @@ mod tests {
     #[test]
     fn numbering_is_six_wide_and_grows_past_it() {
         assert_eq!(run(b"x\n", &["-n"]), b"     1\tx\n");
-        let mut state = Numbering { next: 999_999, in_blank_run: false };
+        let mut state = Numbering {
+            next: 999_999,
+            in_blank_run: false,
+        };
         let mut out: Vec<u8> = Vec::new();
-        copy_lines(io::BufReader::new(&b"a\nb\n"[..]), &parse(&["-n"]).0, &mut state, &mut out)
-            .unwrap_or_else(|e| panic!("io: {}", e.error));
+        copy_lines(
+            io::BufReader::new(&b"a\nb\n"[..]),
+            &parse(&["-n"]).0,
+            &mut state,
+            &mut out,
+        )
+        .unwrap_or_else(|e| panic!("io: {}", e.error));
         assert_eq!(out, b"999999\ta\n1000000\tb\n");
     }
 
@@ -620,7 +649,10 @@ mod tests {
     #[test]
     fn a_line_of_one_space_is_not_blank() {
         // For both `-b` and `-s`, "blank" is empty, not whitespace-only.
-        assert_eq!(run(b"a\n \nb\n", &["-b"]), b"     1\ta\n     2\t \n     3\tb\n");
+        assert_eq!(
+            run(b"a\n \nb\n", &["-b"]),
+            b"     1\ta\n     2\t \n     3\tb\n"
+        );
         assert_eq!(run(b"a\n \n \nb\n", &["-s"]), b"a\n \n \nb\n");
     }
 
@@ -633,7 +665,10 @@ mod tests {
     #[test]
     fn squeeze_happens_before_numbering() {
         // The line that survives is numbered; the ones removed never were.
-        assert_eq!(run(b"a\n\n\n\nb\n", &["-ns"]), b"     1\ta\n     2\t\n     3\tb\n");
+        assert_eq!(
+            run(b"a\n\n\n\nb\n", &["-ns"]),
+            b"     1\ta\n     2\t\n     3\tb\n"
+        );
     }
 
     #[test]

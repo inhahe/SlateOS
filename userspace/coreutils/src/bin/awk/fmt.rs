@@ -85,7 +85,9 @@ pub fn sprintf(fmt: &[u8], args: &[Value], convfmt: &[u8]) -> Result<Str, String
             let mut w = 0usize;
             let mut any = false;
             while let Some(d) = fmt.get(i).filter(|b| b.is_ascii_digit()) {
-                w = w.saturating_mul(10).saturating_add(usize::from(d.wrapping_sub(b'0')));
+                w = w
+                    .saturating_mul(10)
+                    .saturating_add(usize::from(d.wrapping_sub(b'0')));
                 any = true;
                 i = i.saturating_add(1);
             }
@@ -104,7 +106,9 @@ pub fn sprintf(fmt: &[u8], args: &[Value], convfmt: &[u8]) -> Result<Str, String
             } else {
                 let mut p = 0usize;
                 while let Some(d) = fmt.get(i).filter(|b| b.is_ascii_digit()) {
-                    p = p.saturating_mul(10).saturating_add(usize::from(d.wrapping_sub(b'0')));
+                    p = p
+                        .saturating_mul(10)
+                        .saturating_add(usize::from(d.wrapping_sub(b'0')));
                     i = i.saturating_add(1);
                 }
                 // `%.f` means precision zero, which is not the same as no
@@ -114,7 +118,10 @@ pub fn sprintf(fmt: &[u8], args: &[Value], convfmt: &[u8]) -> Result<Str, String
         }
         // Length modifiers exist in C and mean nothing here; skip them so a
         // format string written for C still works.
-        while matches!(fmt.get(i), Some(b'h' | b'l' | b'L' | b'q' | b'j' | b'z' | b't')) {
+        while matches!(
+            fmt.get(i),
+            Some(b'h' | b'l' | b'L' | b'q' | b'j' | b'z' | b't')
+        ) {
             i = i.saturating_add(1);
         }
 
@@ -177,7 +184,11 @@ fn clamp_len(v: f64) -> usize {
         return 0;
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let n = if v >= MAX_FIELD as f64 { MAX_FIELD } else { v as usize };
+    let n = if v >= MAX_FIELD as f64 {
+        MAX_FIELD
+    } else {
+        v as usize
+    };
     n
 }
 
@@ -298,7 +309,11 @@ fn to_radix(mut n: u64, base: u32, upper: bool) -> Str {
     if n == 0 {
         return b"0".to_vec();
     }
-    let digits: &[u8] = if upper { b"0123456789ABCDEF" } else { b"0123456789abcdef" };
+    let digits: &[u8] = if upper {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
     let base64 = u64::from(base.max(2));
     let mut out = Str::new();
     while n > 0 {
@@ -315,7 +330,11 @@ fn floating(spec: &Spec, conv: u8, v: f64) -> Str {
     let prec = spec.prec.unwrap_or(6);
     if !v.is_finite() {
         let word: &[u8] = if v.is_nan() {
-            if conv.is_ascii_uppercase() { b"NAN" } else { b"nan" }
+            if conv.is_ascii_uppercase() {
+                b"NAN"
+            } else {
+                b"nan"
+            }
         } else if conv.is_ascii_uppercase() {
             b"INF"
         } else {
@@ -409,7 +428,11 @@ fn general(v: f64, prec: usize, upper: bool, alt: bool) -> String {
         // Re-derive from the rounded rendering, so a value that rounds up into
         // the next decade picks the same branch C would.
         let probe = format!("{:.*e}", p.saturating_sub(1), v);
-        probe.split(['e', 'E']).nth(1).and_then(|t| t.parse::<i32>().ok()).unwrap_or(e)
+        probe
+            .split(['e', 'E'])
+            .nth(1)
+            .and_then(|t| t.parse::<i32>().ok())
+            .unwrap_or(e)
     };
     #[allow(clippy::cast_possible_wrap)]
     let p_i = p as i32;
@@ -460,7 +483,11 @@ fn character(v: &Value, convfmt: &[u8]) -> Str {
         }
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let code = if (0.0..=f64::from(u32::MAX)).contains(&n) { n as u32 } else { 0 };
+    let code = if (0.0..=f64::from(u32::MAX)).contains(&n) {
+        n as u32
+    } else {
+        0
+    };
     // A code that is not a scalar value is emitted as the single byte it names
     // when it can be, because awk is a byte filter and `printf "%c", 200` in a
     // pipeline is expected to produce one byte.

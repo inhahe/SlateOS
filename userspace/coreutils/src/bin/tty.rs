@@ -107,7 +107,10 @@ mod tests {
 
     #[test]
     fn output_not_a_tty() {
-        assert_eq!(output_line(false, false, None).as_deref(), Some("not a tty"));
+        assert_eq!(
+            output_line(false, false, None).as_deref(),
+            Some("not a tty")
+        );
     }
 
     #[test]
@@ -120,10 +123,7 @@ mod tests {
 
     #[test]
     fn output_tty_without_name_uses_dev_tty() {
-        assert_eq!(
-            output_line(false, true, None).as_deref(),
-            Some("/dev/tty"),
-        );
+        assert_eq!(output_line(false, true, None).as_deref(), Some("/dev/tty"),);
     }
 
     #[test]

@@ -108,8 +108,8 @@ fn lcs_table(a: &[&str], b: &[&str]) -> Vec<Vec<u32>> {
 #[derive(Debug)]
 enum Edit {
     Keep(usize, ()), // line from a[i], b[j]
-    Delete(usize),       // line from a[i]
-    Insert(usize),       // line from b[j]
+    Delete(usize),   // line from a[i]
+    Insert(usize),   // line from b[j]
 }
 
 fn compute_edits<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<Edit> {
@@ -177,7 +177,12 @@ fn output_normal(out: &mut impl Write, a: &[&str], b: &[&str]) {
 
                 if let Some(is) = ins_start {
                     // Change
-                    let _ = writeln!(out, "{}c{}", range_str(start + 1, end + 1), range_str(is + 1, ins_end + 1));
+                    let _ = writeln!(
+                        out,
+                        "{}c{}",
+                        range_str(start + 1, end + 1),
+                        range_str(is + 1, ins_end + 1)
+                    );
                     for line in a.iter().take(end + 1).skip(start) {
                         let _ = writeln!(out, "< {line}");
                     }

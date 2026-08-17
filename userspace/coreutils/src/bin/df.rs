@@ -143,7 +143,11 @@ fn stat_fs(path: &str) -> Result<FsInfo, String> {
         return Err("statvfs failed".to_string());
     }
 
-    let bsize = if buf.f_frsize > 0 { buf.f_frsize } else { buf.f_bsize };
+    let bsize = if buf.f_frsize > 0 {
+        buf.f_frsize
+    } else {
+        buf.f_bsize
+    };
 
     Ok(FsInfo {
         name: path.to_string(),

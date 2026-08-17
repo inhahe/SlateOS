@@ -18,13 +18,14 @@ use std::time::SystemTime;
 fn current_tty() -> String {
     // Try reading the symlink target of stdin.
     if let Ok(target) = fs::read_link("/proc/self/fd/0")
-        && let Some(s) = target.to_str() {
-            // Strip leading /dev/ if present.
-            if let Some(stripped) = s.strip_prefix("/dev/") {
-                return stripped.to_string();
-            }
-            return s.to_string();
+        && let Some(s) = target.to_str()
+    {
+        // Strip leading /dev/ if present.
+        if let Some(stripped) = s.strip_prefix("/dev/") {
+            return stripped.to_string();
         }
+        return s.to_string();
+    }
 
     // Try the TTY environment variable.
     if let Ok(tty) = env::var("TTY") {
@@ -67,7 +68,16 @@ fn days_to_date(mut days: u64) -> (u64, u64, u64) {
     let month_days: [u64; 12] = [
         31,
         if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
 
     let mut month = 0;
@@ -104,8 +114,11 @@ fn parse_utmp_records(data: &[u8]) -> Vec<(String, String, String)> {
         let Some(record) = data.get(offset..offset.saturating_add(RECORD_SIZE)) else {
             break;
         };
-        let Some(type_bytes) = record.get(0..4) else { break };
-        let ut_type = i32::from_le_bytes([type_bytes[0], type_bytes[1], type_bytes[2], type_bytes[3]]);
+        let Some(type_bytes) = record.get(0..4) else {
+            break;
+        };
+        let ut_type =
+            i32::from_le_bytes([type_bytes[0], type_bytes[1], type_bytes[2], type_bytes[3]]);
 
         if ut_type == USER_PROCESS {
             let user = record.get(44..76).map(extract_string).unwrap_or_default();
@@ -125,7 +138,11 @@ fn parse_utmp_records(data: &[u8]) -> Vec<(String, String, String)> {
 fn try_read_utmp(path: &Path) -> Option<Vec<(String, String, String)>> {
     let data = fs::read(path).ok()?;
     let entries = parse_utmp_records(&data);
-    if entries.is_empty() { None } else { Some(entries) }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
 }
 
 /// Read a NUL-terminated (or full-buffer) UTF-8 string from a byte slice.
@@ -241,7 +258,10 @@ mod tests {
     #[test]
     fn format_with_host() {
         let line = format_who_line("bob", "pts/1", "2024-01-01 12:34", "10.0.0.1");
-        assert_eq!(line, "bob          pts/1        2024-01-01 12:34 (10.0.0.1)");
+        assert_eq!(
+            line,
+            "bob          pts/1        2024-01-01 12:34 (10.0.0.1)"
+        );
     }
 
     #[test]
@@ -281,7 +301,14 @@ mod tests {
     fn parse_one_user_process() {
         let rec = build_record(7, "alice", "pts/0", "localhost");
         let parsed = parse_utmp_records(&rec);
-        assert_eq!(parsed, vec![("alice".to_string(), "pts/0".to_string(), "localhost".to_string())]);
+        assert_eq!(
+            parsed,
+            vec![(
+                "alice".to_string(),
+                "pts/0".to_string(),
+                "localhost".to_string()
+            )]
+        );
     }
 
     #[test]

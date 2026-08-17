@@ -42,6 +42,60 @@ pub enum TextOverflow {
     Ellipsis,
 }
 
+/// One coloured stretch of a [`RichText`](RenderCommand::RichText) string.
+///
+/// A span is a range of *bytes*, and deliberately not a range of glyphs: the
+/// caller — a syntax highlighter, a diff view, a search-match highlighter —
+/// knows where its runs begin and end in the text, and cannot know where they
+/// begin and end in the glyphs, because that depends on the face, the size and
+/// the shaping. The renderer performs that translation, since it is the party
+/// doing the shaping.
+///
+/// Spans are cumulative: `end` is one past the last byte the colour covers, and
+/// the span begins where the previous one ended (at 0 for the first). That
+/// representation makes gaps and overlaps *unrepresentable* rather than merely
+/// invalid — a start-and-end pair invites a caller to emit two spans that
+/// disagree about a byte, and then the answer depends on which one the renderer
+/// happens to consult first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextSpan {
+    /// Byte offset one past the last byte this colour applies to.
+    ///
+    /// `u32` rather than `usize` because this crosses to another process: the
+    /// wire format needs a fixed width, and a 4 GiB line of text is not a case
+    /// worth widening every span for.
+    pub end: u32,
+    /// What to draw those bytes in.
+    pub color: Color,
+}
+
+impl TextSpan {
+    /// The colour for a glyph whose source byte is `cluster`.
+    ///
+    /// Lives here, next to the representation, so that every backend resolves a
+    /// span list the same way. Two backends that each write the obvious three
+    /// lines will agree on the ordinary case and disagree on the boundary, and
+    /// the boundary is every single colour change on the screen.
+    ///
+    /// A binary search rather than a forward walk because glyphs are *drawn* in
+    /// visual order, where clusters do not ascend — a right-to-left word's
+    /// glyphs run backwards through the string. The list is one entry per
+    /// syntax token, so this is a handful of comparisons.
+    ///
+    /// `None` means no span covers the byte, rather than a fallback colour
+    /// passed in and handed straight back: a backend holds its fallback in its
+    /// own pixel format, and taking it here would oblige it to convert that
+    /// colour into this one's form once per glyph only to convert it back.
+    #[must_use]
+    pub fn color_at(spans: &[Self], cluster: usize) -> Option<Color> {
+        // The first span that has not already ended at `cluster`. Cumulative
+        // spans mean that span also *starts* at or before `cluster`, so it is
+        // the containing one; if there is none, the byte is past the last span.
+        let i = spans.partition_point(|s| s.end as usize <= cluster);
+        spans.get(i).copied().map(|s| s.color)
+    }
+}
+
 /// A render command — one drawing primitive.
 #[derive(Clone, Debug)]
 pub enum RenderCommand {
@@ -78,6 +132,55 @@ pub enum RenderCommand {
         /// What to do with the part that does not fit `max_width`. Vacuous —
         /// and so [`TextOverflow::Clip`] by convention — when `max_width` is
         /// `None`, since nothing can fail to fit an unbounded width.
+        overflow: TextOverflow,
+    },
+
+    /// Draw one string in several colours, shaped as a single run.
+    ///
+    /// This is [`Text`](RenderCommand::Text) for text whose colour changes part
+    /// way through — syntax highlighting, a diff, a highlighted search match —
+    /// and it exists because the obvious alternative is wrong. Cutting the
+    /// string at each colour change and drawing the pieces end to end assumes
+    /// that screen order is byte order: it is, right up until the text contains
+    /// a right-to-left run, at which point the pieces are laid out left to right
+    /// while their glyphs belong interleaved. There is then no `x` at which a
+    /// piece can be drawn correctly, because the piece is not contiguous on the
+    /// screen. Colour has to be an attribute of a glyph, not of a substring to
+    /// draw — which is what this command makes it.
+    ///
+    /// It is also *cheaper* than the decomposition it replaces, which is worth
+    /// stating because the reverse is what one would guess. Shaping carries a
+    /// fixed cost of a few microseconds on top of the per-character cost, and
+    /// cutting a line into *n* pieces pays it *n* times: an 80-character line of
+    /// 40 tokens measured 2.3x the cost of shaping it whole. See
+    /// `known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL`.
+    ///
+    /// Each glyph takes the colour of the span containing the byte it came
+    /// from. Bytes past the last span — and the overflow mark, which belongs to
+    /// no byte at all — take `color`.
+    ///
+    /// A backend that does not understand this command should draw the string
+    /// in `color`, which is wrong only in its colours and never in its layout.
+    RichText {
+        x: f32,
+        y: f32,
+        text: String,
+        /// Cumulative colour runs over `text`, in ascending order of `end`. May
+        /// be empty, which is `Text` with extra steps.
+        ///
+        /// Offsets that are not on a character boundary, that do not ascend, or
+        /// that run past the end of `text` are not an error the renderer
+        /// reports: it resolves each glyph against whatever it is given and
+        /// draws. A malformed list mis-colours; it never mis-positions, and it
+        /// never fails to draw the text.
+        spans: Vec<TextSpan>,
+        /// The colour for bytes after the last span, and for the overflow mark.
+        color: Color,
+        font_size: f32,
+        font_weight: FontWeightHint,
+        max_width: Option<f32>,
+        /// As [`Text`](RenderCommand::Text)'s: vacuous, and so
+        /// [`TextOverflow::Clip`] by convention, when `max_width` is `None`.
         overflow: TextOverflow,
     },
 
@@ -389,6 +492,79 @@ impl RenderTree {
         });
     }
 
+    /// Draw one string whose colour changes part way through, shaped whole.
+    ///
+    /// The multi-coloured counterpart of [`RenderTree::text`], and unbounded for
+    /// the same reason: use it where the text has nothing to its right, or clip
+    /// the region yourself. See [`RenderCommand::RichText`] for why this is a
+    /// primitive rather than a loop over [`RenderTree::text`] — briefly, the
+    /// loop is the assumption that screen order is byte order, and it is both
+    /// wrong under bidirectional text and slower on ordinary text.
+    pub fn rich_text(
+        &mut self,
+        x: f32,
+        y: f32,
+        text: &str,
+        spans: Vec<TextSpan>,
+        color: Color,
+        font_size: f32,
+    ) {
+        self.push(RenderCommand::RichText {
+            x,
+            y,
+            text: text.to_string(),
+            spans,
+            color,
+            font_size,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            // Vacuous: with no bound, nothing can fail to fit.
+            overflow: TextOverflow::Clip,
+        });
+    }
+
+    /// [`RenderTree::rich_text`] bounded to `width`, cutting without a mark.
+    ///
+    /// The unmarked cut is deliberate and is the one case §427 exempts: this is
+    /// for a *viewport* onto text that visibly continues — a code editor's line,
+    /// a log pane — where the reader can see the text filling the pane and has a
+    /// scrollbar to reach the rest. An ellipsis there would claim the line ends
+    /// at the window edge, which is the opposite of true. Use it only where that
+    /// holds; for a rich-text *label* in a column, the cut is real information
+    /// and wants a mark.
+    ///
+    /// The bound is not only about honesty: without it the renderer shapes and
+    /// blits every glyph of a line that may be thousands of columns wide, of
+    /// which a screenful is visible. `max_width` is what lets it stop.
+    // The eight are [`RenderTree::text_in`]'s seven plus the spans, and the same
+    // argument applies: they are the irreducible description of one piece of
+    // drawn text, and a struct would only move them to the call site, where they
+    // would read worse than positional arguments matching the sibling
+    // primitives.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rich_text_clipped(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        text: &str,
+        spans: Vec<TextSpan>,
+        color: Color,
+        font_size: f32,
+    ) {
+        self.push(RenderCommand::RichText {
+            x,
+            y,
+            text: text.to_string(),
+            spans,
+            color,
+            font_size,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width),
+            overflow: TextOverflow::Clip,
+        });
+    }
+
     pub fn clip(&mut self, x: f32, y: f32, width: f32, height: f32) {
         self.push(RenderCommand::PushClip {
             x,
@@ -581,5 +757,148 @@ mod tests {
             FontWeightHint::Bold,
         );
         assert_eq!(overflow_of(&tree), TextOverflow::Ellipsis);
+    }
+
+    // ---- rich text ---------------------------------------------------------
+
+    const RED: Color = Color::rgb(255, 0, 0);
+    const GREEN: Color = Color::rgb(0, 255, 0);
+    const BLUE: Color = Color::rgb(0, 0, 255);
+
+    fn spans(ends: &[(u32, Color)]) -> Vec<TextSpan> {
+        ends.iter().map(|&(end, color)| TextSpan { end, color }).collect()
+    }
+
+    /// The basic contract: a byte inside a span takes that span's colour, and
+    /// the span it is inside is the first one that has not already ended.
+    #[test]
+    fn a_byte_takes_the_colour_of_the_span_containing_it() {
+        let s = spans(&[(3, RED), (6, GREEN)]);
+        for (byte, want) in [(0, RED), (1, RED), (2, RED), (3, GREEN), (5, GREEN)] {
+            assert_eq!(
+                TextSpan::color_at(&s, byte),
+                Some(want),
+                "byte {byte} resolved wrongly",
+            );
+        }
+    }
+
+    /// `end` is exclusive, so the boundary byte belongs to the *next* span. This
+    /// is the off-by-one that decides the colour of every character adjacent to
+    /// a colour change on the screen — which is to say, all of the interesting
+    /// ones.
+    #[test]
+    fn a_span_end_is_exclusive() {
+        let s = spans(&[(1, RED), (2, GREEN)]);
+        assert_eq!(TextSpan::color_at(&s, 0), Some(RED));
+        assert_eq!(TextSpan::color_at(&s, 1), Some(GREEN));
+    }
+
+    /// Past the last span there is no answer to give, and the *backend's* own
+    /// fallback is the right one — see the method's doc for why it is not passed
+    /// in and handed back.
+    #[test]
+    fn a_byte_past_every_span_has_no_colour() {
+        assert_eq!(TextSpan::color_at(&spans(&[(3, RED)]), 3), None);
+        assert_eq!(TextSpan::color_at(&spans(&[(3, RED)]), 900), None);
+        assert_eq!(TextSpan::color_at(&[], 0), None);
+    }
+
+    /// An empty span — one whose `end` equals the previous span's — covers no
+    /// byte and must never win. A tokenizer emitting a zero-length token, or a
+    /// scroll position that clamps two token starts to the same offset, produces
+    /// exactly this.
+    #[test]
+    fn an_empty_span_colours_nothing() {
+        let s = spans(&[(2, RED), (2, GREEN), (4, BLUE)]);
+        assert_eq!(TextSpan::color_at(&s, 0), Some(RED));
+        assert_eq!(TextSpan::color_at(&s, 1), Some(RED));
+        assert_eq!(TextSpan::color_at(&s, 2), Some(BLUE));
+        assert_eq!(TextSpan::color_at(&s, 3), Some(BLUE));
+    }
+
+    /// The lookup is a binary search, so it must not assume it is walked in
+    /// ascending order — glyphs are *drawn* in visual order, where a
+    /// right-to-left word's clusters run backwards. Querying the same list
+    /// backwards must give the same answers.
+    #[test]
+    fn resolution_does_not_depend_on_query_order() {
+        let s = spans(&[(2, RED), (5, GREEN), (9, BLUE)]);
+        let forward: Vec<_> = (0..9).map(|b| TextSpan::color_at(&s, b)).collect();
+        let mut backward: Vec<_> = (0..9).rev().map(|b| TextSpan::color_at(&s, b)).collect();
+        backward.reverse();
+        assert_eq!(forward, backward);
+    }
+
+    fn rich(tree: &RenderTree) -> (&str, &[TextSpan], Option<f32>, TextOverflow) {
+        match tree.commands.first().expect("one command") {
+            RenderCommand::RichText {
+                text,
+                spans,
+                max_width,
+                overflow,
+                ..
+            } => (text.as_str(), spans.as_slice(), *max_width, *overflow),
+            other => panic!("expected RichText, got {other:?}"),
+        }
+    }
+
+    /// One command, not one per colour: the whole point is that the string is
+    /// shaped once. A helper that quietly emitted a command per span would pass
+    /// every colour assertion and reintroduce the bug.
+    #[test]
+    fn rich_text_emits_a_single_command() {
+        let mut tree = RenderTree::new();
+        tree.rich_text(
+            0.0,
+            0.0,
+            "let x = 1;",
+            spans(&[(3, RED), (5, GREEN), (10, BLUE)]),
+            Color::rgb(0, 0, 0),
+            11.0,
+        );
+        assert_eq!(tree.len(), 1);
+        let (text, s, max_width, overflow) = rich(&tree);
+        assert_eq!(text, "let x = 1;");
+        assert_eq!(s.len(), 3);
+        // Unbounded, so the overflow question is vacuous — as for `text`.
+        assert_eq!(max_width, None);
+        assert_eq!(overflow, TextOverflow::Clip);
+    }
+
+    /// The viewport variant bounds the run and says so, and does *not* ask for a
+    /// mark: the text visibly continues past the pane edge, and an ellipsis
+    /// there would claim it ends.
+    #[test]
+    fn clipped_rich_text_is_bounded_and_unmarked() {
+        let mut tree = RenderTree::new();
+        tree.rich_text_clipped(
+            0.0,
+            0.0,
+            120.0,
+            "let x = 1;",
+            spans(&[(3, RED)]),
+            Color::rgb(0, 0, 0),
+            11.0,
+        );
+        let (text, _, max_width, overflow) = rich(&tree);
+        // Not elided by the helper: the renderer cuts at the pixel, so the
+        // string arrives whole and the cut lands where the glyphs actually run
+        // out rather than where a second measurement guessed they would.
+        assert_eq!(text, "let x = 1;");
+        assert_eq!(max_width, Some(120.0));
+        assert_eq!(overflow, TextOverflow::Clip);
+    }
+
+    /// An empty span list is `Text` with extra steps, and must behave like it —
+    /// every byte falls through to the fallback colour.
+    #[test]
+    fn rich_text_with_no_spans_is_uniformly_the_fallback() {
+        let mut tree = RenderTree::new();
+        tree.rich_text(0.0, 0.0, "plain", Vec::new(), RED, 11.0);
+        let (text, s, _, _) = rich(&tree);
+        assert_eq!(text, "plain");
+        assert!(s.is_empty());
+        assert!((0..5).all(|b| TextSpan::color_at(s, b).is_none()));
     }
 }

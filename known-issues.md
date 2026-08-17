@@ -28168,7 +28168,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 10 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 11 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28581,9 +28581,122 @@ upstream C source rather than a black-box probe:
   the code from the C source, then reconciling, is what caught these; writing
   both from intuition would have produced a self-consistent wrong utility.
 
+`fold` is the eleventh (`scripts/fold-diff.sh`: 272 passed, 0 differed, 5 differ
+on purpose — the directory operand, `--help`, `--version`, and the two
+*abbreviations* of the latter pair, which are xfails rather than plain cases so
+that what they certify is "`--he` resolves at all", not the help text we already
+know differs). The old implementation was wrong in six ways a one-line command
+would show — a column was always a byte, input was decoded as UTF-8 through
+`lines()` (so a non-UTF-8 file stopped at the first bad byte, CRs vanished, and
+an unterminated last line *gained* a newline), `-w bogus` silently became
+`-w 80` via `parse().unwrap_or(80)`, `-w 0` meant "don't wrap" where GNU refuses
+it, every exit was 0, and `-b`/`--width=N`/`-40`/`--` were all read as
+filenames. Four things worth carrying forward:
+
+- **Measuring the *next* utility found a bug in the *last* one.** Probing
+  `fold --width 5` to establish its grammar is what exposed that `expand
+  --tabs 4` and `unexpand --tabs 4` — shipped an hour earlier — printed
+  `option '--tabs' requires an argument`. A long option with a *required*
+  argument takes the next word when there is no `=`; both files had been
+  written from the opposite belief, and *both harnesses lacked the row that
+  would have caught it*, so the harnesses were part of the fix (commit
+  `2a70349c7`). Every other converted utility already got this right, which is
+  the tell: when one conversion disagrees with seven, suspect the one.
+  Generalise: a utility with a required-argument long option needs the
+  separated spelling in its harness, not only the `=` one.
+- **A sixth shared module, `xnum.rs`,** rather than a third hand-rolled copy of
+  gnulib's `xstrtoumax`/`xdectoint`. `nl` and `head` had each already written a
+  partial one, disagreeing exactly where two partial copies would, and `fold
+  -w` would have been the third. The grammar is much larger than "a decimal
+  integer": leading whitespace, an accepted `+`, a suffix table with two
+  possible bases, a bare suffix meaning *one* of it (`head -c K` is 1024), and
+  — the part no one reinvents correctly — a choice between two different
+  `strerror` sentences for out-of-range decided by a heuristic on the *value*
+  (`INT_MAX / 2`) rather than on the bound that was violated. The suffix table
+  was certified against GNU `head -c` rather than against my reading of it.
+  `fold` passes `Some(b"")` (no suffixes at all), which is why `fold -w 1K` is
+  an error though `head -c 1K` is not: one function, different caller lists.
+- **The over-wide character does not reset the column.** When a character alone
+  exceeds the width, upstream emits it on its own line via `if (offset_out ==
+  0) { line_out[offset_out++] = c; continue; }` — and that `continue` skips the
+  `column = offset_out = 0` that every *other* break performs. So `printf
+  'a\tb\n' | fold -w 4` is `a\n\t\nb\n`, not the intuitive `a\n\tb\n`: the tab
+  lands alone at column 8, and `b` is therefore column 9 and breaks again. Both
+  halves of the unit test asserting the intuitive answer were wrong and GNU was
+  right, at width 8 as well as at width 4.
+- **`fold` is per-file where `expand` is one stream.** `column` and
+  `offset_out` are locals of `fold_file`, so a file not ending in a newline has
+  its partial line flushed *without* one and the next operand starts at column
+  zero. `expand`'s operands are a single continuous stream. The two utilities
+  are neighbours, share a harness shape, and differ here — which is precisely
+  why `half1.txt`/`half2.txt` exist in both harnesses with opposite
+  expectations.
+
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
-**Status: OPEN.**
+**Status: OPEN — items 3 and 4 (steps (c) and (d)) done 2026-08-17; 1 and 2
+remain.**
+
+**Update 2026-08-17 — item 4 is fixed.** `draw_tokens` no longer emits a
+command per token. The toolkit gained a `RenderCommand::RichText`: one string,
+one shaping, plus a list of byte-ranged colour spans, and the renderer — which
+is the party doing the shaping, and the only party that knows the resolved
+font — gives each glyph the colour of the span containing the byte it came
+from. See `design-decisions.md` §455 for why the spans cross the wire as byte
+ranges rather than as positioned glyphs, and why span ends are cumulative. The
+editor now emits exactly one `rich_text_clipped` per visible line;
+`a_highlighted_line_is_drawn_as_one_shaped_run` is the regression guard, and
+`rich_text_lays_out_exactly_as_plain_text_does` in the compositor asserts the
+pixels are unchanged for ordinary text. The kerning across token boundaries
+that the old comment accepted losing comes back for free, and the 2.3x cost of
+the decomposition goes with it.
+
+**Update 2026-08-17 — item 3 is fixed too.** `Document::scroll_col`, a byte
+offset, is now `Document::scroll_px`, a pixel offset. The line is shaped once,
+whole, and *translated* left by `scroll_px` under a clip rectangle, instead of
+being sliced at a byte and the tail re-shaped. That is the difference between a
+window onto the correctly-ordered line and a separate shaping of part of it:
+the bidi algorithm resolves visual order from the whole paragraph, so a suffix
+can come out ordered differently from the way those same characters sit in the
+complete line — scrolling would have rearranged the text rather than slid it.
+`a_scroll_changes_only_where_the_line_is_drawn_not_what` is the regression
+guard; it asserts the drawn string and every span are *identical* at rest and
+scrolled, and only the `x` differs.
+
+Three things fell out of it:
+
+- **The "scrolled into the middle of a character" bug class is gone, not
+  guarded.** There is no slice left to land inside a character, so `rebase` lost
+  its scroll argument and became `span_end`, and the test that drove
+  `scroll_col` through every byte of `"café au lait"` was replaced by one
+  asserting a multi-byte line is drawn *whole* at every scroll position.
+- **The caret is measured over the whole prefix**, from byte 0, then shifted —
+  not measured from the scroll position. It therefore keeps the kerning that
+  used to be lost at the scroll boundary, and sits in the same coordinate
+  system as the glyphs it is placed among.
+- **`max_width` is measured from the shifted x**, since the renderer stops at
+  `x + max_width`. Getting that wrong is invisible until someone scrolls and
+  then truncates the line early by exactly the scroll distance;
+  `the_drawn_run_is_bounded_by_the_viewport` now asserts the stop lands on the
+  viewport edge at a non-zero scroll.
+
+Also added `EditorState::ensure_caret_visible_horizontally`, the companion to
+the existing `Document::ensure_cursor_visible` and the reason `scroll_px` is
+ever non-zero. **Note that neither is called by anything yet** — `apps/editor`
+has no live input loop; its `main()` is a demo harness, and the editor is a
+model plus a renderer driven by tests. Both are ready for the loop when it
+lands. (`ensure_cursor_visible` having sat uncalled since it was written is
+worth knowing: vertical auto-scroll is equally unwired, so a caret moved below
+the viewport vanishes today for the same reason a horizontal one used to.)
+
+**What that leaves.** Items 1 and 2 — the caret's x and the selection
+rectangles are still prefix-*width* sums, and under a right-to-left run the
+caret between two characters is not at the summed width of the bytes before
+it, nor is a selection one rectangle. Both need the shaped run's cluster
+positions rather than a measured width, which is step (e), and step (b)'s
+per-line shaped cache is what makes asking for those positions cheap. **(b) is
+now the head of the queue**, because (e) wants somewhere to ask for cluster
+positions and (b) is what provides it.
 
 **What.** `apps/editor` was left out of `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`
 above, and not because its arrow keys are fine — they have the same defect. It
@@ -28624,7 +28737,10 @@ widgets do today.
    than the same characters occupy in the full line. Scrolling has to become
    pixel-based over the whole shaped line, with clipping, rather than
    byte-based over a re-shaped tail.
-4. **Syntax highlighting draws one run per token, each positioned at the sum of
+4. **~~Syntax highlighting draws one run per token~~ — FIXED 2026-08-17, see
+   the update at the top of this entry.** Kept below as written, because it is
+   the argument for the shape of the fix and (d) rests on the same reasoning.
+   **Syntax highlighting draws one run per token, each positioned at the sum of
    the previous runs' widths** — `draw_tokens` (`main.rs:1513`), which walks the
    `StyledToken` list emitting a `tree.text(x, …)` per token and advancing
    `x += text::measure(piece, …)`. Found 2026-08-17 while scoping the fix; it is
@@ -28678,9 +28794,11 @@ doing them in the wrong order means writing code twice. Shape-the-whole-line is
 the foundation and 3 and 4 both sit on it, so: (a) ~~measure the shaping cost on
 a pathological line and decide the caching question~~ — **done 2026-08-17; the
 answer is "cache it", and the numbers are in the shaping entry below**;
-(c) convert `draw_tokens` to colour glyphs rather than slice strings (4), which
-is the change that makes the output correct; (d) convert scrolling to
-pixels over the shaped run with clipping (3); (b) build the per-line shaped
+~~(c) convert `draw_tokens` to colour glyphs rather than slice strings (4)~~ —
+**done 2026-08-17, see the update at the top**;
+~~(d) convert scrolling to pixels over the shaped run with clipping (3)~~ —
+**done 2026-08-17, see the second update at the top**; **(b) is now the head of
+the queue:** build the per-line shaped
 cache keyed on document revision; (e) 1 and 2 then fall out as
 one-line substitutions to `text::caret_x` / `cursor_at` / `selection_boxes`,
 because by then the shaped line they need is already in hand. Motion (the arrow
@@ -29889,3 +30007,130 @@ the attribution this entry got wrong.
 second lock while holding a first, so the per-nested-acquire cost is measured
 directly instead of being inferred from whichever unrelated benchmark happens
 to take nested locks.
+
+## TD-SPANS-ARE-LAID-OUT-END-TO-END (lane C, 2026-08-17)
+
+**What.** Three more places have the defect `TD-EDITOR-IS-NOT-BIDIRECTIONAL`
+item 4 just had fixed — two widgets in `gui/toolkit/src/textview.rs` and
+`apps/markdowneditor` — and all three were left alone deliberately: the fix
+that worked for the editor does not fit them, for a reason worth writing down
+before someone tries it.
+
+`RichTextView` draws a wrapped line by walking its `RichSpan`s, emitting a
+`RenderCommand::Text` per span at a running `x` and advancing
+`x += self.span_width(span, heading)` (`textview.rs:1821` for selection boxes,
+`:2541` for the drawing itself; `span_width` at `:1751` is
+`crate::text::measure`). Laying the pieces out end to end **is** the assumption
+that screen order equals byte order — the same assumption, with the same
+consequence: on a line containing a right-to-left run the spans' glyphs belong
+interleaved with each other, so there is no `x` at which a span can be drawn as
+one left-to-right piece.
+
+`SimpleTextView` (the ANSI/terminal view) advances by
+`columns(&span.text) * self.config.char_width` (`:1125`) instead. That is
+narrower than a bug: a terminal *is* a grid of cells and advancing by cells is
+the terminal's own model, not a mis-measurement. It is still wrong under a
+right-to-left run — a terminal has to reorder within the line to display one —
+but fixing it is a terminal-bidi question (BiDi in a cell grid), not the same
+question as `RichTextView`'s.
+
+`apps/markdowneditor` has the same shape as `RichTextView` and one extra fault
+on top. It emits a `RenderCommand::Text` per `HighlightSpan`
+(`markdowneditor/src/main.rs:2881–2898`) positioned by
+`col_x(line, span.start, text_x)` — and `col_x` (`:139`) is
+`text_x + prefix.chars().count() * char_width()`, a *nominal* character width
+multiplied by a character count. That is wrong before bidi ever enters: it
+assumes every glyph is exactly `char_width()` wide, so on a proportional face
+the error compounds along the line and every span after the first lands in the
+wrong place. The same expression positions the caret, so the caret and the text
+drift together and the editor looks self-consistent while both are wrong. Fix
+the nominal width first — that one is a plain bug with a plain fix
+(`text::measure`, exactly as `apps/editor`'s caret comment already argues) —
+and the span layout with the rest of this entry.
+
+**Why `RichText` does not simply apply.** The editor's spans differ only in
+*colour*, which is why a `TextSpan { end, color }` could carry them. These do
+not:
+
+| Carrier | Per-span attributes beyond colour |
+|---|---|
+| `RichSpan` → `RichSpanStyle` (`:1215`) | `weight`, `font_style`, `font_size`, `bg_color`, `underline`, `strikethrough`, `link` |
+| `SimpleTextView` → `AnsiStyle` (`:161`) | `bg`, `bold`, `dim`, `italic`, `underline`, `reverse` |
+| `markdowneditor` → `HighlightSpan` (`:2197`) | `weight` |
+
+A span that changes the *size* or the *weight* changes the shaping, so it is
+not merely a colour attribute painted onto glyphs that were shaped uniformly —
+it is a genuine style run, and shaping a line whose runs differ in face means
+shaping each run and then ordering the results, which is what a real text
+engine (HarfBuzz + a bidi pass + a line breaker) does. `underline`,
+`strikethrough` and `bg_color` are worse still: each needs the *rectangles* the
+span occupies on screen, and under bidi one span occupies several disjoint
+rectangles — exactly the problem `text::selection_boxes` already solves for
+selections, and the same machinery is the answer here.
+
+**The proper fix.** Widen the render primitive from "colour per byte range" to
+"style per byte range" — a `RichTextSpan { end, color, bg, weight, size,
+decorations }` — and have the renderer shape each style run, order the runs by
+the bidi algorithm over the whole line, then emit glyphs and, for each span,
+the set of rectangles its glyphs cover (which the decorations and the
+background are drawn into). That is a larger change than §455's, and it wanted
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL` step (d) done first: (d) establishes
+shape-the-whole-line-and-clip in the editor, which is the same shape this
+needs, and doing them in the other order means designing the multi-run
+machinery against no caller.
+
+**That prerequisite is met as of 2026-08-17** — step (d) landed, and the
+pattern it establishes is worth copying verbatim here: shape the whole line,
+translate it under a clip rectangle rather than slicing it, and measure
+`max_width` from the *shifted* x. `apps/editor`'s `draw_tokens` is the worked
+example.
+
+**Severity.** Low today for the bidi part, same as the editor's:
+uni-directional text lays out correctly under the present code, and
+`RichTextView`'s callers are help text and markdown-ish rendering. It bites on
+a document with a quoted Arabic or Hebrew phrase — which is precisely what a
+markdown view exists to display. **`markdowneditor`'s nominal character width
+is not low severity** and is not really part of this entry's question: it is
+visibly wrong on any proportional face, today, in English.
+
+**Where.** `gui/toolkit/src/textview.rs`: `RichTextView::span_width` (~1751),
+`selection_boxes_of_cols` (~1796–1821), the draw loop (~2470–2545); and
+`SimpleTextView`'s draw loop (~1090–1126) for the terminal-grid variant.
+`apps/markdowneditor/src/main.rs`: `col_x` (~139), the span draw loop
+(~2881–2898), and the caret at (~2902).
+
+## TD-EDITOR-HAS-NO-INPUT-LOOP (lane C, 2026-08-17)
+
+**What.** `apps/editor` is a document model plus a renderer with no way to
+drive it. `fn main()` is a demo harness that mutates a `Document`
+programmatically and prints to stdout; there is no key handler, no event
+dispatch, and no connection to the compositor. Every feature the editor has —
+undo/redo, find, folding, outline, structural selection, external-change
+merging, syntax highlighting — is reachable only from tests.
+
+**How it was found.** Wiring horizontal auto-scroll for
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL` step (d) needed a caller, and there was none.
+`Document::ensure_cursor_visible` turned out to have *zero* callers and to have
+had none since it was written: vertical auto-scroll is written, tested by
+nobody, and never runs. `EditorState::ensure_caret_visible_horizontally`, added
+by step (d), is in exactly the same position — correct, tested, and uncalled.
+
+**Why this matters more than it looks.** Two uncalled scroll functions is the
+visible symptom; the real cost is that *nothing* in the editor is exercised
+end to end. A model-level test can assert that `ensure_cursor_visible` moves
+`scroll_line`, but not that anything ever asks it to — and that is precisely
+the kind of defect that survives a green test suite. The longer the model
+grows without a driver, the more of it is written against an imagined caller.
+
+**The proper fix.** Give the editor a real event loop against
+`gui/remote`: connect, receive input events, translate them to the document
+operations that already exist, call `ensure_cursor_visible` and
+`ensure_caret_visible_horizontally` after any cursor movement, and push a
+`RenderTree` per frame. `apps/markdowneditor` has a working loop of this shape
+to copy from. The demo `main()` should become an example or a test, not be
+deleted — it is a compact tour of the model's API.
+
+**Severity.** High as a *blocker* (the editor cannot be used at all), low as a
+*defect* (nothing is wrong with what exists; it is only unreachable). Not
+urgent for correctness, but it should come before more model features are
+added, so that what is added is shaped by a real caller.

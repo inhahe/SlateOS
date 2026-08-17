@@ -224,6 +224,19 @@ run_ascii -w -1 plain.txt
 run_ascii -w abc plain.txt
 run_ascii -w '' plain.txt
 run_ascii -w 2147483648 plain.txt
+# Which of the two `strerror` sentences an out-of-range value gets is decided by
+# a heuristic on the *value* — `INT_MIN / 2 <= v <= INT_MAX / 2` — and not by
+# the limit that was violated. Every row above falls off a limit at a magnitude
+# where the two possible rules agree, which is exactly how a wrong rule survived
+# in this utility until `xnum.rs` was written: the old code said "Numerical
+# result out of range" for anything below the floor, and GNU says "Value too
+# large" once the value is past `INT_MIN / 2`. These are the rows that separate
+# them, and every harness for a utility with a *bounded* number needs them.
+run_ascii -w -3000000000 plain.txt
+run_ascii -l -3000000000 plain.txt
+run_ascii -l -5 plain.txt
+run_ascii -w -1073741824 plain.txt
+run_ascii -w -1073741825 plain.txt
 
 # --- -v and -i: signed, and zero is legal ------------------------------------
 run_case -ba -w4 -v 10 plain.txt

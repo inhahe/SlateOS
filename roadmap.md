@@ -944,6 +944,22 @@ Roadmap:
   horizontally by *slicing the line at a byte offset* — and the visible part of
   a bidirectional line is not the shaping of a substring of it, so that is a
   model change rather than a substitution (`TD-EDITOR-IS-NOT-BIDIRECTIONAL`).
+  **One of that entry's four items is now done** (§455): syntax highlighting no
+  longer draws a command per token. Cutting a line at each colour change and
+  laying the pieces out end to end *is* the screen-order-is-byte-order
+  assumption, applied once per token; colour is now an attribute of a glyph,
+  carried by a new `RenderCommand::RichText` (a string plus byte-ranged colour
+  spans) that the renderer resolves per glyph while it shapes — it has to be
+  the renderer, since the compositor re-shapes the string itself and resolves
+  the family from its own font stack, so the app cannot know which glyphs it is
+  colouring. It is also 2.3x *faster* on an ordinary 80-character line of 40
+  tokens, since each shaping pays a fixed cost that the decomposition paid once
+  per piece. Still outstanding there: the byte-offset scroll (the model change
+  above), the caret, and hit testing. The same end-to-end layout was then found
+  in three more places — `RichTextView`, `SimpleTextView` and
+  `apps/markdowneditor` — and cannot take the same fix, because their spans
+  carry weight and size rather than colour alone
+  (`TD-SPANS-ARE-LAID-OUT-END-TO-END`).
   Vello itself waits on `[A]`'s GPU driver.
   **Variable fonts are done** (§448, §449, §450, §451): all four steps
   `TD-FONT-DOES-NOT-READ-VARIATION-STORES` mandates have

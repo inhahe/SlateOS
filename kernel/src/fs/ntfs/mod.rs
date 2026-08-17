@@ -67,7 +67,6 @@ pub mod boot;
 pub mod index;
 pub mod raw;
 pub mod record;
-pub mod source;
 pub mod tests;
 
 use alloc::boxed::Box;
@@ -87,7 +86,7 @@ use attr::{
 use boot::BootSector;
 use index::{DIR_INDEX_NAME, INDEX_ROOT_NODE_OFFSET, INDX_NODE_OFFSET, IndexEntry, IndexRoot};
 use record::{FILE_MAGIC, FileRecord, ROOT_RECORD, apply_fixups, mft_ref_record};
-use source::{DeviceSource, SectorSource, read_bytes};
+use crate::fs::blocksrc::{DeviceSource, SectorSource, read_bytes};
 
 /// Largest file we will read into memory in one call.
 ///

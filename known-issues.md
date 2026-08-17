@@ -590,10 +590,11 @@ on an invariant maintained by four other methods. All three are now a single
 
 ## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
 
-**Status: OPEN 2026-08-16 — thirteen of 27 crates fixed** (`simon`,
+**Status: OPEN 2026-08-16 — fourteen of 27 crates fixed** (`simon`,
 `battleship`, `sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`,
-`freecell`, `minesweeper`, `flood`, `snake`, `wordsearch`, `pacman`); the
-shared crate that the rest should move to is written and green.
+`freecell`, `minesweeper`, `flood`, `snake`, `wordsearch`, `pacman`,
+`breakout`); the shared crate that the rest should move to is written and
+green.
 
 The defect above is not `simon`'s. A scan of the tree
 (`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
@@ -626,6 +627,7 @@ measured:
 | `apps/snake` | 20, 20 | the food could reach 50 of the 400 cells, in a fixed diagonal lattice | fixed `4d448a617` |
 | `apps/wordsearch` | 26, 2..30 | every second filler letter came from {A,C,…,Y} and the ones between from {B,D,…,Z} — 0 repeats in 2000 draws, 76 expected; and BISON was picked for 14% of puzzles against ZEBRA's 41% | fixed `4cce605f8` |
 | `apps/pacman` | 31, 28 | each frightened ghost could flee to 7 of the 28 columns and 217 of the 868 cells; all four together to 14 columns, the seed choosing only *which* 14 | fixed `481f36e8d` |
+| `apps/breakout` | 1000 | every game in a session opened at the same launch parity: 500 of the 1000 angles and 4 of the 8 residues mod 8 over a chain of 5000 new games | fixed `589045fe1` |
 
 **The three card games are one shape and worth reading together.** All three
 shuffle 52 cards with a correct downward Fisher–Yates and draw the partner with
@@ -651,9 +653,56 @@ so long: most call sites use an odd or non-power-of-two bound and look fine,
 and the ones that do not still pass every distribution test written against
 them.
 
-Still degenerate, not yet migrated: `breakout`, `dots`, `hangman`, `life`,
-`lightsout`, `match3`, `maze`, `memory`, `pinball`, `sudoku`, `tetris`,
-`wordle`.
+Still degenerate, not yet migrated: `dots`, `hangman`, `life`, `lightsout`,
+`match3`, `maze`, `memory`, `pinball`, `sudoku`, `tetris`, `wordle`.
+
+**Those eleven are deliberately parked, not merely pending.** Every one of them
+is a game, and as of 2026-08-16 no game is reachable from the desktop:
+`gui/desktop/src/launcher.rs` hardcodes eighteen entries, not one of which is an
+`apps/` game, and its `Category` enum (`Application`, `System`, `Setting`,
+`File`, `Command`) has no games variant to put one in. No game name appears
+anywhere outside `apps/`. Running one requires knowing the binary name and
+typing it into a shell, so the audience for these eleven defects is currently
+zero — which is the ground the migration was stopped on at fourteen of 27, not
+any technical one.
+
+**Trigger to resume: the first time a game gets a launcher entry, fix the
+remaining eleven before shipping that entry.** The moment a game is discoverable
+it has players, and this defect lands hardest exactly where a player would
+notice — a fixed piece order in `tetris`, a fixed word in `wordle`/`hangman`, a
+fixed layout in `maze`/`sudoku`. The already-fixed cases show the ceiling:
+`simon` dealt Green-Red-Yellow-Blue for ever at every seed, and `sliding`
+produced two distinct boards across 499 seeds. Each remaining crate is a
+measure-migrate-test cycle of the same shape as the fourteen already done, so
+the whole tail is a few hours of work rather than a project.
+
+**`breakout` is the case for not clearing a crate because its bound has an odd
+factor.** Its only bound was 1000, and by the rule of thumb above the factor 125
+should have restored the period — the *values* are uniform and a histogram of
+them is perfect. But 8 also divides 1000, and that is enough: `(state % 1000) %
+8` is exactly `state % 8`, so the draw's bottom three bits are the raw LCG's,
+whatever the other factor does. **Check a bound for a power-of-two divisor, not
+for being a power of two.** `1000 = 8 × 125` reads as safe and is not; the same
+reasoning re-opens `life`'s `% 100` (= 4 × 25), which this entry has been
+calling mild, and it should be re-measured rather than assumed when its turn
+comes.
+
+**`breakout` is also the clearest case of a reseed turning fine structure into
+half the range.** A period-8 cycle in the bottom bits is usually invisible,
+because a game draws often enough to walk the whole cycle. What made it
+permanent is that `start_game` reseeds from the running generator and the fresh
+generator's *first* output is the opening launch angle — `init_bricks` draws
+nothing in between. So the one draw a player meets at the start of every single
+game was pinned to a fixed stride through that cycle: over 5000 consecutive new
+games the opening angle held one parity for ever and reached 4 of the 8 residues
+mod 8. **When a crate reseeds per game, look hardest at the first draw after the
+reseed** — it is both the most exposed to the low-bit cycle and the one the
+player sees most often. `solitaire` and `freecell` are the same shape.
+
+The corollary for the remaining eleven: *counting distinct values is not enough
+to clear a draw.* Breakout's chain produced 500 distinct opening angles out of
+1000, which looks plentiful and would pass any "does it vary?" test. The parity
+is the part that had to be asserted, and it is one line away.
 
 **`pacman` is the cleanest case of the two-draws-per-consumer stride**, and it
 is the one to remember when a crate draws for several actors in a round-robin.
@@ -14522,7 +14571,99 @@ Tracked as part of the net-userspace migration; this control-path client is
 intentionally the bounded-self-test stand-in until then. See
 `net-userspace-migration.md` Phase 4/5 and `design-decisions.md` §64.
 
-### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~10.6ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 4.6x 2026-07-02
+### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~7.0ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 6.9x 2026-08-16
+
+**UPDATE 2026-08-16 (6) — inter-window occlusion cull landed, 12.0ms → 7.0ms/frame
+min (cumulative 48.6ms → 7.0ms = 6.9x). It also corrects a wrong assumption
+recorded in UPDATE (5) below.**
+
+*First, the measurement that redirected the work.* UPDATE (5) closed with
+"the 4K benchmark's dominant cost is the background clear + per-window
+RenderEngine draws", and the deferred next step recorded there (and in
+`requests/a-c-bench-compositor-entries-are-yours.md`) was a persistent tile
+thread-pool to amortize the per-frame `thread::scope` spawn. That was aimed at
+the wrong half. A new `Compositor::bench_full_composite_phases()` returning
+`(background_clear_ns, window_render_ns)` measured the split directly:
+
+| phase | before | after |
+|---|---|---|
+| background clear | 1.531 ms | 1.392 ms |
+| window render | 11.128 ms | 5.313 ms |
+| whole frame (min / mean) | 12.046 / 15.231 ms | 7.041 / 8.955 ms |
+
+The clear was **already fine** — 13% of the frame, and the three rounds of
+parallel-fill work above had done their job. Window rendering was 88%. So the
+bottleneck was not a parallelism problem at all; it was **overdraw**: windows
+were painted strictly back-to-front, so every pixel of every window was drawn
+even where a higher window overwrote it. Parallelizing that would have divided
+the wasted work across cores instead of not doing it. **Lesson worth keeping:
+the "remaining work" note at the end of a perf entry is a hypothesis, not a
+finding — measure the split before acting on it.**
+
+*The fix.* Each window's conservative drawn extent (client rect + `BORDER_WIDTH`
++ `SHADOW_SIZE` + 3 slack, plus `TITLE_BAR_HEIGHT` on top) now has the
+provably-opaque covers of all windows **above** it subtracted from it, and the
+window is redrawn once per surviving fragment under a framebuffer-level clip.
+Pieces:
+
+- `Rect::subtract` — exact rectangle difference. It cuts the top and bottom
+  bands **full-width first** and only then splits the middle row into left/right.
+  That ordering is load-bearing: the fragments must be **disjoint**, because a
+  window is redrawn once per fragment, so a pixel appearing in two fragments is
+  painted twice — invisible for an opaque fill, but *wrong* for a translucent
+  one (the shadow would darken along the seam).
+- `subtract_region(base, occluders, max_parts) -> Option<Vec<Rect>>` — declines
+  (returns `None`, caller falls back to one unclipped draw) rather than
+  fragmenting without bound. `MAX_FRAGMENTS = 4`: past that, the per-fragment
+  redraw setup costs more than the overdraw saved.
+- `window_opaque_cover` / `window_drawn_extent` — the per-window predicates,
+  factored out and now **shared with the background cull** (`opaque_cover_rects`
+  was refactored onto them), so the two culls cannot disagree about what counts
+  as opaque.
+- `Framebuffer::frame_clip` + `set_frame_clip` — the enforcement point. It lives
+  on the framebuffer rather than in `RenderEngine`'s clip stack because **three**
+  routes paint a window — the render engine's commands, the decoration helpers
+  (`render_shadow`/`render_border`/`render_title_bar`, which run *outside*
+  `execute` where the clip stack is cleared), and the shared-buffer blit — and
+  only the framebuffer is common to all three. A cull honoured by just one route
+  would silently let a hidden window's decorations through. Every primitive that
+  writes a pixel now goes through `clip_allows` (per-pixel) or `clip_span`
+  (per-row); `copy_row` and `blit_opaque_band` shift the *source* offset in step
+  with the narrowed destination. The clear/`clear_except` path is deliberately
+  **not** clipped — it runs once per frame before any window and has its own cull.
+
+*Verification, and why it is not vacuous.* `Compositor::occlusion_cull: bool`
+(default `true`) exists purely so a test can composite the same scene both ways:
+`occlusion_cull_composites_the_same_pixels_as_drawing_every_window` builds a
+900×700 six-window cascade — **window 3 deliberately translucent at 0.5**, which
+is the case a non-disjoint subtraction would corrupt — twice, and compares front
+buffers pixel for pixel. Plus
+`subtract_yields_disjoint_parts_that_miss_exactly_the_occluder` (exhaustive
+per-pixel coverage-count oracle over 6 occluder shapes: interior, disjoint,
+covering, edge bands; asserts every pixel is covered exactly 0 or 1 times and
+the areas sum) and
+`subtract_region_declines_rather_than_fragmenting_without_bound`. To prove these
+actually bite, a deliberate bug was injected (`if false &&` on the left-fragment
+push in `Rect::subtract`): **both** new tests failed, the equivalence test
+reporting "occlusion cull changed 85246 pixel(s)". 82 compositor tests, clippy
+clean.
+
+**Still open, and what to try next.** 7.0 ms against a 2.0 ms target — 3.5x to
+go, so this entry stays. The honest reading of the new phase split is that
+window render is *still* the larger half (5.3 of 7.0 ms) even with the overdraw
+gone, so the next attempt should again start by measuring rather than assuming.
+Candidates, in the order I would try them: (a) SIMD/streaming stores for the
+remaining large opaque fills — the frame is now much closer to a pure
+memory-bandwidth problem than it was, which is exactly when non-temporal stores
+pay; (b) damage tracking, i.e. recompositing only the changed region across
+frames rather than a full desktop every time — a much bigger structural win than
+anything left inside a single frame, and the natural next design step; (c) the
+persistent tile thread-pool from UPDATE (5), which is now worth *less* than it
+looked (the work it would parallelize has shrunk by half) but is still real.
+
+**`bench/baselines.toml` needs `measured_ns` 10572000 → 7041000** — that file is
+`bench/**`, i.e. lane A's zone, so it is filed as `requests/c-a-bench-baseline-compositor-frame-4k.md`
+rather than edited here.
 
 **UPDATE 2026-07-14 (5) — parallel opaque window blit landed (first increment of
 the deferred window-render parallelization).** The opaque fast path of
@@ -25863,3 +26004,178 @@ asked; the answer was 'binaries', and there was no guilty commit."
 - The near-miss to remember: this was one step away from being "fixed" as a
   comparator defect that did not exist, and one step away from a bisect for a
   commit that does not exist.
+
+---
+
+## B-EXPLORER-A-MOVE-DELETED-SOURCES-IT-HAD-NEVER-COPIED (lane C, 2026-08-16) — FIXED
+
+**In short:** Cutting-and-pasting files in the file explorer could destroy them.
+If a file could not be copied to the destination — because a file of that name
+was already there and the user had chosen "skip", or because the copy simply
+failed — the explorer deleted the original anyway. The user's only copy of that
+data was gone, and the operation reported success. Fixed in `3b0056f7a`.
+
+**Where:** `apps/explorer/src/fileops.rs`, `OperationExecutor::run_actions`, the
+Move source-deletion phase.
+
+**The defect.** The phase ran over every planned action, gated only on
+`self.progress.state != OperationState::Failed`:
+
+```rust
+if operation == FileOperation::Move && self.progress.state != OperationState::Failed {
+    for action in &actions {
+        if action.is_dir { continue; }
+        let _ = fs::remove_file(&action.src);
+    }
+    …
+}
+```
+
+`execute_copy_action` returns `Ok(ActionOutcome::Skipped)` — having copied
+nothing — in four situations: `ConflictPolicy::Skip` with the destination
+occupied, `OverwriteIfNewer` where the source was not newer, `ConflictPolicy::Ask`
+(which currently falls through to a skip because there is no way to ask yet), and
+any action whose copy failed under `ErrorPolicy::SkipAndContinue` or that
+exhausted `ErrorPolicy::RetryN`. None of those put the source's bytes at the
+destination. All of them had the source deleted.
+
+The `Skip` case is the worst of the four because it is the *normal* one: a user
+moving a folder into a folder that already holds same-named files, choosing
+"skip", and losing every one of those files from the source. What sits at the
+destination is a *different* file that happened to share a name.
+
+**Why it was invisible.** `let _ =` on the removal meant a removal that failed
+was equally silent, so the only two observable outcomes were "moved" and
+"moved" — the summary counted `succeeded` from `completed_files - skipped` and
+never consulted what the deletion phase actually did.
+
+**The fix.** The journal now records *whether an action transferred data*, not
+merely that it finished: `mark_skipped` writes a ` skip` suffix and
+`transferred(index) -> bool` answers the question the deletion phase has to ask.
+A source is removed only when `journal.transferred(action.index)`. Removal
+failures go through `FileOpEvent::Error` and into the summary's `failed` count.
+A source directory left non-empty *because* something under it was skipped is
+the already-reported consequence of that skip, so it does not add one error per
+ancestor directory.
+
+**Two further defects found in the same read:**
+
+1. **The journal had no identity.** `.fileop-journal` stores *plan-relative*
+   action indices, so a journal left in a destination directory by any earlier
+   operation would be read as the next operation's progress — every colliding
+   index treated as already done, i.e. never copied, and reported as success.
+   Reaching that state needed only one interrupted operation, because
+   `journal.remove()` was itself a `let _ =`. `OperationJournal::open` now takes
+   a plan fingerprint (`OperationPlan::id()`), writes it as a `plan <id>` header,
+   and discards any journal it cannot attribute to the running plan.
+2. **`atomic_copy_file` leaked its temporary on both error paths.** A failed
+   copy of a large file left a full-size `.<name>.fileop-tmp` in the user's
+   destination directory under a name they never asked for. Both the `fs::copy`
+   and the `fs::rename` error paths now remove it.
+
+**Tests:** six regression tests in `fileops::tests` —
+`a_skipped_move_does_not_delete_the_source`,
+`a_failed_move_does_not_delete_the_source`,
+`a_successful_move_still_deletes_the_source`,
+`a_partly_skipped_directory_move_keeps_what_it_did_not_copy`,
+`a_journal_from_another_plan_is_discarded`,
+`a_stale_journal_does_not_swallow_a_copy`, plus
+`journal_distinguishes_a_skip_from_a_copy`. Injection-verified: restoring the
+unconditional delete fails exactly the three data-loss tests and nothing else.
+
+**Portable failure injection worth reusing.** To make a copy fail while leaving
+its source intact, put a *directory* at the destination path. The final
+`fs::rename` of the temporary onto it fails on every platform, and unlike
+removing the source or changing permissions it leaves the source exactly where
+the deletion phase would find it.
+
+**How it was found:** the `apps/**` bug-hunt sweep, scanning for the pattern
+"a user-visible action wired to a function whose return value is the whole
+point, with the caller discarding it" (`let _ =`, `.ok();`) before the first
+`#[cfg(test)]` line. Three of the four `let _ =` sites in this file were the bug.
+
+## TD-EXPLORER-CLIPPY-ALL-TARGETS-WAS-RED (lane C, 2026-08-16) — FIXED
+
+`cargo clippy -p explorer --all-targets` failed outright on three
+`useless_vec` errors in `apps/explorer/src/columns.rs` test code (clippy is
+deny-level for the crate). Because the failure was in the *test* target, a plain
+`cargo clippy -p explorer` was green and nobody saw it. Fixed in `3b0056f7a`.
+
+Worth generalising: **run the clippy gate with `--all-targets`.** A crate whose
+test target does not lint is a crate whose lint findings are half-observed, and
+the failure mode is silent — the command exits 0.
+
+Still open in this crate: 46 `arithmetic_side_effects` warnings in non-test code
+(unchanged by this work, counted before and after). Not yet triaged.
+
+## B-TERMINAL-THE-PTY-ACCEPTED-KEYSTROKES-AND-THREW-THEM-AWAY (lane C, 2026-08-16) — FIXED
+
+**In short:** If you typed in the terminal faster than the program could read —
+or typed at all while a program was busy — the terminal could quietly lose
+whole command lines, or hand the program *half* of one and run it. Nothing
+reported this. Fixed in `3bcbaecc0`.
+
+**Where:** `apps/terminal/src/pty.rs`, `PtyMaster::write` (cooked-mode arm) and
+`PtySlave::set_raw_mode`.
+
+**The defect.** The line discipline delivered completed lines and echo bytes
+best-effort and then lied about it:
+
+```rust
+CookedAction::FlushLine(line) => {
+    // Best-effort write of the completed line.
+    // If the channel is full we drop the data
+    // (real implementation would block or buffer).
+    let _ = inner.master_to_slave.write(&line);
+}
+```
+
+and every byte was counted as consumed regardless, so `write` returned
+`Ok(data.len())`. A caller has no way to retry what it has been told was
+delivered.
+
+**Truncation was the worse half.** `ByteChannel::write` writes
+`data.len().min(available)` and returns that count — so a nearly-full channel
+takes a *prefix* of the line. `let _ =` discarded the remainder, and the child
+received a command line with its tail cut off. The shell then runs something
+the user never typed. Dropping the line is recoverable by retyping; running
+`rm -rf /home/user/proj` as `rm -rf /home/user` is not.
+
+**The fix.** Two bounded pending queues in `PtyInner`, one per direction.
+Overflowing lines and echoes are queued, not dropped; every read flushes what
+now fits. When the input queue reaches the channel capacity, `PtyMaster::write`
+stops consuming and reports a short count — or `BufferFull` when it could take
+nothing, which is distinguishable from a successful zero-byte write that a
+caller would spin on.
+
+**Ordering had to be fixed with it.** Once a queue exists, a write that goes
+straight to the channel jumps ahead of bytes produced earlier. The raw-mode
+master write and the slave write now append to the queue whenever it is
+non-empty. Without this the child's reply could be displayed above the
+characters that prompted it.
+
+**A third defect in the same file: the cooked-mode line buffer was unbounded.**
+`cooked_process` pushed every printable byte into `line_buf` and only a line
+terminator released it, so input that never contains one — a paste of binary
+data, a file piped into a PTY left in cooked mode — grew it until the process
+ran out of memory. Now bounded at `MAX_CANON` (4096, as POSIX); past it a
+printable byte is refused and echoed as BEL, which is `IMAXBEL`. Editing and
+control characters keep working so the user can back out.
+
+**Tests:** `nothing_the_user_typed_is_lost_when_the_channel_fills`,
+`a_backlogged_write_reports_a_short_count_rather_than_swallowing_input`,
+`slave_output_does_not_overtake_queued_echo`,
+`a_mode_switch_does_not_discard_the_partial_line`,
+`the_line_buffer_stops_growing_at_max_canon`,
+`an_ordinary_line_is_unaffected_by_the_bound`. Injection-verified one defect at
+a time: restoring the dropping line write fails exactly the two data-loss
+tests; restoring the dropping echo write fails exactly the ordering test.
+
+**Sweep note.** Same pattern as
+`B-EXPLORER-A-MOVE-DELETED-SOURCES-IT-HAD-NEVER-COPIED`: a `let _ =` on a call
+whose return value *is* the outcome the user cares about. Both were found by
+scanning `apps/**/*.rs` for `let _ =` / `.ok();` before the first `#[cfg(test)]`
+line. It is worth saying plainly that the comment next to the `let _ =`
+correctly described the bug ("we drop the data") and it still shipped — a
+documented data-loss path is still a data-loss path, and `todo.txt` is where
+that belongs, not a comment nobody greps.

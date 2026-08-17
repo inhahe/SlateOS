@@ -1769,7 +1769,7 @@ mod tests {
         assert_eq!(text("\u{e9}clair").cmp(&text("alpha")), Ordering::Greater);
         assert_eq!(text("\u{65e5}").cmp(&text("zulu")), Ordering::Greater);
 
-        let mut names = vec![text("zulu"), text("\u{e9}clair"), text("alpha")];
+        let mut names = [text("zulu"), text("\u{e9}clair"), text("alpha")];
         names.sort();
         let order: Vec<String> = names.iter().map(ColumnValue::display).collect();
         assert_eq!(order, ["alpha", "zulu", "\u{e9}clair"]);
@@ -1823,7 +1823,7 @@ mod tests {
         // Case-insensitive is the primary order, so `README` lands next to
         // `readme` rather than ahead of every lowercase name — but the two are
         // still different values, so the tie-break must order them.
-        let mut names = vec![text("readme"), text("apple"), text("README"), text("Zebra")];
+        let mut names = [text("readme"), text("apple"), text("README"), text("Zebra")];
         names.sort();
         let order: Vec<String> = names.iter().map(ColumnValue::display).collect();
         assert_eq!(order, ["apple", "README", "readme", "Zebra"]);
@@ -1841,7 +1841,7 @@ mod tests {
 
     #[test]
     fn empty_cells_collect_at_the_bottom() {
-        let mut vals = vec![
+        let mut vals = [
             ColumnValue::Empty,
             ColumnValue::Size(3),
             text("name"),

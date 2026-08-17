@@ -20,6 +20,21 @@
 //! that buffers input, echoes characters, and translates control keys
 //! into signals. In raw mode, bytes pass through unmodified.
 //!
+//! ## Back-pressure
+//!
+//! Neither channel is infinite, so a writer can outrun its reader. When that
+//! happens the PTY **queues** rather than drops: a completed line or an echo
+//! byte that does not fit is held in a bounded pending queue and delivered as
+//! the reader frees space. Once the queue is full, a write reports a short
+//! count (or `BufferFull` if it could take nothing at all) so the caller can
+//! retry. The one thing the PTY never does is accept a byte and then discard
+//! it — that is a keystroke the user typed and will never see again, and a
+//! command line the child runs with a piece missing.
+//!
+//! Cooked mode's line buffer is bounded too, at [`MAX_CANON`]: input that
+//! never contains a line terminator would otherwise grow it until the process
+//! runs out of memory.
+//!
 //! ## Signals
 //!
 //! Terminal control characters (Ctrl+C, Ctrl+D, etc.) are translated
@@ -234,11 +249,25 @@ pub enum CookedAction {
     Echo(u8),
 }
 
+/// Largest line the cooked-mode discipline will accumulate before it starts
+/// refusing printable input, matching POSIX `MAX_CANON`.
+///
+/// Without a bound, input that never contains a newline — a paste of binary
+/// data, a program piping a file into a PTY left in cooked mode — grows
+/// `line_buf` until the process runs out of memory. The buffer is only
+/// released by a line terminator, and nothing guarantees one arrives.
+pub const MAX_CANON: usize = 4096;
+
 /// Process a single input byte in cooked mode.
 ///
 /// Updates `line_buf` and returns the action the caller should take.
 /// This implements a basic line discipline: line buffering, backspace
 /// editing, and control character translation.
+///
+/// Once `line_buf` reaches [`MAX_CANON`] a printable byte is refused and
+/// echoed as BEL (`0x07`) instead of being buffered — the `IMAXBEL` behaviour
+/// of a real terminal. Editing and control characters keep working, so the
+/// user can still backspace or press Enter to get out of the state.
 pub fn cooked_process(input: u8, line_buf: &mut Vec<u8>) -> CookedAction {
     match input {
         // Ctrl+C → Interrupt
@@ -282,8 +311,12 @@ pub fn cooked_process(input: u8, line_buf: &mut Vec<u8>) -> CookedAction {
             let flushed = std::mem::take(line_buf);
             CookedAction::FlushLine(flushed)
         }
-        // Printable or other byte → buffer and echo
+        // Printable or other byte → buffer and echo, unless the line is
+        // already at MAX_CANON, in which case refuse it with a bell.
         _ => {
+            if line_buf.len() >= MAX_CANON {
+                return CookedAction::Echo(0x07);
+            }
             line_buf.push(input);
             CookedAction::Echo(input)
         }
@@ -333,6 +366,18 @@ struct PtyInner {
     winsize: WinSize,
     /// Line buffer for cooked mode input processing.
     line_buf: Vec<u8>,
+    /// Completed cooked-mode lines that did not fit in `master_to_slave`.
+    ///
+    /// Without this, a line completed while the channel was full was written
+    /// with `let _ =` and lost — the user pressed Enter and the command
+    /// vanished. Worse, `ByteChannel::write` can accept a *prefix* of the line,
+    /// so the discarded remainder truncated the command rather than dropping
+    /// it, and the child ran whatever the prefix happened to spell.
+    pending_to_slave: Vec<u8>,
+    /// Echo bytes that did not fit in `slave_to_master`, held for the same
+    /// reason: a dropped echo makes the terminal show something other than
+    /// what the user typed.
+    pending_echo: Vec<u8>,
     /// Whether the master side has been closed.
     master_closed: bool,
     /// Whether the slave side has been closed.
@@ -347,9 +392,64 @@ impl PtyInner {
             mode: PtyTerminalMode::Cooked,
             winsize: WinSize::new(cols, rows),
             line_buf: Vec::with_capacity(256),
+            pending_to_slave: Vec::new(),
+            pending_echo: Vec::new(),
             master_closed: false,
             slave_closed: false,
         }
+    }
+
+    /// Push as much of `pending` into `channel` as it will take, dropping the
+    /// bytes that made it from the front of `pending`.
+    ///
+    /// A closed channel clears the queue: nobody will ever read those bytes,
+    /// and holding them would keep the PTY permanently backlogged, which
+    /// `PtyMaster::write` reads as "refuse all further input".
+    fn drain_into(channel: &mut ByteChannel, pending: &mut Vec<u8>) {
+        while !pending.is_empty() {
+            match channel.write(pending) {
+                Ok(0) => break,
+                Ok(n) => {
+                    pending.drain(..n.min(pending.len()));
+                }
+                Err(PtyError::Closed) => {
+                    pending.clear();
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Move whatever now fits from both pending queues into their channels.
+    ///
+    /// Called on every read and write, because a read is what frees the space
+    /// a backlogged write is waiting for.
+    fn flush_pending(&mut self) {
+        Self::drain_into(&mut self.master_to_slave, &mut self.pending_to_slave);
+        Self::drain_into(&mut self.slave_to_master, &mut self.pending_echo);
+    }
+
+    /// Queue cooked-mode input for the slave, sending what fits immediately.
+    fn queue_to_slave(&mut self, data: &[u8]) {
+        self.pending_to_slave.extend_from_slice(data);
+        Self::drain_into(&mut self.master_to_slave, &mut self.pending_to_slave);
+    }
+
+    /// Queue an echo byte for the master, sending what fits immediately.
+    fn queue_echo(&mut self, byte: u8) {
+        self.pending_echo.push(byte);
+        Self::drain_into(&mut self.slave_to_master, &mut self.pending_echo);
+    }
+
+    /// Whether the input side is backlogged enough to refuse more input.
+    ///
+    /// The bound is the channel capacity, so the worst case holds one channel
+    /// plus one queue — the same shape as a real line discipline's input queue
+    /// sitting behind a pipe buffer. Once it is reached `PtyMaster::write`
+    /// reports a short write instead of accepting bytes it cannot deliver.
+    fn input_backlogged(&self) -> bool {
+        self.pending_to_slave.len() >= DEFAULT_CHANNEL_CAPACITY
     }
 }
 
@@ -382,27 +482,56 @@ impl PtyMaster {
             return Err(PtyError::Closed);
         }
 
+        // A reader may have freed space since the last write; take it before
+        // deciding whether we are backlogged.
+        inner.flush_pending();
+
         match inner.mode {
-            PtyTerminalMode::Raw => inner.master_to_slave.write(data),
+            PtyTerminalMode::Raw => {
+                // Anything already queued was produced *before* these bytes —
+                // typically a partial line handed over by a cooked→raw switch.
+                // Writing straight to the channel while a queue exists would
+                // put these bytes in front of it and reorder the stream.
+                if inner.pending_to_slave.is_empty() {
+                    return inner.master_to_slave.write(data);
+                }
+                let room =
+                    DEFAULT_CHANNEL_CAPACITY.saturating_sub(inner.pending_to_slave.len());
+                if room == 0 {
+                    return Err(PtyError::BufferFull);
+                }
+                let n = data.len().min(room);
+                match data.get(..n) {
+                    Some(head) => {
+                        inner.queue_to_slave(head);
+                        Ok(n)
+                    }
+                    None => Err(PtyError::BufferFull),
+                }
+            }
             PtyTerminalMode::Cooked => {
-                // In cooked mode, process each byte through the line
-                // discipline. We consume all input bytes even if the
-                // underlying channel cannot accept more yet -- the line
-                // buffer absorbs them.
+                // Each byte goes through the line discipline. Completed lines
+                // and echoes are *queued*, never dropped: this used to write
+                // them with `let _ =`, so a line completed while the channel
+                // was full disappeared — and because `ByteChannel::write`
+                // accepts a prefix when it is nearly full, a long line could
+                // arrive at the child truncated rather than missing, which is
+                // worse than losing it.
                 let mut consumed = 0;
                 for &byte in data {
+                    // Stop before consuming a byte we might not be able to
+                    // deliver. Reporting a short write is what lets the caller
+                    // retry; consuming it and dropping it is what lost data.
+                    if inner.input_backlogged() {
+                        break;
+                    }
                     let action = cooked_process(byte, &mut inner.line_buf);
                     match action {
-                        CookedAction::FlushLine(line) => {
-                            // Best-effort write of the completed line.
-                            // If the channel is full we drop the data
-                            // (real implementation would block or buffer).
-                            let _ = inner.master_to_slave.write(&line);
-                        }
+                        CookedAction::FlushLine(line) => inner.queue_to_slave(&line),
                         CookedAction::Echo(echo_byte) => {
                             // Echo the byte back to the master's read side
                             // so the terminal emulator can display it.
-                            let _ = inner.slave_to_master.write(&[echo_byte]);
+                            inner.queue_echo(echo_byte);
                         }
                         CookedAction::Signal(_) | CookedAction::Buffer => {
                             // Signals are stored in the return value for
@@ -411,6 +540,11 @@ impl PtyMaster {
                         }
                     }
                     consumed += 1;
+                }
+                if consumed == 0 && !data.is_empty() {
+                    // Distinguishable from a successful zero-byte write, which
+                    // a caller would otherwise spin on.
+                    return Err(PtyError::BufferFull);
                 }
                 Ok(consumed)
             }
@@ -430,7 +564,12 @@ impl PtyMaster {
         if inner.master_closed {
             return Err(PtyError::Closed);
         }
-        inner.slave_to_master.read(buf)
+        // Backlogged echo becomes readable here, and the read then frees the
+        // space the next backlogged byte needs.
+        inner.flush_pending();
+        let n = inner.slave_to_master.read(buf);
+        inner.flush_pending();
+        n
     }
 
     /// Non-blocking read. Returns `Ok(None)` if no data is available.
@@ -439,6 +578,9 @@ impl PtyMaster {
         if inner.master_closed {
             return Err(PtyError::Closed);
         }
+        // Take anything backlogged first, so a queued echo is visible to a
+        // caller that polls rather than blocking.
+        inner.flush_pending();
         match inner.slave_to_master.read(buf) {
             Ok(n) => Ok(Some(n)),
             Err(PtyError::WouldBlock) => Ok(None),
@@ -506,7 +648,25 @@ impl PtySlave {
         if inner.master_closed {
             return Err(PtyError::Closed);
         }
-        inner.slave_to_master.write(data)
+        // A queued echo was produced before this output; jumping ahead of it
+        // would show the child's reply above the characters that prompted it.
+        inner.flush_pending();
+        if inner.pending_echo.is_empty() {
+            return inner.slave_to_master.write(data);
+        }
+        let room = DEFAULT_CHANNEL_CAPACITY.saturating_sub(inner.pending_echo.len());
+        if room == 0 {
+            return Err(PtyError::BufferFull);
+        }
+        let n = data.len().min(room);
+        match data.get(..n) {
+            Some(head) => {
+                inner.pending_echo.extend_from_slice(head);
+                inner.flush_pending();
+                Ok(n)
+            }
+            None => Err(PtyError::BufferFull),
+        }
     }
 
     /// Read input data (from the terminal/keyboard) delivered by the
@@ -522,7 +682,12 @@ impl PtySlave {
         if inner.slave_closed {
             return Err(PtyError::Closed);
         }
-        inner.master_to_slave.read(buf)
+        // Backlogged input becomes readable here, and the read then frees the
+        // space the next backlogged line needs.
+        inner.flush_pending();
+        let n = inner.master_to_slave.read(buf);
+        inner.flush_pending();
+        n
     }
 
     /// Query the current terminal window size.
@@ -540,8 +705,12 @@ impl PtySlave {
             // Flush any partially buffered line data through the channel
             // so it is not lost during the mode switch.
             if !inner.line_buf.is_empty() {
-                let pending: Vec<u8> = inner.line_buf.drain(..).collect();
-                let _ = inner.master_to_slave.write(&pending);
+                let partial: Vec<u8> = inner.line_buf.drain(..).collect();
+                // Queued, not written best-effort: a mode switch while the
+                // channel was full used to discard whatever the user had typed
+                // so far, which is exactly the data the switch is trying to
+                // preserve.
+                inner.queue_to_slave(&partial);
             }
         }
     }
@@ -1766,5 +1935,253 @@ mod tests {
         let action = cooked_process(b'\n', &mut line_buf);
         assert_eq!(action, CookedAction::FlushLine(b"test\n".to_vec()));
         assert!(line_buf.is_empty());
+    }
+
+    // -- Back-pressure: nothing the user typed may be silently dropped --
+
+    /// Enough newline-terminated input to overflow one channel several times.
+    fn long_input() -> Vec<u8> {
+        let mut input = Vec::new();
+        let mut n = 0u32;
+        while input.len() < DEFAULT_CHANNEL_CAPACITY * 3 {
+            input.extend_from_slice(format!("command number {n}\n").as_bytes());
+            n += 1;
+        }
+        input
+    }
+
+    /// Drain everything currently readable from a slave.
+    fn drain_slave(slave: &PtySlave) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match slave.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(buf.get(..n).unwrap_or(&[])),
+                Err(PtyError::WouldBlock) => break,
+                Err(e) => panic!("unexpected slave read error: {e}"),
+            }
+        }
+        out
+    }
+
+    /// Drain everything currently readable from a master.
+    fn drain_master(master: &PtyMaster) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match master.try_read(&mut buf) {
+                Ok(Some(0)) | Ok(None) => break,
+                Ok(Some(n)) => out.extend_from_slice(buf.get(..n).unwrap_or(&[])),
+                Err(e) => panic!("unexpected master read error: {e}"),
+            }
+        }
+        out
+    }
+
+    /// The core regression: every byte the user typed reaches the child, in
+    /// order, even when the input far exceeds the channel's capacity.
+    ///
+    /// The line discipline used to write completed lines with `let _ =`, so a
+    /// line completed while the channel was full simply vanished — and because
+    /// `ByteChannel::write` accepts a *prefix* when it is nearly full, a line
+    /// could also arrive truncated, making the child run something the user
+    /// never typed.
+    #[test]
+    fn nothing_the_user_typed_is_lost_when_the_channel_fills() {
+        let pair = PtyPair::open().expect("pty");
+        let input = long_input();
+
+        let mut sent = 0usize;
+        let mut received = Vec::new();
+        // Interleave writing and reading, as a terminal emulator and a child
+        // process would.
+        let mut spins = 0;
+        while sent < input.len() {
+            let remaining = input.get(sent..).expect("in bounds");
+            match pair.master.write(remaining) {
+                Ok(0) | Err(PtyError::BufferFull) => {}
+                Ok(n) => sent += n,
+                Err(e) => panic!("unexpected master write error: {e}"),
+            }
+            // The master's echo channel would otherwise fill and stall the
+            // whole PTY, exactly as a terminal that never repaints would.
+            drain_master(&pair.master);
+            received.extend_from_slice(&drain_slave(&pair.slave));
+            spins += 1;
+            assert!(spins < 10_000, "made no progress draining the PTY");
+        }
+        drain_master(&pair.master);
+        received.extend_from_slice(&drain_slave(&pair.slave));
+
+        assert_eq!(
+            received.len(),
+            input.len(),
+            "the child received {} bytes of the {} typed",
+            received.len(),
+            input.len()
+        );
+        assert_eq!(received, input, "the child received different bytes");
+    }
+
+    /// The other half of the guarantee: when the PTY cannot take more input it
+    /// must say so, rather than consume the bytes and drop them. A caller that
+    /// is told "all 40000 consumed" has no way to retry.
+    #[test]
+    fn a_backlogged_write_reports_a_short_count_rather_than_swallowing_input() {
+        let pair = PtyPair::open().expect("pty");
+        let input = long_input();
+
+        // Nobody reads. Keep writing until the PTY refuses.
+        let mut sent = 0usize;
+        loop {
+            let remaining = match input.get(sent..) {
+                Some(r) if !r.is_empty() => r,
+                _ => panic!("the PTY accepted every byte without anyone reading"),
+            };
+            match pair.master.write(remaining) {
+                Ok(0) | Err(PtyError::BufferFull) => break,
+                Ok(n) => sent += n,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert!(sent > 0, "the PTY accepted nothing at all");
+        assert!(sent < input.len(), "the PTY claimed to accept everything");
+
+        // And exactly the accepted prefix is what the child can read.
+        let received = drain_slave(&pair.slave);
+        assert_eq!(
+            received,
+            input.get(..sent).expect("in bounds"),
+            "the delivered bytes are not the prefix the write claimed"
+        );
+    }
+
+    /// A slave writing output must not overtake echo bytes that were queued
+    /// before it: the child's reply appearing above the characters that
+    /// prompted it is a visibly scrambled terminal.
+    #[test]
+    fn slave_output_does_not_overtake_queued_echo() {
+        let pair = PtyPair::open().expect("pty");
+
+        // Fill the display channel so the echo of the next keystroke has to be
+        // queued rather than written straight through.
+        let filler = vec![b'.'; DEFAULT_CHANNEL_CAPACITY];
+        let mut filled = 0usize;
+        while filled < filler.len() {
+            match pair.slave.write(filler.get(filled..).expect("in bounds")) {
+                Ok(0) | Err(PtyError::BufferFull) => break,
+                Ok(n) => filled += n,
+                Err(e) => panic!("unexpected slave write error: {e}"),
+            }
+        }
+        assert!(filled > 0);
+
+        // A keystroke: its echo cannot fit, so it is queued.
+        let _ = pair.master.write(b"Z");
+        // Child output produced afterwards must land after that echo.
+        let mut out = drain_master(&pair.master);
+        let _ = pair.slave.write(b"REPLY");
+        out.extend_from_slice(&drain_master(&pair.master));
+
+        let z = out.iter().position(|&b| b == b'Z');
+        let reply = out
+            .windows(5)
+            .position(|w| w == b"REPLY");
+        let z = z.expect("the echoed keystroke was dropped");
+        let reply = reply.expect("the child's output was dropped");
+        assert!(
+            z < reply,
+            "the child's reply ({reply}) came out before the echo it followed ({z})"
+        );
+    }
+
+    /// Switching to raw mode hands the partially-typed line to the child. When
+    /// the channel is full that hand-off used to be a `let _ =` write, which
+    /// discarded the very data the switch exists to preserve.
+    #[test]
+    fn a_mode_switch_does_not_discard_the_partial_line() {
+        let pair = PtyPair::open().expect("pty");
+
+        // Fill the input channel with completed lines nobody reads.
+        let filler = long_input();
+        let mut sent = 0usize;
+        loop {
+            let remaining = filler.get(sent..).filter(|r| !r.is_empty());
+            let Some(remaining) = remaining else { break };
+            match pair.master.write(remaining) {
+                Ok(0) | Err(PtyError::BufferFull) => break,
+                Ok(n) => sent += n,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+            drain_master(&pair.master);
+        }
+
+        // Free just enough room to type one more thing, without emptying the
+        // channel — the point of the test is that the channel is still full
+        // when the mode switch hands over the partial line.
+        let mut buf = [0u8; 8192];
+        let freed = pair.slave.read(&mut buf).expect("slave read");
+        assert!(freed > 0, "could not free room in a full channel");
+
+        // Type a partial line (no newline, so it stays in the line buffer),
+        // then switch to raw mode.
+        drain_master(&pair.master);
+        let typed = pair.master.write(b"partial");
+        assert!(typed.is_ok(), "could not type a partial line: {typed:?}");
+        pair.slave.set_raw_mode();
+
+        // Drain everything; the partial line must be in there.
+        let mut received = Vec::new();
+        for _ in 0..10_000 {
+            let chunk = drain_slave(&pair.slave);
+            if chunk.is_empty() {
+                break;
+            }
+            received.extend_from_slice(&chunk);
+        }
+        assert!(
+            received.windows(7).any(|w| w == b"partial"),
+            "the partial line was discarded by the mode switch"
+        );
+    }
+
+    /// Cooked mode holds input until a line terminator arrives. Input that
+    /// never contains one must not grow the buffer without limit.
+    #[test]
+    fn the_line_buffer_stops_growing_at_max_canon() {
+        let mut line_buf = Vec::new();
+        let mut last = CookedAction::Buffer;
+        for _ in 0..(MAX_CANON * 2) {
+            last = cooked_process(b'x', &mut line_buf);
+        }
+        assert_eq!(line_buf.len(), MAX_CANON);
+        assert_eq!(
+            last,
+            CookedAction::Echo(0x07),
+            "input past MAX_CANON should be refused with a bell"
+        );
+
+        // The user can still get out of the state.
+        assert_eq!(cooked_process(0x08, &mut line_buf), CookedAction::Echo(0x08));
+        assert_eq!(line_buf.len(), MAX_CANON - 1);
+        assert!(matches!(
+            cooked_process(b'\n', &mut line_buf),
+            CookedAction::FlushLine(_)
+        ));
+        assert!(line_buf.is_empty());
+    }
+
+    /// The bound must not apply to a PTY that is being used normally.
+    #[test]
+    fn an_ordinary_line_is_unaffected_by_the_bound() {
+        let mut line_buf = Vec::new();
+        for &b in b"ls -la /usr/share" {
+            assert_eq!(cooked_process(b, &mut line_buf), CookedAction::Echo(b));
+        }
+        assert_eq!(
+            cooked_process(b'\n', &mut line_buf),
+            CookedAction::FlushLine(b"ls -la /usr/share\n".to_vec())
+        );
     }
 }

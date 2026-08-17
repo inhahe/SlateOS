@@ -84040,12 +84040,25 @@ fn cmd_mount(args: &str) {
         "sysfs" | "sys" => crate::fs::sysfs::mount(&mount_path_resolved),
         "ext4" => crate::fs::ext4::mount(device, &mount_path_resolved),
         "iso9660" | "iso" => crate::fs::iso9660::mount(device, &mount_path_resolved),
+        "ntfs" => crate::fs::ntfs::mount(device, &mount_path_resolved),
+        "btrfs" => crate::fs::btrfs::mount(device, &mount_path_resolved),
         "auto" => {
             // Try to probe the device for known filesystem types.
+            //
+            // Order is not arbitrary: each probe reads a different offset for a
+            // different magic (ext4 0x38 in its 1 KiB superblock, ISO 9660 the
+            // CD001 at 32 KiB, NTFS the OEM id at LBA 0, Btrfs its magic in the
+            // 64 KiB superblock), so no two can match the same volume. The
+            // sequence is therefore for readability, not for disambiguation —
+            // but keep the cheapest reads first.
             if crate::fs::ext4::probe(device) {
                 crate::fs::ext4::mount(device, &mount_path_resolved)
             } else if crate::fs::iso9660::probe(device) {
                 crate::fs::iso9660::mount(device, &mount_path_resolved)
+            } else if crate::fs::ntfs::probe(device) {
+                crate::fs::ntfs::mount(device, &mount_path_resolved)
+            } else if crate::fs::btrfs::probe(device) {
+                crate::fs::btrfs::mount(device, &mount_path_resolved)
             } else {
                 crate::console_println!(
                     "mount: could not detect filesystem on '{}' (try -t to specify type)",

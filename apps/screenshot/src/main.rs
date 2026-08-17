@@ -5,6 +5,7 @@
 //! - BMP file encoding (32-bit BGRA)
 //! - Region selection overlay with dimension labels
 //! - Annotation tools: rectangle, arrow, text, highlight
+//! - Annotations flattened into the saved image, so the file matches the preview
 //! - Hotkey-driven operation for background service mode
 //! - Post-capture preview with save/copy/discard actions
 //!
@@ -128,6 +129,63 @@ impl AnnotationTool {
             Self::Highlight => "Highlight",
         }
     }
+}
+
+/// A clickable control in the preview view's two toolbars.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewButton {
+    /// Write the annotated capture to a file.
+    Save,
+    /// Put the annotated capture on the system clipboard.
+    Copy,
+    /// Throw the capture away and return to the menu.
+    Discard,
+    /// Select an annotation tool.
+    Tool(AnnotationTool),
+    /// Remove the most recent annotation.
+    Undo,
+}
+
+/// The action buttons in the preview's main toolbar, left to right.
+const PREVIEW_ACTIONS: [PreviewButton; 3] = [
+    PreviewButton::Save,
+    PreviewButton::Copy,
+    PreviewButton::Discard,
+];
+
+/// The tool buttons in the preview's annotation toolbar, left to right.
+const PREVIEW_TOOLS: [AnnotationTool; 4] = [
+    AnnotationTool::Rectangle,
+    AnnotationTool::Arrow,
+    AnnotationTool::Text,
+    AnnotationTool::Highlight,
+];
+
+/// Width of an action button in the preview's main toolbar.
+const PREVIEW_ACTION_WIDTH: f32 = 80.0;
+
+/// Bounds of the `i`th preview action button, as `(x, y, w, h)`.
+///
+/// Rendering and hit-testing both call this. They used to compute the geometry
+/// separately — except hit-testing did not compute it at all, so Save, Copy and
+/// Discard were painted every frame and could never be clicked.
+fn preview_action_rect(window_width: f32, i: usize) -> (f32, f32, f32, f32) {
+    #[allow(clippy::cast_precision_loss)]
+    let from_right = (PREVIEW_ACTIONS.len().saturating_sub(i)) as f32;
+    let x = window_width - from_right * (PREVIEW_ACTION_WIDTH + BUTTON_SPACING);
+    (x, 6.0, PREVIEW_ACTION_WIDTH, 30.0)
+}
+
+/// Bounds of the `i`th annotation tool button, as `(x, y, w, h)`.
+fn preview_tool_rect(i: usize) -> (f32, f32, f32, f32) {
+    #[allow(clippy::cast_precision_loss)]
+    let x = 10.0 + i as f32 * 90.0;
+    (x, TOOLBAR_HEIGHT + 4.0, 80.0, 28.0)
+}
+
+/// Bounds of the Undo button, as `(x, y, w, h)`.
+fn preview_undo_rect() -> (f32, f32, f32, f32) {
+    (10.0 + 4.0 * 90.0 + 20.0, TOOLBAR_HEIGHT + 4.0, 60.0, 28.0)
 }
 
 /// A single annotation drawn on top of a captured screenshot.
@@ -263,6 +321,35 @@ impl core::fmt::Display for BmpError {
             }
             Self::Io(err) => write!(f, "I/O error: {err}"),
             Self::DimensionOverflow => write!(f, "image dimensions overflow BMP format limits"),
+        }
+    }
+}
+
+/// Why a save did not happen.
+///
+/// Distinct from [`BmpError`] because "there is nothing captured to save" is
+/// not an encoding failure, and reporting it as one — which this used to do,
+/// as a `PixelCountMismatch` of 1-expected-0-actual — produced a message about
+/// pixel counts for a user who had simply not taken a screenshot yet.
+#[derive(Debug)]
+pub enum SaveError {
+    /// No capture is loaded, so there is nothing to write.
+    NoCapture,
+    /// Encoding or writing the BMP failed.
+    Bmp(BmpError),
+}
+
+impl From<BmpError> for SaveError {
+    fn from(err: BmpError) -> Self {
+        Self::Bmp(err)
+    }
+}
+
+impl core::fmt::Display for SaveError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoCapture => write!(f, "no screenshot to save"),
+            Self::Bmp(err) => write!(f, "{err}"),
         }
     }
 }
@@ -704,30 +791,45 @@ impl ScreenshotApp {
         self.finish_capture(capture);
     }
 
+    /// Turn the outcome of a save into the notification the user sees.
+    ///
+    /// Both save paths — the automatic one in [`finish_capture`](Self::finish_capture)
+    /// and the explicit Ctrl+S in the preview — go through here, so they cannot
+    /// drift into reporting the same event differently. A *failure* always
+    /// notifies, even with `show_notification` off: that setting suppresses the
+    /// routine "saved!" confirmation, and reading it as permission to hide an
+    /// error is how a screenshot silently fails to exist.
+    fn notify_save(&mut self, outcome: &Result<PathBuf, SaveError>) {
+        match outcome {
+            Ok(path) => {
+                if self.settings.show_notification {
+                    self.notification = Some(Notification {
+                        message: format!("Screenshot saved to {}", path.display()),
+                        file_path: Some(path.clone()),
+                        remaining_ms: 4000,
+                    });
+                }
+            }
+            Err(err) => {
+                self.notification = Some(Notification {
+                    message: format!("Failed to save screenshot: {err}"),
+                    file_path: None,
+                    remaining_ms: 5000,
+                });
+            }
+        }
+    }
+
     /// Process a completed capture: store it, save if needed, show notification.
     fn finish_capture(&mut self, capture: Capture) {
         // Save to file if that is the default action.
         if self.settings.default_action == PostCaptureAction::SaveToFile {
             let filename = capture.default_filename();
             let save_path = self.settings.save_directory.join(&filename);
-            match write_bmp(&save_path, capture.width, capture.height, &capture.pixels) {
-                Ok(()) => {
-                    if self.settings.show_notification {
-                        self.notification = Some(Notification {
-                            message: format!("Screenshot saved to {}", save_path.display()),
-                            file_path: Some(save_path),
-                            remaining_ms: 4000,
-                        });
-                    }
-                }
-                Err(err) => {
-                    self.notification = Some(Notification {
-                        message: format!("Failed to save screenshot: {err}"),
-                        file_path: None,
-                        remaining_ms: 5000,
-                    });
-                }
-            }
+            let outcome = write_bmp(&save_path, capture.width, capture.height, &capture.pixels)
+                .map(|()| save_path)
+                .map_err(SaveError::Bmp);
+            self.notify_save(&outcome);
         }
 
         // Move to preview if annotating.
@@ -746,22 +848,34 @@ impl ScreenshotApp {
         self.capture_history.insert(0, capture);
     }
 
-    /// Save the current capture (with annotations baked in) to a file.
-    pub fn save_current(&mut self) -> Result<PathBuf, BmpError> {
+    /// Save the current capture, with annotations baked in, to a file.
+    ///
+    /// The annotations are flattened into a *copy* of the pixels: the capture
+    /// itself stays clean, so undo still works and a second save after another
+    /// arrow does not stack the first one twice.
+    pub fn save_current(&mut self) -> Result<PathBuf, SaveError> {
         let capture = match &self.current_capture {
             Some(c) => c,
-            None => {
-                return Err(BmpError::PixelCountMismatch {
-                    expected: 1,
-                    actual: 0,
-                });
-            }
+            None => return Err(SaveError::NoCapture),
         };
 
         let filename = capture.default_filename();
         let save_path = self.settings.save_directory.join(filename);
-        write_bmp(&save_path, capture.width, capture.height, &capture.pixels)?;
+        let pixels = flatten_annotations(capture, &self.annotations);
+        write_bmp(&save_path, capture.width, capture.height, &pixels)?;
         Ok(save_path)
+    }
+
+    /// Save the current capture and tell the user what happened.
+    ///
+    /// The user-facing operation. [`save_current`](Self::save_current) is the
+    /// mechanism and returns a `Result` nobody is obliged to read; this is the
+    /// one the UI calls, and it cannot fail silently.
+    pub fn save_current_notifying(&mut self) -> bool {
+        let outcome = self.save_current();
+        let ok = outcome.is_ok();
+        self.notify_save(&outcome);
+        ok
     }
 
     /// Discard the current capture and return to the menu.
@@ -881,7 +995,7 @@ impl ScreenshotApp {
                 true
             }
             Key::S if event.modifiers.ctrl => {
-                let _ = self.save_current();
+                self.save_current_notifying();
                 true
             }
             Key::Z if event.modifiers.ctrl => {
@@ -984,48 +1098,54 @@ impl ScreenshotApp {
 
         match &event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
-                if event.y >= content_y {
-                    let draw_x = event.x;
-                    let draw_y = event.y - content_y;
+                // Toolbars first: they sit above the content area, and a click
+                // there is a command, not a place to start drawing.
+                if event.y < content_y {
+                    if let Some(button) = self.preview_button_at(event.x, event.y) {
+                        self.activate_preview_button(button);
+                        return true;
+                    }
+                    return false;
+                }
+                let draw_x = event.x;
+                let draw_y = event.y - content_y;
 
-                    if self.annotation_tool == AnnotationTool::Text {
-                        // Place text annotation at click position.
-                        if !self.annotation_text_input.is_empty() {
-                            let mut ann = Annotation::new(
-                                AnnotationTool::Text,
-                                draw_x,
-                                draw_y,
-                                self.annotation_color,
-                            );
-                            ann.text = self.annotation_text_input.clone();
-                            // The annotation's box is the box its text will
-                            // actually occupy when drawn at 14 px, not one
-                            // guessed from the byte count.
-                            ann.end_x = draw_x
-                                + text::measure(
-                                    &self.annotation_text_input,
-                                    14.0,
-                                    FontWeightHint::Regular,
-                                );
-                            ann.end_y = draw_y + 16.0;
-                            self.annotations.push(ann);
-                            self.annotation_text_input.clear();
-                        }
-                    } else {
-                        self.pending_annotation = Some(Annotation::new(
-                            self.annotation_tool,
+                if self.annotation_tool == AnnotationTool::Text {
+                    // Place text annotation at click position.
+                    if !self.annotation_text_input.is_empty() {
+                        let mut ann = Annotation::new(
+                            AnnotationTool::Text,
                             draw_x,
                             draw_y,
-                            if self.annotation_tool == AnnotationTool::Highlight {
-                                HIGHLIGHT_COLOR
-                            } else {
-                                self.annotation_color
-                            },
-                        ));
+                            self.annotation_color,
+                        );
+                        ann.text = self.annotation_text_input.clone();
+                        // The annotation's box is the box its text will
+                        // actually occupy when drawn, not one guessed from the
+                        // byte count.
+                        ann.end_x = draw_x
+                            + text::measure(
+                                &self.annotation_text_input,
+                                ANNOTATION_TEXT_SIZE,
+                                FontWeightHint::Regular,
+                            );
+                        ann.end_y = draw_y + 16.0;
+                        self.annotations.push(ann);
+                        self.annotation_text_input.clear();
                     }
-                    return true;
+                } else {
+                    self.pending_annotation = Some(Annotation::new(
+                        self.annotation_tool,
+                        draw_x,
+                        draw_y,
+                        if self.annotation_tool == AnnotationTool::Highlight {
+                            HIGHLIGHT_COLOR
+                        } else {
+                            self.annotation_color
+                        },
+                    ));
                 }
-                false
+                true
             }
             MouseEventKind::Move => {
                 if let Some(ref mut ann) = self.pending_annotation {
@@ -1108,6 +1228,51 @@ impl ScreenshotApp {
             }
         }
         None
+    }
+
+    /// Returns the preview toolbar control at (x, y), if any.
+    #[must_use]
+    pub fn preview_button_at(&self, x: f32, y: f32) -> Option<PreviewButton> {
+        let hit = |r: (f32, f32, f32, f32)| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
+
+        for (i, action) in PREVIEW_ACTIONS.iter().enumerate() {
+            if hit(preview_action_rect(self.window_width, i)) {
+                return Some(*action);
+            }
+        }
+        for (i, tool) in PREVIEW_TOOLS.iter().enumerate() {
+            if hit(preview_tool_rect(i)) {
+                return Some(PreviewButton::Tool(*tool));
+            }
+        }
+        if hit(preview_undo_rect()) {
+            return Some(PreviewButton::Undo);
+        }
+        None
+    }
+
+    /// Perform the action a preview toolbar control stands for.
+    pub fn activate_preview_button(&mut self, button: PreviewButton) {
+        match button {
+            PreviewButton::Save => {
+                self.save_current_notifying();
+            }
+            PreviewButton::Copy => {
+                // The clipboard lives in a separate service reached over IPC,
+                // and this app has no channel to it yet. Say so rather than
+                // appearing to copy — a button that silently does nothing is
+                // the bug this whole pass is about.
+                self.notification = Some(Notification {
+                    message: "Copy needs the clipboard service, which is not connected yet"
+                        .to_string(),
+                    file_path: None,
+                    remaining_ms: 4000,
+                });
+            }
+            PreviewButton::Discard => self.discard_current(),
+            PreviewButton::Tool(tool) => self.annotation_tool = tool,
+            PreviewButton::Undo => self.undo_annotation(),
+        }
     }
 
     // ========================================================================
@@ -1247,11 +1412,14 @@ impl ScreenshotApp {
         tree.text(16.0, 12.0, "Preview", TEXT_PRIMARY, 18.0);
 
         // Action buttons in toolbar.
-        let actions = ["Save", "Copy", "Discard"];
-        for (i, label) in actions.iter().enumerate() {
-            let bx = self.window_width - ((actions.len() - i) as f32) * (80.0 + BUTTON_SPACING);
-            let by = 6.0;
-            tree.fill_rounded_rect(bx, by, 80.0, 30.0, BUTTON_BG, CornerRadii::all(4.0));
+        for (i, action) in PREVIEW_ACTIONS.iter().enumerate() {
+            let (bx, by, bw, bh) = preview_action_rect(self.window_width, i);
+            let label = match action {
+                PreviewButton::Save => "Save",
+                PreviewButton::Copy => "Copy",
+                _ => "Discard",
+            };
+            tree.fill_rounded_rect(bx, by, bw, bh, BUTTON_BG, CornerRadii::all(4.0));
             tree.text(bx + 12.0, by + 8.0, label, TEXT_PRIMARY, 12.0);
         }
 
@@ -1259,28 +1427,21 @@ impl ScreenshotApp {
         let ann_y = TOOLBAR_HEIGHT;
         tree.fill_rect(0.0, ann_y, self.window_width, ANNOTATION_TOOLBAR_HEIGHT, Color::rgb(55, 55, 55));
 
-        let tools = [
-            AnnotationTool::Rectangle,
-            AnnotationTool::Arrow,
-            AnnotationTool::Text,
-            AnnotationTool::Highlight,
-        ];
-        for (i, tool) in tools.iter().enumerate() {
-            let tx = 10.0 + i as f32 * 90.0;
-            let ty = ann_y + 4.0;
+        for (i, tool) in PREVIEW_TOOLS.iter().enumerate() {
+            let (tx, ty, tw, th) = preview_tool_rect(i);
             let bg = if self.annotation_tool == *tool {
                 BUTTON_ACTIVE_BG
             } else {
                 BUTTON_BG
             };
-            tree.fill_rounded_rect(tx, ty, 80.0, 28.0, bg, CornerRadii::all(3.0));
+            tree.fill_rounded_rect(tx, ty, tw, th, bg, CornerRadii::all(3.0));
             tree.text(tx + 8.0, ty + 7.0, tool.label(), TEXT_PRIMARY, 11.0);
         }
 
         // Undo button.
-        let undo_x = 10.0 + 4.0 * 90.0 + 20.0;
-        tree.fill_rounded_rect(undo_x, ann_y + 4.0, 60.0, 28.0, BUTTON_BG, CornerRadii::all(3.0));
-        tree.text(undo_x + 10.0, ann_y + 11.0, "Undo", TEXT_PRIMARY, 11.0);
+        let (ux, uy, uw, uh) = preview_undo_rect();
+        tree.fill_rounded_rect(ux, uy, uw, uh, BUTTON_BG, CornerRadii::all(3.0));
+        tree.text(ux + 10.0, uy + 7.0, "Undo", TEXT_PRIMARY, 11.0);
 
         // Content area: show the captured image.
         let content_y = TOOLBAR_HEIGHT + ANNOTATION_TOOLBAR_HEIGHT;
@@ -1422,12 +1583,304 @@ fn render_annotation(tree: &mut RenderTree, ann: &Annotation) {
             }
         }
         AnnotationTool::Text => {
-            tree.text(ann.start_x, ann.start_y, &ann.text, ann.color, 14.0);
+            tree.text(
+                ann.start_x,
+                ann.start_y,
+                &ann.text,
+                ann.color,
+                ANNOTATION_TEXT_SIZE,
+            );
         }
         AnnotationTool::Highlight => {
             tree.fill_rect(ann.min_x(), ann.min_y(), ann.width(), ann.height(), ann.color);
         }
     }
+}
+
+// ============================================================================
+// Annotation flattening (baking annotations into the saved pixels)
+// ============================================================================
+
+/// A mutable ARGB pixel surface with alpha blending, used to bake annotations
+/// into a capture before it is written to disk.
+///
+/// # Why this is not the compositor's code
+///
+/// Saving happens with no compositor in the loop: the app owns the pixels and
+/// writes them straight to a file. The drawing rules here therefore deliberately
+/// mirror the compositor's — 1-pixel Bresenham lines, an inward rectangle
+/// stroke, source-over blending — so that what lands in the file is what the
+/// user saw on screen. Where the compositor and this disagree, this is the bug.
+struct Canvas<'a> {
+    pixels: &'a mut [u32],
+    width: u32,
+    height: u32,
+}
+
+impl Canvas<'_> {
+    /// Blend `color` over the pixel at `(x, y)`, ignoring out-of-bounds writes.
+    fn blend(&mut self, x: i32, y: i32, color: Color) {
+        if color.a == 0 || x < 0 || y < 0 {
+            return;
+        }
+        let (Ok(ux), Ok(uy)) = (u32::try_from(x), u32::try_from(y)) else {
+            return;
+        };
+        if ux >= self.width || uy >= self.height {
+            return;
+        }
+        let idx = (uy as usize)
+            .saturating_mul(self.width as usize)
+            .saturating_add(ux as usize);
+        let Some(slot) = self.pixels.get_mut(idx) else {
+            return;
+        };
+        if color.a == 255 {
+            *slot = argb_of(color);
+            return;
+        }
+        // Source-over in 8-bit channels. `src * a + dst * (255 - a)` peaks at
+        // 65_025, so a u32 intermediate cannot overflow.
+        let a = u32::from(color.a);
+        let inv = 255_u32.saturating_sub(a);
+        let mix = |src: u8, dst: u32| -> u32 {
+            (u32::from(src).saturating_mul(a).saturating_add(dst.saturating_mul(inv))) / 255
+        };
+        let dst = *slot;
+        let r = mix(color.r, (dst >> 16) & 0xFF);
+        let g = mix(color.g, (dst >> 8) & 0xFF);
+        let b = mix(color.b, dst & 0xFF);
+        *slot = 0xFF00_0000 | (r << 16) | (g << 8) | b;
+    }
+
+    /// Fill an axis-aligned rectangle given in float screen coordinates.
+    fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
+        let (Some(x0), Some(y0)) = (whole(x), whole(y)) else {
+            return;
+        };
+        let (Some(x1), Some(y1)) = (whole(x + w), whole(y + h)) else {
+            return;
+        };
+        for py in y0..y1 {
+            for px in x0..x1 {
+                self.blend(px, py, color);
+            }
+        }
+    }
+
+    /// Stroke a rectangle outline `line_width` pixels thick, drawn *inward*
+    /// from the given bounds — the same convention the compositor uses.
+    fn stroke_rect(&mut self, x: f32, y: f32, w: f32, h: f32, line_width: f32, color: Color) {
+        self.fill_rect(x, y, w, line_width, color);
+        self.fill_rect(x, y + h - line_width, w, line_width, color);
+        self.fill_rect(x, y, line_width, h, color);
+        self.fill_rect(x + w - line_width, y, line_width, h, color);
+    }
+
+    /// Draw a 1-pixel Bresenham line.
+    ///
+    /// One pixel, not the annotation's nominal 2.0 width, because the
+    /// compositor's `Line` handler discards the width field — so a thicker line
+    /// in the file than on the screen would be a *new* discrepancy, not a fix.
+    ///
+    /// The segment is clipped to the canvas *before* it is walked, not by
+    /// discarding out-of-bounds plots inside the loop. Discarding inside the
+    /// loop is what the compositor does, and it is only safe there because its
+    /// coordinates come from a framebuffer; here they come from annotations in
+    /// preview space, so a line from far outside the image would spend
+    /// millions of iterations plotting nothing before it arrived.
+    fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, color: Color) {
+        let Some(((sx, sy), (tx, ty))) = self.clip_segment(x1, y1, x2, y2) else {
+            return;
+        };
+        let (Some(mut cx), Some(mut cy)) = (whole(sx), whole(sy)) else {
+            return;
+        };
+        let (Some(ex), Some(ey)) = (whole(tx), whole(ty)) else {
+            return;
+        };
+        // `unsigned_abs` rather than `abs`: the latter panics on `i32::MIN`,
+        // which a saturating subtraction can produce.
+        let dx = i32::try_from(ex.saturating_sub(cx).unsigned_abs()).unwrap_or(i32::MAX);
+        let dy = 0_i32
+            .saturating_sub(i32::try_from(ey.saturating_sub(cy).unsigned_abs()).unwrap_or(i32::MAX));
+        let sx: i32 = if cx < ex { 1 } else { -1 };
+        let sy: i32 = if cy < ey { 1 } else { -1 };
+        let mut err = dx.saturating_add(dy);
+
+        loop {
+            self.blend(cx, cy, color);
+            if cx == ex && cy == ey {
+                break;
+            }
+            let e2 = err.saturating_mul(2);
+            if e2 >= dy {
+                err = err.saturating_add(dy);
+                cx = cx.saturating_add(sx);
+            }
+            if e2 <= dx {
+                err = err.saturating_add(dx);
+                cy = cy.saturating_add(sy);
+            }
+        }
+    }
+
+    /// Liang-Barsky clip of a segment against the canvas, returning the visible
+    /// portion or `None` when the segment misses the canvas entirely.
+    ///
+    /// The clipped endpoints round to whole pixels a little differently from
+    /// the unclipped walk, so a line entering from off-image can land one pixel
+    /// off what an infinite canvas would have drawn. That is the price of a
+    /// bounded loop, and it is only ever visible on the one-pixel entry stub of
+    /// a line the user drew mostly outside the image.
+    fn clip_segment(
+        &self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    ) -> Option<((f32, f32), (f32, f32))> {
+        if !(x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite()) {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let (max_x, max_y) = (self.width as f32 - 1.0, self.height as f32 - 1.0);
+        if max_x < 0.0 || max_y < 0.0 {
+            return None;
+        }
+        let (dx, dy) = (x2 - x1, y2 - y1);
+        let (mut t0, mut t1) = (0.0_f32, 1.0_f32);
+
+        for (p, q) in [
+            (-dx, x1 - 0.0),
+            (dx, max_x - x1),
+            (-dy, y1 - 0.0),
+            (dy, max_y - y1),
+        ] {
+            if p == 0.0 {
+                // Parallel to this edge: outside it means the whole segment is.
+                if q < 0.0 {
+                    return None;
+                }
+                continue;
+            }
+            let r = q / p;
+            if p < 0.0 {
+                if r > t1 {
+                    return None;
+                }
+                t0 = t0.max(r);
+            } else {
+                if r < t0 {
+                    return None;
+                }
+                t1 = t1.min(r);
+            }
+        }
+
+        Some((
+            (dx.mul_add(t0, x1), dy.mul_add(t0, y1)),
+            (dx.mul_add(t1, x1), dy.mul_add(t1, y1)),
+        ))
+    }
+}
+
+/// Pack a toolkit colour into the `0xAARRGGBB` word the capture buffer holds.
+fn argb_of(color: Color) -> u32 {
+    (u32::from(color.a) << 24)
+        | (u32::from(color.r) << 16)
+        | (u32::from(color.g) << 8)
+        | u32::from(color.b)
+}
+
+/// Truncate a float coordinate to a whole pixel, rejecting the degenerate
+/// values (`NaN`, infinities) that `as i32` would silently map to 0 or
+/// saturate — either of which would stamp a stray mark on the image instead of
+/// drawing nothing.
+fn whole(v: f32) -> Option<i32> {
+    if !v.is_finite() {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let out = (v >= -2_147_483_648.0 && v <= 2_147_483_647.0).then_some(v as i32);
+    out
+}
+
+/// The font size text annotations are drawn at, on screen and in the file.
+const ANNOTATION_TEXT_SIZE: f32 = 14.0;
+
+/// Return a copy of `capture`'s pixels with `annotations` painted into them.
+///
+/// This is what makes a saved screenshot match the one on screen. Annotations
+/// are stored relative to the preview's content area, and the image is shown
+/// 1:1 filling that area from its origin, so an annotation at `(ax, ay)` is
+/// image pixel `(ax, ay)` with no transform. Anything falling outside the image
+/// is clipped rather than wrapping to the next row.
+#[must_use]
+pub fn flatten_annotations(capture: &Capture, annotations: &[Annotation]) -> Vec<u32> {
+    let mut pixels = capture.pixels.clone();
+    if annotations.is_empty() {
+        return pixels;
+    }
+    let mut canvas = Canvas {
+        pixels: &mut pixels,
+        width: capture.width,
+        height: capture.height,
+    };
+
+    for ann in annotations {
+        match ann.tool {
+            AnnotationTool::Rectangle => {
+                canvas.stroke_rect(ann.min_x(), ann.min_y(), ann.width(), ann.height(), 2.0, ann.color);
+            }
+            AnnotationTool::Highlight => {
+                canvas.fill_rect(ann.min_x(), ann.min_y(), ann.width(), ann.height(), ann.color);
+            }
+            AnnotationTool::Arrow => {
+                canvas.line(ann.start_x, ann.start_y, ann.end_x, ann.end_y, ann.color);
+                let dx = ann.end_x - ann.start_x;
+                let dy = ann.end_y - ann.start_y;
+                let len = dx.mul_add(dx, dy * dy).sqrt();
+                if len > 1.0 {
+                    let arrow_len = 12.0_f32.min(len * 0.3);
+                    let (ux, uy) = (dx / len, dy / len);
+                    let (px, py) = (-uy, ux);
+                    let base_x = ann.end_x - ux * arrow_len;
+                    let base_y = ann.end_y - uy * arrow_len;
+                    let wing = arrow_len * 0.5;
+                    canvas.line(ann.end_x, ann.end_y, base_x + px * wing, base_y + py * wing, ann.color);
+                    canvas.line(ann.end_x, ann.end_y, base_x - px * wing, base_y - py * wing, ann.color);
+                }
+            }
+            AnnotationTool::Text => {
+                if ann.text.is_empty() {
+                    continue;
+                }
+                // `RenderCommand::Text`'s `y` is the top of the line and the
+                // compositor adds the ascent to reach the baseline; do the same
+                // here, from the same font cache, so the glyphs land on the
+                // same row in the file as they did on screen.
+                let baseline =
+                    ann.start_y + text::ascent(ANNOTATION_TEXT_SIZE, FontWeightHint::Regular);
+                let mut surface = text::Surface {
+                    pixels: canvas.pixels,
+                    width: canvas.width,
+                    height: canvas.height,
+                };
+                text::draw_into(
+                    &mut surface,
+                    &ann.text,
+                    ann.start_x,
+                    baseline,
+                    ANNOTATION_TEXT_SIZE,
+                    FontWeightHint::Regular,
+                    ann.color,
+                );
+            }
+        }
+    }
+
+    pixels
 }
 
 // ============================================================================
@@ -1500,6 +1953,427 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Shared helpers ----
+
+    /// A fresh, empty directory under the system temp dir.
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("slateos-screenshot-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// A directory that does not exist and whose parent does not either, so
+    /// `fs::write` into it fails on every platform without touching
+    /// permissions.
+    fn unwritable_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("slateos-screenshot-missing-{tag}"))
+            .join("nor-this")
+    }
+
+    fn ctrl(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            text: None,
+        }
+    }
+
+    fn click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// An app sitting in the preview view with a plain blue capture loaded.
+    fn app_in_preview() -> ScreenshotApp {
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        app.settings.default_action = PostCaptureAction::Annotate;
+        app.current_capture = Some(Capture::solid(100, 80, 0xFF0000FF));
+        app.view = AppView::Preview;
+        app
+    }
+
+    fn annotation(tool: AnnotationTool, x1: f32, y1: f32, x2: f32, y2: f32, color: Color) -> Annotation {
+        let mut ann = Annotation::new(tool, x1, y1, color);
+        ann.end_x = x2;
+        ann.end_y = y2;
+        ann
+    }
+
+    fn differing(a: &[u32], b: &[u32]) -> usize {
+        a.iter().zip(b).filter(|(l, r)| l != r).count()
+    }
+
+    // ---- Annotation flattening ----
+
+    /// The headline bug: the user draws on a screenshot, saves it, and the
+    /// annotations are not in the file. `save_current`'s own doc comment
+    /// promised they would be.
+    #[test]
+    fn annotations_reach_the_saved_file() {
+        let dir = temp_dir("baked");
+        let mut app = app_in_preview();
+        app.settings.save_directory = dir.clone();
+        app.annotations.push(annotation(
+            AnnotationTool::Rectangle,
+            10.0,
+            10.0,
+            60.0,
+            50.0,
+            Color::rgb(255, 0, 0),
+        ));
+
+        let path = app.save_current().expect("save");
+        let with_ann = std::fs::read(&path).expect("read back");
+
+        app.annotations.clear();
+        let path2 = app.save_current().expect("save again");
+        let without = std::fs::read(&path2).expect("read back");
+
+        assert_eq!(path, path2, "same capture, same filename");
+        assert_ne!(
+            with_ann, without,
+            "the file was byte-identical with and without a rectangle drawn on it"
+        );
+    }
+
+    #[test]
+    fn flattening_does_not_modify_the_capture() {
+        let capture = Capture::solid(40, 30, 0xFF0000FF);
+        let original = capture.pixels.clone();
+        let anns = [annotation(
+            AnnotationTool::Highlight,
+            0.0,
+            0.0,
+            40.0,
+            30.0,
+            HIGHLIGHT_COLOR,
+        )];
+        let flat = flatten_annotations(&capture, &anns);
+        assert_eq!(capture.pixels, original, "the capture itself was painted on");
+        assert_ne!(flat, original, "the flattened copy was not painted on");
+    }
+
+    #[test]
+    fn no_annotations_means_the_pixels_are_returned_unchanged() {
+        let capture = Capture::solid(16, 16, 0xFF123456);
+        assert_eq!(flatten_annotations(&capture, &[]), capture.pixels);
+    }
+
+    #[test]
+    fn a_rectangle_paints_its_border_and_not_its_interior() {
+        let capture = Capture::solid(40, 40, 0xFF0000FF);
+        let red = Color::rgb(255, 0, 0);
+        let anns = [annotation(AnnotationTool::Rectangle, 10.0, 10.0, 30.0, 30.0, red)];
+        let flat = flatten_annotations(&capture, &anns);
+        let at = |x: usize, y: usize| flat[y * 40 + x];
+
+        assert_eq!(at(10, 10), argb_of(red), "top-left corner of the border");
+        assert_eq!(at(20, 10), argb_of(red), "middle of the top edge");
+        assert_eq!(at(20, 29), argb_of(red), "middle of the bottom edge");
+        assert_eq!(at(20, 20), 0xFF0000FF, "the interior must stay untouched");
+        assert_eq!(at(5, 5), 0xFF0000FF, "outside the rectangle");
+    }
+
+    #[test]
+    fn a_highlight_blends_instead_of_replacing() {
+        let capture = Capture::solid(20, 20, 0xFF0000FF);
+        let anns = [annotation(
+            AnnotationTool::Highlight,
+            0.0,
+            0.0,
+            20.0,
+            20.0,
+            HIGHLIGHT_COLOR,
+        )];
+        let flat = flatten_annotations(&capture, &anns);
+        let px = flat[10 * 20 + 10];
+        assert_ne!(px, 0xFF0000FF, "the highlight did not tint the pixel");
+        assert_ne!(
+            px,
+            argb_of(HIGHLIGHT_COLOR),
+            "a translucent highlight must blend, not overwrite"
+        );
+        assert!(px & 0xFF > 0, "the blue underneath must survive");
+    }
+
+    #[test]
+    fn an_arrow_paints_a_line_and_a_head() {
+        let capture = Capture::solid(60, 60, 0xFF000000);
+        let anns = [annotation(
+            AnnotationTool::Arrow,
+            5.0,
+            5.0,
+            50.0,
+            5.0,
+            Color::rgb(255, 255, 255),
+        )];
+        let flat = flatten_annotations(&capture, &anns);
+        let at = |x: usize, y: usize| flat[y * 60 + x];
+        assert_eq!(at(25, 5), 0xFFFFFFFF, "the shaft");
+        // The head fans off the shaft, so at least one pixel above it is set.
+        let head_rows = (1..5).any(|dy| (38..52).any(|x| at(x, 5 - dy) == 0xFFFFFFFF));
+        assert!(head_rows, "the arrowhead was not drawn");
+    }
+
+    #[test]
+    fn a_text_annotation_reaches_the_pixels() {
+        let capture = Capture::solid(200, 60, 0xFF000000);
+        let mut ann = annotation(
+            AnnotationTool::Text,
+            10.0,
+            10.0,
+            10.0,
+            26.0,
+            Color::rgb(255, 255, 255),
+        );
+        ann.text = "Look here".to_string();
+        let flat = flatten_annotations(&capture, &[ann]);
+        assert!(
+            differing(&capture.pixels, &flat) > 0,
+            "the text label was dropped from the flattened image"
+        );
+    }
+
+    #[test]
+    fn empty_text_draws_nothing() {
+        let capture = Capture::solid(50, 20, 0xFF000000);
+        let ann = annotation(AnnotationTool::Text, 5.0, 5.0, 5.0, 21.0, Color::WHITE);
+        assert_eq!(flatten_annotations(&capture, &[ann]), capture.pixels);
+    }
+
+    /// Annotations are in preview coordinates and the image may be smaller than
+    /// the preview, so out-of-range ones are routine. They must clip, not wrap
+    /// onto the next row and not panic.
+    #[test]
+    fn annotations_outside_the_image_are_clipped() {
+        let capture = Capture::solid(20, 20, 0xFF0000FF);
+        let anns = [
+            annotation(AnnotationTool::Rectangle, 100.0, 100.0, 200.0, 200.0, Color::RED),
+            annotation(AnnotationTool::Highlight, -50.0, -50.0, -10.0, -10.0, HIGHLIGHT_COLOR),
+            annotation(AnnotationTool::Arrow, -30.0, 10.0, -5.0, 10.0, Color::RED),
+        ];
+        assert_eq!(flatten_annotations(&capture, &anns), capture.pixels);
+    }
+
+    /// An arrow whose tail is millions of pixels off-image must not walk the
+    /// whole way there one pixel at a time. Bounded by the segment clip, this
+    /// returns instantly; unbounded it would take minutes.
+    #[test]
+    fn an_arrow_from_far_off_image_is_clipped_not_walked() {
+        let capture = Capture::solid(32, 32, 0xFF000000);
+        let anns = [annotation(
+            AnnotationTool::Arrow,
+            -8_000_000.0,
+            16.0,
+            16.0,
+            16.0,
+            Color::WHITE,
+        )];
+        let flat = flatten_annotations(&capture, &anns);
+        assert!(
+            differing(&capture.pixels, &flat) > 0,
+            "the visible part of the arrow was dropped"
+        );
+    }
+
+    /// A segment that never touches the image draws nothing at all.
+    #[test]
+    fn a_line_that_misses_the_image_draws_nothing() {
+        let capture = Capture::solid(32, 32, 0xFF000000);
+        let anns = [annotation(
+            AnnotationTool::Arrow,
+            -100.0,
+            -100.0,
+            -50.0,
+            -60.0,
+            Color::WHITE,
+        )];
+        assert_eq!(flatten_annotations(&capture, &anns), capture.pixels);
+    }
+
+    #[test]
+    fn a_degenerate_annotation_does_not_panic() {
+        let capture = Capture::solid(10, 10, 0xFF000000);
+        let anns = [
+            annotation(AnnotationTool::Rectangle, f32::NAN, 0.0, 5.0, 5.0, Color::RED),
+            annotation(AnnotationTool::Arrow, 0.0, 0.0, f32::INFINITY, 0.0, Color::RED),
+            annotation(AnnotationTool::Highlight, 0.0, f32::NEG_INFINITY, 5.0, 5.0, HIGHLIGHT_COLOR),
+        ];
+        let _ = flatten_annotations(&capture, &anns);
+    }
+
+    // ---- Save reporting ----
+
+    #[test]
+    fn ctrl_s_reports_where_it_saved() {
+        let dir = temp_dir("reports");
+        let mut app = app_in_preview();
+        app.settings.save_directory = dir;
+
+        assert!(app.handle_event(&Event::Key(ctrl(Key::S))));
+
+        let notif = app.notification.as_ref().expect("Ctrl+S said nothing at all");
+        let path = notif.file_path.as_ref().expect("no path in the notification");
+        assert!(path.exists(), "notification named {} which does not exist", path.display());
+        assert!(notif.message.contains("saved"), "message was {:?}", notif.message);
+    }
+
+    /// The bug: `let _ = self.save_current()`. A save that failed looked
+    /// exactly like one that worked — which is to say, like nothing at all.
+    #[test]
+    fn ctrl_s_reports_a_failure() {
+        let mut app = app_in_preview();
+        app.settings.save_directory = unwritable_dir("fail");
+
+        app.handle_event(&Event::Key(ctrl(Key::S)));
+
+        let notif = app.notification.as_ref().expect("a failed save said nothing");
+        assert!(
+            notif.message.contains("Failed"),
+            "message was {:?}",
+            notif.message
+        );
+        assert!(notif.file_path.is_none(), "a failed save must not claim a path");
+    }
+
+    #[test]
+    fn ctrl_s_with_nothing_captured_says_so() {
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        app.view = AppView::Preview;
+        app.handle_event(&Event::Key(ctrl(Key::S)));
+
+        let notif = app.notification.as_ref().expect("no notification");
+        assert!(
+            notif.message.contains("no screenshot to save"),
+            "a missing capture must not be reported as a pixel-count mismatch; got {:?}",
+            notif.message
+        );
+    }
+
+    /// `show_notification` suppresses the routine confirmation. It must not
+    /// suppress an error, or a save that never happened is invisible.
+    #[test]
+    fn a_failure_is_reported_even_with_notifications_off() {
+        let mut app = app_in_preview();
+        app.settings.show_notification = false;
+        app.settings.save_directory = unwritable_dir("quiet");
+
+        app.save_current_notifying();
+        assert!(app.notification.is_some(), "the error was suppressed");
+
+        let dir = temp_dir("quiet-ok");
+        app.settings.save_directory = dir;
+        app.notification = None;
+        assert!(app.save_current_notifying());
+        assert!(
+            app.notification.is_none(),
+            "the routine confirmation must still be suppressed"
+        );
+    }
+
+    // ---- Preview toolbar ----
+
+    /// The Save / Copy / Discard buttons were painted every frame and hit-tested
+    /// nowhere: clicking them did nothing.
+    #[test]
+    fn the_preview_action_buttons_are_clickable() {
+        let app = app_in_preview();
+        for (i, expected) in PREVIEW_ACTIONS.iter().enumerate() {
+            let (x, y, w, h) = preview_action_rect(app.window_width, i);
+            assert_eq!(
+                app.preview_button_at(x + w / 2.0, y + h / 2.0),
+                Some(*expected)
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_save_in_the_toolbar_saves() {
+        let dir = temp_dir("toolbar-save");
+        let mut app = app_in_preview();
+        app.settings.save_directory = dir;
+
+        let (x, y, w, h) = preview_action_rect(app.window_width, 0);
+        assert!(app.handle_event(&click(x + w / 2.0, y + h / 2.0)));
+
+        let notif = app.notification.as_ref().expect("the Save button did nothing");
+        assert!(notif.file_path.as_ref().is_some_and(|p| p.exists()));
+    }
+
+    #[test]
+    fn clicking_discard_returns_to_the_menu() {
+        let mut app = app_in_preview();
+        app.annotations.push(annotation(
+            AnnotationTool::Rectangle,
+            1.0,
+            1.0,
+            5.0,
+            5.0,
+            Color::RED,
+        ));
+
+        let (x, y, w, h) = preview_action_rect(app.window_width, 2);
+        app.handle_event(&click(x + w / 2.0, y + h / 2.0));
+
+        assert_eq!(app.view, AppView::Menu);
+        assert!(app.current_capture.is_none());
+        assert!(app.annotations.is_empty());
+    }
+
+    #[test]
+    fn clicking_a_tool_button_selects_that_tool() {
+        let mut app = app_in_preview();
+        for (i, tool) in PREVIEW_TOOLS.iter().enumerate() {
+            let (x, y, w, h) = preview_tool_rect(i);
+            app.handle_event(&click(x + w / 2.0, y + h / 2.0));
+            assert_eq!(app.annotation_tool, *tool);
+        }
+    }
+
+    #[test]
+    fn clicking_undo_removes_the_last_annotation() {
+        let mut app = app_in_preview();
+        app.annotations.push(annotation(AnnotationTool::Rectangle, 1.0, 1.0, 5.0, 5.0, Color::RED));
+        app.annotations.push(annotation(AnnotationTool::Arrow, 2.0, 2.0, 9.0, 9.0, Color::RED));
+
+        let (x, y, w, h) = preview_undo_rect();
+        app.handle_event(&click(x + w / 2.0, y + h / 2.0));
+
+        assert_eq!(app.annotations.len(), 1);
+    }
+
+    /// A click in a toolbar is a command. It must not also start drawing an
+    /// annotation on the image underneath.
+    #[test]
+    fn a_toolbar_click_does_not_begin_an_annotation() {
+        let mut app = app_in_preview();
+        let (x, y, w, h) = preview_tool_rect(0);
+        app.handle_event(&click(x + w / 2.0, y + h / 2.0));
+        assert!(app.pending_annotation.is_none());
+        assert!(app.annotations.is_empty());
+    }
+
+    #[test]
+    fn copy_admits_it_cannot_copy_yet() {
+        let mut app = app_in_preview();
+        app.activate_preview_button(PreviewButton::Copy);
+        let notif = app.notification.as_ref().expect("Copy was silent");
+        assert!(
+            notif.message.contains("clipboard"),
+            "message was {:?}",
+            notif.message
+        );
+    }
 
     // ---- BMP encoder tests ----
 

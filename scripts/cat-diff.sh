@@ -205,6 +205,79 @@ run_case --nope plain.txt
 run_case -nZ plain.txt
 run_case -- -Z
 
+# --- option diagnostics, compared word for word against glibc ---------------
+#
+# The cases above only check *whether* there was a diagnostic, which is right
+# for the ones whose text comes from the host's error table. These check the
+# text, and so need a reference whose getopt is glibc's.
+#
+# `$GNU` is not that reference. On this host it is MSYS2's coreutils, and MSYS2
+# is a Cygwin derivative: it links `msys-2.0.dll` rather than glibc, and its
+# getopt is not glibc's. The two disagree on every sentence here --
+# `unknown option -- x` against `invalid option -- 'x'` -- so a harness pointed
+# at it certifies wording that no GNU/Linux system prints. `sort-diff.sh` did
+# exactly that for eight cases, and passed the whole time. See
+# `known-issues.md` -> TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE.
+#
+# So this section reaches for glibc through WSL, and skips if it is not there
+# rather than quietly falling back to a reference that would pass wrongly.
+GLIBC=${GLIBC:-"wsl -e env LC_ALL=C cat"}
+if printf 'x\n' | $GLIBC >/dev/null 2>&1; then
+  HAVE_GLIBC=yes
+else
+  HAVE_GLIBC=no
+  echo "cat-diff: glibc cat not reachable (tried: $GLIBC); skipping option diagnostics"
+fi
+
+# Compare stdout, stderr and status exactly, against glibc rather than $GNU.
+run_getopt() {
+  [ "$HAVE_GLIBC" = yes ] || return 0
+  local o_err g_err o_out g_out o_rc g_rc label="cat $*"
+  o_err=$(mktemp); g_err=$(mktemp)
+  o_out=$("$OURS_ABS" "$@" </dev/null 2>"$o_err"); o_rc=$?
+  g_out=$($GLIBC "$@" </dev/null 2>"$g_err"); g_rc=$?
+  local o_msg g_msg
+  o_msg=$(tr '\n' '|' <"$o_err"); g_msg=$(tr '\n' '|' <"$g_err")
+  rm -f "$o_err" "$g_err"
+  if [ "$o_msg" = "$g_msg" ] && [ "$o_rc" = "$g_rc" ] && [ "$o_out" = "$g_out" ]; then
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   %s\n' "$label"
+  else
+    fail=$((fail+1))
+    printf 'DIFF %s [stderr]\n  ours (rc=%s): %s\n  gnu  (rc=%s): %s\n' \
+      "$label" "$o_rc" "$o_msg" "$g_rc" "$g_msg"
+  fi
+  return 0
+}
+
+# The status is 1 here, not sort's 2 -- it is per-utility, and 1 is the common
+# case. `cat --zzz-bogus; echo $?` is how to check a newly converted utility.
+run_getopt -x
+run_getopt -Z
+run_getopt --nope
+run_getopt --nope=1
+
+# Abbreviation. Every one of these was refused before `cat` used the shared
+# getopt, which is the bug that motivated the module.
+run_getopt --squeeze
+run_getopt --show-a
+run_getopt --number-non
+run_getopt --num
+run_getopt --show
+run_getopt --sq=1
+run_getopt --show-e=1
+run_getopt --number=1
+
+# `--help` and `--version` go through the table like any other option, so they
+# refuse an argument the same way rather than printing what was asked for.
+run_getopt --help=x
+run_getopt --version=x
+
+# The empty prefix matches every option, so this one case pins the table's
+# whole declaration order -- which is observable, and which was measured with
+# precisely this command rather than recalled.
+run_getopt --=x
+
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then
   printf ' (%d of which no longer do)' "$xpass"

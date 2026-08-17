@@ -63,8 +63,49 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Salt appended to master password before hashing to derive the session key.
+/// Salt mixed into the master password before hashing to derive the session key.
+///
+/// A salt's job is to be *different for every vault*, so that an attacker who
+/// precomputes a table of hashed passwords has to redo the work for each
+/// victim rather than once for the world. This one is a compile-time constant
+/// and so does exactly the opposite — every SlateOS install shares it.
+///
+/// It is still here because fixing it needs a per-vault random value, and
+/// there is no source of unpredictable numbers in userspace yet; see
+/// `requests/c-a-userspace-entropy-syscall.md`. When that syscall exists, this
+/// constant becomes a per-vault salt generated at `set_master_password` time
+/// and stored beside the verifier. Tracked in `known-issues.md` →
+/// `C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES`.
 const KEY_DERIVATION_SALT: &str = "slateos_credential_salt";
+
+/// How many hash iterations turn a master password into a key, for a vault
+/// created today.
+///
+/// This is *key stretching*, and it is the entire defence a password-derived
+/// key has. A password has perhaps 30–40 bits of real entropy, which is
+/// nothing; what makes it survive is that each guess costs the attacker time.
+/// A single SHA-256 pass — what this used to do — lets commodity GPU hardware
+/// try billions of candidates per second. At 100 000 iterations the same
+/// hardware manages tens of thousands: a factor of 10^5, bought once.
+///
+/// The number is chosen the standard way — by measurement, so that one
+/// derivation costs enough to hurt an attacker and not enough for a user to
+/// notice. On the development machine one SHA-256 of a ~70-byte input takes
+/// 1.28 µs in a release build, so 100 000 rounds is ~130 ms per unlock.
+///
+/// It is a *default* rather than a constant of the format because the right
+/// number rises with hardware, and a vault written under the old number must
+/// keep opening after the default moves: the cost is a property of the stored
+/// verifier, not of the code that reads it. Every real password-hashing format
+/// records its cost parameters alongside the hash for this reason. See
+/// [`CredentialStore::kdf_rounds`].
+///
+/// This is PBKDF2's *structure*, not PBKDF2 (which iterates HMAC, not a bare
+/// hash), and it is far weaker than a memory-hard function such as Argon2id —
+/// stretching only costs an attacker time, whereas memory-hardness also
+/// denies them the parallelism that makes GPUs worth using. Argon2id is the
+/// end state; see `open-questions.md` → C-Q5.
+const DEFAULT_KDF_ROUNDS: u32 = 100_000;
 
 /// Default auto-lock timeout in seconds (5 minutes).
 const DEFAULT_LOCK_TIMEOUT_SECS: u64 = 300;
@@ -353,48 +394,156 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     result
 }
 
-/// Derive a 32-byte session key from the master password using SHA-256.
-fn derive_session_key(master_password: &str) -> [u8; 32] {
-    let mut input = master_password.as_bytes().to_vec();
-    input.extend_from_slice(KEY_DERIVATION_SALT.as_bytes());
-    sha256(&input)
-}
+/// The size of the nonce prefix that [`encrypt`] writes ahead of a ciphertext.
+const NONCE_LEN: usize = 8;
 
-/// Encrypt plaintext using XOR stream cipher with the given key.
+/// Derive a 32-byte session key from the master password at a given cost.
 ///
-/// The key is expanded by repeatedly hashing (key || counter) to produce
-/// a keystream of sufficient length. This is a demonstration cipher;
-/// production use would employ AES-256-GCM.
-pub fn encrypt(plaintext: &[u8], key: &[u8; 32]) -> Vec<u8> {
-    let keystream = generate_keystream(key, plaintext.len());
-    plaintext
-        .iter()
-        .zip(keystream.iter())
-        .map(|(p, k)| p ^ k)
-        .collect()
+/// `rounds` comes from the vault ([`CredentialStore::kdf_rounds`]), not from a
+/// constant — see [`DEFAULT_KDF_ROUNDS`] for why, and for why the single
+/// SHA-256 pass this used to be was not a key derivation function at all.
+fn derive_session_key(master_password: &str, rounds: u32) -> [u8; 32] {
+    stretch(
+        master_password.as_bytes(),
+        KEY_DERIVATION_SALT.as_bytes(),
+        rounds,
+    )
 }
 
-/// Decrypt ciphertext using XOR stream cipher with the given key.
+/// Iterated SHA-256 over `password` and `salt` — PBKDF2's shape.
 ///
-/// XOR encryption is symmetric so decryption is the same operation.
-pub fn decrypt(ciphertext: &[u8], key: &[u8; 32]) -> Vec<u8> {
-    encrypt(ciphertext, key)
+/// The password and salt are folded back in on *every* round rather than the
+/// accumulator merely being hashed with itself. That matters: a chain of the
+/// form `h = SHA-256(h)` is the same chain for every password, so an attacker
+/// could walk it once and then test candidates against any point on it. Mixing
+/// the password in each round makes the whole chain password-specific, which
+/// is what forces the attacker to pay the full cost per guess.
+fn stretch(password: &[u8], salt: &[u8], rounds: u32) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(32usize.saturating_add(password.len()).saturating_add(salt.len()));
+    buf.extend_from_slice(password);
+    buf.extend_from_slice(salt);
+    let mut acc = sha256(&buf);
+
+    for _ in 0..rounds {
+        buf.clear();
+        buf.extend_from_slice(&acc);
+        buf.extend_from_slice(password);
+        buf.extend_from_slice(salt);
+        acc = sha256(&buf);
+    }
+    acc
 }
 
-/// Generate a keystream of the requested length by chaining SHA-256 hashes.
-fn generate_keystream(key: &[u8; 32], length: usize) -> Vec<u8> {
+/// The value stored to check a master password against, derived from the
+/// *stretched* key rather than from the password.
+///
+/// This distinction is the whole point. The store used to keep
+/// `SHA-256(password)`, which meant an attacker holding a copy of the vault
+/// could test a candidate password for the price of one SHA-256 and never
+/// touch [`derive_session_key`] at all — so stretching the key would have
+/// bought exactly nothing. Deriving the verifier from the key instead puts the
+/// full [`KEY_DERIVATION_ROUNDS`] between the attacker and each guess.
+///
+/// The extra label keeps this from being a value the key itself could collide
+/// with: the verifier is public (it is stored beside the ciphertext) and must
+/// not be usable as, or derivable into, the key.
+fn verifier_for(key: &[u8; 32]) -> [u8; 32] {
+    let label = b"slateos-credential-verifier";
+    let mut buf = Vec::with_capacity(32usize.saturating_add(label.len()));
+    buf.extend_from_slice(key);
+    buf.extend_from_slice(label);
+    sha256(&buf)
+}
+
+/// Compare two byte strings without leaking *where* they first differ.
+///
+/// The obvious `a == b` returns as soon as it finds a mismatch, so it takes
+/// measurably longer the more leading bytes match. Against anything an
+/// attacker can submit repeatedly, that timing recovers the secret one byte at
+/// a time. This reads every byte of both, always.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Encrypt plaintext under `key`, using `nonce` once and only once.
+///
+/// The returned blob is `nonce ‖ ciphertext`: the nonce travels with the
+/// ciphertext so that [`decrypt`] needs nothing but the key, and so that a
+/// caller cannot store the ciphertext and forget the nonce.
+///
+/// **The caller must never reuse a nonce under the same key.** This is a
+/// stream cipher: the keystream is a function of `(key, nonce)` alone, so two
+/// messages sharing both are XORed with identical material, and XORing the two
+/// ciphertexts together cancels the key entirely and leaves the two plaintexts
+/// XORed with each other — recoverable by hand for anything text-like. That is
+/// precisely the bug this parameter exists to fix; before it, *every* record
+/// in a vault shared one keystream. [`CredentialStore`] supplies nonces from a
+/// counter that only ever increases.
+///
+/// Still not authenticated: an attacker who cannot read the ciphertext can
+/// nonetheless flip any bit of the plaintext by flipping the same bit of the
+/// ciphertext, undetectably. Fixing that needs an AEAD or an HMAC — see
+/// `open-questions.md` → C-Q5.
+pub fn encrypt(plaintext: &[u8], key: &[u8; 32], nonce: u64) -> Vec<u8> {
+    let keystream = generate_keystream(key, nonce, plaintext.len());
+    let mut out = Vec::with_capacity(NONCE_LEN.saturating_add(plaintext.len()));
+    out.extend_from_slice(&nonce.to_be_bytes());
+    out.extend(plaintext.iter().zip(keystream).map(|(p, k)| p ^ k));
+    out
+}
+
+/// Decrypt a blob produced by [`encrypt`], reading the nonce off its front.
+///
+/// No longer the same operation as `encrypt`, because the output carries a
+/// nonce the input did not. A blob too short to hold one is malformed rather
+/// than empty — an empty plaintext still encrypts to `NONCE_LEN` bytes, so
+/// anything shorter never came from `encrypt`.
+pub fn decrypt(blob: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, CredentialError> {
+    let (prefix, body) = blob.split_at_checked(NONCE_LEN).ok_or_else(|| {
+        CredentialError::CryptoError {
+            detail: format!(
+                "ciphertext is {} bytes, too short to carry its {NONCE_LEN}-byte nonce",
+                blob.len()
+            ),
+        }
+    })?;
+    let nonce_bytes: [u8; NONCE_LEN] =
+        prefix
+            .try_into()
+            .map_err(|_| CredentialError::CryptoError {
+                detail: "malformed nonce prefix".to_string(),
+            })?;
+    let nonce = u64::from_be_bytes(nonce_bytes);
+    let keystream = generate_keystream(key, nonce, body.len());
+    Ok(body.iter().zip(keystream).map(|(c, k)| c ^ k).collect())
+}
+
+/// Generate `length` bytes of keystream for `(key, nonce)`.
+///
+/// SHA-256 used as a counter-mode pseudo-random function: block `i` is
+/// `SHA-256(key ‖ nonce ‖ i)`. The nonce is what makes two encryptions under
+/// one key produce different keystreams; the counter is what lets one
+/// encryption exceed 32 bytes.
+fn generate_keystream(key: &[u8; 32], nonce: u64, length: usize) -> Vec<u8> {
     let mut stream = Vec::with_capacity(length);
     let mut counter: u64 = 0;
     while stream.len() < length {
-        let mut block_input = key.to_vec();
-        block_input.extend_from_slice(&counter.to_le_bytes());
+        let mut block_input = Vec::with_capacity(48);
+        block_input.extend_from_slice(key);
+        block_input.extend_from_slice(&nonce.to_be_bytes());
+        block_input.extend_from_slice(&counter.to_be_bytes());
         let block = sha256(&block_input);
         let remaining = length.saturating_sub(stream.len());
-        let take = remaining.min(32);
-        stream.extend_from_slice(&block[..take]);
+        stream.extend(block.into_iter().take(remaining));
         counter = counter.wrapping_add(1);
     }
-    stream.truncate(length);
     stream
 }
 
@@ -749,8 +898,32 @@ pub struct CredentialStore {
     next_id: u64,
     /// User ID that owns this store.
     uid: u32,
-    /// SHA-256 hash of the master password (for verification).
-    master_password_hash: Option<[u8; 32]>,
+    /// Verifier for the master password: `SHA-256(session key ‖ tag)`.
+    ///
+    /// Deliberately derived from the *stretched* key rather than from the
+    /// password directly. A verifier that is a single hash of the password
+    /// would let an attacker holding the vault test guesses at one SHA-256
+    /// each and never touch the slow derivation at all — which would make the
+    /// stretching in `derive_session_key` decorative. Checking a password now
+    /// costs the same [`Self::kdf_rounds`] as using it.
+    master_password_verifier: Option<[u8; 32]>,
+    /// Iteration count this vault's verifier and session key were derived at.
+    ///
+    /// **A persistence layer must round-trip this**, for the same reason every
+    /// password-hashing format stores its cost alongside its hash: when
+    /// [`DEFAULT_KDF_ROUNDS`] is raised, a vault written under the old number
+    /// still has to open, and it can only do that if it remembers what the old
+    /// number was.
+    kdf_rounds: u32,
+    /// Next nonce to hand to [`encrypt`]. Only ever increases.
+    ///
+    /// **A persistence layer must round-trip this.** The one rule a stream
+    /// cipher's nonce has is that it is never reused under a given key; a
+    /// vault reloaded from disk with this reset to zero would re-issue nonces
+    /// it has already used and reintroduce exactly the two-time pad this
+    /// exists to prevent. There is no persistence layer yet, so today it
+    /// cannot happen — this comment is here so it does not start happening.
+    next_nonce: u64,
     /// Derived session key (present only when unlocked).
     session_key: Option<[u8; 32]>,
     /// Timestamp of last activity (for auto-lock).
@@ -766,17 +939,49 @@ pub struct CredentialStore {
 impl CredentialStore {
     /// Create a new empty credential store for the given user.
     pub fn new(uid: u32) -> Self {
+        Self::with_kdf_rounds(uid, DEFAULT_KDF_ROUNDS)
+    }
+
+    /// Create a store whose master password is stretched by `rounds`
+    /// iterations rather than [`DEFAULT_KDF_ROUNDS`].
+    ///
+    /// This exists so a vault loaded from disk can be reconstructed at the
+    /// cost it was written at, and so tests need not pay ~130 ms per unlock.
+    /// It is **not** a knob for lowering the cost of a live vault: a smaller
+    /// `rounds` is a proportionally cheaper offline guess at the user's master
+    /// password, and nothing else.
+    #[must_use]
+    pub fn with_kdf_rounds(uid: u32, rounds: u32) -> Self {
         Self {
             credentials: HashMap::new(),
             next_id: 1,
             uid,
-            master_password_hash: None,
+            master_password_verifier: None,
+            kdf_rounds: rounds,
+            next_nonce: 0,
             session_key: None,
             last_activity: current_timestamp(),
             lock_timeout_secs: DEFAULT_LOCK_TIMEOUT_SECS,
             failed_attempts: 0,
             lockout_until: 0,
         }
+    }
+
+    /// The iteration count this vault's master password is stretched by.
+    #[must_use]
+    pub fn kdf_rounds(&self) -> u32 {
+        self.kdf_rounds
+    }
+
+    /// The stored master-password verifier, or `None` if no master password
+    /// has been set.
+    ///
+    /// Public because [`IdentityVerifier::verify`] re-checks the master
+    /// password without unlocking the store, and must check it against the
+    /// same value and at the same cost that [`Self::unlock`] would.
+    #[must_use]
+    pub fn master_password_verifier(&self) -> Option<[u8; 32]> {
+        self.master_password_verifier
     }
 
     /// Check whether the store is currently locked.
@@ -787,6 +992,18 @@ impl CredentialStore {
     /// Update the last activity timestamp (resets auto-lock timer).
     fn touch(&mut self) {
         self.last_activity = current_timestamp();
+    }
+
+    /// Take the next `count` nonces, advancing the counter past them.
+    ///
+    /// Returned as a base rather than one at a time so that a caller already
+    /// holding a mutable borrow of `credentials` — re-encrypting the whole
+    /// vault, say — can still get fresh nonces without a second borrow of
+    /// `self`. Gaps are harmless: nonces must be unique, not contiguous.
+    fn take_nonces(&mut self, count: u64) -> u64 {
+        let base = self.next_nonce;
+        self.next_nonce = self.next_nonce.saturating_add(count);
+        base
     }
 
     /// Check if auto-lock timeout has elapsed and lock if so.
@@ -805,30 +1022,45 @@ impl CredentialStore {
         old_password: Option<&str>,
         new_password: &str,
     ) -> Result<(), CredentialError> {
+        let new_key = derive_session_key(new_password, self.kdf_rounds);
+
         // If a master password is already set, verify the old one
-        if let Some(existing_hash) = self.master_password_hash {
+        if let Some(existing) = self.master_password_verifier {
             let old_pw = old_password.ok_or(CredentialError::InvalidMasterPassword)?;
-            let old_hash = sha256(old_pw.as_bytes());
-            if old_hash != existing_hash {
+            let old_key = derive_session_key(old_pw, self.kdf_rounds);
+            if !constant_time_eq(&verifier_for(&old_key), &existing) {
                 return Err(CredentialError::InvalidMasterPassword);
             }
 
-            // Re-encrypt all credentials with the new key
-            let old_key = derive_session_key(old_pw);
-            let new_key = derive_session_key(new_password);
-
-            for cred in self.credentials.values_mut() {
-                let plaintext = decrypt(&cred.encrypted_data, &old_key);
-                cred.encrypted_data = encrypt(&plaintext, &new_key);
+            // Re-encrypt all credentials with the new key. Fresh nonces are
+            // taken even though the key has changed (so reuse would be
+            // harmless): a counter that only ever moves forward is one fewer
+            // invariant to reason about than one with exceptions.
+            let count = u64::try_from(self.credentials.len()).unwrap_or(u64::MAX);
+            let base = self.take_nonces(count);
+            let mut failures = Vec::new();
+            for (i, cred) in self.credentials.values_mut().enumerate() {
+                let nonce = base.saturating_add(u64::try_from(i).unwrap_or(u64::MAX));
+                match decrypt(&cred.encrypted_data, &old_key) {
+                    Ok(plaintext) => cred.encrypted_data = encrypt(&plaintext, &new_key, nonce),
+                    // Re-encryption is a batch: one unreadable record must not
+                    // abandon the rest half-converted under two different keys.
+                    // Convert what can be converted, then report.
+                    Err(_) => failures.push(cred.id),
+                }
             }
-
-            self.session_key = Some(new_key);
+            if !failures.is_empty() {
+                return Err(CredentialError::CryptoError {
+                    detail: format!(
+                        "{} credential(s) could not be re-encrypted and remain under the old key: {failures:?}",
+                        failures.len()
+                    ),
+                });
+            }
         }
 
-        self.master_password_hash = Some(sha256(new_password.as_bytes()));
-        if self.session_key.is_none() {
-            self.session_key = Some(derive_session_key(new_password));
-        }
+        self.master_password_verifier = Some(verifier_for(&new_key));
+        self.session_key = Some(new_key);
         self.touch();
         Ok(())
     }
@@ -843,10 +1075,16 @@ impl CredentialStore {
             });
         }
 
-        let hash = self.master_password_hash.ok_or(CredentialError::MasterPasswordNotSet)?;
-        let attempt_hash = sha256(master_password.as_bytes());
+        let expected = self
+            .master_password_verifier
+            .ok_or(CredentialError::MasterPasswordNotSet)?;
 
-        if attempt_hash != hash {
+        // Derive once and reuse: the derivation is deliberately expensive
+        // (~130 ms), so doing it a second time to produce the session key
+        // would double the cost of every legitimate unlock for no benefit.
+        let key = derive_session_key(master_password, self.kdf_rounds);
+
+        if !constant_time_eq(&verifier_for(&key), &expected) {
             self.failed_attempts = self.failed_attempts.saturating_add(1);
             if self.failed_attempts >= MAX_UNLOCK_ATTEMPTS {
                 self.lockout_until = now.saturating_add(LOCKOUT_DURATION_SECS);
@@ -855,9 +1093,9 @@ impl CredentialStore {
             return Err(CredentialError::InvalidMasterPassword);
         }
 
-        // Success — reset attempts and derive session key
+        // Success — reset attempts and adopt the key we just derived.
         self.failed_attempts = 0;
-        self.session_key = Some(derive_session_key(master_password));
+        self.session_key = Some(key);
         self.touch();
         Ok(())
     }
@@ -892,7 +1130,7 @@ impl CredentialStore {
         }
 
         let now = current_timestamp();
-        let encrypted_data = encrypt(data, &key);
+        let encrypted_data = encrypt(data, &key, self.take_nonces(1));
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
 
@@ -925,7 +1163,7 @@ impl CredentialStore {
             .ok_or(CredentialError::NotFound { id })?;
 
         cred.last_accessed = current_timestamp();
-        let plaintext = decrypt(&cred.encrypted_data, &key);
+        let plaintext = decrypt(&cred.encrypted_data, &key)?;
         let metadata = CredentialMetadata::from(&*cred);
 
         self.touch();
@@ -946,7 +1184,7 @@ impl CredentialStore {
             let priority = match_url(&cred.target, target);
             if priority != MatchPriority::None {
                 cred.last_accessed = now;
-                let plaintext = decrypt(&cred.encrypted_data, &key);
+                let plaintext = decrypt(&cred.encrypted_data, &key)?;
                 let metadata = CredentialMetadata::from(&*cred);
                 results.push((metadata, plaintext, priority));
             }
@@ -971,6 +1209,17 @@ impl CredentialStore {
     ) -> Result<(), CredentialError> {
         let key = self.require_unlocked()?;
 
+        // Reserve the nonce *before* borrowing the credential: `take_nonces`
+        // needs `&mut self`, and `get_mut` below holds that borrow for the
+        // rest of the function. Reserved only when there is new data to
+        // encrypt — a nonce spent on nothing is a nonce that can never be
+        // reused, but there is no reason to burn one.
+        let nonce = if data.is_some() {
+            Some(self.take_nonces(1))
+        } else {
+            None
+        };
+
         let cred = self
             .credentials
             .get_mut(&id)
@@ -990,8 +1239,8 @@ impl CredentialStore {
         if let Some(new_target) = target {
             cred.target = new_target;
         }
-        if let Some(new_data) = data {
-            cred.encrypted_data = encrypt(new_data, &key);
+        if let Some((new_data, n)) = data.zip(nonce) {
+            cred.encrypted_data = encrypt(new_data, &key, n);
         }
         if let Some(new_tags) = tags {
             cred.tags = new_tags;
@@ -1425,11 +1674,21 @@ impl IdentityVerifier {
     }
 
     /// Verify the user's identity by checking their master password against
-    /// the stored hash. On success, records the verification with debounce.
+    /// the store's verifier. On success, records the verification with
+    /// debounce.
+    ///
+    /// `verifier` and `rounds` come from the store
+    /// ([`CredentialStore::master_password_verifier`] and
+    /// [`CredentialStore::kdf_rounds`]) — the same value `unlock` checks,
+    /// derived the same way and at the same cost. This used to take a bare
+    /// `SHA-256(password)`, which made re-verification a second, far cheaper
+    /// oracle for the master password than the unlock path it was supposed to
+    /// mirror.
     pub fn verify(
         &mut self,
         password: &str,
-        master_password_hash: &[u8; 32],
+        verifier: &[u8; 32],
+        rounds: u32,
         level: SensitivityLevel,
         now: u64,
     ) -> VerificationResult {
@@ -1440,8 +1699,8 @@ impl IdentityVerifier {
             };
         }
 
-        let attempt_hash = sha256(password.as_bytes());
-        if attempt_hash == *master_password_hash {
+        let attempt = verifier_for(&derive_session_key(password, rounds));
+        if constant_time_eq(&attempt, verifier) {
             self.record_success(level, now);
             VerificationResult::Verified
         } else {
@@ -1569,9 +1828,41 @@ fn main() {
 // Tests
 // ---------------------------------------------------------------------------
 
+// The five defensive lints the workspace turns on are for production code: a
+// test that indexes a fixed-size fixture, or unwraps a value it just
+// constructed, is *asserting*, and an assertion that fails by panicking is a
+// test doing its job rather than a robustness hole.
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    /// Stretching cost for tests.
+    ///
+    /// [`DEFAULT_KDF_ROUNDS`] is deliberately expensive — ~130 ms per
+    /// derivation in release, and roughly seven times that in the debug build
+    /// tests run under. Several hundred derivations across this module at that
+    /// price would put the suite in the minutes. The rounds parameter is not
+    /// what these tests are checking, so they pay a token amount of it;
+    /// `default_kdf_rounds_are_usable` below covers the real number once.
+    const TEST_KDF_ROUNDS: u32 = 4;
+
+    /// A store cheap enough to unlock in a test. See [`TEST_KDF_ROUNDS`].
+    fn test_store() -> CredentialStore {
+        CredentialStore::with_kdf_rounds(1000, TEST_KDF_ROUNDS)
+    }
+
+    /// A key derived at the test cost.
+    fn test_key(password: &str) -> [u8; 32] {
+        derive_session_key(password, TEST_KDF_ROUNDS)
+    }
 
     // -- Crypto tests --
 
@@ -1591,35 +1882,106 @@ mod tests {
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        let key = derive_session_key("test_password");
+        let key = test_key("test_password");
         let plaintext = b"super secret credential data";
-        let ciphertext = encrypt(plaintext, &key);
+        let ciphertext = encrypt(plaintext, &key, 7);
 
         // Ciphertext should differ from plaintext
         assert_ne!(&ciphertext[..], &plaintext[..]);
 
-        let decrypted = decrypt(&ciphertext, &key);
+        let decrypted = decrypt(&ciphertext, &key).expect("decrypt");
         assert_eq!(&decrypted[..], &plaintext[..]);
     }
 
     #[test]
     fn test_encrypt_decrypt_empty() {
-        let key = derive_session_key("key");
+        let key = test_key("key");
         let plaintext = b"";
-        let ciphertext = encrypt(plaintext, &key);
-        assert!(ciphertext.is_empty());
-        let decrypted = decrypt(&ciphertext, &key);
+        let ciphertext = encrypt(plaintext, &key, 0);
+        // Not empty: an empty plaintext still carries its nonce.
+        assert_eq!(ciphertext.len(), NONCE_LEN);
+        let decrypted = decrypt(&ciphertext, &key).expect("decrypt");
         assert!(decrypted.is_empty());
     }
 
     #[test]
     fn test_wrong_key_fails_decrypt() {
-        let key1 = derive_session_key("password1");
-        let key2 = derive_session_key("password2");
+        let key1 = test_key("password1");
+        let key2 = test_key("password2");
         let plaintext = b"sensitive data";
-        let ciphertext = encrypt(plaintext, &key1);
-        let wrong_decrypt = decrypt(&ciphertext, &key2);
+        let ciphertext = encrypt(plaintext, &key1, 1);
+        let wrong_decrypt = decrypt(&ciphertext, &key2).expect("decrypt");
         assert_ne!(&wrong_decrypt[..], &plaintext[..]);
+    }
+
+    #[test]
+    fn the_same_plaintext_twice_does_not_produce_the_same_ciphertext() {
+        // The two-time-pad regression. Before nonces existed, the keystream
+        // was a function of the key alone, so every record in a vault was
+        // XORed with identical material and XORing two ciphertexts together
+        // cancelled the key outright. Two encryptions of *the same bytes*
+        // under *the same key* differing is the cheapest observable proof
+        // that no longer holds.
+        let key = test_key("pw");
+        let plaintext = b"the same message, twice";
+        let first = encrypt(plaintext, &key, 0);
+        let second = encrypt(plaintext, &key, 1);
+        assert_ne!(first, second);
+
+        // Specifically: the bodies differ, not merely the nonce prefixes.
+        assert_ne!(first[NONCE_LEN..], second[NONCE_LEN..]);
+
+        // And both still decrypt.
+        assert_eq!(decrypt(&first, &key).expect("first"), plaintext);
+        assert_eq!(decrypt(&second, &key).expect("second"), plaintext);
+    }
+
+    #[test]
+    fn a_blob_too_short_to_hold_a_nonce_is_rejected_not_misread() {
+        let key = test_key("pw");
+        for len in 0..NONCE_LEN {
+            let truncated = vec![0u8; len];
+            assert!(
+                decrypt(&truncated, &key).is_err(),
+                "{len}-byte blob should be rejected"
+            );
+        }
+        // Exactly NONCE_LEN bytes is the encryption of the empty plaintext.
+        assert!(decrypt(&vec![0u8; NONCE_LEN], &key).is_ok());
+    }
+
+    #[test]
+    fn stretching_more_rounds_gives_a_different_key() {
+        // Guards against the rounds parameter being accepted and ignored —
+        // which would silently reduce every vault to the cost of whatever was
+        // hard-coded instead.
+        assert_ne!(
+            derive_session_key("pw", 1),
+            derive_session_key("pw", 2),
+            "the iteration count must actually reach the hash"
+        );
+    }
+
+    #[test]
+    fn the_verifier_is_not_the_key_it_verifies() {
+        // The verifier is stored in the clear beside the ciphertext. If it
+        // were the key, or trivially convertible to it, the vault would be
+        // readable without the password at all.
+        let key = test_key("pw");
+        assert_ne!(verifier_for(&key), key);
+    }
+
+    #[test]
+    fn default_kdf_rounds_are_usable() {
+        // The rest of the module runs at TEST_KDF_ROUNDS, so this is the one
+        // place the shipped cost is exercised end to end. It is also a crude
+        // budget check: if this test ever becomes slow enough to notice, the
+        // number is too high for an interactive unlock.
+        let mut store = CredentialStore::new(1000);
+        assert_eq!(store.kdf_rounds(), DEFAULT_KDF_ROUNDS);
+        store.set_master_password(None, "real cost").expect("set pw");
+        store.lock();
+        store.unlock("real cost").expect("unlock");
     }
 
     #[test]
@@ -1641,14 +2003,14 @@ mod tests {
 
     #[test]
     fn test_store_locked_by_default_after_new() {
-        let store = CredentialStore::new(1000);
+        let store = test_store();
         // No master password set yet, so session_key is None
         assert!(store.is_locked());
     }
 
     #[test]
     fn test_set_master_password_unlocks() {
-        let mut store = CredentialStore::new(1000);
+        let mut store = test_store();
         store
             .set_master_password(None, "my_password")
             .expect("should succeed");
@@ -1657,7 +2019,7 @@ mod tests {
 
     #[test]
     fn test_lock_and_unlock() {
-        let mut store = CredentialStore::new(1000);
+        let mut store = test_store();
         store.set_master_password(None, "pw123").expect("set pw");
         assert!(!store.is_locked());
 
@@ -1670,7 +2032,7 @@ mod tests {
 
     #[test]
     fn test_unlock_wrong_password() {
-        let mut store = CredentialStore::new(1000);
+        let mut store = test_store();
         store.set_master_password(None, "correct").expect("set pw");
         store.lock();
 
@@ -1680,7 +2042,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiting() {
-        let mut store = CredentialStore::new(1000);
+        let mut store = test_store();
         store.set_master_password(None, "secure").expect("set pw");
         store.lock();
 
@@ -1696,7 +2058,7 @@ mod tests {
 
     #[test]
     fn test_store_and_retrieve_credential() {
-        let mut store = CredentialStore::new(1000);
+        let mut store = test_store();
         store.set_master_password(None, "master").expect("set pw");
 
         let id = store
@@ -1719,7 +2081,7 @@ mod tests {
 
     #[test]
     fn test_retrieve_while_locked() {
-        let mut store = CredentialStore::new(1000);
+        let mut store = test_store();
         store.set_master_password(None, "master").expect("set pw");
 
         let id = store
@@ -1740,7 +2102,7 @@ mod tests {
 
     #[test]
     fn test_delete_credential() {
-        let mut store = CredentialStore::new(1000);
+        let mut store = test_store();
         store.set_master_password(None, "master").expect("set pw");
 
         let id = store
@@ -1761,7 +2123,7 @@ mod tests {
 
     #[test]
     fn test_search_credentials() {
-        let mut store = CredentialStore::new(1000);
+        let mut store = test_store();
         store.set_master_password(None, "master").expect("set pw");
 
         store
@@ -1893,7 +2255,7 @@ mod tests {
 
     #[test]
     fn test_change_master_password_reencrypts() {
-        let mut store = CredentialStore::new(1000);
+        let mut store = test_store();
         store.set_master_password(None, "old_pw").expect("set pw");
 
         let id = store
@@ -1927,7 +2289,7 @@ mod tests {
 
     #[test]
     fn test_handle_request_lifecycle() {
-        let mut store = CredentialStore::new(1000);
+        let mut store = test_store();
 
         // Set master password
         let resp = store.handle_request(CredentialRequest::SetMasterPassword {
@@ -1997,7 +2359,7 @@ mod tests {
 
     #[test]
     fn test_autofill_query_priority_ordering() {
-        let mut store = CredentialStore::new(1000);
+        let mut store = test_store();
         store.set_master_password(None, "master").expect("set pw");
 
         // Wildcard match
@@ -2123,38 +2485,38 @@ mod tests {
     #[test]
     fn test_verifier_password_verification_success() {
         let mut verifier = IdentityVerifier::new();
-        let master_hash = sha256(b"correct_password");
-        let result = verifier.verify("correct_password", &master_hash, SensitivityLevel::Medium, 1000);
+        let master_hash = verifier_for(&test_key("correct_password"));
+        let result = verifier.verify("correct_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
         assert_eq!(result, VerificationResult::Verified);
     }
 
     #[test]
     fn test_verifier_password_verification_failure() {
         let mut verifier = IdentityVerifier::new();
-        let master_hash = sha256(b"correct_password");
-        let result = verifier.verify("wrong_password", &master_hash, SensitivityLevel::Medium, 1000);
+        let master_hash = verifier_for(&test_key("correct_password"));
+        let result = verifier.verify("wrong_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
         assert_eq!(result, VerificationResult::Failed);
     }
 
     #[test]
     fn test_verifier_lockout_after_max_attempts() {
         let mut verifier = IdentityVerifier::new();
-        let master_hash = sha256(b"correct_password");
+        let master_hash = verifier_for(&test_key("correct_password"));
         // 3 failed attempts
-        verifier.verify("wrong1", &master_hash, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, SensitivityLevel::Medium, 1001);
-        let result = verifier.verify("wrong3", &master_hash, SensitivityLevel::Medium, 1002);
+        verifier.verify("wrong1", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
+        let result = verifier.verify("wrong3", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
         assert!(matches!(result, VerificationResult::LockedOut { .. }));
     }
 
     #[test]
     fn test_verifier_lockout_blocks_check() {
         let mut verifier = IdentityVerifier::new();
-        let master_hash = sha256(b"correct_password");
+        let master_hash = verifier_for(&test_key("correct_password"));
         // Trigger lockout
-        verifier.verify("wrong1", &master_hash, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, SensitivityLevel::Medium, 1001);
-        verifier.verify("wrong3", &master_hash, SensitivityLevel::Medium, 1002);
+        verifier.verify("wrong1", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
+        verifier.verify("wrong3", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
         // Even check() should report lockout
         let result = verifier.check(SensitivityLevel::Medium, 1005);
         assert!(matches!(result, VerificationResult::LockedOut { .. }));
@@ -2163,27 +2525,27 @@ mod tests {
     #[test]
     fn test_verifier_lockout_expires() {
         let mut verifier = IdentityVerifier::new();
-        let master_hash = sha256(b"correct_password");
+        let master_hash = verifier_for(&test_key("correct_password"));
         // Trigger lockout (default 30s)
-        verifier.verify("wrong1", &master_hash, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, SensitivityLevel::Medium, 1001);
-        verifier.verify("wrong3", &master_hash, SensitivityLevel::Medium, 1002);
+        verifier.verify("wrong1", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
+        verifier.verify("wrong3", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
         // After lockout expires (30s), should be able to verify again
-        let result = verifier.verify("correct_password", &master_hash, SensitivityLevel::Medium, 1035);
+        let result = verifier.verify("correct_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1035);
         assert_eq!(result, VerificationResult::Verified);
     }
 
     #[test]
     fn test_verifier_success_resets_failed_count() {
         let mut verifier = IdentityVerifier::new();
-        let master_hash = sha256(b"correct_password");
+        let master_hash = verifier_for(&test_key("correct_password"));
         // 2 failed attempts
-        verifier.verify("wrong1", &master_hash, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, SensitivityLevel::Medium, 1001);
+        verifier.verify("wrong1", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
         // Success resets counter
-        verifier.verify("correct_password", &master_hash, SensitivityLevel::Medium, 1002);
+        verifier.verify("correct_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
         // Another failure should not trigger lockout (counter was reset)
-        let result = verifier.verify("wrong3", &master_hash, SensitivityLevel::Medium, 1003);
+        let result = verifier.verify("wrong3", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1003);
         assert_eq!(result, VerificationResult::Failed);
     }
 
@@ -2241,10 +2603,10 @@ mod tests {
     #[test]
     fn test_verifier_stats() {
         let mut verifier = IdentityVerifier::new();
-        let master_hash = sha256(b"correct_password");
-        verifier.verify("correct_password", &master_hash, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong", &master_hash, SensitivityLevel::Medium, 1001);
-        verifier.verify("correct_password", &master_hash, SensitivityLevel::Medium, 1002);
+        let master_hash = verifier_for(&test_key("correct_password"));
+        verifier.verify("correct_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
+        verifier.verify("correct_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
         let (successes, failures) = verifier.stats();
         assert_eq!(successes, 2);
         assert_eq!(failures, 1);
@@ -2253,10 +2615,10 @@ mod tests {
     #[test]
     fn test_verifier_lockout_remaining() {
         let mut verifier = IdentityVerifier::new();
-        let master_hash = sha256(b"correct_password");
-        verifier.verify("wrong1", &master_hash, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, SensitivityLevel::Medium, 1001);
-        verifier.verify("wrong3", &master_hash, SensitivityLevel::Medium, 1002);
+        let master_hash = verifier_for(&test_key("correct_password"));
+        verifier.verify("wrong1", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
+        verifier.verify("wrong3", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
         // Lockout duration is 30s from timestamp 1002
         assert!(verifier.is_locked_out(1010));
         assert_eq!(verifier.lockout_remaining(1010), 22); // 1032 - 1010

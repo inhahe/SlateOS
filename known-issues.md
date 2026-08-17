@@ -32214,6 +32214,28 @@ authentication (the ciphertext can be flipped bit-for-bit undetected — wants a
 HMAC or a real AEAD) and a vetted AES-256-GCM. See
 `open-questions.md` → "Do we write our own cryptographic primitives?".
 
+**Resolved 2026-08-17, as described.** `encrypt` now takes a nonce and returns
+`nonce ‖ ciphertext`; `decrypt` reads the nonce back off the front and returns
+`Result`, because a blob shorter than the 8-byte nonce never came from
+`encrypt`. `generate_keystream(key, nonce, len)` is
+`SHA-256(key ‖ nonce ‖ counter)`. `CredentialStore` supplies nonces from
+`next_nonce`, a counter that only ever increases; `take_nonces(n)` hands out a
+contiguous base so a caller already holding `&mut credentials` (the re-encrypt
+loop in `set_master_password`) can still get fresh ones. Gaps are harmless —
+nonces must be unique, not contiguous.
+
+Regression test:
+`the_same_plaintext_twice_does_not_produce_the_same_ciphertext` asserts the
+*bodies* differ and not merely the nonce prefixes, plus
+`a_blob_too_short_to_hold_a_nonce_is_rejected_not_misread`.
+
+**One thing a persistence layer must not get wrong**, and there is no
+persistence layer yet: `next_nonce` has to round-trip to disk. A vault
+reloaded with the counter reset to zero re-issues nonces it has already used
+and reintroduces exactly this bug. The field carries a comment saying so.
+
+The authentication half is *not* fixed and remains open under C-Q5.
+
 ## C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES (lane C, 2026-08-17)
 
 **In short:** the credential manager turns the user's master password into a
@@ -32249,6 +32271,46 @@ salt needs a randomness source the crate does not have (see below), but a
 salt that merely varies per *installation* already defeats a shared table, so
 it should not wait for one. The end state wants a memory-hard KDF (scrypt or
 Argon2id), which is gated on the same open question as the cipher.
+
+**Half resolved 2026-08-17 — the stretching. The salt is still shared.**
+
+`derive_session_key(password, rounds)` now runs `rounds` iterations of
+`SHA-256(acc ‖ password ‖ salt)`. The password and salt are folded back in on
+*every* round rather than the accumulator merely being rehashed: a chain of
+the form `h = SHA-256(h)` is the same chain for every password, so an attacker
+could walk it once and test candidates against any point on it. Mixing the
+password in each round is what forces the full cost per guess.
+
+The count was picked by measurement, not by taste: one SHA-256 of a ~70-byte
+input on this machine is **1.278 µs release** (8.564 µs debug), so
+`DEFAULT_KDF_ROUNDS = 100_000` is ~130 ms per unlock.
+
+**A second defect had to be fixed for the first fix to be worth anything.**
+The store kept `master_password_hash = SHA-256(password)` to check unlock
+attempts against. An attacker holding the vault would have tested guesses
+against *that* — one SHA-256 each — and never called `derive_session_key` at
+all, so the stretching would have been decorative. The field is now
+`master_password_verifier`, `SHA-256(stretched key ‖ label)`, so a guess costs
+the full derivation. `IdentityVerifier::verify` had the identical bug on the
+re-verification path and is routed through the same value.
+Both comparisons use `constant_time_eq` rather than `==`, which returns early
+on the first differing byte and so leaks how many leading bytes matched.
+
+**Why the round count is stored rather than compiled in.** `kdf_rounds` is a
+field of `CredentialStore` (`with_kdf_rounds`, default `DEFAULT_KDF_ROUNDS`).
+The right number rises with hardware, and a vault written under the old number
+must keep opening after the default moves — it can only do that if it
+remembers what the old number was. Every real password-hashing format records
+its cost parameters beside the hash for this reason. **This too must
+round-trip through any persistence layer.** It also lets the test module run
+at 4 rounds instead of putting the suite in the minutes;
+`default_kdf_rounds_are_usable` exercises the shipped number once.
+
+**Still open:** the salt. `KEY_DERIVATION_SALT` is still a compile-time
+constant shared by every install, because a per-vault salt needs entropy that
+userspace cannot obtain — see the next entry and
+`requests/c-a-userspace-entropy-syscall.md`. `apps/lockscreen` still derives
+its stored hash with a single SHA-256 pass and has not been touched.
 
 ## C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE (lane C, 2026-08-17)
 

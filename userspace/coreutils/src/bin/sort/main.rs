@@ -186,7 +186,7 @@ fn main() {
     let cfg = match parse_args(&raw) {
         Ok(Some(c)) => c,
         Ok(None) => return,
-        Err(e) => die_with(&e.message, e.status),
+        Err(e) => die_with(&e.message(), e.status),
     };
 
     // Every input is read before anything is written, which is what lets
@@ -972,7 +972,7 @@ mod tests {
             let raw: Vec<OsString> = args.iter().map(OsString::from).collect();
             parse_args(&raw).unwrap_err()
         };
-        let err = |args: &[&str]| fail(args).message;
+        let err = |args: &[&str]| fail(args).sentence;
         assert!(err(&["-q"]).starts_with("invalid option -- 'q'"));
         assert_eq!(err(&["-t", ""]), "empty tab");
         assert_eq!(err(&["-t", "ab"]), "multi-character tab 'ab'");
@@ -991,14 +991,10 @@ mod tests {
 
     fn fail_msg(args: &[&str]) -> String {
         let raw: Vec<OsString> = args.iter().map(OsString::from).collect();
-        #[allow(clippy::unwrap_used)]
-        let message = parse_args(&raw).unwrap_err().message;
         // Every getopt and argmatch diagnostic ends with the same referral;
-        // dropping it keeps the assertions to the sentence under test.
-        message
-            .strip_suffix("\nTry 'sort --help' for more information.")
-            .unwrap_or(&message)
-            .to_string()
+        // taking the sentence alone keeps the assertions to what is under test.
+        #[allow(clippy::unwrap_used)]
+        parse_args(&raw).unwrap_err().sentence
     }
 
     /// `getopt_long` resolves an abbreviation only when it is unambiguous, and

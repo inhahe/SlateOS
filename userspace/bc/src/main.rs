@@ -2553,6 +2553,6 @@ s
         // A negative exponent is `1/(a^|b|)`, a division, so the result has
         // exactly `scale` places -- `.125` padded to five, not trimmed to three.
         let output = capture_output("scale=5\n2^-3");
-        assert_eq!(output, vec!["0.12500"]);
+        assert_eq!(output, vec![".12500"]);
     }
 }

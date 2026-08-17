@@ -931,12 +931,12 @@ mod tests {
     fn a_quotient_has_exactly_the_digits_k_asks_for() {
         // Truncation, not rounding, and no binary approximation underneath.
         assert_eq!(eval("1 3 / p"), "0\n");
-        assert_eq!(eval("20 k 1 3 / p"), "0.33333333333333333333\n");
-        assert_eq!(eval("20 k 2 3 / p"), "0.66666666666666666666\n");
+        assert_eq!(eval("20 k 1 3 / p"), ".33333333333333333333\n");
+        assert_eq!(eval("20 k 2 3 / p"), ".66666666666666666666\n");
         // Every one of the five places `k` asked for is printed. Trimming the
         // zeros would make the two lines below indistinguishable.
-        assert_eq!(eval("5 k 1 10 / p"), "0.10000\n");
-        assert_eq!(eval("1 k 1 10 / p"), "0.1\n");
+        assert_eq!(eval("5 k 1 10 / p"), ".10000\n");
+        assert_eq!(eval("1 k 1 10 / p"), ".1\n");
     }
 
     #[test]
@@ -1000,8 +1000,8 @@ mod tests {
 
     #[test]
     fn a_sum_carries_the_larger_scale_of_its_operands() {
-        assert_eq!(eval("0.1 0.02 + p"), "0.12\n");
-        assert_eq!(eval("1 0.5 - p"), "0.5\n");
+        assert_eq!(eval("0.1 0.02 + p"), ".12\n");
+        assert_eq!(eval("1 0.5 - p"), ".5\n");
     }
 
     // ── Stack operations ──
@@ -1096,7 +1096,7 @@ mod tests {
     #[test]
     fn a_hex_fraction_is_sixteenths() {
         // .8 hex is a half, not eight tenths.
-        assert_eq!(eval("16 i .8 p"), "0.5\n");
+        assert_eq!(eval("16 i .8 p"), ".5\n");
         assert_eq!(eval("16 i A.8 p"), "10.5\n");
     }
 

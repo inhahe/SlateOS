@@ -555,10 +555,21 @@ impl Decimal {
             return self.format_base10();
         }
         let int_val = self.rescale(0);
-        let mut result = int_val.digits.to_str_radix(obase);
         if self.scale == 0 {
-            return result;
+            return int_val.digits.to_str_radix(obase);
         }
+        // Same rule as base ten: a value under one has no integer part to
+        // write, so `.8` and not `0.8`.
+        //
+        // The sign has to be put back by hand in that case. `rescale(0)`
+        // truncates -0.5 to zero and `BigInt` keeps no negative zero, so
+        // `to_str_radix` would answer "0" and the minus would be lost
+        // outright — this printed `-0.5` as `0.8` in base sixteen.
+        let mut result = if int_val.digits.is_zero() {
+            if self.is_negative() { "-" } else { "" }.to_string()
+        } else {
+            int_val.digits.to_str_radix(obase)
+        };
         result.push('.');
         // The fractional digits of a non-decimal base are produced one at a
         // time by repeated multiplication, because they are not a substring of
@@ -600,10 +611,16 @@ impl Decimal {
                 abs_s.get(..split).unwrap_or("0").to_string(),
                 abs_s.get(split..).unwrap_or("").to_string(),
             ),
-            // Fewer: the value is under one and the fraction needs leading zeros.
+            // Fewer: the value is under one, so there is no integer part to
+            // write at all — `1/2` prints as `.5`, not `0.5`. That is what
+            // every traditional `bc` and `dc` does, and scripts compare
+            // against it: `$(echo "scale=2;1/2" | bc)` is `.50` elsewhere, and
+            // a test that checks for `.50` fails against `0.50`. The fraction
+            // still needs its own leading zeros, which is what stops `0.001`
+            // rendering as `.1`.
             _ => {
                 let padding = self.scale.saturating_sub(abs_s.len());
-                ("0".to_string(), format!("{}{}", "0".repeat(padding), abs_s))
+                (String::new(), format!("{}{}", "0".repeat(padding), abs_s))
             }
         };
 
@@ -682,12 +699,12 @@ mod tests {
         // One place, because `0.5` had one and the product rule keeps the
         // larger of the operands' scales -- the digit is a zero, and it is
         // still printed.
-        assert_eq!(multiply("0.5", "4", 10), "2.0");
+        assert_eq!(multiply(".5", "4", 10), "2.0");
     }
 
     #[test]
     fn a_product_at_a_high_scale_is_the_exact_one() {
-        assert_eq!(multiply("0.001", "0.001", 10), "0.000001");
+        assert_eq!(multiply(".001", ".001", 10), ".000001");
         assert_eq!(multiply("1.11", "1.11", 4), "1.2321");
         // Cut short by the operands' own scales, not by `scale`.
         assert_eq!(multiply("1.11", "1.11", 1), "1.23");
@@ -711,7 +728,7 @@ mod tests {
     fn a_power_of_zero_or_a_negative_exponent_behaves() {
         assert_eq!(pow("7", "0", 5), "1");
         assert_eq!(pow("0", "0", 5), "1");
-        assert_eq!(pow("2", "-3", 5), "0.12500");
+        assert_eq!(pow("2", "-3", 5), ".12500");
         assert_eq!(pow("0", "5", 5), "0");
         assert_eq!(
             d("0").pow(&d("-1"), 5).unwrap_err(),
@@ -729,7 +746,7 @@ mod tests {
             ("17.5", "5", 0),
             ("1", "3", 5),
             ("-17", "5", 0),
-            ("0.001", "0.3", 4),
+            (".001", ".3", 4),
         ] {
             let (x, y) = (d(a), d(b));
             let q = x.div(&y, scale).unwrap();
@@ -741,10 +758,7 @@ mod tests {
             );
         }
         assert_eq!(d("17").modulo(&d("5"), 0).unwrap().format_base10(), "2");
-        assert_eq!(
-            d("1").modulo(&d("3"), 5).unwrap().format_base10(),
-            "0.00001"
-        );
+        assert_eq!(d("1").modulo(&d("3"), 5).unwrap().format_base10(), ".00001");
     }
 
     #[test]
@@ -752,10 +766,10 @@ mod tests {
         assert_eq!(d("12345").length(), 5);
         assert_eq!(d("1.001").length(), 4);
         assert_eq!(d("100").length(), 3);
-        assert_eq!(d("0.5").length(), 1);
+        assert_eq!(d(".5").length(), 1);
         // The case the mantissa count gets wrong: the leading zeros are digits.
-        assert_eq!(d("0.001").length(), 3);
-        assert_eq!(d("-0.001").length(), 3);
+        assert_eq!(d(".001").length(), 3);
+        assert_eq!(d("-.001").length(), 3);
     }
 
     #[test]
@@ -763,16 +777,16 @@ mod tests {
         // Hex .8 is eight sixteenths. Counting the digit as a decimal place
         // made it 0.8, which is 0.3 out on the very first hex fraction anyone
         // would type.
-        assert_eq!(Decimal::parse(".8", 16).format_base10(), "0.5");
+        assert_eq!(Decimal::parse(".8", 16).format_base10(), ".5");
         assert_eq!(Decimal::parse("A.8", 16).format_base10(), "10.5");
-        assert_eq!(Decimal::parse(".1", 16).format_base10(), "0.0625");
-        assert_eq!(Decimal::parse(".01", 16).format_base10(), "0.00390625");
-        assert_eq!(Decimal::parse(".1", 2).format_base10(), "0.5");
+        assert_eq!(Decimal::parse(".1", 16).format_base10(), ".0625");
+        assert_eq!(Decimal::parse(".01", 16).format_base10(), ".00390625");
+        assert_eq!(Decimal::parse(".1", 2).format_base10(), ".5");
         assert_eq!(Decimal::parse("1.1", 2).format_base10(), "1.5");
-        assert_eq!(Decimal::parse(".4", 8).format_base10(), "0.5");
-        assert_eq!(Decimal::parse("-.8", 16).format_base10(), "-0.5");
+        assert_eq!(Decimal::parse(".4", 8).format_base10(), ".5");
+        assert_eq!(Decimal::parse("-.8", 16).format_base10(), "-.5");
         // Base ten is unchanged, including its exact scale.
-        assert_eq!(Decimal::parse(".8", 10).format_base10(), "0.8");
+        assert_eq!(Decimal::parse(".8", 10).format_base10(), ".8");
         assert_eq!(Decimal::parse("1.250", 10).scale, 3);
         // Integers in any base are unaffected.
         assert_eq!(Decimal::parse("FF", 16).format_base10(), "255");
@@ -797,14 +811,14 @@ mod tests {
         assert_eq!(d("1.25").scale, 2);
         assert_eq!(d("1.25").digits.to_string_base10(), "125");
         assert_eq!(d("7").scale, 0);
-        assert_eq!(d("-0.001").scale, 3);
-        assert!(d("-0.001").is_negative());
+        assert_eq!(d("-.001").scale, 3);
+        assert!(d("-.001").is_negative());
     }
 
     #[test]
     fn a_trailing_or_leading_point_parses_rather_than_panicking() {
         assert_eq!(d("5.").format_base10(), "5");
-        assert_eq!(d(".5").format_base10(), "0.5");
+        assert_eq!(d(".5").format_base10(), ".5");
         assert_eq!(d("").format_base10(), "0");
         assert_eq!(d("-").format_base10(), "0");
         assert_eq!(d(".").format_base10(), "0");
@@ -814,14 +828,14 @@ mod tests {
     fn tenths_add_exactly() {
         // The whole reason this type exists rather than an f64: in binary,
         // 0.1 + 0.2 is 0.30000000000000004.
-        assert_eq!(d("0.1").add(&d("0.2")).format_base10(), "0.3");
+        assert_eq!(d(".1").add(&d(".2")).format_base10(), ".3");
     }
 
     #[test]
     fn addition_takes_the_larger_scale() {
         assert_eq!(d("1.5").add(&d("2.25")).format_base10(), "3.75");
-        assert_eq!(d("1").add(&d("0.001")).format_base10(), "1.001");
-        assert_eq!(d("1.5").sub(&d("2.25")).format_base10(), "-0.75");
+        assert_eq!(d("1").add(&d(".001")).format_base10(), "1.001");
+        assert_eq!(d("1.5").sub(&d("2.25")).format_base10(), "-.75");
     }
 
     #[test]
@@ -842,8 +856,8 @@ mod tests {
         // 0.05 * 0.05 is 0.0025; truncating to 2 places gives 0.00, but
         // truncating the *operands* first would give 0.0 * 0.0 = 0 for the
         // wrong reason. The distinction shows when a kept digit survives.
-        assert_eq!(d("0.05").mul(&d("0.05"), 4).format_base10(), "0.0025");
-        assert_eq!(d("0.05").mul(&d("0.05"), 2).format_base10(), "0");
+        assert_eq!(d(".05").mul(&d(".05"), 4).format_base10(), ".0025");
+        assert_eq!(d(".05").mul(&d(".05"), 2).format_base10(), "0");
         assert_eq!(d("1.5").mul(&d("1.5"), 2).format_base10(), "2.25");
     }
 
@@ -852,24 +866,24 @@ mod tests {
         // scale=0; 1/2 is 0 in bc, not 1. Rounding here would be a POSIX
         // violation, not a matter of taste.
         assert_eq!(div("1", "2", 0), "0");
-        assert_eq!(div("1", "2", 1), "0.5");
+        assert_eq!(div("1", "2", 1), ".5");
         assert_eq!(div("-1", "2", 0), "0");
         assert_eq!(div("9", "10", 0), "0");
     }
 
     #[test]
     fn division_carries_the_requested_number_of_digits() {
-        assert_eq!(div("1", "3", 5), "0.33333");
-        assert_eq!(div("2", "3", 5), "0.66666");
+        assert_eq!(div("1", "3", 5), ".33333");
+        assert_eq!(div("2", "3", 5), ".66666");
         assert_eq!(div("10", "4", 2), "2.50");
-        assert_eq!(div("1", "8", 3), "0.125");
+        assert_eq!(div("1", "8", 3), ".125");
     }
 
     #[test]
     fn division_by_a_fraction_cancels_the_divisors_scale() {
-        assert_eq!(div("1", "0.5", 2), "2.00");
-        assert_eq!(div("1", "0.001", 0), "1000");
-        assert_eq!(div("0.001", "0.001", 3), "1.000");
+        assert_eq!(div("1", ".5", 2), "2.00");
+        assert_eq!(div("1", ".001", 0), "1000");
+        assert_eq!(div(".001", ".001", 3), "1.000");
     }
 
     #[test]
@@ -877,7 +891,7 @@ mod tests {
         // The version this was lifted from printed to stderr and returned
         // zero, so the caller went on computing with a plausible number.
         assert_eq!(d("1").div(&d("0"), 5), Err(DecimalError::DivideByZero));
-        assert_eq!(d("1").div(&d("0.000"), 5), Err(DecimalError::DivideByZero));
+        assert_eq!(d("1").div(&d(".000"), 5), Err(DecimalError::DivideByZero));
         assert_eq!(d("1").modulo(&d("0"), 5), Err(DecimalError::DivideByZero));
     }
 
@@ -887,7 +901,7 @@ mod tests {
         // the answer.
         assert_eq!(d("10").modulo(&d("3"), 0).unwrap().format_base10(), "1");
         assert_eq!(d("-10").modulo(&d("3"), 0).unwrap().format_base10(), "-1");
-        assert_eq!(d("10").modulo(&d("3"), 1).unwrap().format_base10(), "0.1");
+        assert_eq!(d("10").modulo(&d("3"), 1).unwrap().format_base10(), ".1");
     }
 
     #[test]
@@ -904,7 +918,7 @@ mod tests {
     fn a_zero_exponent_is_one_and_a_negative_one_inverts() {
         assert_eq!(d("7").pow(&d("0"), 0).unwrap().format_base10(), "1");
         assert_eq!(d("0").pow(&d("0"), 0).unwrap().format_base10(), "1");
-        assert_eq!(d("2").pow(&d("-2"), 3).unwrap().format_base10(), "0.250");
+        assert_eq!(d("2").pow(&d("-2"), 3).unwrap().format_base10(), ".250");
         // 1/0 reached through the exponent is still a division by zero.
         assert_eq!(d("0").pow(&d("-1"), 3), Err(DecimalError::DivideByZero));
     }
@@ -951,7 +965,7 @@ mod tests {
         assert_eq!(d("2").signum_of_difference(&d("1")), 1);
         assert_eq!(d("-2").signum_of_difference(&d("-1")), -1);
         assert_eq!(d("-1").signum_of_difference(&d("1")), -1);
-        assert_eq!(d("0").signum_of_difference(&d("0.000")), 0);
+        assert_eq!(d("0").signum_of_difference(&d(".000")), 0);
     }
 
     #[test]
@@ -963,11 +977,41 @@ mod tests {
         assert!(d("1.5") >= d("1.50"));
         assert!(d("1.5") < d("2"));
         assert!(d("-3") < d("1.5"));
-        assert!(d("0") > d("-0.001"));
-        let mut v = [d("2"), d("-1"), d("1.5"), d("0.25")];
+        assert!(d("0") > d("-.001"));
+        let mut v = [d("2"), d("-1"), d("1.5"), d(".25")];
         v.sort();
         let rendered: Vec<String> = v.iter().map(Decimal::format_base10).collect();
-        assert_eq!(rendered, ["-1", "0.25", "1.5", "2"]);
+        assert_eq!(rendered, ["-1", ".25", "1.5", "2"]);
+    }
+
+    #[test]
+    fn a_value_below_one_is_written_without_a_leading_zero() {
+        // What every traditional `bc` and `dc` prints, and what scripts that
+        // capture their output compare against.
+        assert_eq!(div("1", "2", 1), ".5");
+        assert_eq!(div("1", "2", 3), ".500");
+        assert_eq!(d("-0.5").format_base10(), "-.5");
+        assert_eq!(d("0.001").format_base10(), ".001");
+        // A value of one or more keeps its integer digits, zeros included.
+        assert_eq!(d("10.5").format_base10(), "10.5");
+        assert_eq!(d("1.5").format_base10(), "1.5");
+        assert_eq!(d("0").format_base10(), "0");
+        // Same rule in another base -- and the sign survives, which it did
+        // not when `rescale(0)` truncated -0.5 to an unsigned zero.
+        assert_eq!(d("0.5").format(16), ".8");
+        assert_eq!(d("-0.5").format(16), "-.8");
+        assert_eq!(d("10.5").format(16), "A.8");
+    }
+
+    #[test]
+    fn the_two_spellings_of_a_fraction_read_the_same() {
+        // Output drops the leading zero; input still accepts it, because a
+        // person typing into `dc` writes `0.5` as often as `.5`.
+        for (with, without) in [("0.5", ".5"), ("-0.5", "-.5"), ("0.001", ".001")] {
+            assert_eq!(d(with), d(without));
+            assert_eq!(d(with).scale, d(without).scale);
+            assert_eq!(d(with).format_base10(), d(without).format_base10());
+        }
     }
 
     #[test]
@@ -977,10 +1021,10 @@ mod tests {
         // make the setting unobservable.
         assert_eq!(d("1.500").format_base10(), "1.500");
         assert_eq!(d("1.000").format_base10(), "1.000");
-        assert_eq!(d("-0.500").format_base10(), "-0.500");
+        assert_eq!(d("-.500").format_base10(), "-.500");
         // Zero is the one exception: it prints as `0` at any scale, which is
         // what both calculators do rather than `0.000`.
-        assert_eq!(d("0.000").format_base10(), "0");
+        assert_eq!(d(".000").format_base10(), "0");
         assert_eq!(d("0").format_base10(), "0");
     }
 
@@ -989,9 +1033,9 @@ mod tests {
         // Reading `.8` in base sixteen computes at an upper bound of four
         // decimal places, but the value needs one. The bound must not be
         // printed: `16i .8 p` answers `.5`, not `.5000`.
-        assert_eq!(Decimal::parse(".8", 16).format_base10(), "0.5");
-        assert_eq!(Decimal::parse(".4", 16).format_base10(), "0.25");
-        assert_eq!(Decimal::parse(".1", 2).format_base10(), "0.5");
+        assert_eq!(Decimal::parse(".8", 16).format_base10(), ".5");
+        assert_eq!(Decimal::parse(".4", 16).format_base10(), ".25");
+        assert_eq!(Decimal::parse(".1", 2).format_base10(), ".5");
         // A base-ten literal is a decision, not an artefact, and keeps its
         // places -- which is why `trim_scale` is not applied to that path.
         assert_eq!(Decimal::parse("1.50", 10).format_base10(), "1.50");
@@ -1013,8 +1057,8 @@ mod tests {
     fn a_value_under_one_keeps_its_leading_zeros() {
         // The fractional digits are shorter than the scale here, so the
         // padding is what stops 0.001 rendering as 0.1.
-        assert_eq!(d("0.001").format_base10(), "0.001");
-        assert_eq!(div("1", "1000", 5), "0.00100");
+        assert_eq!(d(".001").format_base10(), ".001");
+        assert_eq!(div("1", "1000", 5), ".00100");
     }
 
     #[test]
@@ -1034,10 +1078,10 @@ mod tests {
 
     #[test]
     fn negligible_is_what_lets_a_series_stop() {
-        assert!(d("0.0001").is_negligible(3));
-        assert!(!d("0.0001").is_negligible(4));
+        assert!(d(".0001").is_negligible(3));
+        assert!(!d(".0001").is_negligible(4));
         assert!(d("0").is_negligible(0));
-        assert!(d("-0.0001").is_negligible(3));
+        assert!(d("-.0001").is_negligible(3));
     }
 
     #[test]

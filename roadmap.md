@@ -6180,7 +6180,31 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
 - [ ] `[B]` Result: WINE runs unmodified (or with minimal patches) → Windows app support
 
 ### 5.2 Additional filesystems
-- [ ] `[A]` Port Btrfs (CoW, snapshots, checksums)
+- [-] `[A]` Port Btrfs (CoW, snapshots, checksums) — **read side done
+  (2026-08-16), write side deliberately not started.** `kernel/src/fs/btrfs/`:
+  the mount bootstrap that makes Btrfs awkward (superblock at a fixed physical
+  64 KiB → `sys_chunk_array` → chunk tree → root tree → `FS_TREE_OBJECTID`'s
+  root item → the FS tree), CRC32C metadata checksums, the logical→physical
+  chunk map for every non-striped profile (single/DUP/RAID1/RAID1C3/RAID1C4;
+  RAID0/10/5/6 refused at parse time), generic B-tree descent with `search` /
+  `next` / `prev` over both leaves and internal nodes, and the leaf items a
+  reader needs (`INODE_ITEM`, `INODE_REF`, `DIR_ITEM`/`DIR_INDEX` incl. hash
+  collisions packed into one item, `EXTENT_DATA` inline/regular/prealloc,
+  `ROOT_ITEM`). Four independent per-block validations — checksum, `bytenr`,
+  `generation`, and `nritems`-fits-the-block — because each catches something
+  the others cannot, the generation check specifically being the CoW hazard
+  that a stale node still checksums correctly. Holes (NO_HOLES) and PREALLOC
+  read as zeroes; compressed/encrypted extents are `NotSupported`, never
+  returned raw. Full `FileSystem` impl (readdir / read_file / read_at / stat /
+  lstat / metadata / lmetadata / readlink / statvfs / debug_stats) reporting
+  `read_only: true` and `0o555`-masked modes. Reads through the shared
+  `fs::blocksrc::SectorSource`, so the self-test drives the whole driver over a
+  synthetic in-RAM volume on **every** boot with no device attached (7 test
+  groups; logical and physical addresses are deliberately a constant 0x080000
+  apart so a broken chunk map cannot accidentally produce correct reads).
+  Mountable as `-t btrfs` from kshell, `SYS_FS_MOUNT`, and by `auto` probe.
+  Snapshots are readable as ordinary subvolume trees; *creating* them is write
+  support. See `design-decisions.md` §215.
 - [ ] `[A]` Port F2FS (SSD optimization)
 - [-] `[A]` NTFS read/write support — **read side done (2026-08-16), write side
   deliberately not started.** `kernel/src/fs/ntfs/`: boot sector (incl. the

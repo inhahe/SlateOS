@@ -1429,6 +1429,15 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::ntfs::self_test() {
         serial_println!("WARNING: NTFS self-test failed: {:?}", e);
     }
+    // Btrfs read self-test, in RAM for the same reason as the NTFS one. It
+    // matters more here: the awkward part of Btrfs is the mount bootstrap
+    // (superblock -> sys_chunk_array -> chunk tree -> root tree -> FS tree),
+    // and the synthetic volume deliberately places logical and physical
+    // addresses a fixed distance apart so that a broken chunk map cannot
+    // accidentally produce correct reads.
+    if let Err(e) = fs::btrfs::self_test() {
+        serial_println!("WARNING: Btrfs self-test failed: {:?}", e);
+    }
     // devfs self-test (validates device file operations).
     if let Err(e) = fs::devfs::self_test() {
         serial_println!("WARNING: DevFs self-test failed: {:?}", e);

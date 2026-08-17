@@ -328,8 +328,7 @@ mod tests {
     fn import_tightly_packed_argb() {
         let px = [0xFF11_2233, 0x8044_5566, 0x00AA_BBCC, 0xFFFF_FFFF];
         let bytes = make_bytes(2, 2, 8, &px);
-        let buf =
-            SharedBuffer::import(7, 2, 2, 8, BufferFormat::Argb8888, &bytes).expect("import");
+        let buf = SharedBuffer::import(7, 2, 2, 8, BufferFormat::Argb8888, &bytes).expect("import");
         assert_eq!(buf.handle(), 7);
         assert_eq!(buf.width(), 2);
         assert_eq!(buf.height(), 2);
@@ -357,8 +356,7 @@ mod tests {
         // Alpha bytes are 0x00 in the source but Xrgb must report opaque.
         let px = [0x0011_2233, 0x0044_5566];
         let bytes = make_bytes(2, 1, 8, &px);
-        let buf =
-            SharedBuffer::import(0, 2, 1, 8, BufferFormat::Xrgb8888, &bytes).expect("import");
+        let buf = SharedBuffer::import(0, 2, 1, 8, BufferFormat::Xrgb8888, &bytes).expect("import");
         assert_eq!(buf.pixel(0, 0), Some(0xFF11_2233));
         assert_eq!(buf.pixel(1, 0), Some(0xFF44_5566));
     }

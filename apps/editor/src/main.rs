@@ -15,6 +15,9 @@
 //! Uses the guitk library for UI rendering.
 
 mod highlight;
+// The keyboard and mouse. Everything above this module can be *asked* to edit;
+// `input` is the only place that decides that Ctrl+S means save.
+mod input;
 mod syntree;
 
 use guitk::color::Color;
@@ -22,6 +25,8 @@ use guitk::render::{FontWeightHint, RenderTree, TextSpan};
 use guitk::tabs::Tabs;
 use guitk::text;
 use highlight::{DEFAULT_THEME, HighlightState, StyledToken, Token};
+use input::{EditorResponse, FindField};
+use oswindow::{EventLoop, EventResponse, WindowBuilder};
 use syntree::{Pos, SyntaxTree};
 
 use diffcore::{
@@ -254,7 +259,7 @@ fn snap_to_boundary(line: &str, col: usize) -> usize {
     let mut col = col.min(line.len());
     // Terminates: offset 0 is always a boundary.
     while !line.is_char_boundary(col) {
-        col -= 1;
+        col = col.saturating_sub(1);
     }
     col
 }
@@ -554,7 +559,7 @@ impl Document {
             entries.push(HighlightState::Normal);
         }
         while entries.len() <= line {
-            let index = entries.len() - 1;
+            let index = entries.len().saturating_sub(1);
             // `last()` rather than an index: the vector is never empty here — it
             // was seeded just above and only grows in this loop.
             let mut state = entries.last().cloned().unwrap_or(HighlightState::Normal);
@@ -663,7 +668,10 @@ impl Document {
                 doc.cursor_line = line.saturating_add(1);
             } else if ch == '\t' && doc.use_spaces {
                 // Insert spaces instead of a tab.
-                let spaces = " ".repeat(doc.tab_width.saturating_sub(col % doc.tab_width));
+                let spaces = " ".repeat(
+                    doc.tab_width
+                        .saturating_sub(col.checked_rem(doc.tab_width).unwrap_or(0)),
+                );
                 if let Some(current_line) = doc.lines.get_mut(line) {
                     let at = snap_to_boundary(current_line, col);
                     current_line.insert_str(at, &spaces);
@@ -851,32 +859,32 @@ impl Document {
 
     pub fn move_left(&mut self) {
         if let Some(ch) = self.char_before_cursor() {
-            self.cursor_col -= ch.len_utf8();
+            self.cursor_col = self.cursor_col.saturating_sub(ch.len_utf8());
         } else if self.cursor_line > 0 {
-            self.cursor_line -= 1;
+            self.cursor_line = self.cursor_line.saturating_sub(1);
             self.cursor_col = self.cursor_line_text().len();
         }
     }
 
     pub fn move_right(&mut self) {
         if let Some(ch) = self.char_at_cursor() {
-            self.cursor_col += ch.len_utf8();
-        } else if self.cursor_line + 1 < self.lines.len() {
-            self.cursor_line += 1;
+            self.cursor_col = self.cursor_col.saturating_add(ch.len_utf8());
+        } else if self.cursor_line.saturating_add(1) < self.lines.len() {
+            self.cursor_line = self.cursor_line.saturating_add(1);
             self.cursor_col = 0;
         }
     }
 
     pub fn move_up(&mut self) {
         if self.cursor_line > 0 {
-            self.cursor_line -= 1;
+            self.cursor_line = self.cursor_line.saturating_sub(1);
             self.cursor_col = snap_to_boundary(self.cursor_line_text(), self.cursor_col);
         }
     }
 
     pub fn move_down(&mut self) {
-        if self.cursor_line + 1 < self.lines.len() {
-            self.cursor_line += 1;
+        if self.cursor_line.saturating_add(1) < self.lines.len() {
+            self.cursor_line = self.cursor_line.saturating_add(1);
             self.cursor_col = snap_to_boundary(self.cursor_line_text(), self.cursor_col);
         }
     }
@@ -908,8 +916,11 @@ impl Document {
     pub fn ensure_cursor_visible(&mut self, visible_lines: usize) {
         if self.cursor_line < self.scroll_line {
             self.scroll_line = self.cursor_line;
-        } else if self.cursor_line >= self.scroll_line + visible_lines {
-            self.scroll_line = self.cursor_line - visible_lines + 1;
+        } else if self.cursor_line >= self.scroll_line.saturating_add(visible_lines) {
+            self.scroll_line = self
+                .cursor_line
+                .saturating_sub(visible_lines)
+                .saturating_add(1);
         }
     }
 
@@ -1007,6 +1018,278 @@ impl Document {
         self.cursor_line = end.line;
         self.cursor_col = end.col;
     }
+
+    /// Whether anything is selected.
+    ///
+    /// An anchor equal to the cursor is *not* a selection: clicking sets an
+    /// anchor before the drag is known to be a drag, and treating that as a
+    /// zero-width selection would make a plain click delete-on-next-keystroke.
+    #[must_use]
+    pub fn has_selection(&self) -> bool {
+        let (start, end) = self.selection_range();
+        start != end
+    }
+
+    /// The selected text, with `\n` between lines. Empty when nothing is
+    /// selected.
+    ///
+    /// Offsets are snapped to character boundaries before slicing, because a
+    /// selection endpoint is a byte offset that a buffer edit may have left
+    /// mid-character — and slicing there panics rather than rounding.
+    #[must_use]
+    pub fn selected_text(&self) -> String {
+        let (start, end) = self.selection_range();
+        if start == end {
+            return String::new();
+        }
+        let slice = |line: usize, from: usize, to: usize| -> String {
+            let text = self.lines.get(line).map_or("", String::as_str);
+            let from = snap_to_boundary(text, from);
+            let to = snap_to_boundary(text, to.max(from));
+            text.get(from..to).unwrap_or("").to_string()
+        };
+        if start.line == end.line {
+            return slice(start.line, start.col, end.col);
+        }
+        let mut out = slice(start.line, start.col, usize::MAX);
+        for line in start.line.saturating_add(1)..end.line {
+            out.push('\n');
+            out.push_str(self.lines.get(line).map_or("", String::as_str));
+        }
+        out.push('\n');
+        out.push_str(&slice(end.line, 0, end.col));
+        out
+    }
+
+    /// Delete the selection, leaving the cursor where it began. Returns whether
+    /// there was anything to delete.
+    ///
+    /// One recorded edit, so undo takes the whole selection back in a single
+    /// step rather than a character at a time — which is what a user means by
+    /// "undo that deletion", and is also why this cannot be written as a loop
+    /// over [`Self::backspace`].
+    pub fn delete_selection(&mut self) -> bool {
+        let (start, end) = self.selection_range();
+        if start == end {
+            return false;
+        }
+        // The edit replaces every line the selection touches with one joined
+        // line, so that is the range to record.
+        let span = end.line.saturating_sub(start.line).saturating_add(1);
+        self.record_edit(start.line, span, |doc| {
+            let head = {
+                let text = doc.lines.get(start.line).map_or("", String::as_str);
+                let at = snap_to_boundary(text, start.col);
+                text.get(..at).unwrap_or("").to_string()
+            };
+            let tail = {
+                let text = doc.lines.get(end.line).map_or("", String::as_str);
+                let at = snap_to_boundary(text, end.col);
+                text.get(at..).unwrap_or("").to_string()
+            };
+            let joined = format!("{head}{tail}");
+            let from = start.line.min(doc.lines.len());
+            let to = end.line.saturating_add(1).min(doc.lines.len());
+            doc.lines
+                .splice(from..to, std::iter::once(joined))
+                .for_each(drop);
+            doc.cursor_line = start.line;
+            doc.cursor_col = head.len();
+            doc.selection_anchor = None;
+        });
+        self.clamp_cursor();
+        true
+    }
+
+    /// Select the word under the cursor, as a double-click does.
+    ///
+    /// "Word" is a run of alphanumerics and underscores, or — when the cursor
+    /// is not on one — the run of identical-class characters it *is* on, so
+    /// double-clicking whitespace or punctuation selects that run rather than
+    /// nothing at all. Returns whether anything was selected.
+    pub fn select_word_at_cursor(&mut self) -> bool {
+        let line = self.cursor_line;
+        let text = self.lines.get(line).map_or("", String::as_str).to_string();
+        if text.is_empty() {
+            return false;
+        }
+        let at = snap_to_boundary(&text, self.cursor_col);
+
+        // The character to the right decides the class; at end of line, the one
+        // to the left, so double-clicking past the last word still selects it.
+        let class = word_class;
+        let Some(here) = text
+            .get(at..)
+            .and_then(|s| s.chars().next())
+            .or_else(|| text.get(..at).and_then(|s| s.chars().next_back()))
+        else {
+            return false;
+        };
+        let want = class(here);
+
+        let mut start = at.min(text.len());
+        while let Some(ch) = text.get(..start).and_then(|s| s.chars().next_back()) {
+            if class(ch) != want {
+                break;
+            }
+            start = start.saturating_sub(ch.len_utf8());
+        }
+        let mut end = at.min(text.len());
+        while let Some(ch) = text.get(end..).and_then(|s| s.chars().next()) {
+            if class(ch) != want {
+                break;
+            }
+            end = end.saturating_add(ch.len_utf8());
+        }
+        if start == end {
+            return false;
+        }
+        self.set_selection(Pos::new(line, start), Pos::new(line, end));
+        true
+    }
+
+    /// Select the whole buffer.
+    pub fn select_all(&mut self) {
+        let last = self.lines.len().saturating_sub(1);
+        let end = self.lines.get(last).map_or(0, String::len);
+        self.set_selection(Pos::new(0, 0), Pos::new(last, end));
+    }
+
+    /// Move the caret to the start of the previous word.
+    ///
+    /// At column 0 this falls through to [`Self::move_left`], which is what
+    /// crosses the line break — word motion is defined within a line, and a
+    /// caret that stopped dead at the left margin could never leave it.
+    pub fn move_word_left(&mut self) {
+        if self.cursor_col == 0 {
+            self.move_left();
+            return;
+        }
+        let text = self.cursor_line_text().to_string();
+        let mut at = snap_to_boundary(&text, self.cursor_col);
+        // Whitespace behind the caret belongs to the gap, not to a word, so
+        // skip it before deciding which run is being crossed. Without this,
+        // pressing Ctrl+Left in the indentation of a line would land one space
+        // to the left each time rather than at the previous word.
+        while let Some(ch) = text.get(..at).and_then(|s| s.chars().next_back()) {
+            if !ch.is_whitespace() {
+                break;
+            }
+            at = at.saturating_sub(ch.len_utf8());
+        }
+        let Some(anchor) = text.get(..at).and_then(|s| s.chars().next_back()) else {
+            self.cursor_col = at;
+            return;
+        };
+        let want = word_class(anchor);
+        while let Some(ch) = text.get(..at).and_then(|s| s.chars().next_back()) {
+            if word_class(ch) != want {
+                break;
+            }
+            at = at.saturating_sub(ch.len_utf8());
+        }
+        self.cursor_col = at;
+    }
+
+    /// Move the caret past the end of the next word.
+    ///
+    /// The mirror of [`Self::move_word_left`]: it crosses the run under the
+    /// caret and then the whitespace after it, so repeated presses land on
+    /// successive word *starts* — which is where the eye expects the caret when
+    /// moving rightwards.
+    pub fn move_word_right(&mut self) {
+        let text = self.cursor_line_text().to_string();
+        if self.cursor_col >= text.len() {
+            self.move_right();
+            return;
+        }
+        let mut at = snap_to_boundary(&text, self.cursor_col);
+        if let Some(here) = text.get(at..).and_then(|s| s.chars().next()) {
+            let want = word_class(here);
+            while let Some(ch) = text.get(at..).and_then(|s| s.chars().next()) {
+                if word_class(ch) != want {
+                    break;
+                }
+                at = at.saturating_add(ch.len_utf8());
+            }
+        }
+        while let Some(ch) = text.get(at..).and_then(|s| s.chars().next()) {
+            if !ch.is_whitespace() {
+                break;
+            }
+            at = at.saturating_add(ch.len_utf8());
+        }
+        self.cursor_col = at;
+    }
+
+    /// Insert text at the caret, splitting lines on every newline it contains.
+    ///
+    /// This is what paste needs and what a loop over [`Self::insert_char`]
+    /// cannot give: the loop would record one undo entry per character, so
+    /// undoing a paste would take the pasted text back one keystroke at a time,
+    /// and every `'\n'` in it would run the auto-indent — silently adding
+    /// leading whitespace to text the user copied from somewhere else.
+    ///
+    /// Carriage returns are folded into newlines first. A paste from a CRLF
+    /// source would otherwise leave a stray `\r` *inside* a line, where it draws
+    /// as a replacement box, never matches a search for the word beside it, and
+    /// is written back out in the middle of the file on save.
+    pub fn insert_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let pieces: Vec<&str> = text.split('\n').collect();
+        let line = self.cursor_line;
+        let col = self.cursor_col;
+
+        self.record_edit(line, 1, |doc| {
+            let current = doc.lines.get(line).cloned().unwrap_or_default();
+            let at = snap_to_boundary(&current, col);
+            let (head, tail) = current.split_at(at);
+            let first = pieces.first().copied().unwrap_or("");
+
+            let mut replacement: Vec<String> = Vec::with_capacity(pieces.len());
+            if pieces.len() == 1 {
+                replacement.push(format!("{head}{first}{tail}"));
+                doc.cursor_line = line;
+                doc.cursor_col = head.len().saturating_add(first.len());
+            } else {
+                replacement.push(format!("{head}{first}"));
+                let middle = pieces
+                    .get(1..pieces.len().saturating_sub(1))
+                    .unwrap_or_default();
+                replacement.extend(middle.iter().map(|s| (*s).to_string()));
+                let last = pieces.last().copied().unwrap_or("");
+                replacement.push(format!("{last}{tail}"));
+                doc.cursor_line = line.saturating_add(pieces.len()).saturating_sub(1);
+                doc.cursor_col = last.len();
+            }
+
+            let from = line.min(doc.lines.len());
+            let to = line.saturating_add(1).min(doc.lines.len());
+            doc.lines.splice(from..to, replacement).for_each(drop);
+            doc.selection_anchor = None;
+        });
+        self.clamp_cursor();
+    }
+}
+
+/// Which of the three character classes word motion treats as one run:
+/// identifier (0), whitespace (1), or punctuation (2).
+///
+/// Shared by [`Document::select_word_at_cursor`] and the word-motion pair so
+/// that double-clicking a word selects exactly what Ctrl+Left/Ctrl+Right skip
+/// over. Two separate definitions would drift, and the drift would show up as a
+/// double-click selecting a different span than the keyboard does.
+fn word_class(c: char) -> u8 {
+    if c.is_alphanumeric() || c == '_' {
+        0
+    } else if c.is_whitespace() {
+        1
+    } else {
+        2
+    }
 }
 
 // ============================================================================
@@ -1069,11 +1352,7 @@ impl FindState {
                 // one after another, shredding the line. A one-byte step also
                 // lands inside a multi-byte character, where the old
                 // `search_line[start..]` panicked outright.
-                start = if end > at {
-                    end
-                } else {
-                    at.saturating_add(1)
-                };
+                start = if end > at { end } else { at.saturating_add(1) };
             }
         }
 
@@ -1085,7 +1364,14 @@ impl FindState {
         if self.matches.is_empty() {
             return;
         }
-        self.current_match = (self.current_match + 1) % self.matches.len();
+        // Written as a comparison rather than `% len`: a remainder is a
+        // division, and the compiler cannot see that the list is non-empty here.
+        let ahead = self.current_match.saturating_add(1);
+        self.current_match = if ahead >= self.matches.len() {
+            0
+        } else {
+            ahead
+        };
         let Some(&(line, col, _)) = self.matches.get(self.current_match) else {
             return;
         };
@@ -1101,7 +1387,7 @@ impl FindState {
         if self.current_match == 0 {
             self.current_match = self.matches.len().saturating_sub(1);
         } else {
-            self.current_match -= 1;
+            self.current_match = self.current_match.saturating_sub(1);
         }
         let Some(&(line, col, _)) = self.matches.get(self.current_match) else {
             return;
@@ -1157,7 +1443,6 @@ impl FindState {
 // site had to keep, and both editors had broken them. The generic type is
 // in the toolkit because the markdown editor needs exactly the same thing.
 
-
 /// Byte offset just past a case-folded match of `needle` starting exactly at
 /// byte offset `at` in `haystack`, or `None` if there is no match there.
 ///
@@ -1193,6 +1478,18 @@ fn folded_match_end(haystack: &str, at: usize, needle: &str) -> Option<usize> {
     want.is_none().then_some(end)
 }
 
+/// Height of the tab strip along the top, in pixels.
+///
+/// A constant rather than a literal in each of the four places that used to
+/// spell it, because the viewport height, the first text line's `y`, the find
+/// panel's `y` and the strip itself must agree or text is drawn under
+/// furniture.
+pub const TAB_BAR_HEIGHT: f32 = 32.0;
+
+/// Height of the status bar along the bottom, in pixels. See
+/// [`TAB_BAR_HEIGHT`].
+pub const STATUS_BAR_HEIGHT: f32 = 24.0;
+
 /// Complete editor application state.
 pub struct EditorState {
     /// Open documents (tabs), and which is in front.
@@ -1217,6 +1514,37 @@ pub struct EditorState {
     pub line_height: f32,
     /// Pending external-change prompt (file edited/deleted outside the editor).
     pub external_prompt: Option<ExternalChangePrompt>,
+    /// The last thing worth telling the user, shown in the status bar.
+    ///
+    /// Somewhere for a failure to go. Saving, closing a modified tab and
+    /// opening a file can all be refused, and an editor driven by keystrokes
+    /// has no return value to hand the refusal back through — without this the
+    /// only options are to swallow the error or to print it to a console the
+    /// user is not looking at.
+    pub status: Option<String>,
+    /// Whether the left button is down inside the text area, so that mouse
+    /// movement extends the selection.
+    ///
+    /// Needed because `MouseEventKind::Move` does not say which buttons are
+    /// held; the press and release are what bound a drag.
+    pub dragging: bool,
+    /// Modifiers as of the last key event.
+    ///
+    /// Mouse events do not carry them — [`guitk::event::MouseEvent`] is a
+    /// position and a kind — so shift-click can only be recognised from what the
+    /// keyboard last said. Tracked in `input`, read by the mouse handling there.
+    pub modifiers: oswindow::Modifiers,
+    /// The editor's own clipboard.
+    ///
+    /// Not the system clipboard: `gui/clipboard` is a *service binary*, not a
+    /// library, and reaching it needs an IPC transport that does not exist yet
+    /// (see `known-issues.md`, the transport step). Cut/copy/paste therefore
+    /// work within this editor and nowhere else. When the clipboard protocol
+    /// lands, this field becomes the local cache in front of it rather than the
+    /// whole story.
+    pub clipboard: String,
+    /// Which of the find bar's two fields the keyboard is typing into.
+    pub find_field: FindField,
 }
 
 /// A pending prompt shown when the active document's file changed on disk.
@@ -1265,6 +1593,11 @@ impl EditorState {
             font_size,
             line_height: font_size * 1.5,
             external_prompt: None,
+            status: None,
+            dragging: false,
+            modifiers: oswindow::Modifiers::NONE,
+            clipboard: String::new(),
+            find_field: FindField::Query,
         }
     }
 
@@ -1305,9 +1638,16 @@ impl EditorState {
     }
 
     /// Number of visible lines in the editor viewport.
+    ///
+    /// Derived from the same two constants the renderer lays out with. It used
+    /// to subtract 64 for a "toolbar" that is 32 pixels tall and is the tab bar,
+    /// so it under-reported the viewport by about two lines: `render_editor`
+    /// stopped drawing two lines above the status bar, leaving a strip of
+    /// background, and `ensure_cursor_visible` scrolled two lines early. Two
+    /// numbers that must agree are now one.
     pub fn visible_lines(&self) -> usize {
-        let editor_height = self.window_height as f32 - 64.0 - 24.0; // toolbar + status bar
-        (editor_height / self.line_height) as usize
+        let editor_height = self.window_height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
+        (editor_height / self.line_height).max(0.0) as usize
     }
 
     // ======================================================================
@@ -1483,12 +1823,20 @@ impl EditorState {
     }
 
     fn render_tabs(&self, tree: &mut RenderTree) {
-        let tab_h = 32.0;
-        tree.fill_rect(0.0, 0.0, self.window_width as f32, tab_h, Color::from_hex(0x181825));
+        let tab_h = TAB_BAR_HEIGHT;
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width as f32,
+            tab_h,
+            Color::from_hex(0x181825),
+        );
 
         let mut x = 0.0;
         for (i, doc) in self.tabs.iter().enumerate() {
-            let tab_w = 160.0;
+            // The same width the hit test uses, so a click lands on the tab it
+            // looks like it landed on.
+            let tab_w = input::TAB_WIDTH;
             let bg = if i == self.tabs.active_index() {
                 Color::from_hex(0x1E1E2E)
             } else {
@@ -1503,18 +1851,19 @@ impl EditorState {
             } else {
                 doc.name.clone()
             };
+            tree.text(x + 12.0, 9.0, &title, Color::from_hex(0xCDD6F4), 12.0);
+
+            // Close button, drawn inside the box `tab_at` reports as the close
+            // box so that the glyph and the clickable area coincide.
             tree.text(
-                x + 12.0,
+                x + tab_w - input::TAB_CLOSE_WIDTH + 4.0,
                 9.0,
-                &title,
-                Color::from_hex(0xCDD6F4),
-                12.0,
+                "x",
+                Color::from_hex(0x6C7086),
+                11.0,
             );
 
-            // Close button
-            tree.text(x + tab_w - 20.0, 9.0, "x", Color::from_hex(0x6C7086), 11.0);
-
-            x += tab_w + 1.0;
+            x += tab_w + input::TAB_GAP;
         }
     }
 
@@ -1624,15 +1973,24 @@ impl EditorState {
 
     fn render_editor(&self, tree: &mut RenderTree) {
         let doc = self.active_document();
-        let editor_y = 32.0;
-        let editor_h = self.window_height as f32 - 32.0 - 24.0;
+        let editor_y = TAB_BAR_HEIGHT;
+        let editor_h = self.window_height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
         let w = self.window_width as f32;
 
         // Gutter (line numbers)
-        tree.fill_rect(0.0, editor_y, self.gutter_width, editor_h, Color::from_hex(0x181825));
+        tree.fill_rect(
+            0.0,
+            editor_y,
+            self.gutter_width,
+            editor_h,
+            Color::from_hex(0x181825),
+        );
 
         let visible_lines = self.visible_lines();
-        let end_line = (doc.scroll_line + visible_lines).min(doc.lines.len());
+        let end_line = doc
+            .scroll_line
+            .saturating_add(visible_lines)
+            .min(doc.lines.len());
 
         // The syntax state entering the first visible line. Everything above the
         // viewport has to be tokenized to know it — a block comment opened on
@@ -1642,10 +2000,10 @@ impl EditorState {
         let mut state = doc.entry_state(doc.scroll_line);
 
         for i in doc.scroll_line..end_line {
-            let y = editor_y + (i - doc.scroll_line) as f32 * self.line_height;
+            let y = editor_y + i.saturating_sub(doc.scroll_line) as f32 * self.line_height;
 
             // Line number
-            let ln = format!("{:>4}", i + 1);
+            let ln = format!("{:>4}", i.saturating_add(1));
             let ln_color = if i == doc.cursor_line {
                 Color::from_hex(0xCDD6F4)
             } else {
@@ -1666,6 +2024,33 @@ impl EditorState {
 
             // Line text: one shaped run, coloured per glyph.
             let line = doc.lines.get(i).map_or("", String::as_str);
+
+            // Selection band, drawn before the text so the glyphs sit on top
+            // of it. Without this a selection is a state the editor knows
+            // about and never shows, which reads as the selection keys doing
+            // nothing at all.
+            if let Some((from, to, trailing)) = Self::selection_on_line(doc, i) {
+                let start_px = self.measure_prefix(line, from);
+                let end_px = self.measure_prefix(line, to);
+                let x = self.text_x() + start_px - doc.scroll_px.max(0.0);
+                // A line whose selection continues onto the next one gets a
+                // sliver past its last glyph, so the selected line break is
+                // visible rather than the band appearing to stop early.
+                let width = (end_px - start_px) + if trailing { self.font_size * 0.4 } else { 0.0 };
+                let left = self.text_x();
+                let clipped_x = x.max(left);
+                let clipped_w = (x + width - clipped_x).min(w - clipped_x);
+                if clipped_w > 0.0 {
+                    tree.fill_rect(
+                        clipped_x,
+                        y,
+                        clipped_w,
+                        self.line_height,
+                        Color::from_hex(0x45475A),
+                    );
+                }
+            }
+
             let tokens = highlight::highlight_line(line, doc.language, &mut state);
             Self::draw_tokens(
                 tree,
@@ -1687,19 +2072,24 @@ impl EditorState {
         // long line the caret drifts visibly away from the character it is on
         // — and it drifts differently for every font the user picks.
         if doc.cursor_line >= doc.scroll_line && doc.cursor_line < end_line {
-            let cursor_y =
-                editor_y + (doc.cursor_line - doc.scroll_line) as f32 * self.line_height;
+            let cursor_y = editor_y
+                + doc.cursor_line.saturating_sub(doc.scroll_line) as f32 * self.line_height;
             // Measured from the start of the line and then shifted by the
             // scroll, rather than measured from the scroll position: the text
             // is one shaping of the whole line, so the caret has to be placed
             // in that same coordinate system or it disagrees with the glyphs
             // by whatever kerning crosses the scroll boundary.
-            let cursor_x =
-                self.text_x() - doc.scroll_px.max(0.0) + self.caret_offset_px(doc);
+            let cursor_x = self.text_x() - doc.scroll_px.max(0.0) + self.caret_offset_px(doc);
             // Clipped for the same reason the text is: a caret scrolled off the
             // left belongs behind the gutter, not drawn over the line numbers.
             tree.clip(self.text_x(), cursor_y, w - self.text_x(), self.line_height);
-            tree.fill_rect(cursor_x, cursor_y + 2.0, 2.0, self.line_height - 4.0, Color::from_hex(0x89B4FA));
+            tree.fill_rect(
+                cursor_x,
+                cursor_y + 2.0,
+                2.0,
+                self.line_height - 4.0,
+                Color::from_hex(0x89B4FA),
+            );
             tree.unclip();
         }
     }
@@ -1716,13 +2106,85 @@ impl EditorState {
     /// `known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL`. It is at least now
     /// wrong in one place instead of two, and consistently with nothing.
     fn caret_offset_px(&self, doc: &Document) -> f32 {
-        let before = doc.lines.get(doc.cursor_line).map_or("", |line| {
-            // Snapped, not merely clamped: `cursor_col` is a byte offset and
-            // slicing inside a character panics.
-            let to = snap_to_boundary(line, doc.cursor_col);
-            line.get(..to).unwrap_or("")
-        });
+        let line = doc.lines.get(doc.cursor_line).map_or("", String::as_str);
+        self.measure_prefix(line, doc.cursor_col)
+    }
+
+    /// Width of `line[..col]`, with `col` snapped to a character boundary.
+    ///
+    /// The one place a byte offset in a line becomes an x. Carries the same
+    /// caveat as [`Self::caret_offset_px`]: a prefix width is not a position in
+    /// a bidirectional line.
+    fn measure_prefix(&self, line: &str, col: usize) -> f32 {
+        // Snapped, not merely clamped: `col` is a byte offset and slicing
+        // inside a character panics.
+        let to = snap_to_boundary(line, col);
+        let before = line.get(..to).unwrap_or("");
         text::measure(before, self.font_size, FontWeightHint::Regular)
+    }
+
+    /// The byte range of `line` covered by the selection, and whether the
+    /// selection continues past the end of the line.
+    ///
+    /// `None` when the line is outside the selection or nothing is selected.
+    fn selection_on_line(doc: &Document, line: usize) -> Option<(usize, usize, bool)> {
+        let (start, end) = doc.selection_range();
+        if start == end || line < start.line || line > end.line {
+            return None;
+        }
+        let text_len = doc.lines.get(line).map_or(0, String::len);
+        let from = if line == start.line { start.col } else { 0 };
+        let to = if line == end.line { end.col } else { text_len };
+        Some((from.min(text_len), to.min(text_len), line < end.line))
+    }
+
+    /// Which byte offset in which line a point in the window names.
+    ///
+    /// The inverse of [`Self::caret_offset_px`], and deliberately its
+    /// neighbour: a click that does not land where the caret is then drawn is
+    /// the most immediately visible bug an editor can have, and the two agree
+    /// only if they measure the same way. `None` for a point outside the text
+    /// area — the tab strip, the gutter or the status bar — because those are
+    /// not places a caret can go.
+    ///
+    /// The column is the character boundary *nearest* the point rather than the
+    /// one before it, so clicking the right half of a character puts the caret
+    /// after it, which is what every other editor does and what the eye
+    /// expects.
+    #[must_use]
+    pub fn caret_position_at(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        let bottom = self.window_height as f32 - STATUS_BAR_HEIGHT;
+        if y < TAB_BAR_HEIGHT || y >= bottom || x < self.text_x() {
+            return None;
+        }
+        let doc = self.active_document();
+        let row = ((y - TAB_BAR_HEIGHT) / self.line_height) as usize;
+        let line = doc
+            .scroll_line
+            .saturating_add(row)
+            .min(doc.lines.len().saturating_sub(1));
+        let text = doc.lines.get(line).map_or("", String::as_str);
+
+        // Where the click falls along the line, in the line's own coordinates.
+        let target = x - self.text_x() + doc.scroll_px.max(0.0);
+
+        // Walk the character boundaries, keeping the closest. Linear in the
+        // line's length and quadratic in it overall, which is fine for a click
+        // — it happens once, not once per frame — and is the only measurement
+        // that stays correct when glyph widths differ.
+        let mut best = 0usize;
+        let mut best_distance = f32::INFINITY;
+        for (offset, _) in text
+            .char_indices()
+            .chain(std::iter::once((text.len(), ' ')))
+        {
+            let distance = (self.measure_prefix(text, offset) - target).abs();
+            if distance < best_distance {
+                best_distance = distance;
+                best = offset;
+            }
+        }
+        Some((line, best))
     }
 
     /// Scroll horizontally so the caret is inside the text area.
@@ -1763,13 +2225,25 @@ impl EditorState {
 
     fn render_status_bar(&self, tree: &mut RenderTree) {
         let doc = self.active_document();
-        let bar_y = self.window_height as f32 - 24.0;
+        let bar_y = self.window_height as f32 - STATUS_BAR_HEIGHT;
         let w = self.window_width as f32;
 
-        tree.fill_rect(0.0, bar_y, w, 24.0, Color::from_hex(0x181825));
+        tree.fill_rect(0.0, bar_y, w, STATUS_BAR_HEIGHT, Color::from_hex(0x181825));
+
+        // A message takes the bar over. It is there because something the user
+        // asked for did not happen, which matters more for the moment than the
+        // line number they can also see in the caret's position.
+        if let Some(message) = self.status.as_deref() {
+            tree.text(8.0, bar_y + 5.0, message, Color::from_hex(0xF9E2AF), 11.0);
+            return;
+        }
 
         // Cursor position
-        let pos_text = format!("Ln {}, Col {}", doc.cursor_line + 1, doc.cursor_col + 1);
+        let pos_text = format!(
+            "Ln {}, Col {}",
+            doc.cursor_line.saturating_add(1),
+            doc.cursor_col.saturating_add(1)
+        );
         tree.text(8.0, bar_y + 5.0, &pos_text, Color::from_hex(0x6C7086), 11.0);
 
         // Language
@@ -1796,17 +2270,42 @@ impl EditorState {
     }
 
     fn render_find_panel(&self, tree: &mut RenderTree) {
-        let panel_y = 32.0;
+        let panel_y = TAB_BAR_HEIGHT;
         let panel_w = 350.0;
         let panel_h = 80.0;
         let panel_x = self.window_width as f32 - panel_w - 16.0;
 
-        tree.fill_rect(panel_x, panel_y, panel_w, panel_h, Color::from_hex(0x313244));
-        tree.stroke_rect(panel_x, panel_y, panel_w, panel_h, Color::from_hex(0x585B70), 1.0);
+        tree.fill_rect(
+            panel_x,
+            panel_y,
+            panel_w,
+            panel_h,
+            Color::from_hex(0x313244),
+        );
+        tree.stroke_rect(
+            panel_x,
+            panel_y,
+            panel_w,
+            panel_h,
+            Color::from_hex(0x585B70),
+            1.0,
+        );
 
         // Find input
-        tree.text(panel_x + 8.0, panel_y + 10.0, "Find:", Color::from_hex(0xA6ADC8), 11.0);
-        tree.fill_rect(panel_x + 50.0, panel_y + 6.0, panel_w - 60.0, 22.0, Color::from_hex(0x1E1E2E));
+        tree.text(
+            panel_x + 8.0,
+            panel_y + 10.0,
+            "Find:",
+            Color::from_hex(0xA6ADC8),
+            11.0,
+        );
+        tree.fill_rect(
+            panel_x + 50.0,
+            panel_y + 6.0,
+            panel_w - 60.0,
+            22.0,
+            Color::from_hex(0x1E1E2E),
+        );
         tree.text(
             panel_x + 54.0,
             panel_y + 10.0,
@@ -1816,8 +2315,20 @@ impl EditorState {
         );
 
         // Replace input
-        tree.text(panel_x + 8.0, panel_y + 40.0, "Repl:", Color::from_hex(0xA6ADC8), 11.0);
-        tree.fill_rect(panel_x + 50.0, panel_y + 36.0, panel_w - 60.0, 22.0, Color::from_hex(0x1E1E2E));
+        tree.text(
+            panel_x + 8.0,
+            panel_y + 40.0,
+            "Repl:",
+            Color::from_hex(0xA6ADC8),
+            11.0,
+        );
+        tree.fill_rect(
+            panel_x + 50.0,
+            panel_y + 36.0,
+            panel_w - 60.0,
+            22.0,
+            Color::from_hex(0x1E1E2E),
+        );
         tree.text(
             panel_x + 54.0,
             panel_y + 40.0,
@@ -1827,10 +2338,7 @@ impl EditorState {
         );
 
         // Match count
-        let match_info = format!(
-            "{} match(es)",
-            self.find.matches.len()
-        );
+        let match_info = format!("{} match(es)", self.find.matches.len());
         tree.text(
             panel_x + 8.0,
             panel_y + 64.0,
@@ -1870,7 +2378,9 @@ impl EditorState {
         let (title, body): (&str, String) = match &prompt.change {
             DiskChange::Deleted => (
                 "File deleted on disk",
-                format!("\"{name}\" was deleted outside the editor while you have unsaved changes."),
+                format!(
+                    "\"{name}\" was deleted outside the editor while you have unsaved changes."
+                ),
             ),
             _ => (
                 "File changed on disk",
@@ -1896,13 +2406,7 @@ impl EditorState {
         for (label, hint) in options {
             tree.fill_rect(dx + 12.0, by, dw - 24.0, 30.0, Color::from_hex(0x45475A));
             tree.text(dx + 20.0, by + 6.0, label, Color::from_hex(0xCDD6F4), 12.0);
-            tree.text(
-                dx + 160.0,
-                by + 8.0,
-                hint,
-                Color::from_hex(0x9399B2),
-                10.0,
-            );
+            tree.text(dx + 160.0, by + 8.0, hint, Color::from_hex(0x9399B2), 10.0);
             by += 34.0;
         }
     }
@@ -1934,7 +2438,13 @@ impl EditorState {
             "Review merge — {name}  ({} conflict(s))",
             review.conflict_count()
         );
-        tree.text(dx + 12.0, dy + 9.0, &header, Color::from_hex(0xF9E2AF), 13.0);
+        tree.text(
+            dx + 12.0,
+            dy + 9.0,
+            &header,
+            Color::from_hex(0xF9E2AF),
+            13.0,
+        );
 
         // Column headers.
         let col_w = (dw - 24.0) / 2.0;
@@ -1962,7 +2472,7 @@ impl EditorState {
                 tree.fill_rect(theirs_x - 4.0, y, col_w, block_h, Color::from_hex(0x3A2A2A));
             }
 
-            let label = format!("#{}", i + 1);
+            let label = format!("#{}", i.saturating_add(1));
             tree.text(dx + 2.0, y, &label, Color::from_hex(0x6C7086), 9.0);
 
             for (li, line) in ours.iter().enumerate() {
@@ -2002,83 +2512,723 @@ impl EditorState {
 // Main
 // ============================================================================
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut editor = EditorState::new();
+/// Drive the editor on `window` until the user quits or the connection closes.
+///
+/// Everything the editor decides is in [`EditorState::handle_event`]; this is
+/// only the strap between it and the loop. The one thing it adds is *when to
+/// draw*: a frame is submitted for the initial state and thereafter exactly when
+/// an event reported a visible change. Redrawing unconditionally would repaint
+/// the whole document for every mouse move across the window.
+fn run<T: oswindow::ConnectionTransport>(
+    events: &mut EventLoop<T>,
+    window: u64,
+    editor: &mut EditorState,
+) -> Result<(), oswindow::Error<T>> {
+    // Nothing has happened yet, so no event is going to ask for the first frame.
+    events.submit(window, &editor.render())?;
 
-    // Open files from command line
-    for path_str in &args {
+    // A failed submit has nowhere to be reported from inside the handler — its
+    // return type is the loop's `EventResponse`, not a `Result` — so it is
+    // carried out here and the loop stopped. Swallowing it would leave an
+    // editor that runs on happily while the screen no longer changes.
+    let mut failure = None;
+    events.run(|events, id, event| {
+        if id != window {
+            return EventResponse::Continue;
+        }
+        match editor.handle_event(&event) {
+            EditorResponse::Idle => EventResponse::Continue,
+            EditorResponse::Redraw => {
+                if let Err(e) = events.submit(id, &editor.render()) {
+                    failure = Some(e);
+                    return EventResponse::Exit;
+                }
+                EventResponse::Continue
+            }
+            EditorResponse::Exit => EventResponse::Exit,
+        }
+    })?;
+
+    failure.map_or(Ok(()), Err)
+}
+
+/// The command-line arguments, split into a display address and file names.
+///
+/// `--display ADDR` overrides `SLATE_DISPLAY`, in the same way and for the same
+/// reason a compositor takes an address as its first argument: a second display
+/// on one machine should not require editing the environment of the first.
+/// Everything else is a file to open. A lone `--` ends option parsing, so a file
+/// genuinely named `--display` is still openable.
+fn split_args<I: IntoIterator<Item = String>>(
+    args: I,
+) -> Result<(Option<String>, Vec<String>), String> {
+    let mut display = None;
+    let mut files = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--" => {
+                files.extend(args);
+                break;
+            }
+            "--display" => {
+                display = Some(args.next().ok_or_else(|| {
+                    "--display needs an address, e.g. --display 127.0.0.1:7373".to_string()
+                })?);
+            }
+            other => match other.strip_prefix("--display=") {
+                Some(addr) => display = Some(addr.to_string()),
+                None => files.push(arg),
+            },
+        }
+    }
+    Ok((display, files))
+}
+
+fn main() {
+    let (display, files) = match split_args(std::env::args().skip(1)) {
+        Ok(split) => split,
+        Err(e) => {
+            eprintln!("editor: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let mut editor = EditorState::new();
+    for path_str in &files {
         let path = PathBuf::from(path_str);
-        match editor.open_file(&path) {
-            Ok(()) => println!("Opened: {}", path.display()),
-            Err(e) => eprintln!("Error opening {}: {e}", path.display()),
+        if let Err(e) = editor.open_file(&path) {
+            eprintln!("editor: cannot open {}: {e}", path.display());
         }
     }
 
-    // Render initial frame
-    let render = editor.render();
-    let doc = editor.active_document();
-    println!(
-        "Text Editor: {} ({} lines, {})",
-        doc.name,
-        doc.line_count(),
-        doc.language.name()
-    );
-    println!("  {} render commands", render.len());
-    println!("  Cursor at Ln {}, Col {}", doc.cursor_line + 1, doc.cursor_col + 1);
+    // The editor names `oswindow` and never TCP — see `design-decisions.md`
+    // §460 — so the day the transport becomes a SlateOS channel, none of this
+    // changes.
+    let dialled = match &display {
+        Some(addr) => oswindow::connect_to(addr.as_str()),
+        None => oswindow::connect(),
+    };
+    let transport = match dialled {
+        Ok(t) => t,
+        Err(e) => {
+            // Almost always "connection refused", which means no compositor is
+            // running. The errno alone reads like a fault in this program, so
+            // say what it actually means and what to do about it.
+            eprintln!("editor: cannot reach the compositor: {e}");
+            eprintln!("  A compositor must be running for the editor to have a window.");
+            eprintln!("  Start one with `compositor`, or point the editor at an existing");
+            eprintln!(
+                "  display with `--display HOST:PORT` or the {} variable.",
+                oswindow::DISPLAY_VAR
+            );
+            std::process::exit(1);
+        }
+    };
 
-    // Demonstrate editing
-    let doc = editor.active_document_mut();
-    doc.insert_char('H');
-    doc.insert_char('e');
-    doc.insert_char('l');
-    doc.insert_char('l');
-    doc.insert_char('o');
-    println!(
-        "  After typing 'Hello': \"{}\"",
-        doc.line(0)
-    );
+    let title = format!("{} — Editor", editor.active_document().name);
+    let mut events = EventLoop::new(transport);
+    let window = match WindowBuilder::new(title, editor.window_width, editor.window_height)
+        .resizable(true)
+        .build(&mut events)
+    {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("editor: the compositor refused the window: {e:?}");
+            std::process::exit(1);
+        }
+    };
 
-    doc.undo();
-    doc.undo();
-    println!("  After 2x undo: \"{}\"", doc.line(0));
-
-    doc.redo();
-    println!("  After redo: \"{}\"", doc.line(0));
-
-    // Demonstrate structural editing on a small Rust snippet.
-    let mut sample = Document::new();
-    sample.language = Language::Rust;
-    sample.lines = vec![
-        "fn outer() {".to_string(),
-        "    fn inner() {".to_string(),
-        "        let x = 1;".to_string(),
-        "    }".to_string(),
-        "}".to_string(),
-    ];
-    let outline = sample.outline();
-    println!("\nOutline of sample snippet ({} entries):", outline.len());
-    for (depth, header) in &outline {
-        println!("  {}{}", "  ".repeat(*depth), header);
+    if let Err(e) = run(&mut events, window, &mut editor) {
+        eprintln!("editor: the connection failed: {e:?}");
+        std::process::exit(1);
     }
-    sample.cursor_line = 2;
-    sample.cursor_col = 12;
-    sample.selection_anchor = None;
-    let mut steps = 0;
-    while sample.expand_selection() && steps < 8 {
-        let (s, e) = sample.selection_range();
-        println!(
-            "  expand-selection #{}: ({}:{}) -> ({}:{})",
-            steps + 1,
-            s.line + 1,
-            s.col + 1,
-            e.line + 1,
-            e.col + 1
+}
+
+/// The editor as a compositor client, driven end to end.
+///
+/// These go through the real protocol — the requests are encoded, decoded by
+/// `oswindow::testing`'s compositor, and answered, and the frames the editor
+/// draws come back as decoded submissions. What they check is the one thing
+/// [`run`] adds over [`EditorState::handle_event`]: *when* a frame is sent.
+/// How the editor is invoked: which display, and which files.
+#[cfg(test)]
+mod arg_tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::split_args;
+
+    fn split(args: &[&str]) -> Result<(Option<String>, Vec<String>), String> {
+        split_args(args.iter().map(|s| (*s).to_string()))
+    }
+
+    #[test]
+    fn with_no_arguments_the_display_comes_from_the_environment() {
+        let (display, files) = split(&[]).unwrap();
+        assert_eq!(display, None, "no override was asked for");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn files_are_kept_in_the_order_they_were_given() {
+        let (display, files) = split(&["a.rs", "b.rs", "a.rs"]).unwrap();
+        assert_eq!(display, None);
+        // Not deduplicated: opening the same file twice is the user's business,
+        // and the editor's tab list is ordered.
+        assert_eq!(files, vec!["a.rs", "b.rs", "a.rs"]);
+    }
+
+    #[test]
+    fn a_display_can_be_given_either_spelling() {
+        assert_eq!(
+            split(&["--display", "10.0.0.4:7373", "x.rs"]).unwrap(),
+            (Some("10.0.0.4:7373".to_string()), vec!["x.rs".to_string()])
         );
-        steps += 1;
+        assert_eq!(
+            split(&["--display=10.0.0.4:7373", "x.rs"]).unwrap(),
+            (Some("10.0.0.4:7373".to_string()), vec!["x.rs".to_string()])
+        );
     }
 
-    println!("\nText editor ready.");
+    #[test]
+    fn a_display_option_with_nothing_after_it_is_an_error_and_not_a_silent_default() {
+        // Silently falling back to the environment here would connect to a
+        // *different* compositor than the one the user named, which is the kind
+        // of failure that looks like the program ignoring them.
+        let e = split(&["--display"]).unwrap_err();
+        assert!(e.contains("--display"), "the message names the option: {e}");
+    }
+
+    #[test]
+    fn the_last_display_wins_so_a_wrapper_script_can_override_one() {
+        let (display, files) = split(&["--display", "a:1", "--display", "b:2"]).unwrap();
+        assert_eq!(display, Some("b:2".to_string()));
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn a_file_really_named_like_an_option_is_reachable_after_a_bare_dash_dash() {
+        let (display, files) = split(&["--", "--display", "--display=x"]).unwrap();
+        assert_eq!(display, None, "past `--` nothing is an option");
+        assert_eq!(files, vec!["--display", "--display=x"]);
+    }
+
+    #[test]
+    fn a_bare_dash_is_a_file_name_and_not_an_option() {
+        let (_, files) = split(&["-"]).unwrap();
+        assert_eq!(files, vec!["-"]);
+    }
+}
+
+/// The editor against the **real** compositor, over a **real** socket.
+///
+/// Every other test in this tree stands one half of the display protocol up
+/// against a stand-in for the other: `loop_tests` runs the editor against
+/// `oswindow::testing`, and the compositor's own `server` tests run a
+/// hand-written client against the real compositor. Both can pass while the two
+/// halves disagree, because neither ever puts the shipped code on both ends.
+/// This module does: a genuine `compositor::Server` on a background thread, an
+/// ephemeral TCP port, and the same `oswindow::connect_to` that `main` calls.
+///
+/// It is what makes the difference between believing the chain works and
+/// knowing it, and it is the reason `gui/compositor` was split into a library
+/// and a thin binary — while it was a binary only, no crate outside its own
+/// source file could link it, so this test could not have been written.
+#[cfg(test)]
+mod against_the_real_compositor {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
+    use std::net::SocketAddr;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use compositor::{Compositor, InputEvent as Hardware, Server};
+    use oswindow::{EventLoop, WindowBuilder};
+
+    use super::EditorState;
+
+    /// How long a step may take before the test calls it a failure.
+    ///
+    /// Generous, because it is only ever reached when something is wrong: the
+    /// real latency of every step here is one tick, a millisecond.
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    /// How long the compositor thread lives no matter what.
+    ///
+    /// A watchdog, and a necessary one. `wait` on a socket promises only that it
+    /// *may* return — a timeout there is not an error — so a client blocked in a
+    /// request the compositor never answers would retry for ever, and the test
+    /// would hang rather than fail. When this expires the server drops, the
+    /// sockets close, and the client's next call returns a closed connection,
+    /// which is a failure with a message instead of a killed process.
+    const WATCHDOG: Duration = Duration::from_secs(30);
+
+    /// What the test can ask the compositor thread to do between ticks.
+    enum Ask {
+        /// Feed the compositor an event as if it came from a keyboard or mouse.
+        Input(Hardware),
+        /// Report the state of the world.
+        Snapshot(mpsc::Sender<Snap>),
+    }
+
+    /// What the compositor thread reports back.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Snap {
+        windows: usize,
+        clients: usize,
+        /// Requests and submissions served.
+        served: u64,
+        frames: u64,
+        routed_events: u64,
+        unrouted_events: u64,
+        orphans_reclaimed: u64,
+    }
+
+    /// A compositor running on its own thread, on a port the OS chose.
+    struct Desktop {
+        addr: SocketAddr,
+        ask: mpsc::Sender<Ask>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Desktop {
+        fn start() -> Self {
+            let (addr_tx, addr_rx) = mpsc::channel();
+            let (ask, asks) = mpsc::channel::<Ask>();
+            let thread = thread::spawn(move || {
+                // Small, because every tick composites it and this is a test.
+                let mut compositor = Compositor::new(1280, 800, 60).expect("compositor");
+                // Port zero: the OS picks a free one, so concurrent test
+                // binaries never collide on a fixed port.
+                let mut server = Server::bind("127.0.0.1:0").expect("bind");
+                addr_tx
+                    .send(server.local_addr().expect("the listener knows its address"))
+                    .expect("the test is waiting for this");
+                drop(addr_tx);
+
+                let started = Instant::now();
+                while started.elapsed() < WATCHDOG {
+                    server.tick(&mut compositor).expect("the listener failed");
+                    // Through the server rather than calling `compose_frame`
+                    // directly, so `ServerStats::frames` counts what this loop
+                    // does exactly as it counts what the shipped binary does.
+                    server.compose(&mut compositor);
+                    match asks.try_recv() {
+                        Ok(Ask::Input(event)) => compositor.handle_input(event),
+                        Ok(Ask::Snapshot(reply)) => {
+                            let stats = *server.stats();
+                            // A send that fails means the test gave up waiting;
+                            // there is nobody left to tell, so it is dropped.
+                            let _ = reply.send(Snap {
+                                windows: compositor.window_count(),
+                                clients: server.client_count(),
+                                served: stats.served,
+                                frames: stats.frames,
+                                routed_events: stats.routed_events,
+                                unrouted_events: stats.unrouted_events,
+                                orphans_reclaimed: stats.orphans_reclaimed,
+                            });
+                        }
+                        // The test finished and dropped its end. Nothing more
+                        // will be asked, so stop rather than spin to the
+                        // watchdog.
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
+                    // A real compositor sleeps a frame; this one is being
+                    // hurried through a handful of round trips.
+                    thread::sleep(Duration::from_millis(1));
+                }
+            });
+
+            let addr = addr_rx
+                .recv_timeout(PATIENCE)
+                .expect("the compositor thread should have bound a port");
+            Self {
+                addr,
+                ask,
+                thread: Some(thread),
+            }
+        }
+
+        fn snapshot(&self) -> Snap {
+            let (tx, rx) = mpsc::channel();
+            self.ask
+                .send(Ask::Snapshot(tx))
+                .expect("the compositor thread died");
+            rx.recv_timeout(PATIENCE)
+                .expect("the compositor thread stopped answering")
+        }
+
+        /// Poll until the compositor's state satisfies `done`, or give up.
+        ///
+        /// Polling rather than a condition variable because the thing being
+        /// waited on is a *remote* effect: bytes have to cross a socket and be
+        /// served on the next tick, and there is no signal to subscribe to.
+        fn until(&self, what: &str, done: impl Fn(&Snap) -> bool) -> Snap {
+            let deadline = Instant::now() + PATIENCE;
+            let mut last = self.snapshot();
+            while Instant::now() < deadline {
+                if done(&last) {
+                    return last;
+                }
+                thread::sleep(Duration::from_millis(2));
+                last = self.snapshot();
+            }
+            panic!("waited {PATIENCE:?} for {what}; the compositor last reported {last:?}");
+        }
+
+        fn input(&self, event: Hardware) {
+            self.ask
+                .send(Ask::Input(event))
+                .expect("the compositor thread died");
+        }
+    }
+
+    impl Drop for Desktop {
+        fn drop(&mut self) {
+            // Dropping the sender is what ends the loop; joining is what makes
+            // the port free before the next test binds one.
+            let (dead, _) = mpsc::channel();
+            let ask = std::mem::replace(&mut self.ask, dead);
+            drop(ask);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    /// Connect the way `main` does, with a bounded wait so a hang is a failure.
+    fn dial(desktop: &Desktop) -> EventLoop<oswindow::Link> {
+        let mut link = oswindow::connect_to(desktop.addr).expect("nothing was listening");
+        link.set_wait_timeout(Some(Duration::from_millis(50)))
+            .expect("the socket refused a wait timeout");
+        EventLoop::new(link)
+    }
+
+    #[test]
+    fn the_editor_gets_a_window_from_the_real_compositor_over_a_real_socket() {
+        let desktop = Desktop::start();
+        let mut events = dial(&desktop);
+
+        // Blocks on the socket until the compositor answers with the id. This
+        // one line is the whole point: before the transport existed, `connect()`
+        // returned `None` and this could not be reached at all.
+        let window = WindowBuilder::new("Editor", 900, 600)
+            .resizable(true)
+            .build(&mut events)
+            .expect("the compositor should have created the window");
+
+        // The id is the compositor's, not a local counter's — the defect that
+        // made `oswindow` a simulation before §457's rewrite.
+        assert_ne!(window, 0, "a window id of zero means nobody assigned one");
+        let snap = desktop.until("the window to exist", |s| s.windows == 1);
+        assert_eq!(snap.clients, 1, "the editor is connected");
+    }
+
+    #[test]
+    fn a_frame_the_editor_draws_reaches_the_compositor() {
+        let desktop = Desktop::start();
+        let mut events = dial(&desktop);
+        let editor = EditorState::new();
+
+        let window = WindowBuilder::new("Editor", 900, 600)
+            .build(&mut events)
+            .expect("window");
+        let before = desktop.until("the window to exist", |s| s.windows == 1);
+
+        // The editor's real render tree — every line, the gutter, the status
+        // bar — encoded by `oswindow`, carried by TCP, decoded by the
+        // compositor's wire front end and rasterised.
+        let tree = editor.render();
+        assert!(!tree.commands.is_empty(), "the editor drew nothing to send");
+        events.submit(window, &tree).expect("submit");
+
+        let after = desktop.until("the picture to be served", |s| s.served > before.served);
+        assert!(
+            after.frames > 0,
+            "the compositor never composited: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_keystroke_typed_at_the_compositor_arrives_in_the_editors_document() {
+        let desktop = Desktop::start();
+        let mut events = dial(&desktop);
+        let mut editor = EditorState::new();
+
+        let window = WindowBuilder::new("Editor", 900, 600)
+            .build(&mut events)
+            .expect("window");
+        desktop.until("the window to exist", |s| s.windows == 1);
+        events.submit(window, &editor.render()).expect("submit");
+
+        // Scancode 0x1E is `A` on a set-1 keyboard. The compositor is what turns
+        // it into a key name and a character (`design-decisions.md` §456), so
+        // this is the physical event, not a synthesised `guitk` one.
+        desktop.input(Hardware::KeyDown {
+            scancode: 0x1E,
+            character: Some('a'),
+        });
+        desktop.until("the keystroke to be routed", |s| s.routed_events > 0);
+
+        // `poll` is non-blocking, so this drains what has arrived and gives the
+        // socket a moment when it has not.
+        let deadline = Instant::now() + PATIENCE;
+        let mut typed = false;
+        while Instant::now() < deadline && !typed {
+            while let Some((id, event)) = events.poll().expect("the connection failed") {
+                assert_eq!(id, window, "an event for a window the editor never opened");
+                editor.handle_event(&event);
+                if editor.active_document().lines.concat().contains('a') {
+                    typed = true;
+                }
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        assert!(
+            typed,
+            "the keystroke never reached the document; it reads {:?}",
+            editor.active_document().lines
+        );
+        assert_eq!(
+            desktop.snapshot().unrouted_events,
+            0,
+            "an event was addressed to a window no connection owned"
+        );
+    }
+
+    #[test]
+    fn when_the_editor_exits_the_compositor_reclaims_its_window() {
+        // The failure this guards against is a crashed application leaving a
+        // window on screen that nothing can close, because the only client that
+        // could ask is gone.
+        let desktop = Desktop::start();
+        {
+            let mut events = dial(&desktop);
+            WindowBuilder::new("Editor", 900, 600)
+                .build(&mut events)
+                .expect("window");
+            desktop.until("the window to exist", |s| s.windows == 1);
+        }
+        let snap = desktop.until("the window to be reclaimed", |s| s.windows == 0);
+        assert_eq!(snap.clients, 0, "the connection was dropped too");
+        assert_eq!(snap.orphans_reclaimed, 1, "and counted as an orphan");
+    }
+}
+
+#[cfg(test)]
+mod loop_tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{EditorState, run};
+    use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
+    use oswindow::testing;
+    use oswindow::{InputEvent, WindowBuilder};
+
+    fn typed(ch: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: Some(ch),
+        })
+    }
+
+    #[test]
+    fn the_editor_opens_a_window_draws_once_and_then_only_on_change() {
+        let (mut events, desktop) = testing::desktop();
+        let window = WindowBuilder::new("Editor", 900, 600)
+            .resizable(true)
+            .build(&mut events)
+            .expect("the compositor should have created the window");
+
+        // Each batch is delivered on one turn of the loop, so these arrive in
+        // order with the editor processing each before the next appears.
+        {
+            let mut desk = desktop.borrow_mut();
+            // A mouse move with no button held: nothing changes, nothing draws.
+            desk.script.push_back(vec![InputEvent::new(
+                window,
+                Event::Mouse(MouseEvent {
+                    x: 400.0,
+                    y: 300.0,
+                    kind: MouseEventKind::Move,
+                }),
+            )]);
+            desk.script
+                .push_back(vec![InputEvent::new(window, typed('a'))]);
+            desk.script
+                .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+        }
+
+        let mut editor = EditorState::new();
+        run(&mut events, window, &mut editor).expect("the loopback connection cannot fail");
+
+        assert_eq!(editor.active_document().lines[0], "a", "the key arrived");
+
+        let drawn = desktop.borrow_mut().drawn();
+        assert_eq!(
+            drawn.len(),
+            2,
+            "the initial frame and one for the keystroke, not one per event: {drawn:?}"
+        );
+        assert!(
+            drawn.iter().all(|(w, count)| *w == window && *count > 0),
+            "every frame is a real picture of this window: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn events_for_another_window_are_ignored_rather_than_applied() {
+        let (mut events, desktop) = testing::desktop();
+        let mine = WindowBuilder::new("Editor", 900, 600)
+            .build(&mut events)
+            .unwrap();
+        let theirs = WindowBuilder::new("Other", 100, 100)
+            .build(&mut events)
+            .unwrap();
+        assert_ne!(mine, theirs);
+
+        {
+            let mut desk = desktop.borrow_mut();
+            desk.script
+                .push_back(vec![InputEvent::new(theirs, typed('z'))]);
+            desk.script
+                .push_back(vec![InputEvent::new(mine, Event::CloseRequested)]);
+        }
+
+        let mut editor = EditorState::new();
+        run(&mut events, mine, &mut editor).unwrap();
+
+        assert_eq!(
+            editor.active_document().lines[0],
+            "",
+            "a keystroke addressed to another window must not edit this document"
+        );
+        let drawn = desktop.borrow_mut().drawn();
+        assert_eq!(drawn, vec![(mine, drawn[0].1)], "only the initial frame");
+    }
+}
+
+/// A tour of the model's API, kept as a test.
+///
+/// This was the body of `main` before there was an event loop: the only way to
+/// exercise the editor was to call its operations from a program and print what
+/// came out. It is kept because it is a compact walk through the whole model —
+/// open, render, type, undo, redo, outline, expand-selection — but the prints
+/// are now assertions, so a regression in any of them fails a build instead of
+/// changing a line of console output nobody reads.
+#[cfg(test)]
+mod api_tour {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{Document, EditorState, Language};
+
+    #[test]
+    fn the_model_answers_every_operation_the_demo_used_to_print() {
+        let mut editor = EditorState::new();
+
+        // Rendering an empty editor still produces a frame: the chrome — tab
+        // bar, gutter, status bar — is drawn whether or not there is text.
+        let render = editor.render();
+        assert!(
+            render.len() > 3,
+            "an empty editor still draws its chrome, got {} commands",
+            render.len()
+        );
+        assert_eq!(editor.active_document().line_count(), 1);
+
+        let doc = editor.active_document_mut();
+        for ch in "Hello".chars() {
+            doc.insert_char(ch);
+        }
+        assert_eq!(doc.line(0), "Hello");
+
+        doc.undo();
+        doc.undo();
+        assert_eq!(doc.line(0), "Hel", "one character per undo step");
+
+        doc.redo();
+        assert_eq!(doc.line(0), "Hell");
+    }
+
+    #[test]
+    fn expand_selection_walks_out_through_the_nesting() {
+        let mut sample = Document::new();
+        sample.language = Language::Rust;
+        sample.lines = vec![
+            "fn outer() {".to_string(),
+            "    fn inner() {".to_string(),
+            "        let x = 1;".to_string(),
+            "    }".to_string(),
+            "}".to_string(),
+        ];
+
+        let outline = sample.outline();
+        assert_eq!(outline.len(), 2, "both functions are headers: {outline:?}");
+        assert!(outline[1].0 > outline[0].0, "`inner` nests inside `outer`");
+
+        sample.cursor_line = 2;
+        sample.cursor_col = 12;
+        sample.selection_anchor = None;
+
+        // Each expansion must cover the previous one and reach strictly
+        // further, which is the property that makes repeated presses useful.
+        let mut previous: Option<(super::Pos, super::Pos)> = None;
+        let mut steps = 0;
+        while sample.expand_selection() && steps < 8 {
+            let range = sample.selection_range();
+            if let Some((was_start, was_end)) = previous {
+                assert!(
+                    range.0 <= was_start && range.1 >= was_end && range != (was_start, was_end),
+                    "step {steps} did not grow: {range:?} vs {:?}",
+                    (was_start, was_end)
+                );
+            }
+            previous = Some(range);
+            steps += 1;
+        }
+        assert!(steps >= 2, "expected several expansions, got {steps}");
+    }
 }
 
 // ============================================================================
@@ -2090,7 +3240,13 @@ mod caret_tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::*;
     use guitk::render::RenderCommand;
@@ -2123,9 +3279,7 @@ mod caret_tests {
             .find_map(|c| match c {
                 RenderCommand::FillRect {
                     x, width, color, ..
-                } if *color == Color::from_hex(CARET) && (*width - 2.0).abs() < 0.01 => {
-                    Some(*x)
-                }
+                } if *color == Color::from_hex(CARET) && (*width - 2.0).abs() < 0.01 => Some(*x),
                 _ => None,
             })
             .expect("the caret is drawn")
@@ -2349,7 +3503,13 @@ mod highlight_render_tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::*;
     use guitk::render::RenderCommand;
@@ -2615,7 +3775,8 @@ mod highlight_render_tests {
         assert_eq!(doc.line(0), "a\u{e9}b");
         doc.undo();
         assert_eq!(
-            doc.line(0), "ab",
+            doc.line(0),
+            "ab",
             "undo removed the character after the one it inserted"
         );
     }
@@ -2687,7 +3848,10 @@ mod highlight_render_tests {
         let line = "fn main() { let x: u32 = 0x1F; /* hi */ }";
         let mut state = HighlightState::Normal;
         let tokens = highlight::highlight_line(line, Language::Rust, &mut state);
-        assert!(tokens.len() > 4, "this line should tokenize into several runs");
+        assert!(
+            tokens.len() > 4,
+            "this line should tokenize into several runs"
+        );
         EditorState::draw_tokens(
             &mut tree, line, &tokens, 0.0, TEST_LEFT, 0.0, 800.0, 18.0, 14.0,
         );
@@ -2698,7 +3862,8 @@ mod highlight_render_tests {
             .filter(|c| matches!(c, Rc::Text { .. } | Rc::RichText { .. }))
             .count();
         assert_eq!(
-            texts, 1,
+            texts,
+            1,
             "a {}-token line produced {texts} text commands; it must produce one",
             tokens.len(),
         );
@@ -2825,7 +3990,12 @@ mod highlight_render_tests {
         let mut state = HighlightState::Normal;
         let tokens = highlight::highlight_line("x", Language::Rust, &mut state);
         EditorState::draw_tokens(&mut tree, "x", &tokens, 0.0, 800.0, 0.0, 800.0, 18.0, 14.0);
-        assert_eq!(tree.len(), 0, "a zero-width viewport drew {:?}", tree.commands);
+        assert_eq!(
+            tree.len(),
+            0,
+            "a zero-width viewport drew {:?}",
+            tree.commands
+        );
     }
 
     /// A multi-byte line is never sliced, at any scroll position — the whole
@@ -2836,7 +4006,11 @@ mod highlight_render_tests {
         let line = "日本語 x";
         for i in 0..line.len() {
             let d = tokens_drawn(line, Language::Rust, i as f32 * 3.5, 800.0);
-            assert_eq!(d.text, line, "scroll {i} drew {:?}, not the whole line", d.text);
+            assert_eq!(
+                d.text, line,
+                "scroll {i} drew {:?}, not the whole line",
+                d.text
+            );
         }
     }
 
@@ -2918,7 +4092,13 @@ mod undo_tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::*;
 
@@ -3138,7 +4318,13 @@ mod doc_syntree_tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::*;
 
@@ -3461,7 +4647,13 @@ mod tab_tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::{Document, FindState, Tabs};
 

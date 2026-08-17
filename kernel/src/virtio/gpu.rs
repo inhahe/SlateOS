@@ -46,64 +46,24 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
-use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::pci::{self, PciDevice};
 use crate::serial_println;
+use crate::virtio::modern::{ModernTransport, STATUS_DRIVER_OK, VIRTIO_VENDOR};
 use crate::virtio::queue::{VRING_DESC_F_WRITE, Virtqueue};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Virtio vendor ID (Red Hat / QEMU).
-const VIRTIO_VENDOR: u16 = 0x1AF4;
+/// Serial-log prefix, passed to the shared transport so its diagnostics name
+/// this driver rather than the module they are emitted from.
+const LOG_TAG: &str = "[virtio-gpu]";
+
 /// Virtio-GPU transitional PCI device ID (type 16 → 0x1040 + 16 = 0x1050).
 const VIRTIO_GPU_DEVICE_ID: u16 = 0x1050;
 
 /// Maximum number of scanouts (displays) the spec allows.
 const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
-
-/// PCI Capability ID for Vendor Specific.
-const PCI_CAP_ID_VNDR: u8 = 0x09;
-
-// Virtio PCI capability cfg_type values.
-const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
-const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
-const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;
-const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
-
-// Virtio device status bits (same semantics, different access method).
-const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
-const VIRTIO_STATUS_DRIVER: u8 = 2;
-const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
-const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
-
-// ---------------------------------------------------------------------------
-// Modern common config register offsets (§4.1.4.3)
-// ---------------------------------------------------------------------------
-
-const COMMON_DFSELECT: usize = 0x00; // u32 - device feature select
-const COMMON_DF: usize = 0x04; // u32 - device feature (read)
-const COMMON_GFSELECT: usize = 0x08; // u32 - guest feature select
-const COMMON_GF: usize = 0x0C; // u32 - guest feature (write)
-#[allow(dead_code)]
-const COMMON_MSIX: usize = 0x10; // u16 - MSI-X config vector
-const COMMON_NUMQ: usize = 0x12; // u16 - number of queues
-const COMMON_STATUS: usize = 0x14; // u8 - device status
-#[allow(dead_code)]
-const COMMON_CFGGEN: usize = 0x15; // u8 - config generation
-const COMMON_QSELECT: usize = 0x16; // u16 - queue select
-const COMMON_QSIZE: usize = 0x18; // u16 - queue size
-#[allow(dead_code)]
-const COMMON_QMSIX: usize = 0x1A; // u16 - queue MSI-X vector
-const COMMON_QENABLE: usize = 0x1C; // u16 - queue enable
-const COMMON_QNOFF: usize = 0x1E; // u16 - queue notify offset
-const COMMON_QDESC_LO: usize = 0x20; // u32 - queue desc low
-const COMMON_QDESC_HI: usize = 0x24; // u32 - queue desc high
-const COMMON_QDRIVER_LO: usize = 0x28; // u32 - queue driver (avail) low
-const COMMON_QDRIVER_HI: usize = 0x2C; // u32 - queue driver (avail) high
-const COMMON_QDEVICE_LO: usize = 0x30; // u32 - queue device (used) low
-const COMMON_QDEVICE_HI: usize = 0x34; // u32 - queue device (used) high
 
 // ---------------------------------------------------------------------------
 // GPU command types (virtio 1.1 §5.7.6.7)
@@ -240,216 +200,13 @@ struct VirtioGpuResourceFlush {
 }
 
 // ---------------------------------------------------------------------------
-// Modern PCI Transport
-// ---------------------------------------------------------------------------
-
-/// Parsed virtio PCI capability information.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-struct VirtioPciCap {
-    /// Capability type (COMMON, NOTIFY, ISR, DEVICE).
-    cfg_type: u8,
-    /// BAR index.
-    bar: u8,
-    /// Offset within the BAR.
-    offset: u32,
-    /// Length of this config region.
-    length: u32,
-}
-
-/// Modern virtio PCI transport state (MMIO-based).
-struct VirtioModernTransport {
-    /// Virtual address of the common config region.
-    common_cfg: *mut u8,
-    /// Virtual address of the notify region.
-    notify_cfg: *mut u8,
-    /// Notify offset multiplier (from cap struct).
-    notify_off_multiplier: u32,
-    /// Virtual address of the ISR config.
-    #[allow(dead_code)]
-    isr_cfg: *mut u8,
-    /// Virtual address of device-specific config.
-    device_cfg: *mut u8,
-}
-
-impl VirtioModernTransport {
-    /// Read device status.
-    fn status(&self) -> u8 {
-        // SAFETY: common_cfg points to mapped MMIO for the device.
-        unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_STATUS)) }
-    }
-
-    /// Write device status.
-    fn set_status(&self, status: u8) {
-        // SAFETY: common_cfg points to mapped MMIO for the device (set
-        // during transport setup).  COMMON_STATUS is within the common
-        // config region.
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_STATUS), status);
-        }
-    }
-
-    /// Reset device.
-    fn reset(&self) {
-        self.set_status(0);
-        // Spec says: after writing 0, read back until 0 is returned.
-        let mut attempts = 0u32;
-        while self.status() != 0 && attempts < 100_000 {
-            core::hint::spin_loop();
-            attempts = attempts.wrapping_add(1);
-        }
-    }
-
-    /// Read 32-bit device feature (select page first).
-    fn device_features(&self, page: u32) -> u32 {
-        // SAFETY: common_cfg points to mapped MMIO.  DFSELECT and DF are
-        // within the common config region per the virtio spec layout.
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_DFSELECT) as *mut u32, page);
-            core::ptr::read_volatile(self.common_cfg.add(COMMON_DF) as *const u32)
-        }
-    }
-
-    /// Write 32-bit guest feature (select page first).
-    fn set_guest_features(&self, page: u32, features: u32) {
-        // SAFETY: common_cfg points to mapped MMIO.  GFSELECT and GF are
-        // within the common config region.
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_GFSELECT) as *mut u32, page);
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_GF) as *mut u32, features);
-        }
-    }
-
-    /// Read number of queues.
-    fn num_queues(&self) -> u16 {
-        // SAFETY: common_cfg points to mapped MMIO.  NUMQ is within
-        // the common config region.
-        unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_NUMQ) as *const u16) }
-    }
-
-    /// Select a queue for configuration.
-    fn select_queue(&self, index: u16) {
-        // SAFETY: common_cfg points to mapped MMIO.  QSELECT is within
-        // the common config region.
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_QSELECT) as *mut u16, index);
-        }
-    }
-
-    /// Read the selected queue's size.
-    fn queue_size(&self) -> u16 {
-        // SAFETY: common_cfg points to mapped MMIO.  QSIZE is within
-        // the common config region.
-        unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_QSIZE) as *const u16) }
-    }
-
-    /// Set the selected queue's descriptor table physical address.
-    #[allow(clippy::cast_possible_truncation)]
-    fn set_queue_desc(&self, addr: u64) {
-        // SAFETY: common_cfg points to mapped MMIO.  QDESC_LO/HI are
-        // within the common config region.
-        unsafe {
-            core::ptr::write_volatile(
-                self.common_cfg.add(COMMON_QDESC_LO) as *mut u32,
-                addr as u32,
-            );
-            core::ptr::write_volatile(
-                self.common_cfg.add(COMMON_QDESC_HI) as *mut u32,
-                (addr >> 32) as u32,
-            );
-        }
-    }
-
-    /// Set the selected queue's driver (available) ring physical address.
-    #[allow(clippy::cast_possible_truncation)]
-    fn set_queue_driver(&self, addr: u64) {
-        // SAFETY: common_cfg points to mapped MMIO.  QDRIVER_LO/HI are
-        // within the common config region.
-        unsafe {
-            core::ptr::write_volatile(
-                self.common_cfg.add(COMMON_QDRIVER_LO) as *mut u32,
-                addr as u32,
-            );
-            core::ptr::write_volatile(
-                self.common_cfg.add(COMMON_QDRIVER_HI) as *mut u32,
-                (addr >> 32) as u32,
-            );
-        }
-    }
-
-    /// Set the selected queue's device (used) ring physical address.
-    #[allow(clippy::cast_possible_truncation)]
-    fn set_queue_device(&self, addr: u64) {
-        // SAFETY: common_cfg points to mapped MMIO.  QDEVICE_LO/HI are
-        // within the common config region.
-        unsafe {
-            core::ptr::write_volatile(
-                self.common_cfg.add(COMMON_QDEVICE_LO) as *mut u32,
-                addr as u32,
-            );
-            core::ptr::write_volatile(
-                self.common_cfg.add(COMMON_QDEVICE_HI) as *mut u32,
-                (addr >> 32) as u32,
-            );
-        }
-    }
-
-    /// Enable the selected queue.
-    fn enable_queue(&self) {
-        // SAFETY: common_cfg points to mapped MMIO.  QENABLE is within
-        // the common config region.
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_QENABLE) as *mut u16, 1);
-        }
-    }
-
-    /// Read the notify offset for the selected queue.
-    fn queue_notify_off(&self) -> u16 {
-        // SAFETY: common_cfg points to mapped MMIO.  QNOFF is within
-        // the common config region.
-        unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_QNOFF) as *const u16) }
-    }
-
-    /// Notify a queue (write queue index to the doorbell).
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn notify_queue(&self, queue_index: u16) {
-        // The notification address for queue N is:
-        // notify_cfg + queue_notify_off[N] * notify_off_multiplier
-        // For simplicity with QEMU, the multiplier is typically 2 (each
-        // queue gets a 16-bit doorbell slot), and we just write the queue index.
-        self.select_queue(queue_index);
-        let off = self.queue_notify_off();
-        // SAFETY: notify_cfg points to the mapped notification BAR region.
-        // The offset is queue_notify_off * notify_off_multiplier, which the
-        // device guarantees stays within the notify region.
-        let notify_addr = unsafe {
-            self.notify_cfg
-                .add((off as u32 * self.notify_off_multiplier) as usize)
-        };
-        // SAFETY: notify_addr is within the mapped notify BAR region
-        // (computed above).  Writing the queue index to this doorbell
-        // tells the device to process the queue.
-        unsafe {
-            core::ptr::write_volatile(notify_addr as *mut u16, queue_index);
-        }
-    }
-
-    /// Read a device-specific config u32.
-    fn read_device_config32(&self, offset: usize) -> u32 {
-        // SAFETY: device_cfg points to the mapped device-specific config
-        // BAR region.  Callers pass offsets within the documented config.
-        unsafe { core::ptr::read_volatile(self.device_cfg.add(offset) as *const u32) }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Device state
 // ---------------------------------------------------------------------------
 
 /// Virtio GPU device state.
 struct VirtioGpuDevice {
     /// Modern PCI transport.
-    transport: VirtioModernTransport,
+    transport: ModernTransport,
     /// Control virtqueue (queue 0).
     controlq: Virtqueue,
     /// Cursor virtqueue (queue 1).
@@ -514,36 +271,17 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     pci::enable_bus_master(dev.address);
 
     // Parse PCI capabilities to locate virtio config regions.
-    let transport = setup_modern_transport(&dev, hhdm_offset)?;
+    let transport = ModernTransport::probe(LOG_TAG, &dev, hhdm_offset)?;
 
     // --- Device initialization sequence (modern transport §3.1) ---
 
-    // 1. Reset.
-    transport.reset();
-
-    // 2. Set ACKNOWLEDGE.
-    transport.set_status(VIRTIO_STATUS_ACKNOWLEDGE);
-
-    // 3. Set DRIVER.
-    transport.set_status(transport.status() | VIRTIO_STATUS_DRIVER);
-
-    // 4. Read device features.
-    let features0 = transport.device_features(0);
-    serial_println!("[virtio-gpu] Device features[0]: {:#010x}", features0);
-
-    // Accept no optional features (base 2D only).
-    transport.set_guest_features(0, 0);
-    transport.set_guest_features(1, 0);
-
-    // 5. Set FEATURES_OK.
-    transport.set_status(transport.status() | VIRTIO_STATUS_FEATURES_OK);
-
-    // Verify FEATURES_OK stuck.
-    if transport.status() & VIRTIO_STATUS_FEATURES_OK == 0 {
-        serial_println!("[virtio-gpu] Device rejected feature set");
-        transport.reset();
-        return Err(KernelError::NoSuchDevice);
-    }
+    // Steps 1-5 (reset, ACKNOWLEDGE, DRIVER, feature negotiation, FEATURES_OK).
+    // We want no optional GPU features -- 2D only, no VIRGL, no EDID -- so the
+    // requested page-0 mask is empty; `negotiate` still accepts
+    // VIRTIO_F_VERSION_1 on our behalf, which the previous open-coded sequence
+    // here did not.  QEMU's virtio-gpu tolerated that omission; a stricter
+    // device would not have.
+    transport.negotiate(0)?;
 
     // 6. Read device config.
     let _events_read = transport.read_device_config32(0);
@@ -561,12 +299,12 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     }
 
     // Setup controlq (queue 0).
-    let controlq = setup_queue(&transport, 0, hhdm_offset)?;
+    let controlq = transport.setup_queue(0, hhdm_offset)?;
     // Setup cursorq (queue 1).
-    let cursorq = setup_queue(&transport, 1, hhdm_offset)?;
+    let cursorq = transport.setup_queue(1, hhdm_offset)?;
 
     // 8. Set DRIVER_OK — device is live.
-    transport.set_status(transport.status() | VIRTIO_STATUS_DRIVER_OK);
+    transport.add_status(STATUS_DRIVER_OK);
     serial_println!(
         "[virtio-gpu] Device status: DRIVER_OK ({:#x})",
         transport.status()
@@ -690,205 +428,6 @@ fn find_device() -> KernelResult<PciDevice> {
     }
     serial_println!("[virtio-gpu] No virtio-gpu device found");
     Err(KernelError::NoSuchDevice)
-}
-
-/// Parse PCI capabilities and map MMIO regions for the modern transport.
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-fn setup_modern_transport(
-    dev: &PciDevice,
-    hhdm_offset: u64,
-) -> KernelResult<VirtioModernTransport> {
-    let caps = pci::find_capabilities(dev.address, PCI_CAP_ID_VNDR);
-    if caps.is_empty() {
-        serial_println!("[virtio-gpu] No vendor-specific PCI capabilities found");
-        return Err(KernelError::NoSuchDevice);
-    }
-
-    serial_println!("[virtio-gpu] Found {} vendor capabilities", caps.len());
-
-    let mut common_cap: Option<VirtioPciCap> = None;
-    let mut notify_cap: Option<VirtioPciCap> = None;
-    let mut isr_cap: Option<VirtioPciCap> = None;
-    let mut device_cap: Option<VirtioPciCap> = None;
-    let mut notify_off_multiplier: u32 = 0;
-
-    for cap in &caps {
-        // Read the virtio PCI cap structure at this config space offset.
-        // Layout (§4.1.4.3):
-        //   +0: cap_vndr (u8)
-        //   +1: cap_next (u8)
-        //   +2: cap_len (u8)
-        //   +3: cfg_type (u8)
-        //   +4: bar (u8)
-        //   +5: padding[3]
-        //   +8: offset (u32)
-        //   +12: length (u32)
-        let a = dev.address;
-        let off = cap.offset;
-        let cfg_type = pci::config_read8(a.bus, a.device, a.function, off.wrapping_add(3));
-        let bar = pci::config_read8(a.bus, a.device, a.function, off.wrapping_add(4));
-        let region_offset = pci::config_read32(a.bus, a.device, a.function, off.wrapping_add(8));
-        let region_length = pci::config_read32(a.bus, a.device, a.function, off.wrapping_add(12));
-
-        let vcap = VirtioPciCap {
-            cfg_type,
-            bar,
-            offset: region_offset,
-            length: region_length,
-        };
-
-        serial_println!(
-            "[virtio-gpu]   Cap type={} bar={} offset={:#x} len={:#x}",
-            cfg_type,
-            bar,
-            region_offset,
-            region_length
-        );
-
-        match cfg_type {
-            VIRTIO_PCI_CAP_COMMON_CFG => common_cap = Some(vcap),
-            VIRTIO_PCI_CAP_NOTIFY_CFG => {
-                notify_cap = Some(vcap);
-                // Read notify_off_multiplier at offset +16 of this cap.
-                notify_off_multiplier =
-                    pci::config_read32(a.bus, a.device, a.function, off.wrapping_add(16));
-            }
-            VIRTIO_PCI_CAP_ISR_CFG => isr_cap = Some(vcap),
-            VIRTIO_PCI_CAP_DEVICE_CFG => device_cap = Some(vcap),
-            _ => {} // PCI_CFG (5) or unknown — ignore.
-        }
-    }
-
-    let common = common_cap.ok_or_else(|| {
-        serial_println!("[virtio-gpu] Missing COMMON_CFG capability");
-        KernelError::NoSuchDevice
-    })?;
-    let notify = notify_cap.ok_or_else(|| {
-        serial_println!("[virtio-gpu] Missing NOTIFY_CFG capability");
-        KernelError::NoSuchDevice
-    })?;
-    let isr = isr_cap.ok_or_else(|| {
-        serial_println!("[virtio-gpu] Missing ISR_CFG capability");
-        KernelError::NoSuchDevice
-    })?;
-    let devcfg = device_cap.ok_or_else(|| {
-        serial_println!("[virtio-gpu] Missing DEVICE_CFG capability");
-        KernelError::NoSuchDevice
-    })?;
-
-    // Map each BAR MMIO region into the kernel virtual address space.
-    // MMIO BARs are device memory, not RAM — they're NOT covered by the HHDM.
-    // We map them at their natural HHDM offset (phys + hhdm_offset) with
-    // explicit page table entries using NO_CACHE flags.
-    let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
-    let mmio_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
-
-    let map_bar_region = |cap: &VirtioPciCap| -> KernelResult<*mut u8> {
-        let bar_phys =
-            pci::bar_mmio_addr64(dev, cap.bar as usize).ok_or(KernelError::NoSuchDevice)?;
-        let region_phys = bar_phys + cap.offset as u64;
-        let region_virt = region_phys + hhdm_offset;
-
-        // Map enough 16 KiB frames to cover this region.
-        // Each frame is 16 KiB but hardware pages are 4 KiB.
-        // We map at frame granularity (our allocator's unit).
-        let region_len = (cap.length as u64).max(FRAME_SIZE as u64);
-        let num_frames = (region_len as usize).div_ceil(FRAME_SIZE);
-
-        for i in 0..num_frames {
-            let frame_phys =
-                (region_phys & !(FRAME_SIZE as u64 - 1)) + (i as u64) * (FRAME_SIZE as u64);
-            let frame_virt = frame_phys + hhdm_offset;
-
-            if let Some(frame) = PhysFrame::from_addr(frame_phys) {
-                let va = VirtAddr::new(frame_virt);
-                // SAFETY: We're mapping device MMIO into the HHDM range
-                // where it would naturally live.  This is the same pattern
-                // used by the APIC MMIO mapping.
-                let _ = unsafe { page_table::map_frame(pml4_phys, va, frame, mmio_flags) };
-                // SAFETY: Flushing the TLB for a page we just mapped is
-                // always safe and ensures subsequent accesses use the new mapping.
-                unsafe {
-                    page_table::flush_frame(va);
-                }
-            }
-        }
-
-        Ok(region_virt as *mut u8)
-    };
-
-    let common_cfg = map_bar_region(&common)?;
-    let notify_cfg = map_bar_region(&notify)?;
-    let isr_cfg = map_bar_region(&isr)?;
-    let device_cfg = map_bar_region(&devcfg)?;
-
-    serial_println!(
-        "[virtio-gpu] Transport: common={:p} notify={:p} isr={:p} dev={:p} mult={}",
-        common_cfg,
-        notify_cfg,
-        isr_cfg,
-        device_cfg,
-        notify_off_multiplier
-    );
-
-    Ok(VirtioModernTransport {
-        common_cfg,
-        notify_cfg,
-        notify_off_multiplier,
-        isr_cfg,
-        device_cfg,
-    })
-}
-
-/// Set up a virtqueue for the modern transport.
-///
-/// The modern transport requires setting descriptor/avail/used ring
-/// addresses separately (as 64-bit physical addresses), then enabling.
-#[allow(clippy::arithmetic_side_effects)]
-fn setup_queue(
-    transport: &VirtioModernTransport,
-    queue_idx: u16,
-    hhdm_offset: u64,
-) -> KernelResult<Virtqueue> {
-    transport.select_queue(queue_idx);
-    let queue_size = transport.queue_size();
-    if queue_size == 0 {
-        serial_println!("[virtio-gpu] Queue {} size is 0", queue_idx);
-        return Err(KernelError::NoSuchDevice);
-    }
-
-    // Allocate the virtqueue (same layout as legacy, but we set addresses separately).
-    let (vq, _pfn) = Virtqueue::new(queue_size, hhdm_offset)?;
-
-    // For the modern transport, we need to tell the device where each
-    // ring section lives.  Our Virtqueue allocates them contiguously
-    // within one 16 KiB frame, so we calculate offsets.
-    let phys_base = vq.phys_addr();
-    let qs = queue_size as u64;
-
-    // Descriptor table: at offset 0, 16 bytes per descriptor.
-    let desc_addr = phys_base;
-    // Available ring: immediately after descriptors.
-    let avail_addr = phys_base + qs * 16;
-    // Used ring: page-aligned after available ring.
-    let avail_size = 4 + qs * 2 + 2;
-    let used_addr = align_up_u64(avail_addr + avail_size, 4096);
-
-    transport.set_queue_desc(desc_addr);
-    transport.set_queue_driver(avail_addr);
-    transport.set_queue_device(used_addr);
-    transport.enable_queue();
-
-    serial_println!(
-        "[virtio-gpu]   Queue {}: size={} desc={:#x} avail={:#x} used={:#x}",
-        queue_idx,
-        queue_size,
-        desc_addr,
-        avail_addr,
-        used_addr
-    );
-
-    Ok(vq)
 }
 
 // ---------------------------------------------------------------------------
@@ -1430,7 +969,3 @@ const fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
 }
 
-#[allow(clippy::arithmetic_side_effects)]
-const fn align_up_u64(value: u64, align: u64) -> u64 {
-    (value + align - 1) & !(align - 1)
-}

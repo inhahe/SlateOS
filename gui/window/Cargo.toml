@@ -9,3 +9,4 @@ path = "src/lib.rs"
 
 [dependencies]
 guitk = { path = "../toolkit" }
+guiremote = { path = "../remote" }

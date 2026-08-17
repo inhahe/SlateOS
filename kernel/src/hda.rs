@@ -30,14 +30,14 @@
 //! - OSDev Wiki: Intel High Definition Audio
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use spin::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::pci::{self, PciDevice};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // PCI identification
@@ -282,7 +282,43 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static CODEC_COUNT: AtomicU8 = AtomicU8::new(0);
 
 /// Global driver state, protected by a mutex.
-static DEVICE: Mutex<Option<HdaDevice>> = Mutex::new(None);
+///
+/// A `PreemptSpinMutex` leaf lock (Q24 / design-decisions §70), acquired with
+/// plain `lock()` — **it is a task-context-only lock, and must stay that way.**
+///
+/// [`handle_irq`] deliberately does *not* touch it; it reads
+/// [`IRQ_MMIO_BASE`]/[`IRQ_STREAM_IDX`] instead. Were the handler to take this
+/// lock, a task-context holder interrupted on the same CPU would deadlock
+/// against itself, and the only fix available at the lock would be
+/// `lock_irqsave` — which is correct but disastrous here: [`configure_output`]
+/// holds `DEVICE` across six [`send_verb`] calls, each of which polls the RIRB
+/// for up to `CODEC_RESPONSE_TIMEOUT_US` (50 ms), plus two 10 ms stream-reset
+/// waits. That is up to ~320 ms with interrupts disabled — no timer tick, no
+/// keyboard, nothing — for what is only a driver-configuration path.
+///
+/// Publishing the three values the handler actually needs is the fix that
+/// removes the hazard rather than trading it for a latency cliff. **If you add
+/// a field that `handle_irq` needs, publish it the same way; do not reach for
+/// `lock_irqsave` here.**
+static DEVICE: PreemptSpinMutex<Option<HdaDevice>> =
+    PreemptSpinMutex::named(None, b"HDA_DEVICE");
+
+/// Controller MMIO base, published for [`handle_irq`]. Zero until initialised.
+///
+/// `handle_irq` runs in interrupt context and needs exactly three values — the
+/// MMIO base and the two stream indices — all of which are written once during
+/// [`init`] and never mutated again. Publishing them in atomics is what lets
+/// `DEVICE` stay a task-context-only lock; see its doc comment for why that
+/// matters.
+///
+/// This one is stored **last** (with `Release`) and checked **first** (with
+/// `Acquire`), so a non-zero base implies [`IRQ_STREAM_IDX`] is already visible.
+static IRQ_MMIO_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// Output stream-descriptor index (`iss + out_stream_idx`), for [`handle_irq`].
+///
+/// Ordered by [`IRQ_MMIO_BASE`]'s release/acquire pair; see there.
+static IRQ_STREAM_IDX: AtomicU32 = AtomicU32::new(0);
 
 /// Represents the HDA controller's runtime state.
 struct HdaDevice {
@@ -319,6 +355,10 @@ struct HdaDevice {
     /// PCM buffer size in bytes.
     pcm_size: u32,
     /// Output stream index (offset from first output stream).
+    ///
+    /// Set once in [`init`] and never changed. If that ever stops being true,
+    /// [`IRQ_STREAM_IDX`] must be re-published alongside it — the IRQ handler
+    /// reads the derived index from there, not from here.
     out_stream_idx: u8,
     /// Codec 0 vendor ID.
     vendor_id: u32,
@@ -652,6 +692,13 @@ pub fn init(hhdm_offset: u64) {
     if codec_count > 0 {
         probe_codec(&mut dev, 0);
     }
+
+    // Publish the values `handle_irq` needs before anything can call it. The
+    // index first, the base last with Release: the handler bails on a zero base,
+    // so that ordering is what makes a non-zero base imply a valid index.
+    IRQ_STREAM_IDX.store(u32::from(dev.iss).wrapping_add(u32::from(dev.out_stream_idx)),
+        Ordering::Relaxed);
+    IRQ_MMIO_BASE.store(dev.mmio_base, Ordering::Release);
 
     INITIALIZED.store(true, Ordering::Release);
     *DEVICE.lock() = Some(dev);
@@ -987,6 +1034,22 @@ fn probe_afg(dev: &mut HdaDevice, cad: u8, afg_nid: u8) {
 /// stereo PCM output.
 ///
 /// Returns `Ok(())` if the stream is ready to run.
+///
+/// # Locking
+///
+/// Holds `DEVICE` across the whole codec-verb sequence, and that is
+/// deliberate: [`send_verb`] advances `corb_wp` and `rirb_rp`, the shared
+/// CORB/RIRB ring pointers, so two interleaved verb sequences would desync the
+/// response ring and each would read the other's replies. The verbs below are
+/// one indivisible configuration, not six independent transactions, so unlike
+/// [`crate::ac97::play_test_tone`] this one cannot drop the lock between steps.
+///
+/// The cost is a long preempt-disabled window — two 10 ms stream-reset polls
+/// plus up to `CODEC_RESPONSE_TIMEOUT_US` (50 ms) per verb — but that bound is
+/// only reached when a codec has stopped answering; a healthy codec replies in
+/// microseconds. It is bounded, it is a once-per-boot configuration path, and
+/// (since [`handle_irq`] no longer takes `DEVICE`) it no longer disables
+/// interrupts, which is what would have made it a real latency problem.
 pub fn configure_output() -> KernelResult<()> {
     let mut guard = DEVICE.lock();
     let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
@@ -1258,27 +1321,47 @@ pub fn stream_counts() -> Option<(u8, u8, u8)> {
 /// Handle an HDA controller interrupt.
 ///
 /// Called from the IOAPIC IRQ handler when the HDA interrupt fires.
+///
+/// # Locking
+///
+/// Takes **no** lock. Everything it needs is read from [`IRQ_MMIO_BASE`] and
+/// [`IRQ_STREAM_IDX`], which are written once by [`init`] and immutable
+/// thereafter. Taking `DEVICE` here would deadlock this CPU against a
+/// task-context holder it interrupted, and the usual remedy — `lock_irqsave` on
+/// every site — would leave interrupts disabled for the ~320 ms worst case of
+/// [`configure_output`]. See `DEVICE`'s doc comment.
+///
+/// Nothing it writes overlaps what task context writes: the handler touches
+/// only `INTSTS` and the stream's `STS`, both write-1-to-clear, while
+/// `configure_output` programs `CTL`/`CBL`/`LVI`/`FMT`/`BDP*` and `INTCTL`. No
+/// register is read-modify-written from both sides.
 #[allow(dead_code)]
 pub fn handle_irq() {
-    let guard = DEVICE.lock();
-    let Some(dev) = guard.as_ref() else { return };
+    // Acquire pairs with the Release store in `init`: a non-zero base means
+    // IRQ_STREAM_IDX is published too.
+    let base = IRQ_MMIO_BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return; // Not initialised (or torn down); nothing to acknowledge.
+    }
+    let stream_idx = IRQ_STREAM_IDX.load(Ordering::Relaxed);
 
-    let intsts = mmio_read32(dev.mmio_base, REG_INTSTS);
+    let intsts = mmio_read32(base, REG_INTSTS);
     if intsts == 0 {
         return; // Not our interrupt.
     }
 
     // Check for stream completion interrupts.
-    let stream_idx = dev.iss + dev.out_stream_idx;
-    if intsts & (1 << stream_idx) != 0 {
+    if stream_idx < 32 && intsts & (1u32 << stream_idx) != 0 {
         // Clear stream interrupt status.
-        let stream_off = STREAM_BASE + (stream_idx as usize) * STREAM_SIZE;
-        let sts = mmio_read8(dev.mmio_base, stream_off + SD_STS);
-        mmio_write8(dev.mmio_base, stream_off + SD_STS, sts); // Write 1 to clear.
+        let stream_off = STREAM_BASE
+            .wrapping_add((stream_idx as usize).wrapping_mul(STREAM_SIZE))
+            .wrapping_add(SD_STS);
+        let sts = mmio_read8(base, stream_off);
+        mmio_write8(base, stream_off, sts); // Write 1 to clear.
     }
 
     // Clear controller interrupt status.
-    mmio_write32(dev.mmio_base, REG_INTSTS, intsts);
+    mmio_write32(base, REG_INTSTS, intsts);
 }
 
 // ---------------------------------------------------------------------------
@@ -1298,8 +1381,17 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Test 1: Controller is initialized and has stream counts.
+    //
+    // Reported as an error rather than asserted: this is a hardware-derived
+    // value (GCAP), so a controller that reports no output streams is a
+    // *finding about the machine*, not a broken invariant in this code. A
+    // panic here takes the whole boot down for something the driver should
+    // simply decline to use.
     let (iss, oss, bss) = stream_counts().ok_or(KernelError::NoSuchDevice)?;
-    assert!(oss > 0 || bss > 0, "must have output streams");
+    if oss == 0 && bss == 0 {
+        serial_println!("[hda]   FAIL: controller reports no output or bidirectional streams");
+        return Err(KernelError::NotSupported);
+    }
     serial_println!(
         "[hda]   Stream counts OK (ISS={} OSS={} BSS={})",
         iss,
@@ -1312,9 +1404,15 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[hda]   Codec count: {}", count);
 
     if count > 0 {
-        // Test 3: Vendor ID was read.
+        // Test 3: Vendor ID was read. Same reasoning as Test 1 — a codec that
+        // answers STATESTS but returns a zero vendor ID is a fact about the
+        // hardware (or about our CORB/RIRB sequencing), and the self-test's
+        // job is to report it, not to halt the machine over it.
         let vid = vendor_id().unwrap_or(0);
-        assert!(vid != 0, "vendor ID should be non-zero for detected codec");
+        if vid == 0 {
+            serial_println!("[hda]   FAIL: codec detected but vendor ID reads zero");
+            return Err(KernelError::IoError);
+        }
         serial_println!(
             "[hda]   Vendor ID: {:04x}:{:04x}",
             (vid >> 16) & 0xFFFF,
@@ -1322,9 +1420,17 @@ pub fn self_test() -> KernelResult<()> {
         );
 
         // Test 4: Output path discovered.
+        //
+        // `let Some(..) else` rather than `.unwrap()`: `is_initialized()` was
+        // true above, but nothing holds the lock in between, so the device
+        // could in principle be torn down here. Reporting that is cheap;
+        // panicking on it is not.
         {
             let guard = DEVICE.lock();
-            let dev = guard.as_ref().unwrap();
+            let Some(dev) = guard.as_ref() else {
+                serial_println!("[hda]   FAIL: device disappeared mid-self-test");
+                return Err(KernelError::NoSuchDevice);
+            };
             if dev.dac_nid != 0 && dev.pin_nid != 0 {
                 serial_println!(
                     "[hda]   Output path: DAC={} Pin={}",

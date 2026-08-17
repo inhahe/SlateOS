@@ -5,6 +5,10 @@ edition = "2024"
 description = "SlateOS Text Editor — graphical text editor with syntax highlighting"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window and the event loop. The editor names `oswindow`, never
+# `guiremote` — an application should no more name the display protocol than a
+# Unix program names the socket layer.
+oswindow = { path = "../../gui/window" }
 diffcore = { path = "../diffcore" }
 safeio = { path = "../safeio" }
 
@@ -14,6 +18,13 @@ safeio = { path = "../safeio" }
 # tests, so the counters cost nothing in the shipped binary.
 [dev-dependencies]
 safeio = { path = "../safeio", features = ["audit"] }
+
+# The real compositor, for the one test module that puts the shipped code on
+# *both* ends of the display protocol (`against_the_real_compositor`). A test
+# against a stand-in compositor and a test against a stand-in client can both
+# pass while the two disagree; this is what closes that gap. It is a
+# dev-dependency, so the shipped editor does not link a display server.
+compositor = { path = "../../gui/compositor" }
 
 [lints]
 workspace = true

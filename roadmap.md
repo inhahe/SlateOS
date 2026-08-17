@@ -964,9 +964,15 @@ Roadmap:
   inside), and lets the caret keep the kerning it used to lose at the scroll
   boundary. Still outstanding there: the caret and hit testing, both of which
   want the per-line shaped cache first so there is somewhere to ask for cluster
-  positions. Wiring any of it to a user needs `TD-EDITOR-HAS-NO-INPUT-LOOP`
-  closed — the editor has no event loop at all, which is how two auto-scroll
-  functions came to be written, tested and never called.
+  positions. Wiring any of it to a user needs
+  `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` closed — the editor has no event loop,
+  which is how two auto-scroll functions came to be written, tested and never
+  called. Chasing that down found the gap is not the editor's: `guiremote`
+  encodes frames in one direction only and has no input events at all, the
+  compositor builds correctly-routed key and mouse events and then drops them
+  into a stub that comments where the IPC send would go, and of 142 app crates
+  138 depend on `guitk` while none depend on `guiremote`. Every app in the tree
+  is an unreachable model-plus-renderer for the same reason the editor is.
   The same end-to-end layout was then found
   in three more places — `RichTextView`, `SimpleTextView` and
   `apps/markdowneditor` — and cannot take the same fix, because their spans

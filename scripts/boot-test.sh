@@ -1849,6 +1849,34 @@ QEMU_START_EPOCH=$(date +%s)
 # (Note that virtio-gpu-pci does NOT have this effect: it is display-class but
 # not VGA-class, so it never suppressed the default.  Testing coexistence with
 # virtio-gpu alone is what missed this.)
+#
+# The three audio devices are here for the same reason as ati-vga: without
+# them, ac97::self_test, hda::self_test and virtio::sound::self_test each print
+# "no device (skipped)" on every boot, so the drivers' register programming,
+# DMA setup and playback paths are *never executed* -- and a driver that is
+# only ever compiled is a driver whose bugs ship.  Each device below is chosen
+# to match the first entry of its driver's own PCI ID table:
+#
+#   AC97               8086:2415 (ICH AC'97)  -> AC97_DEVICE_IDS[0]
+#   intel-hda          8086:2668 (ICH6 HDA)   -> HDA_DEVICE_IDS[0]
+#   virtio-sound-pci   virtio device type 25  -> virtio/sound.rs
+#
+# `hda-duplex` is the *codec* that hangs off the intel-hda controller.  It is
+# not optional decoration: with no codec on the link, STATESTS reads 0, the
+# driver's codec enumeration finds nothing, and probe_codec / probe_afg / the
+# whole CORB-RIRB verb round-trip stay untested -- which is most of the
+# driver.  The controller alone would only prove that a BAR maps.
+#
+# `-audiodev none` is deliberate and correct for a headless harness: it
+# discards the decoded samples, but it changes nothing about the *device
+# model*, which is the only part the kernel talks to.  The BDL walk, the
+# CORB/RIRB rings, the virtqueue and every MMIO/PIO register still behave
+# exactly as with a real backend, and the guest still observes buffer-completion
+# progress.  A real backend would only add a dependency on the build host
+# having a sound card.
+#
+# Unlike ati-vga these are multimedia-class, not VGA-class, so they suppress
+# nothing and need no counterpart to `-vga std`.
 "$QEMU" \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
     -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \
@@ -1860,6 +1888,11 @@ QEMU_START_EPOCH=$(date +%s)
     -device virtio-gpu-pci \
     -vga std \
     -device ati-vga,model=rv100 \
+    -audiodev none,id=snd0 \
+    -device AC97,audiodev=snd0 \
+    -device intel-hda \
+    -device hda-duplex,audiodev=snd0 \
+    -device virtio-sound-pci,audiodev=snd0,streams=2 \
     -serial "file:$SERIAL_FILE_WIN" \
     -pidfile "$PIDFILE_WIN" \
     -display none \

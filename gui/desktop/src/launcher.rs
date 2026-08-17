@@ -677,9 +677,20 @@ impl LauncherState {
         }
 
         // Cursor
-        let approx_char_width = INPUT_FONT_SIZE * 0.55;
-        let cursor_chars = self.query[..self.cursor].chars().count() as f32;
-        let cursor_x = 12.0 + cursor_chars * approx_char_width;
+        // Where the text before the caret actually ends, in the face it is
+        // drawn in. This was `chars * (INPUT_FONT_SIZE * 0.55)`: a guessed
+        // average advance applied to *proportional* text, so the caret sat left
+        // of the query after any run of wide letters and right of it after a
+        // run of narrow ones — visibly wrong on a word as ordinary as "will".
+        // `0.55` is not a fixable constant, because no single number is right
+        // for a face whose whole purpose is that its characters differ.
+        //
+        // `get` rather than `[..cursor]`: the caret is a byte offset, and
+        // slicing a `str` off a character boundary aborts the process. A caret
+        // that is momentarily inconsistent should draw at the left edge, not
+        // take the desktop's launcher down.
+        let before = self.query.get(..self.cursor).unwrap_or("");
+        let cursor_x = 12.0 + text::measure(before, INPUT_FONT_SIZE, FontWeightHint::Regular);
         cmds.push(RenderCommand::Line {
             x1: cursor_x,
             y1: text_y,
@@ -1037,6 +1048,66 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
 mod tests {
     use super::*;
     use guitk::event::{Key, KeyEvent, Modifiers};
+
+    /// The caret has to sit where the query text ends, and the query is drawn
+    /// in the *proportional* UI face. It used to be placed at
+    /// `chars * (INPUT_FONT_SIZE * 0.55)` — a guessed average advance — so it
+    /// landed left of the text after wide letters and right of it after narrow
+    /// ones. No constant can be right here: a proportional face exists
+    /// precisely because its characters do not share a width.
+    #[test]
+    fn the_caret_sits_where_the_query_text_ends() {
+        let caret_x = |query: &str| {
+            let mut state = LauncherState::new(1280.0, 800.0);
+            state.visible = true;
+            state.query = query.to_owned();
+            state.cursor = query.len();
+            state
+                .render()
+                .into_iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Line { x1, x2, color, .. }
+                        if (x1 - x2).abs() < f32::EPSILON && color == theme::BLUE =>
+                    {
+                        Some(x1)
+                    }
+                    _ => None,
+                })
+                .expect("the launcher draws a caret")
+        };
+
+        for query in ["WWW", "iii", "will", "Wii", "documents"] {
+            let expected = 12.0 + text::measure(query, INPUT_FONT_SIZE, FontWeightHint::Regular);
+            let actual = caret_x(query);
+            assert!(
+                (actual - expected).abs() < 0.01,
+                "caret for {query:?} at {actual}, text ends at {expected}"
+            );
+        }
+
+        // The claim with teeth: the old guess is *not* this answer. If these
+        // agreed for narrow and wide text alike the face would be monospace and
+        // this test would be asserting nothing.
+        let narrow = caret_x("iii");
+        let wide = caret_x("WWW");
+        assert!(
+            wide > narrow * 1.5,
+            "three W measure {wide} and three i measure {narrow} — one guessed \
+             average would have put both at the same place"
+        );
+    }
+
+    /// A caret byte offset off a character boundary must not abort the process.
+    /// `self.query[..self.cursor]` on a `String` panics there, and this is a
+    /// launcher: it is drawn while the user is mid-keystroke.
+    #[test]
+    fn a_caret_off_a_character_boundary_draws_rather_than_panicking() {
+        let mut state = LauncherState::new(1280.0, 800.0);
+        state.visible = true;
+        state.query = "é".to_owned();
+        state.cursor = 1;
+        assert!(!state.render().is_empty());
+    }
 
     fn press(key: Key) -> KeyEvent {
         KeyEvent {

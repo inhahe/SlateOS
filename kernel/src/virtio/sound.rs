@@ -33,22 +33,27 @@ use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::pci::{self, PciDevice};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
+use crate::virtio::modern::{ModernTransport, STATUS_DRIVER_OK, VIRTIO_VENDOR};
 use crate::virtio::queue::{VRING_DESC_F_WRITE, Virtqueue};
-use crate::virtio::{STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, VirtioLegacyPci};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Virtio vendor ID (Red Hat / QEMU).
-const VIRTIO_VENDOR: u16 = 0x1AF4;
-/// Virtio-sound device ID (legacy PCI: type 25 → 0x1040 + 25 - 1 = 0x1058).
-/// Actually for transitional devices: 0x1040 + device_type.
-/// QEMU uses 0x1059 for virtio-sound in modern mode, but for legacy
-/// it's typically probed by subsystem device ID or device class.
-/// Let's try both the legacy (0x1058) and modern transitional (0x1059) IDs.
-const VIRTIO_SND_DEVICE_LEGACY: u16 = 0x1058;
-const VIRTIO_SND_DEVICE_MODERN: u16 = 0x1059;
+/// Serial-log prefix, handed to the shared transport so that its diagnostics
+/// name this driver rather than the module they are emitted from.
+const LOG_TAG: &str = "[virtio-snd]";
+
+/// Virtio-sound PCI device ID.
+///
+/// Modern virtio device IDs are `0x1040 + device_type`, and virtio-sound is
+/// device type 25, giving 0x1059 — which is what QEMU reports.  There is no
+/// transitional/legacy ID to try: the device postdates virtio 1.0 and has no
+/// legacy interface at all.  (0x1058 was previously probed as a "legacy ID";
+/// that is device type 24, virtio-iommu, and matching it would have bound this
+/// driver to the wrong device.)
+const VIRTIO_SND_DEVICE_ID: u16 = 0x1059;
 
 // Virtio sound control request types (virtio 1.2 §5.14.6)
 /// Query jack information.
@@ -80,16 +85,77 @@ const VIRTIO_SND_S_NOT_SUPP: u32 = 0x8002;
 #[allow(dead_code)]
 const VIRTIO_SND_S_IO_ERR: u32 = 0x8003;
 
-// PCM formats (virtio 1.2 §5.14.6.6)
-/// Signed 16-bit little-endian.
-const VIRTIO_SND_PCM_FMT_S16: u8 = 2;
+// PCM formats (virtio 1.2 §5.14.6.6.1, `virtio_snd_pcm_info`)
+//
+// These are *dense ordinals*, and each value is used two different ways: it is
+// the number written into `set_params.format`, AND it is the bit index into the
+// `formats` mask the device advertises.  So a wrong value is wrong twice, and
+// the two errors cancel under any check that only compares our request against
+// our own constants.
+//
+// The whole table is spelled out even though only one entry is used, because
+// that is what makes it *checkable*.  The previous version carried three
+// hand-picked constants (`S16 = 2`, `RATE_44100 = 5`, `RATE_48000 = 6`) with no
+// neighbours to compare against, and all three were wrong: S16 is 5 (2 is
+// A-law), and each rate was one short.  A lone constant with a spec citation
+// beside it is indistinguishable from a correct one at a glance; a contiguous
+// run starting at 0 that can be read off against the spec's own list is not.
+#[allow(dead_code)]
+mod fmt {
+    pub const IMA_ADPCM: u8 = 0;
+    pub const MU_LAW: u8 = 1;
+    pub const A_LAW: u8 = 2;
+    pub const S8: u8 = 3;
+    pub const U8: u8 = 4;
+    pub const S16: u8 = 5;
+    pub const U16: u8 = 6;
+    pub const S18_3: u8 = 7;
+    pub const U18_3: u8 = 8;
+    pub const S20_3: u8 = 9;
+    pub const U20_3: u8 = 10;
+    pub const S24_3: u8 = 11;
+    pub const U24_3: u8 = 12;
+    pub const S20: u8 = 13;
+    pub const U20: u8 = 14;
+    pub const S24: u8 = 15;
+    pub const U24: u8 = 16;
+    pub const S32: u8 = 17;
+    pub const U32: u8 = 18;
+    pub const FLOAT: u8 = 19;
+    pub const FLOAT64: u8 = 20;
+    pub const DSD_U8: u8 = 21;
+    pub const DSD_U16: u8 = 22;
+    pub const DSD_U32: u8 = 23;
+    pub const IEC958_SUBFRAME: u8 = 24;
+}
 
-// PCM rates
+/// Signed 16-bit little-endian — the format the tone generator produces.
+const VIRTIO_SND_PCM_FMT_S16: u8 = fmt::S16;
+
+// PCM rates (virtio 1.2 §5.14.6.6.1).  Same dense-ordinal rule as the formats.
+#[allow(dead_code)]
+mod rate {
+    pub const R5512: u8 = 0;
+    pub const R8000: u8 = 1;
+    pub const R11025: u8 = 2;
+    pub const R16000: u8 = 3;
+    pub const R22050: u8 = 4;
+    pub const R32000: u8 = 5;
+    pub const R44100: u8 = 6;
+    pub const R48000: u8 = 7;
+    pub const R64000: u8 = 8;
+    pub const R88200: u8 = 9;
+    pub const R96000: u8 = 10;
+    pub const R176400: u8 = 11;
+    pub const R192000: u8 = 12;
+    pub const R384000: u8 = 13;
+}
+
 /// 44100 Hz.
 #[allow(dead_code)]
-const VIRTIO_SND_PCM_RATE_44100: u8 = 5;
-/// 48000 Hz.
-const VIRTIO_SND_PCM_RATE_48000: u8 = 6;
+const VIRTIO_SND_PCM_RATE_44100: u8 = rate::R44100;
+/// 48000 Hz — the rate the tone generator is sampled at.
+const VIRTIO_SND_PCM_RATE_48000: u8 = rate::R48000;
 
 // Stream directions
 /// Output (playback).
@@ -179,10 +245,30 @@ struct VirtioSndPcmStatus {
 /// Maximum number of PCM streams we support.
 const MAX_STREAMS: usize = 8;
 
+/// What one PCM stream will accept, as the device itself reported it.
+///
+/// Recorded rather than merely printed so [`set_params`] can check a request
+/// *before* putting it on the wire.  The device already answers a bad request
+/// with `VIRTIO_SND_S_NOT_SUPP` (0x8002), but that status names no field and no
+/// value — it is the same four bytes whether the format, the rate or the
+/// channel count was the problem — so a driver that relies on it learns only
+/// that something, somewhere, was rejected.
+#[derive(Clone, Copy)]
+struct StreamCaps {
+    /// Bit `n` set ⇔ format ordinal `n` (see [`fmt`]) is supported.
+    formats: u64,
+    /// Bit `n` set ⇔ rate ordinal `n` (see [`rate`]) is supported.
+    rates: u64,
+    /// Minimum channel count.
+    channels_min: u8,
+    /// Maximum channel count.
+    channels_max: u8,
+}
+
 /// Virtio sound device state.
 struct VirtioSndDevice {
-    /// Legacy PCI transport.
-    transport: VirtioLegacyPci,
+    /// Modern (virtio 1.0+) MMIO PCI transport.
+    transport: ModernTransport,
     /// Control virtqueue.
     controlq: Virtqueue,
     /// Event virtqueue.
@@ -203,8 +289,22 @@ struct VirtioSndDevice {
     num_output_streams: u32,
     /// Number of input (capture) streams.
     num_input_streams: u32,
+    /// Per-stream capabilities, indexed by stream id; `None` if the device did
+    /// not report that stream.
+    stream_caps: [Option<StreamCaps>; MAX_STREAMS],
     /// Stream currently playing (None if idle).
     active_stream: Option<u32>,
+    /// Monotonic counter identifying *which* playback owns `active_stream`.
+    ///
+    /// Incremented by [`play_test_tone`] each time it claims a stream.
+    /// `active_stream == Some(id)` is not sufficient on its own to answer "is
+    /// this still my tone?" after the lock has been released between chunks: a
+    /// concurrent [`stop`] followed by a second `play_test_tone` re-claims the
+    /// *same* stream id (playback always uses stream 0), so the first caller
+    /// would keep submitting into — and then tear down — the second caller's
+    /// stream. Comparing the generation recorded at start closes that ABA
+    /// window.
+    play_gen: u64,
 }
 
 // SAFETY: VirtioSndDevice contains raw pointers (inside Virtqueue) that point
@@ -213,7 +313,16 @@ struct VirtioSndDevice {
 unsafe impl Send for VirtioSndDevice {}
 
 /// Global device instance (single virtio-sound device supported).
-static DEVICE: spin::Mutex<Option<VirtioSndDevice>> = spin::Mutex::new(None);
+///
+/// A `PreemptSpinMutex` leaf lock (Q24 / design-decisions §70): nothing is
+/// acquired underneath it, and this driver polls its virtqueues rather than
+/// taking an interrupt, so `lock_irqsave` is not needed.
+///
+/// Every critical section must cover **one** device transaction and no more.
+/// See [`play_test_tone`], which re-acquires per chunk instead of holding the
+/// lock for the length of the tone.
+static DEVICE: PreemptSpinMutex<Option<VirtioSndDevice>> =
+    PreemptSpinMutex::named(None, b"VIRTIO_SND_DEVICE");
 
 /// Whether the device is initialized.
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -242,43 +351,30 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
         dev.device_id
     );
 
-    // Get I/O port base from BAR0.
-    let bar0 = dev.bars[0];
-    if bar0 == 0 || bar0 & 1 == 0 {
-        serial_println!("[virtio-snd] BAR0 is not I/O space or is zero");
-        return Err(KernelError::NoSuchDevice);
-    }
-    let io_base = (bar0 & !0x3) as u16;
-    serial_println!("[virtio-snd] I/O base: {:#x}", io_base);
-
     // Enable bus mastering for DMA.
     pci::enable_bus_master(dev.address);
 
-    let transport = VirtioLegacyPci::new(io_base);
+    // virtio-sound is a **modern-only** device: it was standardised well after
+    // virtio 1.0 and never had a legacy I/O-port register block.  This driver
+    // originally used the legacy transport, so on every boot with the device
+    // actually present it got as far as reading BAR0, found MMIO where it
+    // wanted an I/O BAR, printed "BAR0 is not I/O space or is zero" and gave
+    // up -- which looked indistinguishable from "no sound card".  See
+    // `virtio::modern` for the transport this needs instead.
+    let transport = ModernTransport::probe(LOG_TAG, &dev, hhdm_offset)?;
 
-    // --- Device initialization sequence (virtio 1.0 §3.1.1, legacy) ---
+    // --- Device initialization sequence (virtio 1.1 §3.1) ---
 
-    // 1. Reset.
-    transport.reset();
+    // Steps 1-5: reset, ACKNOWLEDGE, DRIVER, features, FEATURES_OK.  We want
+    // no optional virtio-snd features (VIRTIO_SND_F_CTLS gives access to
+    // mixer controls we do not drive), so the requested mask is empty;
+    // `negotiate` still accepts VIRTIO_F_VERSION_1, which a modern-only device
+    // requires before it will let FEATURES_OK stick.
+    transport.negotiate(0)?;
 
-    // 2. Acknowledge.
-    transport.set_status(STATUS_ACKNOWLEDGE);
-
-    // 3. Driver.
-    transport.set_status(STATUS_DRIVER);
-
-    // 4. Read device features.
-    let features = transport.device_features();
-    serial_println!("[virtio-snd] Device features: {:#010x}", features);
-
-    // Accept no optional features for now (just base functionality).
-    transport.set_guest_features(0);
-
-    // 5. Read device config to discover stream counts.
-    // Device config layout (legacy transport, offset 0x14 from BAR0):
-    //   u32 jacks
-    //   u32 streams
-    //   u32 chmaps
+    // 6. Read device config to discover stream counts.
+    // virtio-snd config layout (§5.14.4):
+    //   u32 jacks; u32 streams; u32 chmaps;
     let num_jacks = transport.read_device_config32(0);
     let num_streams = transport.read_device_config32(4);
     let num_chmaps = transport.read_device_config32(8);
@@ -296,47 +392,26 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
         return Err(KernelError::NoSuchDevice);
     }
 
-    // 6. Set up virtqueues.
-    // Queue 0: controlq
-    transport.select_queue(0);
-    let ctl_size = transport.queue_size();
-    if ctl_size == 0 {
-        serial_println!("[virtio-snd] controlq size is 0");
+    // 7. Set up the four virtqueues the spec defines (§5.14.2): controlq,
+    // eventq, txq, rxq -- in that fixed order.  All four are mandatory, and
+    // txq being queue *2* is why a device with fewer queues is unusable for
+    // playback rather than merely feature-reduced.
+    let num_queues = transport.num_queues();
+    if num_queues < 4 {
+        serial_println!(
+            "[virtio-snd] Device has {} queues; the spec requires 4 (control, event, tx, rx)",
+            num_queues
+        );
         transport.reset();
-        return Err(KernelError::NoSuchDevice);
+        return Err(KernelError::NotSupported);
     }
-    let (controlq, ctl_pfn) = Virtqueue::new(ctl_size, hhdm_offset)?;
-    transport.set_queue_pfn(ctl_pfn);
+    let controlq = transport.setup_queue(0, hhdm_offset)?;
+    let eventq = transport.setup_queue(1, hhdm_offset)?;
+    let txq = transport.setup_queue(2, hhdm_offset)?;
+    let rxq = transport.setup_queue(3, hhdm_offset)?;
 
-    // Queue 1: eventq
-    transport.select_queue(1);
-    let evt_size = transport.queue_size();
-    let (eventq, evt_pfn) = Virtqueue::new(if evt_size > 0 { evt_size } else { 16 }, hhdm_offset)?;
-    if evt_size > 0 {
-        transport.set_queue_pfn(evt_pfn);
-    }
-
-    // Queue 2: txq (playback)
-    transport.select_queue(2);
-    let tx_size = transport.queue_size();
-    if tx_size == 0 {
-        serial_println!("[virtio-snd] txq size is 0");
-        transport.reset();
-        return Err(KernelError::NoSuchDevice);
-    }
-    let (txq, tx_pfn) = Virtqueue::new(tx_size, hhdm_offset)?;
-    transport.set_queue_pfn(tx_pfn);
-
-    // Queue 3: rxq (capture)
-    transport.select_queue(3);
-    let rx_size = transport.queue_size();
-    let (rxq, rx_pfn) = Virtqueue::new(if rx_size > 0 { rx_size } else { 16 }, hhdm_offset)?;
-    if rx_size > 0 {
-        transport.set_queue_pfn(rx_pfn);
-    }
-
-    // 7. Driver OK — device is live.
-    transport.set_status(STATUS_DRIVER_OK);
+    // 8. Driver OK — device is live.
+    transport.add_status(STATUS_DRIVER_OK);
     serial_println!("[virtio-snd] Device status: DRIVER_OK");
 
     // Allocate DMA frames for control and PCM data.
@@ -363,7 +438,9 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
         pcm_frame,
         num_output_streams: 0,
         num_input_streams: 0,
+        stream_caps: [None; MAX_STREAMS],
         active_stream: None,
+        play_gen: 0,
     };
 
     // Query PCM stream info to classify output vs input streams.
@@ -388,13 +465,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
 
 /// Find a virtio-sound PCI device.
 fn find_device() -> KernelResult<PciDevice> {
-    // Try modern transitional device ID first.
-    if let Some(dev) = pci::find_device(VIRTIO_VENDOR, VIRTIO_SND_DEVICE_MODERN) {
-        return Ok(dev);
-    }
-
-    // Try legacy device ID.
-    if let Some(dev) = pci::find_device(VIRTIO_VENDOR, VIRTIO_SND_DEVICE_LEGACY) {
+    if let Some(dev) = pci::find_device(VIRTIO_VENDOR, VIRTIO_SND_DEVICE_ID) {
         return Ok(dev);
     }
 
@@ -498,6 +569,18 @@ fn query_stream_info(dev: &mut VirtioSndDevice, num_streams: u32) -> KernelResul
         } else if info.direction == VIRTIO_SND_D_INPUT {
             num_input = num_input.wrapping_add(1);
         }
+        // Keep what the device said it accepts, so `set_params` can reject a
+        // bad request here rather than shipping it and decoding a bare
+        // NOT_SUPP.  `i < count ≤ MAX_STREAMS`, so the index is in range;
+        // `get_mut` rather than `[i]` because indexing_slicing is denied.
+        if let Some(slot) = dev.stream_caps.get_mut(i) {
+            *slot = Some(StreamCaps {
+                formats: info.formats,
+                rates: info.rates,
+                channels_min: info.channels_min,
+                channels_max: info.channels_max,
+            });
+        }
         serial_println!(
             "[virtio-snd]   Stream {}: dir={} ch={}-{} fmts={:#x} rates={:#x}",
             i,
@@ -592,6 +675,52 @@ fn set_params(
     buffer_bytes: u32,
     period_bytes: u32,
 ) -> KernelResult<()> {
+    // Check the request against what the device advertised for this stream
+    // before sending it.  This is not belt-and-braces: `format` and `rate` are
+    // ordinals that double as bit indices into these very masks, so a mistake
+    // in the constants is invisible to any check that does not consult the
+    // device.  It was exactly such a mistake — `S16` encoded as 2 (A-law) —
+    // that made the first boot with a virtio sound card attached fail with
+    // nothing but `status 0x8002` on our side and "Stream format is not
+    // supported." on QEMU's.
+    //
+    // A stream we have no capabilities for is *not* rejected: the device may
+    // legitimately expose more streams than MAX_STREAMS, and refusing to drive
+    // one we simply did not record would turn a missing optimisation into a
+    // failure.  In that case we fall through and let the device arbitrate.
+    if let Some(Some(caps)) = dev.stream_caps.get(stream_id as usize) {
+        if format >= 64 || caps.formats & (1u64 << format) == 0 {
+            serial_println!(
+                "[virtio-snd] ERROR: stream {} does not accept format ordinal {} \
+                 (device advertises formats {:#x})",
+                stream_id,
+                format,
+                caps.formats
+            );
+            return Err(KernelError::NotSupported);
+        }
+        if rate >= 64 || caps.rates & (1u64 << rate) == 0 {
+            serial_println!(
+                "[virtio-snd] ERROR: stream {} does not accept rate ordinal {} \
+                 (device advertises rates {:#x})",
+                stream_id,
+                rate,
+                caps.rates
+            );
+            return Err(KernelError::NotSupported);
+        }
+        if channels < caps.channels_min || channels > caps.channels_max {
+            serial_println!(
+                "[virtio-snd] ERROR: stream {} accepts {}-{} channels, not {}",
+                stream_id,
+                caps.channels_min,
+                caps.channels_max,
+                channels
+            );
+            return Err(KernelError::NotSupported);
+        }
+    }
+
     let ctl_phys = dev.ctl_frame.addr();
     let ctl_virt = (ctl_phys + dev.hhdm_offset) as *mut u8;
 
@@ -759,40 +888,80 @@ pub fn is_available() -> bool {
 /// Start playback of a test tone (440 Hz sine wave, 48kHz 16-bit stereo).
 ///
 /// Configures stream 0 for playback and sends a short buffer of audio.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchDevice`] if there is no device or it has no output
+/// stream, [`KernelError::DeviceBusy`] if a stream is already running, or
+/// whatever the underlying control/PCM transactions return.
+///
+/// # Locking
+///
+/// `DEVICE` is re-acquired **per transaction** — once for the setup commands,
+/// once per PCM chunk, once for teardown — rather than held for the length of
+/// the tone. A whole tone is `duration_ms` milliseconds and each chunk's
+/// `submit_pcm_buffer` polls the used ring for up to ten million iterations, so
+/// holding a preempt-disabling spinlock across the loop would keep the
+/// scheduler off this CPU for the entire playback and spin every other caller
+/// for just as long. Mutual exclusion across the whole tone is provided by
+/// `dev.active_stream`, which is set under the lock during setup and cleared
+/// under the lock during teardown; a second caller sees it set and gets
+/// `DeviceBusy` instead of reprogramming a live stream.
+///
+/// [`stop`] is the one caller allowed to break that claim — it exists precisely
+/// to end a tone early. Every chunk therefore re-checks the claim after
+/// re-acquiring the lock; if it has been taken, playback ends there and the
+/// teardown is skipped, because whoever took it already issued STOP/RELEASE.
+/// The check is on `play_gen` as well as `active_stream`, because playback
+/// always uses stream 0 and so a stop-then-restart would otherwise be
+/// indistinguishable from our own claim — see [`VirtioSndDevice::play_gen`].
 pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
     if !is_available() {
         return Err(KernelError::NoSuchDevice);
     }
 
-    let mut guard = DEVICE.lock();
-    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
-
-    if dev.num_output_streams == 0 {
-        return Err(KernelError::NoSuchDevice);
-    }
-
     let stream_id: u32 = 0; // First output stream.
+    // Set inside the setup section below, and only there.
+    let my_gen: u64;
 
-    // Set parameters: 48kHz, 16-bit signed, stereo, 8192 buffer / 4096 period.
-    set_params(
-        dev,
-        stream_id,
-        2,
-        VIRTIO_SND_PCM_FMT_S16,
-        VIRTIO_SND_PCM_RATE_48000,
-        8192,
-        4096,
-    )?;
-    serial_println!("[virtio-snd] Stream 0: params set (48kHz/S16/stereo)");
+    // --- Setup: params, prepare, start. One critical section. ---
+    {
+        let mut guard = DEVICE.lock();
+        let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
 
-    // Prepare the stream.
-    control_stream_cmd(dev, VIRTIO_SND_R_PCM_PREPARE, stream_id)?;
-    serial_println!("[virtio-snd] Stream 0: prepared");
+        if dev.num_output_streams == 0 {
+            return Err(KernelError::NoSuchDevice);
+        }
+        if dev.active_stream.is_some() {
+            return Err(KernelError::DeviceBusy);
+        }
 
-    // Start the stream.
-    control_stream_cmd(dev, VIRTIO_SND_R_PCM_START, stream_id)?;
-    serial_println!("[virtio-snd] Stream 0: started");
-    dev.active_stream = Some(stream_id);
+        // Set parameters: 48kHz, 16-bit signed, stereo, 8192 buffer / 4096 period.
+        set_params(
+            dev,
+            stream_id,
+            2,
+            VIRTIO_SND_PCM_FMT_S16,
+            VIRTIO_SND_PCM_RATE_48000,
+            8192,
+            4096,
+        )?;
+        serial_println!("[virtio-snd] Stream 0: params set (48kHz/S16/stereo)");
+
+        // Prepare the stream.
+        control_stream_cmd(dev, VIRTIO_SND_R_PCM_PREPARE, stream_id)?;
+        serial_println!("[virtio-snd] Stream 0: prepared");
+
+        // Start the stream. Claim `active_stream` in the same section that
+        // starts it, so the device is never running without a claim recorded --
+        // otherwise a failure below would leak a started stream that `stop()`
+        // could not find.
+        control_stream_cmd(dev, VIRTIO_SND_R_PCM_START, stream_id)?;
+        dev.active_stream = Some(stream_id);
+        dev.play_gen = dev.play_gen.wrapping_add(1);
+        my_gen = dev.play_gen;
+        serial_println!("[virtio-snd] Stream 0: started");
+    }
 
     // Generate and submit PCM data in chunks.
     // 48000 samples/sec × 2 channels × 2 bytes = 192000 bytes/sec.
@@ -803,25 +972,91 @@ pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
     let mut sample_offset: u32 = 0;
 
     let mut bytes_sent: u32 = 0;
+    let mut submit_result = Ok(());
+    // Set when a concurrent `stop()` takes the claim out from under us. It has
+    // already issued STOP/RELEASE at that point, so our teardown must be
+    // skipped: a second RELEASE on a released stream is a protocol error, and
+    // clearing `active_stream` again could clobber a *third* caller's claim.
+    let mut claim_lost = false;
     while bytes_sent < total_bytes {
-        let remaining = (total_bytes - bytes_sent) as usize;
+        let remaining = (total_bytes.saturating_sub(bytes_sent)) as usize;
         let send_len = remaining.min(chunk_size);
 
-        // Generate 440 Hz sine wave (integer approximation).
-        generate_sine_440(&mut buf[..send_len], sample_offset);
+        // Generate 440 Hz sine wave (integer approximation) with the lock
+        // released -- this is pure computation over a stack buffer.
+        let Some(chunk) = buf.get_mut(..send_len) else {
+            break;
+        };
+        generate_sine_440(chunk, sample_offset);
         sample_offset = sample_offset.wrapping_add((send_len / 4) as u32); // 4 bytes per stereo sample
 
-        submit_pcm_buffer(dev, stream_id, &buf[..send_len])?;
+        // One transaction, one critical section.
+        {
+            let mut guard = DEVICE.lock();
+            let Some(dev) = guard.as_mut() else {
+                // Device torn down underneath us; nothing left to stop.
+                return Err(KernelError::NoSuchDevice);
+            };
+            // Re-verify the claim every time we re-enter. Holding DEVICE for the
+            // whole tone would make this unnecessary, but that is precisely the
+            // defect being fixed: the lock is released between chunks, so
+            // `stop()` can legitimately end the tone early. Treat that as a
+            // normal end of playback, not an error -- the caller asked for a
+            // tone and something deliberately stopped it.
+            if dev.play_gen != my_gen || dev.active_stream != Some(stream_id) {
+                claim_lost = true;
+                break;
+            }
+            if let Err(e) = submit_pcm_buffer(dev, stream_id, chunk) {
+                // Do not return yet: the stream is started and claimed, and
+                // bailing here would leave it that way forever. Fall through to
+                // the teardown below and report the error after.
+                submit_result = Err(e);
+                break;
+            }
+        }
         bytes_sent = bytes_sent.wrapping_add(send_len as u32);
     }
 
-    // Stop the stream.
-    control_stream_cmd(dev, VIRTIO_SND_R_PCM_STOP, stream_id)?;
-    dev.active_stream = None;
+    // --- Teardown: stop, release, drop the claim. One critical section. ---
+    // Skipped entirely when the claim was taken from us: whoever took it owns
+    // the teardown.
+    // `Ok(true)` = we tore the stream down, `Ok(false)` = someone else already
+    // had, so there was nothing to do.
+    let teardown: KernelResult<bool> = if claim_lost {
+        Ok(false)
+    } else {
+        let mut guard = DEVICE.lock();
+        match guard.as_mut() {
+            Some(dev) => {
+                // Re-check once more under the lock: `stop()` may have run
+                // between the last chunk and here.
+                if dev.play_gen == my_gen && dev.active_stream == Some(stream_id) {
+                    // Clear the claim first so a failing STOP/RELEASE cannot
+                    // strand the device as permanently busy. The worst case is
+                    // then a stream that stays running, which a later call
+                    // re-programs; the alternative is a driver that refuses to
+                    // play again.
+                    dev.active_stream = None;
+                    let stop = control_stream_cmd(dev, VIRTIO_SND_R_PCM_STOP, stream_id);
+                    let release = control_stream_cmd(dev, VIRTIO_SND_R_PCM_RELEASE, stream_id);
+                    stop.and(release).map(|()| true)
+                } else {
+                    Ok(false)
+                }
+            }
+            None => Err(KernelError::NoSuchDevice),
+        }
+    };
 
-    // Release the stream.
-    control_stream_cmd(dev, VIRTIO_SND_R_PCM_RELEASE, stream_id)?;
-    serial_println!("[virtio-snd] Stream 0: stopped and released");
+    // Report the first thing that actually went wrong: a submit failure is the
+    // cause, a teardown failure is a consequence.
+    submit_result?;
+    if teardown? {
+        serial_println!("[virtio-snd] Stream 0: stopped and released");
+    } else {
+        serial_println!("[virtio-snd] Stream 0: ended early (stopped by another caller)");
+    }
 
     Ok(())
 }
@@ -931,8 +1166,11 @@ pub fn self_test() {
     serial_println!("[virtio-snd] Running self-test...");
 
     if !is_available() {
+        // The boot test attaches -device virtio-sound-pci, so reaching this
+        // branch there means init *failed*, not that the hardware is absent.
+        // Say both, because the two have wholly different follow-ups.
         serial_println!(
-            "[virtio-snd]   No device (skipped — add -device virtio-sound-pci to QEMU)"
+            "[virtio-snd]   Not available — either no device is attached, or init failed above"
         );
         serial_println!("[virtio-snd] Self-test PASSED (no device)");
         return;

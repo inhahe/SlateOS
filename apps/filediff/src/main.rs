@@ -131,17 +131,22 @@ const STATUS_BAR_HEIGHT: f32 = 26.0;
 /// The cell was then `text::digit_advance` — the right idea, the wrong face.
 /// A digit's advance *in the proportional UI face* is a cell only digits fit,
 /// and source code is not digits: `'W'` is nearly twice as wide, `'i'` barely
-/// half. The inline view showed it worst, since its highlight rectangle is
-/// placed at `columns(span) * char_width()` and so slid off the very change it
-/// was drawn to mark. A grid needs a face where every glyph advances the same
-/// distance, which is what `text::cell_advance` asks for.
+/// half. A grid needs a face where every glyph advances the same distance,
+/// which is what `text::cell_advance` asks for.
+///
+/// **What this is still for, and what it is no longer for.** It reserves the
+/// two-column prefix gutter that holds `'+'`, `'-'` or a space — a fixed
+/// indent, of known ASCII characters, which is exactly the job a cell width
+/// can do. It is *not* used to place anything against the line's own text any
+/// more: a companion `columns()` used to count characters and multiply, which
+/// is right only where every character advances one cell, and a tab does not —
+/// it draws four cells wide and counts as one `char`, so on the tab-indented
+/// source that most diffs are made of, every inline highlight and every search
+/// box was placed three cells short per level of indentation. Anything
+/// positioned against real text now measures it: see `render_inline_spans`
+/// and `render_search_highlights`.
 fn char_width() -> f32 {
     text::cell_advance(CONTENT_FONT_SIZE, FontWeightHint::Regular)
-}
-
-/// How many grid cells `text` occupies. Characters, not bytes.
-fn columns(text: &str) -> f32 {
-    text.chars().count() as f32
 }
 
 /// The next position after `index` in a list of `len` items, wrapping at the end.
@@ -1855,10 +1860,11 @@ impl FileDiffApp {
         // filed under. Side-by-side is the view where that stops being true.
         let inline_rows = &self.inline_rows;
 
-        // The character-level highlight rectangles are placed at
-        // `columns(span) * char_width()`, so the run they sit behind has to be
-        // drawn with that same advance or the highlight slides off the change
-        // it marks — the whole point of the inline view.
+        // The character-level highlight rectangles are sized and placed by
+        // measuring each span in `FontFamily::Mono`, so the runs they sit
+        // behind have to be *drawn* in that family too, or the highlight slides
+        // off the change it marks — the whole point of the inline view. This
+        // push is what makes the measurement and the drawing the same question.
         tree.push(RenderCommand::PushFont {
             family: FontFamily::Mono,
         });
@@ -1983,8 +1989,23 @@ impl FileDiffApp {
                 continue;
             }
 
+            let weight = if span.changed {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            };
+            // What this span will actually be drawn as, rather than a nominal
+            // cell count. The two are equal only where every character advances
+            // the cell width — true of Latin source in a mono face, and not
+            // true of a tab (four cells, one `char`), a CJK ideograph, a
+            // combining mark, or anything the face substitutes. Where they
+            // disagreed the highlight rectangle was drawn a different width
+            // from the text it marks and the pen stepped to the wrong place
+            // for the next span, so on a tab-indented line — which is most
+            // source — the highlight slid off the change it exists to point at.
+            let span_w = text::measure_in(span_text, CONTENT_FONT_SIZE, weight, FontFamily::Mono);
+
             if span.changed {
-                let span_w = columns(span_text) * char_width();
                 let highlight_color = match row.op {
                     DiffOp::Insert => colors::ADD_LINE_BG,
                     DiffOp::Delete => colors::DEL_LINE_BG,
@@ -2014,16 +2035,12 @@ impl FileDiffApp {
                     colors::TEXT
                 },
                 font_size: CONTENT_FONT_SIZE,
-                font_weight: if span.changed {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
+                font_weight: weight,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
 
-            char_offset += columns(span_text) * char_width();
+            char_offset += span_w;
         }
     }
 
@@ -2403,7 +2420,6 @@ fn render_search_highlights(
     text: &str,
     overlay: SearchOverlay<'_>,
 ) {
-    let cell = char_width();
     for m in overlay.matches {
         if m.panel != overlay.panel {
             continue;
@@ -2422,15 +2438,28 @@ fn render_search_highlights(
         let Some(matched) = text.get(m.byte_offset..match_end) else {
             continue;
         };
-        // Columns, not bytes: the content is a monospace grid, so a run's width
-        // is how many characters it holds. Measuring `before.len()` would put
-        // the box in the wrong place on every line holding a character that is
-        // not one byte -- the confusion that has now been this sweep's single
-        // most common defect.
+        // Measured, not counted. Bytes were the first version of this bug and
+        // characters were the second: `before.len()` put the box wrong on every
+        // line holding a multi-byte character, and `before.chars().count()`
+        // put it wrong on every line holding a character the face does not
+        // advance one cell for -- a tab above all, which is how most source is
+        // indented, and which the face draws four cells wide. The width the
+        // renderer will use is the only width a highlight box can be right at.
         tree.push(RenderCommand::FillRect {
-            x: text_x + columns(before) * cell,
+            x: text_x
+                + text::measure_in(
+                    before,
+                    CONTENT_FONT_SIZE,
+                    FontWeightHint::Regular,
+                    FontFamily::Mono,
+                ),
             y,
-            width: columns(matched) * cell,
+            width: text::measure_in(
+                matched,
+                CONTENT_FONT_SIZE,
+                FontWeightHint::Regular,
+                FontFamily::Mono,
+            ),
             height: LINE_HEIGHT,
             color: if overlay.current == Some(*m) {
                 colors::SEARCH_CURRENT_BG
@@ -3515,28 +3544,43 @@ mod tests {
         );
     }
 
-    /// The content panels are a grid, so a span's highlight rectangle covers a
-    /// whole number of cells. It has to be counted in characters: `len()` is
-    /// bytes, which made an accented word's highlight two or three times too
-    /// wide and painted over the columns beside it.
+    /// A highlight rectangle is as wide as the run it marks, whatever that run
+    /// is made of. Bytes were the first version of this bug — an accented word
+    /// got a box two or three times too wide — and a character count was the
+    /// second, which is right only where every character advances one cell.
     #[test]
-    fn inline_highlight_is_measured_in_cells_not_bytes() {
-        let ascii = columns("abc") * char_width();
-        let accented = columns("áéí") * char_width();
+    fn a_highlight_is_as_wide_as_the_run_it_marks() {
+        let width = |s: &str| {
+            text::measure_in(
+                s,
+                CONTENT_FONT_SIZE,
+                FontWeightHint::Regular,
+                FontFamily::Mono,
+            )
+        };
+        // Bytes: three characters, six bytes, one width.
+        assert!((width("abc") - width("áéí")).abs() < 0.01);
+        // Cells: one character, and emphatically not one cell. This is the
+        // case a character count still got wrong, and tabs are how source is
+        // indented, so it was not a corner.
         assert!(
-            (ascii - accented).abs() < f32::EPSILON,
-            "three characters are three cells wide however many bytes they take"
+            width("\t") > width("x") * 1.5,
+            "a tab measures {} against a {} character — if a tab really is one \
+             cell on this face, this test has stopped testing anything",
+            width("\t"),
+            width("x")
         );
+        // Additive, which is what lets the pen walk span by span.
+        assert!((width("ab") + width("cd") - width("abcd")).abs() < 0.01);
         assert!(
             char_width() > 0.0,
             "a zero cell would collapse every column"
         );
     }
 
-    /// A cell counted in characters is only right if a character actually fits
-    /// one. Source code is not digits, so the cell has to hold the widest
-    /// glyph a line can contain — otherwise the highlight rectangle placed at
-    /// `columns(span) * char_width()` ends up narrower than the run it marks.
+    /// Why a character count survived review: for Latin source in the mono
+    /// face, a character does fit a cell. This is the premise that held for
+    /// everything anyone looked at and failed for everything else.
     #[test]
     fn a_source_character_fits_a_content_cell() {
         let cell = char_width();

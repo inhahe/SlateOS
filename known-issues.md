@@ -28352,7 +28352,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 11 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 13 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28815,6 +28815,132 @@ filenames. Four things worth carrying forward:
   are neighbours, share a harness shape, and differ here — which is precisely
   why `half1.txt`/`half2.txt` exist in both harnesses with opposite
   expectations.
+
+### Progress (appended 2026-08-17, `paste`)
+
+`paste` is the twelfth (`scripts/paste-diff.sh`: 200 passed, 0 differed, 6
+differ on purpose; 37 differ when pointed at MSYS2's `paste`, which is the
+harness proving it still discriminates). The shipped version recognised only
+`-d` and `-s`, did not cycle the delimiter list, did not collapse its escapes,
+had no `-z`, treated `-` as a file called `-`, split input as UTF-8 text, and
+exited 0 whatever happened. Five things worth carrying forward:
+
+- **A whole gnulib quoting style had to be built first, and it was built by
+  reading the C, not by guessing.** `paste`'s trailing-backslash diagnostic uses
+  `quotearg_n_style_colon (0, c_maybe_quoting_style, …)` — deliberately *not*
+  the usual `quote()`, because that "would double the number of displayed
+  backslashes, making the diagnostic look bogus." Nothing else in our tree had
+  `c_maybe`. It is now `quote_c_maybe`/`quote_c_maybe_colon` in `quote.rs`
+  (`a465d3b29`), settled by reading `lib/quotearg.c` and then *measured* against
+  two independent GNU oracles — `ls --quoting-style=c-maybe` for the plain form
+  and `paste -d 'ARG\'` for the colon one — over every byte in three positions
+  (`scripts/c-maybe-probe.py` → `tests/c-maybe-gnu.txt`, 1590 rows,
+  `tests/c_maybe.rs`). **All 1590 matched on the first run**, which is the value
+  of doing both: source-reading and black-box measurement agreeing is evidence,
+  either one alone is a belief. Three inputs no oracle can express (NUL, the
+  empty string, and `/` for the `ls` oracle) are unit tests marked *unmeasured*
+  rather than quietly folded in with the rest.
+- **The two modes are not two spellings of one algorithm, and the difference is
+  in the *error* rules, not the merge.** Parallel opens every operand up front
+  with `error (EXIT_FAILURE, …)` — fatal, before a byte of stdout, and only the
+  first bad operand is ever named. Serial opens as it goes with `error (0, …)` —
+  names every one and continues. So `paste A nosuch B` and `paste -s A nosuch B`
+  differ in stdout, stderr *and* their interleaving. Every missing-file row in
+  the harness therefore runs both ways; a harness that tested one mode's failure
+  path would have certified the other's as identical.
+- **A read error is reported one output line *after* the read that failed.**
+  Upstream leaves it in the stream's `ferror` flag and only looks when it closes
+  the file, which is the next time round the loop — and in the meantime the
+  failed stream keeps answering "end of file", so the line it was part of still
+  finishes and still gets its delimiter. `Source::failed` exists to reproduce
+  that delay rather than to store an error, and the unit test drives a reader
+  that yields one byte and then fails, because nothing else exhibits it.
+- **`\0` and "no delimiter" are the same value, which is why `-d ''` is not the
+  empty list.** `#define EMPTY_DELIM '\0'`, so a NUL cannot be *used* as a
+  delimiter; `main` rewrites an empty `-d` argument to the two characters `\0`
+  so the list has one position that emits nothing. The position is still spent:
+  `-d 'x\0y'` puts `x` between columns 1|2, nothing between 2|3, and `y`
+  between 3|4 — a list that merely dropped the position would put `y` at 2|3.
+  This is exactly the kind of rule a plausible implementation gets wrong and a
+  whitespace-tolerant harness never catches.
+- **The delimiter diagnostic is raised between the option loop and the opens**,
+  which pins it in a two-sided way no single test states: a later `-d` rescues
+  an earlier bad one and any getopt error preempts it (both are raised inside
+  the loop), yet it preempts a missing file (the opens come after). Three
+  harness rows and one unit test hold that position from both sides.
+
+One asymmetry is deliberately *not* reproduced and is recorded here instead.
+With standard input closed, `paste -s - A 0<&-` prints `paste: -: Bad file
+descriptor` **twice**: once from the per-file read and once from `main`'s
+closing `if (have_read_stdin && fclose (stdin) == EOF)`. Rust has no
+`fclose (stdin)` and surfaces a read error where the read happens, so the second
+line has no analogue. The parallel-mode companion — `opened_stdin &&
+have_read_stdin` → `paste: standard input is closed` — *is* reproduced, guarded
+by a `#[cfg(unix)]` file-descriptor check that can never fire on the Windows
+host this harness runs on.
+
+### Progress (appended 2026-08-17, `comm`)
+
+`comm` is the thirteenth (`scripts/comm-diff.sh`: 195 passed, 0 differed, 7
+differ on purpose — **zero differences on the harness's first run**; 61 differ
+when pointed at MSYS2's `comm`, which is the harness proving it still
+discriminates). The shipped version had no `--total`, no `--output-delimiter`,
+no `-z`, no order checking at all, took `--check-order` and `--` as filenames,
+and read its input as UTF-8 text. Five things worth carrying forward:
+
+- **The locale decides what the program *computes*, not just how it words a
+  complaint — so this harness runs under `C` end to end.** Its twelve siblings
+  run under `C.UTF-8` and drop to `C` only for the gnulib-quoted diagnostics
+  (B-Q2). `comm` cannot: `order = hard_LC_COLLATE ? xmemcoll (…) : memcmp2 (…)`,
+  and `hard_locale` is false for exactly `C` and `POSIX`. Under any other locale
+  GNU pairs lines by `strcoll`, where case can be secondary and two different
+  byte strings can compare *equal*. Ours compares bytes always. Under `C` that
+  is GNU's rule and the agreement is by construction; under `C.UTF-8` it would
+  have been a coincidence of codepoint order matching byte order, and a harness
+  that ran there would have been certifying the coincidence. A closing section
+  re-runs five ASCII comparison cases under `C.UTF-8` to *bound* the claim
+  rather than hide it; the divergence itself is filed against the same
+  collation entry as the `oils` funmap listing.
+- **The default order check is not "warn on descent" — it is armed by something
+  else entirely.** `check_order` fires only when
+  `check != DISABLED && (check == ENABLED || seen_unpairable)`. So `comm D D`
+  over a file that is thoroughly out of order is *silent and exits 0*: every
+  line pairs, nothing ever sets `seen_unpairable`, and the descent is never
+  looked at. Add `--check-order` and the same command line becomes a fatal error
+  after one line of output. That pair of rows is in the harness precisely
+  because an implementation written from the option's *name* passes every other
+  order-checking test and fails these two.
+- **The three columns are made of separators, not of padding.** `writeline`
+  writes zero separators before a column-1 line, one before column 2 *if
+  column 1 is shown*, and two before column 3 *counting only the shown columns*.
+  So `-1` does not blank a column, it removes a tab from every remaining line —
+  which is why stdout is compared through `od -An -c` and why all ten
+  suppression spellings are separate rows.
+- **`--output-delimiter=` is a NUL, not nothing.** `col_sep` keeps pointing at
+  `""` while `col_sep_len = *optarg ? strlen (optarg) : 1` forces the length to
+  1, so each boundary emits one zero byte. Repeating the option is allowed only
+  with an *identical* argument, and the comparison is against the argument **as
+  typed** — which is why `Settings` stores the raw bytes and derives the
+  effective separator, rather than storing the separator and losing the
+  distinction between `=` and `=\0`.
+- **Upstream's four-buffer-per-file rotation collapses to two owned lines, and
+  the one behavioural difference is provably invisible.** `lba[2][4]` +
+  `alt[2][3]` exist so the EOF path can re-check the last two lines; ours keeps
+  `prev` and `prev2`. After exactly one line has been read upstream's "two back"
+  *aliases* that same line, so its re-check compares a line with itself and
+  stays silent — where ours skips the re-check because `prev2` is `None`. Same
+  silence, reached two ways. The argument is written out on `Column::prev2` so
+  the next reader does not have to reconstruct it from the C.
+
+One asymmetry is deliberately *not* reproduced. `comm - -` merges one stream
+against itself — well defined, and both sides get the output right — but GNU
+then closes both files, and both are `stdin`, so the second `fclose` runs on an
+already-closed stream. That is undefined behaviour; on glibc it sets the error
+indicator and `close_stdout` reports `comm: -: Bad file descriptor` and exits 1.
+Reproducing the diagnostic would mean reproducing a double free, so the case is
+an xfail in the harness with the reasoning attached, alongside the two host
+xfails (a directory operand, which a Windows `File::open` refuses outright) and
+the four `--help`/`--version` ones.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
@@ -30479,3 +30605,41 @@ resume is observed, the park is declined, and the task is left `Running` and
 **not** queued (checked via `queue_length`, so the dequeue is actually
 verified rather than assumed). Testing it at this level rather than through the
 ring-3 fixture is the point: the fixture found the bug once in fifty boots.
+
+## TD-BACKGROUND-TASK-LOGS-ARE-UNBOUNDED (lane B, 2026-08-17) — **mitigated once; the cause is unfixed**
+
+**In short:** commands we start in the background write everything they print
+to a log file on the C: drive, and nothing ever truncates or deletes those
+files. One of them reached **40 GB** and filled the system disk, at which point
+unrelated things started failing with `could not write to temporary response
+file`. Deleting dead logs got the disk from 11 GB free back to 52 GB, but
+nothing stops it happening again.
+
+**Where it lives.** `%LOCALAPPDATA%\Temp\claude\<project>\<session>\tasks\*.output`
+— one file per backgrounded Bash call, written by the agent harness, never
+rotated. On 2026-08-17 the OS project's directory held 2491 of them totalling
+43 GB across four sessions, of which a single file (`bf8dfbpnv.output`, 6
+Aug, another lane's session) was 40 GB on its own: a command whose output was
+neither bounded nor filtered, left running.
+
+**Reproduce.** Background anything that prints without limit — a `cargo build`
+with a stuck dependency retrying, a QEMU run with `-d int`, a test loop that
+prints per iteration — and leave it. The file grows at the process's write
+rate with no ceiling.
+
+**The proper fix, in order of preference:**
+
+1. **Bound the output at the source.** A backgrounded command should end in a
+   filter that cannot grow without limit — `| tail -c 10M`, `| grep -E …`, or
+   for a known-chatty run `2>&1 | head -5000`. This is the one an agent can
+   apply today and costs nothing.
+2. **Cap the log.** If the harness ever grows a per-task output limit, use it.
+   Not ours to change from here.
+3. **Sweep on a schedule.** `find … -name '*.output' -mtime +7 -delete` is what
+   was run by hand this time. A weekly sweep would have kept the disk from ever
+   reaching 100%, but it treats the symptom.
+
+**Note for whoever reads this next:** the 40 GB file was *another lane's*, and
+deleting an eleven-day-old write-once log is safe, but do not delete a `.output`
+file for a task that may still be running — read the task list first. Files
+under `-mtime +7` are unambiguously dead.

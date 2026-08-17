@@ -23105,30 +23105,57 @@ waved through as "probably noise again".
 
 ## TD-FONT-DOES-NOT-READ-VARIATION-STORES
 
-**Status 2026-08-17: steps 1-3 and two thirds of step 4 landed — `fvar`,
-`avar`, `gvar`, the instance on `ScaledFont`, and now `HVAR` + `MVAR` through a
-shared `ItemVariationStore` reader (commit `94748f2c0`). A variable face draws
-at the weight you ask for *and is spaced at that weight*.** The entry stays
-open for one reason only: the `GDEF` store — the `VariationIndex` arm this
-entry is named for — is still declined in `device.rs`. What exists now is
-`gui/font/src/var.rs` (axes, named instances, user → normalized-F2Dot14,
-reachable as `Face::variation_axes()`), `gui/font/src/gvar.rs` (per-glyph
-outline deltas, tuple scalars, IUP, phantom points, composite component
-offsets) behind `Face::outline_at`, `gui/font/src/varstore.rs` (regions,
-subtables, `DeltaSetIndexMap`, `Hvar`, `Mvar`) behind `Face::advance_at` /
-`Face::metric_delta` / `Face::metrics_at`, and `ScaledFont::shared_at` /
-`set_axes` / `set_variations`, which is what makes a chosen instance reach the
-rasterizer.
+**Status: FIXED 2026-08-17 — all four steps landed.** `fvar`, `avar`, `gvar`,
+the instance on `ScaledFont`, `HVAR` + `MVAR` (commit `94748f2c0`), and now the
+`GDEF` store reached from a `GPOS` `VariationIndex` (commit `2ee86901d`). A
+variable face draws at the weight you ask for, is spaced at that weight, *and
+kerns and stacks its marks at that weight*. Only `CFF2` remains out of scope,
+deliberately and for want of a face to check against — see below.
 
-**What is still missing, and what it costs today:**
+**What landed for the last third.** `device.rs` gained `Corrections<'a>`
+alongside `Ppem`: `Ppem` is the pixel size alone and answers device tables,
+`Corrections` adds a borrow of `GDEF`'s store plus the normalized coordinates
+and answers both kinds. `Face::ppem` became `Face::corrections`; `gpos`, `kern`
+and `mark` thread the new type through. `Face` parses `GDEF`'s Offset32 store.
+See design-decisions §451 for why it is two types rather than one widened one.
 
-* **The `GDEF` `ItemVariationStore`, i.e. the last third of step 4** — the
-  store this entry is named for, reached from a `GPOS` `VariationIndex` rather
-  than from a glyph id or a metric tag. Concretely: **marks and kerns still
-  position at the default instance.** The reader that will serve it already
-  exists and is proved; what is missing is `Face` parsing `GDEF`'s Offset32
-  (at +14, version 1.3 and later only) and a way to carry the coordinates and
-  a borrow of the store down to `pixel_delta`. See "Proper fix" item 2.
+**Three real bugs came out of proving it, and two were not about variations at
+all.** None was reachable before the oracle could be asked at a non-default
+instance, which is why they had survived a 556-face sweep:
+
+* **`PairPos` format 1 measured its device offsets from the subtable instead of
+  from the `PairSet`** (commit `8a70341eb`). The spec measures a value record's
+  device offsets from its *immediate parent*, and format 1's parent is the
+  `PairSet` where format 2's is the subtable. Pre-existing, and it mis-read
+  plain device tables just as happily — it stayed invisible only because no host
+  face had an in-range device table on a format 1 record, so the wrong base
+  always landed somewhere that decoded to nothing.
+* **`avar` interpolated with truncating integer division** where HarfBuzz rounds
+  half away from zero (commit `777a040ff`) — and the code comment asserting
+  HarfBuzz truncates was simply wrong. One F2Dot14 unit, but the normalized
+  coordinate is the input to *every* delta the face computes, so at Segoe UI
+  Variable's wght=550 every advance in the face came out a unit short. Reaches
+  `gvar` outlines and `HVAR`/`MVAR` metrics too, not just this entry's arm.
+* **Fallback mark positioning measured the default instance's ink box** (commit
+  `1f542b478`). `gvar` moves a glyph's points without rewriting the bbox in its
+  header, and the format has no per-instance box, so the stored one describes a
+  shape the face no longer draws. `Face::glyph_bbox_at` measures the varied
+  outline instead — which is *looser* off the default (the control-point hull),
+  which is also what HarfBuzz produces there.
+
+**Measured.** HarfBuzz over the host's 7 variable faces x 95 strings, at the
+default instance and at wght=700, wght=300, wght=550,wdth=75,
+opsz=27.5,wght=600 and opsz=5 — identical every time: agree 663, reordered 0,
+misplaced 1, differ 0, mixed 1. The one misplaced is the pre-existing
+`a\u034fb` CGJ divergence, present at the default instance too; the mixed is the
+documented itemizer difference. Full-host static sweep unchanged at its recorded
+baseline (556 faces x 95 strings, agree 51423, misplaced 170, reordered 0,
+differ 1178). Pinned by `a_variation_index_kern_follows_the_instance` in
+`gui/font/tests/host_fonts.rs`, whose expectations were computed independently
+from fontTools' region scalars plus a raw byte parse rather than snapshotted.
+
+**Still out of scope:**
+
 * **`CFF2`.** A `CFF2` face varies through the charstring interpreter, not
   through `gvar`. No face on this host has one, so it is neither implemented
   nor checkable against a real file. `Face::outline_at` falls back to the
@@ -23288,11 +23315,18 @@ outlines. What remains is the second half of step 4:
    value-tag record, `GDEF` from the `VariationIndex`'s own four bytes). The
    first two are wired; `VarStore::delta` takes the pair directly and is
    already what the third needs.
-2. **Coordinates at the `Ppem` boundary** — give `Ppem` a sibling that carries
-   the normalized coordinates and a borrow of the store, so `pixel_delta` can
-   dispatch on `deltaFormat` and *compute* the `0x8000` arm instead of
-   returning zero for it. Then delete the decline, and the "What is not here"
-   paragraph in `device.rs`'s module doc that names this entry.
+2. ~~**Coordinates at the `Ppem` boundary**~~ — **done, commit `2ee86901d`.**
+   `Ppem` got the sibling described below, `Corrections<'a>`, carrying the
+   normalized coordinates and a borrow of the store; `Corrections::delta`
+   dispatches on `deltaFormat` and computes the `0x8000` arm. The decline and
+   the "What is not here" paragraph are gone from `device.rs`'s module doc,
+   replaced by "The other thing that can occupy the slot".
+
+   Both things this said to get right were right, and were the two that
+   mattered: the font-units asymmetry is exactly as described below, and
+   `Face` does parse the Offset32 itself. The one thing the plan did not
+   anticipate is that reading the arm at all would expose three unrelated
+   bugs — see the status block at the top.
 
    Two things to get right in that piece, both found while planning it:
 
@@ -23313,9 +23347,13 @@ outlines. What remains is the second half of step 4:
 `CFF2` stays out of scope until a face on some host actually has one; see the
 missing-pieces list at the top of this entry.
 
-**Where.** `gui/font/src/device.rs` — `VARIATION_INDEX` and the format check in
-`pixel_delta`, and the "What is not here" section of the module doc, which
-names this entry.
+**Where it landed.** `gui/font/src/device.rs` (`Corrections`, `variation_delta`,
+the module doc), `gui/font/src/sfnt.rs` (`gdef_store`, `Face::corrections`,
+`Face::glyph_bbox_at`), `gui/font/src/gpos.rs`, `gui/font/src/kern.rs`,
+`gui/font/src/mark.rs`, `gui/font/src/scaled.rs`, `gui/font/src/var.rs`
+(`round_div`), `gui/font/tests/host_fonts.rs`, and the oracle
+(`gui/font/examples/shape_dump.rs`, `gui/font/tools/harfbuzz_sweep.py`, which
+can now be asked at an instance with `--axes`).
 
 ## TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL
 

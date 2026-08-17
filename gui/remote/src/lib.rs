@@ -19,6 +19,9 @@
 //!   [`scene`] for a whole stacked desktop.
 //! * **Back** — input events, [`input`]. A display protocol that only travelled
 //!   outwards could show a window but never let anyone use it.
+//! * **Control** — [`control`], the requests with replies: create a window,
+//!   name it, move it, ask about the display. Neither of the two streaming
+//!   directions can bring a window into existence in the first place.
 //!
 //! Each direction has its own frame magic, so a frame sent the wrong way over a
 //! duplex transport fails on its first four bytes instead of decoding into
@@ -86,6 +89,13 @@ pub mod input;
 pub use input::{
     INPUT_MAGIC, INPUT_VERSION, InputEvent, decode_input_frame, encode_input_frame,
     encode_input_frame_into, try_decode_input_frame,
+};
+
+pub mod control;
+pub use control::{
+    CursorShape, DisplayInfo, Request, RequestBody, Response as ControlResponse, ResponseBody,
+    WindowSpec, decode_requests, decode_responses, encode_requests, encode_responses,
+    try_decode_requests, try_decode_responses,
 };
 
 pub mod client;
@@ -340,6 +350,10 @@ pub enum DecodeError {
     /// A character field held a value that is not a Unicode scalar — a
     /// surrogate, or past `U+10FFFF`.
     BadChar(u32),
+    /// A control frame's message count exceeds [`control::MAX_MESSAGES_PER_FRAME`].
+    TooManyMessages(u32),
+    /// A [`CursorShape`](control::CursorShape) byte is not in this decoder's table.
+    BadCursorShape(u8),
 }
 
 impl core::fmt::Display for DecodeError {
@@ -350,7 +364,10 @@ impl core::fmt::Display for DecodeError {
             Self::UnsupportedVersion(v) => write!(f, "unsupported protocol version {v}"),
             Self::ReservedFlags(b) => write!(f, "reserved flags bits set: {b:#04x}"),
             Self::TooManyCommands(n) => {
-                write!(f, "command count {n} exceeds limit {MAX_COMMANDS_PER_FRAME}")
+                write!(
+                    f,
+                    "command count {n} exceeds limit {MAX_COMMANDS_PER_FRAME}"
+                )
             }
             Self::StringTooLarge(n) => {
                 write!(f, "string length {n} exceeds limit {MAX_STRING_LEN}")
@@ -381,6 +398,14 @@ impl core::fmt::Display for DecodeError {
             Self::BadMouseButton(b) => write!(f, "unknown mouse button {b:#04x}"),
             Self::BadMouseKind(b) => write!(f, "unknown mouse event kind {b:#04x}"),
             Self::BadChar(c) => write!(f, "codepoint {c:#x} is not a Unicode scalar value"),
+            Self::TooManyMessages(n) => {
+                write!(
+                    f,
+                    "control message count {n} exceeds limit {}",
+                    control::MAX_MESSAGES_PER_FRAME
+                )
+            }
+            Self::BadCursorShape(b) => write!(f, "unknown cursor shape {b:#04x}"),
         }
     }
 }
@@ -520,7 +545,14 @@ fn read_spans(r: &mut Reader<'_>) -> Result<Vec<TextSpan>, DecodeError> {
 #[allow(clippy::too_many_lines)]
 fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
     match cmd {
-        RenderCommand::FillRect { x, y, width, height, color, corner_radii } => {
+        RenderCommand::FillRect {
+            x,
+            y,
+            width,
+            height,
+            color,
+            corner_radii,
+        } => {
             out.push(Tag::FillRect as u8);
             write_f32(out, *x);
             write_f32(out, *y);
@@ -529,7 +561,15 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
             write_color(out, *color);
             write_radii(out, *corner_radii);
         }
-        RenderCommand::StrokeRect { x, y, width, height, color, line_width, corner_radii } => {
+        RenderCommand::StrokeRect {
+            x,
+            y,
+            width,
+            height,
+            color,
+            line_width,
+            corner_radii,
+        } => {
             out.push(Tag::StrokeRect as u8);
             write_f32(out, *x);
             write_f32(out, *y);
@@ -539,7 +579,16 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
             write_f32(out, *line_width);
             write_radii(out, *corner_radii);
         }
-        RenderCommand::Text { x, y, text, color, font_size, font_weight, max_width, overflow } => {
+        RenderCommand::Text {
+            x,
+            y,
+            text,
+            color,
+            font_size,
+            font_weight,
+            max_width,
+            overflow,
+        } => {
             out.push(Tag::Text as u8);
             write_f32(out, *x);
             write_f32(out, *y);
@@ -547,7 +596,15 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
             write_text_style(out, *color, *font_size, *font_weight, *max_width, *overflow);
         }
         RenderCommand::RichText {
-            x, y, text, spans, color, font_size, font_weight, max_width, overflow
+            x,
+            y,
+            text,
+            spans,
+            color,
+            font_size,
+            font_weight,
+            max_width,
+            overflow,
         } => {
             out.push(Tag::RichText as u8);
             write_f32(out, *x);
@@ -556,7 +613,13 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
             write_spans(out, spans);
             write_text_style(out, *color, *font_size, *font_weight, *max_width, *overflow);
         }
-        RenderCommand::Image { x, y, width, height, image_id } => {
+        RenderCommand::Image {
+            x,
+            y,
+            width,
+            height,
+            image_id,
+        } => {
             out.push(Tag::Image as u8);
             write_f32(out, *x);
             write_f32(out, *y);
@@ -564,7 +627,14 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
             write_f32(out, *height);
             write_u64(out, *image_id);
         }
-        RenderCommand::Line { x1, y1, x2, y2, color, width } => {
+        RenderCommand::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            color,
+            width,
+        } => {
             out.push(Tag::Line as u8);
             write_f32(out, *x1);
             write_f32(out, *y1);
@@ -573,7 +643,12 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
             write_color(out, *color);
             write_f32(out, *width);
         }
-        RenderCommand::PushClip { x, y, width, height } => {
+        RenderCommand::PushClip {
+            x,
+            y,
+            width,
+            height,
+        } => {
             out.push(Tag::PushClip as u8);
             write_f32(out, *x);
             write_f32(out, *y);
@@ -812,12 +887,7 @@ fn decode_internal(input: &[u8]) -> Result<(RenderTree, usize), DecodeError> {
     let mut r = Reader::new(input);
     // Header.
     r.need(HEADER_LEN)?;
-    let magic = [
-        r.buf[0],
-        r.buf[1],
-        r.buf[2],
-        r.buf[3],
-    ];
+    let magic = [r.buf[0], r.buf[1], r.buf[2], r.buf[3]];
     if magic != MAGIC {
         return Err(DecodeError::BadMagic);
     }
@@ -1034,9 +1104,18 @@ mod tests {
             y: 21.0,
             text: "let x = 1;".to_string(),
             spans: vec![
-                TextSpan { end: 3, color: Color::rgba(200, 100, 50, 255) },
-                TextSpan { end: 5, color: Color::rgba(1, 2, 3, 4) },
-                TextSpan { end: 10, color: Color::rgb(9, 9, 9) },
+                TextSpan {
+                    end: 3,
+                    color: Color::rgba(200, 100, 50, 255),
+                },
+                TextSpan {
+                    end: 5,
+                    color: Color::rgba(1, 2, 3, 4),
+                },
+                TextSpan {
+                    end: 10,
+                    color: Color::rgb(9, 9, 9),
+                },
             ],
             color: Color::rgb(255, 255, 255),
             font_size: 13.0,
@@ -1079,7 +1158,8 @@ mod tests {
             width: 200.0,
             height: 200.0,
         });
-        t.commands.push(RenderCommand::PushTranslate { dx: 10.0, dy: -5.0 });
+        t.commands
+            .push(RenderCommand::PushTranslate { dx: 10.0, dy: -5.0 });
         t.commands.push(RenderCommand::PopTranslate);
         // Both families, so `each_command_kind_roundtrips_individually` covers
         // the payload byte and not merely the tag. `Ui` is the default, which
@@ -1118,11 +1198,7 @@ mod tests {
     fn assert_tree_eq(a: &RenderTree, b: &RenderTree) {
         assert_eq!(a.commands.len(), b.commands.len(), "command count differs");
         for (i, (x, y)) in a.commands.iter().zip(b.commands.iter()).enumerate() {
-            assert_eq!(
-                format!("{x:?}"),
-                format!("{y:?}"),
-                "command #{i} differs"
-            );
+            assert_eq!(format!("{x:?}"), format!("{y:?}"), "command #{i} differs");
         }
     }
 
@@ -1173,7 +1249,8 @@ mod tests {
         let t1 = sample_tree();
         let t2 = {
             let mut t = RenderTree::new();
-            t.commands.push(RenderCommand::PushTranslate { dx: 1.0, dy: 2.0 });
+            t.commands
+                .push(RenderCommand::PushTranslate { dx: 1.0, dy: 2.0 });
             t.commands.push(RenderCommand::PopTranslate);
             t
         };
@@ -1223,7 +1300,10 @@ mod tests {
     fn reserved_flags_are_rejected() {
         let mut bytes = encode_frame_to_vec(&RenderTree::new());
         bytes[5] = 0x01;
-        assert!(matches!(decode_frame(&bytes), Err(DecodeError::ReservedFlags(_))));
+        assert!(matches!(
+            decode_frame(&bytes),
+            Err(DecodeError::ReservedFlags(_))
+        ));
     }
 
     #[test]
@@ -1233,7 +1313,10 @@ mod tests {
         let mut bytes = encode_frame_to_vec(&t);
         // Header is 10 bytes; the next byte is the tag. Flip it to invalid.
         bytes[HEADER_LEN] = 0xFE;
-        assert!(matches!(decode_frame(&bytes), Err(DecodeError::BadTag(0xFE))));
+        assert!(matches!(
+            decode_frame(&bytes),
+            Err(DecodeError::BadTag(0xFE))
+        ));
     }
 
     /// An unknown family byte must be rejected, not silently read as `Ui`.
@@ -1271,7 +1354,10 @@ mod tests {
         let mut bytes = encode_frame_to_vec(&t);
         // Drop the last 4 bytes — should be inside the final BoxShadow.
         bytes.truncate(bytes.len() - 4);
-        assert!(matches!(decode_frame(&bytes), Err(DecodeError::UnexpectedEof)));
+        assert!(matches!(
+            decode_frame(&bytes),
+            Err(DecodeError::UnexpectedEof)
+        ));
     }
 
     #[test]

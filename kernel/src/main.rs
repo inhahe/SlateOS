@@ -5794,6 +5794,21 @@ extern "C" fn kernel_main() -> ! {
     // for the whole run and went unnoticed until a benchmark contradicted it.
     scfilter::verify_index("boot");
 
+    // Kernel-stack depth census.  Sited here — after every self-test, but
+    // BEFORE the BOOT_OK marker — for two independent reasons:
+    //
+    //  * The scheduler's own self-test runs ~1100 log lines before the
+    //    process-spawn tests, which drive by far the deepest kernel stacks in
+    //    the system (spawn_process -> ELF parse -> page-table walk).  A census
+    //    there would systematically miss the tasks that matter.
+    //  * Anything printed after BOOT_OK is not printed at all as far as the
+    //    boot test is concerned: the harness stops at the marker and kills
+    //    QEMU, so output below it never reaches the log.
+    //
+    // It reports rather than gates: a deep stack is a condition the operator
+    // needs to see, not a reason to refuse to boot.
+    sched::report_stack_census();
+
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,
     // regardless of how long deferred benchmarks take.

@@ -31294,3 +31294,112 @@ driver printed the capability mask that contradicted its own constants. Reading
 a value into a log message is not the same as checking it; where a device tells
 you what it accepts, check the request against it rather than printing both and
 trusting the constant.
+
+
+## A-INTERMITTENT-STACK-CANARY-HALT-AT-REAP-TIME (lane A, 2026-08-17) - **instrumented, root cause not yet proven**
+
+**In short:** roughly one boot in ten dies with `FATAL: Stack canary
+corrupted`, naming a task that exited tens of thousands of log lines
+earlier, and halts the machine - throwing away the rest of the boot's
+self-tests. Two very different faults produce that message and they want
+opposite fixes, and the message as written could not tell them apart. The
+halt itself was also wrong at that call site, and is fixed; the underlying
+corruption is now instrumented to identify itself on the next occurrence.
+
+**Symptom** (observed once in 74 boots' history; ~9.5% of boots fail for
+some reason, this fingerprint is new):
+
+```
+[sched]   sleep_ns: PASSED (slept 21.563ms for 20ms request)
+FATAL: Stack canary corrupted for task 100 (spawn-test-linux-sysv)!
+  Expected: 0xdeadbeefcafebabe, Found: 0x0000000000000000
+  stack_bottom=0xffffc10000004000, stack_top=0xffffc10000014000
+FATAL: Kernel stack overflow is unrecoverable. Halting.
+```
+
+### What the evidence establishes
+
+- The check fired from the **reaper** (`reap_dead_tasks`), not from a
+  context switch: task 100 is not `current`, and the message lands
+  immediately after another task exited and triggered a reap.
+- Task 100 was created at serial line 1474 and **exited at line 1482**; the
+  canary was not read until line **25349**. It stayed in the task table that
+  whole time because the reaper skips any task still recorded as `current`
+  on some CPU. So the corruption happened ~24000 lines before it was noticed.
+- `stack_bottom = 0xffffc10000004000` decodes to **slot 0** of the kstack
+  allocator (`KSTACK_REGION_BASE = 0xFFFF_C100_0000_0000`, `GUARD_SIZE =
+  0x4000`) - the first slot the bitmap allocator hands out and the first it
+  re-issues after a free.
+- Task 100 predates the per-boot canary randomisation (line 1597), so
+  `0xdeadbeefcafebabe` is genuinely the value that was planted.
+- `stack_bottom` was non-zero, so `free_stack()` - which zeroes it - had not
+  run on that `Task`.
+
+### The two candidate causes
+
+| | **Real marginal overflow** | **Stale reference to a recycled slot** |
+|---|---|---|
+| What happened | the task's own frames reached the bottom of its 64 KiB stack and overwrote the canary | the slot was freed and re-issued; `kstack::alloc` memsets the whole stack, and this `Task` still pointed at it |
+| Where the bug is | the deep path, or `TASK_STACK_SIZE` | the stack free path |
+
+**The guard page does not rule out the first.** The guard sits *below*
+`stack_bottom`, so a write landing exactly on the canary corrupts it without
+ever leaving the mapped stack - which is precisely the case the canary
+exists to catch. Reading exactly zero is consistent with a zero-initialised
+local buffer or a `write_bytes` reaching the bottom eight bytes.
+
+The second is much weaker than it first looks: `kstack::alloc` zeroes the
+stack, but `Task::new_kernel` then plants a fresh (randomised, non-zero)
+canary a few instructions later. A stale read would therefore have to land
+inside that window to see zero rather than the *new* task's canary. Possible,
+but it requires a coincidence that a 24000-line-later reap does not offer.
+
+Intermittency fits the first cause well: the code path is deterministic, but
+an interrupt taken near the deepest point pushes an IRET frame, a register
+save and the handler's own frames onto the *same* kernel stack. `spawn_process`
+-> ELF parse -> page-table work is among the deepest paths in the kernel.
+
+### What was fixed now
+
+1. **The reaper no longer halts.** Its comment already said *"the task is
+   already dead so we can't halt"* while calling `check_stack_canary()`,
+   which halts unconditionally - intent and behaviour had silently disagreed.
+   Split into two:
+   - `check_stack_canary()` - still halts. Correct for the context-switch
+     callers, where a live task is about to resume on a stack known to be bad.
+   - `report_stack_canary() -> bool` - diagnoses and returns. Correct for the
+     reaper, where the task is dead and already removed from the table, so a
+     halt buys no safety and costs the rest of the boot's diagnostics.
+
+2. **The failure now identifies its own cause.** The post-mortem prints the
+   stack watermark, the kstack slot, and the composition (zero / sentinel /
+   other words) of the bottom 512 bytes *and* the top 512 bytes. That last
+   pair is the discriminator: a real overflow leaves the top of the stack
+   full of ordinary frame data, whereas a recycled slot has been zeroed or
+   repainted end to end. It prints an explicit `VERDICT:` line either way.
+
+3. **A system-wide stack census now runs every boot** (`report_stack_census`,
+   last in the scheduler self-test). It reports the five deepest kernel
+   stacks and warns above 75%. This is the measurement whose absence made the
+   bug undiagnosable: `test_stack_watermark` proved the watermark *API*
+   worked, but only ever measured a purpose-built task that touches 256
+   bytes, so "is any real kernel stack close to overflowing?" was a question
+   nothing in the tree could answer - despite every stack already being
+   painted with a sentinel that answers it for free.
+
+### Generalisation
+
+Two rules fell out of this one.
+
+**An assertion that halts must be sited where halting helps.** The same
+canary check was correct at the context-switch callers and wrong at the
+reaper, for the same reason in both cases: whether anything is going to
+*run* on that stack again. A check copied to a second call site inherits its
+severity, and severity is a property of the site, not of the condition.
+
+**When a diagnostic fires intermittently, the first fix is to make the
+diagnostic conclusive, not to guess at the cause.** Both hypotheses here are
+plausible, they want opposite fixes, and picking one on a hunch had an even
+chance of hardening the wrong path while leaving the real one live. The
+evidence needed to choose was cheap - it was sitting unread in a sentinel
+pattern the kernel already paints on every stack.

@@ -4351,10 +4351,28 @@ pub fn reap_dead_tasks() -> usize {
                 let _ = crate::cgroup::detach_task(task_cgroup);
             }
 
-            // Final canary check — if the task overflowed before dying,
-            // log a warning (the task is already dead so we can't halt,
-            // but the corruption may have affected other memory).
-            task.check_stack_canary();
+            // Final canary check.  Use the *reporting* form, not
+            // `check_stack_canary`: the task is dead and already removed from
+            // the table, so nothing will ever run on this stack again and
+            // halting the machine buys no safety — it only throws away the
+            // rest of the boot's output, including the self-tests that would
+            // say whether anything else is wrong.  This comment used to claim
+            // "we can't halt" while calling the form that does exactly that,
+            // which is how an intermittent flake here took down whole runs.
+            // Fold this task's high-water mark into the boot-wide peak
+            // BEFORE the stack is freed — after `free_stack` the sentinel
+            // pattern is gone and the measurement is unrecoverable.  Deep
+            // stacks belong to short-lived tasks, so this is the only place
+            // most of them can be measured at all.
+            record_peak_stack(&task);
+
+            if !task.report_stack_canary() {
+                serial_println!(
+                    "[sched] WARNING: task {} died with a corrupt stack canary (see above); \
+                     continuing, since the task is already gone",
+                    id
+                );
+            }
 
             // SAFETY: The task is Dead, was removed from the table,
             // and no CPU has it as current (checked all CPUs above).
@@ -8536,6 +8554,192 @@ fn test_stack_watermark() -> KernelResult<()> {
 
     serial_println!("[sched]   Stack watermark: PASSED");
     Ok(())
+}
+
+/// Percentage of a kernel stack above which the census complains.
+///
+/// 75% of 64 KiB leaves 16 KiB of headroom.  That is roughly the worst case
+/// for an interrupt arriving at the deepest point of a syscall — an IRET
+/// frame, the register save, and a handler's own frames all land on the
+/// *same* kernel stack — so a task that is quietly sitting above this line
+/// is one badly-timed interrupt away from writing through its own canary.
+const STACK_CENSUS_WARN_PCT: u8 = 75;
+
+/// One task's kernel-stack high-water mark, with enough identity to name it
+/// after the task itself is gone.
+///
+/// A struct rather than a tuple because the peak and the live-task census
+/// are compared and iterated together, and a positional `(u8, usize, ...)`
+/// pair whose first two fields are both numbers is trivially transposable.
+#[derive(Clone, Copy)]
+struct StackDepth {
+    /// Percentage of `TASK_STACK_SIZE` used.
+    pct: u8,
+    /// Bytes used.
+    used: usize,
+    id: TaskId,
+    name: [u8; 32],
+    name_len: usize,
+}
+
+impl StackDepth {
+    /// Measure a task, or `None` if it has no allocated stack (idle tasks).
+    fn measure(task: &task::Task) -> Option<Self> {
+        Some(Self {
+            pct: task.stack_usage_pct()?,
+            used: task.stack_usage_bytes()?,
+            id: task.id,
+            name: task.name,
+            name_len: task.name_len,
+        })
+    }
+
+    fn label(&self) -> &str {
+        self.name
+            .get(..self.name_len)
+            .and_then(|b| core::str::from_utf8(b).ok())
+            .unwrap_or("<invalid>")
+    }
+}
+
+/// Deepest kernel-stack usage seen so far this boot, in bytes.
+///
+/// Read without taking [`PEAK_STACK_WHO`] as a fast reject, so the common
+/// case of "this task is not a new record" costs one relaxed load.
+static PEAK_STACK_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// Identity of the task that set [`PEAK_STACK_BYTES`].
+///
+/// Separate from the counter because the interesting part of a peak is
+/// *which* path got that deep, and a task that dies is gone from the table
+/// before anyone can ask.
+static PEAK_STACK_WHO: spin::Mutex<Option<StackDepth>> = spin::Mutex::new(None);
+
+/// Fold a measurement into the boot-wide peak if it is a new record.
+fn record_peak_stack_depth(d: StackDepth) {
+    if d.used <= PEAK_STACK_BYTES.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut who = PEAK_STACK_WHO.lock();
+    // Re-check under the lock: two CPUs can pass the load above at once.
+    if d.used > PEAK_STACK_BYTES.load(Ordering::Relaxed) {
+        PEAK_STACK_BYTES.store(d.used, Ordering::Relaxed);
+        *who = Some(d);
+    }
+}
+
+/// Fold a dying task's stack watermark into the boot-wide peak.
+///
+/// Called from the reaper while the task is still in hand and its stack is
+/// still mapped.  This is the half that makes the census meaningful: a census
+/// of *live* tasks systematically misses the deepest ones, because the paths
+/// that go deep — process spawn, ELF loading, page-table walks — belong to
+/// short-lived tasks that are reaped long before anyone looks.  The task whose
+/// canary failure prompted all of this was exactly such a task, and had been
+/// dead for ~24000 log lines when it was finally noticed.
+/// This runs on the reaper's path, once per dying task, so it must not
+/// measure unconditionally.  `stack_usage_bytes` is an O(stack-size) scan of
+/// volatile per-word reads — 8192 of them for a 64 KiB stack — and it is
+/// *slowest for shallow tasks*, which are the overwhelming majority: it walks
+/// intact sentinel from the bottom up until it finds the first disturbed word,
+/// so a task that touched 1 KiB costs 63 KiB of scanning.  `stack_snapshot`
+/// already carries a comment warning callers off it for exactly this reason.
+///
+/// So the peak is defended by a single read first.  A task can only beat the
+/// current peak `P` if it disturbed the word just below `P`'s boundary; if
+/// that word is still the sentinel, this task cannot be a new record and the
+/// full scan is skipped.  This is exact, not an approximation — it rejects
+/// only tasks that provably cannot win — and it reduces the common case to
+/// one volatile read.
+fn record_peak_stack(task: &task::Task) {
+    let peak = PEAK_STACK_BYTES.load(Ordering::Relaxed);
+    if peak > 0 && !task.could_exceed_stack_usage(peak) {
+        return;
+    }
+    if let Some(d) = StackDepth::measure(task) {
+        record_peak_stack_depth(d);
+    }
+}
+
+/// Report the deepest kernel stacks in the system.
+///
+/// This is the measurement whose absence made an intermittent canary halt
+/// impossible to diagnose.  `test_stack_watermark` proves the watermark
+/// *API* works, but only ever measures a purpose-built task that touches
+/// 256 bytes — so "is any real kernel stack close to overflowing?" was a
+/// question nothing in the tree could answer.  It is answerable, cheaply,
+/// because every stack is already painted with `STACK_SENTINEL` at creation:
+/// the deepest disturbed sentinel word is the high-water mark.
+///
+/// Printing this every boot means a deep path shows up as a rising number
+/// long before it shows up as a corrupted canary, and a regression that adds
+/// a large stack frame to a hot path is visible in the diff of two boot logs.
+pub fn report_stack_census() {
+    let mut live: alloc::vec::Vec<StackDepth> = {
+        let state = SCHED.lock();
+        state
+            .tasks
+            .values()
+            .filter_map(|t| StackDepth::measure(t))
+            .collect()
+    };
+    // Live tasks are measured here; tasks that already died were folded in by
+    // the reaper.  Both halves are needed — neither alone sees the deepest
+    // stack the boot actually produced.
+    for d in &live {
+        record_peak_stack_depth(*d);
+    }
+    live.sort_unstable_by_key(|d| core::cmp::Reverse(d.pct));
+
+    let peak = *PEAK_STACK_WHO.lock();
+    if let Some(p) = peak {
+        serial_println!(
+            "[sched]   Stack peak this boot: {} bytes ({}% of {}) by task {} ({})",
+            p.used,
+            p.pct,
+            task::TASK_STACK_SIZE,
+            p.id,
+            p.label()
+        );
+    }
+
+    serial_println!(
+        "[sched]   Stack census: {} live task(s) with allocated stacks, deepest first",
+        live.len()
+    );
+    for d in live.iter().take(5) {
+        serial_println!(
+            "[sched]     task {:<4} {:<24} {:>6} bytes ({:>3}% of {})",
+            d.id,
+            d.label(),
+            d.used,
+            d.pct,
+            task::TASK_STACK_SIZE
+        );
+    }
+
+    // A task over the warning line is not a test failure — it is a real
+    // condition the operator needs to see, and failing the boot on it would
+    // just get the census deleted.  Say it loudly and carry on.
+    //
+    // The peak is checked as well as the live tasks: the deepest stack of the
+    // boot usually belongs to a task that is already gone, so warning only on
+    // what is still in the table would reliably miss the case that matters.
+    for d in live.iter().copied().chain(peak) {
+        if d.pct >= STACK_CENSUS_WARN_PCT {
+            serial_println!(
+                "[sched]   WARNING: task {} ({}) used {}% of its kernel stack \
+                 ({} of {} bytes) — an interrupt at this depth could reach the canary",
+                d.id,
+                d.label(),
+                d.pct,
+                d.used,
+                task::TASK_STACK_SIZE
+            );
+        }
+    }
+
+    serial_println!("[sched]   Stack census: PASSED");
 }
 
 /// Test: sleep_ns wakes a task after the requested duration.

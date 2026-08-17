@@ -118,11 +118,12 @@
 use alloc::vec::Vec;
 
 use crate::context::{MAX_NESTING, Matched, Nested, chain_match, context_match, read_records};
+use crate::digest::Digest;
 use crate::indic::Char;
 use crate::joining::Form;
 use crate::lang::Lang;
 use crate::norm::Ignorable;
-use crate::otl::{ByScript, Lookup, MAX_SUBTABLES, coverage_index, lookup_at, lookup_list};
+use crate::otl::{ByScript, Lookup, MAX_SUBTABLES, Subtable, coverage_index, lookup_at, lookup_list};
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, u16_at};
 use crate::skip::{CLASS_BASE, CLASS_MARK, Definitions, Joiners, Skipper};
@@ -949,16 +950,31 @@ impl Substitutions {
             manual_zwnj: staging.manual_zwnj,
             manual_zwj: staging.manual_zwj,
             serial: 0,
+            run: Digest::EMPTY,
+            dirty: true,
         };
         // Hoisted out of both loops for the same reason `Ctx::scratch` is: a
         // per-syllable stage would otherwise allocate once per syllable per
         // lookup, and Devanagari text is nothing but syllables.
         let mut piece: Vec<SubGlyph> = Vec::new();
         for (i, &stage) in staging.stages.iter().enumerate() {
+            // `between` is free to rewrite the run between stages, so the
+            // digest carried over from the last one may no longer describe it.
+            ctx.dirty = true;
             for (lookup, mask) in self.lookups.for_script(script, lang) {
                 let mask = mask & stage;
                 if mask == 0 {
                     continue;
+                }
+                // One pass over the run, and only when the last lookup changed
+                // it. A line of ordinary text substitutes nothing, so this runs
+                // once and the other 146 lookups read the answer.
+                if ctx.dirty {
+                    ctx.run = Digest::EMPTY;
+                    for glyph in glyphs.iter() {
+                        ctx.run.add(glyph.gid);
+                    }
+                    ctx.dirty = false;
                 }
                 ctx.mask = mask;
                 if mask & staging.per_syllable != 0 {
@@ -1118,6 +1134,26 @@ struct Ctx {
     /// How many ligature ids have been handed out so far in this run, for
     /// [`next_lig_id`](Ctx::next_lig_id).
     serial: u8,
+    /// A conservative summary of the glyphs in the run, against which a whole
+    /// lookup can be dismissed in O(1) — see [`apply_lookup`].
+    ///
+    /// Rebuilt only when it has gone stale, not per lookup: building it costs
+    /// a pass over the run, and a face offering 147 lookups would pay that 147
+    /// times over, which is most of what the digest was introduced to save.
+    /// Ordinary text substitutes nothing, so it is built once per stage and
+    /// read 147 times.
+    run: Digest,
+    /// Whether a substitution has rewritten the run since [`run`](Self::run)
+    /// was built.
+    ///
+    /// A rewritten run may hold glyphs the digest never saw, and skipping a
+    /// later lookup on the strength of a digest that predates them would lose
+    /// a substitution outright. The rebuild is left to
+    /// [`apply_stages`](Substitutions::apply_stages) rather than done here
+    /// because the per-syllable path applies a lookup to a *slice* of the run,
+    /// and rebuilding from the slice would describe the syllable rather than
+    /// the run.
+    dirty: bool,
 }
 
 impl Ctx {
@@ -1152,16 +1188,42 @@ impl Ctx {
 /// eligibility half is no restriction at all, since their bits are set on
 /// every glyph, so ordinary text pays a comparison rather than a branch.
 fn apply_lookup(data: &[u8], lookup: &Lookup, glyphs: &mut Vec<SubGlyph>, ctx: &mut Ctx) {
+    // Two O(1) filters before any coverage table is searched, both resting on
+    // a digest never answering "no" for a glyph a subtable covers.
+    //
+    // The first is the whole run against the whole lookup. A face offers every
+    // lookup its script selects — 147 of them over 768 subtables on the
+    // development host's monospace face — and a line of Latin reaches none of
+    // those written for other scripts and other features. Asking once, here,
+    // is what stops each of them costing a coverage search per glyph.
+    //
+    // The run summary is `ctx.run`, kept up to date by every substitution
+    // below rather than rebuilt here: rebuilding is a pass over the run, and
+    // paying that once per lookup would give most of the saving straight back.
+    if !ctx.run.may_intersect(lookup.digest) {
+        return;
+    }
     let skip = skipper(lookup, data, ctx);
     let mut i = 0usize;
     while i < glyphs.len() {
-        if !skip.considers(glyphs, i) {
+        // And the second, per position: a lookup the run as a whole reaches
+        // still does not reach most of the run's glyphs.
+        if !glyphs.get(i).is_some_and(|g| lookup.digest.may_have(g.gid))
+            || !skip.considers(glyphs, i)
+        {
             i = i.saturating_add(1);
             continue;
         }
         // A match that somehow produced nothing would leave `i` where it was;
         // the floor of one is what makes the walk terminate regardless.
-        let step = apply_at(data, lookup, glyphs, i, ctx).unwrap_or(0).max(1);
+        let matched = apply_at(data, lookup, glyphs, i, ctx);
+        // The run now holds glyphs that were not in it when the digest was
+        // built, so the digest no longer describes it. It stays usable for the
+        // rest of *this* lookup — the walk only moves forward, and every
+        // position it has yet to reach is untouched — and the caller rebuilds
+        // it before the next one. See [`Ctx::dirty`].
+        ctx.dirty |= matched.is_some();
+        let step = matched.unwrap_or(0).max(1);
         i = i.saturating_add(step);
     }
 }
@@ -1221,22 +1283,41 @@ fn apply_at(
     }
 }
 
+/// The subtables of a lookup that could act at `glyph`, in font order.
+///
+/// This is the second half of the skip that `Lookup::digest` starts. The
+/// lookup-level digest answers "is this lookup worth walking for this run" and
+/// "for this glyph"; a lookup that survives both still has every one of its
+/// subtables searched, and on the development host's monospace face 95 of the
+/// 147 selected lookups do survive — they genuinely share glyphs with a Latin
+/// run somewhere — at roughly five coverage searches each per admitted glyph.
+/// Asking each subtable's own digest first turns most of those into three
+/// shifts and three `and`s.
+///
+/// Order is preserved because it is semantic: within a lookup the first
+/// subtable that matches wins, so filtering must remove candidates rather than
+/// reorder them.
+fn admitting(subtables: &[Subtable], glyph: u16) -> impl Iterator<Item = usize> + '_ {
+    subtables
+        .iter()
+        .filter(move |sub| sub.digest.may_have(glyph))
+        .map(|sub| sub.at)
+}
+
 /// Apply a `SingleSubst` lookup at one position.
 ///
 /// The position is independent of every other — nothing here can look at a
 /// neighbour — so the run's length and clusters come out unchanged.
 fn apply_single(
     data: &[u8],
-    subtables: &[usize],
+    subtables: &[Subtable],
     glyphs: &mut [SubGlyph],
     i: usize,
 ) -> Option<usize> {
     let glyph = glyphs.get_mut(i)?;
     // First subtable that covers the glyph wins, and the result is not offered
     // to the rest: within one lookup a glyph is substituted once.
-    let gid = subtables
-        .iter()
-        .find_map(|&sub| single_at(data, sub, glyph.gid))?;
+    let gid = admitting(subtables, glyph.gid).find_map(|sub| single_at(data, sub, glyph.gid))?;
     glyph.gid = gid;
     // The font asked for this glyph, so it is no longer standing for the
     // control character it was looked up from and must not be hidden at the
@@ -1283,15 +1364,14 @@ fn single_at(data: &[u8], sub: usize, glyph: u16) -> Option<u16> {
 /// [`ShapedRun`](crate::shape::ShapedRun) work in whole clusters.
 fn apply_multiple(
     data: &[u8],
-    subtables: &[usize],
+    subtables: &[Subtable],
     glyphs: &mut Vec<SubGlyph>,
     i: usize,
     ctx: &mut Ctx,
 ) -> Option<usize> {
     let glyph = *glyphs.get(i)?;
-    subtables
-        .iter()
-        .find_map(|&sub| sequence_at(data, sub, glyph.gid, &mut ctx.scratch))?;
+    admitting(subtables, glyph.gid)
+        .find_map(|sub| sequence_at(data, sub, glyph.gid, &mut ctx.scratch))?;
     // `sequence_at` owns the buffer: it clears on entry and only returns
     // `Some` after pushing at least one glyph, so a match here is never empty
     // and never carries a failed subtable's partial read. Checking emptiness
@@ -1366,14 +1446,12 @@ fn apply_multiple(
 /// clusters come out unchanged.
 fn apply_alternate(
     data: &[u8],
-    subtables: &[usize],
+    subtables: &[Subtable],
     glyphs: &mut [SubGlyph],
     i: usize,
 ) -> Option<usize> {
     let glyph = glyphs.get_mut(i)?;
-    let gid = subtables
-        .iter()
-        .find_map(|&sub| alternate_at(data, sub, glyph.gid))?;
+    let gid = admitting(subtables, glyph.gid).find_map(|sub| alternate_at(data, sub, glyph.gid))?;
     glyph.gid = gid;
     // As in `apply_single`: substituted is no longer ignorable.
     glyph.ignorable = Ignorable::No;
@@ -1465,16 +1543,20 @@ fn sequence_at(data: &[u8], sub: usize, glyph: u16, out: &mut Vec<u16>) -> Optio
 /// attachment reads it back to choose an anchor.
 fn apply_ligature(
     data: &[u8],
-    subtables: &[usize],
+    subtables: &[Subtable],
     glyphs: &mut Vec<SubGlyph>,
     i: usize,
     skip: Skipper<'_>,
     ctx: &mut Ctx,
 ) -> Option<usize> {
     let mut at = [0usize; MAX_COMPONENTS];
-    let (gid, count, total) = subtables
-        .iter()
-        .find_map(|&sub| ligature_at(data, sub, glyphs, i, skip, &mut at))?;
+    // The coverage a ligature subtable is filtered on is the *first
+    // component's*, which is the glyph standing at `i` — the rest of the
+    // components are matched by walking forward from there, and are not what
+    // decides whether the subtable applies here.
+    let first = glyphs.get(i)?.gid;
+    let (gid, count, total) = admitting(subtables, first)
+        .find_map(|sub| ligature_at(data, sub, glyphs, i, skip, &mut at))?;
     let end = at.get(count.checked_sub(1)?).copied()?;
     // Before the removal, while the recorded positions still mean something.
     stamp_components(data, glyphs, &at, count, total, ctx);
@@ -1767,7 +1849,7 @@ fn base_is_hidden(glyphs: &[SubGlyph], from: usize, id: u8, skip: Skipper<'_>) -
 /// Apply a `SequenceContext` (type 5) lookup at one position.
 fn apply_context(
     data: &[u8],
-    subtables: &[usize],
+    subtables: &[Subtable],
     glyphs: &mut Vec<SubGlyph>,
     i: usize,
     skip: Skipper<'_>,
@@ -1779,7 +1861,8 @@ fn apply_context(
     // position where a coverage matched.
     let mut rules = Vec::new();
     let mut records = Vec::new();
-    for &sub in subtables {
+    let here = glyphs.get(i)?.gid;
+    for sub in admitting(subtables, here) {
         // First subtable that matches wins, as everywhere else in a lookup.
         let Some(hit) = context_match(data, sub, glyphs, i, skip, &mut rules) else {
             continue;
@@ -1793,7 +1876,7 @@ fn apply_context(
 /// Apply a `ChainedSequenceContext` (type 6) lookup at one position.
 fn apply_chain_context(
     data: &[u8],
-    subtables: &[usize],
+    subtables: &[Subtable],
     glyphs: &mut Vec<SubGlyph>,
     i: usize,
     skip: Skipper<'_>,
@@ -1801,7 +1884,11 @@ fn apply_chain_context(
 ) -> Option<usize> {
     let mut rules = Vec::new();
     let mut records = Vec::new();
-    for &sub in subtables {
+    // The input coverage, not the backtrack's: `otl::subtable_coverage` skips
+    // past the backtrack array precisely so this filter means "could match
+    // here" rather than "could follow something here".
+    let here = glyphs.get(i)?.gid;
+    for sub in admitting(subtables, here) {
         let Some(hit) = chain_match(data, sub, glyphs, i, skip, &mut rules) else {
             continue;
         };
@@ -4298,5 +4385,145 @@ mod tests {
                 let _ = subst(short, &subs, &[5, 10, 11, 20]);
             }
         }
+    }
+
+    /// The single lookup of a table built from `subtables`, digests and all.
+    ///
+    /// Goes through the real parse rather than calling the digest builder
+    /// directly, because what is being checked is the *wiring*: that
+    /// `ByScript::parse` fills the fields in, from the coverage each subtable
+    /// actually names.
+    fn lookup_of(kind: u16, subtables: &[&[u8]]) -> Lookup {
+        let data = gsub_subtables(b"liga", kind, subtables);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None)
+            .expect("the fixture must parse");
+        subs.lookups
+            .all()
+            .first()
+            .expect("the fixture has one lookup")
+            .clone()
+    }
+
+    /// The lookup-level digest — the union over the subtables.
+    fn digest_of(kind: u16, subtables: &[&[u8]]) -> Digest {
+        lookup_of(kind, subtables).digest
+    }
+
+    /// 9000 is the far-away glyph these tests exclude with. It differs from 10
+    /// in all three of the digest's windows — bits 0-5, 4-9 and 9-14 — so an
+    /// assertion that it is excluded is testing the filter rather than a lucky
+    /// choice of id.
+    const FAR: u16 = 9000;
+
+    #[test]
+    fn a_single_substitutions_digest_is_its_coverage() {
+        let digest = digest_of(LOOKUP_SINGLE, &[&single_delta(&[10, 11, 12], 5)]);
+        for g in [10u16, 11, 12] {
+            assert!(digest.may_have(g), "glyph {g} is covered");
+        }
+        assert!(!digest.may_have(FAR));
+    }
+
+    #[test]
+    fn a_lookups_digest_unions_every_subtable() {
+        // A glyph either subtable covers has to survive the filter: the lookup
+        // is skipped as a whole, so summarising only the first subtable would
+        // lose the second's substitutions.
+        let near = single_list(&[10], &[42]);
+        let far = single_list(&[FAR], &[43]);
+        let digest = digest_of(LOOKUP_SINGLE, &[&near, &far]);
+        assert!(digest.may_have(10));
+        assert!(digest.may_have(FAR));
+    }
+
+    #[test]
+    fn a_contextual_digest_comes_from_the_first_input_coverage() {
+        // Format 3 is the one type whose coverage is not the second field. The
+        // digest has to name the coverage the *current position* is matched
+        // against — the first input — and not the second, or the run's first
+        // glyph would be filtered out against the wrong set.
+        let digest = digest_of(LOOKUP_CONTEXT, &[&context3(&[&[10], &[FAR]], &[(0, 0)])]);
+        assert!(digest.may_have(10));
+        assert!(!digest.may_have(FAR));
+    }
+
+    #[test]
+    fn a_chaining_digest_skips_the_backtrack() {
+        // The chained format 3 puts the backtrack coverages first, so reading
+        // the second field would summarise what must *precede* the match
+        // rather than what matches.
+        let sub = chain_context3(&[&[FAR]], &[&[10]], &[&[FAR]], &[(0, 0)]);
+        let digest = digest_of(LOOKUP_CHAIN_CONTEXT, &[&sub]);
+        assert!(digest.may_have(10));
+        assert!(!digest.may_have(FAR));
+    }
+
+    #[test]
+    fn an_unreadable_subtable_makes_the_digest_admit_everything() {
+        // A coverage that cannot be read is one nothing can be excluded from.
+        // Point the offset past the end of the table and the digest must widen
+        // to everything rather than narrow to the subtables it could read.
+        let mut broken = single_delta(&[10], 5);
+        broken[2..4].copy_from_slice(&be16(0xFFFF));
+        let digest = digest_of(LOOKUP_SINGLE, &[&broken, &single_list(&[10], &[42])]);
+        assert!(digest.may_have(FAR));
+        assert!(digest.may_have(10));
+    }
+
+    #[test]
+    fn each_subtable_keeps_its_own_digest() {
+        // The lookup-level digest is the union, so it cannot tell the two
+        // apart; the per-subtable ones must, or the second half of the skip
+        // buys nothing.
+        let lookup = lookup_of(
+            LOOKUP_SINGLE,
+            &[&single_list(&[10], &[42]), &single_list(&[FAR], &[43])],
+        );
+        let [near, far] = lookup.subtables.as_slice() else {
+            panic!("two subtables");
+        };
+        assert!(near.digest.may_have(10) && !near.digest.may_have(FAR));
+        assert!(far.digest.may_have(FAR) && !far.digest.may_have(10));
+    }
+
+    #[test]
+    fn a_glyph_only_the_second_subtable_covers_is_still_substituted() {
+        // The assertion that matters. A per-subtable filter is only safe if it
+        // never removes a subtable that would have matched, and the way to get
+        // that wrong is to check every subtable against the *first* one's
+        // coverage — which no test of the digests alone would catch, because
+        // the digests would still be right.
+        let data = gsub_subtables(
+            b"liga",
+            LOOKUP_SINGLE,
+            &[&single_list(&[10], &[42]), &single_list(&[FAR], &[43])],
+        );
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [42]);
+        assert_eq!(subst(&data, &subs, &[FAR]), [43]);
+        assert_eq!(subst(&data, &subs, &[10, FAR]), [42, 43]);
+    }
+
+    #[test]
+    fn an_unreadable_subtable_widens_only_itself() {
+        // Before the per-subtable digests one bad subtable made the whole
+        // lookup unfilterable. It still makes the *lookup's* digest full —
+        // that is the union, and it must stay conservative — but its readable
+        // neighbour keeps a digest narrow enough to be skipped on.
+        let mut broken = single_delta(&[10], 5);
+        broken[2..4].copy_from_slice(&be16(0xFFFF));
+        let lookup = lookup_of(LOOKUP_SINGLE, &[&broken, &single_list(&[10], &[42])]);
+        let [bad, good] = lookup.subtables.as_slice() else {
+            panic!("two subtables");
+        };
+        assert!(bad.digest.may_have(FAR), "an unreadable coverage excludes nothing");
+        assert!(!good.digest.may_have(FAR), "its neighbour is unaffected");
+        assert!(lookup.digest.may_have(FAR), "the union stays conservative");
+
+        // And the broken subtable is still *tried*: it is unreadable, not
+        // absent, so the good one answers only because the bad one declines.
+        let data = gsub_subtables(b"liga", LOOKUP_SINGLE, &[&broken, &single_list(&[10], &[42])]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [42]);
     }
 }

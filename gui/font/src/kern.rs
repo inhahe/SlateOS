@@ -272,7 +272,12 @@ fn parse_gpos(data: &[u8], span: Span) -> Option<Vec<Group>> {
     .map(|l| Group {
         flag: l.flag,
         filter: l.filter,
-        subtables: l.subtables,
+        // The digests are dropped rather than carried: kerning is asked about
+        // a *pair*, and a digest summarises the glyphs a subtable acts at —
+        // the left one only. Filtering on it would be sound but would answer
+        // half the question, and `GPOS` is not where shaping's cost is. See
+        // the note in `gpos.rs`'s `at`.
+        subtables: l.subtables.iter().map(|sub| sub.at).collect(),
     })
     .collect();
     (!out.is_empty()).then_some(out)

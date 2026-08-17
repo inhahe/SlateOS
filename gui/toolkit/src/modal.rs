@@ -18,6 +18,7 @@ use crate::event::{
 };
 use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
+use crate::text::TextCursor;
 
 // --- Catppuccin Mocha palette ---
 
@@ -892,7 +893,12 @@ pub struct InputDialog {
     message: String,
     placeholder: String,
     input_text: String,
-    cursor_pos: usize,
+    /// The caret: a byte offset *and* which side of a direction boundary it is
+    /// on. Not a bare offset — where a left-to-right stretch meets a
+    /// right-to-left one, a single offset names two different places on the
+    /// screen, and a caret rebuilt from the offset alone steps over a
+    /// right-to-left word rather than through it.
+    cursor: TextCursor,
     password_mode: bool,
     validation_error: Option<String>,
     /// Validation function stored as a flag; actual validation is done via `validate()`.
@@ -923,7 +929,7 @@ impl InputDialog {
             message: message.to_string(),
             placeholder: placeholder.to_string(),
             input_text: String::new(),
-            cursor_pos: 0,
+            cursor: TextCursor::default(),
             password_mode: false,
             validation_error: None,
             has_validator: false,
@@ -953,7 +959,7 @@ impl InputDialog {
     #[must_use]
     pub fn with_initial_text(mut self, text: &str) -> Self {
         self.input_text = text.to_string();
-        self.cursor_pos = text.len();
+        self.cursor = TextCursor::from(text.len());
         self
     }
 
@@ -983,7 +989,7 @@ impl InputDialog {
     /// Set the input text programmatically.
     pub fn set_input_text(&mut self, text: &str) {
         self.input_text = text.to_string();
-        self.cursor_pos = text.len();
+        self.cursor = TextCursor::from(text.len());
     }
 
     /// Set a validation error message (shown below the input field).
@@ -1063,62 +1069,53 @@ impl InputDialog {
             Key::Enter => {
                 self.try_accept();
             }
-            // `cursor_pos` is a *byte* offset: `String::insert` and
+            // The caret's offset is a *byte* offset: `String::insert` and
             // `String::remove` index by bytes, and both panic outright on an
-            // offset that is not a character boundary. Every move below is
+            // offset that is not a character boundary. Every edit below is
             // therefore by the width of a character in bytes rather than by
             // one — a one-byte step lands inside an `é` and the next edit takes
             // the dialog, and the process, down.
+            //
+            // Deleting is a *logical* edit and stays logical: backspace removes
+            // the character before this one in the string, which is what a
+            // reader of that script means, even where that character is drawn
+            // on the right. The arrows below are the opposite — they are about
+            // the screen — and that asymmetry is deliberate.
             Key::Backspace => {
                 if let Some(ch) = self
                     .input_text
-                    .get(..self.cursor_pos)
+                    .get(..self.cursor.byte())
                     .and_then(|before| before.chars().next_back())
                 {
-                    self.cursor_pos -= ch.len_utf8();
-                    self.input_text.remove(self.cursor_pos);
+                    let at = self.cursor.byte() - ch.len_utf8();
+                    self.input_text.remove(at);
+                    self.cursor = TextCursor::from(at);
                     self.validation_error = None;
                 }
             }
             Key::Delete => {
-                if self.cursor_pos < self.input_text.len() {
+                if self.cursor.byte() < self.input_text.len() {
                     // `remove` takes the whole character at the offset, so no
                     // width arithmetic is needed here — only the guard that the
                     // offset is inside the string.
-                    self.input_text.remove(self.cursor_pos);
+                    self.input_text.remove(self.cursor.byte());
                     self.validation_error = None;
                 }
             }
-            Key::Left => {
-                if let Some(ch) = self
-                    .input_text
-                    .get(..self.cursor_pos)
-                    .and_then(|before| before.chars().next_back())
-                {
-                    self.cursor_pos -= ch.len_utf8();
-                }
-            }
-            Key::Right => {
-                if let Some(ch) = self
-                    .input_text
-                    .get(self.cursor_pos..)
-                    .and_then(|after| after.chars().next())
-                {
-                    self.cursor_pos += ch.len_utf8();
-                }
-            }
+            Key::Left => self.move_caret(false),
+            Key::Right => self.move_caret(true),
             Key::Home => {
-                self.cursor_pos = 0;
+                self.cursor = TextCursor::default();
             }
             Key::End => {
-                self.cursor_pos = self.input_text.len();
+                self.cursor = TextCursor::from(self.input_text.len());
             }
             _ => {
                 if let Some(ch) = event.text
                     && !ch.is_control()
                 {
-                    self.input_text.insert(self.cursor_pos, ch);
-                    self.cursor_pos += ch.len_utf8();
+                    self.input_text.insert(self.cursor.byte(), ch);
+                    self.cursor = TextCursor::from(self.cursor.byte() + ch.len_utf8());
                     self.validation_error = None;
                 }
             }
@@ -1134,6 +1131,43 @@ impl InputDialog {
             return EventResult::Consumed;
         }
         EventResult::Consumed
+    }
+
+    /// Step the caret one character earlier or later **in the string**.
+    ///
+    /// On a line that mixes directions this is not one step left or right on
+    /// the *screen*: the caret jumps across a right-to-left word rather than
+    /// walking through it. That is deliberate. Logical motion is what macOS,
+    /// GTK and Qt do and Windows moves visually; both ship, and choosing
+    /// between them is a user-visible policy the operator has not yet decided
+    /// (`open-questions.md` → C-Q2).
+    ///
+    /// The visual alternative is built and tested — `text::caret_left` /
+    /// `caret_right`, and this dialog already stores the `TextCursor` they
+    /// need. Answering C-Q2 "visual" means calling those here for the
+    /// non-password case, and nothing else. **A password field would stay on
+    /// this path either way:** what it draws is a row of asterisks, so its
+    /// drawn order is its string order whatever was typed, and moving by the
+    /// layout of the hidden text would scatter the caret among identical marks
+    /// with nothing on screen to explain the jumps.
+    fn move_caret(&mut self, right: bool) {
+        let at = self.cursor.byte();
+        // By a whole character's width in bytes, never by one: `String::remove`
+        // and `insert` panic on an offset inside a character.
+        let stepped = if right {
+            self.input_text
+                .get(at..)
+                .and_then(|after| after.chars().next())
+                .map(|ch| at + ch.len_utf8())
+        } else {
+            self.input_text
+                .get(..at)
+                .and_then(|before| before.chars().next_back())
+                .map(|ch| at - ch.len_utf8())
+        };
+        if let Some(next) = stepped {
+            self.cursor = TextCursor::from(next);
+        }
     }
 
     /// Cycle focus between text field, OK, and Cancel.
@@ -2751,7 +2785,7 @@ mod tests {
     fn test_input_dialog_initial_text() {
         let dialog = InputDialog::prompt("Edit", "Edit value:", "").with_initial_text("hello");
         assert_eq!(dialog.input_text(), "hello");
-        assert_eq!(dialog.cursor_pos, 5);
+        assert_eq!(dialog.cursor.byte(), 5);
     }
 
     #[test]
@@ -2799,7 +2833,7 @@ mod tests {
     fn test_input_dialog_delete() {
         let mut dialog = InputDialog::prompt("Test", "Type:", "").with_initial_text("hello");
         dialog.show();
-        dialog.cursor_pos = 0;
+        dialog.cursor = TextCursor::default();
 
         let del = Event::Key(KeyEvent {
             key: Key::Delete,
@@ -2815,7 +2849,7 @@ mod tests {
     fn test_input_dialog_cursor_movement() {
         let mut dialog = InputDialog::prompt("Test", "Type:", "").with_initial_text("hello");
         dialog.show();
-        assert_eq!(dialog.cursor_pos, 5);
+        assert_eq!(dialog.cursor.byte(), 5);
 
         // Left.
         let left = Event::Key(KeyEvent {
@@ -2825,7 +2859,7 @@ mod tests {
             text: None,
         });
         dialog.handle_event(&left);
-        assert_eq!(dialog.cursor_pos, 4);
+        assert_eq!(dialog.cursor.byte(), 4);
 
         // Home.
         let home = Event::Key(KeyEvent {
@@ -2835,7 +2869,7 @@ mod tests {
             text: None,
         });
         dialog.handle_event(&home);
-        assert_eq!(dialog.cursor_pos, 0);
+        assert_eq!(dialog.cursor.byte(), 0);
 
         // End.
         let end = Event::Key(KeyEvent {
@@ -2845,7 +2879,7 @@ mod tests {
             text: None,
         });
         dialog.handle_event(&end);
-        assert_eq!(dialog.cursor_pos, 5);
+        assert_eq!(dialog.cursor.byte(), 5);
     }
 
     /// Typing a character that is more than one byte long, then editing around
@@ -2882,24 +2916,105 @@ mod tests {
         }
         assert_eq!(dialog.input_text(), "café");
         // Five bytes for four characters: the cursor counts bytes.
-        assert_eq!(dialog.cursor_pos, 5);
+        assert_eq!(dialog.cursor.byte(), 5);
 
         // Stepping over the two-byte `é` must land on its start, not inside it.
         dialog.handle_event(&pressed(Key::Left));
-        assert_eq!(dialog.cursor_pos, 3);
+        assert_eq!(dialog.cursor.byte(), 3);
         dialog.handle_event(&pressed(Key::Right));
-        assert_eq!(dialog.cursor_pos, 5);
+        assert_eq!(dialog.cursor.byte(), 5);
 
         // Backspace removes the whole character, not one of its two bytes.
         dialog.handle_event(&pressed(Key::Backspace));
         assert_eq!(dialog.input_text(), "caf");
-        assert_eq!(dialog.cursor_pos, 3);
+        assert_eq!(dialog.cursor.byte(), 3);
 
         // Delete from before a multi-byte character takes all of it.
         dialog.handle_event(&typed('é'));
         dialog.handle_event(&pressed(Key::Left));
         dialog.handle_event(&pressed(Key::Delete));
         assert_eq!(dialog.input_text(), "caf");
+    }
+
+    fn key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        })
+    }
+
+    /// The arrows move **logically** — one character earlier or later in the
+    /// string — so on `ab` + two Hebrew letters + `cd`, drawn
+    /// `a b <bet> <aleph> c d`, walking left from the end visits the byte
+    /// offsets 7, 6, 4, 2, 1, 0 and the caret jumps sideways across the Hebrew
+    /// rather than stepping through it.
+    ///
+    /// **This pins a policy, not a truth.** Logical is macOS/GTK/Qt; Windows
+    /// moves visually; the choice is `open-questions.md` → C-Q2 and is
+    /// unanswered. If it answers "visual" this expectation becomes
+    /// 7, 6, 4, 6, 1, 0. Do not change it to match without that answer.
+    #[test]
+    fn the_arrows_move_by_the_string_pending_c_q2() {
+        let text = "ab\u{05D0}\u{05D1}cd";
+        let mut dialog = InputDialog::prompt("Test", "Path:", "").with_initial_text(text);
+        dialog.show();
+        let mut seen = vec![];
+        for _ in 0..6 {
+            dialog.handle_event(&key(Key::Left));
+            seen.push(dialog.cursor.byte());
+        }
+        assert_eq!(seen, vec![7, 6, 4, 2, 1, 0]);
+        let mut seen = vec![];
+        for _ in 0..6 {
+            dialog.handle_event(&key(Key::Right));
+            seen.push(dialog.cursor.byte());
+        }
+        assert_eq!(seen, vec![1, 2, 4, 6, 7, 8]);
+        // Past the end it stays put rather than wrapping.
+        dialog.handle_event(&key(Key::Right));
+        assert_eq!(dialog.cursor.byte(), text.len());
+    }
+
+    /// A password field would keep stepping logically **even if C-Q2 answers
+    /// "visual"**, so this is the one place the answer is already known. What
+    /// it draws is a row of asterisks: its drawn order is its string order
+    /// whatever was typed, and moving by the layout of the hidden text would
+    /// scatter the caret among identical marks with nothing on screen to
+    /// explain the jumps — and would leak the shape of the secret besides.
+    #[test]
+    fn a_password_field_would_step_through_its_mask_not_its_secret() {
+        let text = "ab\u{05D0}\u{05D1}cd";
+        let mut hidden = InputDialog::prompt("Test", "Password:", "")
+            .with_password_mode(true)
+            .with_initial_text(text);
+        hidden.show();
+        let mut seen = vec![];
+        for _ in 0..6 {
+            hidden.handle_event(&key(Key::Left));
+            seen.push(hidden.cursor.byte());
+        }
+        assert_eq!(
+            seen,
+            vec![7, 6, 4, 2, 1, 0],
+            "asterisks are crossed in string order"
+        );
+        // What the *visual* walk would have done with the same text, for the
+        // contrast: it enters the Hebrew from the other end. This is the
+        // sequence a password field must not adopt.
+        let mut visual = vec![];
+        let mut at = crate::text::TextCursor::from(text.len());
+        for _ in 0..6 {
+            let Some(next) =
+                crate::text::caret_left(text, at, FONT_SIZE, FontWeightHint::Regular)
+            else {
+                break;
+            };
+            visual.push(next.byte());
+            at = next;
+        }
+        assert_eq!(visual, vec![7, 6, 4, 6, 1, 0]);
     }
 
     #[test]

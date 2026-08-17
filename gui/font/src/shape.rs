@@ -212,6 +212,48 @@ pub struct Hit {
     pub affinity: Affinity,
 }
 
+/// One cluster as the screen sees it: where it is drawn, and the caret that
+/// belongs at each of its two edges.
+///
+/// Built only by [`ShapedRun::visual_clusters`], which is the whole of what
+/// visual-order caret motion needs — the sequence of clusters left to right,
+/// and for each of them the byte position a caret arriving at either edge
+/// should report. Keeping the two edges as [`Hit`]s rather than as a
+/// direction flag plus a byte range is deliberate: the swap that
+/// right-to-left text performs happens once, here, instead of at every place
+/// that asks which edge it is looking at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisualCluster {
+    /// The leftmost drawn slot any of the cluster's glyphs occupies. Orders
+    /// the clusters across the screen; not otherwise used.
+    leftmost: usize,
+    /// The caret at the cluster's left edge on the screen.
+    left: Hit,
+    /// The caret at its right edge.
+    right: Hit,
+}
+
+impl VisualCluster {
+    /// Is this cluster read right to left? Recovered from the edges rather
+    /// than stored again: a left-to-right cluster's left edge is the boundary
+    /// *before* its first character, which is the `Downstream` one, and a
+    /// right-to-left cluster's left edge is the boundary after its last.
+    const fn is_rtl(self) -> bool {
+        matches!(self.left.affinity, Affinity::Upstream)
+    }
+
+    /// The source bytes the cluster covers, `start..next`, in logical terms —
+    /// which is the `Downstream` edge's offset and the `Upstream` edge's,
+    /// whichever way round they are drawn.
+    const fn byte_range(self) -> (usize, usize) {
+        if self.is_rtl() {
+            (self.right.offset, self.left.offset)
+        } else {
+            (self.left.offset, self.right.offset)
+        }
+    }
+}
+
 /// The glyphs a string turns into, ready to draw.
 ///
 /// The glyphs are in **logical** order — the order the characters were typed
@@ -625,6 +667,150 @@ impl ShapedRun {
         // Past the last character: the far end of the run as *read*, which for
         // a run that ends in right-to-left text is not its right edge.
         previous.map_or(0.0, |(from, upto)| self.trailing_edge(from, upto))
+    }
+
+    /// The caret one cluster to the **left on the screen** of `from`, or
+    /// `None` when there is nothing further left in this run.
+    ///
+    /// `end` is the source string's length.
+    ///
+    /// This is what the left arrow key means. It is not "the previous byte
+    /// offset", and on bidirectional text the two are different journeys: in
+    /// `ab` + a right-to-left `HR` + `cd`, drawn `a b R H c d`, pressing left
+    /// from the far right visits the offsets 5, 4, 2, 3, 1, 0 — the two in the
+    /// middle *increase* as the caret moves left, because that stretch is read
+    /// the other way. A cursor stepped by `offset - 1` walks 5, 4, 3, 2, 1, 0
+    /// instead, which puts the caret at the far side of the right-to-left word
+    /// on the first press and back again on the second: it jumps across the
+    /// screen rather than stepping across it.
+    ///
+    /// See [`caret_right`](Self::caret_right) for the mirror, and
+    /// [`Affinity`] for why the answer is a [`Hit`] and not an offset: the
+    /// caret arriving from the right at a direction boundary and the caret
+    /// arriving from the left name the same byte and two different pixels, and
+    /// a caller that kept only the byte would draw the next press at the wrong
+    /// end and then step the wrong way from it.
+    #[must_use]
+    pub fn caret_left(&self, from: Hit, end: usize) -> Option<Hit> {
+        let clusters = self.visual_clusters(end);
+        let slot = Self::slot_of_caret(&clusters, from)?;
+        // Moving left crosses the cluster to the left of the caret, and lands
+        // on that cluster's *left* edge — which is its leading edge if it is
+        // read left to right and its trailing edge if it is not.
+        clusters.get(slot.checked_sub(1)?).map(|c| c.left)
+    }
+
+    /// The caret one cluster to the **right on the screen** of `from`, or
+    /// `None` when there is nothing further right in this run.
+    ///
+    /// `end` is the source string's length. The mirror of
+    /// [`caret_left`](Self::caret_left); see it for why this is not
+    /// `offset + 1`.
+    #[must_use]
+    pub fn caret_right(&self, from: Hit, end: usize) -> Option<Hit> {
+        let clusters = self.visual_clusters(end);
+        let slot = Self::slot_of_caret(&clusters, from)?;
+        clusters.get(slot).map(|c| c.right)
+    }
+
+    /// The run's clusters in the order they are drawn, each carrying the caret
+    /// that belongs at its left edge and the one that belongs at its right.
+    ///
+    /// The two are the cluster's leading and trailing boundaries, swapped when
+    /// it is read right to left — the same mapping [`offset_at`](Self::offset_at)
+    /// makes when it decides which half of a glyph a click landed in, and it
+    /// has to be the same one or a click and an arrow key would disagree about
+    /// where the caret is.
+    fn visual_clusters(&self, end: usize) -> alloc::vec::Vec<VisualCluster> {
+        // Logical index -> drawn slot, built once. `slot_of` answers the same
+        // question by searching, which would make this walk quadratic in the
+        // length of the line for no reason: the permutation is a permutation,
+        // so inverting it costs one pass.
+        let n = self.glyphs.len();
+        let mut slot = alloc::vec![0usize; n];
+        if self.visual.is_empty() {
+            for (i, s) in slot.iter_mut().enumerate() {
+                *s = i;
+            }
+        } else {
+            for (s, &v) in self.visual.iter().enumerate() {
+                if let Some(cell) = usize::try_from(v).ok().and_then(|v| slot.get_mut(v)) {
+                    *cell = s;
+                }
+            }
+        }
+        let mut out = alloc::vec::Vec::new();
+        let mut i = 0usize;
+        while i < n {
+            let to = self.group_end(i);
+            let start = self.glyphs.get(i).map_or(end, |g| g.cluster);
+            let next = self.glyphs.get(to).map_or(end, |g| g.cluster);
+            let leading = Hit {
+                offset: start,
+                affinity: Affinity::Downstream,
+            };
+            let trailing = Hit {
+                offset: next,
+                affinity: Affinity::Upstream,
+            };
+            let rtl = self.is_rtl(i);
+            // A cluster occupies consecutive slots whichever way it is drawn —
+            // rule L2 reverses whole level runs and a cluster lies inside one —
+            // so its leftmost slot orders it against every other cluster.
+            let leftmost = (i..to).filter_map(|j| slot.get(j).copied()).min().unwrap_or(0);
+            out.push(VisualCluster {
+                leftmost,
+                left: if rtl { trailing } else { leading },
+                right: if rtl { leading } else { trailing },
+            });
+            i = to;
+        }
+        out.sort_by_key(|c| c.leftmost);
+        out
+    }
+
+    /// Which gap between drawn clusters the caret `at` sits in: `0` is left of
+    /// everything, `clusters.len()` is right of everything.
+    ///
+    /// A gap has two names whenever the clusters either side of it are read in
+    /// different directions — the right edge of the one and the left edge of
+    /// the other are the same pixels and different bytes — and the affinity is
+    /// what picks between them. So the exact `(offset, affinity)` is tried
+    /// first, and only then the offset alone.
+    fn slot_of_caret(clusters: &[VisualCluster], at: Hit) -> Option<usize> {
+        let exact = clusters
+            .iter()
+            .position(|c| c.left == at)
+            .or_else(|| clusters.iter().position(|c| c.right == at).map(|k| k.saturating_add(1)));
+        if let Some(slot) = exact {
+            return Some(slot);
+        }
+        // The offset alone. This is the caller that has never had an affinity
+        // to give — a cursor freshly built from a byte index — and the caller
+        // sitting at the end of the text, where `Downstream` names a character
+        // that does not exist and only the `Upstream` reading is real.
+        let loose = clusters
+            .iter()
+            .position(|c| c.left.offset == at.offset)
+            .or_else(|| {
+                clusters
+                    .iter()
+                    .position(|c| c.right.offset == at.offset)
+                    .map(|k| k.saturating_add(1))
+            });
+        if let Some(slot) = loose {
+            return Some(slot);
+        }
+        // Not a boundary at all: an offset inside a ligature, which has no
+        // interior the caret can occupy. Snap to where `x_of` would draw it —
+        // the start of the glyph that swallowed the character — so that the
+        // arrow key moves from the position the user can see rather than from
+        // one nothing ever drew.
+        clusters.iter().enumerate().find_map(|(k, c)| {
+            let (start, next) = c.byte_range();
+            (start < at.offset && at.offset < next)
+                .then(|| if c.is_rtl() { k.saturating_add(1) } else { k })
+        })
     }
 
     /// The boxes to paint to highlight the source bytes `from..to`, as
@@ -1142,6 +1328,179 @@ mod tests {
         assert!((r.x_of(1, 3, Affinity::Downstream) - 20.0).abs() < f32::EPSILON);
         assert!((r.x_of(2, 3, Affinity::Downstream) - 20.0).abs() < f32::EPSILON);
         assert!((r.x_of(2, 3, Affinity::Upstream) - 10.0).abs() < f32::EPSILON);
+    }
+
+    /// Walk a caret to one side until it runs out, collecting where it stops.
+    fn walk(r: &ShapedRun, from: Hit, end: usize, right: bool) -> Vec<(usize, Affinity, f32)> {
+        let mut out = Vec::new();
+        let mut at = from;
+        // Bounded rather than `loop`: a bug that made motion cyclic would
+        // otherwise hang the test suite instead of failing it.
+        for _ in 0..64 {
+            let Some(next) = (if right {
+                r.caret_right(at, end)
+            } else {
+                r.caret_left(at, end)
+            }) else {
+                return out;
+            };
+            out.push((next.offset, next.affinity, r.x_of(next.offset, end, next.affinity)));
+            at = next;
+        }
+        panic!("caret motion did not terminate: {out:?}");
+    }
+
+    /// Every stop was drawn where it was supposed to be. Separate from the
+    /// offsets so that a failure says which of the two went wrong: a walk with
+    /// the right bytes and the wrong pixels is a different bug from a walk
+    /// with the wrong bytes.
+    fn assert_xs(stops: &[(usize, Affinity, f32)], want: &[f32]) {
+        let got: Vec<f32> = stops.iter().map(|s| s.2).collect();
+        let same = got.len() == want.len()
+            && got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.001);
+        assert!(same, "drawn at {got:?}, want {want:?} (stops {stops:?})");
+    }
+
+    /// The bug this whole pair of methods exists for. `ab` + a right-to-left
+    /// `HR` + `cd` is drawn `abRHcd`; pressing the right arrow from the left
+    /// edge must walk the caret across the screen in even 10 px steps, and the
+    /// byte offsets it passes through are *not* sorted — 0, 1, 2, 3, 2, 5, 6.
+    /// A cursor stepped by `offset + 1` would visit 1, 2, 3, 4, 5, 6 and draw
+    /// itself at 10, 20, 30, 20, 40, 50: two of those go backwards.
+    #[test]
+    fn the_right_arrow_steps_right_across_the_screen() {
+        let r = bidi_run();
+        let start = Hit { offset: 0, affinity: Affinity::Downstream };
+        let stops = walk(&r, start, 6, true);
+        let offsets: Vec<usize> = stops.iter().map(|s| s.0).collect();
+        assert_eq!(offsets, alloc::vec![1, 2, 3, 2, 5, 6], "{stops:?}");
+        assert_xs(&stops, &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+    }
+
+    /// The mirror. The offsets are *not* the rightward walk reversed, and that
+    /// is not a bug: at a direction boundary two byte offsets share one pixel,
+    /// and each direction names the boundary by the character it has just
+    /// crossed. What must match — and does — is the sequence of positions.
+    #[test]
+    fn the_left_arrow_steps_left_across_the_screen() {
+        let r = bidi_run();
+        let start = Hit { offset: 6, affinity: Affinity::Upstream };
+        let stops = walk(&r, start, 6, false);
+        let offsets: Vec<usize> = stops.iter().map(|s| s.0).collect();
+        assert_eq!(offsets, alloc::vec![5, 4, 3, 4, 1, 0], "{stops:?}");
+        assert_xs(&stops, &[50.0, 40.0, 30.0, 20.0, 10.0, 0.0]);
+    }
+
+    /// Right then left returns the caret to the pixel it started at, every
+    /// time. The *offset* may come back as the other of the boundary's two
+    /// names — that is inherent, since the two are one place on the screen —
+    /// so the invariant is stated in pixels, which is where the user is
+    /// looking.
+    #[test]
+    fn a_step_and_its_reverse_return_to_the_same_place() {
+        let r = bidi_run();
+        let mut at = Hit { offset: 0, affinity: Affinity::Downstream };
+        while let Some(next) = r.caret_right(at, 6) {
+            let there = r.x_of(next.offset, 6, next.affinity);
+            let back = r.caret_left(next, 6).expect("something was crossed to get here");
+            let here = r.x_of(at.offset, 6, at.affinity);
+            let returned = r.x_of(back.offset, 6, back.affinity);
+            assert!(
+                (returned - here).abs() < 0.001,
+                "right to {there} then left landed at {returned}, want {here}"
+            );
+            at = next;
+        }
+    }
+
+    /// The run's two ends are the two ends. Nothing to the left of the left
+    /// edge, nothing to the right of the right one — and `None` rather than a
+    /// caret that stays put, so a widget can hand the keystroke to whatever
+    /// owns the line above or below instead of swallowing it.
+    #[test]
+    fn motion_stops_at_the_edges_and_says_so() {
+        let r = bidi_run();
+        let left_edge = Hit { offset: 0, affinity: Affinity::Downstream };
+        assert_eq!(r.caret_left(left_edge, 6), None);
+        let right_edge = Hit { offset: 6, affinity: Affinity::Upstream };
+        assert_eq!(r.caret_right(right_edge, 6), None);
+        // An empty run has no clusters, so neither direction goes anywhere.
+        let empty = ShapedRun::new(alloc::vec![]);
+        assert_eq!(empty.caret_right(left_edge, 0), None);
+        assert_eq!(empty.caret_left(left_edge, 0), None);
+    }
+
+    /// A cursor that has never carried an affinity — one built from a byte
+    /// index, which is every cursor in the toolkit until it is told otherwise
+    /// — still moves. At the end of the text `Downstream` names a character
+    /// that does not exist, so only the `Upstream` reading is real, and the
+    /// query has to fall back to it rather than refusing.
+    #[test]
+    fn a_cursor_with_only_a_byte_offset_still_moves() {
+        let r = bidi_run();
+        let end = Hit { offset: 6, affinity: Affinity::Downstream };
+        assert_eq!(r.caret_left(end, 6), Some(Hit { offset: 5, affinity: Affinity::Downstream }));
+        assert_eq!(r.caret_right(end, 6), None);
+    }
+
+    /// On text that runs one way, this is simply "the next character" — the
+    /// property that keeps the arrow keys unsurprising for the overwhelming
+    /// majority of text, and the one a bidi-aware implementation is most
+    /// likely to break.
+    #[test]
+    fn motion_on_one_direction_text_is_the_next_character() {
+        let r = run(4);
+        let mut at = Hit { offset: 0, affinity: Affinity::Downstream };
+        for want in 1..=4 {
+            at = r.caret_right(at, 4).expect("four characters, four steps");
+            assert_eq!(at.offset, want);
+        }
+        assert_eq!(r.caret_right(at, 4), None);
+        for want in (0..4).rev() {
+            at = r.caret_left(at, 4).expect("and four steps back");
+            assert_eq!(at.offset, want);
+        }
+        assert_eq!(r.caret_left(at, 4), None);
+    }
+
+    /// A ligature has no interior a caret can occupy, so motion crosses it
+    /// whole — and a cursor that somehow *is* inside one steps out of it
+    /// rather than refusing to move. `x_of` already draws such a cursor at
+    /// the ligature's start; motion has to begin from the same place, or the
+    /// caret would jump on the first keypress.
+    #[test]
+    fn a_ligature_is_crossed_whole() {
+        // "office": o, ffi (one glyph, three chars), c, e.
+        let r = ShapedRun::new(alloc::vec![
+            ShapedGlyph { key: GlyphKey::bitmap('o'), cluster: 0, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('\u{FB03}'), cluster: 1, advance: 20.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('c'), cluster: 4, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('e'), cluster: 5, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+        ]);
+        let at = Hit { offset: 1, affinity: Affinity::Downstream };
+        // One press crosses all three characters of the `ffi`.
+        assert_eq!(r.caret_right(at, 6).map(|h| h.offset), Some(4));
+        // From byte 2 — inside the ligature — the next stop is the same one,
+        // because that cursor is drawn at byte 1 and moving is relative to
+        // where it is drawn.
+        let inside = Hit { offset: 2, affinity: Affinity::Downstream };
+        assert_eq!(r.caret_right(inside, 6).map(|h| h.offset), Some(4));
+        assert_eq!(r.caret_left(inside, 6).map(|h| h.offset), Some(0));
+    }
+
+    /// A lone right-to-left letter between two Latin words: the permutation is
+    /// the identity, so an implementation that read the permutation and not the
+    /// levels would see nothing to do here and step straight through. The
+    /// caret still has to face the other way while it crosses the letter.
+    #[test]
+    fn a_lone_right_to_left_letter_is_still_crossed_backwards() {
+        let r = ShapedRun::reordered(spelled("aHb"), vec![0, 1, 2], vec![0, 1, 0]);
+        let stops = walk(&r, Hit { offset: 0, affinity: Affinity::Downstream }, 3, true);
+        let offsets: Vec<usize> = stops.iter().map(|s| s.0).collect();
+        // Crossing `H` rightwards lands *before* it — byte 1 — because that is
+        // the edge of it that faces right.
+        assert_eq!(offsets, alloc::vec![1, 1, 3], "{stops:?}");
+        assert_xs(&stops, &[10.0, 20.0, 30.0]);
     }
 
     /// `(left, width)` pairs compared at a tolerance. Spelled as an assertion

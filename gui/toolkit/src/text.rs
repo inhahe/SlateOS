@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use osfont::select::Query;
 pub use osfont::shape::Affinity;
+use osfont::shape::Hit;
 use osfont::system::{Family, FontCache, Weight};
 
 use crate::color::Color;
@@ -927,6 +928,92 @@ pub fn cursor_at_in(
     }
 }
 
+/// The cursor one step to the left of `at` on the *screen*, or `None` when
+/// there is nothing further left — the caller's cue to leave the field, wrap to
+/// the previous line, or do nothing.
+///
+/// This is what the left arrow key means, and it is not `byte - 1`. Byte order
+/// is the order the text is stored in; the arrow key is about the order it is
+/// drawn in, and the two part company the moment a line mixes directions. In
+/// `ab` followed by a right-to-left `HR` followed by `cd` — drawn `a b R H c d`
+/// — pressing left from the end visits the offsets 5, 4, 2, 3, 1, 0. The pair
+/// in the middle *increases* while the caret moves left, because crossing `R`
+/// leftward moves later in the string. Decrementing the offset instead walks 5,
+/// 4, 3, 2, 1, 0, which lands the caret on the far side of the right-to-left
+/// word on the first press and back on the second: it teleports rather than
+/// steps.
+///
+/// The returned affinity is not decoration. Where two directions meet, one gap
+/// on the screen has two byte offsets, and only the affinity says which of them
+/// this caret is. Store the whole cursor, not its `byte()`, or the next
+/// [`caret_x`] will draw it at the other end of the run.
+pub fn caret_left(
+    text: &str,
+    at: TextCursor,
+    size: f32,
+    weight: FontWeightHint,
+) -> Option<TextCursor> {
+    caret_left_in(text, at, size, weight, FontFamily::Ui)
+}
+
+/// The family-aware form of [`caret_left`].
+pub fn caret_left_in(
+    text: &str,
+    at: TextCursor,
+    size: f32,
+    weight: FontWeightHint,
+    family: FontFamily,
+) -> Option<TextCursor> {
+    with_font(size, weight, family, |font| {
+        font.shape(text).caret_left(
+            Hit {
+                offset: at.byte,
+                affinity: at.affinity,
+            },
+            text.len(),
+        )
+    })
+    .map(|hit| TextCursor {
+        byte: hit.offset,
+        affinity: hit.affinity,
+    })
+}
+
+/// The cursor one step to the right of `at` on the screen, or `None` at the
+/// right end. The mirror of [`caret_left`]; see it for why this is not
+/// `byte + 1`.
+pub fn caret_right(
+    text: &str,
+    at: TextCursor,
+    size: f32,
+    weight: FontWeightHint,
+) -> Option<TextCursor> {
+    caret_right_in(text, at, size, weight, FontFamily::Ui)
+}
+
+/// The family-aware form of [`caret_right`].
+pub fn caret_right_in(
+    text: &str,
+    at: TextCursor,
+    size: f32,
+    weight: FontWeightHint,
+    family: FontFamily,
+) -> Option<TextCursor> {
+    with_font(size, weight, family, |font| {
+        font.shape(text).caret_right(
+            Hit {
+                offset: at.byte,
+                affinity: at.affinity,
+            },
+            text.len(),
+        )
+    })
+    .map(|hit| TextCursor {
+        byte: hit.offset,
+        affinity: hit.affinity,
+    })
+}
+
 /// The character index in `text` nearest to `offset` pixels from its start.
 ///
 /// This is what a click on a line of text means: the caret goes to the closest
@@ -953,6 +1040,173 @@ pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint)
     });
     text.get(..at)
         .map_or_else(|| text.chars().count(), |prefix| prefix.chars().count())
+}
+
+/// Cost of shaping, measured rather than guessed.
+///
+/// `apps/editor` scrolls sideways by slicing each line at a byte offset and
+/// shaping only the tail. That is incompatible with bidirectional text — the
+/// visible part of a mixed-direction line is not the shaping of a substring of
+/// it — and the replacement is to shape the whole line and clip. Whether that
+/// is affordable is a question about *this* function's cost as a function of
+/// line length, and `known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL` asked
+/// for a measurement before the choice was made. This module is that
+/// measurement, kept in the tree so the number can be re-taken on other
+/// hardware rather than believed on this one.
+///
+/// The tests are `#[ignore]`d: they are instruments, not assertions, and
+/// timings on a loaded CI box would be noise. Run them deliberately:
+///
+/// ```text
+/// cargo test --release -p guitk --lib shaping_cost -- --ignored --nocapture --test-threads=1
+/// ```
+///
+/// `--release` and `--test-threads=1` are both required for the numbers to
+/// mean anything: a debug build measures the absence of inlining, and two of
+/// these tests in parallel contend on the toolkit's global font-cache mutex.
+#[cfg(test)]
+mod shaping_cost {
+    use super::*;
+    use std::time::Instant;
+
+    const SIZE: f32 = 14.0;
+
+    /// A minified-JavaScript-ish line: no spaces to break on, mixed character
+    /// classes, the shape of the worst line a code editor actually meets.
+    fn pathological(chars: usize) -> String {
+        const CYCLE: &str = "a1(){};=>[]\"x\",";
+        CYCLE.chars().cycle().take(chars).collect()
+    }
+
+    /// Median of `runs` shapings, in microseconds.
+    ///
+    /// Median rather than mean because a scheduler preemption in one iteration
+    /// would otherwise decide the answer.
+    ///
+    /// The font is fetched **once**, outside the timed loop. `with_font` takes
+    /// a global mutex and a cache lookup per call, and measuring that here
+    /// would answer a different question than the one asked — and, because the
+    /// mutex is shared, would let two tests running concurrently contend and
+    /// inflate each other. (That is not hypothetical: the first run of this
+    /// instrument reported 4.5ms to shape 80 characters, which was two tests
+    /// fighting over the lock, not shaping.) These tests must run with
+    /// `--test-threads=1` regardless; see the module doc.
+    fn shape_us(text: &str, runs: usize) -> f64 {
+        with_font(SIZE, FontWeightHint::Regular, FontFamily::Mono, |font| {
+            // One warm-up outside the samples: the first shaping of a size
+            // populates per-glyph caches inside the face, and charging that to
+            // the first sample would overstate every short-line figure.
+            let _ = font.shape(text);
+            let mut samples: Vec<f64> = (0..runs)
+                .map(|_| {
+                    let t = Instant::now();
+                    let run = font.shape(text);
+                    let elapsed = t.elapsed().as_secs_f64() * 1e6;
+                    // Keep the result observable so the shaping cannot be
+                    // optimised away as dead.
+                    assert!(run.width() >= 0.0);
+                    elapsed
+                })
+                .collect();
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        })
+    }
+
+    /// The same measurement against the built-in bitmap face, which has no
+    /// layout tables at all — one glyph per character, no `GSUB`, no kerning.
+    /// It is the floor: whatever it costs is the cost of the shaping pipeline's
+    /// bookkeeping alone, and the gap between it and the system face is what
+    /// the layout tables are charging.
+    fn shape_builtin_us(text: &str, runs: usize) -> f64 {
+        let font = osfont::system::SystemFont::builtin(SIZE);
+        let _ = font.shape(text);
+        let mut samples: Vec<f64> = (0..runs)
+            .map(|_| {
+                let t = Instant::now();
+                let run = font.shape(text);
+                let elapsed = t.elapsed().as_secs_f64() * 1e6;
+                assert!(run.width() >= 0.0);
+                elapsed
+            })
+            .collect();
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    }
+
+    /// What one `with_font` costs on its own — the mutex plus the cache lookup
+    /// that every `measure`/`shape` call in the toolkit pays before it shapes
+    /// anything. Reported alongside the shaping figures because if it is
+    /// comparable to shaping a short line, then *it*, and not shaping, is what
+    /// a renderer doing one call per syntax token should worry about.
+    fn font_lookup_us(runs: usize) -> f64 {
+        let mut samples: Vec<f64> = (0..runs)
+            .map(|_| {
+                let t = Instant::now();
+                let w = with_font(SIZE, FontWeightHint::Regular, FontFamily::Mono, |font| {
+                    font.metrics().line_height
+                });
+                let elapsed = t.elapsed().as_secs_f64() * 1e6;
+                assert!(w > 0.0);
+                elapsed
+            })
+            .collect();
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    }
+
+    /// What it costs to shape one line, from a screenful to absurd.
+    ///
+    /// The editor's question is not "what does one line cost" but "what does a
+    /// *screen* cost", so the report converts: a full-height window shows
+    /// roughly 50 lines, and a 60Hz frame is 16.7ms.
+    #[test]
+    #[ignore = "timing instrument, not an assertion; see the module doc"]
+    fn shaping_cost_by_line_length() {
+        const LINES_ON_SCREEN: f64 = 50.0;
+        const FRAME_BUDGET_US: f64 = 16_700.0;
+
+        println!("\none with_font(): {:.3}us", font_lookup_us(2001));
+        println!(
+            "\n{:>9}  {:>12}  {:>12}  {:>14}  {:>9}",
+            "chars", "shape (us)", "builtin", "50 lines (ms)", "of frame"
+        );
+        for chars in [80usize, 200, 1_000, 5_000, 20_000] {
+            let text = pathological(chars);
+            // Fewer runs at the big sizes: the point is the shape of the curve,
+            // and a 20k-char shaping repeated 200 times is minutes of nothing.
+            let runs = if chars <= 1_000 { 201 } else { 21 };
+            let us = shape_us(&text, runs);
+            let builtin = shape_builtin_us(&text, runs);
+            let screen_ms = us * LINES_ON_SCREEN / 1000.0;
+            println!(
+                "{chars:>9}  {us:>12.1}  {builtin:>12.1}  {screen_ms:>14.2}  {:>8.1}%",
+                us * LINES_ON_SCREEN / FRAME_BUDGET_US * 100.0
+            );
+        }
+        println!(
+            "\n(a frame is {FRAME_BUDGET_US:.0}us at 60Hz; {LINES_ON_SCREEN:.0} lines assumed \
+             visible)"
+        );
+    }
+
+    /// The comparison that actually decides the design: shaping the whole line
+    /// every frame, against shaping only the ~200 characters that fit on
+    /// screen — which is what the byte-slicing buys today.
+    #[test]
+    #[ignore = "timing instrument, not an assertion; see the module doc"]
+    fn whole_line_against_visible_window() {
+        const VISIBLE: usize = 200;
+        println!("\n{:>9}  {:>12}  {:>12}  {:>8}", "chars", "whole", "visible", "ratio");
+        for chars in [200usize, 1_000, 5_000, 20_000] {
+            let whole = pathological(chars);
+            let window = pathological(VISIBLE.min(chars));
+            let runs = if chars <= 1_000 { 201 } else { 21 };
+            let w = shape_us(&whole, runs);
+            let v = shape_us(&window, runs);
+            println!("{chars:>9}  {w:>12.1}  {v:>12.1}  {:>7.1}x", w / v);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1189,6 +1443,192 @@ mod tests {
             );
             offset += 1.0;
         }
+    }
+
+    /// `ab` + two Hebrew letters + `cd`. The Hebrew runs the other way, so it
+    /// is drawn `a b <bet> <aleph> c d` — the two middle letters swap. The byte
+    /// offsets are `a`=0, `b`=1, aleph=2..4, bet=4..6, `c`=6, `d`=7, end 8.
+    ///
+    /// Nothing here depends on the host owning a Hebrew font: the direction is
+    /// a property of the characters, decided before a glyph is chosen, so a
+    /// machine that draws these as blank boxes still draws them in this order.
+    const MIXED: &str = "ab\u{05D0}\u{05D1}cd";
+
+    /// Walk the caret with the arrow key until it runs out, collecting where it
+    /// stopped and what it was drawn at. Bounded so a motion that fails to
+    /// terminate fails the test rather than the machine.
+    fn walk(text: &str, from: TextCursor, right: bool) -> Vec<(usize, f32)> {
+        let mut out = Vec::new();
+        let mut at = from;
+        for _ in 0..64 {
+            let step = if right {
+                caret_right(text, at, 16.0, FontWeightHint::Regular)
+            } else {
+                caret_left(text, at, 16.0, FontWeightHint::Regular)
+            };
+            let Some(next) = step else { return out };
+            out.push((
+                next.byte,
+                caret_x(text, next, 16.0, FontWeightHint::Regular),
+            ));
+            at = next;
+        }
+        panic!("caret motion did not terminate on {text:?}");
+    }
+
+    /// The bug this exists to fix, stated as the user sees it: pressing the
+    /// right arrow moves the caret rightwards *on the screen*, every press,
+    /// including across the direction boundary where the byte offsets go
+    /// backwards.
+    #[test]
+    fn the_right_arrow_always_moves_the_caret_rightwards() {
+        let stops = walk(MIXED, TextCursor::from(0), true);
+        assert_eq!(
+            stops.iter().map(|&(b, _)| b).collect::<Vec<_>>(),
+            vec![1, 2, 4, 2, 7, 8],
+            "the offsets the right arrow visits"
+        );
+        // 4 then 2: the offset *decreases* while the caret moves right. This is
+        // the assertion an `offset + 1` cursor cannot satisfy, and the reason
+        // the whole visual-order walk exists.
+        for pair in stops.windows(2) {
+            assert!(
+                pair[1].1 > pair[0].1,
+                "the right arrow moved leftwards: {stops:?}"
+            );
+        }
+    }
+
+    /// The mirror. Note the start: a caller holding only the text length has no
+    /// affinity to offer, and must still be able to walk back from the end.
+    #[test]
+    fn the_left_arrow_always_moves_the_caret_leftwards() {
+        let stops = walk(MIXED, TextCursor::from(MIXED.len()), false);
+        assert_eq!(
+            stops.iter().map(|&(b, _)| b).collect::<Vec<_>>(),
+            vec![7, 6, 4, 6, 1, 0],
+            "the offsets the left arrow visits"
+        );
+        for pair in stops.windows(2) {
+            assert!(
+                pair[1].1 < pair[0].1,
+                "the left arrow moved rightwards: {stops:?}"
+            );
+        }
+    }
+
+    /// A step and its reverse return to the same *place*. The byte offset may
+    /// come back as the other of the boundary's two names — where two
+    /// directions meet, one gap on the screen genuinely has two offsets — so
+    /// the pixel is what must round trip, and does.
+    #[test]
+    fn a_step_and_its_reverse_return_to_the_same_pixel() {
+        let mut at = TextCursor::from(0);
+        while let Some(right) = caret_right(MIXED, at, 16.0, FontWeightHint::Regular) {
+            let there = caret_x(MIXED, at, 16.0, FontWeightHint::Regular);
+            let back = caret_left(MIXED, right, 16.0, FontWeightHint::Regular)
+                .expect("a caret that stepped right can always step back");
+            let x = caret_x(MIXED, back, 16.0, FontWeightHint::Regular);
+            assert!(
+                (x - there).abs() < 0.001,
+                "stepped right from {there} and back to {x} (byte {} -> {})",
+                at.byte,
+                back.byte
+            );
+            at = right;
+        }
+    }
+
+    /// Motion reports running out rather than silently staying put, so a widget
+    /// can tell "the caret moved" from "the caret is already at the edge" and
+    /// hand the keypress on to whatever wraps lines or leaves the field.
+    #[test]
+    fn motion_stops_at_the_edges_and_says_so() {
+        assert!(caret_left(MIXED, TextCursor::from(0), 16.0, FontWeightHint::Regular).is_none());
+        assert!(
+            caret_right(
+                MIXED,
+                TextCursor::from(MIXED.len()),
+                16.0,
+                FontWeightHint::Regular
+            )
+            .is_none()
+        );
+        // Empty text has one caret slot and no cluster to cross.
+        assert!(caret_left("", TextCursor::from(0), 16.0, FontWeightHint::Regular).is_none());
+        assert!(caret_right("", TextCursor::from(0), 16.0, FontWeightHint::Regular).is_none());
+    }
+
+    /// On the text almost every widget actually holds, the arrow key is the
+    /// next character and nothing surprising happens. This is the case the old
+    /// `offset ± 1` got right, and which must keep working.
+    #[test]
+    fn on_one_direction_text_the_arrows_are_the_next_character() {
+        let text = "hello";
+        assert_eq!(
+            walk(text, TextCursor::from(0), true)
+                .iter()
+                .map(|&(b, _)| b)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            walk(text, TextCursor::from(text.len()), false)
+                .iter()
+                .map(|&(b, _)| b)
+                .collect::<Vec<_>>(),
+            vec![4, 3, 2, 1, 0]
+        );
+    }
+
+    /// Why a widget must store the whole cursor and not just `.byte()`: rebuild
+    /// the cursor from its offset each step and the caret skips the reordered
+    /// run entirely, in one press, silently.
+    ///
+    /// The offset `2` where `b` meets the Hebrew is one gap on the screen with
+    /// two names — the trailing edge of `b` and the trailing edge of the last
+    /// Hebrew letter are the same pixels — and dropping the affinity throws
+    /// away which of them the caret is. This is a *test of the failure*, kept
+    /// so that a widget refactor which regresses to a bare `usize` is caught by
+    /// this file rather than by a user typing Hebrew.
+    #[test]
+    fn dropping_the_affinity_between_steps_skips_the_reordered_run() {
+        let mut byte = 0usize;
+        let mut visited = vec![];
+        for _ in 0..8 {
+            let Some(next) = caret_right(MIXED, byte.into(), 16.0, FontWeightHint::Regular) else {
+                break;
+            };
+            byte = next.byte(); // The mistake: the affinity is discarded here.
+            visited.push(byte);
+        }
+        assert_eq!(
+            visited,
+            vec![1, 2, 7, 8],
+            "an affinity-less walk should visibly skip the Hebrew; if this now \
+             matches the full walk, the loose fallback changed and the widgets \
+             may no longer need to carry a TextCursor"
+        );
+        // The same walk carrying the cursor visits six places, not four.
+        assert_eq!(walk(MIXED, TextCursor::from(0), true).len(), 6);
+    }
+
+    /// A character wider than one byte is crossed whole. The old arithmetic
+    /// would have landed inside it.
+    #[test]
+    fn a_multi_byte_character_is_crossed_whole() {
+        let text = "aéb";
+        for &(b, _) in &walk(text, TextCursor::from(0), true) {
+            assert!(text.is_char_boundary(b), "byte {b} splits a character");
+        }
+        assert_eq!(
+            walk(text, TextCursor::from(0), true)
+                .iter()
+                .map(|&(b, _)| b)
+                .collect::<Vec<_>>(),
+            vec![1, 3, 4],
+            "é occupies bytes 1..3"
+        );
     }
 
     /// A byte offset alone still names a caret, because the default affinity is

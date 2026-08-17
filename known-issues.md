@@ -23389,10 +23389,22 @@ affinity. Both did, however, hold a *byte* offset and move it by *one byte* per
 keypress, which is a separate and worse bug; see
 `GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES` below.
 
-Still not done, and still deliberately out of scope: **visual-order arrow-key
-motion** (left arrow moving left on the screen whichever way the text runs).
-The affinity is a prerequisite for it, not a solution to it, and it wants its
-own entry when someone picks it up.
+The arrow-key half — **visual-order motion**, the left arrow moving left on
+the screen whichever way the text runs — was out of scope here. On 2026-08-17
+the *machinery* for it was built (`ShapedRun::caret_left`/`caret_right` in the
+font crate, `text::caret_left`/`caret_right` in the toolkit), but the arrow keys
+were **not** switched over to it: whether they should move visually or logically
+is an open operator question, `open-questions.md` → **C-Q2**, and both answers
+are defensible. See `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER` below, which
+remains OPEN and now records exactly what changes when C-Q2 is answered.
+
+The affinity added here turned out to be a prerequisite in a stronger sense than
+"useful": a caret rebuilt from its byte offset each keypress does not merely
+land on the wrong side of a boundary, it steps over an entire right-to-left run
+in one press. That is why `TextInput` and `InputDialog`, called out four
+paragraphs above as needing no affinity *because they never draw one*, in fact
+needed one as soon as they had to **move** — and why they were converted to
+`TextCursor` on 2026-08-17 even though their motion is still logical.
 
 The original entry follows.
 
@@ -24342,25 +24354,54 @@ right-to-left word and press Right once: the caret jumps to the *far side* of
 that word rather than moving one letter-width right, then walks back across it
 on subsequent presses.
 
-**What the proper fix looks like, if C-Q2 answers "visual".** The prerequisite
-is already built and this is the whole reason it was built:
-`TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL` (fixed 2026-08-16) gave
-`gui/toolkit/src/text.rs` a `TextCursor { byte, affinity }`, and
-`gui/font/src/shape.rs` a `ShapedRun` that knows each glyph's screen position
-and bidi direction. A visual step is then: ask the run for the glyph the cursor
-currently sits beside, take its neighbour in *draw* order (`draw_order()`), and
-set the cursor to that neighbour's leading or trailing edge depending on whether
-that glyph runs left-to-right or right-to-left -- which is exactly the pairing
-`offset_at` already computes (`in_left = upstream(next)` for an RTL cluster,
-the reverse for LTR). The affinity bit is what makes the two ends of a direction
-boundary distinguishable, so no extra state is needed.
+**What the proper fix looks like, if C-Q2 answers "visual". The code for it is
+now written, tested and merged -- it is simply not wired to the arrow keys.**
+Added 2026-08-17 (lane C):
+
+* `gui/font/src/shape.rs` -- `ShapedRun::caret_left` / `caret_right`. These take
+  a `Hit { offset, affinity }` and return the neighbouring caret slot in *draw*
+  order. n drawn clusters give n+1 gaps; moving right from slot k lands on
+  `clusters[k].right`, moving left from slot k lands on `clusters[k-1].left`,
+  where a cluster's `left`/`right` are its leading/trailing hits swapped when it
+  is RTL. The convention is to name a boundary by the character just *crossed*,
+  so the caret pixel round-trips exactly while the byte offset may come back as
+  the boundary's other name.
+* `gui/toolkit/src/text.rs` -- `caret_left` / `caret_right` (and the `_in`
+  variants taking a prepared font), wrapping the above in `TextCursor`.
+
+Wiring it up is one line per site: replace the `cursor.byte() -+ len_utf8()`
+step with a call to `text::caret_left` / `caret_right`. Each of the three sites
+carries a comment naming that line and pointing at C-Q2.
+
+**The affinity turned out to be load-bearing, which was not obvious in advance.**
+A widget that stores only the byte offset and rebuilds the cursor on each
+keypress does not merely land on the wrong side of a direction boundary -- it
+*skips the entire reordered run in a single press*. On `ab` + two Hebrew letters
++ `cd`, an affinity-less rightward walk visits offsets 1, 2, 7, 8 and never
+enters the Hebrew at all. This is pinned as a test
+(`dropping_the_affinity_between_steps_skips_the_reordered_run` in `text.rs`)
+which asserts the *broken* sequence, so the requirement cannot be quietly
+regressed. It is also why the three widgets were converted from `cursor_pos:
+usize` to `cursor: TextCursor` in the same change: without that conversion,
+answering C-Q2 "visual" later would produce a subtly worse behaviour than the
+status quo rather than a better one.
 
 Two things must stay logical under either answer, and would be wrong to convert
 along with the arrows: Home/End and word-motion (Ctrl+arrow). Those name
 positions in the sentence, not directions on the screen.
 
-If C-Q2 answers "logical", this entry closes with no code change and a comment
-at each of the three sites recording that the behaviour is deliberate.
+If C-Q2 answers "logical", this entry closes with no code change: the comment at
+each of the three sites already records that the behaviour is deliberate, and
+the `caret_left`/`caret_right` primitives stay -- selection-by-mouse and any
+future visual-order feature want them regardless.
+
+**The editor is a separate problem and is not covered by C-Q2.** `apps/editor`
+cannot move its caret visually even if the answer is "visual", because it draws
+the caret at `measure(prefix_of_line)` and scrolls horizontally by byte-slicing
+the line -- both of which assume screen order equals logical order. Converting
+only its motion would move the caret to positions it is not drawn at, which is
+worse than today, where drawing and motion at least agree with each other. See
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL`.
 ## B-BOOT-TEST-HANGS-INTERMITTENTLY-WITH-A-QEMU-GLIB-HANDLE-ERROR, AND LOOKS EXACTLY LIKE A KERNEL REGRESSION (lane B, 2026-08-16)
 
 **Status: OPEN — host-level, cause not identified. Recorded so the next lane
@@ -28101,7 +28142,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 3 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 4 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28211,3 +28252,241 @@ locale GNU quotes option arguments with `‘…’` rather than `'…'`. Confine
 `quote()`/`argmatch` — `quotef`, `quoteaf` and getopt's own sentences are ASCII
 in every locale. Left as-is and queued for the operator: `open-questions.md` →
 **B-Q2**.
+
+`head` is the fourth (`scripts/head-diff.sh`). It is the first conversion where
+the getopt swap was the *smaller* half: the parser it replaced knew `-n` and
+nothing else — no `-c`, no `-q`/`-v`, no `-z`, no negative count, no multiplier
+suffix — and it silently substituted 10 for any count it could not parse, so
+`head -n 5O f` (letter O) printed ten lines rather than saying so. It also read
+input as UTF-8 `String` lines, which reported a non-UTF-8 line as an I/O error
+and truncated the file there, and re-emitted `\r\n` as `\n` because
+`BufRead::lines` strips the carriage return. Four more traps for the remaining
+81:
+
+- **A utility may have a second option syntax that getopt never sees.**
+  `head -3 f` is the pre-POSIX form, and upstream parses it by hand off `argv[1]`
+  alone, *before* `getopt_long` runs. The position rule is observable and nobody
+  would guess it: `head -3 -q f` works, `head -q -3 f` answers
+  `invalid trailing option -- 3`. It falls out of the digits `0123456789` being
+  listed in the short-option string, so a digit reaching getopt at all proves it
+  was not first. `tail` has the same form; check for one before assuming argv is
+  getopt's alone.
+- **The obsolete form's letters are not flags.** In `head -2k`, `k` is a
+  *multiplier suffix* appended to the digits before parsing, so it means 2048
+  lines. `c` selects bytes and clears the multiplier; `l` selects lines and does
+  **not** clear it, so `-2kl` is 2048 lines. Reproduced rather than tidied.
+- **Numeric arguments go through gnulib's `xstrtoumax`, which is a specification
+  in itself.** Leading whitespace and `+` accepted, trailing whitespace not; a
+  bare suffix means one of it (`head -n K` is 1024) but only if it is the very
+  first byte, so `head -n ' K'` is an error; a second suffix switches the base
+  (`1K`=1024, `1kB`=1000, `1KiB`=1024, a lone `1Ki` invalid); and **a bad suffix
+  outranks an overflow**, so `head -n 99999999999999999999X` reports an invalid
+  number rather than a value too large. The caller's own suffix list narrows
+  gnulib's, which is why `head -n 1w` is refused though `w` exists in the same
+  function. `head.rs` → `parse_count` is the shape to copy; `tail`, `split`,
+  `fold`, `cut` and `nl` all reach the same code upstream.
+- **Streaming is a correctness requirement, not an optimisation.** `wc` reads
+  each input whole; `head` must not, because `yes | head -n1` has to terminate.
+  The two eliding forms (`-n -N`, `-c -N`) do have to see the end, and buffer
+  only the tail they might still drop. Note the rule the streaming loop cannot
+  apply until EOF: an unterminated final line *counts* as a line for `-n -N`
+  (so `printf 'a\nb' | head -n -1` prints `a\n`) but is never itself printed.
+
+## TD-EDITOR-IS-NOT-BIDIRECTIONAL
+
+**Status: OPEN.**
+
+**What.** `apps/editor` was left out of `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`
+above, and not because its arrow keys are fine — they have the same defect. It
+is out because motion is the *smallest* of three problems there, and fixing
+only motion would move the caret to positions the editor does not draw it at,
+which is worse than the present state where at least the two agree with each
+other about being wrong.
+
+**This entry is not blocked on C-Q2**, and should not wait for it. C-Q2 asks
+only whether the arrow keys should step by the screen or by the string; items 1
+and 2 below are wrong under *either* answer, because they concern where the
+caret is drawn and what a selection looks like, not which way a key moves. Item
+3 is a design question of the editor's own. Whoever picks this up can fix all
+three and leave the arrow keys stepping logically, exactly as the toolkit
+widgets do today.
+
+**Three problems, which have to be fixed together.**
+
+1. **The caret is placed at the width of the prefix, not at the caret's own
+   position.** `render_editor` (around `main.rs:1637`) computes
+   `text_x() + text::measure(before_cursor, …)`. That is `width_upto` under
+   another name — the quantity `TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL` renamed
+   precisely because it is not a caret position. On any line with a
+   right-to-left run the caret is drawn at the distance *into* the text rather
+   than the position *across* the line. The fix is `text::caret_x`, which
+   needs `cursor_col` to carry an affinity.
+2. **Hit-testing and selection have the same shape.** A click resolves to a
+   byte column by measuring prefixes, and a selection is painted as a span
+   between two measured prefixes — but a logically-contiguous selection that
+   crosses a direction change is two or more *disjoint* rectangles.
+   `text::cursor_at` and `text::selection_boxes` are the replacements, exactly
+   as in `pathbar`.
+3. **Horizontal scrolling slices the line at a byte offset** — `scroll_col` is
+   a byte index, and the renderer draws `line[scroll_col..]`. This one is not a
+   substitution; it is a model problem. *The visible portion of a bidirectional
+   line is not the shaping of a substring of it.* Reordering is decided over
+   the whole paragraph, so shaping a suffix can yield a different visual order
+   than the same characters occupy in the full line. Scrolling has to become
+   pixel-based over the whole shaped line, with clipping, rather than
+   byte-based over a re-shaped tail.
+4. **Syntax highlighting draws one run per token, each positioned at the sum of
+   the previous runs' widths** — `draw_tokens` (`main.rs:1513`), which walks the
+   `StyledToken` list emitting a `tree.text(x, …)` per token and advancing
+   `x += text::measure(piece, …)`. Found 2026-08-17 while scoping the fix; it is
+   *not* a variant of 1 and it is the hardest of the four. A token is a range of
+   *bytes*, and bidi reordering does not respect byte ranges: on
+   `let s = "<HEBREW> x";` the string literal's glyphs are drawn interleaved in
+   screen order with the punctuation around them, so there is no `x` at which
+   the token can be drawn as one left-to-right run. Splitting the line by token
+   and laying the pieces out end to end **is** the assumption that screen order
+   equals byte order, applied once per token.
+
+   This means colour cannot stay a property of a *substring to draw*; it has to
+   become an attribute carried on the shaped glyphs. The line is shaped once as
+   a whole, and each glyph takes the colour of the token containing the byte it
+   came from (`ShapedRun` already keeps each glyph's source byte offset, which
+   is what makes this possible). The comment above `draw_tokens` explicitly
+   accepts losing kerning across token boundaries as a small cost; under bidi
+   the same decomposition stops being a small cost and becomes wrong output.
+
+**Why 3 and 4 make this its own task.** Between them they are a real design
+change with a genuine tradeoff — shape-whole-line-and-clip costs work
+proportional to line length on every frame, where the present code shapes only
+what is visible — and the editor's long-line performance is the reason the
+byte-slicing exists. Anyone picking this up should measure that cost on a
+pathological line before choosing, and record the choice in
+`design-decisions.md`. Caching the shaped line per document revision is the
+obvious mitigation and probably makes the question moot, but "probably" is not a
+measurement. Note that 4 pushes toward shape-whole-line anyway: once colour is a
+per-glyph attribute, the shaping the renderer needs is of the whole line, so the
+per-frame cost 3 worries about is incurred either way and the cache stops being
+optional.
+
+**Where.** `apps/editor/src/main.rs`: `Document::move_left`/`move_right`
+(~822), `cursor_col`/`scroll_col` (~54, ~67), the caret and text drawing in
+`render_editor` (~1620–1640), `draw_tokens` (~1513), and the click handler.
+
+**Suggested order for whoever takes this**, since the four are entangled and
+doing them in the wrong order means writing code twice. Shape-the-whole-line is
+the foundation and 3 and 4 both sit on it, so: (a) measure the shaping cost on a
+pathological line and decide the caching question, recording it in
+`design-decisions.md`; (b) build the per-line shaped cache keyed on document
+revision; (c) convert `draw_tokens` to colour glyphs rather than slice strings
+(4), which is the change that makes the output correct; (d) convert scrolling to
+pixels over the cached run with clipping (3); (e) 1 and 2 then fall out as
+one-line substitutions to `text::caret_x` / `cursor_at` / `selection_boxes`,
+because by then the shaped line they need is already in hand. Motion (the arrow
+keys) is deliberately *last* and is the least of it — and note it is **not**
+gated on C-Q2 either way, since the editor is out of that question's scope.
+
+**Severity.** Low in practice today — a code editor's content is
+overwhelmingly one-directional, and on such text every one of these is
+correct. It bites a user editing a document with a quoted Arabic or Hebrew
+phrase in it, which markdown and comment text make entirely plausible.
+
+## C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE (lane C, 2026-08-17)
+
+**Status: OPEN — measured, not yet root-caused. This is the most severe
+performance problem currently known in the GUI, and it is not confined to one
+app: every piece of text the system measures or draws goes through it.**
+
+**What.** `ScaledFont::shape` costs **~64 microseconds per character** on a
+real outline face, and the cost is *linear* in the string — so it is a huge
+per-character constant, not an algorithmic blow-up over the string. For scale,
+HarfBuzz shapes a short Latin run in single-digit microseconds *total*. We are
+roughly three orders of magnitude off.
+
+**Measured** on the dev host, release build, by
+`gui/toolkit/src/text.rs` → `mod shaping_cost` (two `#[ignore]`d timing tests,
+kept in the tree so the numbers can be re-taken elsewhere):
+
+```
+cargo test --release -p guitk --lib shaping_cost -- --ignored --nocapture --test-threads=1
+```
+
+| chars | system face | built-in bitmap face | ratio |
+|---:|---:|---:|---:|
+| 80 | 5,033 us | 3.0 us | 1678x |
+| 200 | 12,365 us | 5.6 us | 2208x |
+| 1,000 | 64,269 us | 31.5 us | 2040x |
+| 5,000 | 323,435 us | 159.7 us | 2025x |
+| 20,000 | 1,289,777 us | 900.1 us | 1433x |
+
+Both columns are linear; the system face's slope is ~64 us/char and the
+built-in face's is ~0.045 us/char. Note the built-in (bitmap) backend
+**bypasses the shaping pipeline entirely** — `SystemFont::shape_lang` builds
+the run straight from `char_indices` — so that column is not "the same work
+without layout tables", it is "no pipeline at all". It is included as a floor,
+not as an apples-to-apples comparison.
+
+**Why this is severe.** A single 200-character line takes **12 ms** to shape.
+A 60 Hz frame is 16.7 ms. So one line of text is 74% of a frame, and a
+50-line screen is roughly **620 ms** — 37 frames' worth — if anything shapes
+per frame. Every `text::measure` call shapes; the toolkit measures constantly
+(button labels, list rows, `draw_tokens` once *per syntax token*). Whatever is
+saving us today is caching further up, not speed here, and any path that
+misses that cache falls off a cliff.
+
+**What has been ruled out.**
+
+* **Not the font-cache mutex.** One `with_font()` — lock plus cache lookup —
+  measures **0.100 us**, i.e. 0.15% of a single character's shaping cost.
+* **Not test-harness contention.** The first run of the instrument reported
+  4.5 ms for 80 characters *with* two tests sharing the global font mutex; with
+  `--test-threads=1` and the font fetched once outside the timed loop, the
+  number barely moved. The instrument now documents both requirements.
+* **Not cold caches.** Every measurement takes a warm-up shaping outside the
+  sample set and reports the **median** of 21-201 runs.
+* **Not per-shape re-parsing of the big OpenType tables.** `GSUB` and `GPOS`
+  both decode through `otl::ByScript`, built once per face — `otl.rs:409`
+  already documents that doing that walk per shape is too slow ("re-reading
+  1874 subtable offsets for every string drawn"). `MarkPositioning::parse` and
+  the kerning tables are likewise parsed once, at `Face` construction
+  (`sfnt.rs:821`).
+
+**Where to look next.** The cost is inside the per-shape passes in
+`ScaledFont::shape_with` (`gui/font/src/scaled.rs:677`). The suspects, in the
+order worth timing:
+
+1. **`cmap` lookups.** `shape_with` calls `self.face.glyph_index(ch)` from
+   `norm::pieces`, then *twice more per character* from `hangul::preprocess`
+   (once for `has_glyph`, once inside the `zero_width` closure, which also
+   calls `advance_at`). `Face::glyph_index` → `lookup` → `cmap_format4`
+   (`sfnt.rs:1295`) re-reads the segment count and walks segments from the raw
+   byte slice on **every call** — nothing is memoised. A large Unicode face has
+   on the order of a thousand segments. That is the leading hypothesis and the
+   cheapest to test.
+2. **`advance_at(gid, &self.coords)`**, if it re-reads `hmtx` (and interpolates
+   variable-font deltas) per call rather than from a decoded table.
+3. The remaining passes — `byte_levels`, `joining::forms`, `script::runs` — are
+   all linear over pieces with no obvious per-character table walk, so they are
+   lower suspects.
+
+**The proper fix**, assuming (1) confirms: give `Face` a decoded `cmap` — a
+sorted segment array, or a direct map for the BMP — built once at parse time
+alongside the other tables, so `glyph_index` is a binary search over decoded
+data instead of a byte-slice walk. If `advance_at` is also implicated, decode
+`hmtx` once the same way. Neither changes any observable behaviour, so both are
+covered by the existing shaping tests; add a regression assertion on the
+*measured* rate (something like "80 characters shape in under 200 us") so this
+cannot silently return.
+
+**How this was found.** Scoping `TD-EDITOR-IS-NOT-BIDIRECTIONAL`, whose item 3
+asks whether shape-whole-line-and-clip is affordable. The measurement that was
+supposed to answer that question instead showed that *nothing* is affordable at
+the current rate, so that entry's tradeoff cannot be settled until this is
+fixed. **This is a prerequisite for that work**, not a side quest — and it is
+almost certainly worth more than the bidi correctness it was gathered for.
+
+**Note on the editor question it was gathered for.** At 64 us/char the answer
+is trivially "cache it" — but that is an artefact of the bug, not a real
+finding. Re-take the ratio after the fix before deciding: the built-in
+column's slope (0.045 us/char) suggests that once shaping is fast, shaping a
+5,000-character line whole may well cost less than a frame, and the whole
+byte-slicing design the editor uses for scrolling may be unnecessary.

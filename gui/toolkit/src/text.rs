@@ -1207,6 +1207,44 @@ mod shaping_cost {
             println!("{chars:>9}  {w:>12.1}  {v:>12.1}  {:>7.1}x", w / v);
         }
     }
+
+    /// The one assertion in this module, and the only one here that runs by
+    /// default: shaping a line on the system face must not cost absurdly more
+    /// than shaping it on the built-in bitmap face.
+    ///
+    /// Stated as a *ratio* rather than a microsecond figure on purpose. An
+    /// absolute threshold would have to be loose enough to survive a debug
+    /// build, a loaded machine and slower hardware, and by the time it is that
+    /// loose it no longer catches anything. The built-in face runs the same
+    /// shaping pipeline with no layout tables at all, so it absorbs all three
+    /// of those and what is left is what the layout tables charge — which is
+    /// exactly the quantity that regressed.
+    ///
+    /// The bug this guards against (`C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-
+    /// SHOULD-BE`) sat at 1400-2200x. With the `GSUB` coverage digests in
+    /// place it measures **80x in release and 147x in a debug build** on the
+    /// development host, so 500x leaves better than three times the margin
+    /// against the worse of the two while still failing by a wide margin the
+    /// moment the skip stops working.
+    #[test]
+    fn the_layout_tables_do_not_dominate_shaping() {
+        let text = pathological(80);
+        let system = shape_us(&text, 51);
+        let builtin = shape_builtin_us(&text, 51);
+        // A machine with no system fonts falls back to the built-in face, and
+        // then this is comparing the face against itself — true, but vacuous.
+        assert!(builtin > 0.0, "the built-in face must shape something");
+        let ratio = system / builtin;
+        // Captured unless the run asks for `--nocapture`, which is the only
+        // way to see how much margin is actually left against the threshold.
+        println!("80 chars: {system:.1}us system, {builtin:.1}us builtin, {ratio:.0}x");
+        assert!(
+            ratio < 500.0,
+            "shaping 80 chars costs {system:.1}us on the system face against \
+             {builtin:.1}us built-in ({ratio:.0}x); the layout-table skip has \
+             regressed",
+        );
+    }
 }
 
 #[cfg(test)]

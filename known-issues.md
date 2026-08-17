@@ -28359,11 +28359,13 @@ widgets do today.
 change with a genuine tradeoff — shape-whole-line-and-clip costs work
 proportional to line length on every frame, where the present code shapes only
 what is visible — and the editor's long-line performance is the reason the
-byte-slicing exists. Anyone picking this up should measure that cost on a
-pathological line before choosing, and record the choice in
-`design-decisions.md`. Caching the shaped line per document revision is the
-obvious mitigation and probably makes the question moot, but "probably" is not a
-measurement. Note that 4 pushes toward shape-whole-line anyway: once colour is a
+byte-slicing exists. **That measurement has since been taken** — see
+`C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE` below, "Note on the editor
+question it was gathered for" — and it says shaping a 1,000-character line
+whole costs 3.1 ms against 0.5 ms for the visible window, so the per-frame cost
+is real and **the shaped line must be cached per document revision**. The
+tradeoff is therefore settled: shape whole, cache, clip. Note that 4 pushes
+toward shape-whole-line anyway: once colour is a
 per-glyph attribute, the shaping the renderer needs is of the whole line, so the
 per-frame cost 3 worries about is incurred either way and the cache stops being
 optional.
@@ -28374,9 +28376,10 @@ optional.
 
 **Suggested order for whoever takes this**, since the four are entangled and
 doing them in the wrong order means writing code twice. Shape-the-whole-line is
-the foundation and 3 and 4 both sit on it, so: (a) measure the shaping cost on a
-pathological line and decide the caching question, recording it in
-`design-decisions.md`; (b) build the per-line shaped cache keyed on document
+the foundation and 3 and 4 both sit on it, so: (a) ~~measure the shaping cost on
+a pathological line and decide the caching question~~ — **done 2026-08-17; the
+answer is "cache it", and the numbers are in the shaping entry below**;
+(b) build the per-line shaped cache keyed on document
 revision; (c) convert `draw_tokens` to colour glyphs rather than slice strings
 (4), which is the change that makes the output correct; (d) convert scrolling to
 pixels over the cached run with clipping (3); (e) 1 and 2 then fall out as
@@ -28392,14 +28395,16 @@ phrase in it, which markdown and comment text make entirely plausible.
 
 ## C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE (lane C, 2026-08-17)
 
-**Status: OPEN — measured, not yet root-caused. This is the most severe
-performance problem currently known in the GUI, and it is not confined to one
-app: every piece of text the system measures or draws goes through it.**
+**Status: OPEN, but 19.6x recovered — root-caused 2026-08-17 and a fix
+landed the same day. Shaping now costs ~2.7 us/character where it cost ~64.
+That is still ~2.7x above this crate's own floor and an order of magnitude off
+HarfBuzz, so the entry stays open; what remains is named under "What is left"
+below and is a direct continuation of the fix, not a fresh investigation.**
 
-**What.** `ScaledFont::shape` costs **~64 microseconds per character** on a
-real outline face, and the cost is *linear* in the string — so it is a huge
+**What.** `ScaledFont::shape` cost **~64 microseconds per character** on a
+real outline face, and the cost was *linear* in the string — so it was a huge
 per-character constant, not an algorithmic blow-up over the string. For scale,
-HarfBuzz shapes a short Latin run in single-digit microseconds *total*. We are
+HarfBuzz shapes a short Latin run in single-digit microseconds *total*. We were
 roughly three orders of magnitude off.
 
 **Measured** on the dev host, release build, by
@@ -28425,6 +28430,23 @@ the run straight from `char_indices` — so that column is not "the same work
 without layout tables", it is "no pipeline at all". It is included as a floor,
 not as an apples-to-apples comparison.
 
+**After the `GSUB` coverage digests** (commit "font: skip GSUB lookups a run
+cannot match, with coverage digests"), same instrument, same host:
+
+| chars | system face | built-in | ratio | vs. before |
+|---:|---:|---:|---:|---:|
+| 80 | 219.7 us | 2.8 us | 78x | 22.9x faster |
+| 200 | 519.9 us | 4.5 us | 116x | 23.8x faster |
+| 1,000 | 2,864 us | 32.0 us | 90x | 22.4x faster |
+| 5,000 | 14,763 us | 162.9 us | 91x | 21.9x faster |
+| 20,000 | 56,068 us | 751.8 us | 75x | 23.0x faster |
+
+(The immediately-pre-fix baseline re-taken on the same day at 80 chars was
+4,272 us rather than the 5,033 in the table above, so the honest speed-up
+figure is **19.6x**, not 22.9x; host state moves the absolute numbers by
+~15% between runs, which is why the guard below is a ratio and not a
+microsecond count.)
+
 **Why this is severe.** A single 200-character line takes **12 ms** to shape.
 A 60 Hz frame is 16.7 ms. So one line of text is 74% of a frame, and a
 50-line screen is roughly **620 ms** — 37 frames' worth — if anything shapes
@@ -28449,33 +28471,88 @@ misses that cache falls off a cliff.
   1874 subtable offsets for every string drawn"). `MarkPositioning::parse` and
   the kerning tables are likewise parsed once, at `Face` construction
   (`sfnt.rs:821`).
+* **Not `cmap` lookups**, which this entry originally named as "the leading
+  hypothesis and the cheapest to test". They are not the problem, and the
+  reasoning that made them a suspect was wrong twice over: `Face::glyph_index`
+  → `cmap_format4` (`sfnt.rs:1295`) already **binary-searches** the segment
+  array rather than walking it, and the A/B below charges the whole cost
+  elsewhere anyway. Recorded here because the plausible-sounding hypothesis
+  survived a careful reading of the code and was only killed by measurement.
 
-**Where to look next.** The cost is inside the per-shape passes in
-`ScaledFont::shape_with` (`gui/font/src/scaled.rs:677`). The suspects, in the
-order worth timing:
+**The root cause, measured.** An A/B that environment-gates the two layout
+passes in `ScaledFont::shape_with` (`gui/font/src/scaled.rs:677`) settles it
+outright, at 80 characters:
 
-1. **`cmap` lookups.** `shape_with` calls `self.face.glyph_index(ch)` from
-   `norm::pieces`, then *twice more per character* from `hangul::preprocess`
-   (once for `has_glyph`, once inside the `zero_width` closure, which also
-   calls `advance_at`). `Face::glyph_index` → `lookup` → `cmap_format4`
-   (`sfnt.rs:1295`) re-reads the segment count and walks segments from the raw
-   byte slice on **every call** — nothing is memoised. A large Unicode face has
-   on the order of a thousand segments. That is the leading hypothesis and the
-   cheapest to test.
-2. **`advance_at(gid, &self.coords)`**, if it re-reads `hmtx` (and interpolates
-   variable-font deltas) per call rather than from a decoded table.
-3. The remaining passes — `byte_levels`, `joining::forms`, `script::runs` — are
-   all linear over pieces with no obvious per-character table walk, so they are
-   lower suspects.
+| configuration | median | share of cost |
+|---|---:|---:|
+| baseline | 4,272 us | — |
+| `GPOS` disabled (`position_segments` skipped) | 4,538 us | ~0% |
+| `GSUB` disabled (`face.substitute` skipped) | 80.3 us | **98.1%** |
 
-**The proper fix**, assuming (1) confirms: give `Face` a decoded `cmap` — a
-sorted segment array, or a direct map for the BMP — built once at parse time
-alongside the other tables, so `glyph_index` is a binary search over decoded
-data instead of a byte-slice walk. If `advance_at` is also implicated, decode
-`hmtx` once the same way. Neither changes any observable behaviour, so both are
-covered by the existing shaping tests; add a regression assertion on the
-*measured* rate (something like "80 characters shape in under 200 us") so this
-cannot silently return.
+So **`GSUB` is essentially the entire cost**, and `GPOS` is free. Instrumenting
+the substitution pass says why. On the development host's monospace face a run
+of plain Latin selects **147 of 147 lookups over 768 subtables**, because the
+script selects them — `latn`/`DFLT` reaches every one. `gsub::apply_lookup`
+then walks *every glyph* for *every* selected lookup, and `apply_at` walks
+*every subtable* of that lookup doing a coverage search. For a 200-glyph run
+that is **29,400 `apply_at` calls and ~153,000 coverage searches per shape**,
+and almost every one answers "no" — the lookups belong to features and scripts
+the run does not contain. The ~64 us/char was the cost of asking.
+
+**The fix that landed.** HarfBuzz's `hb_set_digest_t`, in a new
+`gui/font/src/digest.rs`. A digest is a *conservative* membership summary of a
+glyph-id set: three 64-bit masks indexed by the id shifted right by 4, 0 and 9,
+`|`-ed together. It may answer "yes" for a glyph that is not in the set, and is
+never allowed to answer "no" for one that is — that one-sidedness is what makes
+it safe to skip on, since a false "yes" costs a search that was going to happen
+anyway and a false "no" cannot occur.
+
+* At parse time, `otl::ByScript::parse` gives every `Lookup` the union of its
+  subtables' **input** coverage. "Input" is load-bearing: for the contextual
+  types in format 3 the coverage is not the second field, and for a chaining
+  context it sits after the backtrack array. An unreadable subtable widens the
+  lookup's digest to `Digest::full()` rather than narrowing it.
+* At shaping time `gsub::apply_stages` keeps a digest of the run, rebuilt
+  behind a `dirty` flag whenever a lookup actually substituted something. A
+  lookup whose digest cannot intersect the run's is skipped in **O(1)**; within
+  a lookup, a glyph the digest excludes skips the subtable walk.
+* The rebuild lives in `apply_stages`, not `apply_lookup`. Putting it in
+  `apply_lookup` costs O(n) x 147 and gives most of the win straight back —
+  measured at 276.9 us against the 218.3 us the flag version reaches. It also
+  has to be the caller's job because the per-syllable path applies a lookup to
+  a *slice*, and rebuilding from the slice would describe the syllable rather
+  than the run.
+
+**Guard against regression.** `guitk`'s
+`text::shaping_cost::the_layout_tables_do_not_dominate_shaping` is **not
+`#[ignore]`d** and runs in the normal suite. It asserts the system face costs
+under **500x** the built-in face for 80 characters — a ratio rather than a
+microsecond figure, so it survives a debug build, a loaded machine and slower
+hardware without going so loose it stops catching anything. It measures 80x in
+release and 147x in debug today; the bug sat at 1400-2200x.
+
+**What is left.** The A/B above puts the floor — everything except `GSUB` — at
+**80.3 us** for 80 characters, and shaping now costs 219.7 us. So `GSUB` is
+still ~2.5x the whole rest of the pipeline and there is ~2.7x left to recover
+before this becomes a different problem. The next step is named and is the same
+technique one level down:
+
+1. **Per-subtable digests** (HarfBuzz's `hb_applicable_t`, inside its
+   `hb_ot_layout_lookup_accelerator_t`). Only **52 of the 147** lookups are
+   excluded by the run digest — the other 95 genuinely share glyphs with the
+   run somewhere — and each survivor still walks all of its subtables per
+   admitted glyph, ~5 coverage searches each. Giving `Lookup` a `Digest` *per
+   subtable*, checked in `apply_single`/`apply_multiple`/`apply_alternate`/
+   `apply_ligature`/`apply_context`/`apply_chain_context` before each coverage
+   search, cuts that. The parse-time machinery already exists —
+   `otl::subtable_coverage` + `otl::coverage_digest` compute exactly this per
+   subtable and then union it away.
+2. **After that, re-measure before doing anything else.** The remaining passes
+   (`byte_levels`, `joining::forms`, `script::runs`, `hangul::preprocess`,
+   `advance_at`) are all linear with no obvious per-character table walk, and
+   the 80.3 us floor is the budget they share. Which of them dominates is not
+   yet known and should not be guessed at — this entry's original `cmap`
+   hypothesis is the cautionary tale.
 
 **How this was found.** Scoping `TD-EDITOR-IS-NOT-BIDIRECTIONAL`, whose item 3
 asks whether shape-whole-line-and-clip is affordable. The measurement that was
@@ -28485,8 +28562,22 @@ fixed. **This is a prerequisite for that work**, not a side quest — and it is
 almost certainly worth more than the bidi correctness it was gathered for.
 
 **Note on the editor question it was gathered for.** At 64 us/char the answer
-is trivially "cache it" — but that is an artefact of the bug, not a real
-finding. Re-take the ratio after the fix before deciding: the built-in
-column's slope (0.045 us/char) suggests that once shaping is fast, shaping a
-5,000-character line whole may well cost less than a frame, and the whole
-byte-slicing design the editor uses for scrolling may be unnecessary.
+was trivially "cache it" — but that was an artefact of the bug, not a real
+finding, so the ratio was re-taken after the fix. Shaping a whole line against
+shaping only the ~200 characters that fit on screen:
+
+| line length | whole | visible window | ratio |
+|---:|---:|---:|---:|
+| 200 | 519.9 us | 554.3 us | 0.9x |
+| 1,000 | 3,142 us | 523.3 us | 6.0x |
+| 5,000 | 15,287 us | 598.1 us | 25.6x |
+| 20,000 | 74,308 us | 595.9 us | 124.7x |
+
+**The answer did not flip: byte-slicing is still worth its complexity**, but
+the reason is now honest rather than a symptom. Below ~200 characters the
+window costs the same as the whole line, so slicing buys nothing and the
+simpler code is free. From ~1,000 characters up it is the difference between
+0.5 ms and 3 ms *per line*, and a 50-line screen of 1,000-character lines is
+157 ms whole against 26 ms sliced. Revisit only if `GSUB` reaches the 80 us
+floor named above, which would move the whole-line 1,000-char figure to
+roughly 1 ms and make the tradeoff genuinely close.

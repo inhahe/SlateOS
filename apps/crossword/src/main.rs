@@ -515,11 +515,12 @@ impl CrosswordApp {
 
     fn delete_letter(&mut self) {
         if let Some(cell) = self.cell_at_mut(self.cursor_row, self.cursor_col)
-            && cell.entry.is_some() {
-                cell.entry = None;
-                cell.flagged_wrong = false;
-                return;
-            }
+            && cell.entry.is_some()
+        {
+            cell.entry = None;
+            cell.flagged_wrong = false;
+            return;
+        }
         // If current cell empty, go back and delete
         self.retreat_cursor();
         if let Some(cell) = self.cell_at_mut(self.cursor_row, self.cursor_col) {
@@ -532,9 +533,10 @@ impl CrosswordApp {
         self.check_mode = true;
         for cell_opt in &mut self.cells {
             if let Some(cell) = cell_opt
-                && let Some(entry) = cell.entry {
-                    cell.flagged_wrong = entry != cell.solution;
-                }
+                && let Some(entry) = cell.entry
+            {
+                cell.flagged_wrong = entry != cell.solution;
+            }
         }
     }
 
@@ -614,12 +616,13 @@ impl CrosswordApp {
         let (start_r, start_c) = self.word_start(self.cursor_row, self.cursor_col, self.direction);
         // Find the clue number at the start of this word
         if let Some(cell) = self.cell_at(start_r, start_c)
-            && cell.number > 0 {
-                return self
-                    .clues
-                    .iter()
-                    .find(|cl| cl.number == cell.number && cl.direction == self.direction);
-            }
+            && cell.number > 0
+        {
+            return self
+                .clues
+                .iter()
+                .find(|cl| cl.number == cell.number && cl.direction == self.direction);
+        }
         None
     }
 
@@ -645,21 +648,20 @@ impl CrosswordApp {
 
     fn move_cursor(&mut self, key: Key) {
         match key {
-            Key::Up
-                if self.cursor_row > 0 => {
-                    let mut r = self.cursor_row - 1;
-                    loop {
-                        if self.is_playable(r, self.cursor_col) {
-                            self.cursor_row = r;
-                            self.direction = Direction::Down;
-                            return;
-                        }
-                        if r == 0 {
-                            break;
-                        }
-                        r -= 1;
+            Key::Up if self.cursor_row > 0 => {
+                let mut r = self.cursor_row - 1;
+                loop {
+                    if self.is_playable(r, self.cursor_col) {
+                        self.cursor_row = r;
+                        self.direction = Direction::Down;
+                        return;
                     }
+                    if r == 0 {
+                        break;
+                    }
+                    r -= 1;
                 }
+            }
             Key::Down => {
                 let mut r = self.cursor_row + 1;
                 while r < self.height {
@@ -671,21 +673,20 @@ impl CrosswordApp {
                     r += 1;
                 }
             }
-            Key::Left
-                if self.cursor_col > 0 => {
-                    let mut c = self.cursor_col - 1;
-                    loop {
-                        if self.is_playable(self.cursor_row, c) {
-                            self.cursor_col = c;
-                            self.direction = Direction::Across;
-                            return;
-                        }
-                        if c == 0 {
-                            break;
-                        }
-                        c -= 1;
+            Key::Left if self.cursor_col > 0 => {
+                let mut c = self.cursor_col - 1;
+                loop {
+                    if self.is_playable(self.cursor_row, c) {
+                        self.cursor_col = c;
+                        self.direction = Direction::Across;
+                        return;
                     }
+                    if c == 0 {
+                        break;
+                    }
+                    c -= 1;
                 }
+            }
             Key::Right => {
                 let mut c = self.cursor_col + 1;
                 while c < self.width {
@@ -719,14 +720,14 @@ impl CrosswordApp {
 
     fn handle_event_select(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key: Key::Up, .. })
-                if self.selected_puzzle > 0 => {
-                    self.selected_puzzle -= 1;
-                }
+            Event::Key(KeyEvent { key: Key::Up, .. }) if self.selected_puzzle > 0 => {
+                self.selected_puzzle -= 1;
+            }
             Event::Key(KeyEvent { key: Key::Down, .. })
-                if self.selected_puzzle + 1 < PUZZLES.len() => {
-                    self.selected_puzzle += 1;
-                }
+                if self.selected_puzzle + 1 < PUZZLES.len() =>
+            {
+                self.selected_puzzle += 1;
+            }
             Event::Key(KeyEvent {
                 key: Key::Enter, ..
             }) => {
@@ -1028,8 +1029,13 @@ impl CrosswordApp {
                 font_size: 14.0,
                 color: COL_YELLOW,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                // Bounded to the window: a clue is arbitrary text and this
+                // banner starts 20px from the left edge, so unbounded it ran
+                // straight across the progress counter to its right and off the
+                // window. Found by the test below, which was written for the
+                // clue *panel* and turned up this second, worse site.
+                max_width: Some((width - 40.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1193,9 +1199,9 @@ impl CrosswordApp {
         };
 
         for clue in clues.iter().skip(scroll).take(8) {
-            let is_current = self.current_clue().is_some_and(|c| {
-                c.number == clue.number && c.direction == clue.direction
-            });
+            let is_current = self
+                .current_clue()
+                .is_some_and(|c| c.number == clue.number && c.direction == clue.direction);
 
             let color = if is_current { COL_YELLOW } else { COL_SUBTEXT0 };
             let weight = if is_current {
@@ -1204,23 +1210,24 @@ impl CrosswordApp {
                 FontWeightHint::Regular
             };
 
-            // Truncate clue text to fit
-            let max_chars = (w / 7.0) as usize;
-            let display_text = if clue.text.len() > max_chars {
-                format!("{}...", &clue.text[..max_chars.saturating_sub(3)])
-            } else {
-                clue.text.clone()
-            };
-
+            // The clue is elided by the renderer, which is the only thing that
+            // knows how wide the text it draws will be. This used to cut it at
+            // `(w / 7.0) - 3` *bytes*: a guessed 7px advance for a 12px
+            // proportional face, so long clues were cut short of the panel and
+            // short-but-wide ones still overran it — and `&clue.text[..n]` on a
+            // byte offset **aborts the process** the first time a clue contains
+            // an accented letter or a typographic apostrophe, which crossword
+            // clues routinely do. It also measured only `clue.text` while
+            // drawing `"{number}. {text}"`, so the number's width was free.
             cmds.push(RenderCommand::Text {
                 x,
                 y: cy,
-                text: format!("{}. {display_text}", clue.number),
+                text: format!("{}. {}", clue.number, clue.text),
                 font_size: 12.0,
                 color,
                 font_weight: weight,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 18.0;
         }
@@ -1444,6 +1451,60 @@ mod tests {
         let mut app = CrosswordApp::new();
         app.load_puzzle(0);
         app
+    }
+
+    /// A clue that is not pure ASCII must render. The clue panel used to cut
+    /// the text at a computed *byte* offset, which aborts the process the
+    /// moment the cut lands inside a multi-byte character — and clue text is
+    /// exactly where an accented word or a typographic apostrophe appears.
+    #[test]
+    fn a_non_ascii_clue_renders_rather_than_aborting() {
+        let mut app = make_app();
+        for (i, clue) in app.clues.iter_mut().enumerate() {
+            clue.text = match i % 3 {
+                0 => "Café où l'on prend un café, très fréquenté — n'est-ce pas?".to_string(),
+                1 => "日本語の手がかり、とても長いものです".to_string(),
+                _ => "e\u{0301}e\u{0301}e\u{0301} combining marks all the way down".to_string(),
+            };
+        }
+        assert!(!app.render(1280.0, 800.0).is_empty());
+    }
+
+    /// The clue is handed to the renderer whole, with the width it has to fit
+    /// in, so the *renderer* decides where it is cut. A caller that pre-cuts
+    /// the string is guessing at a width only the font knows.
+    #[test]
+    fn a_clue_is_bounded_by_width_not_pre_truncated() {
+        let mut app = make_app();
+        let long = "a".repeat(400);
+        for clue in &mut app.clues {
+            clue.text = long.clone();
+        }
+        let bounded = app
+            .render(1280.0, 800.0)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    text,
+                    max_width,
+                    overflow,
+                    ..
+                } if text.contains(&long) => Some((max_width, overflow)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !bounded.is_empty(),
+            "the clue text reaches the renderer uncut"
+        );
+        for (max_width, overflow) in bounded {
+            assert!(max_width.is_some(), "with a width to fit inside");
+            assert_eq!(
+                overflow,
+                TextOverflow::Ellipsis,
+                "and a mark when it does not"
+            );
+        }
     }
 
     #[test]

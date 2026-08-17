@@ -204,25 +204,28 @@ impl WindowSnapshot {
         let h = (self.window_height * scale).min(max_h);
         (w, h)
     }
-
-    /// Truncate title to fit a given width at an approximate character width.
-    pub fn display_title(&self, max_chars: usize) -> &str {
-        if self.title.len() <= max_chars {
-            &self.title
-        } else if max_chars >= 3 {
-            // Can't return owned string, just truncate at char boundary
-            let end = self
-                .title
-                .char_indices()
-                .nth(max_chars.saturating_sub(3))
-                .map(|(i, _)| i)
-                .unwrap_or(self.title.len());
-            &self.title[..end]
-        } else {
-            &self.title[..self.title.len().min(max_chars)]
-        }
-    }
 }
+
+// A `display_title(max_chars)` used to live here, cutting the title to a
+// character budget derived from `slot.width / 7.0`. It is gone rather than
+// fixed, for three reasons that are worth keeping written down:
+//
+//   * It was **redundant**. Its one call site already passed `max_width` and
+//     `TextOverflow::Ellipsis`, so the renderer was going to fit the title
+//     anyway — by measuring the face it draws in, which is the only way to get
+//     it right. Cutting first only guaranteed the measured pass never saw the
+//     text it was meant to fit.
+//   * It **panicked**. The `max_chars < 3` branch was
+//     `&self.title[..self.title.len().min(max_chars)]` — a *byte* offset into a
+//     `str`. A narrow thumbnail plus a window titled in any non-Latin script
+//     aborts the desktop shell, and a window title is attacker-supplied in the
+//     sense that any application chooses its own.
+//   * It compared `self.title.len()` (bytes) against a character budget, so
+//     even the non-panicking branch cut early on accented text.
+//
+// The lesson generalises past this function: a caller that pre-truncates for a
+// renderer that already elides is not being careful, it is adding a second,
+// worse answer to a question that was already answered.
 
 // ============================================================================
 // Thumbnail layout — positioned thumbnails
@@ -710,15 +713,16 @@ impl PeekPopup {
             });
         }
 
-        // Title below thumbnail
+        // Title below thumbnail. Handed over whole: `max_width` and
+        // `TextOverflow::Ellipsis` below are the instruction to fit it, and the
+        // renderer carries it out by measuring. See the note on `Snapshot` for
+        // the `display_title` that used to cut it here and why it is gone.
         let title_y = abs_y + slot.height + 4.0;
-        let max_title_chars = (slot.width / 7.0) as usize;
-        let display_title = snap.display_title(max_title_chars);
 
         cmds.push(RenderCommand::Text {
             x: abs_x + 2.0,
             y: title_y,
-            text: display_title.to_string(),
+            text: snap.title.clone(),
             font_size: 11.0,
             color: Color::rgba(MOCHA_TEXT.r, MOCHA_TEXT.g, MOCHA_TEXT.b, a),
             font_weight: FontWeightHint::Regular,
@@ -895,6 +899,16 @@ mod tests {
         WindowSnapshot::new(id, "test-app", title, w, h)
     }
 
+    /// A popup driven all the way to `Visible` showing one window with `title`.
+    fn peek_showing(title: &str) -> PeekPopup {
+        let mut popup = PeekPopup::new(make_config());
+        let snaps = vec![make_snapshot(1, title, 800.0, 600.0)];
+        popup.begin_hover("test-app", 200.0, 200.0, snaps, 1000);
+        popup.tick(1101);
+        popup.tick(1200);
+        popup
+    }
+
     fn make_config() -> PeekConfig {
         PeekConfig {
             hover_delay_ms: 100,
@@ -995,29 +1009,46 @@ mod tests {
         assert!(h > 0.0);
     }
 
+    /// The title reaches the renderer whole, with the width it has to fit in.
+    /// It used to be cut here first, to a character budget guessed from the
+    /// thumbnail's width — which both under- and over-shot on any text that is
+    /// not average-width ASCII, and aborted the process outright on a narrow
+    /// thumbnail with a non-Latin title.
     #[test]
-    fn test_snapshot_display_title_short() {
-        let s = make_snapshot(1, "Hello", 800.0, 600.0);
-        assert_eq!(s.display_title(20), "Hello");
+    fn a_title_is_bounded_by_width_not_pre_truncated() {
+        let long = "This is a very long window title — Café über 日本語 — that cannot fit";
+        let peek = peek_showing(long);
+        let titles: Vec<_> = peek
+            .render()
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    text,
+                    max_width,
+                    overflow,
+                    ..
+                } if text == long => Some((max_width, overflow)),
+                _ => None,
+            })
+            .collect();
+        assert!(!titles.is_empty(), "the title is drawn uncut");
+        for (max_width, overflow) in titles {
+            assert!(max_width.is_some(), "with a width to fit inside");
+            assert_eq!(
+                overflow,
+                TextOverflow::Ellipsis,
+                "and a mark when it does not"
+            );
+        }
     }
 
+    /// A title in a non-Latin script, in a thumbnail too narrow for even an
+    /// ellipsis, must render. The removed `display_title` sliced a `str` at a
+    /// byte offset in exactly that case.
     #[test]
-    fn test_snapshot_display_title_truncate() {
-        let s = make_snapshot(
-            1,
-            "This is a very long window title that should be truncated",
-            800.0,
-            600.0,
-        );
-        let truncated = s.display_title(20);
-        assert!(truncated.len() <= 20);
-    }
-
-    #[test]
-    fn test_snapshot_display_title_tiny_max() {
-        let s = make_snapshot(1, "Hello World", 800.0, 600.0);
-        let t = s.display_title(2);
-        assert!(t.len() <= 2);
+    fn a_narrow_thumbnail_with_a_non_latin_title_renders() {
+        let peek = peek_showing("日本語のウィンドウ");
+        assert!(!peek.render().is_empty());
     }
 
     // ---- Layout tests ----

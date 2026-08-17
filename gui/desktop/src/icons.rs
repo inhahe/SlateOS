@@ -23,6 +23,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -73,8 +74,6 @@ const ICON_GLYPH_SIZE: f32 = 32.0;
 const LABEL_FONT_SIZE: f32 = 11.0;
 /// Maximum label width (for centering and truncation).
 const LABEL_MAX_WIDTH: f32 = 72.0;
-/// Maximum characters per label line before ellipsis.
-const LABEL_MAX_CHARS_PER_LINE: usize = 12;
 /// Maximum number of label lines.
 const LABEL_MAX_LINES: usize = 2;
 /// Drag threshold in pixels (squared, to avoid sqrt).
@@ -969,7 +968,7 @@ impl DesktopIconLayer {
 
         // Label text below icon (centered, 2-line max with ellipsis).
         let label_y = iy + ICON_TOP_PADDING + ICON_GLYPH_SIZE + 6.0;
-        let lines = wrap_label(&icon.label, LABEL_MAX_CHARS_PER_LINE, LABEL_MAX_LINES);
+        let lines = wrap_label(&icon.label, LABEL_MAX_WIDTH, LABEL_MAX_LINES);
 
         for (line_idx, line) in lines.iter().enumerate() {
             let ly = label_y + line_idx as f32 * (LABEL_FONT_SIZE + 2.0);
@@ -1041,61 +1040,89 @@ pub enum DesktopKey {
 // Label wrapping
 // ============================================================================
 
-/// Wrap a label into at most `max_lines` lines, each at most `max_chars`.
-/// The last line gets ellipsis if the text overflows.
-fn wrap_label(text: &str, max_chars: usize, max_lines: usize) -> Vec<String> {
+/// A label broken into at most `max_lines` lines, none wider than `max_width`,
+/// with the cut marked if the whole label did not fit.
+///
+/// # Why a width and not a character budget
+///
+/// This took `max_chars: usize` — 12 characters per line — and broke the label
+/// by counting them. A desktop icon is 72 px wide, and 12 characters is 72 px
+/// only for text of average width: "WWWWWWWWWWWW" is nearly twice that and ran
+/// out under the neighbouring icon, while "iiiiiiiiiiii" left a third of the
+/// cell empty. The renderer was already being told
+/// `max_width: Some(LABEL_MAX_WIDTH)` for the same text, so a wide label was
+/// then cut a second time, by the renderer, in the middle of a word the wrapper
+/// had decided was fine. Two disagreeing answers to one question.
+///
+/// Now there is one answer, and it is measured: every break is placed by
+/// [`text::fit`], so what this function thinks fits is what the renderer draws.
+///
+/// # Breaking inside a word
+///
+/// [`text::wrap`] deliberately does *not* break inside a word — where to do
+/// that is a per-script decision belonging to a real line breaker — so it is
+/// not used here. A desktop icon cannot take that answer: its cell is a fixed
+/// 72 px, an over-long line runs under the next icon, and "日本語のファイル名です"
+/// contains no space at all, so *every* CJK label would be one over-long line.
+/// This breaks by measured fit when a run has no break opportunity in it, which
+/// is right for the Han and Kana that make up most such labels (both break
+/// almost anywhere) and merely inelegant for a long Latin word, which is what
+/// the renderer would have done to it anyway.
+///
+/// The last line absorbs everything left over and is elided, so the mark lands
+/// on real text rather than wherever a count happened to stop.
+fn wrap_label(text: &str, max_width: f32, max_lines: usize) -> Vec<String> {
     if text.is_empty() || max_lines == 0 {
         return vec![String::new()];
     }
 
-    let chars: Vec<char> = text.chars().collect();
-
-    if chars.len() <= max_chars {
-        return vec![text.to_string()];
-    }
-
+    let weight = FontWeightHint::Regular;
     let mut lines: Vec<String> = Vec::new();
-    let mut pos = 0;
+    let mut rest = text;
 
-    while pos < chars.len() && lines.len() < max_lines {
-        let is_last_allowed_line = lines.len() + 1 == max_lines;
-        let remaining = chars.len() - pos;
-
-        if remaining <= max_chars {
-            // Fits on this line.
-            lines.push(chars[pos..].iter().collect());
-            break;
+    while !rest.is_empty() && lines.len() < max_lines {
+        // On the last line we may draw, everything that is left goes on it and
+        // is elided. Stopping at a word boundary instead would end the label
+        // with no sign that anything followed it.
+        if lines.len().saturating_add(1) == max_lines {
+            lines.push(text::elide(
+                rest,
+                max_width,
+                "\u{2026}",
+                LABEL_FONT_SIZE,
+                weight,
+            ));
+            return lines;
         }
 
-        if is_last_allowed_line {
-            // Last line — truncate with ellipsis.
-            let end = pos + max_chars.saturating_sub(1);
-            let mut line: String = chars[pos..end.min(chars.len())].iter().collect();
-            line.push('\u{2026}'); // ellipsis character
-            lines.push(line);
-            break;
+        let fits = text::fit(rest, max_width, LABEL_FONT_SIZE, weight);
+        if fits >= rest.len() {
+            lines.push(rest.to_string());
+            return lines;
+        }
+        if fits == 0 {
+            // Not even one character fits the cell. Anything drawn overflows,
+            // so draw the mark and stop rather than looping forever.
+            lines.push("\u{2026}".to_string());
+            return lines;
         }
 
-        // Try to break at a word boundary.
-        let chunk_end = (pos + max_chars).min(chars.len());
-        let chunk = &chars[pos..chunk_end];
+        // Prefer the last break opportunity at or before the measured cut;
+        // fall back to the cut itself for a run that has none.
+        let head = rest.get(..fits).unwrap_or(rest);
+        let cut = head
+            .rfind([' ', '-', '_', '.'])
+            .map_or(fits, |i| i.saturating_add(1));
+        let cut = if cut == 0 { fits } else { cut };
 
-        // Look for last space in the chunk to break at.
-        let break_at = chunk
-            .iter()
-            .rposition(|c| *c == ' ' || *c == '-' || *c == '_' || *c == '.')
-            .map(|i| i + 1)
-            .unwrap_or(max_chars);
-
-        let line: String = chars[pos..pos + break_at].iter().collect();
+        let (line, tail) = rest.split_at(cut);
         lines.push(line.trim_end().to_string());
-        pos += break_at;
+        rest = tail.trim_start_matches(' ');
     }
 
     if lines.is_empty() {
         lines.push(String::new());
     }
-
     lines
 }
 
@@ -1415,45 +1442,103 @@ mod tests {
     // Label wrapping tests
     // ------------------------------------------------------------------
 
+    /// Every line the wrapper produces has to fit the width it will be drawn
+    /// into. That is the only property that matters here, and it is the one a
+    /// character budget could not state.
+    fn assert_lines_fit(lines: &[String], max_width: f32) {
+        for line in lines {
+            let w = guitk::text::measure(line, LABEL_FONT_SIZE, FontWeightHint::Regular);
+            assert!(
+                w <= max_width + 0.5,
+                "line {line:?} measures {w}, wider than the {max_width} it is drawn into"
+            );
+        }
+    }
+
     #[test]
     fn wrap_short_label() {
-        let lines = wrap_label("Hello", 12, 2);
+        let lines = wrap_label("Hello", LABEL_MAX_WIDTH, 2);
         assert_eq!(lines, vec!["Hello"]);
     }
 
+    /// A label too wide for one line but small enough for two is broken at the
+    /// space and shown whole — nothing is dropped and nothing is marked, because
+    /// nothing was cut.
+    ///
+    /// The label here is deliberately short. "My Documents Folder", which this
+    /// test used to carry, does *not* fit two 72 px lines at 11 px — the old
+    /// character budget of 12 per line claimed it did, which is precisely the
+    /// error being corrected. It survives below as the label that must be marked.
     #[test]
     fn wrap_long_label_two_lines() {
-        let lines = wrap_label("My Documents Folder", 12, 2);
-        assert_eq!(lines.len(), 2);
-        // First line should break at a word boundary.
-        assert!(lines[0].chars().count() <= 12);
-        // Second line should end with ellipsis if it overflows.  Length
-        // is measured in chars (display cells), not bytes — the ellipsis
-        // is a single Unicode '…' which occupies multiple UTF-8 bytes.
-        assert!(lines[1].chars().count() <= 12);
-        assert!(lines[1].ends_with('\u{2026}'));
+        let label = "Holiday Photos";
+        // Stated, not assumed: this label really is too wide for one line, so
+        // the two-line result below is the wrapper working rather than the
+        // label happening to be short.
+        assert!(
+            guitk::text::measure(label, LABEL_FONT_SIZE, FontWeightHint::Regular) > LABEL_MAX_WIDTH,
+            "the test label must not fit one line"
+        );
+        let lines = wrap_label(label, LABEL_MAX_WIDTH, 2);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_lines_fit(&lines, LABEL_MAX_WIDTH);
+        assert_eq!(
+            lines.join(" "),
+            label,
+            "nothing was cut, so nothing is lost"
+        );
     }
 
+    /// A label that does not fit even in `max_lines` lines is marked, so a
+    /// truncated file name is distinguishable from a short one.
     #[test]
-    fn wrap_exact_boundary() {
-        let lines = wrap_label("ABCDEFGHIJKL", 12, 2);
-        // Exactly 12 chars = fits on one line.
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], "ABCDEFGHIJKL");
+    fn wrap_marks_a_label_that_does_not_fit() {
+        let lines = wrap_label(
+            "Quarterly Revenue Projections Final v3 reviewed.xlsx",
+            LABEL_MAX_WIDTH,
+            2,
+        );
+        assert_eq!(lines.len(), 2);
+        assert_lines_fit(&lines, LABEL_MAX_WIDTH);
+        assert!(lines[1].ends_with('\u{2026}'), "{lines:?}");
     }
 
     #[test]
     fn wrap_empty_label() {
-        let lines = wrap_label("", 12, 2);
+        let lines = wrap_label("", LABEL_MAX_WIDTH, 2);
         assert_eq!(lines, vec![""]);
     }
 
     #[test]
     fn wrap_single_line_truncation() {
-        let lines = wrap_label("VeryLongFileNameThatExceedsLimit", 12, 1);
+        let lines = wrap_label("VeryLongFileNameThatExceedsLimit", LABEL_MAX_WIDTH, 1);
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].ends_with('\u{2026}')); // ellipsis
-        assert!(lines[0].chars().count() <= 12);
+        assert!(lines[0].ends_with('\u{2026}'));
+        assert_lines_fit(&lines, LABEL_MAX_WIDTH);
+    }
+
+    /// What the character budget hid: twelve wide letters and twelve narrow
+    /// ones are not the same width, so no single count can be the rule. Both
+    /// now wrap to lines that fit, and they wrap differently.
+    #[test]
+    fn wrapping_follows_the_width_of_the_letters_not_their_number() {
+        let wide = wrap_label("WWWW WWWW WWWW WWWW", LABEL_MAX_WIDTH, 2);
+        let narrow = wrap_label("iiii iiii iiii iiii", LABEL_MAX_WIDTH, 2);
+        assert_lines_fit(&wide, LABEL_MAX_WIDTH);
+        assert_lines_fit(&narrow, LABEL_MAX_WIDTH);
+        assert!(
+            narrow.join(" ").chars().count() > wide.join(" ").chars().count(),
+            "the narrow label shows more characters in the same space: {narrow:?} against {wide:?}"
+        );
+    }
+
+    /// A label in a script whose characters are far from average width must
+    /// still produce lines that fit. Under the old count, three ideographs were
+    /// "3 of 12 characters" and were drawn about twice the cell wide.
+    #[test]
+    fn a_cjk_label_wraps_to_lines_that_fit() {
+        let lines = wrap_label("日本語のファイル名です", LABEL_MAX_WIDTH, 2);
+        assert_lines_fit(&lines, LABEL_MAX_WIDTH);
     }
 
     // ------------------------------------------------------------------

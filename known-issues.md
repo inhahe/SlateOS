@@ -28168,7 +28168,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 7 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 8 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28456,6 +28456,51 @@ parsed against, and what argv is allowed to be:
 all *and* carry no `Try '… --help'` referral — a third combination beyond
 `Program::usage()` and `Program::usage_referring()`, and one more reason to read
 the upstream call site per message rather than look for a per-utility rule.
+
+`nl` is the eighth (`scripts/nl-diff.sh`: 222 passed, 0 differed, 5 differ on
+purpose — three regex ones and `--help`/`--version`). It had the largest
+semantic gap of any conversion so far: the shipped parser knew `-b` and `-w`,
+silently *ignored* every other flag, defaulted `-b` to `a` where GNU defaults to
+`t`, and had no section machinery at all — so `nl` on a file with `\:\:\:`
+delimiter lines numbered them as text. Four more traps:
+
+- **A diagnostic is a sentence plus, separately, a referral — and `nl` is the
+  utility that makes the difference visible.** Upstream `getopt_long` prints only
+  the sentence and returns `'?'`; the `Try '… --help'` line comes later from the
+  caller's own `usage (EXIT_FAILURE)`. Nearly every utility calls `usage` on the
+  spot, so the two always appear together and read as one message — which is how
+  `getopt::Error` modelled them, as a single `message` string. `nl`'s option loop
+  sets an `ok` flag and keeps going, so `nl -Z -bX` prints **two** sentences and
+  **one** referral, in argv order. `Error` is now `{ sentence, referral, status }`
+  with `message()` joining them; five converted utilities had been splitting the
+  referral back off by hand (`e.message.split_once("\nTry '")`), which is the
+  usual sign that one field was two things. **A getopt error is not necessarily
+  fatal to parsing** — check whether the utility's `default:` case exits or only
+  clears a flag.
+- **Out-of-range splits by *direction*, not by which limit was hit.** gnulib's
+  `xdectoint` sets `errno = min <= tnum ? EOVERFLOW : ERANGE`, so `nl -w 0` says
+  `Numerical result out of range` while `nl -w 2147483648` — over the caller's
+  own `INT_MAX`, nowhere near `intmax_t` — says `Value too large for defined data
+  type`, the same as a genuine `intmax_t` overflow. The natural implementation
+  (over/under the caller's range → ERANGE, past `intmax_t` → EOVERFLOW) is wrong
+  in exactly one quadrant, and only a case that exceeds a *small* ceiling can
+  catch it.
+- **An option's argument can be copied over the front of the old value rather
+  than replacing it.** `nl -d abc -d x` leaves the delimiter `xbc`, because
+  upstream writes one or two bytes through a `char *` that may still point into
+  the previous `argv` string. No amount of black-box probing suggests looking for
+  this; `coreutils-9.4/src/nl.c` did. The same read settled the blank-line
+  counter being `static` and so surviving a section change.
+- **Pin every `-w` in the harness.** `nl -w 2147483647` really does emit two
+  gigabytes of spaces per line; one unpinned probe produced a 2 GB transcript.
+  The width bounds are tested through their diagnostics instead.
+
+`nl -bp` needs backreferences, which `userspace/ere` does not have — three
+harness cases are `xfail` for it. The empty BRE is a second `ere` divergence and
+is handled in `nl` instead: `ere` refuses an empty pattern on purpose (bash's
+`[[ x =~ "" ]]` is status 2) while glibc's `re_compile_pattern` accepts one and
+matches everywhere, so `Style::Matching` carries an `Option<Regex>` whose `None`
+is the empty expression.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 

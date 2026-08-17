@@ -29819,14 +29819,43 @@ visibly wrong on any proportional face, today, in English.
 `apps/markdowneditor/src/main.rs`: `col_x` (~139), the span draw loop
 (~2881–2898), and the caret at (~2902).
 
-## TD-EDITOR-HAS-NO-INPUT-LOOP (lane C, 2026-08-17)
+## TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR (lane C, 2026-08-17)
 
-**What.** `apps/editor` is a document model plus a renderer with no way to
-drive it. `fn main()` is a demo harness that mutates a `Document`
-programmatically and prints to stdout; there is no key handler, no event
-dispatch, and no connection to the compositor. Every feature the editor has —
-undo/redo, find, folding, outline, structural selection, external-change
-merging, syntax highlighting — is reachable only from tests.
+*(Filed 2026-08-17 as `TD-EDITOR-HAS-NO-INPUT-LOOP`, and renamed the same day.
+The original entry blamed `apps/editor` for a gap that turned out to be
+tree-wide, and claimed `apps/markdowneditor` had a working event loop to copy
+from — it does not; its `main()` says `// In a real application, this would
+enter the event loop`. Both errors are corrected below. `roadmap.md` still
+refers to the old name at ~967.)*
+
+**What.** No application in this tree is connected to the compositor, and the
+protocol they would connect over has no input direction. Three separate
+findings, each verified:
+
+1. **`guiremote` is one-directional.** Its entire public API is
+   `encode_frame`, `encode_frame_to_vec`, `decode_frame`, `try_decode_frame`
+   (`gui/remote/src/lib.rs:352`, `:377`, `:747`, `:756`) — `RenderTree` → bytes
+   and back, and nothing else. There is no wire encoding for a key press, a
+   mouse move, a resize, or a focus change. Input cannot travel over it because
+   there is nothing to travel *as*.
+2. **Nothing depends on it but the compositor.** `guiremote` appears in exactly
+   one `Cargo.toml` besides its own: `gui/compositor/Cargo.toml:8`. Of the 142
+   crates in `apps/`, 138 depend on `guitk` — so they build `RenderTree`s — and
+   **zero** depend on `guiremote`, so none of those trees can reach a screen.
+3. **The compositor's input routing is complete and then discarded.** It
+   hit-tests, tracks focus, and builds properly addressed per-window events —
+   `handle_key` (`gui/compositor/src/main.rs:3129`) queues an
+   `EventNotification::KeyEvent { window_id, scancode, pressed, character }`,
+   the mouse handlers queue `MouseEvent`s with window-local coordinates
+   (`:2995`, `:3021`, `:3088`, `:3103`, `:3119`), and focus/resize/close
+   changes queue their own (`:2521`, `:2768`, `:2785`, `:3045`). Then
+   `main()`'s stub loop drains them into a `for` body whose entire content is
+   `// In production: send via IPC channel to the owning client.` (`:4305`).
+   The only other caller of `drain_notifications` is a test (`:4592`).
+
+So the two halves exist and the seam between them does not: the compositor
+produces events it cannot deliver, and 138 apps produce frames they cannot
+send.
 
 **How it was found.** Wiring horizontal auto-scroll for
 `TD-EDITOR-IS-NOT-BIDIRECTIONAL` step (d) needed a caller, and there was none.
@@ -29834,23 +29863,43 @@ merging, syntax highlighting — is reachable only from tests.
 had none since it was written: vertical auto-scroll is written, tested by
 nobody, and never runs. `EditorState::ensure_caret_visible_horizontally`, added
 by step (d), is in exactly the same position — correct, tested, and uncalled.
+Looking for another app to copy a loop from is what turned a one-app problem
+into this one: there was no app to copy from.
 
 **Why this matters more than it looks.** Two uncalled scroll functions is the
-visible symptom; the real cost is that *nothing* in the editor is exercised
-end to end. A model-level test can assert that `ensure_cursor_visible` moves
+visible symptom; the real cost is that *nothing* anywhere is exercised end to
+end. A model-level test can assert that `ensure_cursor_visible` moves
 `scroll_line`, but not that anything ever asks it to — and that is precisely
-the kind of defect that survives a green test suite. The longer the model
-grows without a driver, the more of it is written against an imagined caller.
+the kind of defect that survives a green test suite. Multiply that by 138
+crates and the exposure is the whole userland: every one of them is written
+against an imagined caller, and the interface each imagined may differ. The
+longer that goes on, the more of the tree has to be revised when a real caller
+finally arrives — which is the argument for building the seam *now*, while the
+cost of a mismatch is small.
 
-**The proper fix.** Give the editor a real event loop against
-`gui/remote`: connect, receive input events, translate them to the document
-operations that already exist, call `ensure_cursor_visible` and
-`ensure_caret_visible_horizontally` after any cursor movement, and push a
-`RenderTree` per frame. `apps/markdowneditor` has a working loop of this shape
-to copy from. The demo `main()` should become an example or a test, not be
-deleted — it is a compact tour of the model's API.
+**The proper fix**, in the order the dependencies force:
 
-**Severity.** High as a *blocker* (the editor cannot be used at all), low as a
-*defect* (nothing is wrong with what exists; it is only unreachable). Not
-urgent for correctness, but it should come before more model features are
-added, so that what is added is shaped by a real caller.
+- **(a) Give `guiremote` an input direction.** Frames already carry a tag byte
+  (`lib.rs:126-127` for the clip tags), so the container generalises without a
+  format break. Encode the compositor's `EventNotification` variants.
+- **(b) Decide what a key looks like on the wire.** The compositor speaks
+  `scancode: u32` + `character: Option<char>`; `guitk::event` speaks a semantic
+  `Key` (`gui/toolkit/src/event.rs:82`) inside a `KeyEvent` (`:69`), alongside
+  `Event` (`:8`), `MouseEventKind` (`:50`) and `EventResult` (`:224`). No
+  scancode→`Key` mapping exists anywhere in the tree — grepped, it appears only
+  inside the compositor. Somebody has to own that translation, and where it
+  lives is a genuine design decision (server-side keeps one keymap for the
+  system; client-side lets an app see raw scancodes for games). This wants a
+  `design-decisions.md` entry in lane C's §400–499 band.
+- **(c) Write the client-side loop once, in `guitk`,** not once per app: connect,
+  block on events, dispatch to a handler, push a `RenderTree` per frame. 138
+  hand-written loops is 138 chances to get the seam subtly different.
+- **(d) Wire `apps/editor` to it** as the first real client, calling
+  `ensure_cursor_visible` and `ensure_caret_visible_horizontally` after any
+  cursor movement. Its demo `main()` should become an example or a test, not be
+  deleted — it is a compact tour of the model's API.
+
+**Severity.** High as a *blocker* — it is the single gap between "142 app
+crates" and "an OS with any usable application at all". Low as a *defect*:
+nothing that exists is wrong, it is only unreachable, so the fix is additive
+and nothing has to be unwound first.

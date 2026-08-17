@@ -379,6 +379,29 @@ impl Server {
         }
     }
 
+    /// Composite one frame and present it. Reports whether anything was drawn.
+    ///
+    /// Separate from [`Self::tick`] because a caller driving the loop itself may
+    /// want to compose on its own schedule — but it belongs to the *server*
+    /// rather than being left to the caller, so that [`ServerStats::frames`]
+    /// counts the same thing no matter who drives. It previously lived inline in
+    /// [`Self::run`], which meant a test that ticked and composed by hand saw a
+    /// frame count of zero while the screen was demonstrably being drawn: a
+    /// statistic that is only true for one of its two callers is a statistic
+    /// that will eventually be believed by the other.
+    pub fn compose(&mut self, compositor: &mut Compositor) -> bool {
+        if !compositor.compose_frame() {
+            return false;
+        }
+        self.stats.frames = self.stats.frames.saturating_add(1);
+        // The composited pixels. Presenting them needs a framebuffer device or a
+        // DRM plane, which this build does not have; see `known-issues.md` →
+        // `TD-COMPOSITOR-HAS-NO-SCANOUT`. Everything up to the last copy is
+        // real.
+        let _presented = compositor.front_buffer();
+        true
+    }
+
     /// Serve clients and composite for ever, at the display's refresh rate.
     ///
     /// # Errors
@@ -393,14 +416,7 @@ impl Server {
         loop {
             let began = Instant::now();
             self.tick(compositor)?;
-            if compositor.compose_frame() {
-                self.stats.frames = self.stats.frames.saturating_add(1);
-                // The composited pixels. Presenting them needs a framebuffer
-                // device or a DRM plane, which this build does not have; see
-                // `known-issues.md` → `TD-COMPOSITOR-HAS-NO-SCANOUT`. Everything
-                // up to the last copy is real.
-                let _presented = compositor.front_buffer();
-            }
+            self.compose(compositor);
             // Whatever is left of the frame. Subtracting the work already done
             // rather than sleeping a flat interval, so a tick that took eight
             // milliseconds does not push the next frame to twenty-four.

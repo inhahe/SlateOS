@@ -2552,40 +2552,78 @@ fn run<T: oswindow::ConnectionTransport>(
     failure.map_or(Ok(()), Err)
 }
 
-/// Obtain a transport to the compositor.
+/// The command-line arguments, split into a display address and file names.
 ///
-/// There is nothing to connect to yet, so this always returns `None`. Both ends
-/// of the display protocol are finished — the editor speaks it through
-/// `oswindow`, and the compositor decodes it in `gui/compositor/src/wire.rs` —
-/// but no channel exists between two processes to carry the bytes. That is a
-/// tracked, separate piece of work (`known-issues.md`,
-/// `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`).
-///
-/// It is a function returning `None` rather than an unimplemented `main`
-/// precisely so the code above it is real: `run` is written against
-/// [`oswindow::ConnectionTransport`] and compiles, and the day this returns a
-/// socket the editor starts working with no other change here.
-fn connect() -> Option<oswindow::Pipe> {
-    None
+/// `--display ADDR` overrides `SLATE_DISPLAY`, in the same way and for the same
+/// reason a compositor takes an address as its first argument: a second display
+/// on one machine should not require editing the environment of the first.
+/// Everything else is a file to open. A lone `--` ends option parsing, so a file
+/// genuinely named `--display` is still openable.
+fn split_args<I: IntoIterator<Item = String>>(
+    args: I,
+) -> Result<(Option<String>, Vec<String>), String> {
+    let mut display = None;
+    let mut files = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--" => {
+                files.extend(args);
+                break;
+            }
+            "--display" => {
+                display = Some(args.next().ok_or_else(|| {
+                    "--display needs an address, e.g. --display 127.0.0.1:7373".to_string()
+                })?);
+            }
+            other => match other.strip_prefix("--display=") {
+                Some(addr) => display = Some(addr.to_string()),
+                None => files.push(arg),
+            },
+        }
+    }
+    Ok((display, files))
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut editor = EditorState::new();
+    let (display, files) = match split_args(std::env::args().skip(1)) {
+        Ok(split) => split,
+        Err(e) => {
+            eprintln!("editor: {e}");
+            std::process::exit(2);
+        }
+    };
 
-    for path_str in &args {
+    let mut editor = EditorState::new();
+    for path_str in &files {
         let path = PathBuf::from(path_str);
         if let Err(e) = editor.open_file(&path) {
             eprintln!("editor: cannot open {}: {e}", path.display());
         }
     }
 
-    let Some(transport) = connect() else {
-        eprintln!("editor: no connection to the compositor.");
-        eprintln!("  The editor and the compositor both speak the display protocol, but");
-        eprintln!("  nothing carries it between processes yet. See known-issues.md,");
-        eprintln!("  TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR.");
-        std::process::exit(1);
+    // The editor names `oswindow` and never TCP — see `design-decisions.md`
+    // §460 — so the day the transport becomes a SlateOS channel, none of this
+    // changes.
+    let dialled = match &display {
+        Some(addr) => oswindow::connect_to(addr.as_str()),
+        None => oswindow::connect(),
+    };
+    let transport = match dialled {
+        Ok(t) => t,
+        Err(e) => {
+            // Almost always "connection refused", which means no compositor is
+            // running. The errno alone reads like a fault in this program, so
+            // say what it actually means and what to do about it.
+            eprintln!("editor: cannot reach the compositor: {e}");
+            eprintln!("  A compositor must be running for the editor to have a window.");
+            eprintln!("  Start one with `compositor`, or point the editor at an existing");
+            eprintln!(
+                "  display with `--display HOST:PORT` or the {} variable.",
+                oswindow::DISPLAY_VAR
+            );
+            std::process::exit(1);
+        }
     };
 
     let title = format!("{} — Editor", editor.active_document().name);
@@ -2613,6 +2651,392 @@ fn main() {
 /// `oswindow::testing`'s compositor, and answered, and the frames the editor
 /// draws come back as decoded submissions. What they check is the one thing
 /// [`run`] adds over [`EditorState::handle_event`]: *when* a frame is sent.
+/// How the editor is invoked: which display, and which files.
+#[cfg(test)]
+mod arg_tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::split_args;
+
+    fn split(args: &[&str]) -> Result<(Option<String>, Vec<String>), String> {
+        split_args(args.iter().map(|s| (*s).to_string()))
+    }
+
+    #[test]
+    fn with_no_arguments_the_display_comes_from_the_environment() {
+        let (display, files) = split(&[]).unwrap();
+        assert_eq!(display, None, "no override was asked for");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn files_are_kept_in_the_order_they_were_given() {
+        let (display, files) = split(&["a.rs", "b.rs", "a.rs"]).unwrap();
+        assert_eq!(display, None);
+        // Not deduplicated: opening the same file twice is the user's business,
+        // and the editor's tab list is ordered.
+        assert_eq!(files, vec!["a.rs", "b.rs", "a.rs"]);
+    }
+
+    #[test]
+    fn a_display_can_be_given_either_spelling() {
+        assert_eq!(
+            split(&["--display", "10.0.0.4:7373", "x.rs"]).unwrap(),
+            (Some("10.0.0.4:7373".to_string()), vec!["x.rs".to_string()])
+        );
+        assert_eq!(
+            split(&["--display=10.0.0.4:7373", "x.rs"]).unwrap(),
+            (Some("10.0.0.4:7373".to_string()), vec!["x.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_display_option_with_nothing_after_it_is_an_error_and_not_a_silent_default() {
+        // Silently falling back to the environment here would connect to a
+        // *different* compositor than the one the user named, which is the kind
+        // of failure that looks like the program ignoring them.
+        let e = split(&["--display"]).unwrap_err();
+        assert!(e.contains("--display"), "the message names the option: {e}");
+    }
+
+    #[test]
+    fn the_last_display_wins_so_a_wrapper_script_can_override_one() {
+        let (display, files) = split(&["--display", "a:1", "--display", "b:2"]).unwrap();
+        assert_eq!(display, Some("b:2".to_string()));
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn a_file_really_named_like_an_option_is_reachable_after_a_bare_dash_dash() {
+        let (display, files) = split(&["--", "--display", "--display=x"]).unwrap();
+        assert_eq!(display, None, "past `--` nothing is an option");
+        assert_eq!(files, vec!["--display", "--display=x"]);
+    }
+
+    #[test]
+    fn a_bare_dash_is_a_file_name_and_not_an_option() {
+        let (_, files) = split(&["-"]).unwrap();
+        assert_eq!(files, vec!["-"]);
+    }
+}
+
+/// The editor against the **real** compositor, over a **real** socket.
+///
+/// Every other test in this tree stands one half of the display protocol up
+/// against a stand-in for the other: `loop_tests` runs the editor against
+/// `oswindow::testing`, and the compositor's own `server` tests run a
+/// hand-written client against the real compositor. Both can pass while the two
+/// halves disagree, because neither ever puts the shipped code on both ends.
+/// This module does: a genuine `compositor::Server` on a background thread, an
+/// ephemeral TCP port, and the same `oswindow::connect_to` that `main` calls.
+///
+/// It is what makes the difference between believing the chain works and
+/// knowing it, and it is the reason `gui/compositor` was split into a library
+/// and a thin binary — while it was a binary only, no crate outside its own
+/// source file could link it, so this test could not have been written.
+#[cfg(test)]
+mod against_the_real_compositor {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
+    use std::net::SocketAddr;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use compositor::{Compositor, InputEvent as Hardware, Server};
+    use oswindow::{EventLoop, WindowBuilder};
+
+    use super::EditorState;
+
+    /// How long a step may take before the test calls it a failure.
+    ///
+    /// Generous, because it is only ever reached when something is wrong: the
+    /// real latency of every step here is one tick, a millisecond.
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    /// How long the compositor thread lives no matter what.
+    ///
+    /// A watchdog, and a necessary one. `wait` on a socket promises only that it
+    /// *may* return — a timeout there is not an error — so a client blocked in a
+    /// request the compositor never answers would retry for ever, and the test
+    /// would hang rather than fail. When this expires the server drops, the
+    /// sockets close, and the client's next call returns a closed connection,
+    /// which is a failure with a message instead of a killed process.
+    const WATCHDOG: Duration = Duration::from_secs(30);
+
+    /// What the test can ask the compositor thread to do between ticks.
+    enum Ask {
+        /// Feed the compositor an event as if it came from a keyboard or mouse.
+        Input(Hardware),
+        /// Report the state of the world.
+        Snapshot(mpsc::Sender<Snap>),
+    }
+
+    /// What the compositor thread reports back.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Snap {
+        windows: usize,
+        clients: usize,
+        /// Requests and submissions served.
+        served: u64,
+        frames: u64,
+        routed_events: u64,
+        unrouted_events: u64,
+        orphans_reclaimed: u64,
+    }
+
+    /// A compositor running on its own thread, on a port the OS chose.
+    struct Desktop {
+        addr: SocketAddr,
+        ask: mpsc::Sender<Ask>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Desktop {
+        fn start() -> Self {
+            let (addr_tx, addr_rx) = mpsc::channel();
+            let (ask, asks) = mpsc::channel::<Ask>();
+            let thread = thread::spawn(move || {
+                // Small, because every tick composites it and this is a test.
+                let mut compositor = Compositor::new(1280, 800, 60).expect("compositor");
+                // Port zero: the OS picks a free one, so concurrent test
+                // binaries never collide on a fixed port.
+                let mut server = Server::bind("127.0.0.1:0").expect("bind");
+                addr_tx
+                    .send(server.local_addr().expect("the listener knows its address"))
+                    .expect("the test is waiting for this");
+                drop(addr_tx);
+
+                let started = Instant::now();
+                while started.elapsed() < WATCHDOG {
+                    server.tick(&mut compositor).expect("the listener failed");
+                    // Through the server rather than calling `compose_frame`
+                    // directly, so `ServerStats::frames` counts what this loop
+                    // does exactly as it counts what the shipped binary does.
+                    server.compose(&mut compositor);
+                    match asks.try_recv() {
+                        Ok(Ask::Input(event)) => compositor.handle_input(event),
+                        Ok(Ask::Snapshot(reply)) => {
+                            let stats = *server.stats();
+                            // A send that fails means the test gave up waiting;
+                            // there is nobody left to tell, so it is dropped.
+                            let _ = reply.send(Snap {
+                                windows: compositor.window_count(),
+                                clients: server.client_count(),
+                                served: stats.served,
+                                frames: stats.frames,
+                                routed_events: stats.routed_events,
+                                unrouted_events: stats.unrouted_events,
+                                orphans_reclaimed: stats.orphans_reclaimed,
+                            });
+                        }
+                        // The test finished and dropped its end. Nothing more
+                        // will be asked, so stop rather than spin to the
+                        // watchdog.
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
+                    // A real compositor sleeps a frame; this one is being
+                    // hurried through a handful of round trips.
+                    thread::sleep(Duration::from_millis(1));
+                }
+            });
+
+            let addr = addr_rx
+                .recv_timeout(PATIENCE)
+                .expect("the compositor thread should have bound a port");
+            Self {
+                addr,
+                ask,
+                thread: Some(thread),
+            }
+        }
+
+        fn snapshot(&self) -> Snap {
+            let (tx, rx) = mpsc::channel();
+            self.ask
+                .send(Ask::Snapshot(tx))
+                .expect("the compositor thread died");
+            rx.recv_timeout(PATIENCE)
+                .expect("the compositor thread stopped answering")
+        }
+
+        /// Poll until the compositor's state satisfies `done`, or give up.
+        ///
+        /// Polling rather than a condition variable because the thing being
+        /// waited on is a *remote* effect: bytes have to cross a socket and be
+        /// served on the next tick, and there is no signal to subscribe to.
+        fn until(&self, what: &str, done: impl Fn(&Snap) -> bool) -> Snap {
+            let deadline = Instant::now() + PATIENCE;
+            let mut last = self.snapshot();
+            while Instant::now() < deadline {
+                if done(&last) {
+                    return last;
+                }
+                thread::sleep(Duration::from_millis(2));
+                last = self.snapshot();
+            }
+            panic!("waited {PATIENCE:?} for {what}; the compositor last reported {last:?}");
+        }
+
+        fn input(&self, event: Hardware) {
+            self.ask
+                .send(Ask::Input(event))
+                .expect("the compositor thread died");
+        }
+    }
+
+    impl Drop for Desktop {
+        fn drop(&mut self) {
+            // Dropping the sender is what ends the loop; joining is what makes
+            // the port free before the next test binds one.
+            let (dead, _) = mpsc::channel();
+            let ask = std::mem::replace(&mut self.ask, dead);
+            drop(ask);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    /// Connect the way `main` does, with a bounded wait so a hang is a failure.
+    fn dial(desktop: &Desktop) -> EventLoop<oswindow::Link> {
+        let mut link = oswindow::connect_to(desktop.addr).expect("nothing was listening");
+        link.set_wait_timeout(Some(Duration::from_millis(50)))
+            .expect("the socket refused a wait timeout");
+        EventLoop::new(link)
+    }
+
+    #[test]
+    fn the_editor_gets_a_window_from_the_real_compositor_over_a_real_socket() {
+        let desktop = Desktop::start();
+        let mut events = dial(&desktop);
+
+        // Blocks on the socket until the compositor answers with the id. This
+        // one line is the whole point: before the transport existed, `connect()`
+        // returned `None` and this could not be reached at all.
+        let window = WindowBuilder::new("Editor", 900, 600)
+            .resizable(true)
+            .build(&mut events)
+            .expect("the compositor should have created the window");
+
+        // The id is the compositor's, not a local counter's — the defect that
+        // made `oswindow` a simulation before §457's rewrite.
+        assert_ne!(window, 0, "a window id of zero means nobody assigned one");
+        let snap = desktop.until("the window to exist", |s| s.windows == 1);
+        assert_eq!(snap.clients, 1, "the editor is connected");
+    }
+
+    #[test]
+    fn a_frame_the_editor_draws_reaches_the_compositor() {
+        let desktop = Desktop::start();
+        let mut events = dial(&desktop);
+        let editor = EditorState::new();
+
+        let window = WindowBuilder::new("Editor", 900, 600)
+            .build(&mut events)
+            .expect("window");
+        let before = desktop.until("the window to exist", |s| s.windows == 1);
+
+        // The editor's real render tree — every line, the gutter, the status
+        // bar — encoded by `oswindow`, carried by TCP, decoded by the
+        // compositor's wire front end and rasterised.
+        let tree = editor.render();
+        assert!(!tree.commands.is_empty(), "the editor drew nothing to send");
+        events.submit(window, &tree).expect("submit");
+
+        let after = desktop.until("the picture to be served", |s| s.served > before.served);
+        assert!(
+            after.frames > 0,
+            "the compositor never composited: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_keystroke_typed_at_the_compositor_arrives_in_the_editors_document() {
+        let desktop = Desktop::start();
+        let mut events = dial(&desktop);
+        let mut editor = EditorState::new();
+
+        let window = WindowBuilder::new("Editor", 900, 600)
+            .build(&mut events)
+            .expect("window");
+        desktop.until("the window to exist", |s| s.windows == 1);
+        events.submit(window, &editor.render()).expect("submit");
+
+        // Scancode 0x1E is `A` on a set-1 keyboard. The compositor is what turns
+        // it into a key name and a character (`design-decisions.md` §456), so
+        // this is the physical event, not a synthesised `guitk` one.
+        desktop.input(Hardware::KeyDown {
+            scancode: 0x1E,
+            character: Some('a'),
+        });
+        desktop.until("the keystroke to be routed", |s| s.routed_events > 0);
+
+        // `poll` is non-blocking, so this drains what has arrived and gives the
+        // socket a moment when it has not.
+        let deadline = Instant::now() + PATIENCE;
+        let mut typed = false;
+        while Instant::now() < deadline && !typed {
+            while let Some((id, event)) = events.poll().expect("the connection failed") {
+                assert_eq!(id, window, "an event for a window the editor never opened");
+                editor.handle_event(&event);
+                if editor.active_document().lines.concat().contains('a') {
+                    typed = true;
+                }
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        assert!(
+            typed,
+            "the keystroke never reached the document; it reads {:?}",
+            editor.active_document().lines
+        );
+        assert_eq!(
+            desktop.snapshot().unrouted_events,
+            0,
+            "an event was addressed to a window no connection owned"
+        );
+    }
+
+    #[test]
+    fn when_the_editor_exits_the_compositor_reclaims_its_window() {
+        // The failure this guards against is a crashed application leaving a
+        // window on screen that nothing can close, because the only client that
+        // could ask is gone.
+        let desktop = Desktop::start();
+        {
+            let mut events = dial(&desktop);
+            WindowBuilder::new("Editor", 900, 600)
+                .build(&mut events)
+                .expect("window");
+            desktop.until("the window to exist", |s| s.windows == 1);
+        }
+        let snap = desktop.until("the window to be reclaimed", |s| s.windows == 0);
+        assert_eq!(snap.clients, 0, "the connection was dropped too");
+        assert_eq!(snap.orphans_reclaimed, 1, "and counted as an orphan");
+    }
+}
+
 #[cfg(test)]
 mod loop_tests {
     // A test that indexes out of range should fail loudly and point at the

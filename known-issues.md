@@ -30800,3 +30800,117 @@ rate with no ceiling.
 deleting an eleven-day-old write-once log is safe, but do not delete a `.output`
 file for a task that may still be running — read the task list first. Files
 under `-mtime +7` are unambiguously dead.
+
+## TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING (lane C, 2026-08-17)
+
+**What.** `gui/compositor/src/server.rs`'s `run()` is a polling loop. Once per
+display frame interval it wakes, asks the listener whether anyone is trying to
+connect, asks every open socket whether it has bytes, composes, and sleeps the
+remainder of the interval. Nothing in it *waits* for work; it asks repeatedly
+whether work has appeared.
+
+Two costs, one small and one not:
+
+* **Latency.** A request that arrives just after a tick waits until the next
+  one — up to one frame interval, 16.7 ms at 60 Hz. That is invisible for
+  drawing, which is paced by the same clock anyway, but it is a real floor
+  under anything request-shaped: a window that asks for its title to change
+  waits a frame for the reply, and an app that does a create-then-draw at
+  startup pays two.
+* **An idle desktop never idles.** With no clients connected and nothing on
+  screen, the loop still runs 60 times a second, doing a `TcpListener::accept`
+  that returns `WouldBlock` and then sleeping. On a laptop that is a wakeup
+  source that prevents the CPU from reaching a deep idle state, which is
+  battery burned to discover nothing happened.
+
+**Why it is written this way.** The standard library has no readiness
+primitive. `std::net` gives blocking sockets, non-blocking sockets and
+timeouts, and nothing that can block on *several* file descriptors at once —
+no `poll`, no `epoll`, no `kqueue`, no IOCP. With only those parts, a server
+that must watch a listener and N client sockets has exactly two shapes
+available: one thread per socket blocking in `read`, or one thread polling
+them all. The polling loop was chosen because a thread per client makes every
+piece of compositor state shared-mutable — and the compositor's state is a
+window list, a focus stack, a damage set and a framebuffer, all of which are
+touched by nearly every operation, so "shared" would in practice mean one big
+lock held across composition, which is a worse design wearing a better name.
+
+**The proper fix**, in the order the dependencies force:
+
+1. **On SlateOS, this dissolves.** The design calls for an IOCP-like
+   completion port (`design.txt`; `CLAUDE.md`'s performance table lists
+   "IOCP-like completion wait" as a critical path). The moment the compositor
+   runs on SlateOS, its transport is a channel and its wait is a port wait: one
+   blocking call that returns when *any* client has a message or the frame
+   timer expires. `run()`'s shape survives — accept, serve, route, compose —
+   with the sleep replaced by that wait.
+2. **On the hosted build, take the dependency.** `mio` (the readiness layer
+   under `tokio`) wraps `epoll`/`kqueue`/IOCP and is the obvious answer if the
+   hosted build is ever more than a development harness. Not taken now because
+   lane C may not edit the workspace-root `Cargo.toml`, and because a
+   dependency added for a build that exists to test another build is a poor
+   trade.
+3. **Cheap mitigation available today:** back the tick rate off when there are
+   no clients *and* nothing composited — e.g. poll at 10 Hz while idle, snap
+   back to the frame interval on the first connection. This does not fix the
+   latency floor for connected clients and does fix the idle-battery half.
+   Worth doing if the hosted compositor is ever left running.
+
+**Severity.** Low. It is waste and a latency floor, not a defect: every
+request is answered, in order, within a frame. It is logged because the
+polling shape is the kind of thing that gets copied into the next server
+written in this tree if nobody has written down that it was a constraint of
+the standard library rather than a preference.
+
+## TD-COMPOSITOR-HAS-NO-SCANOUT (lane C, 2026-08-17)
+
+**What.** The compositor composes a complete frame and then drops it.
+`Compositor::compose_frame()` blends every visible window, the cursor and the
+desktop furniture into a back buffer, flips it, and `front_buffer()` hands out
+a `&[u32]` of finished ARGB pixels — which `server::run` looks at only to
+count. Nothing in this tree puts those pixels in front of a human. There is no
+`present()`, no framebuffer device, no DRM plane, no window on the host.
+
+So the whole pipeline is real up to the last step: an app can connect, be given
+a window, submit a `RenderTree`, have it rasterised and composited with correct
+z-order, damage and opacity — and the result exists only as memory that is
+overwritten by the next frame.
+
+**Why it is like this.** Scanout is the one part that cannot be written
+portably. It needs either (a) SlateOS's display driver — a framebuffer the
+kernel maps for us, which is the target and does not run yet in a form the
+compositor can reach from the hosted build — or (b) a host window, which means
+a platform dependency (Win32 `BitBlt`, X11, Wayland, or a crate like
+`softbuffer`/`minifb`) that lane C cannot add to the workspace-root
+`Cargo.toml`. `gui/compositor/src/display.rs` models displays, modes and
+refresh rates faithfully and has no code that touches hardware, which is the
+honest state: the *policy* of scanout is written, the *mechanism* is not.
+
+**How to see the gap.** Run the compositor and connect a client. Everything
+reports success — `frame_stats().last_frame_time_us` is non-zero, the client
+gets its window id, `window_count()` is 1 — and the screen is unchanged,
+because the screen was never involved.
+
+**The proper fix.**
+
+1. **The real one: a SlateOS framebuffer.** The compositor asks the display
+   driver for a mapping of the scanout buffer and, after each `compose_frame`,
+   copies (or page-flips, which is why the back/front buffer pair already
+   exists) into it. `TD-NO-WRITE-COMBINING` is a prerequisite for this being
+   fast rather than merely correct — an uncached framebuffer makes the copy
+   roughly an order of magnitude more expensive than it needs to be.
+2. **For the hosted build: a host window behind a trait.** `Present` with one
+   method — take `&[u32]`, width, height — implemented once per platform and
+   once as a no-op. This is the shape that keeps `server::run` unchanged
+   between the two, and it is small; what it needs is the workspace dependency,
+   which is a cross-lane request rather than a design problem.
+3. **A useful intermediate that needs nothing:** dump `front_buffer()` to a PPM
+   or PNG on a key chord or a signal. It does not make the desktop visible, but
+   it makes "did the compositor draw what I think it drew" answerable without a
+   display at all, and it is the only one of these three available to lane C
+   today.
+
+**Severity.** High as a *blocker*, low as a *defect*, in the same sense as
+`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`: nothing that exists is wrong, and the
+missing piece is additive. It is the last link in the chain from an app's
+`RenderTree` to a photon, and it is the only one still missing.

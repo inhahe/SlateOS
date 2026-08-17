@@ -19,5 +19,12 @@ safeio = { path = "../safeio" }
 [dev-dependencies]
 safeio = { path = "../safeio", features = ["audit"] }
 
+# The real compositor, for the one test module that puts the shipped code on
+# *both* ends of the display protocol (`against_the_real_compositor`). A test
+# against a stand-in compositor and a test against a stand-in client can both
+# pass while the two disagree; this is what closes that gap. It is a
+# dev-dependency, so the shipped editor does not link a display server.
+compositor = { path = "../../gui/compositor" }
+
 [lints]
 workspace = true

@@ -88,6 +88,63 @@ pub use guiremote::{Pipe, pipe};
 pub use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 pub use guitk::render::{RenderCommand, RenderTree};
 
+// ---------------------------------------------------------------------------
+// Connecting
+// ---------------------------------------------------------------------------
+
+/// The environment variable naming the display to connect to.
+///
+/// Re-exported so an application can *mention* it in a diagnostic — "set
+/// `SLATE_DISPLAY`" is the useful half of a failure to connect — without
+/// depending on `guiremote` to learn its spelling.
+pub use guiremote::socket::DISPLAY_VAR;
+
+/// A live link to the compositor.
+///
+/// An alias, deliberately: the whole point of this crate is that an application
+/// does not name the display protocol, and it should not name the *carrier*
+/// either. Today this is a TCP socket (see `design-decisions.md` §460 for why
+/// that, rather than a local-only pipe); on SlateOS it becomes a kernel channel.
+/// Code written against `oswindow::Link` survives that change, and code written
+/// against `guiremote::socket::Socket` does not.
+///
+/// It implements [`ConnectionTransport`], which is what [`EventLoop::new`]
+/// wants. Named `Link` rather than `Connection` because
+/// [`guiremote::client::Connection`] — the frame-level machinery this crate is
+/// built on — already has that name, and two `Connection`s one layer apart is
+/// exactly the confusion this crate exists to prevent.
+pub type Link = guiremote::socket::Socket;
+
+/// Connect to the compositor named by the environment.
+///
+/// The address comes from `SLATE_DISPLAY` if it is set and from
+/// [`guiremote::socket::DEFAULT_DISPLAY`] otherwise, so a program started from a
+/// normal session needs no arguments and a second compositor is reachable by
+/// setting one variable.
+///
+/// # Errors
+///
+/// Fails if `SLATE_DISPLAY` is set to something that is not valid UTF-8, if the
+/// address does not resolve, or if nothing is listening on it — the last being
+/// overwhelmingly the common case, and meaning simply that no compositor is
+/// running. That is worth saying in those words when reporting it: the raw
+/// `ConnectionRefused` reads like a fault in the application.
+pub fn connect() -> std::io::Result<Link> {
+    Link::connect_display()
+}
+
+/// Connect to a compositor at an explicit address, ignoring the environment.
+///
+/// For a program given a display on its command line, and for tests that start
+/// a compositor on an ephemeral port.
+///
+/// # Errors
+///
+/// As [`connect`], minus the environment-variable failure.
+pub fn connect_to<A: std::net::ToSocketAddrs>(addr: A) -> std::io::Result<Link> {
+    Link::connect(addr)
+}
+
 /// What can go wrong, for a given transport.
 ///
 /// An alias rather than a new type: an application that wants to report a

@@ -46,6 +46,7 @@ use crate::script::{self, ScriptTags};
 use crate::sfnt::{Face, PathCmd, SfntError};
 use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
 use crate::thai;
+use crate::var;
 
 /// How many rasterized glyphs one [`ScaledFont`] keeps before it starts
 /// evicting.
@@ -108,6 +109,19 @@ pub struct ScaledFont {
     face: Arc<Face>,
     px_per_em: f32,
     scale: f32,
+    /// Where on the face's variation axes these glyphs are drawn.
+    ///
+    /// Deliberately here and not on [`Face`]. A `Face` is the parsed *file* and
+    /// is shared by every size and every instance drawn from it, so an instance
+    /// stored there would make a UI's Regular and its Semibold — two positions
+    /// on one variable face — silently redefine each other. It is also what
+    /// makes the instance free to change: the file is parsed once and only the
+    /// glyph cache is invalidated.
+    ///
+    /// Empty for a face with no axes, which [`Coords::is_default`] reports as
+    /// the default instance, so nothing downstream needs to special-case a
+    /// static font.
+    coords: var::Coords,
     metrics: FontMetrics,
     /// Keyed by glyph id, not character: two characters that map to the same
     /// glyph (and there are many — the space-like codepoints, the various
@@ -126,6 +140,7 @@ impl core::fmt::Debug for ScaledFont {
             .field("px_per_em", &self.px_per_em)
             .field("units_per_em", &self.face.units_per_em())
             .field("num_glyphs", &self.face.num_glyphs())
+            .field("coords", &self.coords.as_slice())
             .field("cached", &self.cache.len())
             // The face bytes and the masks are megabytes; naming them here
             // would make `{:?}` on a font unusable.
@@ -201,19 +216,95 @@ impl ScaledFont {
     /// [`ScaledFontError::InvalidSize`] if `px_per_em` is not finite and
     /// positive.
     pub fn shared(face: Arc<Face>, px_per_em: f32) -> Result<Self, ScaledFontError> {
+        let coords = face
+            .variation_axes()
+            .map_or_else(var::Coords::default, var::Variations::default_coords);
+        Self::shared_at(face, px_per_em, coords)
+    }
+
+    /// Pin a shared `face` to `px_per_em` pixels per em at a variation
+    /// instance.
+    ///
+    /// `coords` comes from the face's own
+    /// [`Variations`](crate::var::Variations) — `normalize_tags(&[(*b"wght",
+    /// 600.0)])` is the usual shape — and the whole font is drawn there:
+    /// outlines, and the metrics derived from them.
+    ///
+    /// A `coords` from a *different* face is not an error and is not checked
+    /// for. It cannot corrupt anything (an axis the face does not have reads as
+    /// its default), and the check that would catch it — comparing axis counts
+    /// — would also reject the perfectly reasonable case of a caller who has
+    /// one position and applies it across a family whose members have different
+    /// axis lists.
+    ///
+    /// # Errors
+    ///
+    /// [`ScaledFontError::InvalidSize`] if `px_per_em` is not finite and
+    /// positive.
+    pub fn shared_at(
+        face: Arc<Face>,
+        px_per_em: f32,
+        coords: var::Coords,
+    ) -> Result<Self, ScaledFontError> {
         if !px_per_em.is_finite() || px_per_em <= 0.0 {
             return Err(ScaledFontError::InvalidSize);
         }
         let scale = face.scale_for_px(px_per_em);
-        let metrics = Self::derive_metrics(&face, scale);
+        let metrics = Self::derive_metrics(&face, scale, &coords);
         Ok(Self {
             face,
             px_per_em,
             scale,
+            coords,
             metrics,
             cache: BTreeMap::new(),
             order: Vec::new(),
         })
+    }
+
+    /// Where on the face's axes this font is drawn.
+    #[must_use]
+    pub fn variations(&self) -> &var::Coords {
+        &self.coords
+    }
+
+    /// Move to another variation instance.
+    ///
+    /// Every cached glyph is dropped and the outline-derived metrics are taken
+    /// again, because both were measured at the old instance — a cache kept
+    /// across the move would draw the old weight until it happened to be
+    /// evicted, which is the sort of bug that only appears on the second frame.
+    ///
+    /// Setting the instance a font is already at is *not* a no-op-by-accident:
+    /// it is checked for, so an animation loop that pushes the same value twice
+    /// does not throw its glyphs away.
+    pub fn set_variations(&mut self, coords: var::Coords) {
+        if self.coords == coords {
+            return;
+        }
+        self.coords = coords;
+        self.clear_cache();
+        self.metrics = Self::derive_metrics(&self.face, self.scale, &self.coords);
+    }
+
+    /// Move to the instance named by `(tag, value)` pairs, leaving axes the
+    /// caller did not mention at their defaults.
+    ///
+    /// The convenience that matters: this is the form a caller actually has
+    /// ("weight 600"), and doing it by hand means reaching through
+    /// [`Face::variation_axes`] and coping with the `None` a static face
+    /// returns. Here a static face simply ignores the request — asking a
+    /// non-variable font for weight 600 is not an error, it is a font that
+    /// cannot honour it.
+    pub fn set_axes(&mut self, requested: &[([u8; 4], f32)]) {
+        let Some(coords) = self
+            .face
+            .variation_axes()
+            .map(|v| v.normalize_tags(requested))
+        else {
+            return;
+        };
+        self.set_variations(coords);
     }
 
     /// The face these glyphs come from, for sharing with another size.
@@ -250,7 +341,7 @@ impl ScaledFont {
     /// frequently absent from older and from bare `glyf` faces, and carries
     /// zeros in those fields in plenty of the faces that do have it. The
     /// outline is the ground truth and we already have a parser for it.
-    fn derive_metrics(face: &Face, scale: f32) -> FontMetrics {
+    fn derive_metrics(face: &Face, scale: f32, coords: &var::Coords) -> FontMetrics {
         let fm = face.metrics();
         let ascent = f32::from(fm.ascender) * scale;
         // `descender` is negative per spec; `FontMetrics::descent` is
@@ -261,8 +352,8 @@ impl ScaledFont {
         let line_height = fm.line_height() as f32 * scale;
         let max_advance = f32::from(fm.advance_width_max) * scale;
 
-        let cap_height = Self::glyph_top(face, 'H', scale).unwrap_or(ascent * 0.7);
-        let x_height = Self::glyph_top(face, 'x', scale).unwrap_or(ascent * 0.5);
+        let cap_height = Self::glyph_top(face, 'H', scale, coords).unwrap_or(ascent * 0.7);
+        let x_height = Self::glyph_top(face, 'x', scale, coords).unwrap_or(ascent * 0.5);
         let average_advance = Self::average_advance(face, scale);
 
         FontMetrics {
@@ -280,9 +371,9 @@ impl ScaledFont {
     ///
     /// `None` when the face has no such glyph or the glyph is blank, so the
     /// caller can fall back rather than record a height of zero.
-    fn glyph_top(face: &Face, ch: char, scale: f32) -> Option<f32> {
+    fn glyph_top(face: &Face, ch: char, scale: f32, coords: &var::Coords) -> Option<f32> {
         let gid = face.glyph_index(ch)?;
-        let outline = face.outline(gid).ok()?;
+        let outline = face.outline_at(gid, coords).ok()?;
         let mut top = f32::NEG_INFINITY;
         let mut note = |y: f32| {
             if y.is_finite() {
@@ -405,7 +496,15 @@ impl ScaledFont {
     }
 
     fn rasterize_glyph(&self, gid: u16) -> Result<Glyph, ScaledFontError> {
-        let outline = self.face.outline(gid)?;
+        let outline = self.face.outline_at(gid, &self.coords)?;
+        // The advance does *not* yet vary: it comes from `HVAR`, which every
+        // variable face on this host carries and which is the next step. Until
+        // then a varied glyph is drawn at its varied shape and spaced at its
+        // default width, which is visibly wrong only at the extremes of a
+        // weight axis — and is still better than the alternative of deriving it
+        // from `gvar`'s phantom points, which would give two sources of truth
+        // for one number before either has been checked against a real file.
+        // Tracked in `known-issues.md`.
         let advance = f32::from(self.face.advance(gid)?) * self.scale;
         // Every rasterizer failure is swallowed, and deliberately: a glyph
         // whose outline is absurd or malformed still has to occupy its
@@ -2148,11 +2247,132 @@ mod tests {
     use crate::sfnt::tests::{
         build_test_font, build_test_font_with_gdef_classes, build_test_font_with_gpos_scripts,
         build_test_font_with_gsub_and_classes, build_test_font_with_layout,
-        build_test_font_with_uvs,
+        build_test_font_with_uvs, build_variable_test_font,
     };
 
     fn font(px: f32) -> ScaledFont {
         ScaledFont::from_bytes(build_test_font(), px).unwrap()
+    }
+
+    // --- variation instances --------------------------------------------
+    //
+    // The fixture's glyph 1 ('A') is a square whose four corners the `gvar`
+    // tuple moves. At weight 700 the tuple is at full strength; see
+    // `sfnt::tests` for the bytes and the arithmetic.
+
+    fn variable_font(px: f32) -> ScaledFont {
+        ScaledFont::from_bytes(build_variable_test_font(), px).unwrap()
+    }
+
+    #[test]
+    fn a_new_font_starts_at_the_default_instance() {
+        let f = variable_font(1000.0);
+        assert!(f.variations().is_default());
+        // One entry, not none: the face has an axis, and the coordinate vector
+        // has to be as long as the axis list for a later `set_axes` to reach it.
+        assert_eq!(f.variations().len(), 1);
+    }
+
+    #[test]
+    fn a_static_face_has_an_empty_coordinate_vector() {
+        // Not an error and not a special case anywhere downstream — an empty
+        // `Coords` reports itself as the default instance.
+        let f = font(1000.0);
+        assert!(f.variations().is_empty());
+        assert!(f.variations().is_default());
+    }
+
+    #[test]
+    fn setting_an_axis_changes_the_rasterized_glyph() {
+        let mut f = variable_font(100.0);
+        let plain = f.glyph(1).unwrap().mask.clone();
+        f.set_axes(&[(*b"wght", 700.0)]);
+        assert_eq!(f.variations().as_slice(), &[16384]);
+        let bold = f.glyph(1).unwrap().mask.clone();
+        // The square grows by 110 units of 1000 on a 100px em, so the mask is
+        // visibly wider. Comparing the width rather than the bytes says *what*
+        // changed, which is what makes a failure diagnosable.
+        assert!(
+            bold.width > plain.width,
+            "weight 700 should widen the square: {} vs {}",
+            bold.width,
+            plain.width
+        );
+    }
+
+    #[test]
+    fn moving_instance_invalidates_the_glyph_cache() {
+        // The bug this guards against is the one that only shows on the second
+        // frame: a cached glyph drawn at the old instance surviving the move
+        // and rendering the old weight until it happens to be evicted.
+        let mut f = variable_font(100.0);
+        let plain = f.glyph(1).unwrap().mask.clone();
+        assert_eq!(f.cached_glyphs(), 1);
+        f.set_axes(&[(*b"wght", 700.0)]);
+        assert_eq!(f.cached_glyphs(), 0);
+        let bold = f.glyph(1).unwrap().mask.clone();
+        assert_ne!(bold.width, plain.width);
+        // And going back gets the original shape, not a second new one.
+        f.set_axes(&[(*b"wght", 400.0)]);
+        assert_eq!(f.glyph(1).unwrap().mask.width, plain.width);
+    }
+
+    #[test]
+    fn setting_the_instance_a_font_is_already_at_keeps_its_glyphs() {
+        // An animation loop that pushes the same value twice must not throw its
+        // cache away every frame.
+        let mut f = variable_font(100.0);
+        f.set_axes(&[(*b"wght", 700.0)]);
+        let _ = f.glyph(1).unwrap();
+        assert_eq!(f.cached_glyphs(), 1);
+        f.set_axes(&[(*b"wght", 700.0)]);
+        assert_eq!(f.cached_glyphs(), 1);
+    }
+
+    #[test]
+    fn a_static_face_ignores_an_axis_request() {
+        // Asking a non-variable font for weight 600 is not an error; it is a
+        // font that cannot honour it.
+        let mut f = font(100.0);
+        let plain = f.glyph(1).unwrap().mask.clone();
+        f.set_axes(&[(*b"wght", 700.0)]);
+        assert!(f.variations().is_empty());
+        assert_eq!(f.glyph(1).unwrap().mask.width, plain.width);
+    }
+
+    #[test]
+    fn two_instances_of_one_face_coexist() {
+        // The reason `Coords` lives here and not on `Face`: a UI showing the
+        // same variable family at two weights parses the file once and must get
+        // two different sets of glyphs from it.
+        let face = Arc::new(Face::parse(build_variable_test_font()).unwrap());
+        let axes = face.variation_axes().unwrap();
+        let light = ScaledFont::shared_at(Arc::clone(&face), 100.0, axes.normalize(&[100.0]));
+        let bold = ScaledFont::shared_at(Arc::clone(&face), 100.0, axes.normalize(&[700.0]));
+        let (mut light, mut bold) = (light.unwrap(), bold.unwrap());
+        assert_ne!(light.variations(), bold.variations());
+        assert_ne!(
+            light.glyph(1).unwrap().mask.width,
+            bold.glyph(1).unwrap().mask.width
+        );
+    }
+
+    #[test]
+    fn outline_derived_metrics_are_taken_at_the_current_instance() {
+        // `cap_height` is measured from 'H' — glyph 1 in this fixture, the
+        // square — so it moves with the weight. A font that kept the metrics it
+        // was built with would lay text out for the wrong instance while
+        // drawing the right one.
+        let mut f = variable_font(1000.0);
+        let plain = f.metrics().cap_height;
+        f.set_axes(&[(*b"wght", 700.0)]);
+        // The square's top corners rise by 3 and 4 units of 1000.
+        assert!(
+            f.metrics().cap_height > plain,
+            "cap height should rise with the weight: {} vs {}",
+            f.metrics().cap_height,
+            plain
+        );
     }
 
     /// The fixture has no `space` glyph — its `cmap` is 'A', 'B' and 'C' —

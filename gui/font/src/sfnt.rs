@@ -3055,10 +3055,72 @@ pub(crate) mod tests {
     /// asserted without a tolerance.
     pub(crate) fn build_variable_test_font() -> Vec<u8> {
         let mut tables = build_test_tables(TRUE_LSB_3);
+        // 'H' is added to the `cmap` on top of the base fixture's 'A'-'C',
+        // mapped onto the square, because `ScaledFont` measures its cap height
+        // from that character's outline. Without it the cap height falls back
+        // to a fraction of the ascender and no longer varies, so the assertion
+        // that outline-derived metrics follow the instance would pass whatever
+        // the code did. The base fixture is left alone rather than given the
+        // same mapping: adding it there would silently change the cap height
+        // every other test in this crate sees.
+        for (tag, data) in &mut tables {
+            if tag == b"cmap" {
+                *data = format4_cmap(&[
+                    (0x0041, 0x0043, 1 - 0x41),
+                    (0x0048, 0x0048, 1 - 0x48),
+                    (0xFFFF, 0xFFFF, 1),
+                ]);
+            }
+        }
         tables.push((*b"fvar", variable_fvar()));
         tables.push((*b"gvar", variable_gvar()));
         tables.sort_by_key(|(tag, _)| *tag);
         assemble(&tables)
+    }
+
+    /// A `cmap` holding one format-4 subtable with the given
+    /// `(start, end, idDelta)` segments, which must be sorted and must end with
+    /// the mandatory `0xFFFF` one.
+    fn format4_cmap(segments: &[(u16, u16, i16)]) -> Vec<u8> {
+        let n = u16::try_from(segments.len()).expect("a test may not need 65536 segments");
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&4u16.to_be_bytes()); // format
+        sub.extend_from_slice(&0u16.to_be_bytes()); // length, filled in below
+        sub.extend_from_slice(&0u16.to_be_bytes()); // language
+        sub.extend_from_slice(&(n * 2).to_be_bytes());
+        // The three search hints are derived from the segment count and are
+        // ignored by every reader that binary-searches the arrays itself, this
+        // one included. They are written correctly anyway so the fixture stays
+        // a file a stricter reader would also accept.
+        let entry_selector = u16::try_from(n.ilog2()).unwrap();
+        let search_range = 2 * (1u16 << entry_selector);
+        sub.extend_from_slice(&search_range.to_be_bytes());
+        sub.extend_from_slice(&entry_selector.to_be_bytes());
+        sub.extend_from_slice(&(n * 2 - search_range).to_be_bytes());
+        for &(_, end, _) in segments {
+            sub.extend_from_slice(&end.to_be_bytes());
+        }
+        sub.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
+        for &(start, _, _) in segments {
+            sub.extend_from_slice(&start.to_be_bytes());
+        }
+        for &(_, _, delta) in segments {
+            sub.extend_from_slice(&delta.to_be_bytes());
+        }
+        for _ in segments {
+            sub.extend_from_slice(&0u16.to_be_bytes()); // idRangeOffset
+        }
+        let len = u16::try_from(sub.len()).unwrap();
+        sub[2..4].copy_from_slice(&len.to_be_bytes());
+
+        let mut cmap = Vec::new();
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // version
+        cmap.extend_from_slice(&1u16.to_be_bytes()); // numTables
+        cmap.extend_from_slice(&3u16.to_be_bytes()); // platformID
+        cmap.extend_from_slice(&1u16.to_be_bytes()); // encodingID
+        cmap.extend_from_slice(&12u32.to_be_bytes()); // offset to the subtable
+        cmap.extend_from_slice(&sub);
+        cmap
     }
 
     /// One `wght` axis, 100 to 700 with the default at 400, and one named

@@ -3414,3 +3414,86 @@ fn installed_variable_fonts_vary_their_outlines() {
     );
     println!("{checked} varied glyphs agree with the oracle ({moved} moved)");
 }
+
+/// A weight axis reaches the pixels, on real files.
+///
+/// `installed_variable_fonts_vary_their_outlines` proves the deltas are read
+/// correctly; this proves they are *plumbed* — that a caller who says "weight
+/// 700" gets a heavier 'H' out of `ScaledFont` rather than the default one.
+/// Those are different failures: an unwired `ScaledFont` would still pass every
+/// outline test in this file.
+///
+/// Rasterizing rather than comparing outlines is the point. It is the only
+/// check that survives the whole pipeline — instance to coordinates to deltas
+/// to path to coverage — and the only one a user could have noticed.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn a_weight_axis_reaches_the_rasterized_glyph() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    files.sort();
+
+    let mut checked = 0usize;
+    for path in &files {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let Some(vars) = face.variation_axes() else {
+            continue;
+        };
+        let Some(axis) = vars.axes().iter().find(|a| a.tag == *b"wght") else {
+            continue;
+        };
+        // A degenerate axis — one whose ends coincide — has nothing to prove
+        // and would fail for the right reason in the wrong test.
+        if axis.min >= axis.max {
+            continue;
+        }
+        let (heaviest, default_weight) = (axis.max, axis.default);
+        let face = std::sync::Arc::new(face);
+        // 64 pixels: large enough that a weight difference is several pixels of
+        // ink rather than one of antialiasing, so this is not a test of the
+        // rasterizer's rounding.
+        let mut font = ScaledFont::shared(std::sync::Arc::clone(&face), 64.0).unwrap();
+        let gid = font.glyph_id('H');
+        if gid == 0 {
+            continue;
+        }
+        let light = font.glyph(gid).unwrap().mask.clone();
+        font.set_axes(&[(*b"wght", heaviest)]);
+        let heavy = font.glyph(gid).unwrap().mask.clone();
+
+        // Heavier means more ink. Comparing total coverage rather than the
+        // bitmaps says *which way* it moved, which is what distinguishes a
+        // wired-up axis from one that is merely different.
+        let ink = |m: &osfont::raster::GlyphMask| -> u64 {
+            m.coverage.iter().map(|&c| u64::from(c)).sum()
+        };
+        assert!(
+            ink(&heavy) > ink(&light),
+            "{name}: weight {} should put more ink on the page than {}: {} vs {}",
+            heaviest,
+            default_weight,
+            ink(&heavy),
+            ink(&light)
+        );
+
+        // And going back to the default reproduces the original exactly, which
+        // is the check that the instance is a *view* and nothing was mutated.
+        font.set_axes(&[(*b"wght", default_weight)]);
+        let again = font.glyph(gid).unwrap().mask.clone();
+        assert_eq!(
+            again.coverage, light.coverage,
+            "{name}: returning to the default weight did not reproduce the default glyph"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 4,
+        "only {checked} faces with a usable weight axis were found; expected the \
+         host's variable fonts"
+    );
+    println!("{checked} faces put more ink on the page at their heaviest weight");
+}

@@ -133,6 +133,13 @@ const SR_BCIS: u16 = 0x08;
 // Global control bits.
 /// Cold reset.
 const GC_COLD_RESET: u32 = 0x02;
+
+/// How long to wait for a channel's self-clearing `CR.RR` reset bit to drop.
+///
+/// The reset is a register-file reload, not a bus operation, so real hardware
+/// clears it in microseconds; 100 ms is "this controller is not responding"
+/// rather than a tuned value.
+const CHANNEL_RESET_TIMEOUT_US: u32 = 100_000;
 /// Warm reset.
 #[allow(dead_code)]
 const GC_WARM_RESET: u32 = 0x04;
@@ -330,7 +337,25 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     // --- Allocate DMA Buffers ---
 
     let bdl_frame = frame::alloc_frame()?;
-    let pcm_frame = frame::alloc_frame()?;
+    let pcm_frame = match frame::alloc_frame() {
+        Ok(f) => f,
+        Err(e) => {
+            // `PhysFrame` is a bare newtype over a physical address with no
+            // Drop, so nothing reclaims `bdl_frame` on the way out of this
+            // function.  Every early return past this point has to hand both
+            // frames back explicitly.
+            //
+            // The free's own Result is dropped deliberately: we are already
+            // unwinding on an allocation failure, a failure to give one frame
+            // back cannot be acted on here, and reporting it instead of `e`
+            // would replace the real cause with a bookkeeping detail.
+            // SAFETY: `bdl_frame` was just allocated here, has never been
+            // handed to the device (BDBAR is programmed further down), and is
+            // not referenced anywhere after this point.
+            let _ = unsafe { frame::free_frame(bdl_frame) };
+            return Err(e);
+        }
+    };
 
     // Zero both frames.
     // SAFETY: Both frames were just allocated; HHDM maps them.
@@ -341,23 +366,85 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
         core::ptr::write_bytes(pcm_virt, 0, FRAME_SIZE);
     }
 
+    // --- Reset the PCM Out DMA engine, THEN point it at our BDL ---
+    //
+    // Order matters, and the reverse order is a silent catastrophe.  CR.RR
+    // ("reset registers") does not merely stop the channel: per the AC'97
+    // controller spec it returns *all* of that channel's registers to their
+    // power-on defaults, and BDBAR is one of them.  Programming BDBAR first
+    // and resetting afterwards therefore leaves BDBAR reading 0 for the entire
+    // life of the driver -- nothing later rewrites it -- so the bus master
+    // fetches its buffer descriptors from guest-physical 0 instead of from our
+    // BDL frame.  Playback then "works" in the sense that the run bit is set
+    // and time passes, while the DMA engine walks whatever bytes happen to
+    // live at address 0.  This was invisible until the boot test grew an
+    // -device AC97 and self_test read the register back.
+    //
+    // RR is self-clearing: hardware drops it when the reset completes, so poll
+    // for that rather than blind-waiting and then writing 0 (which would also
+    // clobber any other CR bits we might later set here).  RR is only honoured
+    // while the run bit is clear, which it is at this point -- the channel has
+    // never been started.
+    // SAFETY: nabm_base is the validated AC97 NABM I/O base and the offset is
+    // this channel's control register.
+    unsafe {
+        port::outb(nabm_base.wrapping_add(NABM_PCMO_CR), CR_RR);
+    }
+    let mut reset_us = 0u32;
+    loop {
+        // SAFETY: as above.
+        let cr = unsafe { port::inb(nabm_base.wrapping_add(NABM_PCMO_CR)) };
+        if cr & CR_RR == 0 {
+            break;
+        }
+        if reset_us >= CHANNEL_RESET_TIMEOUT_US {
+            // Not fatal: a controller that will not self-clear RR still has to
+            // be told where the BDL is, and the read-back below is what
+            // decides whether this device is usable.  Say so rather than
+            // failing init, so the mismatch is attributable if it follows.
+            serial_println!("[ac97] WARNING: PCM Out reset did not self-clear within 100ms");
+            break;
+        }
+        busy_wait_us(100);
+        reset_us = reset_us.wrapping_add(100);
+    }
+
     // --- Set up PCM Out BDL ---
     // Point the PCM Out BDBAR to our BDL frame's physical address.
     let bdl_phys = bdl_frame.addr() as u32; // AC97 is 32-bit DMA.
-    // SAFETY: nabm_base is validated AC97 NABM I/O base.  The following
-    // writes programme the DMA engine: set BDL address, reset, and clear.
+    // SAFETY: nabm_base is validated AC97 NABM I/O base; this write programmes
+    // the channel's buffer-descriptor-list base address.
     unsafe {
         port::outl(nabm_base.wrapping_add(NABM_PCMO_BDBAR), bdl_phys);
     }
 
-    // Reset the PCM Out DMA engine.
-    unsafe {
-        port::outb(nabm_base.wrapping_add(NABM_PCMO_CR), CR_RR);
-    }
-    busy_wait_us(1000);
-    // Clear reset bit.
-    unsafe {
-        port::outb(nabm_base.wrapping_add(NABM_PCMO_CR), 0);
+    // Read it straight back.  BDBAR is the one register whose corruption is
+    // completely silent at runtime -- the DMA engine simply reads the wrong
+    // memory -- so it is worth one I/O read at init to turn that into a log
+    // line.  The low three bits are hardwired to zero (the BDL is 8-byte
+    // aligned), so mask them out of the comparison rather than assuming the
+    // allocator handed us an aligned frame and the controller kept every bit.
+    // SAFETY: as above.
+    let bdbar_readback = unsafe { port::inl(nabm_base.wrapping_add(NABM_PCMO_BDBAR)) };
+    if bdbar_readback & !0x7 == bdl_phys & !0x7 {
+        serial_println!("[ac97] PCM Out BDBAR: {:#010x}", bdbar_readback);
+    } else {
+        serial_println!(
+            "[ac97] ERROR: BDBAR read-back {:#010x} != written {:#010x}; \
+             the DMA engine would fetch descriptors from the wrong address",
+            bdbar_readback,
+            bdl_phys
+        );
+        // Same explicit hand-back as the allocation path above: neither frame
+        // is reachable from anywhere once we return, and the controller is
+        // about to be left alone.
+        // SAFETY: both frames were allocated in this function.  The device was
+        // told about `bdl_frame` one write ago, but the channel's run bit has
+        // never been set, so no DMA has been or can be started against it; and
+        // nothing else holds either address.
+        let _ = unsafe { frame::free_frame(bdl_frame) };
+        let _ = unsafe { frame::free_frame(pcm_frame) };
+        return Err(KernelError::IoError);
     }
 
     let device = Ac97Device {
@@ -676,14 +763,21 @@ pub fn self_test() {
         let master_vol = unsafe { port::inw(dev.nam_base.wrapping_add(NAM_MASTER_VOL)) };
         serial_println!("[ac97]   Master volume register: {:#06x}", master_vol);
 
-        // Verify BDL is programmed.
+        // Verify BDL is still programmed.  `init` already checked this once
+        // and refuses to bring the device up if it fails, so a mismatch *here*
+        // means something clobbered BDBAR after init -- which in practice
+        // means a stray CR.RR from the playback path, since that bit reloads
+        // the whole channel register file.  Worth re-reading precisely because
+        // the failure is otherwise silent: the DMA engine just walks the wrong
+        // memory.  Low three bits are hardwired to zero, so mask them.
         let bdbar = unsafe { port::inl(dev.nabm_base.wrapping_add(NABM_PCMO_BDBAR)) };
         let expected = dev.bdl_frame.addr() as u32;
-        if bdbar == expected {
+        if bdbar & !0x7 == expected & !0x7 {
             serial_println!("[ac97]   BDBAR: OK ({:#010x})", bdbar);
         } else {
             serial_println!(
-                "[ac97]   BDBAR: MISMATCH (got {:#010x}, expected {:#010x})",
+                "[ac97]   BDBAR: MISMATCH (got {:#010x}, expected {:#010x}) \
+                 -- DMA is reading descriptors from the wrong address",
                 bdbar,
                 expected
             );

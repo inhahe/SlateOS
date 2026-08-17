@@ -41,6 +41,7 @@
 //!   not establish.
 
 pub mod mmio;
+pub mod modeset;
 pub mod regs;
 pub mod tests;
 pub mod timing;
@@ -135,8 +136,7 @@ pub fn self_test() -> KernelResult<()> {
 /// Probe the PCI bus for a supported ATI display device and check its
 /// register map.
 ///
-/// Called from [`super::init`]. Reads only — see [`mmio`] for why nothing here
-/// touches the CRTC.
+/// Called from [`super::init`].
 ///
 /// Reports rather than propagates, because a machine without an ATI card is
 /// the overwhelmingly common case and is not a failure of anything. The
@@ -154,15 +154,79 @@ pub fn probe_hardware() {
                     "[ati] WARNING: register-map verification failed: {:?} — offsets in regs.rs are suspect",
                     e
                 );
-            } else {
-                serial_println!(
-                    "[ati] {} register map verified against hardware",
-                    dev.info.name
-                );
+                // A card whose register map does not read back correctly is the
+                // last thing that should be handed a mode-set: every write would
+                // land somewhere other than intended.
+                return;
             }
+            serial_println!(
+                "[ati] {} register map verified against hardware",
+                dev.info.name
+            );
+            exercise_modeset(&dev);
         }
         Err(e) => {
             serial_println!("[ati] WARNING: probe failed: {:?}", e);
         }
+    }
+}
+
+/// Program a mode onto the card and confirm the registers hold it.
+///
+/// ## Why this is safe to do at boot, and when it is not
+///
+/// Mode-setting is the one part of a display driver that cannot be verified
+/// without doing it, and reading a register map back only proves the offsets are
+/// right — not that the values the timing encoder produces are values the
+/// hardware accepts. So the driver programs a real mode and reads it back.
+///
+/// It does that **only on a card that is not showing anything**, which
+/// [`mmio::AtiDevice::owns_console`] establishes by address. If this card holds
+/// the console framebuffer, retiming it would blank the operator's only screen
+/// and leave the explanation in a framebuffer nobody can read; that case is
+/// skipped, loudly, and the register-map verification above is all the
+/// confirmation available on such a machine.
+///
+/// The mode chosen is 640x480@60 — the smallest in the DMT table, so it fits in
+/// any VRAM a supported part could have, and the one mode whose acceptance is
+/// least interesting to be wrong about.
+fn exercise_modeset(dev: &mmio::AtiDevice) {
+    if dev.owns_console() {
+        serial_println!(
+            "[ati]   SKIP mode-set: this card holds the console framebuffer, leaving it alone"
+        );
+        return;
+    }
+
+    let Some(mode) = timing::lookup(640, 480, 60) else {
+        serial_println!("[ati]   SKIP mode-set: 640x480@60 missing from the DMT table");
+        return;
+    };
+
+    let plan = match modeset::ModeSetPlan::new(
+        mode,
+        crate::drm::mode::PixelFormat::Xrgb8888,
+        0,
+        dev.vram_bytes,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            serial_println!("[ati]   WARNING: mode-set plan for 640x480@60 rejected: {e:?}");
+            return;
+        }
+    };
+
+    if let Err(e) = modeset::apply(&dev.mmio, &plan) {
+        serial_println!("[ati]   WARNING: mode-set failed: {e:?}");
+        return;
+    }
+    match modeset::verify_applied(&dev.mmio, &plan) {
+        Ok(()) => serial_println!(
+            "[ati]   Mode-set 640x480@60 XRGB8888 applied and read back exactly \
+             (pitch {} B, {} B scanout) — CRTC programming confirmed",
+            plan.pitch_bytes,
+            plan.size_bytes
+        ),
+        Err(e) => serial_println!("[ati]   WARNING: mode-set did not read back: {e:?}"),
     }
 }

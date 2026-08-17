@@ -5705,11 +5705,24 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
           the offsets in `regs.rs` name the registers they claim to: VRAM size
           reads as a whole number of MiB, and the direct and indirect paths
           agree. Reads only — it does not reprogram a CRTC it does not own.
-    - [ ] `DrmBackend::Ati` — CRTC programming and scanout from the BAR0
-          aperture. Deferred one commit deliberately: enabling it means taking
-          over a display, and the boot test's console is virtio-gpu, so the
-          mode-set path needs its own way to be observed before it is switched
-          on. The register map underneath it is now verified against a device.
+    - [x] `drm/ati/modeset.rs` — CRTC mode-set, split plan/apply. `ModeSetPlan`
+          computes and validates every register value with no MMIO (VRAM fit,
+          scanout alignment, pitch encoding, pixel format), so a rejected mode
+          leaves the display untouched rather than half-retimed; `apply` writes
+          it with the CRTC disabled for the duration, per Linux
+          `radeon_legacy_crtc.c`. The boot test now programs 640x480@60
+          XRGB8888 onto the emulated RV100 and reads all four timing registers
+          back bit-exact — the write path and the whole encoding, confirmed by
+          hardware rather than by assertion. Gated on
+          `AtiDevice::owns_console()`, an address comparison against the
+          bootloader framebuffer, so the driver never retimes the one screen
+          the operator is looking at.
+    - [ ] `DrmBackend::Ati` — a registered backend: BAR0 aperture mapping, GEM
+          objects resident in VRAM, `page_flip` as a `CRTC_OFFSET` write rather
+          than a memcpy. Note that `GemObject::free_backing` returns
+          `phys_frames` to the buddy allocator, so VRAM-backed objects need
+          their own allocator and their own destroy path — reusing
+          `LimineBackend`'s would hand card memory to the system allocator.
 - [ ] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
 - [ ] `[A]` NVIDIA: defer until open-source driver matures, or use Linux compat layer later
 

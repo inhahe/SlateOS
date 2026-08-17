@@ -15,6 +15,7 @@
 //! code that produces it.
 
 use super::mmio;
+use super::modeset;
 use super::regs::{self, CrtcTiming, PixWidth};
 use super::timing::{self, DMT_MODES, ModeTiming};
 use crate::drm::mode::PixelFormat;
@@ -843,6 +844,128 @@ fn test_mmio_offsets(c: &mut Check) {
     );
 }
 
+/// Mode-set planning: the decisions a mode-set makes before it writes anything.
+///
+/// Worth testing on every boot for the reason the plan/apply split exists at
+/// all: these are the checks that stop a mode-set from being started and then
+/// abandoned. A plan that wrongly succeeds leaves a CRTC retimed and pointed at
+/// an address outside VRAM, which the hardware does not fault on — it wraps or
+/// reads zero, and the only symptom is a wrong picture.
+fn test_modeset_plan(c: &mut Check) {
+    /// 16 MiB, what the emulated RV100 reports.
+    const VRAM: u32 = 16 * 1024 * 1024;
+
+    let Some(mode) = timing::lookup(640, 480, 60) else {
+        c.fail();
+        serial_println!("[ati]   FAIL: 640x480@60 missing from the DMT table");
+        return;
+    };
+
+    // The stride is width * bpp with no padding, NOT PixelFormat::pitch, which
+    // rounds up to 64 bytes. For 640x480 the two happen to agree (2560 is
+    // already a multiple of 64), so the case that distinguishes them is checked
+    // below with a width whose unpadded stride is not 64-aligned.
+    if let Some(p) = c.expect_ok(
+        "640x480@60 XRGB8888 plans",
+        modeset::ModeSetPlan::new(mode, PixelFormat::Xrgb8888, 0, VRAM),
+    ) {
+        c.eq_u32("plan pitch_bytes is 640*4", p.pitch_bytes, 2560);
+        c.eq_u32("plan size_bytes is 640*4*480", p.size_bytes, 2560 * 480);
+        c.eq_u32("plan offset is what was asked for", p.offset, 0);
+        // Pitch is denominated in 8-pixel characters: 640 px / 8 = 80.
+        c.eq_u32("plan pitch encodes to 80 characters", p.pitch, 80);
+        c.is_true(
+            "plan carries the 32bpp encoding",
+            matches!(p.pix_width, PixWidth::Bpp32),
+        );
+
+        // `gen_cntl` sets the depth and the enable bit while preserving bits
+        // the driver does not model. 1 << 30 stands in for such a bit here:
+        // if the implementation composed the register from scratch instead of
+        // masking, this bit would come back clear.
+        let composed = p.gen_cntl(1 << 30);
+        c.is_true(
+            "gen_cntl preserves unmodelled bits",
+            composed & (1 << 30) != 0,
+        );
+        c.is_true("gen_cntl sets CRTC_EN", composed & regs::CRTC_EN != 0);
+        c.eq_u32(
+            "gen_cntl sets the pixel width field",
+            composed & regs::CRTC_PIX_WIDTH_MASK,
+            PixWidth::Bpp32.shifted(),
+        );
+        // A stale depth in the incoming value must be replaced, not OR-ed
+        // together with the new one — which would leave a nonsense field.
+        let over_stale = p.gen_cntl(PixWidth::Bpp8.shifted());
+        c.eq_u32(
+            "gen_cntl replaces a stale pixel width",
+            over_stale & regs::CRTC_PIX_WIDTH_MASK,
+            PixWidth::Bpp32.shifted(),
+        );
+        // Interlace is cleared: this driver only plans progressive modes, and
+        // an interlace bit left set by firmware would halve the picture.
+        c.is_true(
+            "gen_cntl clears interlace",
+            p.gen_cntl(regs::CRTC_INTERLACE_EN) & regs::CRTC_INTERLACE_EN == 0,
+        );
+    }
+
+    // 1920x1080 at 32bpp is 8.3 MB, which fits in 16 MiB; the same mode does
+    // not fit in the 4 MiB an older part might report. The second case is the
+    // one that matters — it is the check that stops a scanout running off the
+    // end of VRAM.
+    if let Some(mode) = timing::lookup(1920, 1080, 60) {
+        c.is_true(
+            "1920x1080 XRGB8888 fits in 16 MiB",
+            modeset::ModeSetPlan::new(mode, PixelFormat::Xrgb8888, 0, VRAM).is_ok(),
+        );
+        c.is_err(
+            "1920x1080 XRGB8888 does not fit in 4 MiB",
+            modeset::ModeSetPlan::new(mode, PixelFormat::Xrgb8888, 0, 4 * 1024 * 1024),
+            KernelError::InvalidArgument,
+        );
+        // Fits by size, but not at that offset. Checking the offset is included
+        // in the bound, rather than only the size.
+        c.is_err(
+            "a scanout that fits but is pushed past the end is refused",
+            modeset::ModeSetPlan::new(mode, PixelFormat::Xrgb8888, 15 * 1024 * 1024, VRAM),
+            KernelError::InvalidArgument,
+        );
+    }
+
+    // Scanout base must be burst-aligned. A misaligned base is not refused by
+    // the hardware, it shifts the whole image — which reads as a timing bug and
+    // sends the search somewhere else entirely.
+    c.is_err(
+        "a misaligned scanout base is refused",
+        modeset::ModeSetPlan::new(mode, PixelFormat::Xrgb8888, 128, VRAM),
+        KernelError::InvalidArgument,
+    );
+    c.is_true(
+        "an aligned scanout base is accepted",
+        modeset::ModeSetPlan::new(mode, PixelFormat::Xrgb8888, modeset::SCANOUT_ALIGN, VRAM)
+            .is_ok(),
+    );
+
+    // The format rejection propagates from PixWidth::from_format, and must keep
+    // its own error rather than being flattened into InvalidArgument: "that
+    // offset is wrong" and "this display block cannot scan out that format" ask
+    // for different responses from a caller.
+    c.is_err(
+        "a channel-swapped format is refused by the planner",
+        modeset::ModeSetPlan::new(mode, PixelFormat::Xbgr8888, 0, VRAM),
+        KernelError::NotSupported,
+    );
+
+    // Zero VRAM accepts nothing. This is what a card whose CNFG_MEMSIZE read
+    // failed would present, and it must not be planned against.
+    c.is_err(
+        "no VRAM means no plan",
+        modeset::ModeSetPlan::new(mode, PixelFormat::Xrgb8888, 0, 0),
+        KernelError::InvalidArgument,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -866,6 +989,7 @@ pub fn run() -> KernelResult<()> {
     test_mode_lookup(&mut c);
     test_identify(&mut c);
     test_mmio_offsets(&mut c);
+    test_modeset_plan(&mut c);
 
     serial_println!("[ati] Self-test: {} passed, {} failed.", c.passed, c.failed);
     if c.failed > 0 {

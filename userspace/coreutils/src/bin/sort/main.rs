@@ -467,6 +467,21 @@ fn write_out(cfg: &Config, lines: &[&[u8]]) -> io::Result<()> {
 /// shared rather than reimplemented per utility.
 type Fatal = getopt::Error;
 
+/// Every hand-written message in this file becomes a `Fatal` through here, so
+/// `sort`'s status lives only in [`SORT`] and cannot be typed out again with
+/// the wrong number.
+///
+/// It covers I/O failures as well as usage errors because `sort` makes no
+/// distinction: measured, both `sort -k0` and `sort --files0-from=/nonexistent`
+/// exit 2, which is upstream's single `SORT_FAILURE`.
+///
+/// There is deliberately no `From<String>` for [`getopt::Error`] doing this
+/// implicitly: the status is per-utility, so a blanket conversion would have to
+/// pick one number and be silently wrong for every utility of the other kind.
+fn fatal(message: String) -> Fatal {
+    SORT.usage(message)
+}
+
 /// Parse argv. `Ok(None)` means `--help` or `--version` has already answered.
 #[allow(clippy::too_many_lines)]
 fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
@@ -511,7 +526,7 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
                         .copied()
                         .is_some_and(|c| c.is_ascii_digit())
                 {
-                    parse_obsolete_end(&next_bytes, &mut key)?;
+                    parse_obsolete_end(&next_bytes, &mut key).map_err(fatal)?;
                     i = i.saturating_add(1);
                 }
             }
@@ -552,8 +567,10 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
                 b'c' => cfg.check = Some(Check::Diagnose),
                 b'C' => cfg.check = Some(Check::Quiet),
                 b'z' => cfg.delim = 0,
-                b'k' => cfg.keys.push(parse_key(&take_value(&mut rest)?)?),
-                b't' => cfg.tab = Some(parse_tab(&take_value(&mut rest)?, cfg.tab)?),
+                b'k' => cfg
+                    .keys
+                    .push(parse_key(&take_value(&mut rest)?).map_err(fatal)?),
+                b't' => cfg.tab = Some(parse_tab(&take_value(&mut rest)?, cfg.tab).map_err(fatal)?),
                 b'o' => cfg.output = Some(os_from_bytes(&take_value(&mut rest)?)),
                 // Resource hints. This sort holds the whole input in memory, so
                 // there are no temporary files to place, no external program to
@@ -562,7 +579,7 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
                 b'S' | b'T' | b'y' => {
                     let _ = take_value(&mut rest)?;
                 }
-                b'R' => return Err(RANDOM_UNIMPLEMENTED.to_string().into()),
+                b'R' => return Err(fatal(RANDOM_UNIMPLEMENTED.to_string())),
                 // `other` is a byte, not a `char`: `other as char` would map
                 // 0xC3 to `Ã` and re-encode it as two bytes, so a bundle like
                 // `-é` would be reported as an option nobody typed.
@@ -576,18 +593,17 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
         // than picking one: a command line that used both meant something the
         // reader cannot guess.
         if let Some(extra) = cfg.files.first() {
-            return Err(format!(
+            return Err(fatal(format!(
                 "extra operand {}\nfile operands cannot be combined with --files0-from\n\
                  Try 'sort --help' for more information.",
                 quoteaf_os(extra)
-            )
-            .into());
+            )));
         }
-        cfg.files = read_files0(&list)?;
+        cfg.files = read_files0(&list).map_err(fatal)?;
     }
     if cfg.check.is_some() && cfg.files.len() > 1 {
         let extra = cfg.files.get(1).map_or_else(String::new, quoteaf_os);
-        return Err(format!("extra operand {extra} not allowed with -c").into());
+        return Err(fatal(format!("extra operand {extra} not allowed with -c")));
     }
     if cfg.files.is_empty() {
         cfg.files.push(OsString::from("-"));
@@ -615,8 +631,15 @@ enum Answered {
     No,
 }
 
-/// The name every diagnostic below is stamped with, bound once.
-const SORT: Program = Program("sort");
+/// The name every diagnostic below is stamped with, and the status a bad
+/// command line exits with, both bound once.
+///
+/// The 2 is measured and is the minority: almost every GNU utility exits 1 for
+/// a usage error, but `sort` has already given 1 a meaning — `sort -c` exits 1
+/// when it finds the input unsorted — so it uses 2. `ls` and `grep` do the same
+/// for the same reason. Note this does *not* extend to a bad argument to an
+/// option: `sort --sort=bogus` is 1, which `getopt::argmatch` handles.
+const SORT: Program = Program::new("sort", 2);
 
 /// Every long option `sort` knows, with what it takes.
 ///
@@ -744,12 +767,12 @@ fn long_option(
                 Some(word) => SORT.argmatch(word, "--check", CHECK_WORDS)?,
             });
         }
-        "key" => cfg.keys.push(parse_key(&need())?),
-        "field-separator" => cfg.tab = Some(parse_tab(&need(), cfg.tab)?),
+        "key" => cfg.keys.push(parse_key(&need()).map_err(fatal)?),
+        "field-separator" => cfg.tab = Some(parse_tab(&need(), cfg.tab).map_err(fatal)?),
         "output" => cfg.output = Some(os_from_bytes(&need())),
         "files0-from" => cfg.files0_from = Some(os_from_bytes(&need())),
-        "random-sort" => return Err(RANDOM_UNIMPLEMENTED.to_string().into()),
-        "debug" => return Err(DEBUG_UNIMPLEMENTED.to_string().into()),
+        "random-sort" => return Err(fatal(RANDOM_UNIMPLEMENTED.to_string())),
+        "debug" => return Err(fatal(DEBUG_UNIMPLEMENTED.to_string())),
         // Accepted and ignored, as for their short forms.
         _ => {}
     }
@@ -781,7 +804,7 @@ const SORT_WORDS: &[(&str, Option<Kind>)] = &[
 /// `--sort=WORD`, the long spelling of the ordering options.
 fn parse_sort_word(word: &[u8]) -> Result<Kind, Fatal> {
     SORT.argmatch(word, "--sort", SORT_WORDS)?
-        .ok_or_else(|| RANDOM_UNIMPLEMENTED.to_string().into())
+        .ok_or_else(|| fatal(RANDOM_UNIMPLEMENTED.to_string()))
 }
 
 /// The two options we accept into the parser and then refuse, each with the

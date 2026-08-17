@@ -72,24 +72,26 @@ pub enum Takes {
 /// A command line that cannot be run, and the status to exit with.
 ///
 /// The status is part of the return value rather than a note in a doc comment
-/// because it is **not** constant and the variation is not guessable. A bad
-/// option is status 2, but a bad *argument to* an option (`--sort=bogus`) is 1,
-/// because those go through gnulib's `argmatch`, which dies with the generic
-/// `EXIT_FAILURE` rather than the utility's own failure status. That reads like
-/// an oversight upstream, but it is what a script testing `$?` sees, so it is
-/// reproduced rather than tidied — and reproducing it correctly in 85 utilities
-/// means the caller must not be able to supply the number at all.
+/// because it is **not** constant, and it varies along two axes that no
+/// reimplementer would guess. Both were measured, across 28 utilities:
+///
+/// 1. **A bad option exits with the utility's own usage status**, which is 1
+///    for almost everything but **2 for `ls`, `sort` and `grep`** — the ones
+///    that have already spent 1 on a real answer (`sort -c` found the input
+///    unsorted, `grep` matched nothing). That is [`Program`]'s second field,
+///    and it has no default precisely because the minority is not derivable.
+/// 2. **A bad *argument to* an option is 1 for everybody**, `ls` and `sort`
+///    included, because those go through gnulib's `argmatch`, which dies with
+///    the generic `EXIT_FAILURE` rather than the caller's usage status. So
+///    `ls --zzz` is 2 while `ls --sort=zzz` is 1, in the same program, which
+///    reads like an upstream oversight and is reproduced rather than tidied.
+///
+/// A caller therefore never supplies a status: it states its usage status once
+/// when it builds its [`Program`], and this module applies rule 2 on top.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     pub message: String,
     pub status: i32,
-}
-
-/// Status 2: the command line was not understood.
-impl From<String> for Error {
-    fn from(message: String) -> Self {
-        Error { message, status: 2 }
-    }
 }
 
 /// The message alone, which is what gets printed; the status is acted on, not
@@ -107,11 +109,12 @@ fn try_help(program: &str) -> String {
     format!("\nTry '{program} --help' for more information.")
 }
 
-/// A getopt diagnostic: the sentence, the referral, and status 2.
-fn sentence(program: &str, body: &str) -> Error {
+/// A getopt diagnostic: the sentence, the referral, and the caller's usage
+/// status.
+fn sentence(program: Program, body: &str) -> Error {
     Error {
-        message: format!("{body}{}", try_help(program)),
-        status: 2,
+        message: format!("{body}{}", try_help(program.name)),
+        status: program.usage_status,
     }
 }
 
@@ -126,31 +129,62 @@ fn named_long(resolved: &str) -> String {
     quote(format!("--{resolved}").as_bytes())
 }
 
-/// A utility's name, bound once so that every diagnostic it produces carries
-/// the right one.
+/// A utility's name and usage status, bound once so that every diagnostic it
+/// produces carries the right ones.
 ///
-/// It is a type rather than a `&str` parameter on each function because these
-/// are going into 85 binaries, most of which will be converted by copying a
-/// converted neighbour — and a `&str` parameter makes `cat` printing `sort:`
-/// a silent one-word mistake that no test in `cat` would necessarily catch.
-/// Bound once at the top of a `main.rs`, it cannot drift:
+/// It is a type rather than two parameters on each call because these are going
+/// into 85 binaries, most of which will be converted by copying an already
+/// converted neighbour — and parameters make `cat` printing `sort:`, or
+/// exiting 2 where GNU's `cat` exits 1, a silent one-token slip that `cat`'s
+/// own tests need not catch. Bound once at the top of a `main.rs`, neither can
+/// drift:
 ///
 /// ```
 /// use coreutils::getopt::Program;
-/// const SORT: Program = Program("sort");
-/// assert_eq!(
-///     SORT.invalid_option(b'x').message,
-///     "invalid option -- 'x'\nTry 'sort --help' for more information."
-/// );
+/// const CAT: Program = Program::new("cat", 1);
+/// let e = CAT.invalid_option(b'x');
+/// assert_eq!(e.message, "invalid option -- 'x'\nTry 'cat --help' for more information.");
+/// assert_eq!(e.status, 1);
 /// ```
 #[derive(Clone, Copy, Debug)]
-pub struct Program(pub &'static str);
+pub struct Program {
+    name: &'static str,
+    usage_status: i32,
+}
 
 impl Program {
+    /// Name the utility and state what it exits with on a bad command line.
+    ///
+    /// `usage_status` has no default because the value that would be wrong is
+    /// not the rare one. Measured across 28 utilities it is **1** for almost
+    /// everything — `cat`, `head`, `wc`, `cp`, `tr`, `cut`, `sed`, `date` — and
+    /// **2** for `ls`, `sort` and `grep`, which have already given 1 a meaning
+    /// (`sort -c` found the input unsorted; `grep` matched nothing). Measure a
+    /// new utility with `<util> --zzz-bogus; echo $?` rather than assuming.
+    #[must_use]
+    pub const fn new(name: &'static str, usage_status: i32) -> Self {
+        Program { name, usage_status }
+    }
+
+    /// The utility's *own* usage errors — `invalid field specification '0'`,
+    /// `invalid --parallel argument 'x'` — rather than getopt's.
+    ///
+    /// They take the same status as a getopt error but, measured, carry **no**
+    /// `Try '… --help'` referral; only getopt's and `argmatch`'s do. This
+    /// exists so that a caller with hand-written usage messages still gets its
+    /// status from one place instead of writing the number out again.
+    #[must_use]
+    pub fn usage(self, message: String) -> Error {
+        Error {
+            message,
+            status: self.usage_status,
+        }
+    }
+
     /// `sort -x` → `invalid option -- 'x'`.
     #[must_use]
     pub fn invalid_option(self, flag: u8) -> Error {
-        sentence(self.0, &format!("invalid option -- {}", named(&[flag])))
+        sentence(self, &format!("invalid option -- {}", named(&[flag])))
     }
 
     /// `sort -k` → `option requires an argument -- 'k'`.
@@ -160,7 +194,7 @@ impl Program {
     #[must_use]
     pub fn short_missing_argument(self, flag: u8) -> Error {
         sentence(
-            self.0,
+            self,
             &format!("option requires an argument -- {}", named(&[flag])),
         )
     }
@@ -171,14 +205,14 @@ impl Program {
     /// because there is nothing resolved to name instead.
     #[must_use]
     pub fn unrecognized_option(self, whole: &[u8]) -> Error {
-        sentence(self.0, &format!("unrecognized option {}", named(whole)))
+        sentence(self, &format!("unrecognized option {}", named(whole)))
     }
 
     /// `sort --k` → `option '--key' requires an argument`, naming the resolution.
     #[must_use]
     pub fn long_missing_argument(self, resolved: &str) -> Error {
         sentence(
-            self.0,
+            self,
             &format!("option {} requires an argument", named_long(resolved)),
         )
     }
@@ -187,7 +221,7 @@ impl Program {
     #[must_use]
     pub fn long_unwanted_argument(self, resolved: &str) -> Error {
         sentence(
-            self.0,
+            self,
             &format!("option {} doesn't allow an argument", named_long(resolved)),
         )
     }
@@ -238,7 +272,7 @@ impl Program {
             many => {
                 let list: Vec<String> = many.iter().map(|(n, _)| named_long(n)).collect();
                 Err(sentence(
-                    self.0,
+                    self,
                     &format!(
                         "option {} is ambiguous; possibilities: {}",
                         named(whole),
@@ -287,10 +321,10 @@ impl Program {
             ),
         };
         let Some((_, first)) = hits.first() else {
-            return Err(bad_argument(self.0, "invalid", given, option, table));
+            return Err(bad_argument(self, "invalid", given, option, table));
         };
         if hits.iter().any(|(_, v)| v != first) {
-            return Err(bad_argument(self.0, "ambiguous", given, option, table));
+            return Err(bad_argument(self, "ambiguous", given, option, table));
         }
         Ok(*first)
     }
@@ -306,7 +340,7 @@ impl Program {
 /// mean the same thing, and it is the same fact the matcher uses to decide that
 /// a prefix hitting both is not ambiguous.
 fn bad_argument<T: PartialEq>(
-    program: &str,
+    program: Program,
     what: &str,
     given: &[u8],
     option: &str,
@@ -326,7 +360,8 @@ fn bad_argument<T: PartialEq>(
         prev = Some(value);
     }
     Error {
-        // Status 1, not the 2 `sentence` would give: see [`Error`].
+        // Always 1, overriding the caller's usage status rather than taking it
+        // — measured: `ls --zzz` is 2 but `ls --sort=zzz` is 1. See [`Error`].
         status: 1,
         message: sentence(
             program,
@@ -346,7 +381,7 @@ fn bad_argument<T: PartialEq>(
 mod tests {
     use super::*;
 
-    const SORT: Program = Program("sort");
+    const SORT: Program = Program::new("sort", 2);
 
     /// The literals below are glibc's, taken from `sort` under `LC_ALL=C`. They
     /// are here rather than only in a differential harness so that they are
@@ -545,7 +580,24 @@ mod tests {
                 .status,
             1
         );
-        // And a plain usage message a caller builds itself is 2, the common case.
-        assert_eq!(Error::from("bad key".to_string()).status, 2);
+        // A utility's own usage message takes its usage status, and no referral.
+        let own = SORT.usage("field number is zero".to_string());
+        assert_eq!(own.status, 2);
+        assert!(!own.message.contains("Try '"), "{own:?}");
+        // The same three calls for a status-1 utility, which is most of them.
+        // `argmatch` stays 1 for both: that is the whole oddity.
+        const CAT: Program = Program::new("cat", 1);
+        assert_eq!(CAT.invalid_option(b'x').status, 1);
+        assert_eq!(
+            CAT.argmatch(b"bogus", "--check", CHECK_WORDS)
+                .unwrap_err()
+                .status,
+            1
+        );
+        assert!(
+            CAT.invalid_option(b'x')
+                .message
+                .ends_with("Try 'cat --help' for more information."),
+        );
     }
 }

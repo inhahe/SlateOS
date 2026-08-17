@@ -194,7 +194,7 @@ impl SyntaxTree {
             out.push((depth.saturating_sub(1), node.header.clone()));
         }
         for &child in &node.children {
-            let child_depth = if idx == 0 { 1 } else { depth + 1 };
+            let child_depth = if idx == 0 { 1 } else { depth.saturating_add(1) };
             self.outline_walk(child, child_depth, out);
         }
     }
@@ -211,7 +211,7 @@ impl SyntaxTree {
                 out.push((n.start.line, n.end.line));
             }
         }
-        out.sort();
+        out.sort_unstable();
         out
     }
 }
@@ -370,11 +370,11 @@ impl<'a> Parser<'a> {
                 let (close_open, close_close) = self.dialect.block_comment;
                 let _ = close_open;
                 if !close_close.is_empty() && bytes_starts_with(bytes, i, close_close) {
-                    i += close_close.len();
+                    i = i.saturating_add(close_close.len());
                     self.in_block_comment = false;
                     continue;
                 }
-                i += utf8_step(bytes, i);
+                i = i.saturating_add(utf8_step(bytes, i));
                 continue;
             }
 
@@ -388,7 +388,7 @@ impl<'a> Parser<'a> {
             // Block comment start.
             let (bo, _bc) = self.dialect.block_comment;
             if !bo.is_empty() && bytes_starts_with(bytes, i, bo) {
-                i += bo.len();
+                i = i.saturating_add(bo.len());
                 self.in_block_comment = true;
                 continue;
             }
@@ -405,17 +405,17 @@ impl<'a> Parser<'a> {
                 .iter()
                 .find(|(open, _, _)| (*open as u32) == b as u32 && b < 0x80)
             {
-                i += 1;
+                i = i.saturating_add(1);
                 while let Some(ch) = bytes.get(i).copied() {
-                    if ch == b'\\' && i + 1 < bytes.len() {
-                        i += 2;
+                    if ch == b'\\' && i.saturating_add(1) < bytes.len() {
+                        i = i.saturating_add(2);
                         continue;
                     }
                     if (close as u32) < 0x80 && ch == close as u8 {
-                        i += 1;
+                        i = i.saturating_add(1);
                         break;
                     }
-                    i += utf8_step(bytes, i);
+                    i = i.saturating_add(utf8_step(bytes, i));
                 }
                 continue;
             }
@@ -444,7 +444,7 @@ impl<'a> Parser<'a> {
                             p.children.push(new_idx);
                         }
                         self.stack.push(new_idx);
-                        i += 1;
+                        i = i.saturating_add(1);
                         continue;
                     }
                     b'}' | b')' | b']' => {
@@ -459,20 +459,20 @@ impl<'a> Parser<'a> {
                             if node.kind == want {
                                 self.stack.pop();
                                 // Close at position one past the delimiter.
-                                node.end = Pos::new(line_idx, i + 1);
+                                node.end = Pos::new(line_idx, i.saturating_add(1));
                             } else {
                                 // Mismatched close: tolerate by skipping; the
                                 // open scope stays open until EOF.
                             }
                         }
-                        i += 1;
+                        i = i.saturating_add(1);
                         continue;
                     }
                     _ => {}
                 }
             }
 
-            i += utf8_step(bytes, i);
+            i = i.saturating_add(utf8_step(bytes, i));
         }
     }
 }
@@ -529,7 +529,13 @@ mod tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::*;
 

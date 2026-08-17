@@ -259,7 +259,7 @@ fn snap_to_boundary(line: &str, col: usize) -> usize {
     let mut col = col.min(line.len());
     // Terminates: offset 0 is always a boundary.
     while !line.is_char_boundary(col) {
-        col -= 1;
+        col = col.saturating_sub(1);
     }
     col
 }
@@ -559,7 +559,7 @@ impl Document {
             entries.push(HighlightState::Normal);
         }
         while entries.len() <= line {
-            let index = entries.len() - 1;
+            let index = entries.len().saturating_sub(1);
             // `last()` rather than an index: the vector is never empty here — it
             // was seeded just above and only grows in this loop.
             let mut state = entries.last().cloned().unwrap_or(HighlightState::Normal);
@@ -668,7 +668,10 @@ impl Document {
                 doc.cursor_line = line.saturating_add(1);
             } else if ch == '\t' && doc.use_spaces {
                 // Insert spaces instead of a tab.
-                let spaces = " ".repeat(doc.tab_width.saturating_sub(col % doc.tab_width));
+                let spaces = " ".repeat(
+                    doc.tab_width
+                        .saturating_sub(col.checked_rem(doc.tab_width).unwrap_or(0)),
+                );
                 if let Some(current_line) = doc.lines.get_mut(line) {
                     let at = snap_to_boundary(current_line, col);
                     current_line.insert_str(at, &spaces);
@@ -856,32 +859,32 @@ impl Document {
 
     pub fn move_left(&mut self) {
         if let Some(ch) = self.char_before_cursor() {
-            self.cursor_col -= ch.len_utf8();
+            self.cursor_col = self.cursor_col.saturating_sub(ch.len_utf8());
         } else if self.cursor_line > 0 {
-            self.cursor_line -= 1;
+            self.cursor_line = self.cursor_line.saturating_sub(1);
             self.cursor_col = self.cursor_line_text().len();
         }
     }
 
     pub fn move_right(&mut self) {
         if let Some(ch) = self.char_at_cursor() {
-            self.cursor_col += ch.len_utf8();
-        } else if self.cursor_line + 1 < self.lines.len() {
-            self.cursor_line += 1;
+            self.cursor_col = self.cursor_col.saturating_add(ch.len_utf8());
+        } else if self.cursor_line.saturating_add(1) < self.lines.len() {
+            self.cursor_line = self.cursor_line.saturating_add(1);
             self.cursor_col = 0;
         }
     }
 
     pub fn move_up(&mut self) {
         if self.cursor_line > 0 {
-            self.cursor_line -= 1;
+            self.cursor_line = self.cursor_line.saturating_sub(1);
             self.cursor_col = snap_to_boundary(self.cursor_line_text(), self.cursor_col);
         }
     }
 
     pub fn move_down(&mut self) {
-        if self.cursor_line + 1 < self.lines.len() {
-            self.cursor_line += 1;
+        if self.cursor_line.saturating_add(1) < self.lines.len() {
+            self.cursor_line = self.cursor_line.saturating_add(1);
             self.cursor_col = snap_to_boundary(self.cursor_line_text(), self.cursor_col);
         }
     }
@@ -913,8 +916,11 @@ impl Document {
     pub fn ensure_cursor_visible(&mut self, visible_lines: usize) {
         if self.cursor_line < self.scroll_line {
             self.scroll_line = self.cursor_line;
-        } else if self.cursor_line >= self.scroll_line + visible_lines {
-            self.scroll_line = self.cursor_line - visible_lines + 1;
+        } else if self.cursor_line >= self.scroll_line.saturating_add(visible_lines) {
+            self.scroll_line = self
+                .cursor_line
+                .saturating_sub(visible_lines)
+                .saturating_add(1);
         }
     }
 
@@ -1358,7 +1364,14 @@ impl FindState {
         if self.matches.is_empty() {
             return;
         }
-        self.current_match = (self.current_match + 1) % self.matches.len();
+        // Written as a comparison rather than `% len`: a remainder is a
+        // division, and the compiler cannot see that the list is non-empty here.
+        let ahead = self.current_match.saturating_add(1);
+        self.current_match = if ahead >= self.matches.len() {
+            0
+        } else {
+            ahead
+        };
         let Some(&(line, col, _)) = self.matches.get(self.current_match) else {
             return;
         };
@@ -1374,7 +1387,7 @@ impl FindState {
         if self.current_match == 0 {
             self.current_match = self.matches.len().saturating_sub(1);
         } else {
-            self.current_match -= 1;
+            self.current_match = self.current_match.saturating_sub(1);
         }
         let Some(&(line, col, _)) = self.matches.get(self.current_match) else {
             return;
@@ -1974,7 +1987,10 @@ impl EditorState {
         );
 
         let visible_lines = self.visible_lines();
-        let end_line = (doc.scroll_line + visible_lines).min(doc.lines.len());
+        let end_line = doc
+            .scroll_line
+            .saturating_add(visible_lines)
+            .min(doc.lines.len());
 
         // The syntax state entering the first visible line. Everything above the
         // viewport has to be tokenized to know it — a block comment opened on
@@ -1984,10 +2000,10 @@ impl EditorState {
         let mut state = doc.entry_state(doc.scroll_line);
 
         for i in doc.scroll_line..end_line {
-            let y = editor_y + (i - doc.scroll_line) as f32 * self.line_height;
+            let y = editor_y + i.saturating_sub(doc.scroll_line) as f32 * self.line_height;
 
             // Line number
-            let ln = format!("{:>4}", i + 1);
+            let ln = format!("{:>4}", i.saturating_add(1));
             let ln_color = if i == doc.cursor_line {
                 Color::from_hex(0xCDD6F4)
             } else {
@@ -2056,7 +2072,8 @@ impl EditorState {
         // long line the caret drifts visibly away from the character it is on
         // — and it drifts differently for every font the user picks.
         if doc.cursor_line >= doc.scroll_line && doc.cursor_line < end_line {
-            let cursor_y = editor_y + (doc.cursor_line - doc.scroll_line) as f32 * self.line_height;
+            let cursor_y = editor_y
+                + doc.cursor_line.saturating_sub(doc.scroll_line) as f32 * self.line_height;
             // Measured from the start of the line and then shifted by the
             // scroll, rather than measured from the scroll position: the text
             // is one shaping of the whole line, so the caret has to be placed
@@ -2222,7 +2239,11 @@ impl EditorState {
         }
 
         // Cursor position
-        let pos_text = format!("Ln {}, Col {}", doc.cursor_line + 1, doc.cursor_col + 1);
+        let pos_text = format!(
+            "Ln {}, Col {}",
+            doc.cursor_line.saturating_add(1),
+            doc.cursor_col.saturating_add(1)
+        );
         tree.text(8.0, bar_y + 5.0, &pos_text, Color::from_hex(0x6C7086), 11.0);
 
         // Language
@@ -2451,7 +2472,7 @@ impl EditorState {
                 tree.fill_rect(theirs_x - 4.0, y, col_w, block_h, Color::from_hex(0x3A2A2A));
             }
 
-            let label = format!("#{}", i + 1);
+            let label = format!("#{}", i.saturating_add(1));
             tree.text(dx + 2.0, y, &label, Color::from_hex(0x6C7086), 9.0);
 
             for (li, line) in ours.iter().enumerate() {
@@ -2593,14 +2614,18 @@ fn main() {
 /// draws come back as decoded submissions. What they check is the one thing
 /// [`run`] adds over [`EditorState::handle_event`]: *when* a frame is sent.
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
-)]
 mod loop_tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::{EditorState, run};
     use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
     use oswindow::testing;
@@ -2700,14 +2725,18 @@ mod loop_tests {
 /// are now assertions, so a regression in any of them fails a build instead of
 /// changing a line of console output nobody reads.
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
-)]
 mod api_tour {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::{Document, EditorState, Language};
 
     #[test]
@@ -2787,7 +2816,13 @@ mod caret_tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::*;
     use guitk::render::RenderCommand;
@@ -3044,7 +3079,13 @@ mod highlight_render_tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::*;
     use guitk::render::RenderCommand;
@@ -3627,7 +3668,13 @@ mod undo_tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::*;
 
@@ -3847,7 +3894,13 @@ mod doc_syntree_tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::*;
 
@@ -4170,7 +4223,13 @@ mod tab_tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::{Document, FindState, Tabs};
 

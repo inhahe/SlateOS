@@ -741,14 +741,18 @@ impl EditorState {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
-)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
     use crate::Language;
     use guitk::event::Modifiers;

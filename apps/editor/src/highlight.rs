@@ -720,8 +720,8 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
                     continue;
                 }
                 // Stray single quote — treat as operator.
-                push_token(&mut tokens, i, i + 1, Token::Operator);
-                i += 1;
+                push_token(&mut tokens, i, i.saturating_add(1), Token::Operator);
+                i = i.saturating_add(1);
                 continue;
             }
             // Double-quoted string.
@@ -749,8 +749,8 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
             // Macro invocation: word followed by `!`
             if at(bytes, end) == Some(b'!') && !word.is_empty() {
                 let kind = Token::Macro;
-                push_token(&mut tokens, start, end + 1, kind);
-                i = end + 1;
+                push_token(&mut tokens, start, end.saturating_add(1), kind);
+                i = end.saturating_add(1);
                 continue;
             }
             let kind = if is_keyword(word, RUST_KEYWORDS) {
@@ -781,8 +781,8 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 
         // Punctuation
         if is_punctuation_byte(b) {
-            push_token(&mut tokens, i, i + 1, Token::Punctuation);
-            i += 1;
+            push_token(&mut tokens, i, i.saturating_add(1), Token::Punctuation);
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -925,7 +925,7 @@ fn highlight_python_normal(
         // Decorator
         if b == b'@' {
             let start = i;
-            i += 1;
+            i = i.saturating_add(1);
             while at(bytes, i).is_some_and(|c| is_ident_byte(c) || c == b'.') {
                 i = i.saturating_add(1);
             }
@@ -1027,8 +1027,8 @@ fn highlight_python_normal(
 
         // Punctuation
         if is_punctuation_byte(b) {
-            push_token(tokens, i, i + 1, Token::Punctuation);
-            i += 1;
+            push_token(tokens, i, i.saturating_add(1), Token::Punctuation);
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -1249,8 +1249,8 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 
         // Punctuation
         if is_punctuation_byte(b) {
-            push_token(&mut tokens, i, i + 1, Token::Punctuation);
-            i += 1;
+            push_token(&mut tokens, i, i.saturating_add(1), Token::Punctuation);
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -1545,8 +1545,8 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
 
         // Punctuation
         if is_punctuation_byte(b) {
-            push_token(&mut tokens, i, i + 1, Token::Punctuation);
-            i += 1;
+            push_token(&mut tokens, i, i.saturating_add(1), Token::Punctuation);
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -1599,15 +1599,15 @@ fn highlight_json(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
             if b == b'-' {
                 if at(bytes, i.saturating_add(1)).is_some_and(|c| c.is_ascii_digit()) {
                     let start = i;
-                    i += 1; // skip minus
+                    i = i.saturating_add(1); // skip minus
                     let end = scan_number(bytes, i);
                     push_token(&mut tokens, start, end, Token::Number);
                     i = end;
                     continue;
                 }
                 // Otherwise, it's an operator.
-                push_token(&mut tokens, i, i + 1, Token::Operator);
-                i += 1;
+                push_token(&mut tokens, i, i.saturating_add(1), Token::Operator);
+                i = i.saturating_add(1);
                 continue;
             }
             let start = i;
@@ -1632,15 +1632,15 @@ fn highlight_json(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 
         // Colon
         if b == b':' {
-            push_token(&mut tokens, i, i + 1, Token::Operator);
-            i += 1;
+            push_token(&mut tokens, i, i.saturating_add(1), Token::Operator);
+            i = i.saturating_add(1);
             continue;
         }
 
         // Punctuation
         if is_punctuation_byte(b) {
-            push_token(&mut tokens, i, i + 1, Token::Punctuation);
-            i += 1;
+            push_token(&mut tokens, i, i.saturating_add(1), Token::Punctuation);
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -1757,7 +1757,7 @@ fn highlight_toml(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
             {
                 let start = i;
                 if b == b'-' || b == b'+' {
-                    i += 1;
+                    i = i.saturating_add(1);
                 }
                 let end = scan_number(bytes, i);
                 push_token(&mut tokens, start, end, Token::Number);
@@ -1778,8 +1778,8 @@ fn highlight_toml(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
             }
 
             if is_punctuation_byte(b) {
-                push_token(&mut tokens, i, i + 1, Token::Punctuation);
-                i += 1;
+                push_token(&mut tokens, i, i.saturating_add(1), Token::Punctuation);
+                i = i.saturating_add(1);
                 continue;
             }
 
@@ -2012,8 +2012,8 @@ fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 
         // Semicolon
         if b == b';' {
-            push_token(&mut tokens, i, i + 1, Token::Punctuation);
-            i += 1;
+            push_token(&mut tokens, i, i.saturating_add(1), Token::Punctuation);
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -2041,15 +2041,15 @@ fn highlight_shell(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 
         // Other operators
         if is_operator_byte(b) {
-            push_token(&mut tokens, i, i + 1, Token::Operator);
-            i += 1;
+            push_token(&mut tokens, i, i.saturating_add(1), Token::Operator);
+            i = i.saturating_add(1);
             continue;
         }
 
         // Punctuation
         if is_punctuation_byte(b) {
-            push_token(&mut tokens, i, i + 1, Token::Punctuation);
-            i += 1;
+            push_token(&mut tokens, i, i.saturating_add(1), Token::Punctuation);
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -2070,7 +2070,13 @@ mod tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
-    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::*;
 

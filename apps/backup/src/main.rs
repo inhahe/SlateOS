@@ -3172,6 +3172,131 @@ mod tests {
 
     use super::*;
 
+    // --- Write routing (safeio audit counters) ---
+
+    /// Serialises the tests that measure `safeio`'s audit counters.
+    ///
+    /// The counters are process-global, and `cargo test` runs tests in
+    /// parallel, so a delta measured across an unsynchronised span is an
+    /// *upper* bound on the span's own writes rather than an equality. That
+    /// asymmetry points the wrong way: a call site that regressed to
+    /// `fs::write` contributes one fewer write, and a concurrent test can make
+    /// up the difference and hand back a false pass — silently disarming the
+    /// only check that these paths still route through `safeio` at all.
+    /// Holding this across the measured span makes the delta exactly the
+    /// span's own, so the assertions below can be equalities and a single
+    /// regressed call site cannot hide.
+    ///
+    /// A poisoned lock is recovered rather than propagated: the poison means
+    /// some other test panicked, which its own failure already reports, and
+    /// re-panicking here would bury that first failure under a second one.
+    fn audit_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A temporary directory unique to one test.
+    fn temp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("slate_backup_{tag}_{nanos}"));
+        fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// Every file a *command* writes goes through `safeio`, not `fs::write`.
+    ///
+    /// The blob store is covered separately below; this covers the four sites
+    /// the store does not reach, each of which loses different data when a
+    /// truncating write is interrupted:
+    ///
+    /// - `manifest.json` — the list of what is in the backup. Lost, and the
+    ///   blobs are still there but unreachable: bytes with no index.
+    /// - `meta.json` — doubles as the completion marker `list_backups` keys
+    ///   off, so a half-written one can make a *finished* backup unlistable.
+    /// - the restore write — writes *over* a file the user still has, so a
+    ///   truncating write destroys the original and fails to supply the
+    ///   replacement. The one outcome a restore must never produce.
+    /// - `schedules.json` — rewritten whole, so a truncated write does not
+    ///   lose the schedule being added, it loses all of them.
+    ///
+    /// Each is driven end-to-end through the real command rather than through
+    /// an extracted helper, so the test exercises the same call the binary
+    /// makes and cannot drift away from it.
+    #[test]
+    fn command_level_writes_go_through_safeio() {
+        let _guard = audit_lock();
+
+        let root = temp_dir("cmd_routing");
+        let source = root.join("src");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("a.txt"), b"alpha").expect("a.txt");
+        fs::write(source.join("b.txt"), b"beta").expect("b.txt");
+        let dest = root.join("backups");
+
+        // -- cmd_create: manifest.json and meta.json ------------------------
+        //
+        // Blobs enter through `copy_atomically`, which increments the *copy*
+        // counter, so the write counter isolates exactly these two files.
+        let before = safeio::writes_performed();
+        cmd_create(CreateOptions {
+            backup_type: BackupType::Full,
+            source: source.clone(),
+            dest: dest.clone(),
+            exclude: Vec::new(),
+            follow_symlinks: false,
+        })
+        .expect("cmd_create");
+        assert_eq!(
+            safeio::writes_performed() - before,
+            2,
+            "cmd_create must write manifest.json and meta.json through safeio"
+        );
+
+        let backups = list_backups(&dest).expect("list_backups");
+        assert_eq!(backups.len(), 1, "one backup was created");
+        let backup_id = backups[0].id.clone();
+
+        // -- cmd_restore: one write per restored file -----------------------
+        let manifest = load_manifest(&dest, &backup_id).expect("load_manifest");
+        let expected = manifest.files.iter().filter(|f| !f.is_symlink).count() as u64;
+        assert!(expected > 0, "the backup has files to restore");
+
+        let restore_dest = root.join("restored");
+        let before = safeio::writes_performed();
+        cmd_restore(RestoreOptions {
+            backup_id: backup_id.clone(),
+            backup_dest: dest.clone(),
+            restore_dest: restore_dest.clone(),
+            file_pattern: None,
+        })
+        .expect("cmd_restore");
+        assert_eq!(
+            safeio::writes_performed() - before,
+            expected,
+            "cmd_restore must write every restored file through safeio -- it \
+             writes over files the user still has"
+        );
+        assert_eq!(
+            fs::read(restore_dest.join("a.txt")).expect("restored a.txt"),
+            b"alpha"
+        );
+
+        // -- cmd_schedule: schedules.json -----------------------------------
+        let before = safeio::writes_performed();
+        cmd_schedule(&dest, &source.to_string_lossy(), "daily").expect("cmd_schedule");
+        assert_eq!(
+            safeio::writes_performed() - before,
+            1,
+            "cmd_schedule must write schedules.json through safeio"
+        );
+        assert!(schedules_path(&dest).exists(), "the schedule was saved");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     // --- Blob-store write routing ---
 
     /// Both ways a blob enters the content-addressed store go through
@@ -3194,16 +3319,14 @@ mod tests {
     /// different `safeio` entry points (`write_atomically` vs
     /// `copy_atomically`) and so are counted separately.
     ///
-    /// The counters are process-global and tests run in parallel, so each
-    /// check compares a before and after reading rather than an absolute.
+    /// The counters are process-global, so the checks compare a before and
+    /// after reading rather than an absolute, under `audit_lock` so that the
+    /// delta is this test's own and the comparisons can be equalities.
     #[test]
     fn both_blob_store_paths_go_through_safeio() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("slate_backup_routing_{nanos}"));
-        fs::create_dir_all(&dir).expect("temp dir");
+        let _guard = audit_lock();
 
+        let dir = temp_dir("blob_routing");
         let store = ContentStore::new(&dir);
 
         // store_bytes -> safeio::write_atomically
@@ -3211,8 +3334,9 @@ mod tests {
         let hash = sha256_hex(data);
         let before = safeio::writes_performed();
         assert!(store.store_bytes(data, &hash).expect("store_bytes"));
-        assert!(
-            safeio::writes_performed() > before,
+        assert_eq!(
+            safeio::writes_performed() - before,
+            1,
             "store_bytes did not go through safeio -- it must not use std::fs::write"
         );
         assert_eq!(store.read_blob(&hash).expect("read back"), data);
@@ -3224,8 +3348,9 @@ mod tests {
         let file_hash = sha256_hex(&body);
         let before = safeio::copies_performed();
         assert!(store.store_file(&source, &file_hash).expect("store_file"));
-        assert!(
-            safeio::copies_performed() > before,
+        assert_eq!(
+            safeio::copies_performed() - before,
+            1,
             "store_file did not go through safeio -- it must not use fs::copy"
         );
         assert_eq!(store.read_blob(&file_hash).expect("read back"), body);

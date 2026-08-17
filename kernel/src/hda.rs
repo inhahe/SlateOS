@@ -1381,8 +1381,17 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Test 1: Controller is initialized and has stream counts.
+    //
+    // Reported as an error rather than asserted: this is a hardware-derived
+    // value (GCAP), so a controller that reports no output streams is a
+    // *finding about the machine*, not a broken invariant in this code. A
+    // panic here takes the whole boot down for something the driver should
+    // simply decline to use.
     let (iss, oss, bss) = stream_counts().ok_or(KernelError::NoSuchDevice)?;
-    assert!(oss > 0 || bss > 0, "must have output streams");
+    if oss == 0 && bss == 0 {
+        serial_println!("[hda]   FAIL: controller reports no output or bidirectional streams");
+        return Err(KernelError::NotSupported);
+    }
     serial_println!(
         "[hda]   Stream counts OK (ISS={} OSS={} BSS={})",
         iss,
@@ -1395,9 +1404,15 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[hda]   Codec count: {}", count);
 
     if count > 0 {
-        // Test 3: Vendor ID was read.
+        // Test 3: Vendor ID was read. Same reasoning as Test 1 — a codec that
+        // answers STATESTS but returns a zero vendor ID is a fact about the
+        // hardware (or about our CORB/RIRB sequencing), and the self-test's
+        // job is to report it, not to halt the machine over it.
         let vid = vendor_id().unwrap_or(0);
-        assert!(vid != 0, "vendor ID should be non-zero for detected codec");
+        if vid == 0 {
+            serial_println!("[hda]   FAIL: codec detected but vendor ID reads zero");
+            return Err(KernelError::IoError);
+        }
         serial_println!(
             "[hda]   Vendor ID: {:04x}:{:04x}",
             (vid >> 16) & 0xFFFF,
@@ -1405,9 +1420,17 @@ pub fn self_test() -> KernelResult<()> {
         );
 
         // Test 4: Output path discovered.
+        //
+        // `let Some(..) else` rather than `.unwrap()`: `is_initialized()` was
+        // true above, but nothing holds the lock in between, so the device
+        // could in principle be torn down here. Reporting that is cheap;
+        // panicking on it is not.
         {
             let guard = DEVICE.lock();
-            let dev = guard.as_ref().unwrap();
+            let Some(dev) = guard.as_ref() else {
+                serial_println!("[hda]   FAIL: device disappeared mid-self-test");
+                return Err(KernelError::NoSuchDevice);
+            };
             if dev.dac_nid != 0 && dev.pin_nid != 0 {
                 serial_println!(
                     "[hda]   Output path: DAC={} Pin={}",

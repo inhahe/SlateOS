@@ -1009,6 +1009,7 @@ name = "breakout"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -3228,6 +3229,7 @@ name = "flood"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -3382,6 +3384,7 @@ name = "freecell"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -6304,6 +6307,7 @@ name = "minesweeper"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -7513,6 +7517,7 @@ name = "pacman"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -9577,6 +9582,7 @@ name = "snake"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -11720,6 +11726,7 @@ name = "wordsearch"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]

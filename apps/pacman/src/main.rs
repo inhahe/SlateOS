@@ -87,28 +87,32 @@ const INITIAL_LIVES: u32 = 3;
 /// Tunnel row (0-indexed).
 const TUNNEL_ROW: usize = 14;
 
-// -- LCG random number generator ---------------------------------------------
-struct Lcg {
-    state: u64,
-}
+// -- Random numbers -----------------------------------------------------------
+// This crate used to carry its own LCG, whose `next_u64() % bound` handed back
+// the low bits of a power-of-two-modulus generator.  The game's one draw site
+// is a frightened ghost's flee target, two draws back to back with bounds 31
+// and 28.  31 is odd and behaved; 28 = 4 x 7 is not, and cost the ghosts most
+// of the maze -- see `random_maze_cell` below.
+use randrange::Rng;
 
-impl Lcg {
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
+/// A uniformly random maze cell, used as a frightened ghost's flee target.
+///
+/// A free function rather than an `Rng` method because a maze cell is this
+/// game's unit, not the generator's.
+///
+/// Under the old reduction the column was `state % 28`.  An even bound
+/// preserves the state's parity, so a ghost's column parity was fixed by
+/// where in the draw counter its turn fell, and the factor of four in 28
+/// fixed `col % 4` as well.  Each of the four frightened ghosts could
+/// therefore flee to just **7 of the 28 columns** -- one residue class
+/// mod 4 -- and so to 217 of the maze's 868 cells.  All four together
+/// reached 14, and the seed chose only *which* 14, so the frightened
+/// scatter was a pair of fixed vertical combs.
+fn random_maze_cell(rng: &mut Rng) -> Pos {
+    Pos::new(
+        i32::try_from(rng.below(MAZE_ROWS)).unwrap_or(0),
+        i32::try_from(rng.below(MAZE_COLS)).unwrap_or(0),
+    )
 }
 
 // -- Direction ---------------------------------------------------------------
@@ -169,10 +173,7 @@ impl Pos {
     }
 
     fn in_bounds(self) -> bool {
-        self.row >= 0
-            && self.row < MAZE_ROWS as i32
-            && self.col >= 0
-            && self.col < MAZE_COLS as i32
+        self.row >= 0 && self.row < MAZE_ROWS as i32 && self.col >= 0 && self.col < MAZE_COLS as i32
     }
 
     /// Wrap position for the tunnel (horizontal wrap-around at tunnel row).
@@ -225,7 +226,12 @@ enum GhostId {
 }
 
 impl GhostId {
-    const ALL: [GhostId; 4] = [GhostId::Blinky, GhostId::Pinky, GhostId::Inky, GhostId::Clyde];
+    const ALL: [GhostId; 4] = [
+        GhostId::Blinky,
+        GhostId::Pinky,
+        GhostId::Inky,
+        GhostId::Clyde,
+    ];
 
     fn color(self) -> Color {
         match self {
@@ -435,7 +441,7 @@ struct PacmanApp {
     /// Mouth animation angle (for pac-man rendering).
     mouth_open: bool,
     /// RNG.
-    rng: Lcg,
+    rng: Rng,
     /// Total elapsed game time in ms.
     elapsed_total_ms: u64,
 }
@@ -469,7 +475,7 @@ impl PacmanApp {
             ghost_move_accum_ms: 0,
             pulse_counter: 0,
             mouth_open: true,
-            rng: Lcg::new(seed),
+            rng: Rng::new(seed),
             elapsed_total_ms: 0,
         };
         app.init_ghosts();
@@ -576,10 +582,7 @@ impl PacmanApp {
                 // Uses Blinky's position: target is 2 cells ahead of player,
                 // then doubled from Blinky's position.
                 let (dr, dc) = self.player_dir.delta();
-                let ahead = Pos::new(
-                    self.player_pos.row + dr * 2,
-                    self.player_pos.col + dc * 2,
-                );
+                let ahead = Pos::new(self.player_pos.row + dr * 2, self.player_pos.col + dc * 2);
                 let blinky_pos = self
                     .ghosts
                     .iter()
@@ -720,29 +723,21 @@ impl PacmanApp {
             let target = match ghost_mode {
                 GhostMode::Chase => self.ghost_chase_target(ghost_id),
                 GhostMode::Scatter => ghost_id.scatter_target(),
-                GhostMode::Frightened => {
-                    // Random target when frightened.
-                    Pos::new(
-                        self.rng.next_bounded(MAZE_ROWS) as i32,
-                        self.rng.next_bounded(MAZE_COLS) as i32,
-                    )
-                }
+                GhostMode::Frightened => random_maze_cell(&mut self.rng),
                 GhostMode::Eaten => {
                     // Return to ghost house.
                     Pos::new(13, 14)
                 }
             };
 
-            let new_dir =
-                self.ghost_choose_direction(ghost_pos, current_dir, target, ghost_mode);
+            let new_dir = self.ghost_choose_direction(ghost_pos, current_dir, target, ghost_mode);
             let new_pos = ghost_pos.moved(new_dir).tunnel_wrap();
 
             // Verify the new position is passable.
             if self.is_ghost_passable(new_pos)
                 || ghost_mode == GhostMode::Eaten
                 || (new_pos.in_bounds()
-                    && self.maze[new_pos.row as usize][new_pos.col as usize]
-                        != Cell::Wall)
+                    && self.maze[new_pos.row as usize][new_pos.col as usize] != Cell::Wall)
             {
                 self.ghosts[i].pos = new_pos;
                 self.ghosts[i].direction = new_dir;
@@ -917,7 +912,11 @@ impl PacmanApp {
         }
 
         match self.state {
-            GameState::Menu => if key == Key::N { self.start_new_game() },
+            GameState::Menu => {
+                if key == Key::N {
+                    self.start_new_game()
+                }
+            }
             GameState::Playing => match key {
                 Key::Up => self.queued_dir = Some(Direction::Up),
                 Key::Down => self.queued_dir = Some(Direction::Down),
@@ -933,7 +932,11 @@ impl PacmanApp {
                 Key::N => self.start_new_game(),
                 _ => {}
             },
-            GameState::GameOver => if key == Key::N { self.start_new_game() },
+            GameState::GameOver => {
+                if key == Key::N {
+                    self.start_new_game()
+                }
+            }
         }
     }
 
@@ -1539,6 +1542,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     // -- Helpers --------------------------------------------------------------
 
@@ -1570,29 +1574,69 @@ mod tests {
         app.handle_tick(PLAYER_MOVE_MS + 1);
     }
 
-    // -- LCG tests ------------------------------------------------------------
+    // -- Frightened-target tests ----------------------------------------------
+    //
+    // The generator's own behaviour -- determinism, bound respect, uniformity
+    // -- is tested in `randrange`; what belongs here is the maze cell this
+    // game builds on top of it.
 
     #[test]
-    fn test_lcg_deterministic() {
-        let mut rng1 = Lcg::new(42);
-        let mut rng2 = Lcg::new(42);
-        assert_eq!(rng1.next_u64(), rng2.next_u64());
-        assert_eq!(rng1.next_u64(), rng2.next_u64());
+    fn test_random_maze_cell_in_bounds() {
+        let mut rng = Rng::new(99);
+        for _ in 0..2000 {
+            let cell = random_maze_cell(&mut rng);
+            assert!(cell.in_bounds(), "flee target outside the maze: {cell:?}");
+        }
     }
 
+    /// Each frightened ghost must be able to flee anywhere, and it is the
+    /// *per-ghost* reach that matters: the ghosts draw round-robin, one cell
+    /// each per tick, so each ghost sees every fourth pair of draws.
+    ///
+    /// Under the old `state % MAZE_COLS` that stride was the whole defect.
+    /// 28 is even, so the column's parity was pinned by where a ghost's turn
+    /// fell in the draw counter, and 28 = 4 x 7 pinned `col % 4` too: each
+    /// ghost reached 7 of the 28 columns and 217 of the 868 cells, all four
+    /// together reached 14 columns, and the seed chose only which 14.
+    ///
+    /// Counted per seed rather than pooled across seeds, because the defect
+    /// was per game: four ghosts over a handful of seeds cover every column
+    /// between them while each one is still confined to a comb.
     #[test]
-    fn test_lcg_different_seeds() {
-        let mut rng1 = Lcg::new(1);
-        let mut rng2 = Lcg::new(2);
-        assert_ne!(rng1.next_u64(), rng2.next_u64());
-    }
+    fn every_frightened_ghost_can_flee_to_every_column() {
+        const TICKS: usize = 2000;
+        let ghosts = PacmanApp::new().ghosts.len();
 
-    #[test]
-    fn test_lcg_bounded() {
-        let mut rng = Lcg::new(99);
-        for _ in 0..100 {
-            let val = rng.next_bounded(10);
-            assert!(val < 10);
+        for seed in [42_u64, 7, 12_345, 999] {
+            let mut rng = Rng::new(seed);
+            let mut cells: Vec<BTreeSet<(i32, i32)>> = vec![BTreeSet::new(); ghosts];
+            for _ in 0..TICKS {
+                for seen in &mut cells {
+                    let cell = random_maze_cell(&mut rng);
+                    seen.insert((cell.row, cell.col));
+                }
+            }
+
+            for (ghost, seen) in cells.iter().enumerate() {
+                let cols: BTreeSet<i32> = seen.iter().map(|&(_, col)| col).collect();
+                assert_eq!(
+                    cols.len(),
+                    MAZE_COLS,
+                    "seed {seed}: ghost {ghost} fled to only {} of the {MAZE_COLS} columns \
+                     ({:?} mod 4)",
+                    cols.len(),
+                    cols.iter().map(|c| c % 4).collect::<BTreeSet<_>>()
+                );
+
+                // 2000 draws over 868 cells leave about 87% of them hit; the
+                // broken column stride capped this at 7 x 31 = 217.
+                assert!(
+                    seen.len() > 700,
+                    "seed {seed}: ghost {ghost} reached only {} of the {} maze cells",
+                    seen.len(),
+                    MAZE_ROWS * MAZE_COLS
+                );
+            }
         }
     }
 

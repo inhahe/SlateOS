@@ -94,36 +94,41 @@ const SCORE_FONT_SIZE: f32 = 18.0;
 
 // ── Game constants ──────────────────────────────────────────────────
 const INITIAL_LIVES: u32 = 3;
+/// Widest deviation of a ball launch from straight up, in radians (60°).
+const MAX_LAUNCH_ANGLE: f32 = std::f32::consts::FRAC_PI_3;
 
-// ── LCG random number generator ────────────────────────────────────
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Lcg {
-    state: u64,
-}
+// ── Randomness ──────────────────────────────────────────────────────
+// This crate used to carry its own LCG whose `next_bounded` reduced with
+// `state % bound`, taking the low bits of a generator whose low bits are its
+// weakest part.  Breakout's one degenerate bound was the launch angle's 1000:
+// the odd factor 125 hid it, but 8 divides 1000, so `(state % 1000) % 8` *is*
+// `state % 8` -- a period-8 cycle, and the same cycle at every seed, with the
+// seed choosing only the phase.
+//
+// `start_game` then made that permanent rather than transient.  It reseeds
+// (`Self::with_seed(self.rng.next_u64())`), and the new generator's very first
+// output is the opening launch angle, because `init_bricks` draws nothing.  So
+// the opening angle of every game in a session was that fixed cycle sampled at
+// a fixed stride, and its parity never changed: a chain of 5000 new games
+// reached **500 of the 1000 angles and 4 of the 8 residues mod 8**, with the
+// first seed deciding which half was possible.  This is the same reseed shape
+// that made `solitaire` and `freecell` worse than `hearts`.
+//
+// See `known-issues.md`, "The same broken reduction is copy-pasted into 27
+// crates", and `design-decisions.md` §447.
+use randrange::Rng;
 
-impl Lcg {
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Returns a value in `0..bound` (exclusive upper bound).
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
-
-    /// Returns true with probability 1/n.
-    fn one_in(&mut self, n: u64) -> bool {
-        self.next_u64().is_multiple_of(n)
-    }
+/// A uniformly random ball launch direction, in radians from straight up.
+///
+/// A free function rather than an `Rng` method because a launch angle is this
+/// game's unit, not the generator's.
+///
+/// Drawn as a continuous angle rather than the old `next_bounded(1000)` mapped
+/// through `v / 500.0 - 1.0`.  That 1000 was an arbitrary quantisation of a
+/// quantity that was never discrete -- it bought nothing, and it was the sole
+/// even bound in the crate.
+fn random_launch_angle(rng: &mut Rng) -> f32 {
+    rng.between_f32(-MAX_LAUNCH_ANGLE, MAX_LAUNCH_ANGLE)
 }
 
 // ── Game state ──────────────────────────────────────────────────────
@@ -259,7 +264,7 @@ struct BreakoutApp {
     /// Remaining duration for the wide-paddle power-up (ms).
     wide_paddle_remaining_ms: u64,
     /// RNG.
-    rng: Lcg,
+    rng: Rng,
     /// Ball speed for the current level.
     ball_speed: f32,
 }
@@ -286,7 +291,7 @@ impl BreakoutApp {
             bricks_remaining: 0,
             accumulated_ms: 0,
             wide_paddle_remaining_ms: 0,
-            rng: Lcg::new(seed),
+            rng: Rng::new(seed),
             ball_speed: BASE_BALL_SPEED,
         };
         app.init_bricks();
@@ -311,7 +316,7 @@ impl BreakoutApp {
 
     /// Spawn a ball at the center above the paddle, heading upward.
     fn spawn_ball(&mut self) {
-        let angle = self.random_launch_angle();
+        let angle = random_launch_angle(&mut self.rng);
         let vx = self.ball_speed * angle.sin();
         let vy = -self.ball_speed * angle.cos();
         let ball = Ball::new(self.paddle_x, self.paddle_top() - BALL_RADIUS - 1.0, vx, vy);
@@ -321,13 +326,6 @@ impl BreakoutApp {
     /// Returns the y coordinate of the top edge of the paddle.
     fn paddle_top(&self) -> f32 {
         PLAY_HEIGHT - PADDLE_Y_OFFSET
-    }
-
-    /// Random angle between -60 and +60 degrees from vertical.
-    fn random_launch_angle(&mut self) -> f32 {
-        // Generate angle in range [-1.0, 1.0] mapped to [-60deg, 60deg].
-        let r = (self.rng.next_bounded(1000) as f32 / 500.0) - 1.0;
-        r * std::f32::consts::FRAC_PI_3
     }
 
     /// Start a new game.
@@ -343,8 +341,8 @@ impl BreakoutApp {
     /// Advance to the next level: reinitialize bricks, increase speed.
     fn next_level(&mut self) {
         self.level += 1;
-        self.ball_speed = (BASE_BALL_SPEED + BALL_SPEED_INCREMENT * (self.level - 1) as f32)
-            .min(MAX_BALL_SPEED);
+        self.ball_speed =
+            (BASE_BALL_SPEED + BALL_SPEED_INCREMENT * (self.level - 1) as f32).min(MAX_BALL_SPEED);
         self.init_bricks();
         self.balls.clear();
         self.powerups.clear();
@@ -540,14 +538,7 @@ impl BreakoutApp {
     }
 
     /// Reflect a ball off a rectangle based on which side was hit.
-    fn reflect_ball_off_rect(
-        &mut self,
-        ball_idx: usize,
-        rx: f32,
-        ry: f32,
-        rw: f32,
-        rh: f32,
-    ) {
+    fn reflect_ball_off_rect(&mut self, ball_idx: usize, rx: f32, ry: f32, rw: f32, rh: f32) {
         let ball = &mut self.balls[ball_idx];
         let cx = rx + rw / 2.0;
         let cy = ry + rh / 2.0;
@@ -580,8 +571,8 @@ impl BreakoutApp {
     }
 
     fn maybe_spawn_powerup(&mut self, x: f32, y: f32) {
-        if self.rng.one_in(POWERUP_SPAWN_CHANCE) {
-            let kind = match self.rng.next_bounded(3) {
+        if self.rng.chance(1, POWERUP_SPAWN_CHANCE) {
+            let kind = match self.rng.below(3) {
                 0 => PowerUpKind::WidePaddle,
                 1 => PowerUpKind::MultiBall,
                 _ => PowerUpKind::ExtraLife,
@@ -1080,7 +1071,12 @@ impl BreakoutApp {
 
         // Title.
         cmds.push(RenderCommand::Text {
-            x: text::center_x(title, box_x + box_w / 2.0, TITLE_FONT_SIZE, FontWeightHint::Bold),
+            x: text::center_x(
+                title,
+                box_x + box_w / 2.0,
+                TITLE_FONT_SIZE,
+                FontWeightHint::Bold,
+            ),
             y: box_y + 35.0,
             text: title.to_string(),
             color: LAVENDER,
@@ -1137,6 +1133,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     /// Helper: create a test app in Playing state with a fixed seed.
     fn test_app() -> BreakoutApp {
@@ -1512,14 +1509,8 @@ mod tests {
     fn test_ball_rect_collision_edge() {
         let app = BreakoutApp::new();
         // Ball just touching the edge (within radius).
-        let result = app.ball_rect_collision(
-            100.0 - BALL_RADIUS + 1.0,
-            110.0,
-            100.0,
-            100.0,
-            20.0,
-            20.0,
-        );
+        let result =
+            app.ball_rect_collision(100.0 - BALL_RADIUS + 1.0, 110.0, 100.0, 100.0, 20.0, 20.0);
         assert!(result);
     }
 
@@ -1758,7 +1749,19 @@ mod tests {
         // Small tick: power-up only needs to fall ~2 pixels at 120 px/s.
         tick(&mut app, 100);
         assert_eq!(app.lives, lives_before + 1);
-        assert!(app.powerups.is_empty());
+        // Not `powerups.is_empty()`: the ball is live, so a brick it breaks in
+        // this same tick may drop a *second* power-up, and whether it does is a
+        // property of the generator's stream rather than of collection. That
+        // assertion therefore passed only for as long as the stream did not
+        // change. Ask the question it meant instead -- is the one placed at the
+        // paddle gone -- by requiring anything still falling to be up at the
+        // bricks, where a fresh drop starts, rather than down at the paddle.
+        let paddle_band = app.paddle_top() - POWERUP_SIZE;
+        assert!(
+            app.powerups.iter().all(|p| p.y < paddle_band),
+            "the power-up placed at the paddle was not collected: {:?} still within reach",
+            app.powerups.iter().map(|p| p.y).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2029,9 +2032,11 @@ mod tests {
         // Paddle color should differ.
         let find_paddle_color = |cmds: &[RenderCommand]| -> Option<Color> {
             cmds.iter().find_map(|cmd| match cmd {
-                RenderCommand::FillRect {
-                    height, color, ..
-                } if (*height - PADDLE_HEIGHT).abs() < 0.01 => Some(*color),
+                RenderCommand::FillRect { height, color, .. }
+                    if (*height - PADDLE_HEIGHT).abs() < 0.01 =>
+                {
+                    Some(*color)
+                }
                 _ => None,
             })
         };
@@ -2098,38 +2103,138 @@ mod tests {
         }
     }
 
-    // ── LCG RNG ─────────────────────────────────────────────────────
+    // ── Launch angle ────────────────────────────────────────────────
+    //
+    // The three tests that used to sit here checked the generator, not the
+    // game: same seed gives the same stream, a bounded draw is below its
+    // bound, and `one_in(2)` is true somewhere between 0 and 1000 times out of
+    // 1000.  All three passed against the broken reduction, and the third is
+    // the sharpest illustration in this crate of why: on the old LCG
+    // `next_u64() % 2` alternated exactly, so `one_in(2)` returned true on
+    // precisely every other call -- a perfect 500, from a sequence with no
+    // randomness in it at all -- and the assertion was only `0 < count <
+    // 1000`.  What follows tests the angle the player actually sees instead.
 
-    #[test]
-    fn test_lcg_deterministic() {
-        let mut rng1 = Lcg::new(42);
-        let mut rng2 = Lcg::new(42);
-        for _ in 0..10 {
-            assert_eq!(rng1.next_u64(), rng2.next_u64());
+    /// Re-creates the historical draw so the tests below pin the *claim*
+    /// rather than the implementation, in the manner of `randrange`'s own
+    /// `the_original_defect_still_cycles_when_reproduced`.
+    ///
+    /// Returns the opening launch angle of each game in a chain of new games,
+    /// quantised back onto the 1000-step lattice the old code used, so the two
+    /// generators can be compared on one scale.
+    fn opening_angle_lattice_points(seed: u64, games: usize, historical: bool) -> Vec<usize> {
+        /// The old `Lcg::next_u64`.
+        fn lcg(state: u64) -> u64 {
+            state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407)
         }
-    }
-
-    #[test]
-    fn test_lcg_bounded() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..100 {
-            let val = rng.next_bounded(10);
-            assert!(val < 10);
+        /// Angle -> the old code's 0..1000 index, for comparison on one scale.
+        fn lattice(angle: f32) -> usize {
+            let r = angle / MAX_LAUNCH_ANGLE; // back to -1.0..1.0
+            (((r + 1.0) * 500.0) as usize).min(999)
         }
-    }
 
-    #[test]
-    fn test_lcg_one_in() {
-        let mut rng = Lcg::new(42);
-        let mut count = 0;
-        for _ in 0..1000 {
-            if rng.one_in(2) {
-                count += 1;
+        let mut out = Vec::with_capacity(games);
+        let mut carrier = seed;
+        for _ in 0..games {
+            // `start_game`: draw a new seed from the running generator, then
+            // build a fresh one whose first output is the opening angle.
+            if historical {
+                carrier = lcg(carrier);
+                out.push((lcg(carrier) % 1000) as usize);
+                carrier = lcg(carrier);
+            } else {
+                let mut running = Rng::new(carrier);
+                carrier = running.next_u64();
+                let mut fresh = Rng::new(carrier);
+                out.push(lattice(random_launch_angle(&mut fresh)));
+                carrier = fresh.next_u64();
             }
         }
-        // Roughly half should be true; at least some should be.
-        assert!(count > 0);
-        assert!(count < 1000);
+        out
+    }
+
+    #[test]
+    fn launch_angle_stays_within_sixty_degrees_of_vertical() {
+        let mut rng = Rng::new(42);
+        for _ in 0..1000 {
+            let angle = random_launch_angle(&mut rng);
+            assert!(
+                angle >= -MAX_LAUNCH_ANGLE && angle < MAX_LAUNCH_ANGLE,
+                "launch angle {angle} escaped +/-60 degrees"
+            );
+            // A launch must always carry the ball upward, never sideways or
+            // down: that is what bounding the angle is *for*.
+            assert!(-angle.cos() < 0.0, "launch angle {angle} did not go up");
+        }
+    }
+
+    /// The defect this crate was migrated for.
+    ///
+    /// `start_game` reseeds, and the fresh generator's first output is the
+    /// opening angle, so the openings of successive games were consecutive
+    /// low-bit draws of one LCG.  8 divides 1000, so their parity never
+    /// changed for the whole session and only 4 of the 8 residues mod 8 were
+    /// ever reachable -- half the angles, with the first seed choosing which
+    /// half.  Counting distinct values alone would *not* catch this (500 of
+    /// 1000 still looks plentiful); the parity is the part that must be
+    /// asserted.
+    #[test]
+    fn opening_launch_angle_is_not_locked_to_one_parity() {
+        for seed in [42_u64, 7, 999, 2024] {
+            let points = opening_angle_lattice_points(seed, 400, false);
+
+            let parities: BTreeSet<usize> = points.iter().map(|p| p % 2).collect();
+            assert_eq!(
+                parities.len(),
+                2,
+                "seed {seed}: every opening angle over 400 new games had the same parity \
+                 ({:?} mod 2) -- half the range is unreachable",
+                parities
+            );
+
+            let residues: BTreeSet<usize> = points.iter().map(|p| p % 8).collect();
+            assert_eq!(
+                residues.len(),
+                8,
+                "seed {seed}: openings over 400 new games reached only {} of the 8 residues \
+                 mod 8 ({residues:?})",
+                residues.len()
+            );
+
+            let distinct: BTreeSet<usize> = points.iter().copied().collect();
+            assert!(
+                distinct.len() > 300,
+                "seed {seed}: 400 new games produced only {} distinct opening angles",
+                distinct.len()
+            );
+        }
+    }
+
+    /// Pins the claim above: the historical draw really was degenerate, so the
+    /// test cannot quietly rot into asserting nothing.
+    #[test]
+    fn the_original_reduction_still_locks_the_opening_angle() {
+        for seed in [42_u64, 7, 999, 2024] {
+            let points = opening_angle_lattice_points(seed, 400, true);
+
+            let parities: BTreeSet<usize> = points.iter().map(|p| p % 2).collect();
+            assert_eq!(
+                parities.len(),
+                1,
+                "seed {seed}: the historical `state % 1000` was expected to fix the opening \
+                 angle's parity for the whole chain, but reached {parities:?}"
+            );
+
+            let residues: BTreeSet<usize> = points.iter().map(|p| p % 8).collect();
+            assert_eq!(
+                residues.len(),
+                4,
+                "seed {seed}: the historical draw was expected to reach 4 of the 8 residues \
+                 mod 8, but reached {residues:?}"
+            );
+        }
     }
 
     // ── Ball struct ─────────────────────────────────────────────────

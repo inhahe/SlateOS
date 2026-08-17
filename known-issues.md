@@ -590,9 +590,11 @@ on an invariant maintained by four other methods. All three are now a single
 
 ## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
 
-**Status: OPEN 2026-08-16 — five of 27 crates fixed** (`simon`, `battleship`,
-`sliding`, `asteroids`, `yahtzee`); the shared crate that the rest should move
-to is written and green.
+**Status: OPEN 2026-08-16 — fourteen of 27 crates fixed** (`simon`,
+`battleship`, `sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`,
+`freecell`, `minesweeper`, `flood`, `snake`, `wordsearch`, `pacman`,
+`breakout`); the shared crate that the rest should move to is written and
+green.
 
 The defect above is not `simon`'s. A scan of the tree
 (`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
@@ -617,6 +619,25 @@ measured:
 | `apps/sliding` | 4 | 499 seeds produced **two** distinct 4×4 boards between them | fixed `de4280a98` |
 | `apps/asteroids` | 4 | every asteroid of every wave entered from **one** edge; the seed only chose which | fixed `762afae1f` |
 | `apps/yahtzee` | 6 | adjacent dice locked to opposite parity, so a Yahtzee was impossible — zero in 15 000 rolls, ~12 expected | fixed `81b88fc5e` |
+| `apps/hearts` | 2..52 | the two of hearts reached seat 2 44.3% of deals and seat 0 9.5%; 40 of 52 cards misdealt by >2 points; seat 0 led 33.6% of hands | fixed `63066a45b` |
+| `apps/solitaire` | 2..52 | the two of hearts was the leftmost face-up card in 17.6% of deals, against 1.9% | fixed `ea4560541` |
+| `apps/freecell` | 2..52 | the ace of hearts was the deepest card on the board in 17.4% of deals; ace depth alternated 8.5 / 15.5 / 9.7 / 16.2% | fixed `e1fa03154` |
+| `apps/minesweeper` | 256 | an Intermediate board was a window into one 256-cell cycle: 5000 seeds gave 252 layouts, and the 257th new game replayed the first | fixed `3f28501a6` |
+| `apps/flood` | 6 | no two cells in a row ever shared a colour — zero matches in 61 200 pairs; each column used half the palette | fixed `15d7265d6` |
+| `apps/snake` | 20, 20 | the food could reach 50 of the 400 cells, in a fixed diagonal lattice | fixed `4d448a617` |
+| `apps/wordsearch` | 26, 2..30 | every second filler letter came from {A,C,…,Y} and the ones between from {B,D,…,Z} — 0 repeats in 2000 draws, 76 expected; and BISON was picked for 14% of puzzles against ZEBRA's 41% | fixed `4cce605f8` |
+| `apps/pacman` | 31, 28 | each frightened ghost could flee to 7 of the 28 columns and 217 of the 868 cells; all four together to 14 columns, the seed choosing only *which* 14 | fixed `481f36e8d` |
+| `apps/breakout` | 1000 | every game in a session opened at the same launch parity: 500 of the 1000 angles and 4 of the 8 residues mod 8 over a chain of 5000 new games | fixed `589045fe1` |
+
+**The three card games are one shape and worth reading together.** All three
+shuffle 52 cards with a correct downward Fisher–Yates and draw the partner with
+`state % (i + 1)`. Half of those 51 bounds are even, so on 25 of the swaps the
+partner index carried a fixed parity — set by the parity of the draw counter,
+which is set by the seed and nothing else. `solitaire` and `freecell` make it
+worse than `hearts` does, because their `new_game` *reseeds* (`Rng::new(self
+.rng.next_u64())`): the draw counter restarts at zero every deal, so every deal
+repeats the same pattern of fixed parities and only which parity varies. That
+is why one card could own the same slot in a sixth of all games.
 
 `apps/pipes` was in this table and should not have been: its `next_bounded`
 shifts (`>> 33`) before the `%`, so it never touches the low-bit counter. The
@@ -632,12 +653,90 @@ so long: most call sites use an odd or non-power-of-two bound and look fine,
 and the ones that do not still pass every distribution test written against
 them.
 
-Still degenerate, not yet migrated: `breakout`, `dots`, `flood`, `freecell`,
-`hangman`, `hearts`, `life`, `lightsout`, `match3`, `maze`, `memory`,
-`minesweeper`, `pacman`, `pinball`, `snake`, `solitaire`, `sudoku`, `tetris`,
-`wordle`, `wordsearch`. `hearts` is the most interesting of them — it reduces
-with `self.next() % max` against a *decreasing* deck size, which is the card
-shuffle itself.
+Still degenerate, not yet migrated: `dots`, `hangman`, `life`, `lightsout`,
+`match3`, `maze`, `memory`, `pinball`, `sudoku`, `tetris`, `wordle`.
+
+**Those eleven are deliberately parked, not merely pending.** Every one of them
+is a game, and as of 2026-08-16 no game is reachable from the desktop:
+`gui/desktop/src/launcher.rs` hardcodes eighteen entries, not one of which is an
+`apps/` game, and its `Category` enum (`Application`, `System`, `Setting`,
+`File`, `Command`) has no games variant to put one in. No game name appears
+anywhere outside `apps/`. Running one requires knowing the binary name and
+typing it into a shell, so the audience for these eleven defects is currently
+zero — which is the ground the migration was stopped on at fourteen of 27, not
+any technical one.
+
+**Trigger to resume: the first time a game gets a launcher entry, fix the
+remaining eleven before shipping that entry.** The moment a game is discoverable
+it has players, and this defect lands hardest exactly where a player would
+notice — a fixed piece order in `tetris`, a fixed word in `wordle`/`hangman`, a
+fixed layout in `maze`/`sudoku`. The already-fixed cases show the ceiling:
+`simon` dealt Green-Red-Yellow-Blue for ever at every seed, and `sliding`
+produced two distinct boards across 499 seeds. Each remaining crate is a
+measure-migrate-test cycle of the same shape as the fourteen already done, so
+the whole tail is a few hours of work rather than a project.
+
+**`breakout` is the case for not clearing a crate because its bound has an odd
+factor.** Its only bound was 1000, and by the rule of thumb above the factor 125
+should have restored the period — the *values* are uniform and a histogram of
+them is perfect. But 8 also divides 1000, and that is enough: `(state % 1000) %
+8` is exactly `state % 8`, so the draw's bottom three bits are the raw LCG's,
+whatever the other factor does. **Check a bound for a power-of-two divisor, not
+for being a power of two.** `1000 = 8 × 125` reads as safe and is not; the same
+reasoning re-opens `life`'s `% 100` (= 4 × 25), which this entry has been
+calling mild, and it should be re-measured rather than assumed when its turn
+comes.
+
+**`breakout` is also the clearest case of a reseed turning fine structure into
+half the range.** A period-8 cycle in the bottom bits is usually invisible,
+because a game draws often enough to walk the whole cycle. What made it
+permanent is that `start_game` reseeds from the running generator and the fresh
+generator's *first* output is the opening launch angle — `init_bricks` draws
+nothing in between. So the one draw a player meets at the start of every single
+game was pinned to a fixed stride through that cycle: over 5000 consecutive new
+games the opening angle held one parity for ever and reached 4 of the 8 residues
+mod 8. **When a crate reseeds per game, look hardest at the first draw after the
+reseed** — it is both the most exposed to the low-bit cycle and the one the
+player sees most often. `solitaire` and `freecell` are the same shape.
+
+The corollary for the remaining eleven: *counting distinct values is not enough
+to clear a draw.* Breakout's chain produced 500 distinct opening angles out of
+1000, which looks plentiful and would pass any "does it vary?" test. The parity
+is the part that had to be asserted, and it is one line away.
+
+**`pacman` is the cleanest case of the two-draws-per-consumer stride**, and it
+is the one to remember when a crate draws for several actors in a round-robin.
+Its two bounds sit side by side in one expression — 31 for the row, 28 for the
+column — and the odd one behaved perfectly while the even one lost most of the
+board. Because four ghosts draw a pair each per tick, every ghost saw a draw
+counter of the *same* parity for ever, so the parity coupling never averaged
+out the way it does for a single consumer. Counting the reach of all four
+ghosts together hides this: 14 columns of 28 looks merely halved, when each
+individual ghost is confined to 7.
+
+**`wordsearch` is the first crate whose two call sites broke in two different
+ways, and it is the argument for checking every bound rather than the worst
+one.** Its filler alphabet (`% 26`) failed loudly — a visible comb across the
+grid. Its Fisher–Yates over the 30-word category list failed quietly: the word
+list still looked random, and only counting over 5000 games showed one animal
+in 14% of puzzles and another in 41%. A crate can be cleared on the symptom you
+went looking for and still be wrong in the way you did not.
+
+**Three bound shapes account for every symptom found so far**, and it is worth
+checking a call site against all three rather than only the first:
+
+1. **A power-of-two bound** makes the draw the low *n* bits, which are an LCG
+   of the same shape modulo 2^*n* — period 2^*n*, and a permutation of the
+   whole range. `simon` (4), `sliding` (4), `asteroids` (4), `minesweeper`
+   (256). This is the one that makes a *distribution* test pass perfectly
+   while the sequence is worthless.
+2. **Any even bound** preserves the parity of the state, so the draw's parity
+   alternates with the draw counter. `battleship` (10), `yahtzee` (6), `flood`
+   (6), the card games (the even half of `2..52`). Costs half the range when
+   two draws are compared to each other.
+3. **An even bound with a power-of-two factor** does both. `snake` (20 = 4×5)
+   lost half the board to the parity coupling and half of what was left to
+   `row % 4` having period four.
 
 The replacement is **`randrange/`**, a new top-level `no_std`,
 dependency-free crate on the same pattern as `textfind`, `byteread` and
@@ -14472,7 +14571,99 @@ Tracked as part of the net-userspace migration; this control-path client is
 intentionally the bounded-self-test stand-in until then. See
 `net-userspace-migration.md` Phase 4/5 and `design-decisions.md` §64.
 
-### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~10.6ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 4.6x 2026-07-02
+### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~7.0ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 6.9x 2026-08-16
+
+**UPDATE 2026-08-16 (6) — inter-window occlusion cull landed, 12.0ms → 7.0ms/frame
+min (cumulative 48.6ms → 7.0ms = 6.9x). It also corrects a wrong assumption
+recorded in UPDATE (5) below.**
+
+*First, the measurement that redirected the work.* UPDATE (5) closed with
+"the 4K benchmark's dominant cost is the background clear + per-window
+RenderEngine draws", and the deferred next step recorded there (and in
+`requests/a-c-bench-compositor-entries-are-yours.md`) was a persistent tile
+thread-pool to amortize the per-frame `thread::scope` spawn. That was aimed at
+the wrong half. A new `Compositor::bench_full_composite_phases()` returning
+`(background_clear_ns, window_render_ns)` measured the split directly:
+
+| phase | before | after |
+|---|---|---|
+| background clear | 1.531 ms | 1.392 ms |
+| window render | 11.128 ms | 5.313 ms |
+| whole frame (min / mean) | 12.046 / 15.231 ms | 7.041 / 8.955 ms |
+
+The clear was **already fine** — 13% of the frame, and the three rounds of
+parallel-fill work above had done their job. Window rendering was 88%. So the
+bottleneck was not a parallelism problem at all; it was **overdraw**: windows
+were painted strictly back-to-front, so every pixel of every window was drawn
+even where a higher window overwrote it. Parallelizing that would have divided
+the wasted work across cores instead of not doing it. **Lesson worth keeping:
+the "remaining work" note at the end of a perf entry is a hypothesis, not a
+finding — measure the split before acting on it.**
+
+*The fix.* Each window's conservative drawn extent (client rect + `BORDER_WIDTH`
++ `SHADOW_SIZE` + 3 slack, plus `TITLE_BAR_HEIGHT` on top) now has the
+provably-opaque covers of all windows **above** it subtracted from it, and the
+window is redrawn once per surviving fragment under a framebuffer-level clip.
+Pieces:
+
+- `Rect::subtract` — exact rectangle difference. It cuts the top and bottom
+  bands **full-width first** and only then splits the middle row into left/right.
+  That ordering is load-bearing: the fragments must be **disjoint**, because a
+  window is redrawn once per fragment, so a pixel appearing in two fragments is
+  painted twice — invisible for an opaque fill, but *wrong* for a translucent
+  one (the shadow would darken along the seam).
+- `subtract_region(base, occluders, max_parts) -> Option<Vec<Rect>>` — declines
+  (returns `None`, caller falls back to one unclipped draw) rather than
+  fragmenting without bound. `MAX_FRAGMENTS = 4`: past that, the per-fragment
+  redraw setup costs more than the overdraw saved.
+- `window_opaque_cover` / `window_drawn_extent` — the per-window predicates,
+  factored out and now **shared with the background cull** (`opaque_cover_rects`
+  was refactored onto them), so the two culls cannot disagree about what counts
+  as opaque.
+- `Framebuffer::frame_clip` + `set_frame_clip` — the enforcement point. It lives
+  on the framebuffer rather than in `RenderEngine`'s clip stack because **three**
+  routes paint a window — the render engine's commands, the decoration helpers
+  (`render_shadow`/`render_border`/`render_title_bar`, which run *outside*
+  `execute` where the clip stack is cleared), and the shared-buffer blit — and
+  only the framebuffer is common to all three. A cull honoured by just one route
+  would silently let a hidden window's decorations through. Every primitive that
+  writes a pixel now goes through `clip_allows` (per-pixel) or `clip_span`
+  (per-row); `copy_row` and `blit_opaque_band` shift the *source* offset in step
+  with the narrowed destination. The clear/`clear_except` path is deliberately
+  **not** clipped — it runs once per frame before any window and has its own cull.
+
+*Verification, and why it is not vacuous.* `Compositor::occlusion_cull: bool`
+(default `true`) exists purely so a test can composite the same scene both ways:
+`occlusion_cull_composites_the_same_pixels_as_drawing_every_window` builds a
+900×700 six-window cascade — **window 3 deliberately translucent at 0.5**, which
+is the case a non-disjoint subtraction would corrupt — twice, and compares front
+buffers pixel for pixel. Plus
+`subtract_yields_disjoint_parts_that_miss_exactly_the_occluder` (exhaustive
+per-pixel coverage-count oracle over 6 occluder shapes: interior, disjoint,
+covering, edge bands; asserts every pixel is covered exactly 0 or 1 times and
+the areas sum) and
+`subtract_region_declines_rather_than_fragmenting_without_bound`. To prove these
+actually bite, a deliberate bug was injected (`if false &&` on the left-fragment
+push in `Rect::subtract`): **both** new tests failed, the equivalence test
+reporting "occlusion cull changed 85246 pixel(s)". 82 compositor tests, clippy
+clean.
+
+**Still open, and what to try next.** 7.0 ms against a 2.0 ms target — 3.5x to
+go, so this entry stays. The honest reading of the new phase split is that
+window render is *still* the larger half (5.3 of 7.0 ms) even with the overdraw
+gone, so the next attempt should again start by measuring rather than assuming.
+Candidates, in the order I would try them: (a) SIMD/streaming stores for the
+remaining large opaque fills — the frame is now much closer to a pure
+memory-bandwidth problem than it was, which is exactly when non-temporal stores
+pay; (b) damage tracking, i.e. recompositing only the changed region across
+frames rather than a full desktop every time — a much bigger structural win than
+anything left inside a single frame, and the natural next design step; (c) the
+persistent tile thread-pool from UPDATE (5), which is now worth *less* than it
+looked (the work it would parallelize has shrunk by half) but is still real.
+
+**`bench/baselines.toml` needs `measured_ns` 10572000 → 7041000** — that file is
+`bench/**`, i.e. lane A's zone, so it is filed as `requests/c-a-bench-baseline-compositor-frame-4k.md`
+rather than edited here.
 
 **UPDATE 2026-07-14 (5) — parallel opaque window blit landed (first increment of
 the deferred window-render parallelization).** The opaque fast path of

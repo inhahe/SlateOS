@@ -73,40 +73,30 @@ const FREE_CELL_COUNT: usize = 4;
 /// Number of foundation piles.
 const FOUNDATION_COUNT: usize = 4;
 
-// ── LCG random number generator ────────────────────────────────────
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Rng {
-    state: u64,
-}
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 {
-            0
-        } else {
-            (self.next() % max as u64) as usize
-        }
-    }
-
-    fn shuffle<T>(&mut self, s: &mut [T]) {
-        for i in (1..s.len()).rev() {
-            let j = self.next_range(i + 1);
-            s.swap(i, j);
-        }
-    }
-}
+// ── Randomness ──────────────────────────────────────────────────
+//
+// From `randrange`, not a local LCG. The local one drew the Fisher-Yates
+// partner with `state % (i + 1)`, and on a modulus-2^64 generator the low bit
+// of `state` alternates 0,1,0,1 for ever. Half of a 52-card shuffle's bounds
+// are even, and `x % n` for even `n` preserves the parity of `x`, so on all 25
+// of those swaps the partner index had a single fixed parity. `new_game`
+// reseeds from the state, so every deal restarted the draw counter at zero and
+// got the same pattern of fixed parities; only which parity varied.
+//
+// FreeCell deals every card face-up, so the whole layout is the symptom.
+// Measured before the fix, over 200 000 deals played the way `new_game` plays
+// them:
+//
+//   * the ace of hearts was the *bottom* card of column 0 -- the single worst
+//     place for an ace to be -- in **17.4%** of deals, where any one of the 52
+//     should hold that slot 1.9% of the time;
+//   * how deeply that ace was buried alternated with depth rather than
+//     tapering: 8.5% at depth 0, 15.5% at 1, 9.7% at 2, 16.2% at 3. The
+//     difficulty of the deal was tied to the draw counter's parity.
+//
+// The shuffle itself was already the correct downward Fisher-Yates. Only the
+// reduction was wrong.
+use randrange::Rng;
 
 // ── Card types ──────────────────────────────────────────────────────
 
@@ -140,11 +130,7 @@ impl Suit {
 
     /// Display color for this suit.
     fn color(self) -> Color {
-        if self.is_red() {
-            CARD_RED
-        } else {
-            CARD_BLACK
-        }
+        if self.is_red() { CARD_RED } else { CARD_BLACK }
     }
 
     /// Index 0..3 for foundation ordering.
@@ -414,7 +400,7 @@ impl GameState {
 
     /// Start a new game using the next RNG value as seed.
     fn new_game(&mut self) {
-        let seed = self.rng.next();
+        let seed = self.rng.next_u64();
         self.rng = Rng::new(seed);
         self.deal();
     }
@@ -708,10 +694,11 @@ impl GameState {
                 if matches!(action, UndoAction::AutoMove { .. }) {
                     // Keep undoing auto-moves.
                     if let Some(next) = self.undo_stack.last()
-                        && matches!(next, UndoAction::AutoMove { .. }) {
-                            self.undo();
-                            return;
-                        }
+                        && matches!(next, UndoAction::AutoMove { .. })
+                    {
+                        self.undo();
+                        return;
+                    }
                 }
                 if self.move_count > 0 {
                     self.move_count -= 1;
@@ -771,7 +758,9 @@ impl GameState {
     /// Handle a key event.
     fn handle_key(&mut self, key: Key, _modifiers: Modifiers) {
         if self.won {
-            if key == Key::N { self.new_game() }
+            if key == Key::N {
+                self.new_game()
+            }
             return;
         }
 
@@ -1059,13 +1048,7 @@ impl GameState {
     }
 
     /// Render a free cell.
-    fn render_free_cell(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        idx: usize,
-        x: f32,
-        y: f32,
-    ) {
+    fn render_free_cell(&self, cmds: &mut Vec<RenderCommand>, idx: usize, x: f32, y: f32) {
         let is_focused = self.focus == FocusArea::FreeCell(idx);
         let is_selected = self.selection == Some(Selection::FreeCell(idx));
 
@@ -1080,13 +1063,7 @@ impl GameState {
     }
 
     /// Render a foundation pile.
-    fn render_foundation(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        idx: usize,
-        x: f32,
-        y: f32,
-    ) {
+    fn render_foundation(&self, cmds: &mut Vec<RenderCommand>, idx: usize, x: f32, y: f32) {
         let is_focused = self.focus == FocusArea::Foundation(idx);
 
         match self.foundation_top(idx) {
@@ -1144,13 +1121,7 @@ impl GameState {
     }
 
     /// Render an empty pile placeholder.
-    fn render_empty_pile(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        focused: bool,
-    ) {
+    fn render_empty_pile(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, focused: bool) {
         let border_color = if focused { CURSOR_HIGHLIGHT } else { OVERLAY0 };
         cmds.push(RenderCommand::StrokeRect {
             x,
@@ -1340,11 +1311,12 @@ impl FreeCell {
 
     fn handle_event(&mut self, event: Event) {
         if let Event::Key(KeyEvent {
-                key,
-                modifiers,
-                pressed: true,
-                ..
-            }) = event {
+            key,
+            modifiers,
+            pressed: true,
+            ..
+        }) = event
+        {
             self.state.handle_key(key, modifiers);
         }
     }
@@ -1375,7 +1347,15 @@ mod tests {
     }
 
     fn press(state: &mut GameState, key: Key) {
-        state.handle_key(key, Modifiers { shift: false, ctrl: false, alt: false, super_key: false });
+        state.handle_key(
+            key,
+            Modifiers {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                super_key: false,
+            },
+        );
     }
 
     /// Build a game with a specific tableau setup for testing.
@@ -2395,52 +2375,86 @@ mod tests {
         assert!(!state.won);
     }
 
-    // ── RNG tests ──────────────────────────────────────────────────
+    // ────────── Deal fairness ──────────
+    //
+    // These replace five tests that asked whether the generator was
+    // deterministic, whether two seeds differ, whether a bounded draw stays in
+    // range, whether a zero bound is safe, and whether a shuffle keeps its
+    // elements while changing their order. All five are `randrange`'s
+    // properties and are tested there. None of the five could see what was
+    // wrong here, because a shuffle can keep its elements, rearrange them, and
+    // still draw from a handful of the 52! orderings.
+
+    /// Index a card into `0..52`, in the order `make_deck` builds them.
+    fn deck_index(c: Card) -> usize {
+        Suit::ALL.iter().position(|&s| s == c.suit).unwrap_or(0) * 13
+            + Rank::ALL.iter().position(|&r| r == c.rank).unwrap_or(0)
+    }
 
     #[test]
-    fn test_rng_deterministic() {
-        let mut r1 = Rng::new(42);
-        let mut r2 = Rng::new(42);
-        for _ in 0..100 {
-            assert_eq!(r1.next(), r2.next());
+    fn no_card_owns_the_bottom_of_the_first_column() {
+        // Column 0 is dealt first, so `tableau[0][0]` is the deepest card on
+        // the board -- the worst place for a card you need early. Each of the
+        // 52 should land there about 1/52 = 1.9% of the time; the old
+        // generator put the ace of hearts there in 17.4% of deals.
+        const DEALS: u32 = 20_000;
+        let mut counts = [0_u32; 52];
+        let mut state = GameState::new(42);
+        for _ in 0..DEALS {
+            if let Some(&c) = state.tableau[0].first() {
+                counts[deck_index(c)] += 1;
+            }
+            // `new_game` is how a player reaches the next deal, and it reseeds
+            // from the generator state -- so the draw counter restarts at zero
+            // every deal. A counter-dependent defect survives that on purpose.
+            state.new_game();
+        }
+        for (index, &count) in counts.iter().enumerate() {
+            let share = 100.0 * f64::from(count) / f64::from(DEALS);
+            assert!(
+                share < 5.0,
+                "card {index} was the bottom of column 0 in {share:.1}% of deals, not about 1.9%"
+            );
         }
     }
 
     #[test]
-    fn test_rng_different_seeds() {
-        let mut r1 = Rng::new(1);
-        let mut r2 = Rng::new(2);
-        // Extremely unlikely to be equal.
-        assert_ne!(r1.next(), r2.next());
-    }
-
-    #[test]
-    fn test_rng_next_range() {
-        let mut rng = Rng::new(42);
-        for _ in 0..100 {
-            let val = rng.next_range(10);
-            assert!(val < 10);
+    fn how_deeply_an_ace_is_buried_does_not_alternate() {
+        // An ace's depth is the number of cards on top of it, and it is the
+        // single biggest driver of how hard a FreeCell deal is. Depth should
+        // fall off smoothly: eight columns of six or seven make depths 0..=5
+        // equally likely and depth 6 rarer. The old generator gave 8.5%,
+        // 15.5%, 9.7%, 16.2% -- alternating, because the depth inherited the
+        // draw counter's parity.
+        const DEALS: u32 = 20_000;
+        let mut depths = [0_u32; 7];
+        let mut state = GameState::new(42);
+        for _ in 0..DEALS {
+            for pile in &state.tableau {
+                if let Some(row) = pile
+                    .iter()
+                    .position(|c| c.suit == Suit::Hearts && c.rank == Rank::Ace)
+                {
+                    depths[pile.len().saturating_sub(1).saturating_sub(row)] += 1;
+                }
+            }
+            state.new_game();
         }
-    }
-
-    #[test]
-    fn test_rng_next_range_zero() {
-        let mut rng = Rng::new(42);
-        assert_eq!(rng.next_range(0), 0);
-    }
-
-    #[test]
-    fn test_rng_shuffle() {
-        let mut rng = Rng::new(42);
-        let mut v: Vec<i32> = (0..10).collect();
-        let original: Vec<i32> = (0..10).collect();
-        rng.shuffle(&mut v);
-        // After shuffle, should contain same elements.
-        let mut sorted = v.clone();
-        sorted.sort();
-        assert_eq!(sorted, original);
-        // Should be rearranged (extremely unlikely to stay the same).
-        assert_ne!(v, original);
+        // Compare each even depth against the odd one after it. Under a fair
+        // shuffle the two are within a whisker of each other; under the old
+        // one the odd depth was consistently the larger, by five points or
+        // more of all deals.
+        for pair in 0..3_usize {
+            let even = f64::from(depths[pair * 2]);
+            let odd = f64::from(depths[pair * 2 + 1]);
+            let gap = 100.0 * (odd - even).abs() / f64::from(DEALS);
+            assert!(
+                gap < 3.0,
+                "depths {} and {} differ by {gap:.1} points of the deals",
+                pair * 2,
+                pair * 2 + 1
+            );
+        }
     }
 
     // ── Rendering tests ────────────────────────────────────────────
@@ -2668,7 +2682,12 @@ mod tests {
         let mut app = FreeCell::new();
         app.handle_event(Event::Key(KeyEvent {
             key: Key::Right,
-            modifiers: Modifiers { shift: false, ctrl: false, alt: false, super_key: false },
+            modifiers: Modifiers {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                super_key: false,
+            },
             pressed: true,
             text: None,
         }));
@@ -2681,7 +2700,12 @@ mod tests {
         // Key release events should be ignored.
         app.handle_event(Event::Key(KeyEvent {
             key: Key::Right,
-            modifiers: Modifiers { shift: false, ctrl: false, alt: false, super_key: false },
+            modifiers: Modifiers {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                super_key: false,
+            },
             pressed: false,
             text: None,
         }));

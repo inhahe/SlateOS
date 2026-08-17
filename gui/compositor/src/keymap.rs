@@ -323,10 +323,42 @@ mod tests {
         // loses another one entirely; counting catches that where spot checks
         // do not.
         let letters = [
-            Key::A, Key::B, Key::C, Key::D, Key::E, Key::F, Key::G, Key::H, Key::I, Key::J,
-            Key::K, Key::L, Key::M, Key::N, Key::O, Key::P, Key::Q, Key::R, Key::S, Key::T,
-            Key::U, Key::V, Key::W, Key::X, Key::Y, Key::Z, Key::Num0, Key::Num1, Key::Num2,
-            Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9,
+            Key::A,
+            Key::B,
+            Key::C,
+            Key::D,
+            Key::E,
+            Key::F,
+            Key::G,
+            Key::H,
+            Key::I,
+            Key::J,
+            Key::K,
+            Key::L,
+            Key::M,
+            Key::N,
+            Key::O,
+            Key::P,
+            Key::Q,
+            Key::R,
+            Key::S,
+            Key::T,
+            Key::U,
+            Key::V,
+            Key::W,
+            Key::X,
+            Key::Y,
+            Key::Z,
+            Key::Num0,
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
         ];
         for expected in letters {
             let hits: Vec<u32> = (0..0x100u32)
@@ -392,7 +424,10 @@ mod tests {
         m.update(0x2A, true); // left shift down
         m.update(0x36, true); // right shift down
         m.update(0x2A, false); // left shift up
-        assert!(m.modifiers().shift, "shift must survive while one side is held");
+        assert!(
+            m.modifiers().shift,
+            "shift must survive while one side is held"
+        );
         m.update(0x36, false);
         assert!(!m.modifiers().shift);
     }
@@ -431,7 +466,9 @@ mod tests {
 
     #[test]
     fn a_modifier_is_recognised_as_one() {
-        for code in [0x2Au32, 0x36, 0x1D, 0xE01D, 0x38, 0xE038, 0xE05B, 0xE05C, 0x3A] {
+        for code in [
+            0x2Au32, 0x36, 0x1D, 0xE01D, 0x38, 0xE038, 0xE05B, 0xE05C, 0x3A,
+        ] {
             assert!(ModifierState::is_modifier(code), "{code:#x}");
         }
         for code in [0x1Eu32, 0xE04B, 0x39] {

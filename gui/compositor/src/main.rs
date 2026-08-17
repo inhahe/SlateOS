@@ -361,7 +361,10 @@ pub enum InputEvent {
     /// Mouse scroll wheel.
     MouseScroll { dx: f32, dy: f32, x: i32, y: i32 },
     /// Key pressed.
-    KeyDown { scancode: u32, character: Option<char> },
+    KeyDown {
+        scancode: u32,
+        character: Option<char>,
+    },
     /// Key released.
     KeyUp { scancode: u32 },
     /// Text input (after IME processing).
@@ -467,10 +470,8 @@ impl Window {
 
     /// Get the total bounds including decorations (title bar, borders, shadow).
     pub fn outer_rect(&self) -> Rect {
-        let total_width =
-            self.width + (BORDER_WIDTH * 2) + (SHADOW_SIZE * 2);
-        let total_height =
-            self.height + TITLE_BAR_HEIGHT + BORDER_WIDTH + (SHADOW_SIZE * 2);
+        let total_width = self.width + (BORDER_WIDTH * 2) + (SHADOW_SIZE * 2);
+        let total_height = self.height + TITLE_BAR_HEIGHT + BORDER_WIDTH + (SHADOW_SIZE * 2);
         Rect::new(
             self.x - SHADOW_SIZE as i32 - BORDER_WIDTH as i32,
             self.y - SHADOW_SIZE as i32 - TITLE_BAR_HEIGHT as i32,
@@ -1786,8 +1787,7 @@ fn blit_run(
         }
         // Resolved before the mask is fetched: `glyph_mask` borrows the font
         // mutably for as long as the mask lives, and this needs nothing from it.
-        let ink = TextSpan::color_at(spans, shaped.cluster)
-            .map_or(color, |c| color_to_argb(&c));
+        let ink = TextSpan::color_at(spans, shaped.cluster).map_or(color, |c| color_to_argb(&c));
         if let Some(mask) = font.glyph_mask(shaped.key) {
             // `offset` is zero except on an attached combining mark, and its
             // `y` points up where the screen's points down.
@@ -1931,15 +1931,10 @@ impl RenderEngine {
         self.clip_stack.clear();
         self.translate_stack.clear();
         self.font_stack.clear();
-        self.clip_stack.push(Rect::new(
-            window_x,
-            window_y,
-            window_width,
-            window_height,
-        ));
+        self.clip_stack
+            .push(Rect::new(window_x, window_y, window_width, window_height));
         // Push the window origin as the base translation.
-        self.translate_stack
-            .push(window_x as f32, window_y as f32);
+        self.translate_stack.push(window_x as f32, window_y as f32);
 
         for cmd in commands {
             self.execute_command(fb, cmd, opacity);
@@ -2411,16 +2406,16 @@ impl Default for DecorationTheme {
         Self {
             title_bar_focused: 0xFF_2B_2B_3D,    // Dark blue-gray
             title_bar_unfocused: 0xFF_3C_3C_4A,  // Lighter gray
-            title_text_focused: 0xFF_FF_FF_FF,    // White
-            title_text_unfocused: 0xFF_A0_A0_A0,  // Gray text
-            close_button: 0xFF_E8_4D_4D,          // Red
-            close_button_hover: 0xFF_FF_60_60,    // Bright red
-            maximize_button: 0xFF_4D_C8_4D,       // Green
-            minimize_button: 0xFF_E8_C8_4D,       // Yellow
-            border_focused: 0xFF_50_50_70,        // Subtle border
-            border_unfocused: 0xFF_40_40_50,      // Dimmer border
-            shadow_color: 0x40_00_00_00,          // Semi-transparent black
-            desktop_background: 0xFF_1A_1A_2E,    // Dark navy
+            title_text_focused: 0xFF_FF_FF_FF,   // White
+            title_text_unfocused: 0xFF_A0_A0_A0, // Gray text
+            close_button: 0xFF_E8_4D_4D,         // Red
+            close_button_hover: 0xFF_FF_60_60,   // Bright red
+            maximize_button: 0xFF_4D_C8_4D,      // Green
+            minimize_button: 0xFF_E8_C8_4D,      // Yellow
+            border_focused: 0xFF_50_50_70,       // Subtle border
+            border_unfocused: 0xFF_40_40_50,     // Dimmer border
+            shadow_color: 0x40_00_00_00,         // Semi-transparent black
+            desktop_background: 0xFF_1A_1A_2E,   // Dark navy
         }
     }
 }
@@ -2507,13 +2502,11 @@ impl Compositor {
     pub fn new(width: u32, height: u32, refresh_rate: u32) -> CompositorResult<Self> {
         let framebuffer = Framebuffer::new(width, height)?;
         let display_manager = DisplayManager::new(width, height, refresh_rate);
-        let frame_interval = Duration::from_micros(
-            if refresh_rate == 0 {
-                16_667
-            } else {
-                1_000_000 / refresh_rate as u64
-            },
-        );
+        let frame_interval = Duration::from_micros(if refresh_rate == 0 {
+            16_667
+        } else {
+            1_000_000 / refresh_rate as u64
+        });
 
         Ok(Self {
             windows: Vec::new(),
@@ -2639,11 +2632,12 @@ impl Compositor {
         self.damage_window(window_id);
 
         // Notify client of resize.
-        self.pending_notifications.push_back(EventNotification::WindowResized {
-            window_id,
-            width: final_w,
-            height: final_h,
-        });
+        self.pending_notifications
+            .push_back(EventNotification::WindowResized {
+                window_id,
+                width: final_w,
+                height: final_h,
+            });
 
         Ok(())
     }
@@ -2682,20 +2676,14 @@ impl Compositor {
 
             if !window.maximized {
                 // Save current geometry for restore.
-                window.restore_rect = Some(Rect::new(
-                    window.x,
-                    window.y,
-                    window.width,
-                    window.height,
-                ));
+                window.restore_rect =
+                    Some(Rect::new(window.x, window.y, window.width, window.height));
             }
 
             window.maximized = true;
             window.x = display_bounds.x + BORDER_WIDTH as i32;
             window.y = display_bounds.y + TITLE_BAR_HEIGHT as i32;
-            window.width = display_bounds
-                .width
-                .saturating_sub(BORDER_WIDTH * 2);
+            window.width = display_bounds.width.saturating_sub(BORDER_WIDTH * 2);
             window.height = display_bounds
                 .height
                 .saturating_sub(TITLE_BAR_HEIGHT + BORDER_WIDTH);
@@ -2707,11 +2695,12 @@ impl Compositor {
         self.full_recomposite = true;
 
         // Notify client of resize.
-        self.pending_notifications.push_back(EventNotification::WindowResized {
-            window_id,
-            width: final_w,
-            height: final_h,
-        });
+        self.pending_notifications
+            .push_back(EventNotification::WindowResized {
+                window_id,
+                width: final_w,
+                height: final_h,
+            });
 
         Ok(())
     }
@@ -2763,11 +2752,7 @@ impl Compositor {
     /// # Errors
     ///
     /// [`CompositorError::WindowNotFound`] if the window does not exist.
-    pub fn set_fullscreen(
-        &mut self,
-        window_id: WindowId,
-        enable: bool,
-    ) -> CompositorResult<()> {
+    pub fn set_fullscreen(&mut self, window_id: WindowId, enable: bool) -> CompositorResult<()> {
         self.damage_window(window_id);
 
         let fb_w = self.framebuffer.width;
@@ -2839,11 +2824,10 @@ impl Compositor {
     /// buffer would leave the rest of the screen stale), preserving correctness.
     fn direct_scanout_window(&self) -> Option<WindowId> {
         // Topmost visible window in z-order (z_stack top == last).
-        let &top = self
-            .z_stack
-            .iter()
-            .rev()
-            .find(|&&id| self.window_ref(id).is_some_and(|w| w.visible && !w.minimized))?;
+        let &top = self.z_stack.iter().rev().find(|&&id| {
+            self.window_ref(id)
+                .is_some_and(|w| w.visible && !w.minimized)
+        })?;
 
         let win = self.window_ref(top)?;
         if !win.fullscreen || win.opacity < 1.0 {
@@ -2853,14 +2837,10 @@ impl Compositor {
         if win.x > 0 || win.y > 0 {
             return None;
         }
-        let covers_w = win
-            .x
-            .saturating_add(win.width as i32) as i64
-            >= self.framebuffer.width as i64;
-        let covers_h = win
-            .y
-            .saturating_add(win.height as i32) as i64
-            >= self.framebuffer.height as i64;
+        let covers_w =
+            win.x.saturating_add(win.width as i32) as i64 >= self.framebuffer.width as i64;
+        let covers_h =
+            win.y.saturating_add(win.height as i32) as i64 >= self.framebuffer.height as i64;
         if !covers_w || !covers_h {
             return None;
         }
@@ -2880,32 +2860,34 @@ impl Compositor {
 
         // Unfocus the previously focused window.
         if let Some(old_id) = old_focused
-            && old_id != window_id {
-                if let Some(win) = self.window_mut(old_id) {
-                    win.focused = false;
-                    win.dirty = true;
-                }
-                self.damage_window(old_id);
-                self.pending_notifications
-                    .push_back(EventNotification::FocusLost { window_id: old_id });
+            && old_id != window_id
+        {
+            if let Some(win) = self.window_mut(old_id) {
+                win.focused = false;
+                win.dirty = true;
             }
+            self.damage_window(old_id);
+            self.pending_notifications
+                .push_back(EventNotification::FocusLost { window_id: old_id });
+        }
 
         // Focus the new window.
         if let Some(win) = self.window_mut(window_id)
-            && !win.minimized {
-                win.focused = true;
-                win.dirty = true;
-                self.focused_window = Some(window_id);
+            && !win.minimized
+        {
+            win.focused = true;
+            win.dirty = true;
+            self.focused_window = Some(window_id);
 
-                // Bring to top of z-stack.
-                self.z_stack.retain(|&id| id != window_id);
-                self.z_stack.push(window_id);
-                self.update_z_orders();
+            // Bring to top of z-stack.
+            self.z_stack.retain(|&id| id != window_id);
+            self.z_stack.push(window_id);
+            self.update_z_orders();
 
-                self.damage_window(window_id);
-                self.pending_notifications
-                    .push_back(EventNotification::FocusGained { window_id });
-            }
+            self.damage_window(window_id);
+            self.pending_notifications
+                .push_back(EventNotification::FocusGained { window_id });
+        }
     }
 
     /// Set a window's title.
@@ -3064,35 +3046,41 @@ impl Compositor {
                 }
                 DragMode::ResizeLeft => {
                     let new_w = (drag.start_window_size.0 as i32 - dx).max(100) as u32;
-                    let new_x = drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
+                    let new_x =
+                        drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
                     let _ = self.move_window(drag.window_id, new_x, drag.start_window_pos.y);
                     let _ = self.resize_window(drag.window_id, new_w, drag.start_window_size.1);
                 }
                 DragMode::ResizeTop => {
                     let new_h = (drag.start_window_size.1 as i32 - dy).max(50) as u32;
-                    let new_y = drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
+                    let new_y =
+                        drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
                     let _ = self.move_window(drag.window_id, drag.start_window_pos.x, new_y);
                     let _ = self.resize_window(drag.window_id, drag.start_window_size.0, new_h);
                 }
                 DragMode::ResizeTopLeft => {
                     let new_w = (drag.start_window_size.0 as i32 - dx).max(100) as u32;
                     let new_h = (drag.start_window_size.1 as i32 - dy).max(50) as u32;
-                    let new_x = drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
-                    let new_y = drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
+                    let new_x =
+                        drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
+                    let new_y =
+                        drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
                     let _ = self.move_window(drag.window_id, new_x, new_y);
                     let _ = self.resize_window(drag.window_id, new_w, new_h);
                 }
                 DragMode::ResizeTopRight => {
                     let new_w = (drag.start_window_size.0 as i32 + dx).max(100) as u32;
                     let new_h = (drag.start_window_size.1 as i32 - dy).max(50) as u32;
-                    let new_y = drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
+                    let new_y =
+                        drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
                     let _ = self.move_window(drag.window_id, drag.start_window_pos.x, new_y);
                     let _ = self.resize_window(drag.window_id, new_w, new_h);
                 }
                 DragMode::ResizeBottomLeft => {
                     let new_w = (drag.start_window_size.0 as i32 - dx).max(100) as u32;
                     let new_h = (drag.start_window_size.1 as i32 + dy).max(50) as u32;
-                    let new_x = drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
+                    let new_x =
+                        drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
                     let _ = self.move_window(drag.window_id, new_x, drag.start_window_pos.y);
                     let _ = self.resize_window(drag.window_id, new_w, new_h);
                 }
@@ -3110,17 +3098,18 @@ impl Compositor {
 
         // Route mouse move to the window under the cursor.
         if let Some(window_id) = self.window_at(x, y)
-            && let Some(win) = self.window_ref(window_id) {
-                let local_x = x - win.x;
-                let local_y = y - win.y;
-                self.pending_notifications
-                    .push_back(EventNotification::MouseEvent {
-                        window_id,
-                        x: local_x,
-                        y: local_y,
-                        kind: MouseEventKind::Move,
-                    });
-            }
+            && let Some(win) = self.window_ref(window_id)
+        {
+            let local_x = x - win.x;
+            let local_y = y - win.y;
+            self.pending_notifications
+                .push_back(EventNotification::MouseEvent {
+                    window_id,
+                    x: local_x,
+                    y: local_y,
+                    kind: MouseEventKind::Move,
+                });
+        }
     }
 
     fn handle_mouse_button(&mut self, button: MouseButton, pressed: bool, x: i32, y: i32) {
@@ -3136,17 +3125,18 @@ impl Compositor {
         if !pressed {
             // Route release to focused window.
             if let Some(window_id) = self.focused_window
-                && let Some(win) = self.window_ref(window_id) {
-                    let local_x = x - win.x;
-                    let local_y = y - win.y;
-                    self.pending_notifications
-                        .push_back(EventNotification::MouseEvent {
-                            window_id,
-                            x: local_x,
-                            y: local_y,
-                            kind: MouseEventKind::ButtonRelease(button),
-                        });
-                }
+                && let Some(win) = self.window_ref(window_id)
+            {
+                let local_x = x - win.x;
+                let local_y = y - win.y;
+                self.pending_notifications
+                    .push_back(EventNotification::MouseEvent {
+                        window_id,
+                        x: local_x,
+                        y: local_y,
+                        kind: MouseEventKind::ButtonRelease(button),
+                    });
+            }
             return;
         }
 
@@ -3218,23 +3208,8 @@ impl Compositor {
         } else {
             // Non-left button: route to window under cursor.
             if let Some(window_id) = self.window_at(x, y)
-                && let Some(win) = self.window_ref(window_id) {
-                    let local_x = x - win.x;
-                    let local_y = y - win.y;
-                    self.pending_notifications
-                        .push_back(EventNotification::MouseEvent {
-                            window_id,
-                            x: local_x,
-                            y: local_y,
-                            kind: MouseEventKind::ButtonPress(button),
-                        });
-                }
-        }
-    }
-
-    fn handle_mouse_scroll(&mut self, dx: f32, dy: f32, x: i32, y: i32) {
-        if let Some(window_id) = self.window_at(x, y)
-            && let Some(win) = self.window_ref(window_id) {
+                && let Some(win) = self.window_ref(window_id)
+            {
                 let local_x = x - win.x;
                 let local_y = y - win.y;
                 self.pending_notifications
@@ -3242,9 +3217,26 @@ impl Compositor {
                         window_id,
                         x: local_x,
                         y: local_y,
-                        kind: MouseEventKind::Scroll { dx, dy },
+                        kind: MouseEventKind::ButtonPress(button),
                     });
             }
+        }
+    }
+
+    fn handle_mouse_scroll(&mut self, dx: f32, dy: f32, x: i32, y: i32) {
+        if let Some(window_id) = self.window_at(x, y)
+            && let Some(win) = self.window_ref(window_id)
+        {
+            let local_x = x - win.x;
+            let local_y = y - win.y;
+            self.pending_notifications
+                .push_back(EventNotification::MouseEvent {
+                    window_id,
+                    x: local_x,
+                    y: local_y,
+                    kind: MouseEventKind::Scroll { dx, dy },
+                });
+        }
     }
 
     fn handle_key(&mut self, scancode: u32, pressed: bool, character: Option<char>) {
@@ -3304,9 +3296,12 @@ impl Compositor {
         // Iterate z_stack from top to bottom.
         for &window_id in self.z_stack.iter().rev() {
             if let Some(win) = self.window_ref(window_id)
-                && win.visible && !win.minimized && win.client_rect().contains(x, y) {
-                    return Some(window_id);
-                }
+                && win.visible
+                && !win.minimized
+                && win.client_rect().contains(x, y)
+            {
+                return Some(window_id);
+            }
         }
         None
     }
@@ -3315,9 +3310,12 @@ impl Compositor {
     fn window_at_with_decorations(&self, x: i32, y: i32) -> Option<WindowId> {
         for &window_id in self.z_stack.iter().rev() {
             if let Some(win) = self.window_ref(window_id)
-                && win.visible && !win.minimized && win.outer_rect().contains(x, y) {
-                    return Some(window_id);
-                }
+                && win.visible
+                && !win.minimized
+                && win.outer_rect().contains(x, y)
+            {
+                return Some(window_id);
+            }
         }
         None
     }
@@ -3436,7 +3434,8 @@ impl Compositor {
             // Partial recomposite: only redraw damaged areas.
             let damaged_rects: Vec<Rect> = self.damage.rects().to_vec();
             for rect in &damaged_rects {
-                self.framebuffer.clear_rect(rect, self.theme.desktop_background);
+                self.framebuffer
+                    .clear_rect(rect, self.theme.desktop_background);
             }
             // Re-render windows that overlap with damaged areas.
             self.render_damaged_windows(&damaged_rects);
@@ -3729,20 +3728,18 @@ impl Compositor {
     fn render_window(&mut self, window_id: WindowId) {
         // Gather window data we need (avoiding borrow conflicts with self).
         let win_data = match self.window_ref(window_id) {
-            Some(win) if win.visible && !win.minimized => {
-                (
-                    win.x,
-                    win.y,
-                    win.width,
-                    win.height,
-                    win.opacity,
-                    win.focused,
-                    win.title.clone(),
-                    win.render_tree.commands.clone(),
-                    win.buffer.is_some(),
-                    win.fullscreen,
-                )
-            }
+            Some(win) if win.visible && !win.minimized => (
+                win.x,
+                win.y,
+                win.width,
+                win.height,
+                win.opacity,
+                win.focused,
+                win.title.clone(),
+                win.render_tree.commands.clone(),
+                win.buffer.is_some(),
+                win.fullscreen,
+            ),
             _ => return,
         };
 
@@ -3903,21 +3900,21 @@ impl Compositor {
             let sh = total_height + (expand as u32 * 2);
 
             // Draw only the outline of each shadow layer for performance.
-            self.render_engine
-                .stroke_rect(&mut self.framebuffer, sx, sy, sw, sh, 1, shadow_color, opacity);
+            self.render_engine.stroke_rect(
+                &mut self.framebuffer,
+                sx,
+                sy,
+                sw,
+                sh,
+                1,
+                shadow_color,
+                opacity,
+            );
         }
     }
 
     /// Render the window border.
-    fn render_border(
-        &mut self,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-        color: u32,
-        opacity: f32,
-    ) {
+    fn render_border(&mut self, x: i32, y: i32, width: u32, height: u32, color: u32, opacity: f32) {
         let border_x = x - BORDER_WIDTH as i32;
         let border_y = y - TITLE_BAR_HEIGHT as i32 - BORDER_WIDTH as i32;
         let border_w = width + (BORDER_WIDTH * 2);
@@ -3980,9 +3977,8 @@ impl Compositor {
             .get(DEFAULT_FONT_SIZE, Weight::Regular, Family::Ui)
             .line_height();
         let text_y = tb_y + (TITLE_BAR_HEIGHT as i32 - line_height as i32) / 2;
-        let max_text_width = tb_width.saturating_sub(
-            (TITLE_BUTTON_SIZE + TITLE_BUTTON_SPACING) * 3 + 16,
-        );
+        let max_text_width =
+            tb_width.saturating_sub((TITLE_BUTTON_SIZE + TITLE_BUTTON_SPACING) * 3 + 16);
         self.render_engine.draw_text(
             &mut self.framebuffer,
             text_x,
@@ -4002,9 +3998,8 @@ impl Compositor {
         );
 
         // Close button (red circle/square).
-        let close_x = tb_x + tb_width as i32
-            - TITLE_BUTTON_SIZE as i32
-            - TITLE_BUTTON_SPACING as i32;
+        let close_x =
+            tb_x + tb_width as i32 - TITLE_BUTTON_SIZE as i32 - TITLE_BUTTON_SPACING as i32;
         let close_y = tb_y + (TITLE_BAR_HEIGHT as i32 - TITLE_BUTTON_SIZE as i32) / 2;
         self.render_engine.fill_rect(
             &mut self.framebuffer,
@@ -4100,22 +4095,18 @@ impl Compositor {
                     message: e.to_string(),
                 },
             },
-            CompositorRequest::Minimize { window_id } => {
-                match self.minimize_window(window_id) {
-                    Ok(()) => CompositorResponse::Ok,
-                    Err(e) => CompositorResponse::Error {
-                        message: e.to_string(),
-                    },
-                }
-            }
-            CompositorRequest::Maximize { window_id } => {
-                match self.maximize_window(window_id) {
-                    Ok(()) => CompositorResponse::Ok,
-                    Err(e) => CompositorResponse::Error {
-                        message: e.to_string(),
-                    },
-                }
-            }
+            CompositorRequest::Minimize { window_id } => match self.minimize_window(window_id) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::Maximize { window_id } => match self.maximize_window(window_id) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
             CompositorRequest::SetFullscreen { window_id, enable } => {
                 match self.set_fullscreen(window_id, enable) {
                     Ok(()) => CompositorResponse::Ok,
@@ -4124,14 +4115,12 @@ impl Compositor {
                     },
                 }
             }
-            CompositorRequest::Restore { window_id } => {
-                match self.restore_window(window_id) {
-                    Ok(()) => CompositorResponse::Ok,
-                    Err(e) => CompositorResponse::Error {
-                        message: e.to_string(),
-                    },
-                }
-            }
+            CompositorRequest::Restore { window_id } => match self.restore_window(window_id) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
             CompositorRequest::SetCursor { cursor, .. } => {
                 self.cursor_shape = cursor;
                 CompositorResponse::Ok
@@ -4391,15 +4380,10 @@ impl Compositor {
 
     /// Focus the topmost visible window.
     fn focus_topmost_visible(&mut self) {
-        let topmost = self
-            .z_stack
-            .iter()
-            .rev()
-            .copied()
-            .find(|&id| {
-                self.window_ref(id)
-                    .is_some_and(|w| w.visible && !w.minimized)
-            });
+        let topmost = self.z_stack.iter().rev().copied().find(|&id| {
+            self.window_ref(id)
+                .is_some_and(|w| w.visible && !w.minimized)
+        });
 
         if let Some(id) = topmost {
             self.focus_window(id);
@@ -4440,17 +4424,18 @@ fn main() {
     // 4. Send event notifications back to clients
     //
     // For now, we demonstrate the API with a simple test scenario.
-    let window_id = compositor.create_window(
-        "Welcome to Slate OS".to_string(),
-        640,
-        480,
-        1,
-    );
+    let window_id = compositor.create_window("Welcome to Slate OS".to_string(), 640, 480, 1);
 
     // Submit some test render commands.
     let mut tree = RenderTree::new();
     tree.fill_rect(10.0, 10.0, 200.0, 40.0, Color::BLUE);
-    tree.text(20.0, 20.0, "Hello from Slate OS Compositor!", Color::WHITE, 14.0);
+    tree.text(
+        20.0,
+        20.0,
+        "Hello from Slate OS Compositor!",
+        Color::WHITE,
+        14.0,
+    );
     tree.fill_rect(10.0, 60.0, 620.0, 1.0, Color::LIGHT_GRAY);
 
     if let Err(e) = compositor.submit_render(window_id, tree.commands) {
@@ -5159,7 +5144,9 @@ mod tests {
             color: Color::rgba(10, 20, 30, 255),
             corner_radii: CornerRadii::ZERO,
         }];
-        assert!(Compositor::first_command_covers_client(&full, 200, 150, 1.0));
+        assert!(Compositor::first_command_covers_client(
+            &full, 200, 150, 1.0
+        ));
         // Overshooting origin/size still counts as full cover.
         let overshoot = vec![RenderCommand::FillRect {
             x: -5.0,
@@ -5170,14 +5157,13 @@ mod tests {
             corner_radii: CornerRadii::ZERO,
         }];
         assert!(Compositor::first_command_covers_client(
-            &overshoot,
-            200,
-            150,
-            1.0
+            &overshoot, 200, 150, 1.0
         ));
 
         // Translucent window => must NOT skip (top rect would blend).
-        assert!(!Compositor::first_command_covers_client(&full, 200, 150, 0.5));
+        assert!(!Compositor::first_command_covers_client(
+            &full, 200, 150, 0.5
+        ));
         // Non-opaque color => must NOT skip.
         let translucent = vec![RenderCommand::FillRect {
             x: 0.0,
@@ -5348,7 +5334,11 @@ mod tests {
         let min_ms = min_ns as f64 / 1_000_000.0;
         let mean_ms = mean_ns as f64 / 1_000_000.0;
         let verdict = if min_ms <= TARGET_MS { "PASS" } else { "OVER" };
-        let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
 
         println!(
             "[compositor-bench] compose_frame 4K ({W}x{H}, {NUM_WINDOWS} windows, \
@@ -5381,10 +5371,7 @@ mod tests {
 
     /// Sum of the areas of a rect list, as a `u64` so it cannot overflow.
     fn total_area(rects: &[Rect]) -> u64 {
-        rects
-            .iter()
-            .map(|r| r.width as u64 * r.height as u64)
-            .sum()
+        rects.iter().map(|r| r.width as u64 * r.height as u64).sum()
     }
 
     /// Every pixel of `outer` that is in exactly one of `parts`, brute-forced.
@@ -5401,12 +5388,12 @@ mod tests {
         let base = Rect::new(-3, -2, 20, 14);
         // A cut from every direction, plus the degenerate ones.
         let occluders = [
-            Rect::new(0, 0, 5, 5),      // interior-ish corner
-            Rect::new(5, 3, 4, 4),      // strictly interior -> 4 parts
-            Rect::new(-100, -100, 1, 1),// disjoint
+            Rect::new(0, 0, 5, 5),         // interior-ish corner
+            Rect::new(5, 3, 4, 4),         // strictly interior -> 4 parts
+            Rect::new(-100, -100, 1, 1),   // disjoint
             Rect::new(-50, -50, 200, 200), // covers everything
-            Rect::new(-3, -2, 20, 3),   // full-width band at the top
-            Rect::new(10, -2, 7, 14),   // full-height band at the right
+            Rect::new(-3, -2, 20, 3),      // full-width band at the top
+            Rect::new(10, -2, 7, 14),      // full-height band at the right
         ];
         for occ in occluders {
             let parts = base.subtract(&occ);
@@ -5425,8 +5412,14 @@ mod tests {
             // Areas must add up exactly — the check that catches a part that is
             // disjoint and yet still the wrong size.
             let want_area = base.width as u64 * base.height as u64
-                - base.intersect(&occ).map_or(0, |i| i.width as u64 * i.height as u64);
-            assert_eq!(total_area(&parts), want_area, "area after subtracting {occ:?}");
+                - base
+                    .intersect(&occ)
+                    .map_or(0, |i| i.width as u64 * i.height as u64);
+            assert_eq!(
+                total_area(&parts),
+                want_area,
+                "area after subtracting {occ:?}"
+            );
         }
     }
 
@@ -5557,9 +5550,10 @@ mod tests {
 
         let color = 0xFF11_2233u32;
         let bytes = solid_buffer_bytes(4, 4, color);
-        assert!(comp
-            .attach_buffer(id, 55, 4, 4, 16, BufferFormat::Argb8888, &bytes)
-            .is_ok());
+        assert!(
+            comp.attach_buffer(id, 55, 4, 4, 16, BufferFormat::Argb8888, &bytes)
+                .is_ok()
+        );
         assert!(comp.compose_frame());
 
         // The 4x4 buffer should have been blitted at the client origin (100,80).
@@ -5603,9 +5597,10 @@ mod tests {
         let id = comp.create_window("Buf".to_string(), 8, 8, 1);
         let bytes = solid_buffer_bytes(4, 4, 0xFF00FF00);
 
-        assert!(comp
-            .attach_buffer(id, 77, 4, 4, 16, BufferFormat::Argb8888, &bytes)
-            .is_ok());
+        assert!(
+            comp.attach_buffer(id, 77, 4, 4, 16, BufferFormat::Argb8888, &bytes)
+                .is_ok()
+        );
         assert!(comp.window_ref(id).unwrap().buffer.is_some());
 
         assert_eq!(comp.detach_buffer(id), Some(77));
@@ -5620,9 +5615,10 @@ mod tests {
         let id = comp.create_window("Buf".to_string(), 8, 8, 1);
         let bytes = solid_buffer_bytes(4, 4, 0xFF334455);
 
-        assert!(comp
-            .attach_buffer(id, 0xABCD, 4, 4, 16, BufferFormat::Argb8888, &bytes)
-            .is_ok());
+        assert!(
+            comp.attach_buffer(id, 0xABCD, 4, 4, 16, BufferFormat::Argb8888, &bytes)
+                .is_ok()
+        );
         // Before compositing, nothing has been read yet.
         assert!(comp.take_released_buffer_handles().is_empty());
 
@@ -5669,9 +5665,10 @@ mod tests {
         let mut comp = Compositor::new(400, 300, 60).unwrap();
         let id = comp.create_window("Buf".to_string(), 8, 8, 1);
         let bytes = solid_buffer_bytes(4, 4, 0x0011_2233); // alpha 0x00 in source
-        assert!(comp
-            .attach_buffer(id, 1, 4, 4, 16, BufferFormat::Xrgb8888, &bytes)
-            .is_ok());
+        assert!(
+            comp.attach_buffer(id, 1, 4, 4, 16, BufferFormat::Xrgb8888, &bytes)
+                .is_ok()
+        );
         assert!(comp.compose_frame());
 
         let front = comp.framebuffer.front_buffer();
@@ -5682,7 +5679,11 @@ mod tests {
             let w = comp.window_ref(id).unwrap();
             (w.x as usize, w.y as usize)
         };
-        assert_eq!(front[wy * stride + wx], 0xFF11_2233, "opaque fast-path pixel");
+        assert_eq!(
+            front[wy * stride + wx],
+            0xFF11_2233,
+            "opaque fast-path pixel"
+        );
         assert_eq!(front[(wy + 3) * stride + wx + 3], 0xFF11_2233);
     }
 
@@ -5717,9 +5718,10 @@ mod tests {
         // A display-sized opaque buffer makes the window scanout-eligible.
         let color = 0xFF_AB_CD_EFu32;
         let bytes = solid_buffer_bytes(64, 48, color);
-        assert!(comp
-            .attach_buffer(id, 9, 64, 48, 64 * 4, BufferFormat::Argb8888, &bytes)
-            .is_ok());
+        assert!(
+            comp.attach_buffer(id, 9, 64, 48, 64 * 4, BufferFormat::Argb8888, &bytes)
+                .is_ok()
+        );
 
         assert!(comp.compose_frame());
         // Frame should have bypassed compositing entirely.
@@ -5746,9 +5748,10 @@ mod tests {
         // Buffer smaller than the display must NOT bypass (would leave the rest
         // of the screen stale); the compositor falls back to compositing.
         let bytes = solid_buffer_bytes(32, 24, 0xFF112233);
-        assert!(comp
-            .attach_buffer(id, 1, 32, 24, 32 * 4, BufferFormat::Argb8888, &bytes)
-            .is_ok());
+        assert!(
+            comp.attach_buffer(id, 1, 32, 24, 32 * 4, BufferFormat::Argb8888, &bytes)
+                .is_ok()
+        );
 
         assert!(comp.compose_frame());
         assert!(!comp.is_scanout_bypassed());
@@ -5763,9 +5766,10 @@ mod tests {
         let id = comp.create_window("Win".to_string(), 64, 48, 1);
         // Display-sized buffer but the window is NOT fullscreen → no bypass.
         let bytes = solid_buffer_bytes(64, 48, 0xFF445566);
-        assert!(comp
-            .attach_buffer(id, 1, 64, 48, 64 * 4, BufferFormat::Argb8888, &bytes)
-            .is_ok());
+        assert!(
+            comp.attach_buffer(id, 1, 64, 48, 64 * 4, BufferFormat::Argb8888, &bytes)
+                .is_ok()
+        );
         assert!(comp.compose_frame());
         assert!(!comp.is_scanout_bypassed());
     }
@@ -5777,9 +5781,10 @@ mod tests {
         assert!(comp.set_fullscreen(id, true).is_ok());
         comp.set_opacity(id, 0.5).ok();
         let bytes = solid_buffer_bytes(64, 48, 0xFF778899);
-        assert!(comp
-            .attach_buffer(id, 1, 64, 48, 64 * 4, BufferFormat::Argb8888, &bytes)
-            .is_ok());
+        assert!(
+            comp.attach_buffer(id, 1, 64, 48, 64 * 4, BufferFormat::Argb8888, &bytes)
+                .is_ok()
+        );
         assert!(comp.compose_frame());
         // A translucent fullscreen window must blend with what's beneath, so it
         // cannot be scanned out directly.
@@ -5802,8 +5807,7 @@ mod tests {
             CompositorResponse::StreamFrame { data } => data,
             other => panic!("expected StreamFrame, got {other:?}"),
         };
-        let frame =
-            guiremote::scene::decode_scene_frame(&data).expect("decode captured frame");
+        let frame = guiremote::scene::decode_scene_frame(&data).expect("decode captured frame");
         assert_eq!(frame.sequence, 0);
         assert_eq!(frame.display_width, 400);
         assert_eq!(frame.display_height, 300);
@@ -5991,7 +5995,7 @@ mod tests {
         const W: u32 = 2048;
         const H: u32 = 1024; // 2M px > 1<<20 threshold
         let covered = [
-            Rect::new(100, 50, 400, 900),  // tall: crosses many band boundaries
+            Rect::new(100, 50, 400, 900),   // tall: crosses many band boundaries
             Rect::new(1500, 300, 400, 200), // offset block
         ];
 
@@ -6095,7 +6099,10 @@ mod tests {
             want.clear(0xFF_11_22_33);
             blit_opaque_reference(&mut want, &buf, wx, wy);
 
-            assert!(got.back == want.back, "blit_opaque clip mismatch at ({wx},{wy})");
+            assert!(
+                got.back == want.back,
+                "blit_opaque clip mismatch at ({wx},{wy})"
+            );
         }
     }
 
@@ -6402,7 +6409,13 @@ mod tests {
     fn test_text_ellipsis_marks_a_cut_that_clip_leaves_silent() {
         // The whole of §427: with `Clip`, a truncated label is indistinguishable
         // from a complete one. With `Ellipsis` it is not.
-        let clip = paint(LONG, 16.0, FontWeightHint::Regular, Some(60), TextOverflow::Clip);
+        let clip = paint(
+            LONG,
+            16.0,
+            FontWeightHint::Regular,
+            Some(60),
+            TextOverflow::Clip,
+        );
         let ell = paint(
             LONG,
             16.0,
@@ -6424,7 +6437,13 @@ mod tests {
         // A mark on a label that was never cut is a lie in the other direction:
         // it tells the reader there is more to the value than there is.
         for max_width in [Some(180), Some(u32::MAX)] {
-            let clip = paint("M", 16.0, FontWeightHint::Regular, max_width, TextOverflow::Clip);
+            let clip = paint(
+                "M",
+                16.0,
+                FontWeightHint::Regular,
+                max_width,
+                TextOverflow::Clip,
+            );
             let ell = paint(
                 "M",
                 16.0,
@@ -6444,7 +6463,13 @@ mod tests {
         // `max_width: None` cannot overflow, so the policy has nothing to say.
         // Every unbounded site in the tree was swept to `Clip` on exactly this
         // reasoning, so it had better be true.
-        let clip = paint(LONG, 16.0, FontWeightHint::Regular, None, TextOverflow::Clip);
+        let clip = paint(
+            LONG,
+            16.0,
+            FontWeightHint::Regular,
+            None,
+            TextOverflow::Clip,
+        );
         let ell = paint(
             LONG,
             16.0,
@@ -6495,10 +6520,19 @@ mod tests {
             TextOverflow::Clip,
         ));
         let mark_ink = mark_cols.iter().max().copied().unwrap() + 1 - INK_X as u32;
-        assert!(mark_ink > 2, "the ellipsis glyph rendered as {mark_ink}px of ink");
+        assert!(
+            mark_ink > 2,
+            "the ellipsis glyph rendered as {mark_ink}px of ink"
+        );
         let w = mark_ink - 2;
 
-        let clip = paint(LONG, 16.0, FontWeightHint::Regular, Some(w), TextOverflow::Clip);
+        let clip = paint(
+            LONG,
+            16.0,
+            FontWeightHint::Regular,
+            Some(w),
+            TextOverflow::Clip,
+        );
         let ell = paint(
             LONG,
             16.0,
@@ -6665,17 +6699,33 @@ mod tests {
     #[test]
     fn rich_text_lays_out_exactly_as_plain_text_does() {
         let sample = "let x = fn(1, 2);";
-        let plain = paint(sample, 20.0, FontWeightHint::Regular, None, TextOverflow::Clip);
+        let plain = paint(
+            sample,
+            20.0,
+            FontWeightHint::Regular,
+            None,
+            TextOverflow::Clip,
+        );
         let rich = paint_rich(
             sample,
             20.0,
             &[
-                TextSpan { end: 3, color: Color::rgb(255, 0, 0) },
-                TextSpan { end: 5, color: Color::rgb(0, 255, 0) },
-                TextSpan { end: 17, color: Color::rgb(0, 0, 255) },
+                TextSpan {
+                    end: 3,
+                    color: Color::rgb(255, 0, 0),
+                },
+                TextSpan {
+                    end: 5,
+                    color: Color::rgb(0, 255, 0),
+                },
+                TextSpan {
+                    end: 17,
+                    color: Color::rgb(0, 0, 255),
+                },
             ],
         );
-        let plain_at: Vec<(u32, u32)> = lit_pixels(&plain).iter().map(|&(x, y, _)| (x, y)).collect();
+        let plain_at: Vec<(u32, u32)> =
+            lit_pixels(&plain).iter().map(|&(x, y, _)| (x, y)).collect();
         let rich_at: Vec<(u32, u32)> = lit_pixels(&rich).iter().map(|&(x, y, _)| (x, y)).collect();
         assert!(!plain_at.is_empty(), "nothing drawn");
         assert_eq!(
@@ -6696,8 +6746,14 @@ mod tests {
             "HI",
             40.0,
             &[
-                TextSpan { end: 1, color: Color::rgb(255, 0, 0) },
-                TextSpan { end: 2, color: Color::rgb(0, 0, 255) },
+                TextSpan {
+                    end: 1,
+                    color: Color::rgb(255, 0, 0),
+                },
+                TextSpan {
+                    end: 2,
+                    color: Color::rgb(0, 0, 255),
+                },
             ],
         );
         let lit = lit_pixels(&fb);
@@ -6712,8 +6768,14 @@ mod tests {
             .filter(|&&(_, _, c)| c & 0xFF_00_00 == 0 && c & 0x00_FF_00 == 0)
             .map(|&(x, _, _)| x)
             .collect();
-        assert!(!reds.is_empty(), "no red ink — the first span was not applied");
-        assert!(!blues.is_empty(), "no blue ink — the second span was not applied");
+        assert!(
+            !reds.is_empty(),
+            "no red ink — the first span was not applied"
+        );
+        assert!(
+            !blues.is_empty(),
+            "no blue ink — the second span was not applied"
+        );
         assert!(
             lit.len() == reds.len() + blues.len(),
             "{} pixels are neither span's colour",
@@ -6737,7 +6799,13 @@ mod tests {
     #[test]
     fn rich_text_with_no_spans_is_plain_text() {
         let sample = "fallback";
-        let plain = paint(sample, 24.0, FontWeightHint::Regular, None, TextOverflow::Clip);
+        let plain = paint(
+            sample,
+            24.0,
+            FontWeightHint::Regular,
+            None,
+            TextOverflow::Clip,
+        );
         let rich = paint_rich(sample, 24.0, &[]);
         assert_eq!(lit_pixels(&plain), lit_pixels(&rich));
     }
@@ -6752,7 +6820,10 @@ mod tests {
         let fb = paint_rich(
             "HI",
             40.0,
-            &[TextSpan { end: 1, color: Color::rgb(255, 0, 0) }],
+            &[TextSpan {
+                end: 1,
+                color: Color::rgb(255, 0, 0),
+            }],
         );
         let lit = lit_pixels(&fb);
         assert!(!lit.is_empty(), "nothing drawn");
@@ -6766,7 +6837,10 @@ mod tests {
             .filter(|&&(_, _, c)| c & 0x00_FF_00 == 0 && c & 0x00_00_FF == 0)
             .count();
         assert!(red > 0, "the covered byte was not coloured by its span");
-        assert!(white > 0, "the uncovered byte did not fall back to the base colour");
+        assert!(
+            white > 0,
+            "the uncovered byte did not fall back to the base colour"
+        );
     }
 
     /// The overflow mark stands for text that was *not* drawn, so it belongs to
@@ -6785,7 +6859,10 @@ mod tests {
             &long,
             0xFF_FF_FF_FF,
             // One span over the whole string, in a colour with no white in it.
-            &[TextSpan { end: 60, color: Color::rgb(255, 0, 0) }],
+            &[TextSpan {
+                end: 60,
+                color: Color::rgb(255, 0, 0),
+            }],
             1.0,
             Some(120),
             20.0,

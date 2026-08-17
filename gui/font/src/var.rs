@@ -233,18 +233,20 @@ impl SegmentMap {
         }
         let rise = i32::from(hi_to).saturating_sub(i32::from(lo_to));
         let run = i32::from(value).saturating_sub(i32::from(lo_from));
-        // Truncating division, deliberately: HarfBuzz's `SegmentMaps::map`
-        // divides the same way, and this crate is checked against HarfBuzz
-        // glyph-for-glyph. Rounding to nearest here would be marginally more
-        // accurate and would disagree with the oracle by one F2Dot14 unit on
-        // some inputs, which is the worse trade.
-        //
-        // `span` is non-zero by the check above, so `checked_div` can only
-        // decline on `i32::MIN / -1`, unreachable for the same width reason.
-        // Zero is the right fallback regardless: it yields `lo_to`, matching
-        // the vertical-segment case.
-        let delta = rise.saturating_mul(run).checked_div(span).unwrap_or(0);
-        clamp_f2dot14(i32::from(lo_to).saturating_add(delta))
+        // Rounded to nearest, half away from zero, which is what HarfBuzz's
+        // `SegmentMaps::map` does — it interpolates in `float` and takes
+        // `roundf`. The difference from truncating is one F2Dot14 unit, and one
+        // F2Dot14 unit is not nothing: Segoe UI Variable's `avar` maps weight
+        // 550 to 8192*8192/10923, which is 6143.99, so truncating lands on
+        // 6143 where HarfBuzz lands on 6144. Every delta in the face is then
+        // scaled by 0.99995 of what it should be, and a glyph whose exact
+        // advance delta is 10.5 rounds to 10 instead of 11 — every advance in
+        // the face a unit short, at that instance and no other.
+        let delta = round_div(
+            i64::from(rise).saturating_mul(i64::from(run)),
+            i64::from(span),
+        );
+        clamp_f2dot14(i32::try_from(i64::from(lo_to).saturating_add(delta)).unwrap_or(i32::MAX))
     }
 }
 
@@ -424,6 +426,40 @@ fn normalize_value(axis: &Axis, value: f32) -> f32 {
         }
     } else {
         0.0
+    }
+}
+
+/// `n / d` rounded to nearest, halves away from zero, in integers.
+///
+/// Not `(n as f32 / d as f32).round()`: the numerator here is a product of two
+/// F2Dot14 values and reaches a billion, well past the 24 bits an `f32` mantissa
+/// keeps exactly, so the float form would round the *inputs* before dividing
+/// them. HarfBuzz gets away with a float divide because it divides before
+/// multiplying out; doing the arithmetic in `i64` is exact for every input the
+/// format can hold.
+///
+/// `d` is the span of a segment and is positive at the only call site; a
+/// non-positive one would be a malformed curve, and zero is the same answer the
+/// vertical-segment case gives.
+fn round_div(n: i64, d: i64) -> i64 {
+    if d <= 0 {
+        return 0;
+    }
+    // Checked throughout rather than bare operators: `checked_div` is the only
+    // spelling that cannot trap on a zero or `MIN / -1` divisor, and the sign
+    // flips below are `checked_neg` because negating `i64::MIN` is the one
+    // negation that overflows. None of these can fire on a well-formed `avar`
+    // — the guard above and the F2Dot14 range see to that — so every fallback
+    // is `0`, the same answer a degenerate segment already gives.
+    let half = d.checked_div(2).unwrap_or(0);
+    if n >= 0 {
+        n.saturating_add(half).checked_div(d).unwrap_or(0)
+    } else {
+        n.saturating_neg()
+            .saturating_add(half)
+            .checked_div(d)
+            .and_then(i64::checked_neg)
+            .unwrap_or(0)
     }
 }
 
@@ -777,6 +813,43 @@ mod tests {
     fn an_avar_landing_exactly_on_a_point_takes_that_points_value() {
         let map = segment(&[(-16384, -16384), (0, 0), (8192, 4096), (16384, 16384)]);
         assert_eq!(map.map(8192), 4096);
+    }
+
+    /// The interpolation rounds to nearest, and one unit of F2Dot14 matters.
+    ///
+    /// Segoe UI Variable's own curve, and the coordinate weight 550 reaches on
+    /// it: 8192 × 8192 / 10923 is 6143.996, so truncating lands on 6143 and
+    /// rounding on 6144. HarfBuzz reports 6144, and the unit is not cosmetic —
+    /// at 6143 every region scalar in the face is a whisker small, and a glyph
+    /// whose advance delta is exactly 10.5 rounds down instead of up. That was
+    /// a real disagreement: every advance in the face one unit short, at that
+    /// instance and no other.
+    #[test]
+    fn avar_rounds_to_the_nearest_coordinate_rather_than_truncating() {
+        let map = segment(&[(-16384, -16384), (-8192, -8192), (0, 0), (10923, 8192), (16384, 16384)]);
+        assert_eq!(map.map(8192), 6144);
+        // Two thirds, on the way up and on the mirrored way down: both round to
+        // the nearer coordinate rather than towards the segment they started
+        // from.
+        let up = segment(&[(-16384, -16384), (0, 0), (3, 2), (16384, 16384)]);
+        assert_eq!(up.map(2), 1, "1.333 rounds down");
+        let down = segment(&[(-16384, -16384), (-3, -2), (0, 0), (16384, 16384)]);
+        assert_eq!(down.map(-2), -1);
+    }
+
+    /// Halves go away from zero, which is what `roundf` does and therefore what
+    /// the oracle does. A reader rounding half to even would agree with it on
+    /// three inputs out of four and be found only by the fourth.
+    #[test]
+    fn an_exact_half_rounds_away_from_zero() {
+        let up = segment(&[(-16384, -16384), (0, 0), (2, 1), (16384, 16384)]);
+        assert_eq!(up.map(1), 1, "0.5 rounds up, not to even");
+        // A segment that falls as it advances, which is the only way to reach
+        // the negative half from inside one segment. `avar` curves are normally
+        // monotonic, so this is a shape check on the arithmetic rather than on
+        // a face — but the arithmetic is shared with the shapes that are real.
+        let down = segment(&[(-16384, -16384), (0, 0), (2, -1), (16384, 16384)]);
+        assert_eq!(down.map(1), -1, "-0.5 rounds down, not to even");
     }
 
     #[test]

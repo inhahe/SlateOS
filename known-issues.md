@@ -28168,7 +28168,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 6 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 7 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28409,6 +28409,53 @@ places: `-d $'\n'` (where the delimiter *is* the terminator, and a trailing
 newline must end the input rather than open another field) and the
 `buffer_first_field` fork, where whether field 1 is selected decides which of
 two code paths runs. `Input` in `cut.rs` is that shape.
+
+`uniq` is the seventh (`scripts/uniq-diff.sh`: 273 passed, 0 differed, 3 differ
+on purpose). Its lessons are all about the parser's *inputs* — what argv is
+parsed against, and what argv is allowed to be:
+
+- **The environment is part of the grammar, and a harness that varies only argv
+  certifies half the parser.** `uniq` reads two variables by hand.
+  `POSIXLY_CORRECT` makes the first operand end option parsing, so
+  `POSIXLY_CORRECT=1 uniq f -c` treats `-c` as the output file — and note that
+  getopt is *not* doing this: `uniq`'s optstring starts with `-`
+  (RETURN_IN_ORDER, which is how operands come back interleaved with options),
+  and that mode disables getopt's own `POSIXLY_CORRECT` handling, so the utility
+  re-implements it. Separately, `_POSIX2_VERSION` in `[200112, 200809)` disables
+  the `+N` form below. `uniq-diff.sh` grew an `ENVV` array applied to *both*
+  sides for this; copy it for any utility that reads the environment at parse
+  time (`ls`, `sort`, `df`, `du` and `tail` all do).
+- **An obsolete form can be an *operand*, not an option.** `head`'s and `tail`'s
+  pre-POSIX words at least look like options; `uniq +5` is intercepted at the
+  point where a *file name* would be taken, so it never reaches getopt at all,
+  and the same word is a perfectly good file name when any of its three
+  disqualifiers apply (strict POSIX2, a non-numeric tail, or overflow). The `-N`
+  half has a trap the other two do not: digits **accumulate across arguments**,
+  so `uniq -1 -2` skips *twelve* fields, and `-f` resets the accumulator —
+  meaning `-1 -f3` is 3 and `-f3 -1` is 31. Order-dependent state in the option
+  loop is the thing to look for; `-D` resetting `--all-repeated`'s delimiting
+  method is a second instance in the same utility.
+- **The second operand is an OUTPUT file, and it is truncated.** This is the
+  first utility here that writes to a name on its own command line, and it cost
+  a fixture during measurement — a probe of `uniq +1 c.txt` emptied `c.txt`
+  before anything read it. A harness must give each side its own scratch output
+  name and compare the two *files*, distinguishing "no file was created" from
+  "an empty file was created": `run_outfile` in `uniq-diff.sh`. Check for this
+  before writing cases, not after — `tee`, `split` and `csplit` are next.
+- **Reproduce upstream's dead code; do not tidy it.** `uniq.c` has two branches
+  that cannot execute — the `too many repeated lines` error (guarded by
+  `count_occurrences`, which at that point is enum value 0) and the
+  `grouping && countmode` cross-check (unreachable because `-c` sets
+  `output_option_used`, so the earlier check always fires first). Both are ported
+  with comments saying why they are dead. The reason is not fidelity for its own
+  sake: "fixing" one of them changes which sentence a *real* command line
+  produces, and the next reader cannot tell a deliberate divergence from a
+  mistake.
+
+`uniq`'s three invalid-number diagnostics (`-f`, `-s`, `-w`) quote nothing at
+all *and* carry no `Try '… --help'` referral — a third combination beyond
+`Program::usage()` and `Program::usage_referring()`, and one more reason to read
+the upstream call site per message rather than look for a per-utility rule.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 

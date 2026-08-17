@@ -214,7 +214,11 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
     if files.is_empty() {
         // Recursion with no operand walks the working directory, as GNU does;
         // without it there is nothing to walk and the input is stdin.
-        files.push(if opts.recursive { ".".to_string() } else { "-".to_string() });
+        files.push(if opts.recursive {
+            ".".to_string()
+        } else {
+            "-".to_string()
+        });
     }
 
     Ok(GrepArgs {
@@ -431,7 +435,11 @@ fn line_selected(line: &[u8], pats: &[Pat], opts: &Options) -> bool {
 /// command line and *named* `(standard input)` in a diagnostic or a prefix, as
 /// every other grep does — a `-:` prefix reads as part of the line.
 fn display_name(path: &str) -> &str {
-    if path == "-" { "(standard input)" } else { path }
+    if path == "-" {
+        "(standard input)"
+    } else {
+        path
+    }
 }
 
 /// The prefix shown before a printed line: file name, line number, both or
@@ -663,7 +671,8 @@ fn collect_files_recursive(dir: &Path, result: &mut Vec<String>) {
         }
     };
 
-    let mut paths: Vec<std::path::PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+    let mut paths: Vec<std::path::PathBuf> =
+        entries.filter_map(Result::ok).map(|e| e.path()).collect();
     paths.sort();
 
     for path in paths {
@@ -752,9 +761,15 @@ mod tests {
     fn parse_the_options_that_used_to_be_unknown() {
         // Every one of these was `unknown option` until this rewrite, and each
         // is in the failure lane C reported: `grep -E`, `grep -q`, `grep -c --`.
-        assert_eq!(parse_args(&s(&["-E", "a+"])).unwrap().opts.syntax, Syntax::Extended);
+        assert_eq!(
+            parse_args(&s(&["-E", "a+"])).unwrap().opts.syntax,
+            Syntax::Extended
+        );
         assert!(parse_args(&s(&["-q", "a"])).unwrap().opts.quiet);
-        assert_eq!(parse_args(&s(&["-F", "a"])).unwrap().opts.syntax, Syntax::Fixed);
+        assert_eq!(
+            parse_args(&s(&["-F", "a"])).unwrap().opts.syntax,
+            Syntax::Fixed
+        );
         for flag in ["-w", "-x", "-o", "-l", "-L", "-H", "-h", "-s", "-a"] {
             assert!(parse_args(&s(&[flag, "a"])).is_ok(), "{flag} rejected");
         }
@@ -785,17 +800,41 @@ mod tests {
 
     #[test]
     fn parse_an_option_argument_may_be_glued_to_its_cluster() {
-        assert_eq!(parse_args(&s(&["-m5", "a"])).unwrap().opts.max_count, Some(5));
-        assert_eq!(parse_args(&s(&["-m", "5", "a"])).unwrap().opts.max_count, Some(5));
-        assert_eq!(parse_args(&s(&["-im5", "a"])).unwrap().opts.max_count, Some(5));
-        assert_eq!(parse_args(&s(&["-efoo"])).unwrap().patterns, vec![b"foo".to_vec()]);
+        assert_eq!(
+            parse_args(&s(&["-m5", "a"])).unwrap().opts.max_count,
+            Some(5)
+        );
+        assert_eq!(
+            parse_args(&s(&["-m", "5", "a"])).unwrap().opts.max_count,
+            Some(5)
+        );
+        assert_eq!(
+            parse_args(&s(&["-im5", "a"])).unwrap().opts.max_count,
+            Some(5)
+        );
+        assert_eq!(
+            parse_args(&s(&["-efoo"])).unwrap().patterns,
+            vec![b"foo".to_vec()]
+        );
     }
 
     #[test]
     fn parse_a_missing_option_argument_is_an_error() {
-        assert!(parse_args(&s(&["-e"])).unwrap_err().contains("requires an argument"));
-        assert!(parse_args(&s(&["-m"])).unwrap_err().contains("requires an argument"));
-        assert!(parse_args(&s(&["-m", "x", "a"])).unwrap_err().contains("invalid max count"));
+        assert!(
+            parse_args(&s(&["-e"]))
+                .unwrap_err()
+                .contains("requires an argument")
+        );
+        assert!(
+            parse_args(&s(&["-m"]))
+                .unwrap_err()
+                .contains("requires an argument")
+        );
+        assert!(
+            parse_args(&s(&["-m", "x", "a"]))
+                .unwrap_err()
+                .contains("invalid max count")
+        );
     }
 
     #[test]
@@ -804,7 +843,11 @@ mod tests {
         assert!(a.opts.ignore_case);
         assert_eq!(a.opts.max_count, Some(2));
         assert_eq!(a.patterns, vec![b"foo".to_vec()]);
-        assert!(parse_args(&s(&["--nope", "a"])).unwrap_err().contains("unknown option"));
+        assert!(
+            parse_args(&s(&["--nope", "a"]))
+                .unwrap_err()
+                .contains("unknown option")
+        );
     }
 
     #[test]
@@ -834,7 +877,11 @@ mod tests {
         assert!(selects("posix on", "^posix", &o));
         assert!(!selects("set -o posix", "^posix", &o));
         assert!(selects("declare -a FUNCNAME", "^declare -a FUNCNAME$", &o));
-        assert!(!selects("declare -a FUNCNAMEX", "^declare -a FUNCNAME$", &o));
+        assert!(!selects(
+            "declare -a FUNCNAMEX",
+            "^declare -a FUNCNAME$",
+            &o
+        ));
     }
 
     #[test]
@@ -842,7 +889,10 @@ mod tests {
         // BRE: `a+b` is three literal characters. ERE: one or more `a`, then
         // `b`. Not a subset relation, which is why `-E` cannot be a no-op.
         let bre = Options::default();
-        let ere = Options { syntax: Syntax::Extended, ..Options::default() };
+        let ere = Options {
+            syntax: Syntax::Extended,
+            ..Options::default()
+        };
         assert!(selects("a+b", "a+b", &bre));
         assert!(!selects("aab", "a+b", &bre));
         assert!(!selects("a+b", "a+b", &ere));
@@ -854,7 +904,10 @@ mod tests {
 
     #[test]
     fn fixed_strings_have_no_metacharacters() {
-        let f = Options { syntax: Syntax::Fixed, ..Options::default() };
+        let f = Options {
+            syntax: Syntax::Fixed,
+            ..Options::default()
+        };
         assert!(selects("a.c", "a.c", &f));
         assert!(!selects("abc", "a.c", &f));
         assert!(selects("cost: $5*", "$5*", &f));
@@ -862,7 +915,10 @@ mod tests {
 
     #[test]
     fn case_folding_reaches_the_pattern_not_only_the_line() {
-        let o = Options { ignore_case: true, ..Options::default() };
+        let o = Options {
+            ignore_case: true,
+            ..Options::default()
+        };
         assert!(selects("Hello World", "hello", &o));
         assert!(selects("HELLO", "^hel", &o));
         assert!(selects("ABC", "[a-c]*$", &o));
@@ -870,7 +926,10 @@ mod tests {
 
     #[test]
     fn a_malformed_pattern_is_reported_rather_than_matched_literally() {
-        let o = Options { syntax: Syntax::Extended, ..Options::default() };
+        let o = Options {
+            syntax: Syntax::Extended,
+            ..Options::default()
+        };
         let err = compile_patterns(&[b"a[".to_vec()], &o).err().unwrap();
         assert!(err.contains("a["), "{err}");
         // A backreference cannot be evaluated by this engine, and is refused
@@ -900,7 +959,10 @@ mod tests {
 
     #[test]
     fn word_regexp_needs_non_word_neighbours() {
-        let o = Options { word: true, ..Options::default() };
+        let o = Options {
+            word: true,
+            ..Options::default()
+        };
         assert!(selects("foo", "foo", &o));
         assert!(selects("a foo b", "foo", &o));
         assert!(selects("(foo)", "foo", &o));
@@ -914,7 +976,10 @@ mod tests {
 
     #[test]
     fn line_regexp_needs_the_whole_line() {
-        let o = Options { whole_line: true, ..Options::default() };
+        let o = Options {
+            whole_line: true,
+            ..Options::default()
+        };
         assert!(selects("foo", "foo", &o));
         assert!(!selects("foo ", "foo", &o));
         assert!(selects("foo bar", "foo.*", &o));
@@ -922,7 +987,11 @@ mod tests {
 
     #[test]
     fn only_matching_reports_the_parts_not_the_line() {
-        let o = Options { syntax: Syntax::Extended, only_matching: true, ..Options::default() };
+        let o = Options {
+            syntax: Syntax::Extended,
+            only_matching: true,
+            ..Options::default()
+        };
         let p = pats("[0-9]+", &o);
         let spans = matches_in(&p, b"ab12cd345", &o);
         assert_eq!(spans, vec![(2, 4), (6, 9)]);
@@ -932,7 +1001,10 @@ mod tests {
     fn the_longest_alternative_wins_as_posix_requires() {
         // Leftmost-*longest*, not leftmost-first: `-o` is where the difference
         // becomes visible output rather than an internal detail.
-        let o = Options { syntax: Syntax::Extended, ..Options::default() };
+        let o = Options {
+            syntax: Syntax::Extended,
+            ..Options::default()
+        };
         let p = pats("a|ab", &o);
         assert_eq!(matches_in(&p, b"ab", &o), vec![(0, 2)]);
         // …and across `-e` patterns, which are a set and not an order.
@@ -977,7 +1049,10 @@ mod tests {
         assert_eq!(display_name("-"), "(standard input)");
         assert_eq!(display_name("a.txt"), "a.txt");
         // `grep -H pattern -` printing `-:line` reads as part of the line.
-        assert_eq!(line_prefix(display_name("-"), 0, true, false), "(standard input):");
+        assert_eq!(
+            line_prefix(display_name("-"), 0, true, false),
+            "(standard input):"
+        );
     }
 
     #[test]
@@ -1015,7 +1090,13 @@ mod tests {
         (out, matched)
     }
 
-    fn run(input: &[u8], pattern: &str, opts: Options, filename: &str, show_filename: bool) -> (String, bool) {
+    fn run(
+        input: &[u8],
+        pattern: &str,
+        opts: Options,
+        filename: &str,
+        show_filename: bool,
+    ) -> (String, bool) {
         let p = pats(pattern, &opts);
         let (out, matched) = run_search(input, &p, &opts, filename, show_filename);
         (String::from_utf8(out).unwrap(), matched)
@@ -1037,7 +1118,10 @@ mod tests {
 
     #[test]
     fn search_count_only() {
-        let opts = Options { count_only: true, ..Options::default() };
+        let opts = Options {
+            count_only: true,
+            ..Options::default()
+        };
         let (out, matched) = run(b"a\nab\nabc\n", "a", opts, "f", false);
         assert!(matched);
         assert_eq!(out, "3\n");
@@ -1045,14 +1129,20 @@ mod tests {
 
     #[test]
     fn search_count_only_with_filename() {
-        let opts = Options { count_only: true, ..Options::default() };
+        let opts = Options {
+            count_only: true,
+            ..Options::default()
+        };
         let (out, _) = run(b"a\nab\nabc\n", "a", opts, "x.txt", true);
         assert_eq!(out, "x.txt:3\n");
     }
 
     #[test]
     fn search_count_of_no_matches_is_zero_not_silence() {
-        let opts = Options { count_only: true, ..Options::default() };
+        let opts = Options {
+            count_only: true,
+            ..Options::default()
+        };
         let (out, matched) = run(b"a\nb\n", "z", opts, "f", false);
         assert!(!matched);
         assert_eq!(out, "0\n");
@@ -1060,14 +1150,20 @@ mod tests {
 
     #[test]
     fn search_line_numbers() {
-        let opts = Options { line_numbers: true, ..Options::default() };
+        let opts = Options {
+            line_numbers: true,
+            ..Options::default()
+        };
         let (out, _) = run(b"x\nfoo\nbar\nfoo\n", "foo", opts, "f", false);
         assert_eq!(out, "2:foo\n4:foo\n");
     }
 
     #[test]
     fn search_invert() {
-        let opts = Options { invert: true, ..Options::default() };
+        let opts = Options {
+            invert: true,
+            ..Options::default()
+        };
         let (out, matched) = run(b"a\nb\nc\n", "b", opts, "f", false);
         assert!(matched);
         assert_eq!(out, "a\nc\n");
@@ -1075,7 +1171,10 @@ mod tests {
 
     #[test]
     fn search_ignore_case() {
-        let opts = Options { ignore_case: true, ..Options::default() };
+        let opts = Options {
+            ignore_case: true,
+            ..Options::default()
+        };
         let (out, _) = run(b"FOO\nbar\nFooBar\n", "foo", opts, "f", false);
         assert_eq!(out, "FOO\nFooBar\n");
     }
@@ -1088,14 +1187,20 @@ mod tests {
 
     #[test]
     fn search_max_count_stops_early() {
-        let opts = Options { max_count: Some(2), ..Options::default() };
+        let opts = Options {
+            max_count: Some(2),
+            ..Options::default()
+        };
         let (out, _) = run(b"a\na\na\na\n", "a", opts, "f", false);
         assert_eq!(out, "a\na\n");
     }
 
     #[test]
     fn search_quiet_prints_nothing_but_answers() {
-        let opts = Options { quiet: true, ..Options::default() };
+        let opts = Options {
+            quiet: true,
+            ..Options::default()
+        };
         let (out, matched) = run(b"a\nfoo\n", "foo", opts, "f", false);
         assert!(matched);
         assert_eq!(out, "");
@@ -1115,7 +1220,11 @@ mod tests {
 
     #[test]
     fn search_only_matching_with_invert_prints_nothing() {
-        let opts = Options { only_matching: true, invert: true, ..Options::default() };
+        let opts = Options {
+            only_matching: true,
+            invert: true,
+            ..Options::default()
+        };
         let (out, matched) = run(b"abc\n", "z", opts, "f", false);
         assert!(matched, "the line is still selected");
         assert_eq!(out, "");
@@ -1125,14 +1234,24 @@ mod tests {
 
     #[test]
     fn a_pattern_file_holds_one_pattern_per_line() {
-        assert_eq!(split_patterns(b"foo\nbar\n"), vec![b"foo".to_vec(), b"bar".to_vec()]);
-        assert_eq!(split_patterns(b"foo\nbar"), vec![b"foo".to_vec(), b"bar".to_vec()]);
+        assert_eq!(
+            split_patterns(b"foo\nbar\n"),
+            vec![b"foo".to_vec(), b"bar".to_vec()]
+        );
+        assert_eq!(
+            split_patterns(b"foo\nbar"),
+            vec![b"foo".to_vec(), b"bar".to_vec()]
+        );
         // A trailing newline ends the last pattern; it does not begin an empty
         // one, which would match every line and turn grep into cat.
         assert_eq!(split_patterns(b"foo\n"), vec![b"foo".to_vec()]);
         // An empty file, though, *is* the empty pattern.
         assert_eq!(split_patterns(b""), vec![Vec::<u8>::new()]);
-        assert_eq!(split_patterns(b"a\n\nb\n").len(), 3, "a blank line is the empty pattern");
+        assert_eq!(
+            split_patterns(b"a\n\nb\n").len(),
+            3,
+            "a blank line is the empty pattern"
+        );
     }
 
     #[test]

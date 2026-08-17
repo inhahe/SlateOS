@@ -28,9 +28,9 @@ use std::process;
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
 struct Hunk {
-    old_start: usize,  // 1-based line number in original file
+    old_start: usize, // 1-based line number in original file
     old_count: usize,
-    new_start: usize,  // 1-based line number in new file
+    new_start: usize, // 1-based line number in new file
     new_count: usize,
     lines: Vec<HunkLine>,
 }
@@ -86,9 +86,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             let v = args
                 .get(i)
                 .ok_or_else(|| "option -p requires an argument".to_string())?;
-            let n: usize = v
-                .parse()
-                .map_err(|_| format!("invalid strip count: {v}"))?;
+            let n: usize = v.parse().map_err(|_| format!("invalid strip count: {v}"))?;
             opts.strip = Some(n);
         } else if let Some(rest) = a.strip_prefix("-p") {
             if !rest.is_empty() {
@@ -173,8 +171,10 @@ fn parse_patch(input: &str) -> Vec<FilePatch> {
             .is_some_and(|l| l.starts_with("+++ "));
         if line_i.starts_with("--- ") && next_starts_with_plus {
             let old_path = parse_file_path(line_i, "--- ");
-            let new_path =
-                parse_file_path(lines.get(i.saturating_add(1)).copied().unwrap_or(""), "+++ ");
+            let new_path = parse_file_path(
+                lines.get(i.saturating_add(1)).copied().unwrap_or(""),
+                "+++ ",
+            );
             i = i.saturating_add(2);
 
             let mut hunks: Vec<Hunk> = Vec::new();
@@ -500,9 +500,10 @@ fn main() {
 
             // Create parent directories if needed (for new files).
             if let Some(parent) = Path::new(&file_path).parent()
-                && !parent.as_os_str().is_empty() {
-                    let _ = fs::create_dir_all(parent);
-                }
+                && !parent.as_os_str().is_empty()
+            {
+                let _ = fs::create_dir_all(parent);
+            }
 
             // Write the patched file.
             let mut output = lines.join("\n");

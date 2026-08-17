@@ -63,7 +63,11 @@ fn parse_args(args: &[String]) -> Result<LnArgs, String> {
 
     let link_name = paths.pop().unwrap_or_default();
     let target = paths.pop().unwrap_or_default();
-    Ok(LnArgs { symbolic, target, link_name })
+    Ok(LnArgs {
+        symbolic,
+        target,
+        link_name,
+    })
 }
 
 /// Create a symbolic link. Delegates to the platform-specific API.

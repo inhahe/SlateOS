@@ -66,7 +66,15 @@ fn unix_secs_to_datetime(total_secs: u64) -> DateTime {
     // Jan 1 1970 was Thursday (4 in Sun=0..Sat=6).
     let dow = ((total_secs / 86400).saturating_add(4) % 7) as usize;
 
-    DateTime { year, month, day, hour, minute, second, dow }
+    DateTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        dow,
+    }
 }
 
 /// Format a `DateTime` like `Thu Jan  1 00:00:00 UTC 1970`.

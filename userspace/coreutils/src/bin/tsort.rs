@@ -121,7 +121,8 @@ fn topological_sort(adj: &[Vec<usize>], in_degree: &[usize]) -> (Vec<usize>, Vec
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
-    let reader: Box<dyn Read> = if args.is_empty() || args.first().map(String::as_str) == Some("-") {
+    let reader: Box<dyn Read> = if args.is_empty() || args.first().map(String::as_str) == Some("-")
+    {
         Box::new(io::stdin())
     } else {
         let path = args.first().map(String::as_str).unwrap_or("-");

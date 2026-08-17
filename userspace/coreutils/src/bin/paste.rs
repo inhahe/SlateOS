@@ -137,10 +137,7 @@ mod tests {
 
     #[test]
     fn serial_multiple_lines_joined_by_tab() {
-        assert_eq!(
-            join_serial(&s(&["a", "b", "c"]), "\t"),
-            "a\tb\tc"
-        );
+        assert_eq!(join_serial(&s(&["a", "b", "c"]), "\t"), "a\tb\tc");
     }
 
     #[test]

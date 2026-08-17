@@ -62,7 +62,10 @@ fn main() {
     }
 
     let dest = parsed.paths.last().cloned().unwrap_or_default();
-    let sources = parsed.paths.get(..parsed.paths.len().saturating_sub(1)).unwrap_or(&[]);
+    let sources = parsed
+        .paths
+        .get(..parsed.paths.len().saturating_sub(1))
+        .unwrap_or(&[]);
     let dest_path = PathBuf::from(&dest);
     let dest_is_dir = dest_path.is_dir();
 
@@ -79,10 +82,7 @@ fn main() {
         if let Err(e) = fs::rename(src, &target) {
             // rename() can fail across filesystems; fall back to copy + remove.
             if src.is_dir() {
-                eprintln!(
-                    "mv: cannot move '{src_str}' to '{}': {e}",
-                    target.display()
-                );
+                eprintln!("mv: cannot move '{src_str}' to '{}': {e}", target.display());
                 failed = true;
             } else {
                 match fs::copy(src, &target).and_then(|_| fs::remove_file(src)) {

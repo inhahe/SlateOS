@@ -52,7 +52,12 @@ pub struct Records {
 
 impl Records {
     pub fn new(src: Box<dyn Read>) -> Records {
-        Records { src, buf: Vec::new(), pos: 0, eof: false }
+        Records {
+            src,
+            buf: Vec::new(),
+            pos: 0,
+            eof: false,
+        }
     }
 
     /// Read more input. Returns false at end of file.
@@ -108,7 +113,10 @@ impl Records {
         let mut searched = 0usize;
         loop {
             let rest = self.rest();
-            if let Some(k) = rest.get(searched..).and_then(|r| r.iter().position(|b| *b == sep)) {
+            if let Some(k) = rest
+                .get(searched..)
+                .and_then(|r| r.iter().position(|b| *b == sep))
+            {
                 let end = searched.saturating_add(k);
                 let rec = rest.get(..end).unwrap_or_default().to_vec();
                 self.pos = self.pos.saturating_add(end).saturating_add(1);
@@ -235,7 +243,11 @@ pub struct Outputs {
 impl Outputs {
     #[must_use]
     pub fn new() -> Outputs {
-        Outputs { stdout: BufWriter::new(io::stdout()), sinks: HashMap::new(), order: Vec::new() }
+        Outputs {
+            stdout: BufWriter::new(io::stdout()),
+            sinks: HashMap::new(),
+            order: Vec::new(),
+        }
     }
 
     /// Write to standard output.
@@ -251,7 +263,12 @@ impl Outputs {
     ///
     /// # Errors
     /// Propagates a failure to open or to write.
-    pub fn write_to(&mut self, name: &[u8], mode: crate::ast::RedirMode, bytes: &[u8]) -> io::Result<()> {
+    pub fn write_to(
+        &mut self,
+        name: &[u8],
+        mode: crate::ast::RedirMode,
+        bytes: &[u8],
+    ) -> io::Result<()> {
         if !self.sinks.contains_key(name) {
             // A pipe's child inherits our standard output, so anything already
             // buffered has to be on its way out before the child can write.
@@ -387,7 +404,10 @@ pub struct Inputs {
 impl Inputs {
     #[must_use]
     pub fn new() -> Inputs {
-        Inputs { files: HashMap::new(), cmds: HashMap::new() }
+        Inputs {
+            files: HashMap::new(),
+            cmds: HashMap::new(),
+        }
     }
 
     /// The reader for `getline < name`, opening it on first use.
@@ -420,7 +440,8 @@ impl Inputs {
             let Some(stdout) = child.stdout.take() else {
                 return Err(io::Error::other("the child has no standard output"));
             };
-            self.cmds.insert(name.to_vec(), (Records::new(Box::new(stdout)), child));
+            self.cmds
+                .insert(name.to_vec(), (Records::new(Box::new(stdout)), child));
         }
         self.cmds
             .get_mut(name)
@@ -504,12 +525,21 @@ mod tests {
 
     #[test]
     fn a_record_is_the_text_before_the_separator() {
-        assert_eq!(recs(b"a\nb\nc\n", &Rs::Char(b'\n')), vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(
+            recs(b"a\nb\nc\n", &Rs::Char(b'\n')),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
         // A file with no final separator still ends in a record.
-        assert_eq!(recs(b"a\nb", &Rs::Char(b'\n')), vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(
+            recs(b"a\nb", &Rs::Char(b'\n')),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
         assert_eq!(recs(b"", &Rs::Char(b'\n')), Vec::<Str>::new());
         // An empty record between two separators is a record.
-        assert_eq!(recs(b"a\n\nb\n", &Rs::Char(b'\n')), vec![b"a".to_vec(), Str::new(), b"b".to_vec()]);
+        assert_eq!(
+            recs(b"a\n\nb\n", &Rs::Char(b'\n')),
+            vec![b"a".to_vec(), Str::new(), b"b".to_vec()]
+        );
     }
 
     #[test]
@@ -523,7 +553,10 @@ mod tests {
     #[test]
     fn a_regex_separator_splits_where_it_matches() {
         let re = Rc::new(Regex::new(b"[;:]+").unwrap());
-        assert_eq!(recs(b"a;b::c", &Rs::Regex(re)), vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(
+            recs(b"a;b::c", &Rs::Regex(re)),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
     }
 
     #[test]
@@ -537,6 +570,9 @@ mod tests {
 
     #[test]
     fn a_record_that_is_not_text_survives() {
-        assert_eq!(recs(&[0xff, b'\n', 0xfe], &Rs::Char(b'\n')), vec![vec![0xff], vec![0xfe]]);
+        assert_eq!(
+            recs(&[0xff, b'\n', 0xfe], &Rs::Char(b'\n')),
+            vec![vec![0xff], vec![0xfe]]
+        );
     }
 }

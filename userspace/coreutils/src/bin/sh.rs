@@ -38,12 +38,18 @@ fn main() {
 
     match parse_args(&args) {
         Ok(ShMode::Interactive) => { /* fall through to REPL */ }
-        Ok(ShMode::Command { script, args: cmd_args }) => {
+        Ok(ShMode::Command {
+            script,
+            args: cmd_args,
+        }) => {
             set_positionals(&mut state, &cmd_args);
             let exit_code = execute_script(&script, &mut state);
             process::exit(exit_code);
         }
-        Ok(ShMode::Script { path, args: cmd_args }) => {
+        Ok(ShMode::Script {
+            path,
+            args: cmd_args,
+        }) => {
             set_positionals(&mut state, &cmd_args);
             match fs::read_to_string(&path) {
                 Ok(content) => {
@@ -134,7 +140,9 @@ fn parse_args(args: &[String]) -> Result<ShMode, String> {
 fn set_positionals(state: &mut ShellState, args: &[String]) {
     for (i, a) in args.iter().enumerate() {
         // Positional indices start at $1.
-        state.vars.insert(i.saturating_add(1).to_string(), a.clone());
+        state
+            .vars
+            .insert(i.saturating_add(1).to_string(), a.clone());
     }
     state.vars.insert("#".to_string(), args.len().to_string());
 }
@@ -290,11 +298,14 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
     }
 
     // Handle variable assignment: VAR=value
-    if words.len() == 1 && words[0].contains('=') && !words[0].starts_with('=')
-        && let Some((key, val)) = words[0].split_once('=') {
-            state.vars.insert(key.to_string(), val.to_string());
-            return 0;
-        }
+    if words.len() == 1
+        && words[0].contains('=')
+        && !words[0].starts_with('=')
+        && let Some((key, val)) = words[0].split_once('=')
+    {
+        state.vars.insert(key.to_string(), val.to_string());
+        return 0;
+    }
 
     // Handle redirections
     let (words, redirects) = parse_redirections(&words);
@@ -310,9 +321,10 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
             process::exit(code);
         }
         "cd" => {
-            let dir = words.get(1).map(|s| s.as_str()).unwrap_or_else(|| {
-                state.vars.get("HOME").map(|s| s.as_str()).unwrap_or("/")
-            });
+            let dir = words
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or_else(|| state.vars.get("HOME").map(|s| s.as_str()).unwrap_or("/"));
             match env::set_current_dir(dir) {
                 Ok(()) => 0,
                 Err(e) => {
@@ -381,9 +393,7 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
             for i in (argc - n + 1)..=argc {
                 state.vars.remove(&i.to_string());
             }
-            state
-                .vars
-                .insert("#".to_string(), (argc - n).to_string());
+            state.vars.insert("#".to_string(), (argc - n).to_string());
             0
         }
         "." | "source" => {
@@ -514,7 +524,10 @@ fn execute_if(lines: &[&str], state: &mut ShellState) -> (i32, usize) {
         let line = lines[i].trim();
         i += 1;
 
-        if let Some(cond) = line.strip_prefix("if ").or_else(|| line.strip_prefix("elif ")) {
+        if let Some(cond) = line
+            .strip_prefix("if ")
+            .or_else(|| line.strip_prefix("elif "))
+        {
             let cond = cond.trim_end_matches("; then").trim_end_matches(" then");
 
             // Check if "then" is on same line or next
@@ -532,10 +545,7 @@ fn execute_if(lines: &[&str], state: &mut ShellState) -> (i32, usize) {
                 // Execute body until elif/else/fi
                 while i < lines.len() {
                     let body_line = lines[i].trim();
-                    if body_line == "fi"
-                        || body_line.starts_with("elif ")
-                        || body_line == "else"
-                    {
+                    if body_line == "fi" || body_line.starts_with("elif ") || body_line == "else" {
                         break;
                     }
                     result = execute_script(lines[i], state);
@@ -546,10 +556,7 @@ fn execute_if(lines: &[&str], state: &mut ShellState) -> (i32, usize) {
                 // Skip body
                 while i < lines.len() {
                     let body_line = lines[i].trim();
-                    if body_line == "fi"
-                        || body_line.starts_with("elif ")
-                        || body_line == "else"
-                    {
+                    if body_line == "fi" || body_line.starts_with("elif ") || body_line == "else" {
                         break;
                     }
                     i += 1;
@@ -740,8 +747,7 @@ fn expand_variables(s: &str, state: &ShellState) -> String {
                 if bytes[i] == b'?' || bytes[i] == b'#' || bytes[i] == b'$' || bytes[i] == b'!' {
                     i += 1;
                 } else {
-                    while i < bytes.len()
-                        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
                     {
                         i += 1;
                     }
@@ -826,11 +832,10 @@ fn parse_redirections(words: &[String]) -> (Vec<String>, Vec<(String, String)>) 
 
     while i < words.len() {
         match words[i].as_str() {
-            ">" | ">>" | "<" | "2>"
-                if i + 1 < words.len() => {
-                    redirects.push((words[i].clone(), words[i + 1].clone()));
-                    i += 2;
-                }
+            ">" | ">>" | "<" | "2>" if i + 1 < words.len() => {
+                redirects.push((words[i].clone(), words[i + 1].clone()));
+                i += 2;
+            }
             w if w.starts_with('>') => {
                 redirects.push((">".to_string(), w[1..].to_string()));
                 i += 1;
@@ -1008,12 +1013,18 @@ mod tests {
 
     #[test]
     fn split_commands_respects_single_quotes() {
-        assert_eq!(split_commands("echo 'a;b';true"), vec!["echo 'a;b'", "true"]);
+        assert_eq!(
+            split_commands("echo 'a;b';true"),
+            vec!["echo 'a;b'", "true"]
+        );
     }
 
     #[test]
     fn split_commands_respects_double_quotes() {
-        assert_eq!(split_commands("echo \"a;b\";true"), vec!["echo \"a;b\"", "true"]);
+        assert_eq!(
+            split_commands("echo \"a;b\";true"),
+            vec!["echo \"a;b\"", "true"]
+        );
     }
 
     #[test]
@@ -1068,16 +1079,12 @@ mod tests {
     fn parse_redirections_separate_token_form() {
         let (words, redirs) = parse_redirections(&s(&["ls", ">", "out.txt"]));
         assert_eq!(words, vec!["ls".to_string()]);
-        assert_eq!(
-            redirs,
-            vec![(">".to_string(), "out.txt".to_string())]
-        );
+        assert_eq!(redirs, vec![(">".to_string(), "out.txt".to_string())]);
     }
 
     #[test]
     fn parse_redirections_append_and_stderr() {
-        let (words, redirs) =
-            parse_redirections(&s(&["cmd", ">>", "log", "2>", "err"]));
+        let (words, redirs) = parse_redirections(&s(&["cmd", ">>", "log", "2>", "err"]));
         assert_eq!(words, vec!["cmd".to_string()]);
         assert_eq!(
             redirs,

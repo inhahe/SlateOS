@@ -206,7 +206,10 @@ fn parse_size(s: &str) -> usize {
         _ => (s, 1),
     };
 
-    num_str.parse::<usize>().unwrap_or(0).saturating_mul(multiplier)
+    num_str
+        .parse::<usize>()
+        .unwrap_or(0)
+        .saturating_mul(multiplier)
 }
 
 /// Format dd's final progress line based on total bytes and elapsed time.

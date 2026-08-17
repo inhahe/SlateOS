@@ -287,8 +287,7 @@ fn main() {
                         let split_at = (match_line as i64 + *offset) as usize;
                         let split_at = split_at.max(current_pos).min(all_lines.len());
 
-                        let section: Vec<String> =
-                            all_lines[current_pos..split_at].to_vec();
+                        let section: Vec<String> = all_lines[current_pos..split_at].to_vec();
                         sections.push(section);
                         current_pos = split_at;
                     }
@@ -333,8 +332,7 @@ fn main() {
                 // take lines current_pos..(n-1).
                 let effective = if *n > 0 { n - 1 } else { 0 };
                 let effective = effective.max(current_pos).min(all_lines.len());
-                let section: Vec<String> =
-                    all_lines[current_pos..effective].to_vec();
+                let section: Vec<String> = all_lines[current_pos..effective].to_vec();
                 sections.push(section);
                 current_pos = effective;
             }

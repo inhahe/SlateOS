@@ -195,7 +195,9 @@ fn glob_match_inner(pat: &[char], txt: &[char], pi: usize, ti: usize) -> bool {
         return ti == txt.len();
     }
 
-    let Some(&p) = pat.get(pi) else { return ti == txt.len() };
+    let Some(&p) = pat.get(pi) else {
+        return ti == txt.len();
+    };
 
     match p {
         '*' => {

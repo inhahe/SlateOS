@@ -178,7 +178,11 @@ pub struct Lexer<'a> {
 impl<'a> Lexer<'a> {
     #[must_use]
     pub fn new(src: &'a [u8]) -> Lexer<'a> {
-        Lexer { src, i: 0, prev: None }
+        Lexer {
+            src,
+            i: 0,
+            prev: None,
+        }
     }
 
     /// Tokenise the whole program.
@@ -293,19 +297,35 @@ impl<'a> Lexer<'a> {
 
         if c == b'\n' {
             self.i = self.i.saturating_add(1);
-            return Ok(Token { kind: Tok::Newline, at });
+            return Ok(Token {
+                kind: Tok::Newline,
+                at,
+            });
         }
         if c == b'"' {
-            return Ok(Token { kind: Tok::Str(self.string_literal()?), at });
+            return Ok(Token {
+                kind: Tok::Str(self.string_literal()?),
+                at,
+            });
         }
         if c == b'/' && !self.slash_is_division() {
-            return Ok(Token { kind: Tok::Ere(self.ere_literal()?), at });
+            return Ok(Token {
+                kind: Tok::Ere(self.ere_literal()?),
+                at,
+            });
         }
-        if c.is_ascii_digit() || (c == b'.' && matches!(self.at(1), Some(d) if d.is_ascii_digit())) {
-            return Ok(Token { kind: Tok::Number(self.number()), at });
+        if c.is_ascii_digit() || (c == b'.' && matches!(self.at(1), Some(d) if d.is_ascii_digit()))
+        {
+            return Ok(Token {
+                kind: Tok::Number(self.number()),
+                at,
+            });
         }
         if c == b'_' || c.is_ascii_alphabetic() {
-            return Ok(Token { kind: self.word(), at });
+            return Ok(Token {
+                kind: self.word(),
+                at,
+            });
         }
 
         let two: [Option<u8>; 2] = [Some(c), self.at(1)];
@@ -418,7 +438,8 @@ impl<'a> Lexer<'a> {
         while matches!(self.peek(), Some(c) if c == b'_' || c.is_ascii_alphanumeric()) {
             self.i = self.i.saturating_add(1);
         }
-        let name = String::from_utf8_lossy(self.src.get(start..self.i).unwrap_or_default()).into_owned();
+        let name =
+            String::from_utf8_lossy(self.src.get(start..self.i).unwrap_or_default()).into_owned();
         if let Some(k) = keyword(&name) {
             return Tok::Keyword(k);
         }
@@ -477,7 +498,9 @@ impl<'a> Lexer<'a> {
                 while n < 3 {
                     match self.peek() {
                         Some(d @ b'0'..=b'7') => {
-                            v = v.saturating_mul(8).saturating_add(u32::from(d.wrapping_sub(b'0')));
+                            v = v
+                                .saturating_mul(8)
+                                .saturating_add(u32::from(d.wrapping_sub(b'0')));
                             self.i = self.i.saturating_add(1);
                             n = n.saturating_add(1);
                         }
@@ -556,7 +579,12 @@ mod tests {
     use super::*;
 
     fn toks(src: &str) -> Vec<Tok> {
-        Lexer::new(src.as_bytes()).tokens().unwrap().into_iter().map(|t| t.kind).collect()
+        Lexer::new(src.as_bytes())
+            .tokens()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.kind)
+            .collect()
     }
 
     #[test]
@@ -575,7 +603,13 @@ mod tests {
         );
         assert_eq!(
             toks("$1 ~ /x/"),
-            vec![Tok::Dollar, Tok::Number(1.0), Tok::Match, Tok::Ere(b"x".to_vec()), Tok::Eof]
+            vec![
+                Tok::Dollar,
+                Tok::Number(1.0),
+                Tok::Match,
+                Tok::Ere(b"x".to_vec()),
+                Tok::Eof
+            ]
         );
         // At the start of a rule a slash is always a regex.
         assert_eq!(toks("/x/"), vec![Tok::Ere(b"x".to_vec()), Tok::Eof]);
@@ -583,13 +617,48 @@ mod tests {
 
     #[test]
     fn a_newline_ends_a_statement_but_not_a_continued_one() {
-        assert_eq!(toks("a\nb"), vec![Tok::Name("a".into()), Tok::Newline, Tok::Name("b".into()), Tok::Eof]);
+        assert_eq!(
+            toks("a\nb"),
+            vec![
+                Tok::Name("a".into()),
+                Tok::Newline,
+                Tok::Name("b".into()),
+                Tok::Eof
+            ]
+        );
         // After `&&`, `,`, `{` and a backslash, the newline vanishes.
-        assert_eq!(toks("a &&\nb"), vec![Tok::Name("a".into()), Tok::And, Tok::Name("b".into()), Tok::Eof]);
-        assert_eq!(toks("a,\nb"), vec![Tok::Name("a".into()), Tok::Comma, Tok::Name("b".into()), Tok::Eof]);
-        assert_eq!(toks("a \\\nb"), vec![Tok::Name("a".into()), Tok::Name("b".into()), Tok::Eof]);
+        assert_eq!(
+            toks("a &&\nb"),
+            vec![
+                Tok::Name("a".into()),
+                Tok::And,
+                Tok::Name("b".into()),
+                Tok::Eof
+            ]
+        );
+        assert_eq!(
+            toks("a,\nb"),
+            vec![
+                Tok::Name("a".into()),
+                Tok::Comma,
+                Tok::Name("b".into()),
+                Tok::Eof
+            ]
+        );
+        assert_eq!(
+            toks("a \\\nb"),
+            vec![Tok::Name("a".into()), Tok::Name("b".into()), Tok::Eof]
+        );
         // A comment runs to the newline, and the newline still counts.
-        assert_eq!(toks("a # hi\nb"), vec![Tok::Name("a".into()), Tok::Newline, Tok::Name("b".into()), Tok::Eof]);
+        assert_eq!(
+            toks("a # hi\nb"),
+            vec![
+                Tok::Name("a".into()),
+                Tok::Newline,
+                Tok::Name("b".into()),
+                Tok::Eof
+            ]
+        );
     }
 
     #[test]
@@ -600,11 +669,17 @@ mod tests {
 
     #[test]
     fn string_escapes_resolve_but_regex_escapes_do_not() {
-        assert_eq!(toks(r#""a\tb""#), vec![Tok::Str(b"a\tb".to_vec()), Tok::Eof]);
+        assert_eq!(
+            toks(r#""a\tb""#),
+            vec![Tok::Str(b"a\tb".to_vec()), Tok::Eof]
+        );
         assert_eq!(toks(r#""\101""#), vec![Tok::Str(b"A".to_vec()), Tok::Eof]);
         // An escape awk does not know keeps both characters, because it may be
         // on its way to the regex compiler.
-        assert_eq!(toks(r#""a\.b""#), vec![Tok::Str(br"a\.b".to_vec()), Tok::Eof]);
+        assert_eq!(
+            toks(r#""a\.b""#),
+            vec![Tok::Str(br"a\.b".to_vec()), Tok::Eof]
+        );
         // In a regex literal only `\/` is resolved.
         assert_eq!(toks(r"/a\/b/"), vec![Tok::Ere(b"a/b".to_vec()), Tok::Eof]);
         assert_eq!(toks(r"/a\.b/"), vec![Tok::Ere(br"a\.b".to_vec()), Tok::Eof]);
@@ -618,15 +693,18 @@ mod tests {
 
     #[test]
     fn numbers_in_every_shape_awk_accepts() {
-        assert_eq!(toks("1 1.5 .5 1e3 1E-2 0x1f"), vec![
-            Tok::Number(1.0),
-            Tok::Number(1.5),
-            Tok::Number(0.5),
-            Tok::Number(1000.0),
-            Tok::Number(0.01),
-            Tok::Number(31.0),
-            Tok::Eof
-        ]);
+        assert_eq!(
+            toks("1 1.5 .5 1e3 1E-2 0x1f"),
+            vec![
+                Tok::Number(1.0),
+                Tok::Number(1.5),
+                Tok::Number(0.5),
+                Tok::Number(1000.0),
+                Tok::Number(0.01),
+                Tok::Number(31.0),
+                Tok::Eof
+            ]
+        );
     }
 
     #[test]

@@ -128,13 +128,22 @@ fn parse_args(args: &[String]) -> XargsOpts {
         }
     }
 
-    XargsOpts { null_delim, max_args, replace_str, cmd_args }
+    XargsOpts {
+        null_delim,
+        max_args,
+        replace_str,
+        cmd_args,
+    }
 }
 
 /// Split stdin input into items either by null bytes (`-0`) or by whitespace.
 fn split_items(input: &str, null_delim: bool) -> Vec<String> {
     if null_delim {
-        input.split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect()
+        input
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
     } else {
         input.split_whitespace().map(str::to_string).collect()
     }

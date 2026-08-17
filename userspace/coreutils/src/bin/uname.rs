@@ -159,25 +159,41 @@ mod tests {
 
     #[test]
     fn format_all_flags() {
-        let f = UnameFlags { sys: true, rel: true, mach: true };
+        let f = UnameFlags {
+            sys: true,
+            rel: true,
+            mach: true,
+        };
         assert_eq!(format_output(&f, "OS", "1.0", "x64"), "OS 1.0 x64");
     }
 
     #[test]
     fn format_only_release() {
-        let f = UnameFlags { sys: false, rel: true, mach: false };
+        let f = UnameFlags {
+            sys: false,
+            rel: true,
+            mach: false,
+        };
         assert_eq!(format_output(&f, "OS", "1.0", "x64"), "1.0");
     }
 
     #[test]
     fn format_only_machine() {
-        let f = UnameFlags { sys: false, rel: false, mach: true };
+        let f = UnameFlags {
+            sys: false,
+            rel: false,
+            mach: true,
+        };
         assert_eq!(format_output(&f, "OS", "1.0", "x64"), "x64");
     }
 
     #[test]
     fn format_sys_and_mach_skips_release() {
-        let f = UnameFlags { sys: true, rel: false, mach: true };
+        let f = UnameFlags {
+            sys: true,
+            rel: false,
+            mach: true,
+        };
         assert_eq!(format_output(&f, "OS", "1.0", "x64"), "OS x64");
     }
 

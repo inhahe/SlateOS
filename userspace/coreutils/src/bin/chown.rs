@@ -83,20 +83,16 @@ fn parse_owner_group(spec: &str) -> Result<(Option<u32>, Option<u32>), String> {
         let uid = if owner_str.is_empty() {
             None
         } else {
-            Some(
-                owner_str
-                    .parse::<u32>()
-                    .map_err(|_| format!("invalid user: '{owner_str}' (only numeric UIDs supported)"))?,
-            )
+            Some(owner_str.parse::<u32>().map_err(|_| {
+                format!("invalid user: '{owner_str}' (only numeric UIDs supported)")
+            })?)
         };
         let gid = if group_str.is_empty() {
             None
         } else {
-            Some(
-                group_str
-                    .parse::<u32>()
-                    .map_err(|_| format!("invalid group: '{group_str}' (only numeric GIDs supported)"))?,
-            )
+            Some(group_str.parse::<u32>().map_err(|_| {
+                format!("invalid group: '{group_str}' (only numeric GIDs supported)")
+            })?)
         };
         Ok((uid, gid))
     } else {
@@ -249,7 +245,10 @@ mod tests {
 
     #[test]
     fn pog_owner_and_group() {
-        assert_eq!(parse_owner_group("1000:100").unwrap(), (Some(1000), Some(100)));
+        assert_eq!(
+            parse_owner_group("1000:100").unwrap(),
+            (Some(1000), Some(100))
+        );
     }
 
     #[test]

@@ -28,9 +28,9 @@
 
 use crate::ast::{
     BinOp, Builtin, CmpOp, Expr, Func, Getline, GetlineSrc, Lvalue, Pattern, Program, RedirMode,
-    Redirect, Rule, Stmt, VarRef, SPECIALS,
+    Redirect, Rule, SPECIALS, Stmt, VarRef,
 };
-use crate::lex::{Kw, Lexer, Tok, Token, BUILTINS};
+use crate::lex::{BUILTINS, Kw, Lexer, Tok, Token};
 use ere::Regex;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -87,7 +87,9 @@ impl Parser {
         self.toks.get(self.i).map_or(&Tok::Eof, |t| &t.kind)
     }
     fn peek_at(&self, k: usize) -> &Tok {
-        self.toks.get(self.i.saturating_add(k)).map_or(&Tok::Eof, |t| &t.kind)
+        self.toks
+            .get(self.i.saturating_add(k))
+            .map_or(&Tok::Eof, |t| &t.kind)
     }
     fn bump(&mut self) -> Tok {
         let t = self.peek().clone();
@@ -107,7 +109,10 @@ impl Parser {
         if self.eat(t) {
             return Ok(());
         }
-        Err(format!("syntax error: expected {what}, found {}", describe(self.peek())))
+        Err(format!(
+            "syntax error: expected {what}, found {}",
+            describe(self.peek())
+        ))
     }
     /// Skip newlines and semicolons that separate items or statements.
     fn skip_terms(&mut self) {
@@ -168,7 +173,10 @@ impl Parser {
                 prog.end.extend(body);
             } else if self.peek() == &Tok::LBrace {
                 let action = self.block()?;
-                prog.rules.push(Rule { pattern: Pattern::Always, action: Some(action) });
+                prog.rules.push(Rule {
+                    pattern: Pattern::Always,
+                    action: Some(action),
+                });
             } else {
                 let first = self.expr(false)?;
                 let pattern = if self.eat(&Tok::Comma) {
@@ -180,7 +188,11 @@ impl Parser {
                 } else {
                     Pattern::Expr(first)
                 };
-                let action = if self.peek() == &Tok::LBrace { Some(self.block()?) } else { None };
+                let action = if self.peek() == &Tok::LBrace {
+                    Some(self.block()?)
+                } else {
+                    None
+                };
                 prog.rules.push(Rule { pattern, action });
             }
             self.skip_terms();
@@ -200,7 +212,11 @@ impl Parser {
             .funcs
             .iter()
             .map(|f| {
-                f.clone().unwrap_or(Func { name: String::new(), params: Vec::new(), body: Vec::new() })
+                f.clone().unwrap_or(Func {
+                    name: String::new(),
+                    params: Vec::new(),
+                    body: Vec::new(),
+                })
             })
             .collect();
         prog.globals = self.globals.len();
@@ -213,7 +229,10 @@ impl Parser {
         let name = match self.bump() {
             Tok::Name(n) | Tok::FuncName(n) => n,
             other => {
-                return Err(format!("syntax error: expected a function name, found {}", describe(&other)))
+                return Err(format!(
+                    "syntax error: expected a function name, found {}",
+                    describe(&other)
+                ));
             }
         };
         if BUILTINS.iter().any(|(b, _, _)| *b == name) {
@@ -236,7 +255,7 @@ impl Parser {
                         return Err(format!(
                             "syntax error: expected a parameter name, found {}",
                             describe(&other)
-                        ))
+                        ));
                     }
                 }
                 self.skip_newlines();
@@ -252,7 +271,11 @@ impl Parser {
         if self.funcs.get(slot).is_some_and(Option::is_some) {
             return Err(format!("function {name} is defined twice"));
         }
-        self.locals = params.iter().enumerate().map(|(i, p)| (p.clone(), i)).collect();
+        self.locals = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.clone(), i))
+            .collect();
         self.in_function = true;
         self.skip_newlines();
         let body = self.block()?;
@@ -365,7 +388,10 @@ impl Parser {
     }
 
     fn optional_expr(&mut self) -> Result<Option<Expr>, String> {
-        if matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::RBrace | Tok::Eof) {
+        if matches!(
+            self.peek(),
+            Tok::Newline | Tok::Semi | Tok::RBrace | Tok::Eof
+        ) {
             return Ok(None);
         }
         Ok(Some(self.expr(false)?))
@@ -416,7 +442,10 @@ impl Parser {
         self.loop_depth = self.loop_depth.saturating_sub(1);
         let body = body?;
         self.skip_terms();
-        self.expect(&Tok::Keyword(Kw::While), "`while' after the body of a do loop")?;
+        self.expect(
+            &Tok::Keyword(Kw::While),
+            "`while' after the body of a do loop",
+        )?;
         self.expect(&Tok::LParen, "`(' after while")?;
         let cond = self.expr(false)?;
         self.expect(&Tok::RParen, "`)' after the while condition")?;
@@ -441,7 +470,11 @@ impl Parser {
             self.loop_depth = self.loop_depth.saturating_add(1);
             let body = self.stmt();
             self.loop_depth = self.loop_depth.saturating_sub(1);
-            return Ok(Stmt::ForIn { var, array, body: Box::new(body?) });
+            return Ok(Stmt::ForIn {
+                var,
+                array,
+                body: Box::new(body?),
+            });
         }
 
         let init = if self.peek() == &Tok::Semi {
@@ -451,7 +484,11 @@ impl Parser {
         };
         self.expect(&Tok::Semi, "`;' in a for header")?;
         self.skip_newlines();
-        let cond = if self.peek() == &Tok::Semi { None } else { Some(self.expr(false)?) };
+        let cond = if self.peek() == &Tok::Semi {
+            None
+        } else {
+            Some(self.expr(false)?)
+        };
         self.expect(&Tok::Semi, "`;' in a for header")?;
         self.skip_newlines();
         let step = if self.peek() == &Tok::RParen {
@@ -462,12 +499,22 @@ impl Parser {
         self.expect(&Tok::RParen, "`)' after the for header")?;
         self.skip_newlines();
         if self.eat(&Tok::Semi) {
-            return Ok(Stmt::For { init, cond, step, body: Box::new(Stmt::Nop) });
+            return Ok(Stmt::For {
+                init,
+                cond,
+                step,
+                body: Box::new(Stmt::Nop),
+            });
         }
         self.loop_depth = self.loop_depth.saturating_add(1);
         let body = self.stmt();
         self.loop_depth = self.loop_depth.saturating_sub(1);
-        Ok(Stmt::For { init, cond, step, body: Box::new(body?) })
+        Ok(Stmt::For {
+            init,
+            cond,
+            step,
+            body: Box::new(body?),
+        })
     }
 
     fn delete_stmt(&mut self) -> Result<Stmt, String> {
@@ -477,7 +524,7 @@ impl Parser {
                 return Err(format!(
                     "syntax error: delete wants an array name, found {}",
                     describe(&other)
-                ))
+                ));
             }
         };
         let arr = self.var(&name);
@@ -642,7 +689,7 @@ impl Parser {
                     return Err(format!(
                         "syntax error: `in' wants an array name, found {}",
                         describe(&other)
-                    ))
+                    ));
                 }
             };
             let arr = self.var(&name);
@@ -661,7 +708,11 @@ impl Parser {
             };
             self.i = self.i.saturating_add(1);
             let rhs = self.relational(no_gt)?;
-            lhs = Expr::Match { neg, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr::Match {
+                neg,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
         }
     }
 
@@ -696,7 +747,10 @@ impl Parser {
         while self.peek() == &Tok::Pipe && self.peek_at(1) == &Tok::Keyword(Kw::Getline) {
             self.i = self.i.saturating_add(2);
             let into = self.optional_getline_target()?;
-            lhs = Expr::Getline(Box::new(Getline { into, src: GetlineSrc::Cmd(lhs) }));
+            lhs = Expr::Getline(Box::new(Getline {
+                into,
+                src: GetlineSrc::Cmd(lhs),
+            }));
         }
         Ok(lhs)
     }
@@ -837,7 +891,7 @@ impl Parser {
                             return Err(format!(
                                 "syntax error: `in' wants an array name, found {}",
                                 describe(&other)
-                            ))
+                            ));
                         }
                     };
                     let arr = self.var(&name);
@@ -850,7 +904,10 @@ impl Parser {
                 if it.next().is_some() {
                     // `(a, b)` is only a list before `in`; anywhere else it is
                     // a grouping with a stray comma.
-                    return Err("syntax error: a parenthesised list is only allowed before `in'".to_string());
+                    return Err(
+                        "syntax error: a parenthesised list is only allowed before `in'"
+                            .to_string(),
+                    );
                 }
                 Ok(first)
             }
@@ -860,7 +917,9 @@ impl Parser {
                     let subs = self.expr_list(&Tok::RBracket)?;
                     self.expect(&Tok::RBracket, "`]'")?;
                     if subs.is_empty() {
-                        return Err("syntax error: an empty subscript is not a subscript".to_string());
+                        return Err(
+                            "syntax error: an empty subscript is not a subscript".to_string()
+                        );
                     }
                     return Ok(Expr::Get(Lvalue::Index(v, subs)));
                 }
@@ -884,7 +943,10 @@ impl Parser {
                         src: GetlineSrc::File(file),
                     })));
                 }
-                Ok(Expr::Getline(Box::new(Getline { into, src: GetlineSrc::Main })))
+                Ok(Expr::Getline(Box::new(Getline {
+                    into,
+                    src: GetlineSrc::Main,
+                })))
             }
             other => Err(format!("syntax error at {}", describe(&other))),
         }
@@ -895,7 +957,9 @@ impl Parser {
         let e = self.primary(no_gt)?;
         match e {
             Expr::Get(lv) => Ok(lv),
-            _ => Err("syntax error: ++ and -- want a variable, a field or an array element".to_string()),
+            _ => Err(
+                "syntax error: ++ and -- want a variable, a field or an array element".to_string(),
+            ),
         }
     }
 
@@ -935,7 +999,9 @@ impl Parser {
             // `length` alone is `length($0)`. It is the only built-in that may
             // be written without parentheses, and POSIX says so explicitly.
             if b != Builtin::Length {
-                return Err(format!("syntax error: {name} needs its arguments in parentheses"));
+                return Err(format!(
+                    "syntax error: {name} needs its arguments in parentheses"
+                ));
             }
             Vec::new()
         };
@@ -952,7 +1018,10 @@ impl Parser {
             } else {
                 format!("{min} to {max}")
             };
-            return Err(format!("{name}: wants {want} arguments, given {}", args.len()));
+            return Err(format!(
+                "{name}: wants {want} arguments, given {}",
+                args.len()
+            ));
         }
         // The arguments that must be a particular *shape* rather than any
         // expression. Checking here means `split(s, "x")` is refused before the
@@ -1010,7 +1079,11 @@ fn builtin_of(name: &str) -> Builtin {
 /// `[[ =~ ]]`, where bash makes `[[ x =~ "" ]]` an error rather than a match; an
 /// empty *group* is fine there, so that is what the empty pattern becomes.
 pub fn compile_regex(pat: &[u8]) -> Result<Regex, String> {
-    let source = if pat.is_empty() { b"()".as_slice() } else { pat };
+    let source = if pat.is_empty() {
+        b"()".as_slice()
+    } else {
+        pat
+    };
     Regex::new(source).map_err(|e| {
         let shown = String::from_utf8_lossy(pat).into_owned();
         let why = String::from_utf8_lossy(&e.0).into_owned();
@@ -1122,21 +1195,32 @@ mod tests {
     #[test]
     fn a_range_pattern_is_told_from_two_arguments() {
         let p = ok("/a/,/b/ { print }");
-        assert!(matches!(p.rules.first().map(|r| &r.pattern), Some(Pattern::Range(_, _, 0))));
+        assert!(matches!(
+            p.rules.first().map(|r| &r.pattern),
+            Some(Pattern::Range(_, _, 0))
+        ));
         assert_eq!(p.ranges, 1);
     }
 
     #[test]
     fn print_treats_a_bare_gt_as_a_redirection() {
         let p = ok(r#"{ print "x" > "f" }"#);
-        let Some(Stmt::Print(_, Some(r))) = p.rules.first().and_then(|r| r.action.as_ref()).and_then(|a| a.first())
+        let Some(Stmt::Print(_, Some(r))) = p
+            .rules
+            .first()
+            .and_then(|r| r.action.as_ref())
+            .and_then(|a| a.first())
         else {
             panic!("expected a redirected print");
         };
         assert_eq!(r.mode, RedirMode::Truncate);
         // …but a parenthesised `>` still compares.
         let p = ok(r#"{ print ("a" > "b") }"#);
-        let Some(Stmt::Print(args, None)) = p.rules.first().and_then(|r| r.action.as_ref()).and_then(|a| a.first())
+        let Some(Stmt::Print(args, None)) = p
+            .rules
+            .first()
+            .and_then(|r| r.action.as_ref())
+            .and_then(|a| a.first())
         else {
             panic!("expected an unredirected print");
         };
@@ -1146,11 +1230,19 @@ mod tests {
     #[test]
     fn the_two_for_loops_are_told_apart() {
         assert!(matches!(
-            ok("{ for (k in a) print k }").rules.first().and_then(|r| r.action.as_ref()).and_then(|a| a.first()),
+            ok("{ for (k in a) print k }")
+                .rules
+                .first()
+                .and_then(|r| r.action.as_ref())
+                .and_then(|a| a.first()),
             Some(Stmt::ForIn { .. })
         ));
         assert!(matches!(
-            ok("{ for (i = 1; i <= 3; i++) print i }").rules.first().and_then(|r| r.action.as_ref()).and_then(|a| a.first()),
+            ok("{ for (i = 1; i <= 3; i++) print i }")
+                .rules
+                .first()
+                .and_then(|r| r.action.as_ref())
+                .and_then(|a| a.first()),
             Some(Stmt::For { .. })
         ));
     }
@@ -1170,7 +1262,9 @@ mod tests {
     #[test]
     fn a_parameter_shadows_a_global_of_the_same_name() {
         let p = ok("function f(x) { return x } BEGIN { x = 1; print f(2), x }");
-        let Some(f) = p.funcs.first() else { panic!("no function") };
+        let Some(f) = p.funcs.first() else {
+            panic!("no function")
+        };
         assert!(matches!(
             f.body.first(),
             Some(Stmt::Return(Some(Expr::Get(Lvalue::Var(VarRef::Local(0))))))
@@ -1187,10 +1281,10 @@ mod tests {
     fn precedence_is_awks_and_not_cs() {
         // These are the four that catch a hand-rolled parser out.
         let cases = [
-            "BEGIN { print 2 ^ 3 ^ 2 }",   // right-assoc
-            "BEGIN { print -2 ^ 2 }",      // -(2^2)
-            "BEGIN { print $NF - 1 }",     // ($NF) - 1
-            "BEGIN { print 1 \" \" 2 }",   // concatenation
+            "BEGIN { print 2 ^ 3 ^ 2 }", // right-assoc
+            "BEGIN { print -2 ^ 2 }",    // -(2^2)
+            "BEGIN { print $NF - 1 }",   // ($NF) - 1
+            "BEGIN { print 1 \" \" 2 }", // concatenation
         ];
         for c in cases {
             let _ = ok(c);

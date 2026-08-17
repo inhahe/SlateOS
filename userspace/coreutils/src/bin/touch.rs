@@ -49,7 +49,11 @@ fn touch_one(path: &str) -> io::Result<()> {
     // write(true) (without truncate) lets us call `set_len` on Windows;
     // append-only handles can't be resized.  Without truncate(true), the
     // file's existing contents are preserved.
-    let file = OpenOptions::new().create(true).write(true).truncate(false).open(path)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
     let meta = file.metadata()?;
     let len = meta.len();
     file.set_len(len)?;

@@ -46,7 +46,7 @@
 //! array rather than about a value: the bare name in `length(a)`, and `a` in
 //! `split(s, a)` — which is the array-marking use itself.
 
-use crate::ast::{Builtin, Expr, Lvalue, Pattern, Program, Stmt, VarRef, V_ARGV, V_ENVIRON};
+use crate::ast::{Builtin, Expr, Lvalue, Pattern, Program, Stmt, V_ARGV, V_ENVIRON, VarRef};
 
 /// One `f(…, v, …)` argument, recorded so the two ends can agree later.
 struct Link {
@@ -104,7 +104,13 @@ enum Conflict {
     /// A variable and the parameter it is passed to. Neither is wrong on its
     /// own; it is the call that puts them together. `var_use` is the variable's
     /// side, so the message can name the two ends in the right order.
-    Passed { ctx: Option<usize>, var: VarRef, callee: usize, param: usize, var_use: Use },
+    Passed {
+        ctx: Option<usize>,
+        var: VarRef,
+        callee: usize,
+        param: usize,
+        var_use: Use,
+    },
 }
 
 struct Pass {
@@ -129,7 +135,11 @@ struct Pass {
 pub fn resolve(prog: &mut Program) -> Result<(), String> {
     let mut p = Pass {
         global: vec![Flags::default(); prog.globals],
-        param: prog.funcs.iter().map(|f| vec![Flags::default(); f.params.len()]).collect(),
+        param: prog
+            .funcs
+            .iter()
+            .map(|f| vec![Flags::default(); f.params.len()])
+            .collect(),
         links: Vec::new(),
         changed: true,
         conflict: None,
@@ -173,7 +183,12 @@ pub fn resolve(prog: &mut Program) -> Result<(), String> {
         for i in 0..p.links.len() {
             let Some(link) = p.links.get(i) else { continue };
             let (caller, callee, param, var) = (link.caller, link.callee, link.param, link.var);
-            let at_callee = p.param.get(callee).and_then(|v| v.get(param)).copied().unwrap_or_default();
+            let at_callee = p
+                .param
+                .get(callee)
+                .and_then(|v| v.get(param))
+                .copied()
+                .unwrap_or_default();
             let at_caller = p.flags(caller, var);
             // The argument and the parameter are the same storage, so each end
             // of the link teaches the other — in both directions and for both
@@ -196,8 +211,13 @@ pub fn resolve(prog: &mut Program) -> Result<(), String> {
                 }
                 if at_caller.has(u) && !at_callee.has(u) {
                     if at_callee.has(other(u)) && p.conflict.is_none() {
-                        p.conflict =
-                            Some(Conflict::Passed { ctx: caller, var, callee, param, var_use: u });
+                        p.conflict = Some(Conflict::Passed {
+                            ctx: caller,
+                            var,
+                            callee,
+                            param,
+                            var_use: u,
+                        });
                     }
                     if let Some(slot) = p.param.get_mut(callee).and_then(|v| v.get_mut(param))
                         && slot.set(u)
@@ -213,7 +233,11 @@ pub fn resolve(prog: &mut Program) -> Result<(), String> {
         return Err(describe(prog, c));
     }
     prog.global_is_array = p.global.iter().map(|f| f.array).collect();
-    prog.param_is_array = p.param.iter().map(|fs| fs.iter().map(|f| f.array).collect()).collect();
+    prog.param_is_array = p
+        .param
+        .iter()
+        .map(|fs| fs.iter().map(|f| f.array).collect())
+        .collect();
     Ok(())
 }
 
@@ -227,9 +251,15 @@ fn other(u: Use) -> Use {
 /// What a name is called, in a form that reads inside a sentence.
 fn name_of(prog: &Program, ctx: Option<usize>, v: VarRef) -> String {
     match v {
-        VarRef::Global(s) => prog.global_names.get(s).cloned().unwrap_or_else(|| "?".to_string()),
+        VarRef::Global(s) => prog
+            .global_names
+            .get(s)
+            .cloned()
+            .unwrap_or_else(|| "?".to_string()),
         VarRef::Local(s) => {
-            let Some(f) = ctx.and_then(|f| prog.funcs.get(f)) else { return "?".to_string() };
+            let Some(f) = ctx.and_then(|f| prog.funcs.get(f)) else {
+                return "?".to_string();
+            };
             let name = f.params.get(s).map_or("?", String::as_str);
             format!("{}'s parameter {name}", f.name)
         }
@@ -239,9 +269,18 @@ fn name_of(prog: &Program, ctx: Option<usize>, v: VarRef) -> String {
 fn describe(prog: &Program, c: &Conflict) -> String {
     match c {
         Conflict::Direct { ctx, var } => {
-            format!("{} is used both as an array and as a scalar", name_of(prog, *ctx, *var))
+            format!(
+                "{} is used both as an array and as a scalar",
+                name_of(prog, *ctx, *var)
+            )
         }
-        Conflict::Passed { ctx, var, callee, param, var_use } => {
+        Conflict::Passed {
+            ctx,
+            var,
+            callee,
+            param,
+            var_use,
+        } => {
             let (was, becomes) = match var_use {
                 Use::Array => ("an array", "a scalar"),
                 Use::Scalar => ("a scalar", "an array"),
@@ -282,7 +321,9 @@ impl Pass {
         }
         let slot = match v {
             VarRef::Global(s) => self.global.get_mut(s),
-            VarRef::Local(s) => ctx.and_then(|f| self.param.get_mut(f)).and_then(|ps| ps.get_mut(s)),
+            VarRef::Local(s) => ctx
+                .and_then(|f| self.param.get_mut(f))
+                .and_then(|ps| ps.get_mut(s)),
         };
         if let Some(slot) = slot
             && slot.set(u)
@@ -324,7 +365,12 @@ impl Pass {
                 self.stmt(ctx, b);
                 self.expr(ctx, c);
             }
-            Stmt::For { init, cond, step, body } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
                 if let Some(s) = init {
                     self.stmt(ctx, s);
                 }
@@ -386,7 +432,11 @@ impl Pass {
                 self.expr(ctx, b);
                 self.expr(ctx, c);
             }
-            Expr::Or(a, b) | Expr::And(a, b) | Expr::Concat(a, b) | Expr::Bin(_, a, b) | Expr::Cmp(_, a, b) => {
+            Expr::Or(a, b)
+            | Expr::And(a, b)
+            | Expr::Concat(a, b)
+            | Expr::Bin(_, a, b)
+            | Expr::Cmp(_, a, b) => {
                 self.expr(ctx, a);
                 self.expr(ctx, b);
             }
@@ -407,7 +457,12 @@ impl Pass {
                     // Only a *bare* variable can be an array argument; anything
                     // else is an expression and therefore a scalar.
                     if let Expr::Get(Lvalue::Var(v)) = a {
-                        self.links.push(Link { caller: ctx, callee: *f, param: i, var: *v });
+                        self.links.push(Link {
+                            caller: ctx,
+                            callee: *f,
+                            param: i,
+                            var: *v,
+                        });
                     } else {
                         self.expr(ctx, a);
                     }
@@ -438,7 +493,9 @@ impl Pass {
                 }
                 match &g.src {
                     crate::ast::GetlineSrc::Main => {}
-                    crate::ast::GetlineSrc::File(e) | crate::ast::GetlineSrc::Cmd(e) => self.expr(ctx, e),
+                    crate::ast::GetlineSrc::File(e) | crate::ast::GetlineSrc::Cmd(e) => {
+                        self.expr(ctx, e)
+                    }
                 }
             }
         }
@@ -474,8 +531,9 @@ mod tests {
 
     #[test]
     fn the_evidence_travels_through_a_chain_of_calls() {
-        let a = arrays("function inner(x) {x[1] = 1} function outer(y) {inner(y)} BEGIN {outer(g)}")
-            .unwrap();
+        let a =
+            arrays("function inner(x) {x[1] = 1} function outer(y) {inner(y)} BEGIN {outer(g)}")
+                .unwrap();
         assert!(a.contains(&"g".to_string()), "{a:?}");
     }
 
@@ -492,13 +550,19 @@ mod tests {
         // knows that, which is what makes the fixed point necessary — and what
         // makes naming only one of them an unhelpful diagnostic.
         let e = arrays("function f(p) {return p + 1} BEGIN {g[1] = 1; print f(g)}").unwrap_err();
-        assert_eq!(e, "g is an array, but it is passed to f as p, which is a scalar");
+        assert_eq!(
+            e,
+            "g is an array, but it is passed to f as p, which is a scalar"
+        );
     }
 
     #[test]
     fn a_parameter_used_both_ways_names_its_function() {
         let e = arrays("function f(p) {p[1] = 1; p = 2} BEGIN {f(q)}").unwrap_err();
-        assert_eq!(e, "f's parameter p is used both as an array and as a scalar");
+        assert_eq!(
+            e,
+            "f's parameter p is used both as an array and as a scalar"
+        );
     }
 
     #[test]
@@ -541,8 +605,9 @@ mod tests {
     #[test]
     fn a_recursive_function_reaches_a_fixed_point() {
         // A self-link would loop forever without the "only false to true" rule.
-        let a = arrays("function r(a, i) {if (i > 2) return; a[i] = i; r(a, i + 1)} BEGIN {r(q, 0)}")
-            .unwrap();
+        let a =
+            arrays("function r(a, i) {if (i > 2) return; a[i] = i; r(a, i + 1)} BEGIN {r(q, 0)}")
+                .unwrap();
         assert!(a.contains(&"q".to_string()), "{a:?}");
     }
 }

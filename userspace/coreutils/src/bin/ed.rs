@@ -107,12 +107,8 @@ fn main() {
 
             'c' if parsed.addr_start >= 1 && parsed.addr_end <= buffer.len() => {
                 let new_lines = read_input_lines(&stdin);
-                let new_current = change_lines(
-                    &mut buffer,
-                    parsed.addr_start,
-                    parsed.addr_end,
-                    &new_lines,
-                );
+                let new_current =
+                    change_lines(&mut buffer, parsed.addr_start, parsed.addr_end, &new_lines);
                 current = new_current;
                 modified = true;
             }

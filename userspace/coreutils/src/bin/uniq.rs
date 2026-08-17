@@ -80,9 +80,8 @@ fn main() {
                 if let Some(prev) = &prev_line
                     && should_emit(prev_count, duplicates_only, unique_only)
                 {
-                    let _ = writer.write_all(
-                        format_uniq_line(prev, prev_count, count_mode).as_bytes(),
-                    );
+                    let _ =
+                        writer.write_all(format_uniq_line(prev, prev_count, count_mode).as_bytes());
                 }
                 prev_line = Some(line);
                 prev_count = 1;
@@ -93,8 +92,7 @@ fn main() {
     if let Some(prev) = &prev_line
         && should_emit(prev_count, duplicates_only, unique_only)
     {
-        let _ = writer
-            .write_all(format_uniq_line(prev, prev_count, count_mode).as_bytes());
+        let _ = writer.write_all(format_uniq_line(prev, prev_count, count_mode).as_bytes());
     }
 }
 

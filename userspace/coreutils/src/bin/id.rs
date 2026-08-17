@@ -175,18 +175,12 @@ mod tests {
 
     #[test]
     fn format_full_distinct_euid() {
-        assert_eq!(
-            format_full(1000, 0, 1000, 1000),
-            "uid=1000 euid=0 gid=1000",
-        );
+        assert_eq!(format_full(1000, 0, 1000, 1000), "uid=1000 euid=0 gid=1000",);
     }
 
     #[test]
     fn format_full_distinct_egid() {
-        assert_eq!(
-            format_full(1000, 1000, 1000, 4),
-            "uid=1000 gid=1000 egid=4",
-        );
+        assert_eq!(format_full(1000, 1000, 1000, 4), "uid=1000 gid=1000 egid=4",);
     }
 
     #[test]

@@ -44,7 +44,11 @@ fn main() {
     };
 
     let mi = parse_meminfo(&meminfo_text);
-    let used = mi.total.saturating_sub(mi.free).saturating_sub(mi.buffers).saturating_sub(mi.cached);
+    let used = mi
+        .total
+        .saturating_sub(mi.free)
+        .saturating_sub(mi.buffers)
+        .saturating_sub(mi.cached);
     let buff_cache = mi.buffers.saturating_add(mi.cached);
 
     let stdout = io::stdout();
@@ -71,7 +75,11 @@ fn main() {
             "{:>15} {:>10} {:>10} {:>10}",
             "Swap:",
             human_size(mi.swap_total.saturating_mul(1024)),
-            human_size(mi.swap_total.saturating_sub(mi.swap_free).saturating_mul(1024)),
+            human_size(
+                mi.swap_total
+                    .saturating_sub(mi.swap_free)
+                    .saturating_mul(1024)
+            ),
             human_size(mi.swap_free.saturating_mul(1024))
         );
     } else {
@@ -128,7 +136,11 @@ fn parse_args(args: &[String]) -> FreeOpts {
         }
     }
 
-    FreeOpts { human, unit, unit_name }
+    FreeOpts {
+        human,
+        unit,
+        unit_name,
+    }
 }
 
 /// Parse `/proc/meminfo` content into the named fields we care about.

@@ -128,11 +128,7 @@ mod tests {
     fn resolve_missing_file_fails() {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let code = resolve_all(
-            &s(&["/this/does/not/exist/__nope__"]),
-            &mut out,
-            &mut err,
-        );
+        let code = resolve_all(&s(&["/this/does/not/exist/__nope__"]), &mut out, &mut err);
         assert_eq!(code, 1);
         assert!(out.is_empty(), "nothing should be written to stdout");
         assert!(!err.is_empty(), "error message expected on stderr");

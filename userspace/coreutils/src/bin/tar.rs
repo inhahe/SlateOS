@@ -101,7 +101,11 @@ fn main() {
             process::exit(1);
         }
     } else if parsed.extract {
-        do_extract(&parsed.archive_file, parsed.directory.as_deref(), parsed.verbose);
+        do_extract(
+            &parsed.archive_file,
+            parsed.directory.as_deref(),
+            parsed.verbose,
+        );
     } else if parsed.list {
         do_list_main(&parsed.archive_file);
     } else {
@@ -295,8 +299,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let entry_path = entry.path();
-                let entry_name =
-                    format!("{prefix}/{}", entry.file_name().to_string_lossy());
+                let entry_name = format!("{prefix}/{}", entry.file_name().to_string_lossy());
                 if entry_path.is_dir() {
                     add_directory_recursive(&entry_path, &entry_name, out, verbose);
                 } else {

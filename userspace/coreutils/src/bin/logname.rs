@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn main() {
-    match resolve_login_name(&[("LOGNAME", env::var("LOGNAME").ok()), ("USER", env::var("USER").ok())]) {
+    match resolve_login_name(&[
+        ("LOGNAME", env::var("LOGNAME").ok()),
+        ("USER", env::var("USER").ok()),
+    ]) {
         Some(name) => println!("{name}"),
         None => {
             eprintln!("logname: no login name");
@@ -42,47 +45,32 @@ mod tests {
 
     #[test]
     fn first_candidate_wins() {
-        let got = resolve_login_name(&[
-            ("LOGNAME", s("alice")),
-            ("USER", s("bob")),
-        ]);
+        let got = resolve_login_name(&[("LOGNAME", s("alice")), ("USER", s("bob"))]);
         assert_eq!(got, Some("alice".to_string()));
     }
 
     #[test]
     fn falls_back_to_second_when_first_unset() {
-        let got = resolve_login_name(&[
-            ("LOGNAME", None),
-            ("USER", s("bob")),
-        ]);
+        let got = resolve_login_name(&[("LOGNAME", None), ("USER", s("bob"))]);
         assert_eq!(got, Some("bob".to_string()));
     }
 
     #[test]
     fn falls_back_when_first_is_empty_string() {
         // Empty environment value is treated as unset — POSIX-typical.
-        let got = resolve_login_name(&[
-            ("LOGNAME", s("")),
-            ("USER", s("bob")),
-        ]);
+        let got = resolve_login_name(&[("LOGNAME", s("")), ("USER", s("bob"))]);
         assert_eq!(got, Some("bob".to_string()));
     }
 
     #[test]
     fn returns_none_when_all_unset() {
-        let got = resolve_login_name(&[
-            ("LOGNAME", None),
-            ("USER", None),
-        ]);
+        let got = resolve_login_name(&[("LOGNAME", None), ("USER", None)]);
         assert_eq!(got, None);
     }
 
     #[test]
     fn returns_none_when_all_empty() {
-        let got = resolve_login_name(&[
-            ("LOGNAME", s("")),
-            ("USER", s("")),
-        ]);
+        let got = resolve_login_name(&[("LOGNAME", s("")), ("USER", s(""))]);
         assert_eq!(got, None);
     }
 

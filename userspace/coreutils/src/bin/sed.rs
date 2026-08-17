@@ -744,9 +744,7 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
             }
             Some(b'}') => {
                 p.i = p.i.saturating_add(1);
-                let start = open
-                    .pop()
-                    .ok_or_else(|| "unexpected `}'".to_string())?;
+                let start = open.pop().ok_or_else(|| "unexpected `}'".to_string())?;
                 let here = cmds.len();
                 cmds.push(Command {
                     sel: Sel::Always,
@@ -1026,7 +1024,10 @@ enum Flow {
     /// `D` with an embedded newline — run the script again on what is left,
     /// without reading a new line.
     Restart,
-    Quit { code: i32, print: bool },
+    Quit {
+        code: i32,
+        print: bool,
+    },
 }
 
 /// Text queued by `a` or `r`, emitted after the cycle's own output.
@@ -1719,7 +1720,8 @@ fn collect_script(parts: &[ScriptPart]) -> Result<Vec<u8>, String> {
                         .map(|_| b)
                         .map_err(|e| format!("couldn't read -: {}", strerror(&e)))?
                 } else {
-                    fs::read(path).map_err(|e| format!("couldn't open file {path}: {}", strerror(&e)))?
+                    fs::read(path)
+                        .map_err(|e| format!("couldn't open file {path}: {}", strerror(&e)))?
                 };
                 script.extend_from_slice(&bytes);
             }
@@ -1845,13 +1847,7 @@ fn run_separate(script: &Script, files: &[String], suppress: bool, sep: u8) -> i
 ///
 /// The result is built in memory and written once, so a script that fails
 /// part-way through does not leave the file half-edited.
-fn run_in_place(
-    script: &Script,
-    files: &[String],
-    suppress: bool,
-    sep: u8,
-    suffix: &str,
-) -> i32 {
+fn run_in_place(script: &Script, files: &[String], suppress: bool, sep: u8, suffix: &str) -> i32 {
     let mut bad = false;
     for path in files {
         if path == "-" {
@@ -1966,10 +1962,7 @@ mod tests {
 
     #[test]
     fn groups_and_backreferences_work() {
-        assert_eq!(
-            run(r"s/\(a*\)\(b*\)/[\2\1]/", "aaabb\n"),
-            "[bbaaa]\n"
-        );
+        assert_eq!(run(r"s/\(a*\)\(b*\)/[\2\1]/", "aaabb\n"), "[bbaaa]\n");
         assert_eq!(
             run_opts("s/(a+)(b+)/[\\2\\1]/", "aaabb\n", false, true),
             "[bbaaa]\n"
@@ -1991,7 +1984,10 @@ mod tests {
         // The old sed selected the two *endpoints* of `1,3d` and nothing in
         // between, because it kept no state across lines.
         assert_eq!(run("2,4d", "1\n2\n3\n4\n5\n"), "1\n5\n");
-        assert_eq!(run_opts("/b/,/d/p", "a\nb\nc\nd\ne\n", true, false), "b\nc\nd\n");
+        assert_eq!(
+            run_opts("/b/,/d/p", "a\nb\nc\nd\ne\n", true, false),
+            "b\nc\nd\n"
+        );
     }
 
     #[test]
@@ -2015,12 +2011,21 @@ mod tests {
 
     #[test]
     fn relative_and_stepped_ranges() {
-        assert_eq!(run_opts("2,+2p", "1\n2\n3\n4\n5\n", true, false), "2\n3\n4\n");
+        assert_eq!(
+            run_opts("2,+2p", "1\n2\n3\n4\n5\n", true, false),
+            "2\n3\n4\n"
+        );
         // `~4` runs to the *next* multiple of four, so starting on line 4 goes
         // past it to line 8 — which this input never reaches.
-        assert_eq!(run_opts("2,~4p", "1\n2\n3\n4\n5\n", true, false), "2\n3\n4\n");
+        assert_eq!(
+            run_opts("2,~4p", "1\n2\n3\n4\n5\n", true, false),
+            "2\n3\n4\n"
+        );
         assert_eq!(run_opts("4,~4p", "1\n2\n3\n4\n5\n", true, false), "4\n5\n");
-        assert_eq!(run_opts("1~2p", "1\n2\n3\n4\n5\n", true, false), "1\n3\n5\n");
+        assert_eq!(
+            run_opts("1~2p", "1\n2\n3\n4\n5\n", true, false),
+            "1\n3\n5\n"
+        );
     }
 
     #[test]
@@ -2095,7 +2100,10 @@ mod tests {
 
     #[test]
     fn an_empty_pattern_reuses_the_last_one() {
-        assert_eq!(run_opts("/foo/s//bar/", "a foo z\n", false, false), "a bar z\n");
+        assert_eq!(
+            run_opts("/foo/s//bar/", "a foo z\n", false, false),
+            "a bar z\n"
+        );
     }
 
     #[test]
@@ -2115,7 +2123,10 @@ mod tests {
     #[test]
     fn the_hold_space_can_reverse_a_file() {
         // `tac`, written in sed. It exercises hold, exchange, append and `$`.
-        assert_eq!(run_opts("1!G;h;$!d", "a\nb\nc\n", false, false), "c\nb\na\n");
+        assert_eq!(
+            run_opts("1!G;h;$!d", "a\nb\nc\n", false, false),
+            "c\nb\na\n"
+        );
     }
 
     #[test]
@@ -2130,25 +2141,22 @@ mod tests {
     #[test]
     fn capital_d_restarts_without_reading() {
         // Squeeze runs of blank lines: the classic `D` idiom.
-        assert_eq!(
-            run("/^$/{N;/^\\n$/D}", "a\n\n\n\nb\n"),
-            "a\n\nb\n"
-        );
+        assert_eq!(run("/^$/{N;/^\\n$/D}", "a\n\n\n\nb\n"), "a\n\nb\n");
     }
 
     #[test]
     fn branching_loops_until_no_substitution_is_left() {
         // Turn every run of spaces into one, by looping.
         assert_eq!(run(":a;s/  / /;ta", "a    b\n"), "a b\n");
-        assert_eq!(run("s/x/y/;T end;s/$/ (changed)/;:end", "x\nz\n"), "y (changed)\nz\n");
+        assert_eq!(
+            run("s/x/y/;T end;s/$/ (changed)/;:end", "x\nz\n"),
+            "y (changed)\nz\n"
+        );
     }
 
     #[test]
     fn a_block_groups_commands_under_one_address() {
-        assert_eq!(
-            run_opts("/b/{s/b/B/;p}", "a\nb\nc\n", true, false),
-            "B\n"
-        );
+        assert_eq!(run_opts("/b/{s/b/B/;p}", "a\nb\nc\n", true, false), "B\n");
         // An unselected block is skipped whole, not entered and re-tested.
         assert_eq!(run("/zz/{s/a/X/;s/b/Y/}", "ab\n"), "ab\n");
     }

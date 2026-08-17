@@ -46,6 +46,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -86,9 +87,17 @@ struct StreamSlot {
     /// Mute flag.
     muted: AtomicBool,
     /// Stream name (for diagnostics).
-    name: spin::Mutex<[u8; 32]>,
+    ///
+    /// `PreemptSpinMutex` leaf lock (Q24 / design-decisions §70): a fixed-size
+    /// byte array, nothing acquired underneath, not reachable from interrupt
+    /// context.
+    name: PreemptSpinMutex<[u8; 32]>,
     /// Ring buffer for PCM data.
-    ring: spin::Mutex<RingBuffer>,
+    ///
+    /// Also a leaf lock. Critical sections here are bounded memcpys and must
+    /// stay allocation-free — see [`list_streams`], where a temporary guard in
+    /// an argument position used to keep the ring locked across a `Vec::push`.
+    ring: PreemptSpinMutex<RingBuffer>,
 }
 
 /// Simple ring buffer for PCM data.
@@ -189,8 +198,8 @@ impl StreamSlot {
             active: AtomicBool::new(false),
             volume: AtomicU8::new(100),
             muted: AtomicBool::new(false),
-            name: spin::Mutex::new([0u8; 32]),
-            ring: spin::Mutex::new(RingBuffer::new()),
+            name: PreemptSpinMutex::named([0u8; 32], b"MIXER_STREAM_NAME"),
+            ring: PreemptSpinMutex::named(RingBuffer::new(), b"MIXER_STREAM_RING"),
         }
     }
 }
@@ -215,11 +224,19 @@ pub fn open_stream(name: &str) -> KernelResult<StreamId> {
             slot.volume.store(100, Ordering::Relaxed);
             slot.muted.store(false, Ordering::Relaxed);
 
-            // Copy name (truncate if needed).
+            // Copy name, truncating on a character boundary rather than a byte
+            // one so `stream_name`'s output is never a half-character.
+            let mut copy_len = name.len().min(31);
+            while copy_len > 0 && !name.is_char_boundary(copy_len) {
+                copy_len = copy_len.saturating_sub(1);
+            }
             let mut name_buf = slot.name.lock();
             name_buf.fill(0);
-            let copy_len = name.len().min(31);
-            name_buf[..copy_len].copy_from_slice(&name.as_bytes()[..copy_len]);
+            if let (Some(dst), Some(src)) =
+                (name_buf.get_mut(..copy_len), name.as_bytes().get(..copy_len))
+            {
+                dst.copy_from_slice(src);
+            }
             drop(name_buf);
 
             // Clear any leftover data in the ring.
@@ -537,20 +554,37 @@ pub fn stream_name(id: StreamId, dst: &mut [u8]) -> usize {
     let name_buf = slot.name.lock();
     let len = name_buf.iter().position(|&b| b == 0).unwrap_or(32);
     let copy_len = len.min(dst.len());
-    dst[..copy_len].copy_from_slice(&name_buf[..copy_len]);
-    copy_len
+    // `get`/`get_mut` rather than indexing: both bounds are provably in range
+    // here, but proving it requires reading three lines up, and this is a public
+    // entry point taking a caller-supplied `dst`.
+    if let (Some(d), Some(s)) = (dst.get_mut(..copy_len), name_buf.get(..copy_len)) {
+        d.copy_from_slice(s);
+        copy_len
+    } else {
+        0
+    }
 }
 
 /// List all active streams.
+///
+/// # Locking
+///
+/// `buffered` is bound to a local *before* the `push`. Inlining
+/// `slot.ring.lock().len()` into the tuple — which is what this did — keeps the
+/// guard alive until the end of the enclosing statement, so the ring stayed
+/// locked across a `Vec::push` that can allocate, nesting the kernel heap lock
+/// under a leaf spinlock. The lifetime of a temporary guard in an argument
+/// position is the whole statement, not the sub-expression.
 pub fn list_streams() -> alloc::vec::Vec<(StreamId, u8, bool, usize)> {
     let mut result = alloc::vec::Vec::new();
     for (i, slot) in STREAMS.iter().enumerate() {
         if slot.active.load(Ordering::Acquire) {
+            let buffered = slot.ring.lock().len();
             result.push((
                 i as StreamId,
                 slot.volume.load(Ordering::Relaxed),
                 slot.muted.load(Ordering::Relaxed),
-                slot.ring.lock().len(),
+                buffered,
             ));
         }
     }

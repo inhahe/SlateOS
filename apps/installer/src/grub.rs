@@ -752,6 +752,16 @@ impl Default for GrubUpdateRunner {
 
 #[cfg(test)]
 mod tests {
+    // A test that unwraps a failure should fail loudly at the line that did
+    // it — that is the diagnosis. The defensive lints exist to keep panics out
+    // of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
+
     use super::*;
     use std::fs;
 

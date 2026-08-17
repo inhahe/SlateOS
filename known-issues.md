@@ -28352,7 +28352,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 14 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 15 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28996,6 +28996,61 @@ of first position), and input was read with `BufRead::lines` so `\r\n` lost its
   and digits-then-junk are both `INVALID`, clean overflow is `OVERFLOW` and is
   *accepted*, so `-1 -9223372036854775808` is an error while
   `-1 -9223372036854775809` is not.
+
+### Progress (appended 2026-08-17, `tsort`)
+
+`tsort` is the fifteenth (`scripts/tsort-diff.sh`: 86 passed, 0 differed, 9
+differ on purpose — **zero differences on the harness's first run** for the
+third conversion running; 37 differ when pointed at MSYS2's `tsort`, which is
+the harness proving it still discriminates). It also survived 1100 randomly
+generated graphs compared against GNU on stdout, stderr and status separately:
+600 over plain names, and 500 over an alphabet chosen to be hostile — embedded
+NULs, `\r`/`\v`/`\f`, high bytes, names that are prefixes of others, tabs and
+runs of blanks as separators, and a trailing orphan token 15% of the time.
+`scripts/tsort-probe.py` re-derives the rows quoted in `tsort.rs`'s
+documentation. The shipped version had no option parser at all —
+`--help`, `--version` and `--` were all read as file names, and a second operand
+was silently ignored — and four things past the command line changed *output*
+rather than diagnostics. Five things worth carrying forward:
+
+- **A balanced tree whose only use is an in-order walk is not a data structure,
+  it is a sort.** Upstream keeps items in Knuth's Algorithm A tree, rotations
+  and all, keyed by `strcmp`; every pass over the items is `walk_tree`, which is
+  an in-order traversal. An in-order traversal of a search tree yields sorted
+  keys whatever the balancing did, so none of the rotation code is reachable
+  through the output and a vector sorted by name is exactly equivalent. Roughly
+  200 lines of upstream have no behaviour in them. Checking *reachability*
+  before transcribing is the same discipline that caught `join`'s two dead
+  statements, applied to a whole subsystem instead of two lines.
+- **Insertion order into a linked list is output.** `record_relation` *prepends*
+  to the predecessor's successor list, so the list runs newest-relation-first,
+  and that order is the order ready items enter the queue — which is the order
+  standard output prints. `printf 'a c\na b\na d\n' | tsort` answers `a d b c`,
+  not `a b c d`. Any "is this a valid topological order?" test passes both. Only
+  a byte-for-byte comparison against GNU catches it. Stored back-to-front here
+  and walked in reverse, so the prepend stays O(1).
+- **A cycle is a diagnostic, not a stopping condition.** GNU names the file,
+  prints the cycle's members **on standard error**, deletes one relation to
+  break the cycle, and resumes — so standard output still lists every item
+  exactly once, several cycles can be reported in one run, and the status is 1.
+  The shipped version printed the members on standard *out*. The backward walk
+  (`detect_loop`) reuses the queue link field for its chain and needs several
+  tree passes to close one cycle, which is why the caller repeats the walk until
+  the chain empties rather than once.
+- **Three delimiters, not "whitespace".** `DELIM` is `" \t\n"`. Carriage return,
+  vertical tab and form feed are ordinary bytes *inside* a token, so
+  `printf 'a\rb x\n'` is two tokens to GNU and three to anything built on
+  `str::split_whitespace` or a line reader — and three tokens is an odd count,
+  which is fatal. A `\r\n` file therefore fails outright rather than sorting
+  slightly wrong.
+- **gnulib's `parse_gnu_standard_options_only` calls `getopt_long` exactly
+  once**, with a table of just `--help`/`--version` and an optstring of `""`.
+  Three visible consequences: there are no short options at all, so `-h` is
+  `invalid option -- 'h'`; options still permute, so `tsort FILE --version`
+  prints the version; and because the single call either exits or reports
+  nothing, every argument reaching the operand check is an operand. Worth
+  recording because ~15 other utilities use the same helper, and this is their
+  whole parser.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 

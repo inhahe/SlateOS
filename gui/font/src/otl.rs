@@ -80,6 +80,7 @@
 
 use alloc::vec::Vec;
 
+use crate::digest::Digest;
 use crate::lang::Lang;
 use crate::script::ScriptTags;
 use crate::sfnt::{u16_at, u32_at};
@@ -320,6 +321,28 @@ pub(crate) const MAX_SUBTABLES: usize = 8192;
 /// the rest of the lookup header cannot be read without it.
 const USE_MARK_FILTERING_SET: u16 = 0x0010;
 
+/// One subtable: where it is, and a summary of the glyphs it can act *at*.
+///
+/// The offset and the digest are one type rather than two parallel arrays
+/// because they must not be able to drift apart. A digest that describes a
+/// different subtable than the one it is checked against is not a slow filter,
+/// it is a wrong one — it would exclude glyphs the subtable does match, and
+/// the substitutions would silently stop happening. A parallel `Vec<Digest>`
+/// makes that a length bug waiting to happen; this makes it unrepresentable.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Subtable {
+    /// Absolute byte offset of the subtable in the font.
+    pub(crate) at: usize,
+    /// A conservative summary of this subtable's input coverage: never `false`
+    /// for a glyph the subtable covers, so a glyph it excludes can skip the
+    /// coverage search outright.
+    ///
+    /// [`Digest::full`] where the coverage could not be read, and until
+    /// [`ByScript::parse`] fills it in — see [`Lookup::digest`] for why the
+    /// other constructor leaves it that way.
+    pub(crate) digest: Digest,
+}
+
 /// One lookup: what it does, and where the subtables that do it live.
 ///
 /// Kept as a unit rather than flattened into one list of subtables because a
@@ -346,9 +369,22 @@ pub(crate) struct Lookup {
     /// present only when the flag's `UseMarkFilteringSet` bit is set. Zero
     /// otherwise, which is harmless because nothing reads it unless the bit is.
     pub(crate) filter: u16,
-    /// Absolute byte offsets of this lookup's subtables, in the order the font
-    /// lists them — which is the order they are tried in, first match winning.
-    pub(crate) subtables: Vec<usize>,
+    /// This lookup's subtables, in the order the font lists them — which is
+    /// the order they are tried in, first match winning.
+    pub(crate) subtables: Vec<Subtable>,
+    /// A conservative summary of the glyphs this lookup can act *at*: the
+    /// union of its subtables' input coverage. A run none of whose glyphs the
+    /// digest admits skips the lookup entirely, in O(1); a glyph it excludes
+    /// skips the subtable walk. Within the walk, each subtable's own digest
+    /// then decides whether *that* subtable is worth a coverage search.
+    ///
+    /// [`Digest::full`] where it could not be worked out, which is the safe
+    /// direction: it excludes nothing and so changes no result. That is what
+    /// every lookup carries until [`ByScript::parse`] fills it in, because the
+    /// other constructor — [`lookup_at`], resolving a nested lookup *during*
+    /// shaping — must not pay to read coverage tables it is about to search
+    /// anyway.
+    pub(crate) digest: Digest,
 }
 
 /// Offsets of the subtables reachable from the features tagged `tags`, under
@@ -380,7 +416,7 @@ pub(crate) fn feature_subtables(
 ) -> Option<Vec<usize>> {
     let mut out = Vec::new();
     for lookup in feature_lookups(data, base, tags, want, extension)? {
-        out.extend_from_slice(&lookup.subtables);
+        out.extend(lookup.subtables.iter().map(|sub| sub.at));
     }
     (!out.is_empty()).then_some(out)
 }
@@ -549,9 +585,15 @@ impl ByScript {
             };
             // Not of a type this caller can apply — most of a font's lookups,
             // for most callers.
-            let Some(lookup) = read_lookup(data, off, want, extension, &mut budget) else {
+            let Some(mut lookup) = read_lookup(data, off, want, extension, &mut budget) else {
                 continue;
             };
+            // Read the coverage tables once, here, so that applying the lookup
+            // can skip a glyph — or the whole run — without searching them. It
+            // belongs at parse time and not at shaping time for exactly the
+            // reason the type doc gives: this walk is the expensive one, and it
+            // is paid per face rather than per string drawn.
+            fill_digests(data, &mut lookup, extension);
             let Ok(pos) = u16::try_from(lookups.len()) else {
                 break;
             };
@@ -913,7 +955,10 @@ fn read_lookup(
             continue;
         };
         if !extended {
-            subtables.push(sub);
+            subtables.push(Subtable {
+                at: sub,
+                digest: Digest::full(),
+            });
             *budget = budget.saturating_sub(1);
             continue;
         }
@@ -932,7 +977,10 @@ fn read_lookup(
             .and_then(|o| sub.checked_add(o))
         {
             effective = Some(wrapped);
-            subtables.push(target);
+            subtables.push(Subtable {
+                at: target,
+                digest: Digest::full(),
+            });
             *budget = budget.saturating_sub(1);
         }
     }
@@ -954,7 +1002,138 @@ fn read_lookup(
         flag,
         filter,
         subtables,
+        // Filled in by `ByScript::parse` for the lookups that will be applied
+        // as a pass. Conservative here so that the nested-lookup path, which
+        // reads one lookup per contextual match at shaping time, does not read
+        // coverage tables it is about to search directly.
+        digest: Digest::full(),
     })
+}
+
+/// The lookup types whose format-3 subtable does *not* put its coverage
+/// offset in the second field, for the table whose extension lookup type is
+/// `extension`.
+///
+/// The two tables number their types independently — `GSUB` calls them 5 and
+/// 6, `GPOS` calls them 7 and 8 — and `extension` is the only thing in scope
+/// that says which table this is. It is 7 for `GSUB` and 9 for `GPOS`; those
+/// are the only two callers there can be, since a third layout table with a
+/// LookupList does not exist.
+const fn context_types(extension: u16) -> (u16, u16) {
+    if extension == 7 { (5, 6) } else { (7, 8) }
+}
+
+/// Where a subtable's input coverage table begins.
+///
+/// "Input" is the load-bearing word: this must be the coverage that decides
+/// whether the lookup applies *at* a position, because that is what the
+/// digest is used to pre-filter. For the mark-attachment types that is the
+/// mark coverage rather than the base's, and for a contextual type it is the
+/// first input glyph's, which is what the caller matches against the glyph it
+/// is standing on.
+///
+/// `None` means the shape could not be read — an unknown format, a truncated
+/// table — and the caller must then assume the subtable covers everything.
+fn subtable_coverage(data: &[u8], kind: u16, sub: usize, extension: u16) -> Option<usize> {
+    let (context, chain) = context_types(extension);
+    let format = u16_at(data, sub)?;
+    // Every type but the two contextual ones puts its coverage offset in the
+    // second field, in every format it defines. That is true of both tables:
+    // the substitution types 1-4 and 8, and the positioning types 1-6 — where
+    // for 4, 5 and 6 the field is the *mark* coverage, which is the one that
+    // decides where the lookup applies.
+    let at = if (kind == context || kind == chain) && format == 3 {
+        if kind == context {
+            // ContextFormat3: format, glyphCount, lookupCount, then one
+            // coverage offset per input glyph. The first is the one the
+            // current position is matched against.
+            sub.checked_add(6)?
+        } else {
+            // ChainContextFormat3: format, backtrackCount, backtrackCoverage
+            // [backtrackCount], inputCount, inputCoverage[inputCount]. The
+            // input coverages start after the backtrack array and its count.
+            let backtrack = usize::from(u16_at(data, sub.checked_add(2)?)?);
+            sub.checked_add(4)?
+                .checked_add(backtrack.checked_mul(2)?)?
+                .checked_add(2)?
+        }
+    } else {
+        sub.checked_add(2)?
+    };
+    let offset = u16_at(data, at)?;
+    // A zero offset is a subtable declaring no coverage at all, which is
+    // malformed for every type here; treating it as "unreadable" is what makes
+    // the caller fall back to covering everything rather than to covering
+    // whatever happens to sit at the subtable's own start.
+    (offset != 0).then(|| sub.checked_add(usize::from(offset)))?
+}
+
+/// The glyphs a coverage table lists, summarised.
+///
+/// `None` for a format this crate does not know, which the caller must read as
+/// "assume everything": a coverage it cannot parse is one it cannot exclude
+/// anything from.
+fn coverage_digest(data: &[u8], table: usize) -> Option<Digest> {
+    let mut digest = Digest::EMPTY;
+    match u16_at(data, table)? {
+        1 => {
+            let count = u16_at(data, table.checked_add(2)?)?;
+            let first = table.checked_add(4)?;
+            for i in 0..usize::from(count) {
+                let Some(glyph) = first
+                    .checked_add(i.checked_mul(2)?)
+                    .and_then(|at| u16_at(data, at))
+                else {
+                    // A truncated list: everything past here is unknown, so
+                    // the digest can no longer exclude anything.
+                    return None;
+                };
+                digest.add(glyph);
+            }
+        }
+        2 => {
+            let count = u16_at(data, table.checked_add(2)?)?;
+            let first = table.checked_add(4)?;
+            for i in 0..usize::from(count) {
+                let at = first.checked_add(i.checked_mul(6)?)?;
+                let (Some(start), Some(end)) =
+                    (u16_at(data, at), u16_at(data, at.checked_add(2)?))
+                else {
+                    // A truncated array: everything past here is unknown, so
+                    // the digest can no longer exclude anything.
+                    return None;
+                };
+                digest.add_range(start, end);
+            }
+        }
+        _ => return None,
+    }
+    Some(digest)
+}
+
+/// Summarise every subtable of `lookup`, and the lookup as their union.
+///
+/// A subtable whose coverage cannot be read becomes [`Digest::full`] rather
+/// than being dropped or left out of the union: it could still match, so a
+/// summary that excluded it would be a filter that excludes glyphs the lookup
+/// does act on. The digest's one-sidedness — never "no" for a member — is the
+/// whole basis of it being safe to skip on, and it is preserved by widening on
+/// every failure, never by narrowing.
+///
+/// Because the lookup's digest is the union, one unreadable subtable makes it
+/// [`Digest::full`] too, and the lookup is never skipped as a whole. That is
+/// the right answer and costs less than it used to: the *readable* subtables
+/// beside it keep their own digests, so the walk still skips them.
+fn fill_digests(data: &[u8], lookup: &mut Lookup, extension: u16) {
+    let kind = lookup.kind;
+    let mut all = Digest::EMPTY;
+    for sub in &mut lookup.subtables {
+        sub.digest = subtable_coverage(data, kind, sub.at, extension)
+            .and_then(|coverage| coverage_digest(data, coverage))
+            .unwrap_or_else(Digest::full);
+        all.union(sub.digest);
+    }
+    lookup.digest = all;
 }
 
 /// Where `glyph` sits in a coverage table, or `None` if it is not covered.
@@ -1302,4 +1481,5 @@ mod tests {
         unconditional.sort_unstable();
         assert_eq!(positioning, unconditional);
     }
+
 }

@@ -28335,19 +28335,55 @@ widgets do today.
    than the same characters occupy in the full line. Scrolling has to become
    pixel-based over the whole shaped line, with clipping, rather than
    byte-based over a re-shaped tail.
+4. **Syntax highlighting draws one run per token, each positioned at the sum of
+   the previous runs' widths** — `draw_tokens` (`main.rs:1513`), which walks the
+   `StyledToken` list emitting a `tree.text(x, …)` per token and advancing
+   `x += text::measure(piece, …)`. Found 2026-08-17 while scoping the fix; it is
+   *not* a variant of 1 and it is the hardest of the four. A token is a range of
+   *bytes*, and bidi reordering does not respect byte ranges: on
+   `let s = "<HEBREW> x";` the string literal's glyphs are drawn interleaved in
+   screen order with the punctuation around them, so there is no `x` at which
+   the token can be drawn as one left-to-right run. Splitting the line by token
+   and laying the pieces out end to end **is** the assumption that screen order
+   equals byte order, applied once per token.
 
-**Why 3 makes this its own task.** It is a real design change with a genuine
-tradeoff — shape-whole-line-and-clip costs work proportional to line length on
-every frame, where the present code shapes only what is visible — and the
-editor's long-line performance is the reason the byte-slicing exists. Anyone
-picking this up should measure that cost on a pathological line before
-choosing, and record the choice in `design-decisions.md`. Caching the shaped
-line per document revision is the obvious mitigation and probably makes the
-question moot, but "probably" is not a measurement.
+   This means colour cannot stay a property of a *substring to draw*; it has to
+   become an attribute carried on the shaped glyphs. The line is shaped once as
+   a whole, and each glyph takes the colour of the token containing the byte it
+   came from (`ShapedRun` already keeps each glyph's source byte offset, which
+   is what makes this possible). The comment above `draw_tokens` explicitly
+   accepts losing kerning across token boundaries as a small cost; under bidi
+   the same decomposition stops being a small cost and becomes wrong output.
+
+**Why 3 and 4 make this its own task.** Between them they are a real design
+change with a genuine tradeoff — shape-whole-line-and-clip costs work
+proportional to line length on every frame, where the present code shapes only
+what is visible — and the editor's long-line performance is the reason the
+byte-slicing exists. Anyone picking this up should measure that cost on a
+pathological line before choosing, and record the choice in
+`design-decisions.md`. Caching the shaped line per document revision is the
+obvious mitigation and probably makes the question moot, but "probably" is not a
+measurement. Note that 4 pushes toward shape-whole-line anyway: once colour is a
+per-glyph attribute, the shaping the renderer needs is of the whole line, so the
+per-frame cost 3 worries about is incurred either way and the cache stops being
+optional.
 
 **Where.** `apps/editor/src/main.rs`: `Document::move_left`/`move_right`
 (~822), `cursor_col`/`scroll_col` (~54, ~67), the caret and text drawing in
-`render_editor` (~1620–1640), and the click handler.
+`render_editor` (~1620–1640), `draw_tokens` (~1513), and the click handler.
+
+**Suggested order for whoever takes this**, since the four are entangled and
+doing them in the wrong order means writing code twice. Shape-the-whole-line is
+the foundation and 3 and 4 both sit on it, so: (a) measure the shaping cost on a
+pathological line and decide the caching question, recording it in
+`design-decisions.md`; (b) build the per-line shaped cache keyed on document
+revision; (c) convert `draw_tokens` to colour glyphs rather than slice strings
+(4), which is the change that makes the output correct; (d) convert scrolling to
+pixels over the cached run with clipping (3); (e) 1 and 2 then fall out as
+one-line substitutions to `text::caret_x` / `cursor_at` / `selection_boxes`,
+because by then the shaped line they need is already in hand. Motion (the arrow
+keys) is deliberately *last* and is the least of it — and note it is **not**
+gated on C-Q2 either way, since the editor is out of that question's scope.
 
 **Severity.** Low in practice today — a code editor's content is
 overwhelmingly one-directional, and on such text every one of these is

@@ -28168,7 +28168,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 11 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 12 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28631,6 +28631,69 @@ filenames. Four things worth carrying forward:
   are neighbours, share a harness shape, and differ here — which is precisely
   why `half1.txt`/`half2.txt` exist in both harnesses with opposite
   expectations.
+
+### Progress (appended 2026-08-17, `paste`)
+
+`paste` is the twelfth (`scripts/paste-diff.sh`: 200 passed, 0 differed, 6
+differ on purpose; 37 differ when pointed at MSYS2's `paste`, which is the
+harness proving it still discriminates). The shipped version recognised only
+`-d` and `-s`, did not cycle the delimiter list, did not collapse its escapes,
+had no `-z`, treated `-` as a file called `-`, split input as UTF-8 text, and
+exited 0 whatever happened. Five things worth carrying forward:
+
+- **A whole gnulib quoting style had to be built first, and it was built by
+  reading the C, not by guessing.** `paste`'s trailing-backslash diagnostic uses
+  `quotearg_n_style_colon (0, c_maybe_quoting_style, …)` — deliberately *not*
+  the usual `quote()`, because that "would double the number of displayed
+  backslashes, making the diagnostic look bogus." Nothing else in our tree had
+  `c_maybe`. It is now `quote_c_maybe`/`quote_c_maybe_colon` in `quote.rs`
+  (`a465d3b29`), settled by reading `lib/quotearg.c` and then *measured* against
+  two independent GNU oracles — `ls --quoting-style=c-maybe` for the plain form
+  and `paste -d 'ARG\'` for the colon one — over every byte in three positions
+  (`scripts/c-maybe-probe.py` → `tests/c-maybe-gnu.txt`, 1590 rows,
+  `tests/c_maybe.rs`). **All 1590 matched on the first run**, which is the value
+  of doing both: source-reading and black-box measurement agreeing is evidence,
+  either one alone is a belief. Three inputs no oracle can express (NUL, the
+  empty string, and `/` for the `ls` oracle) are unit tests marked *unmeasured*
+  rather than quietly folded in with the rest.
+- **The two modes are not two spellings of one algorithm, and the difference is
+  in the *error* rules, not the merge.** Parallel opens every operand up front
+  with `error (EXIT_FAILURE, …)` — fatal, before a byte of stdout, and only the
+  first bad operand is ever named. Serial opens as it goes with `error (0, …)` —
+  names every one and continues. So `paste A nosuch B` and `paste -s A nosuch B`
+  differ in stdout, stderr *and* their interleaving. Every missing-file row in
+  the harness therefore runs both ways; a harness that tested one mode's failure
+  path would have certified the other's as identical.
+- **A read error is reported one output line *after* the read that failed.**
+  Upstream leaves it in the stream's `ferror` flag and only looks when it closes
+  the file, which is the next time round the loop — and in the meantime the
+  failed stream keeps answering "end of file", so the line it was part of still
+  finishes and still gets its delimiter. `Source::failed` exists to reproduce
+  that delay rather than to store an error, and the unit test drives a reader
+  that yields one byte and then fails, because nothing else exhibits it.
+- **`\0` and "no delimiter" are the same value, which is why `-d ''` is not the
+  empty list.** `#define EMPTY_DELIM '\0'`, so a NUL cannot be *used* as a
+  delimiter; `main` rewrites an empty `-d` argument to the two characters `\0`
+  so the list has one position that emits nothing. The position is still spent:
+  `-d 'x\0y'` puts `x` between columns 1|2, nothing between 2|3, and `y`
+  between 3|4 — a list that merely dropped the position would put `y` at 2|3.
+  This is exactly the kind of rule a plausible implementation gets wrong and a
+  whitespace-tolerant harness never catches.
+- **The delimiter diagnostic is raised between the option loop and the opens**,
+  which pins it in a two-sided way no single test states: a later `-d` rescues
+  an earlier bad one and any getopt error preempts it (both are raised inside
+  the loop), yet it preempts a missing file (the opens come after). Three
+  harness rows and one unit test hold that position from both sides.
+
+One asymmetry is deliberately *not* reproduced and is recorded here instead.
+With standard input closed, `paste -s - A 0<&-` prints `paste: -: Bad file
+descriptor` **twice**: once from the per-file read and once from `main`'s
+closing `if (have_read_stdin && fclose (stdin) == EOF)`. Rust has no
+`fclose (stdin)` and surfaces a read error where the read happens, so the second
+line has no analogue. The parallel-mode companion — `opened_stdin &&
+have_read_stdin` → `paste: standard input is closed` — *is* reproduced, guarded
+by a `#[cfg(unix)]` file-descriptor check that can never fire on the Windows
+host this harness runs on.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 

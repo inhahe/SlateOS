@@ -199,13 +199,21 @@ pub struct Header {
 
 impl Header {
     /// Parse a tree-block header from the front of `buf`.
+    ///
+    /// The offsets follow directly from the field sizes listed on
+    /// [`HEADER_LEN`]: csum(32) fsid(16) puts `bytenr` at 48, flags(8) and
+    /// chunk_tree_uuid(**16**, not 8) put `generation` at 80, and the rest
+    /// follows. The uuid's width is the easy mistake here — getting it wrong
+    /// shifts every field from `generation` on by eight bytes, which reads
+    /// `owner` out of `generation`'s slot and so fails the generation check on
+    /// a block that is in fact perfectly good.
     pub fn parse(buf: &[u8]) -> KernelResult<Self> {
         Ok(Self {
             bytenr: read_u64(buf, 48)?,
-            generation: read_u64(buf, 72)?,
-            owner: read_u64(buf, 80)?,
-            nritems: read_u32(buf, 88)?,
-            level: read_u8(buf, 92)?,
+            generation: read_u64(buf, 80)?,
+            owner: read_u64(buf, 88)?,
+            nritems: read_u32(buf, 96)?,
+            level: read_u8(buf, 100)?,
         })
     }
 

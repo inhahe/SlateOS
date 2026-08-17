@@ -8108,6 +8108,11 @@ pub fn sys_fs_mount(args: &SyscallArgs) -> SyscallResult {
         "ext4" => crate::fs::ext4::mount(source, target),
         "tmpfs" | "memfs" | "ramfs" => crate::fs::memfs::mount(target),
         "iso9660" | "iso" | "cd9660" => crate::fs::iso9660::mount(source, target),
+        // Both are read-only drivers, so a caller that passes MS_RDONLY gets
+        // what it asked for and one that does not gets it anyway; the mount
+        // succeeds either way and writes fail per-operation.
+        "ntfs" | "ntfs3" => crate::fs::ntfs::mount(source, target),
+        "btrfs" => crate::fs::btrfs::mount(source, target),
         "devfs" | "dev" => crate::fs::devfs::mount(target),
         "proc" | "procfs" => crate::fs::procfs::mount(target),
         "sysfs" | "sys" => crate::fs::sysfs::mount(target),

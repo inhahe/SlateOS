@@ -61,7 +61,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::device::Ppem;
+use crate::device::{Corrections, Ppem};
 use crate::gpos::{Adjust, Positioning, Run};
 use crate::gsub::{SubGlyph, Substitutions};
 use crate::indic_shape::{self, Script};
@@ -578,6 +578,15 @@ pub struct Face {
     /// Distinct from `HVAR` in *what* it varies, identical in *how*: both are
     /// an `ItemVariationStore` reached through a different index.
     mvar: Option<varstore::Mvar>,
+    /// `GDEF`'s `ItemVariationStore` — the deltas a `GPOS` `VariationIndex`
+    /// points into, which is how a variable face varies its *positions*
+    /// (mark anchors, kerns) rather than its shapes or its advances.
+    ///
+    /// The bare store, not a wrapper like [`Hvar`](varstore::Hvar) or
+    /// [`Mvar`](varstore::Mvar), because `GDEF` has no index of its own: the
+    /// outer/inner pair arrives in the `VariationIndex`'s own first four bytes,
+    /// so there is nothing between the caller and `VarStore::delta`.
+    gdef_store: Option<varstore::VarStore>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -853,6 +862,9 @@ impl Face {
         let mvar = variation_axes.as_ref().and_then(|v| {
             mvar_span.and_then(|span| varstore::Mvar::parse(&data, span.off, v.axes().len()))
         });
+        let gdef_store = variation_axes
+            .as_ref()
+            .and_then(|v| gdef.and_then(|span| Self::gdef_var_store(&data, span, v.axes().len())));
 
         Ok(Self {
             metrics: FaceMetrics {
@@ -881,8 +893,32 @@ impl Face {
             gvar,
             hvar,
             mvar,
+            gdef_store,
             data,
         })
+    }
+
+    /// `GDEF`'s `ItemVariationStore`, if this `GDEF` is new enough to have one.
+    ///
+    /// The offset is an `Offset32` at `GDEF + 14`, and — unlike every other
+    /// field in that header — it exists only from **version 1.3**. Earlier
+    /// `GDEF`s simply stop before it, so reading it unconditionally would
+    /// interpret whichever subtable happens to follow the header as an offset
+    /// and index the font from an arbitrary place. The version check is the
+    /// whole safety of this function; the bounds checks below only stop it
+    /// reading off the end once it has already gone wrong.
+    fn gdef_var_store(data: &[u8], gdef: Span, axis_count: usize) -> Option<varstore::VarStore> {
+        let major = u16_at(data, gdef.off)?;
+        let minor = u16_at(data, gdef.off.checked_add(2)?)?;
+        if (major, minor) < (1, 3) {
+            return None;
+        }
+        let offset = u32_at(data, gdef.off.checked_add(14)?)?;
+        if offset == 0 {
+            return None;
+        }
+        let at = gdef.off.checked_add(usize::try_from(offset).ok()?)?;
+        varstore::VarStore::parse(data, at, axis_count)
     }
 
     /// Decode the face's place in its family from `OS/2`, falling back to
@@ -1453,30 +1489,45 @@ impl Face {
     /// which is the one that matches how the text will actually be drawn.
     #[must_use]
     pub fn kern_across(&self, left: u16, right: u16, between: &[u16]) -> i16 {
-        self.kern_across_at(left, right, between, Ppem::NONE)
+        self.kern_across_at(left, right, between, Corrections::NONE)
     }
 
-    /// The same, at a known pixel size, so that device-table corrections apply.
+    /// The same, at a known size and instance, so that device-table and
+    /// `VariationIndex` corrections apply.
     pub(crate) fn kern_across_at(
         &self,
         left: u16,
         right: u16,
         between: &[u16],
-        ppem: Ppem,
+        corr: Corrections<'_>,
     ) -> i16 {
         self.kerning
             .as_ref()
-            .map_or(0, |k| k.pair(&self.data, left, right, between, ppem))
+            .map_or(0, |k| k.pair(&self.data, left, right, between, corr))
     }
 
-    /// The pixel size a device table should be read at when this face is drawn
-    /// at `px_per_em`.
+    /// What `GPOS`'s device tables and variation indices should be read with
+    /// when this face is drawn at `px_per_em` at instance `coords`.
     ///
-    /// Here rather than in [`device`](crate::device) because the em a pixel
-    /// correction is converted back through is the face's, and this is what
-    /// holds it.
-    pub(crate) fn ppem(&self, px_per_em: f32) -> Ppem {
-        Ppem::new(px_per_em, self.metrics.units_per_em)
+    /// Here rather than in [`device`](crate::device) because both halves are
+    /// the face's to supply: the em a pixel correction is converted back
+    /// through, and the `GDEF` store a `VariationIndex` points into.
+    ///
+    /// The store is withheld at the default instance. Every delta there
+    /// evaluates to zero anyway — a region's scalar is a product of factors
+    /// that are all zero at coordinate zero — so this is the same answer
+    /// reached without walking the store, and it keeps the non-variable path
+    /// free of variable-font work.
+    pub(crate) fn corrections<'a>(
+        &'a self,
+        px_per_em: f32,
+        coords: &'a var::Coords,
+    ) -> Corrections<'a> {
+        let ppem = Ppem::new(px_per_em, self.metrics.units_per_em);
+        if coords.is_default() {
+            return Corrections::at(ppem);
+        }
+        Corrections::varying(ppem, self.gdef_store.as_ref(), coords.as_slice())
     }
 
     /// Whether this face carries any pair kerning this can read.

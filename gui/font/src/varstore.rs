@@ -614,7 +614,11 @@ impl Mvar {
 ///
 /// Saturating rather than wrapping: a correction larger than an `i16` is a
 /// broken face, and clamping keeps the glyph on the page.
-fn round_to_i16(v: f32) -> i16 {
+///
+/// Shared with [`device`](crate::device), which rounds a `GDEF` delta the same
+/// way `HVAR` and `MVAR` round theirs — three tables reading one store should
+/// not disagree about what 0.5 of a unit is.
+pub(crate) fn round_to_i16(v: f32) -> i16 {
     if !v.is_finite() {
         return 0;
     }
@@ -659,6 +663,52 @@ fn i8_at(d: &[u8], off: usize) -> Option<i8> {
         reason = "reinterpreting the same 8 bits as signed, which is the point"
     )]
     Some(*d.get(off)? as i8)
+}
+
+/// A one-axis `ItemVariationStore` with a single region peaking at the far end
+/// of that axis and a single subtable of one-column rows, one row per entry of
+/// `rows`.
+///
+/// The delta of row *i* is therefore `rows[i] * coord / 16384` — linear in the
+/// caller's coordinate, and computable on paper, which is what makes it useful
+/// as an expected value rather than merely as input.
+///
+/// Here rather than in this module's test module because [`device`] needs the
+/// same fixture to exercise a `VariationIndex`, and two hand-rolled stores
+/// would be two chances to lay one out the way a wrong reader reads it — the
+/// same argument that puts [`device::table`](crate::device::table) where it is.
+/// Written from the specification's field order, not from the parser above.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::arithmetic_side_effects,
+    reason = "test fixture builder: a panic here is the diagnosis"
+)]
+pub(crate) fn one_axis_store(rows: &[i32]) -> alloc::vec::Vec<u8> {
+    /// `F2Dot14` for 1.0 — the far end of the axis.
+    const ONE: i16 = 16384;
+
+    let mut out = alloc::vec::Vec::new();
+    // ItemVariationStore header.
+    out.extend_from_slice(&1u16.to_be_bytes()); // format
+    out.extend_from_slice(&12u32.to_be_bytes()); // variationRegionListOffset
+    out.extend_from_slice(&1u16.to_be_bytes()); // itemVariationDataCount
+    out.extend_from_slice(&22u32.to_be_bytes()); // itemVariationDataOffsets[0]
+    // VariationRegionList, at 12: one axis, one region.
+    out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+    out.extend_from_slice(&1u16.to_be_bytes()); // regionCount
+    out.extend_from_slice(&0i16.to_be_bytes()); // startCoord
+    out.extend_from_slice(&ONE.to_be_bytes()); // peakCoord
+    out.extend_from_slice(&ONE.to_be_bytes()); // endCoord
+    // ItemVariationData, at 22: every column narrow, over region 0 alone.
+    out.extend_from_slice(&u16::try_from(rows.len()).unwrap().to_be_bytes()); // itemCount
+    out.extend_from_slice(&0u16.to_be_bytes()); // wordDeltaCount
+    out.extend_from_slice(&1u16.to_be_bytes()); // regionIndexCount
+    out.extend_from_slice(&0u16.to_be_bytes()); // regionIndexes[0]
+    for &v in rows {
+        out.extend_from_slice(&i8::try_from(v).unwrap().to_be_bytes());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -782,6 +832,10 @@ mod tests {
 
     /// A one-axis store with a single region peaking at the far end and a
     /// single subtable of one-column rows.
+    ///
+    /// Deliberately *not* delegating to [`one_axis_store`], which builds the
+    /// same thing: the two are cross-checked against each other below, and a
+    /// delegation would make that check vacuous.
     fn simple(rows: &[i32]) -> Vec<u8> {
         let rows: Vec<Vec<i32>> = rows.iter().map(|&v| alloc::vec![v]).collect();
         let refs: Vec<&[i32]> = rows.iter().map(Vec::as_slice).collect();
@@ -864,6 +918,19 @@ mod tests {
         VarStore::parse(&bytes, 0, axis_count)
             .unwrap()
             .scalar(0, coords)
+    }
+
+    #[test]
+    fn the_two_fixture_builders_lay_out_the_same_store() {
+        // `simple` composes the general builders; `one_axis_store` writes the
+        // bytes out flat so that `device`'s tests can use it without importing
+        // all of them. They are two transcriptions of one spec section, so
+        // byte equality is a real check on both — and it is what lets a
+        // failure in `device` be read as "the store is misparsed" rather than
+        // "the fixture is malformed".
+        for rows in [&[0i32][..], &[7, -3, 40][..], &[1; 9][..]] {
+            assert_eq!(simple(rows), one_axis_store(rows), "rows {rows:?}");
+        }
     }
 
     // --- the scalar: how much of a region applies ---

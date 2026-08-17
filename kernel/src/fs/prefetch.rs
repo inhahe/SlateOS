@@ -44,6 +44,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -127,7 +128,7 @@ pub struct PrefetchResult {
 const MAX_ENTRIES: usize = 256;
 
 /// Active advice table.
-static ADVICE_TABLE: spin::Mutex<Vec<AdviceEntry>> = spin::Mutex::new(Vec::new());
+static ADVICE_TABLE: PreemptSpinMutex<Vec<AdviceEntry>> = PreemptSpinMutex::named(Vec::new(), b"ADVICE_TABLE");
 
 /// Statistics.
 static ADVISE_COUNT: AtomicU64 = AtomicU64::new(0);

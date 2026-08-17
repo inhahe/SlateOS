@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -254,9 +255,9 @@ static TEMPLATE_COUNTER: AtomicU64 = AtomicU64::new(1);
 static GET_COUNT: AtomicU64 = AtomicU64::new(0);
 static SET_COUNT: AtomicU64 = AtomicU64::new(0);
 
-static STATES: spin::Mutex<Vec<(String, ViewSettings)>> = spin::Mutex::new(Vec::new());
-static TEMPLATES: spin::Mutex<Vec<ViewTemplate>> = spin::Mutex::new(Vec::new());
-static GLOBAL_DEFAULTS: spin::Mutex<Option<ViewSettings>> = spin::Mutex::new(None);
+static STATES: PreemptSpinMutex<Vec<(String, ViewSettings)>> = PreemptSpinMutex::named(Vec::new(), b"STATES");
+static TEMPLATES: PreemptSpinMutex<Vec<ViewTemplate>> = PreemptSpinMutex::named(Vec::new(), b"TEMPLATES");
+static GLOBAL_DEFAULTS: PreemptSpinMutex<Option<ViewSettings>> = PreemptSpinMutex::named(None, b"GLOBAL_DEFAULTS");
 
 // ---------------------------------------------------------------------------
 // Public API

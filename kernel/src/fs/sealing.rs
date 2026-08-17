@@ -40,6 +40,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -159,7 +160,7 @@ struct SealEntry {
 }
 
 /// Sealed file table.
-static SEAL_TABLE: spin::Mutex<Vec<SealEntry>> = spin::Mutex::new(Vec::new());
+static SEAL_TABLE: PreemptSpinMutex<Vec<SealEntry>> = PreemptSpinMutex::named(Vec::new(), b"SEAL_TABLE");
 
 /// Statistics.
 static SEAL_OPS: AtomicU64 = AtomicU64::new(0);

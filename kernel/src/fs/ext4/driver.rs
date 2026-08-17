@@ -417,7 +417,7 @@ struct InodeCacheInner {
 /// This eliminates redundant disk reads during path resolution (which
 /// reads each parent directory's inode) and repeated metadata queries.
 ///
-/// Interior-mutable via `spin::Mutex` for use through `&self` references.
+/// Interior-mutable via `crate::sync::Mutex` for use through `&self` references.
 ///
 /// Cache coherency: `write_inode()` invalidates the cached entry so
 /// subsequent reads pick up the on-disk changes.

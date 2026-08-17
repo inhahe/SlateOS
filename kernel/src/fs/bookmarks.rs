@@ -28,7 +28,7 @@
 //! - Maximum 128 bookmarks.
 //! - Names are case-insensitive for lookup but preserve original case.
 //! - System bookmarks (Home, etc.) cannot be removed, only hidden.
-//! - Thread-safe via spin::Mutex.
+//! - Thread-safe via `PreemptSpinMutex` (a preempt-disabling leaf lock).
 
 #![allow(dead_code)]
 
@@ -39,6 +39,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -119,10 +120,10 @@ pub struct Bookmark {
 // ---------------------------------------------------------------------------
 
 /// Bookmarks storage.
-static BOOKMARKS: spin::Mutex<Vec<Bookmark>> = spin::Mutex::new(Vec::new());
+static BOOKMARKS: PreemptSpinMutex<Vec<Bookmark>> = PreemptSpinMutex::named(Vec::new(), b"BOOKMARKS");
 
 /// Whether system defaults have been initialized.
-static INITIALIZED: spin::Mutex<bool> = spin::Mutex::new(false);
+static INITIALIZED: PreemptSpinMutex<bool> = PreemptSpinMutex::named(false, b"INITIALIZED");
 
 /// Statistics.
 static RESOLVE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -404,11 +405,24 @@ pub fn get(name: &str) -> Option<Bookmark> {
 /// Returns list of (name, path, exists) tuples.
 pub fn validate() -> Vec<(String, PathBuf, bool)> {
     init();
-    let bm = BOOKMARKS.lock();
-    bm.iter()
-        .map(|b| {
-            let exists = crate::fs::Vfs::metadata(&b.path).is_ok();
-            (b.name.clone(), b.path.clone(), exists)
+    // Snapshot the table, then release the lock *before* touching the VFS.
+    // `Vfs::metadata` walks the mount table, takes filesystem locks of its own
+    // and may block on the backing device; doing that once per bookmark while
+    // still holding BOOKMARKS would hold this leaf lock across an unbounded I/O
+    // path and put its acquisition order ahead of the VFS's. The snapshot costs
+    // one clone per bookmark and makes the critical section pure. (Same shape as
+    // `freeze::freeze` and `fileops::undo`, which already drop before calling out.)
+    let snapshot: Vec<(String, PathBuf)> = {
+        let bm = BOOKMARKS.lock();
+        bm.iter()
+            .map(|b| (b.name.clone(), b.path.clone()))
+            .collect()
+    };
+    snapshot
+        .into_iter()
+        .map(|(name, path)| {
+            let exists = crate::fs::Vfs::metadata(&path).is_ok();
+            (name, path, exists)
         })
         .collect()
 }
@@ -452,8 +466,9 @@ pub fn self_test() -> KernelResult<()> {
     test_rename();
     test_categories();
     test_visibility();
+    test_validate();
 
-    serial_println!("[bookmarks] Self-test passed (6 tests).");
+    serial_println!("[bookmarks] Self-test passed (7 tests).");
     Ok(())
 }
 
@@ -560,4 +575,58 @@ fn test_visibility() {
     assert!(set_visible("home", true).is_ok());
 
     serial_println!("[bookmarks]   visibility: ok");
+}
+
+/// Cover `validate()`, which had no test at all before the Q24 lock sweep.
+///
+/// `validate` was restructured to snapshot the table and release `BOOKMARKS`
+/// *before* calling `Vfs::metadata` (it previously held the lock across one
+/// metadata walk per bookmark). The snapshot/re-entry shape is only correct if
+/// the results still line up with the bookmarks they came from, so this checks
+/// both outcomes — a resolvable path and an unresolvable one — by name rather
+/// than by position.
+#[allow(clippy::expect_used)] // Tests panic on unexpected state.
+fn test_validate() {
+    let dir = "/tmp/bookmark_test";
+    let _ = crate::fs::Vfs::mkdir(dir);
+
+    assert!(add("bm_real", dir, "Existing", Category::Favorites).is_ok());
+    assert!(add(
+        "bm_missing",
+        "/no/such/bookmark/target",
+        "Missing",
+        Category::Favorites,
+    )
+    .is_ok());
+
+    let results = validate();
+
+    let real = results
+        .iter()
+        .find(|(n, _, _)| n == "bm_real")
+        .expect("validate must report every bookmark");
+    assert_eq!(real.1, PathBuf::from(dir), "path must survive the snapshot");
+    assert!(real.2, "an existing path must validate as present");
+
+    let missing = results
+        .iter()
+        .find(|(n, _, _)| n == "bm_missing")
+        .expect("validate must report every bookmark");
+    assert!(
+        !missing.2,
+        "a nonexistent path must validate as absent, not be skipped"
+    );
+
+    // Every bookmark in the table must appear exactly once — the snapshot must
+    // neither drop nor duplicate entries.
+    assert_eq!(
+        results.len(),
+        list().len(),
+        "validate must report each bookmark exactly once"
+    );
+
+    let _ = remove("bm_real");
+    let _ = remove("bm_missing");
+    let _ = crate::fs::Vfs::rmdir(dir);
+    serial_println!("[bookmarks]   validate: ok");
 }

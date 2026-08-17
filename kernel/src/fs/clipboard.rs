@@ -32,7 +32,7 @@
 //! - History depth: 32 entries (configurable).
 //! - Clipboard change sequence number for polling.
 //! - File cut operations record source paths + cut flag.
-//! - Thread-safe via spin::Mutex.
+//! - Thread-safe via `PreemptSpinMutex` (a preempt-disabling leaf lock).
 
 #![allow(dead_code)]
 
@@ -43,6 +43,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -168,13 +169,13 @@ struct Watcher {
 // ---------------------------------------------------------------------------
 
 /// Current clipboard content (most recent entry).
-static CURRENT: spin::Mutex<Option<ClipboardEntry>> = spin::Mutex::new(None);
+static CURRENT: PreemptSpinMutex<Option<ClipboardEntry>> = PreemptSpinMutex::named(None, b"CURRENT");
 
 /// Clipboard history.
-static HISTORY: spin::Mutex<Vec<ClipboardEntry>> = spin::Mutex::new(Vec::new());
+static HISTORY: PreemptSpinMutex<Vec<ClipboardEntry>> = PreemptSpinMutex::named(Vec::new(), b"HISTORY");
 
 /// Registered watchers.
-static WATCHERS: spin::Mutex<Vec<Watcher>> = spin::Mutex::new(Vec::new());
+static WATCHERS: PreemptSpinMutex<Vec<Watcher>> = PreemptSpinMutex::named(Vec::new(), b"WATCHERS");
 
 /// Sequence counter (monotonically increasing).
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);

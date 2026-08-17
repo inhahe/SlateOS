@@ -47,6 +47,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -265,8 +266,8 @@ static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
 static CANCEL_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
 
-static ACTIVE_SESSION: spin::Mutex<Option<DragSession>> = spin::Mutex::new(None);
-static DROP_ZONES: spin::Mutex<Vec<DropZone>> = spin::Mutex::new(Vec::new());
+static ACTIVE_SESSION: PreemptSpinMutex<Option<DragSession>> = PreemptSpinMutex::named(None, b"ACTIVE_SESSION");
+static DROP_ZONES: PreemptSpinMutex<Vec<DropZone>> = PreemptSpinMutex::named(Vec::new(), b"DROP_ZONES");
 
 // ---------------------------------------------------------------------------
 // Session management

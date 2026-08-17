@@ -29,7 +29,8 @@
 //! - Maximum tracked entries: 1024 (ring buffer).
 //! - Entries older than retention period are lazily evicted on query.
 //! - Excluded path prefixes: /tmp, /proc, /sys, /dev (configurable).
-//! - Thread-safe via spin::Mutex (low contention — recording is fast).
+//! - Thread-safe via `PreemptSpinMutex`, a preempt-disabling leaf lock
+//!   (low contention — recording is fast).
 
 #![allow(dead_code)]
 
@@ -40,6 +41,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::error::KernelResult;
 use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -142,16 +144,16 @@ impl Default for RecentFilter {
 // ---------------------------------------------------------------------------
 
 /// Recent files buffer.
-static RECENT: spin::Mutex<Vec<RecentEntry>> = spin::Mutex::new(Vec::new());
+static RECENT: PreemptSpinMutex<Vec<RecentEntry>> = PreemptSpinMutex::named(Vec::new(), b"RECENT");
 
 /// Custom excluded prefixes.
-static EXCLUDES: spin::Mutex<Vec<PathBuf>> = spin::Mutex::new(Vec::new());
+static EXCLUDES: PreemptSpinMutex<Vec<PathBuf>> = PreemptSpinMutex::named(Vec::new(), b"EXCLUDES");
 
 /// Retention period.
 static RETENTION_NS: AtomicU64 = AtomicU64::new(DEFAULT_RETENTION_NS);
 
 /// Whether tracking is enabled.
-static ENABLED: spin::Mutex<bool> = spin::Mutex::new(true);
+static ENABLED: PreemptSpinMutex<bool> = PreemptSpinMutex::named(true, b"ENABLED");
 
 /// Statistics.
 static RECORD_COUNT: AtomicU64 = AtomicU64::new(0);

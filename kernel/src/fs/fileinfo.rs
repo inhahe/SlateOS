@@ -42,6 +42,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::error::KernelResult;
 use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
+use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -200,7 +201,7 @@ struct CustomExtractor {
 // ---------------------------------------------------------------------------
 
 /// Custom extractors registry.
-static EXTRACTORS: spin::Mutex<Vec<CustomExtractor>> = spin::Mutex::new(Vec::new());
+static EXTRACTORS: PreemptSpinMutex<Vec<CustomExtractor>> = PreemptSpinMutex::named(Vec::new(), b"EXTRACTORS");
 
 /// Statistics.
 static EXTRACT_COUNT: AtomicU64 = AtomicU64::new(0);

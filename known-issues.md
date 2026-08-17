@@ -28101,7 +28101,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 4 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 5 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28250,3 +28250,56 @@ and truncated the file there, and re-emitted `\r\n` as `\n` because
   only the tail they might still drop. Note the rule the streaming loop cannot
   apply until EOF: an unterminated final line *counts* as a line for `-n -N`
   (so `printf 'a\nb' | head -n -1` prints `a\n`) but is never itself printed.
+
+`tail` is the fifth (`scripts/tail-diff.sh`: 217 passed, 0 differed, 3 differ on
+purpose), and the largest so far: the parser
+it replaced knew `-n` and nothing else, and the feature it did not have *at all*
+was `-f`. Three of its lessons generalise, and one of them is a bug in shipped
+code that the previous entry described but did not fix.
+
+- **The Windows pipe lie is now a shared module, and it corrupts bytes, not
+  just widths.** The `wc` entry above recorded that `Metadata::is_file()` means
+  "not a directory and not a symlink" on Windows, so an MSYS pipe answers *yes*.
+  `tail` showed what that costs when the answer selects an *algorithm* rather
+  than a column width: the pipe also reports the bytes currently buffered in it
+  as a length and returns success from a seek that moves nothing, so
+  `printf 'a\nb\nc\n' | tail -n3` took the backwards block scan, read the pipe
+  dry hunting for a fourth line, and printed **nothing**; `tail -c3` printed the
+  **whole file**. Both were measured against the shipped binary. The question is
+  now `coreutils::filekind` — `regular()` (three-valued: yes / no / could not
+  tell), `is_regular()`, and `is_seekable()`, which additionally performs the
+  seek and reads the position back, because a handle can accept a seek and
+  ignore it. `wc` was moved onto it in the same change. **Every remaining
+  utility that takes a shortcut for regular files must call it rather than
+  `Metadata::is_file()`** — `cat`, `cp`, `split`, `od` and `truncate` all ask
+  the same question.
+- **A harness that runs a following utility needs `timeout -s KILL`, and must
+  normalise the status.** MSYS `timeout` sends SIGTERM, and Cygwin can only
+  deliver a signal to a *native* Windows child by `TerminateProcess`, which it
+  does for SIGKILL alone — so `timeout 3 ./tail.exe -f f` does not expire, it
+  hangs forever. It was measured hanging for five minutes before the run was
+  killed by hand. `timeout -s KILL 3` works, but then the two shells disagree
+  about how to report it: MSYS bash gives **137**, `wsl.exe` gives bare **9**,
+  and neither is `timeout`'s usual 124 — so the harness folds all three
+  together (`norm_rc`) or every `-f` case shows a spurious status difference.
+- **`quote()` and `quoteaf()` are not interchangeable, and picking the wrong one
+  is invisible until the input contains a quote.** gnulib has three styles:
+  `quote()` escapes the way C does, `quotef()` and `quoteaf()` the way a shell
+  would. They agree on every string holding neither a quote nor a backslash,
+  which is why shipped `head` echoed a bad `-n` argument with the wrong one and
+  no harness case noticed — `head -n "a'b"` must answer `'a\'b'` and said
+  `"a'b"`. Fixed here, with six cases added to `head-diff.sh` that can tell the
+  styles apart. **Which style a message uses is a property of the upstream call
+  site**: `xdectoumax`, `xstrtod` and `argmatch` use `quote()`; a file name in
+  an I/O error uses `quoteaf()`.
+
+`tail`'s own shape, for whoever converts the next utility with a pre-POSIX
+option form: the obsolete word is stricter than `head`'s. `head -3 f` needs
+only to be first, but `tail -3 …` requires the *whole* command line to be one
+of three shapes (the word alone; the word and one non-option; the word, `--`,
+and at most one more), and a digit reaching getopt at all produces
+`option used in invalid context -- 3` — where `head` says
+`invalid trailing option -- 3`. The two utilities do not share the sentence.
+Within the word, `b` is both a unit and a ×512 multiplier, applied in two
+different places: `tail -b` is 5120 *bytes* (the default scaled), `tail -2b` is
+1024 (the digits handed to `xstrtoumax` with `"b"` as the suffix list).

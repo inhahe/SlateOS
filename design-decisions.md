@@ -17728,32 +17728,61 @@ correction curve the designer supplies (`avar`, which lets them say "the
 two-thirds point should really be three-fifths"). The curve is stored as fixed
 point — integers over 16384 — and interpolating along it involves a division.
 
-**Decision: divide the way HarfBuzz divides, including truncating toward zero
-rather than rounding to nearest.**
+**Decision: land on the number HarfBuzz lands on, whatever rounding that
+takes, rather than on the number the arithmetic looks like it should give.**
 
-- *What changes:* nothing a user can see directly. On some inputs this crate's
-  number is one 16384th smaller than the mathematically-nearest one.
-- **Why not round to nearest**, which is marginally more accurate: HarfBuzz is
-  this crate's oracle everywhere else — shaping, kerning, mark placement are
-  all checked against it by `gui/font/tools/harfbuzz_sweep.py`. A deliberate
-  one-unit divergence here does not stay here: it feeds `gvar`'s outline
-  deltas and `GPOS`'s positioning deltas, where it becomes a sub-pixel
-  disagreement in a *glyph shape*, at which point no sweep can tell "we round
-  better" from "we have a bug". Agreeing with the oracle is worth more than
-  being right by a sixteen-thousandth.
-- The same reasoning fixes the *other* rounding, in the opposite direction:
-  reaching fixed point from a float uses half-away-from-zero, because that is
-  what HarfBuzz's `roundf` does.
+- *What changes:* nothing a user can see directly. What is at stake is whether
+  this crate's number can differ from the oracle's by one 16384th.
+- **Why the oracle and not accuracy:** HarfBuzz is this crate's oracle
+  everywhere else — shaping, kerning, mark placement are all checked against
+  it by `gui/font/tools/harfbuzz_sweep.py`. A one-unit divergence here does
+  not stay here: it feeds `gvar`'s outline deltas and `GPOS`'s positioning
+  deltas, where it becomes a sub-pixel disagreement in a *glyph shape*, at
+  which point no sweep can tell "we round better" from "we have a bug".
+- **Which rounding that turns out to be, per operation** — the two are not the
+  same and reading one off the other is exactly the mistake made here:
+  - `avar`'s segment map **rounds to nearest, halves away from zero**.
+    HarfBuzz's `SegmentMaps::map` interpolates in `float` and takes `roundf`.
+    Done here in integers, which reaches the same answer without a float's
+    own rounding.
+  - Reaching fixed point from a user-space float is also half-away-from-zero,
+    for the same `roundf`.
+  - Device-table pixel-to-font-unit conversion, by contrast, **truncates**
+    (§440): `Device::get_delta` does `pixels * (int64_t)scale / ppem` in C
+    integers.
+
+**Correction, 2026-08-17 (commit `777a040ff`).** This entry originally read
+"divide the way HarfBuzz divides, **including truncating toward zero**", and
+`SegmentMap::map` truncated to match. That was wrong: the truncation belongs
+to `Device::get_delta`, a different operation, and was generalized to `avar`
+without checking. The cost was not a rounding curiosity — the normalized
+coordinate is the input to *every* delta the face computes, so Segoe UI
+Variable at weight 550 (`8192 * 8192 / 10923` = 6143.99, truncated to 6143
+where HarfBuzz has 6144) had every `gvar` outline delta and every
+`HVAR`/`MVAR` metric scaled by 0.99995 of what it should be, at that instance
+and no other. The *decision* above did not change; only the belief about what
+it required. The lesson kept here: pinning to an oracle means reading the
+oracle for each operation, not extrapolating a rule from a neighbouring one.
 
 **Consequence for testing.** Because the arithmetic is pinned to another
 implementation, "it matches the spec" is not the property under test —
 "it matches, unit for unit" is. So the host-font test compares all 82 named
 instances of this machine's 7 variable faces against
 `variable_survey.py --normalize`, a second implementation written from the
-specification in a different language, *including* its truncating division. A
+specification in a different language, *including* its rounding. A
 disagreement is then a bug rather than a rounding preference. Verified by
 injection: changing the rounding to truncation is caught at one unit
 (9829 against 9830).
+
+**But that host test did not catch the truncation bug** — a second oracle only
+helps if it was written independently, and this one inherited the same wrong
+belief from this entry (it truncated too, until the same day). Even had it
+not, a named instance almost always sits *on* a segment endpoint, where the
+interpolation is exact and every rounding agrees: re-running the survey after
+correcting it produced byte-identical output for all 82 instances. What
+catches it is `avar_rounds_to_the_nearest_coordinate_rather_than_truncating`
+in `var.rs`, an arithmetic unit test at a deliberately fractional point. Two
+implementations of the same misunderstanding are one implementation.
 
 ### A malformed variation table costs variability, not drawability
 

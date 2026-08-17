@@ -2898,9 +2898,12 @@ fn no_installed_face_invents_variation_axes() {
 /// readers.
 ///
 /// The expected values come from `variable_survey.py --normalize`, written from
-/// the specification rather than transcribed from `var.rs` -- including its
-/// truncating fixed-point division, so a disagreement here is a real bug and
-/// not a rounding preference. Regenerate with:
+/// the specification rather than transcribed from `var.rs` -- including the
+/// round-half-away-from-zero of its fixed-point division, so a disagreement
+/// here is a real bug and not a rounding preference. That said, this test did
+/// *not* catch the truncation bug `777a040ff` fixed, because a named instance
+/// almost always sits on a segment endpoint where the interpolation is exact;
+/// the unit tests in `var.rs` are what pin the rounding. Regenerate with:
 ///
 /// ```text
 /// python gui/font/tools/variable_survey.py --normalize

@@ -42,13 +42,19 @@
 //!
 //! # Fixed point, on purpose
 //!
-//! The `avar` remap is done in integer `F2Dot14` with truncating division,
-//! matching HarfBuzz's `SegmentMaps::map` operation for operation rather than
-//! recomputing it in floating point. The two disagree by a unit on values that
-//! land near a segment boundary, and a unit of `F2Dot14` is a real difference
-//! in the delta that comes out the far end. Since HarfBuzz is this crate's
-//! oracle everywhere else, agreeing with it is worth more than being a
-//! fraction more accurate in isolation.
+//! The `avar` remap is done in integer `F2Dot14`, rounded to nearest with
+//! halves going away from zero — the answer HarfBuzz's `SegmentMaps::map`
+//! arrives at by interpolating in `float` and taking `roundf`. Doing it in
+//! integers reaches the same number without a float's rounding of its own.
+//! Getting that rounding wrong costs one `F2Dot14` unit on values that land
+//! between segment endpoints, and a unit there is a real difference in the
+//! delta that comes out the far end: this code truncated until 2026-08-17, on
+//! the mistaken belief that HarfBuzz truncates here too (it truncates in
+//! `Device::get_delta`, which is a different operation), and every delta in
+//! Segoe UI Variable at weight 550 came out scaled by 0.99995 of what it
+//! should have been. Since HarfBuzz is this crate's oracle everywhere else,
+//! agreeing with it is worth more than being a fraction more accurate in
+//! isolation.
 
 use alloc::vec::Vec;
 
@@ -173,9 +179,9 @@ struct SegmentMap {
 impl SegmentMap {
     /// Remap one normalized coordinate through this curve.
     ///
-    /// Transcribed from HarfBuzz's `SegmentMaps::map`, including its truncating
-    /// integer division — see the module docs for why agreeing beats rounding
-    /// better.
+    /// Transcribed from HarfBuzz's `SegmentMaps::map`, including the rounding
+    /// its `roundf` performs — nearest, halves away from zero. See the module
+    /// docs for why agreeing with the oracle beats being independently right.
     fn map(&self, value: i16) -> i16 {
         let n = self.points.len();
         // A curve of fewer than two points cannot interpolate. The spec

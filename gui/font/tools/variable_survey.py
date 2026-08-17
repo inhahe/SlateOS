@@ -237,11 +237,16 @@ def normalize_user(axis, value):
 
 
 def apply_segment_map(pts, value):
-    """Piecewise-linear `avar` correction, in F2Dot14, with truncating division.
+    """Piecewise-linear `avar` correction, in F2Dot14, rounded to nearest.
 
-    The truncation matters: HarfBuzz divides this way, and a reader that rounds
+    The rounding matters: HarfBuzz's `SegmentMaps::map` interpolates in `float`
+    and takes `roundf`, so halves go away from zero and a reader that truncates
     disagrees by one unit on some inputs. Reproduced here so a disagreement
     between this and the Rust means a real bug rather than a rounding choice.
+    (This function truncated until 2026-08-17, on the same wrong belief the
+    Rust held -- see design-decisions.md 448 and commit 777a040ff. Named
+    instances mostly land on segment endpoints, where interpolation is exact,
+    which is why the survey agreed anyway.)
     """
     if len(pts) < 2:
         return value
@@ -264,8 +269,15 @@ def apply_segment_map(pts, value):
     rise = hi_to - lo_to
     run = value - lo_from
     prod = rise * run
-    # C-style truncation toward zero, which Python's `//` does not do.
-    delta = int(prod / span)
+    # Nearest, halves away from zero -- what `roundf` gives HarfBuzz. Written
+    # in integers so it cannot pick up a float rounding of its own: `span` is
+    # positive here, so adding half a span before the floor-divide rounds up
+    # from the midpoint, and the negative arm is the mirror of that.
+    half = span // 2
+    if prod >= 0:
+        delta = (prod + half) // span
+    else:
+        delta = -((-prod + half) // span)
     return max(-16384, min(16384, lo_to + delta))
 
 

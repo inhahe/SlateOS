@@ -28441,13 +28441,23 @@ what is visible — and the editor's long-line performance is the reason the
 byte-slicing exists. **That measurement has since been taken** — see
 `C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE` below, "Note on the editor
 question it was gathered for" — and it says shaping a 1,000-character line
-whole costs 3.1 ms against 0.5 ms for the visible window, so the per-frame cost
-is real and **the shaped line must be cached per document revision**. The
+whole costs 0.75 ms against 0.15 ms for the visible window, so the per-frame
+cost is real and **the shaped line must be cached per document revision**. The
 tradeoff is therefore settled: shape whole, cache, clip. Note that 4 pushes
 toward shape-whole-line anyway: once colour is a
 per-glyph attribute, the shaping the renderer needs is of the whole line, so the
 per-frame cost 3 worries about is incurred either way and the cache stops being
 optional.
+
+**Item 4 is not a cost at all — it is a saving.** The same instrument measured
+what `draw_tokens` does today against shaping the line whole, and the
+decomposition *loses*: a 40-token line of 80 characters costs **2.3x** what
+shaping it whole costs, an 80-character line of 10 tokens 1.5x, a
+1,000-character line of 40 tokens 1.26x. Each shaping carries a fixed cost of
+~3.6 us on top of ~0.75 us per character, and cutting a line into *n* pieces
+pays that fixed cost *n* times. So converting `draw_tokens` to colour glyphs
+rather than slice strings makes the output correct under bidi **and** makes the
+common case faster; there is no tradeoff to weigh on that one.
 
 **Where.** `apps/editor/src/main.rs`: `Document::move_left`/`move_right`
 (~822), `cursor_col`/`scroll_col` (~54, ~67), the caret and text drawing in
@@ -28458,14 +28468,26 @@ doing them in the wrong order means writing code twice. Shape-the-whole-line is
 the foundation and 3 and 4 both sit on it, so: (a) ~~measure the shaping cost on
 a pathological line and decide the caching question~~ — **done 2026-08-17; the
 answer is "cache it", and the numbers are in the shaping entry below**;
-(b) build the per-line shaped cache keyed on document
-revision; (c) convert `draw_tokens` to colour glyphs rather than slice strings
-(4), which is the change that makes the output correct; (d) convert scrolling to
-pixels over the cached run with clipping (3); (e) 1 and 2 then fall out as
+(c) convert `draw_tokens` to colour glyphs rather than slice strings (4), which
+is the change that makes the output correct; (d) convert scrolling to
+pixels over the shaped run with clipping (3); (b) build the per-line shaped
+cache keyed on document revision; (e) 1 and 2 then fall out as
 one-line substitutions to `text::caret_x` / `cursor_at` / `selection_boxes`,
 because by then the shaped line they need is already in hand. Motion (the arrow
 keys) is deliberately *last* and is the least of it — and note it is **not**
 gated on C-Q2 either way, since the editor is out of that question's scope.
+
+**(b) moved after (c) and (d)** on 2026-08-17, once the piece-vs-whole
+measurement came in. Two reasons, and either alone would be enough. First, (c)
+does not need it: `draw_tokens` already shapes each line once *per token*, so
+shaping it once whole is strictly less work than what runs today — the cache is
+an improvement on the new code, not a prerequisite for it. Second, nothing yet
+pays a per-frame cost to save: `apps/editor`'s `main()` is a demo harness that
+renders once and exits, and `Document` has no revision counter to key a cache
+on. Building the cache first would mean inventing the key, the invalidation and
+the eviction policy against a load that does not exist, and then very likely
+rebuilding them when it does. Do the correctness work, then add the cache when
+there is a frame loop to justify its shape.
 
 **Severity.** Low in practice today — a code editor's content is
 overwhelmingly one-directional, and on such text every one of these is
@@ -28474,19 +28496,27 @@ phrase in it, which markdown and comment text make entirely plausible.
 
 ## C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE (lane C, 2026-08-17)
 
-**Status: OPEN, but ~33x recovered — root-caused 2026-08-17 and three fixes
-landed the same day. Shaping now costs ~1.5 us/character where it cost ~64,
-and a 1,000-character line is 1.4 ms where it was 64 ms. That is still an
+**Status: OPEN, but 36-43x recovered — root-caused 2026-08-17 and three fixes
+landed the same day. Shaping now costs ~0.8 us/character where it cost ~29,
+and a 1,000-character line is 0.73 ms where it was 30 ms. That is still an
 order of magnitude off HarfBuzz, so the entry stays open — but it is no longer
 a cliff, and the editor work it was blocking can proceed. What remains is
-named under "What is left" below; the next step is a fresh measurement rather
-than a fresh guess.**
+named under "What is left" below.**
 
-**What.** `ScaledFont::shape` cost **~64 microseconds per character** on a
-real outline face, and the cost was *linear* in the string — so it was a huge
-per-character constant, not an algorithmic blow-up over the string. For scale,
-HarfBuzz shapes a short Latin run in single-digit microseconds *total*. We were
-roughly three orders of magnitude off.
+**Read "How the numbers here were taken" before comparing any two tables in
+this entry.** Every figure recorded on the day of the fixes was a *median*, and
+the median turned out to be measuring the machine as much as the code — it
+inflated everything by roughly 2x and moved by up to 1.9x between runs of the
+identical measurement. The instrument was corrected the following day and the
+whole A/B ladder re-taken in one comparable set; the older tables are kept for
+the history but their absolute figures are all about twice life size.
+
+**What.** `ScaledFont::shape` cost **~29 microseconds per character** on a
+real outline face (reported at the time as ~64; see the statistic note below),
+and the cost was *linear* in the string — so it was a huge per-character
+constant, not an algorithmic blow-up over the string. For scale, HarfBuzz
+shapes a short Latin run in single-digit microseconds *total*. We were roughly
+three orders of magnitude off.
 
 **Measured** on the dev host, release build, by
 `gui/toolkit/src/text.rs` → `mod shaping_cost` (two `#[ignore]`d timing tests,
@@ -28511,39 +28541,42 @@ the run straight from `char_indices` — so that column is not "the same work
 without layout tables", it is "no pipeline at all". It is included as a floor,
 not as an apples-to-apples comparison.
 
-**After the `GSUB` coverage digests** (commit "font: skip GSUB lookups a run
-cannot match, with coverage digests"), same instrument, same host:
+**The A/B ladder, all four configurations measured with one instrument.**
+Taken 2026-08-17 after the statistic was fixed, so unlike the day-of tables
+these five columns are directly comparable to each other. Each configuration
+is the shipping tree with the *filters* neutralised in place — the digests are
+still computed at parse time, which costs nothing per shape — so this is an A/B
+of the skipping and not of four different revisions. Each figure is the best of
+three separate process invocations, none of them sharing a run with a compile.
 
-| chars | system face | built-in | ratio | vs. before |
-|---:|---:|---:|---:|---:|
-| 80 | 219.7 us | 2.8 us | 78x | 22.9x faster |
-| 200 | 519.9 us | 4.5 us | 116x | 23.8x faster |
-| 1,000 | 2,864 us | 32.0 us | 90x | 22.4x faster |
-| 5,000 | 14,763 us | 162.9 us | 91x | 21.9x faster |
-| 20,000 | 56,068 us | 751.8 us | 75x | 23.0x faster |
+| chars | no digests | + run digest | + per-subtable | + `GPOS` | cumulative |
+|---:|---:|---:|---:|---:|---:|
+| 80 | 2,313.0 us | 110.8 us | 78.8 us | **64.2 us** | **36.0x** |
+| 200 | 5,816.6 us | 271.5 us | 190.7 us | **154.2 us** | **37.7x** |
+| 1,000 | 30,047.7 us | 1,334.6 us | 925.3 us | **733.9 us** | **40.9x** |
+| 5,000 | 170,978.8 us | 7,330.6 us | 5,067.1 us | **4,152.2 us** | **41.2x** |
+| 20,000 | 742,798.2 us | 31,084.8 us | 21,263.7 us | **17,188.7 us** | **43.2x** |
 
-(The immediately-pre-fix baseline re-taken on the same day at 80 chars was
-4,272 us rather than the 5,033 in the table above, so the honest speed-up
-figure is **19.6x**, not 22.9x; host state moves the absolute numbers by
-~15% between runs, which is why the guard below is a ratio and not a
-microsecond count.)
+Step by step, and strikingly consistent across a 250x range of line lengths —
+which is what one expects of a fix that removes a per-glyph-per-lookup constant:
 
-**After the per-subtable digests** (commit "font: give every GSUB subtable its
-own coverage digest"), same instrument, same host:
+| step | 80 | 200 | 1,000 | 5,000 | 20,000 |
+|---|---:|---:|---:|---:|---:|
+| run digest (fix 1) | 20.9x | 21.4x | 22.5x | 23.3x | 23.9x |
+| per-subtable (fix 2) | 1.41x | 1.42x | 1.44x | 1.45x | 1.46x |
+| `GPOS` (fix 3) | 1.23x | 1.24x | 1.26x | 1.22x | 1.24x |
 
-| chars | system face | built-in | ratio | vs. run-digest only |
-|---:|---:|---:|---:|---:|
-| 80 | 129.3 us | 2.4 us | 54x | 1.70x faster |
-| 200 | 372.8 us | 6.5 us | 57x | 1.39x faster |
-| 1,000 | 1,895 us | 29.7 us | 64x | 1.51x faster |
-| 5,000 | 10,293 us | 138.0 us | 75x | 1.43x faster |
-| 20,000 | 41,981 us | 832.1 us | 50x | 1.34x faster |
+Against the built-in bitmap face the shipping configuration measures **49x** at
+80 characters and 51x at 1,000, where the bug sat at 1,400-2,200x.
 
-Cumulative against the 4,272 us same-day baseline at 80 characters: **33.0x**.
+The headline was reported as 33.0x on the day. That was median-against-median
+and it was close to right for the wrong reason: the median inflated the
+baseline (5,033 us at 80 chars against a true 2,313) *and* the result, and the
+two errors largely cancelled.
 
-**Why this is severe.** A single 200-character line takes **12 ms** to shape.
-A 60 Hz frame is 16.7 ms. So one line of text is 74% of a frame, and a
-50-line screen is roughly **620 ms** — 37 frames' worth — if anything shapes
+**Why this is severe.** A single 200-character line took **5.8 ms** to shape.
+A 60 Hz frame is 16.7 ms. So one line of text was 35% of a frame, and a
+50-line screen roughly **290 ms** — 17 frames' worth — if anything shapes
 per frame. Every `text::measure` call shapes; the toolkit measures constantly
 (button labels, list rows, `draw_tokens` once *per syntax token*). Whatever is
 saving us today is caching further up, not speed here, and any path that
@@ -28552,13 +28585,14 @@ misses that cache falls off a cliff.
 **What has been ruled out.**
 
 * **Not the font-cache mutex.** One `with_font()` — lock plus cache lookup —
-  measures **0.100 us**, i.e. 0.15% of a single character's shaping cost.
+  measures **0.045 us**, i.e. 0.06% of a single character's shaping cost then,
+  and 5.6% of one now.
 * **Not test-harness contention.** The first run of the instrument reported
   4.5 ms for 80 characters *with* two tests sharing the global font mutex; with
   `--test-threads=1` and the font fetched once outside the timed loop, the
   number barely moved. The instrument now documents both requirements.
 * **Not cold caches.** Every measurement takes a warm-up shaping outside the
-  sample set and reports the **median** of 21-201 runs.
+  sample set before any sample is kept.
 * **Not per-shape re-parsing of the big OpenType tables.** `GSUB` and `GPOS`
   both decode through `otl::ByScript`, built once per face — `otl.rs:409`
   already documents that doing that walk per shape is too slow ("re-reading
@@ -28630,23 +28664,25 @@ search. A free side effect: one unreadable subtable used to force the whole
 lookup's digest to `full()` and kill all skipping for it, and now widens only
 itself while its readable neighbours keep their narrow digests.
 
-The filter is **GSUB-only**, deliberately, with the reason recorded at each of
-the three call sites that do not use it: `gpos.rs` (the A/B charges ~0% of the
-cost to positioning, so filtering there is complexity bought with no evidence),
-`kern.rs` (kerning asks about a *pair*, and a digest summarises only the left
-glyph) and `would.rs` (`would_apply` runs once per candidate pair, not once per
-glyph per lookup). The digests themselves are correct for `GPOS` —
-`subtable_coverage` reads the mark coverage for the attachment types — so
-turning the filter on there is a one-line change if a measurement ever asks
-for it.
+At the time the filter was **GSUB-only**, deliberately, with the reason
+recorded at each of the three call sites that did not use it: `gpos.rs` (the
+A/B charged ~0% of the cost to positioning, so filtering there was complexity
+bought with no evidence), `kern.rs` (kerning asks about a *pair*, and a digest
+summarises only the left glyph) and `would.rs` (`would_apply` runs once per
+candidate pair, not once per glyph per lookup). The `gpos.rs` half of that did
+not survive the day — see "the third fix" below, which is what happens when the
+evidence a decision was waiting for finally arrives. The other two still hold.
 
 **Guard against regression.** `guitk`'s
 `text::shaping_cost::the_layout_tables_do_not_dominate_shaping` is **not
 `#[ignore]`d** and runs in the normal suite. It asserts the system face costs
 under **500x** the built-in face for 80 characters — a ratio rather than a
 microsecond figure, so it survives a debug build, a loaded machine and slower
-hardware without going so loose it stops catching anything. It measures 54x in
-release and ~150x in debug today; the bug sat at 1400-2200x.
+hardware without going so loose it stops catching anything. It measures **38x
+in release and 71x in debug** today — seven times below the threshold and
+nearly three times below the bug, which sat at 1400-2200x. (Those two figures
+read 80x and 147x while the module reported medians. Nothing about the shaping
+changed.)
 
 **The phase breakdown, measured directly.** Once `GSUB` stopped dwarfing
 everything, the coarse A/B stopped being a useful guide, so `shape_with` was
@@ -28667,7 +28703,10 @@ shapings of 80 characters (release build):
 | total | 161.1 us | |
 
 The total exceeds the uninstrumented 129.3 us by the instrument's own cost, so
-read the **shares**, not the absolute figures.
+read the **shares**, not the absolute figures. (These are medians, and doubly
+so — both the phase timings and the total they are divided by. The shares are
+the more robust half of the table for that reason too: a factor that scales
+every phase alike cancels in a ratio.)
 
 Two warnings for whoever re-takes this, both learned the hard way here:
 
@@ -28690,28 +28729,79 @@ consulting the skipper, since the digest is three shifts against a glyph id
 already in hand where `Skipper::considers` reads the glyph's `GDEF` class, and
 `at` filters the subtables as `gsub`'s `admitting` does.
 
-| chars | after per-subtable | after `GPOS` | gain |
-|---:|---:|---:|---:|
-| 80 | 129.3 us | 129.8 us | (noise) |
-| 200 | 372.8 us | 303.1 us | 1.23x |
-| 1,000 | 1,895 us | 1,400 us | 1.35x |
-| 5,000 | 10,293 us | 7,555 us | 1.36x |
-| 20,000 | 41,981 us | 30,015 us | 1.40x |
+Worth **1.22x-1.26x**, flat across every line length — see the ladder above.
 
-At 80 characters the change is inside the run-to-run noise — the built-in
-control moved 2.4 -> 2.8 us over the same pair of runs, and at 1,000 characters
-it moved 29.7 -> 13.9 us in a code path neither fix touches, which is the
-honest measure of how stable these medians are. The gain is real from 200
-characters up, where the run is long enough for the per-glyph work to dominate
-the fixed costs.
+The gain was first published here as "noise at 80 characters, rising to 1.40x
+at 20,000", from a pair of runs one of which had overlapped a full workspace
+build. Both halves of that shape were wrong, and both for the same reason: the
+median. There is no rise with line length, and there is no dead spot at 80
+characters. **Do not benchmark alongside a build, and do not benchmark in the
+same invocation as one** — a `cargo test` that compiles first inflates the
+measurement that follows it by ~10%, which was enough on its own to fake a
+1.14x effect.
+
+**How the numbers here were taken — and why every day-one figure in this entry
+is about twice life size.** This is the most transferable thing the entry
+contains, so it is written out rather than assumed.
+
+Two runs of the *identical* instrument — the cost of shaping a 1,000-character
+line, each the only test running, nothing else on the machine — came back
+**776 us and 1,313 us**. A quantity that moves by 1.7x between runs cannot
+settle a 1.3x question, and by that point this entry was full of 1.2x-1.4x
+questions. So the instrument was pointed at itself:
+`text::shaping_cost::is_this_instrument_stable` repeats one workload twelve
+times inside a single process and prints the median and the minimum of each
+block side by side, with the built-in face alongside as a control.
+
+Across the twelve blocks the **median spread 1.89x and the minimum spread
+1.02x**.
+
+That is not a surprise once said out loud: the noise is **one-sided**. Nothing
+can make a shaping finish sooner than the code allows, but a scheduler stall or
+a clock-speed change can make it finish later. Every sample is therefore the
+true cost plus a non-negative unknown, and the *smallest* sample is the best
+estimate of the cost. The median estimates the cost plus the *typical*
+interference — a property of the machine, not of the shaping. Ranking
+configurations by median is ranking them partly by how busy the box was.
+
+Two things were needed before the minimum could be trusted:
+
+* **A floor on total sampling time, not just a sample count.** This host stalls
+  every process for a millisecond or two at a time, several times a second. 51
+  shapings of the built-in face is 0.7 ms of work — it fits *inside* one stall,
+  so every sample is stalled and the minimum is stalled with them. That is
+  exactly why the built-in column still spread 1.84x when the system column had
+  already settled to 1.02x. `timed()` now samples until both the requested
+  count and 20 ms of wall time are reached.
+* **Batching for anything near the clock's resolution.** The minimum of 200,000
+  timings of one font-cache hit printed a flat `0.000us` — the clock saying it
+  cannot see this, not the lookup being free. Timed in batches of a thousand it
+  reads 0.045 us.
+
+With both in place the instrument reproduces to better than 1%: four separate
+tests in one process measured the 1,000-character line at 750.7 / 749.9 /
+753.4 / 748.7 us during a run whose median column was visibly wobbling by
+1.82x. Across separate process invocations it holds to ~1.03x, provided the
+invocation did not also compile something.
+
+**The correction factor, measured.** Comparing the original median baseline
+against the same configuration re-measured by minimum: 5,033/2,313 = 2.18x at
+80 chars, 2.13x at 200, 2.14x at 1,000, 1.89x at 5,000, 1.74x at 20,000. So the
+median roughly **doubled** everything, and — because it doubled the before and
+the after alike — the *relative* claims made on day one mostly survived while
+every absolute figure did not. The factor shrinks with workload size, which is
+the same fact as the sampling floor above: a 1 ms stall is 100% of a 1 ms
+shaping and 5% of a 20 ms one.
 
 **What is left.** Both continuations this entry originally named are done, and
 so is the `GPOS` one the re-measurement turned up. What remains:
 
-1. **Re-take the phase breakdown.** The table above predates the `GPOS` fix, so
-   `gpos`'s 19.9% is now smaller and every other share correspondingly larger.
-   The patch that produces it is small and is described above; do not attack
-   anything on the strength of the stale table.
+1. **Re-take the phase breakdown**, and with the minimum this time. The table
+   above predates the `GPOS` fix, so `gpos`'s 19.9% is now roughly 3 points
+   lower and every other share correspondingly higher; and it was taken with
+   the statistic that turned out to be measuring Windows. The patch that
+   produces it is small and is described above; do not attack anything on the
+   strength of the stale table.
 2. **The likely next items, from that table:** `norm::pieces` at 8.8% and the
    `advances` loop at 6.3%. The latter is one `advance_at` per glyph — an
    `hmtx` read plus a variation-store lookup — and is a plain caching
@@ -28728,35 +28818,62 @@ the current rate, so that entry's tradeoff cannot be settled until this is
 fixed. **This is a prerequisite for that work**, not a side quest — and it is
 almost certainly worth more than the bidi correctness it was gathered for.
 
-**Note on the editor question it was gathered for.** At 64 us/char the answer
+**Note on the editor question it was gathered for.** At 29 us/char the answer
 was trivially "cache it" — but that was an artefact of the bug, not a real
 finding, so the ratio was re-taken after the fix. Shaping a whole line against
 shaping only the ~200 characters that fit on screen:
 
 | line length | whole | visible window | ratio |
 |---:|---:|---:|---:|
-| 200 | 295.2 us | 297.1 us | 1.0x |
-| 1,000 | 1,497 us | 296.7 us | 5.0x |
-| 5,000 | 7,916 us | 314.2 us | 25.2x |
-| 20,000 | 31,659 us | 294.1 us | 107.6x |
+| 200 | 155.7 us | 155.0 us | 1.0x |
+| 1,000 | 753.4 us | 154.4 us | 4.9x |
+| 5,000 | 4,079.7 us | 154.0 us | 26.5x |
+| 20,000 | 17,314.4 us | 153.0 us | 113x |
 
-(Re-taken after all three fixes. The shape of the answer is unchanged from the
-one-fix figures it replaces — 0.9x/6.0x/25.6x/124.7x — because both columns
-sped up together: the ratio is a property of the line lengths, not of how fast
-shaping is.)
+(The shape of the answer has not changed once across three re-takings —
+0.9x/6.0x/25.6x/124.7x after one fix, 1.0x/5.0x/25.2x/107.6x after three, and
+these — because both columns move together. The ratio is a property of the line
+lengths, not of how fast shaping is or of which statistic reports it.)
 
 **The answer did not flip: byte-slicing is still worth its complexity**, but
 the reason is now honest rather than a symptom. Below ~200 characters the
 window costs the same as the whole line, so slicing buys nothing and the
 simpler code is free. From ~1,000 characters up it is the difference between
-0.3 ms and 1.5 ms *per line*, and a 50-line screen of 1,000-character lines is
-75 ms whole against 15 ms sliced.
+0.15 ms and 0.75 ms *per line*, and a 50-line screen of 1,000-character lines
+is 38 ms whole against 7.7 ms sliced.
+
+**Shaping in pieces costs more than shaping whole** —
+`whole_line_against_one_run_per_token`, which measures what the editor's
+`draw_tokens` actually does (one shaped run *per syntax token*, each measured
+to place the next):
+
+| chars | whole | 5 pieces | 10 pieces | 20 pieces | 40 pieces |
+|---:|---:|---:|---:|---:|---:|
+| 80 | 64.4 us | 1.24x | 1.50x | 1.78x | 2.30x |
+| 200 | 154.5 us | 1.13x | 1.26x | 1.31x | 1.48x |
+| 1,000 | 749.9 us | 1.05x | 1.10x | 1.16x | 1.26x |
+
+Monotone in the number of pieces and decreasing in line length, which is the
+signature of a fixed per-shape cost: from the 200-vs-1,000 pair the marginal
+cost of a character is ~0.75 us and the fixed cost of a shaping ~3.6 us, so a
+line cut into *n* pieces pays that fixed cost *n* times. A 40-token line of
+80 characters — an ordinary line of code — costs **2.3x** what shaping it whole
+would.
+
+An earlier version of this table, measured under a concurrent build, said the
+opposite: that 40 pieces of a 200-character line cost 0.83x the whole. It was
+wrong, and it was the load, not a real inversion. The correct reading is the
+comfortable one: **shaping the line whole is both what bidi correctness
+requires and the cheaper thing**, so item 4 of
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL` costs nothing to adopt and pays for itself.
 
 **What this settles for the editor work.** Whole-line shaping is required by
 `TD-EDITOR-IS-NOT-BIDIRECTIONAL` items 3 and 4 regardless — once colour is a
 per-glyph attribute the renderer needs the whole line shaped anyway — so the
 question was never "slice or not", it was "is the whole-line cost bearable
-behind a cache". At 1.5 ms for a 1,000-character line and 0.3 ms for a typical
-one, **it is**: a cache keyed on document revision pays that once per edit
-rather than once per frame, and an edit is a human keystroke. That is item (b)
-of that entry, and it is now unblocked.
+behind a cache". At 0.75 ms for a 1,000-character line and 0.15 ms for a
+typical one, **it is**: a cache keyed on document revision pays that once per
+edit rather than once per frame, and an edit is a human keystroke. That is item
+(b) of that entry, and it is now unblocked — though see that entry for why (b)
+is not yet *urgent*: `apps/editor` has no frame loop, so nothing pays a
+per-frame shaping cost today.

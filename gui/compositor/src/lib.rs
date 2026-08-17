@@ -124,6 +124,22 @@ const DEFAULT_OPACITY: f32 = 1.0;
 /// window on the desktop.
 const MIN_WINDOW_WIDTH: u32 = 100;
 
+/// The frame interval implied by a refresh rate in Hz.
+///
+/// Zero means the display never reported one — an EDID-less panel, a headless
+/// target — and gets ~60 Hz rather than a division by zero. Written as
+/// `checked_div` so the zero case is handled *by the division*: the two call
+/// sites this replaces each guarded it separately and then disagreed about the
+/// answer, one saying `Duration::from_millis(16)` (62.5 Hz) and the other
+/// `Duration::from_micros(16_667)` (60 Hz). That is what a rule kept in two
+/// places does, and it is why the guard now lives with the operation.
+const fn frame_interval_for(refresh_rate: u32) -> Duration {
+    Duration::from_micros(match 1_000_000u64.checked_div(refresh_rate as u64) {
+        Some(interval) => interval,
+        None => 16_667,
+    })
+}
+
 /// Smallest client-area height the compositor will resize a window to. See
 /// [`MIN_WINDOW_WIDTH`].
 const MIN_WINDOW_HEIGHT: u32 = 50;
@@ -1581,12 +1597,8 @@ impl Display {
     }
 
     /// Get the frame interval for this display's refresh rate.
-    pub fn frame_interval(&self) -> Duration {
-        if self.refresh_rate == 0 {
-            Duration::from_millis(16) // Default to ~60fps
-        } else {
-            Duration::from_micros(1_000_000 / self.refresh_rate as u64)
-        }
+    pub const fn frame_interval(&self) -> Duration {
+        frame_interval_for(self.refresh_rate)
     }
 
     /// Get the display's bounding rectangle in virtual space.
@@ -2729,7 +2741,60 @@ impl RenderEngine {
         }
     }
 
-    /// Draw a line using Bresenham's algorithm.
+    /// The inclusive pixel bounds a line may land on: the framebuffer, narrowed
+    /// by the active clip rectangle. Deliberately *not* narrowed by the
+    /// framebuffer's own `frame_clip` — `blend_pixel` applies that per pixel,
+    /// and being conservative here only costs a few iterations that were being
+    /// spent anyway.
+    fn line_bounds(fb: &Framebuffer, clip: Option<&Rect>) -> (i64, i64, i64, i64) {
+        let (mut x_lo, mut y_lo) = (0i64, 0i64);
+        let mut x_hi = i64::from(fb.width).saturating_sub(1);
+        let mut y_hi = i64::from(fb.height).saturating_sub(1);
+        if let Some(c) = clip {
+            x_lo = x_lo.max(i64::from(c.x));
+            y_lo = y_lo.max(i64::from(c.y));
+            x_hi = x_hi.min(i64::from(c.x).saturating_add(i64::from(c.width)).saturating_sub(1));
+            y_hi = y_hi.min(i64::from(c.y).saturating_add(i64::from(c.height)).saturating_sub(1));
+        }
+        (x_lo, x_hi, y_lo, y_hi)
+    }
+
+    /// Blend one line pixel, honouring the clip stack. Coordinates are `i64`
+    /// because the caller works in that width; anything outside `u32` is off
+    /// every framebuffer and is dropped here.
+    fn plot_line_pixel(fb: &mut Framebuffer, x: i64, y: i64, clip: Option<&Rect>, c: u32, o: f32) {
+        let (Ok(px), Ok(py)) = (u32::try_from(x), u32::try_from(y)) else {
+            return;
+        };
+        if clip.is_some_and(|r| !r.contains(x as i32, y as i32)) {
+            return;
+        }
+        fb.blend_pixel(px, py, c, o);
+    }
+
+    /// Draw a line using Bresenham's algorithm, clipped along its major axis.
+    ///
+    /// The endpoints arrive from a client's [`RenderCommand::Line`] and are not
+    /// the compositor's to trust. The previous loop stepped one pixel at a time
+    /// from `(x1, y1)` all the way to `(x2, y2)` no matter where the screen
+    /// was, so a line spanning the coordinate space cost four *billion*
+    /// iterations of a display-server thread — a hang any client could ask for
+    /// — and it computed `x2 - x1`, `.abs()` and `2 * err` in `i32`, each of
+    /// which overflows on that same input (`(-2^31).abs()` panics outright).
+    ///
+    /// So the major-axis step range is intersected with the drawable area up
+    /// front, in `i64`, and only the surviving steps are walked — at most one
+    /// per framebuffer column or row. Every pixel the old code could actually
+    /// have made visible is still visited, in the same order and colour; the
+    /// dropped steps are exactly those whose `blend_pixel` was already a no-op.
+    /// `line_matches_the_unclipped_bresenham_walk` pins that equivalence
+    /// against a transcription of the old loop.
+    ///
+    /// The minor axis keeps Bresenham's incremental form, but is *seeded* at
+    /// the first surviving step from the closed form
+    /// `round(k · minor / major)` — computed once in `u128`, since `k · minor`
+    /// can reach 2^64 — so skipping to the visible part costs one division
+    /// rather than one iteration per skipped pixel.
     fn draw_line(
         &self,
         fb: &mut Framebuffer,
@@ -2741,40 +2806,68 @@ impl RenderEngine {
         opacity: f32,
     ) {
         let clip = self.clip_stack.current().copied();
+        let (x1, y1, x2, y2) = (i64::from(x1), i64::from(y1), i64::from(x2), i64::from(y2));
 
-        let dx = (x2 - x1).abs();
-        let dy = -(y2 - y1).abs();
-        let sx: i32 = if x1 < x2 { 1 } else { -1 };
-        let sy: i32 = if y1 < y2 { 1 } else { -1 };
-        let mut err = dx + dy;
+        let (adx, ady) = (x2.abs_diff(x1), y2.abs_diff(y1));
+        let steps = adx.max(ady);
+        if steps == 0 {
+            Self::plot_line_pixel(fb, x1, y1, clip.as_ref(), color, opacity);
+            return;
+        }
+        let sx: i64 = if x2 >= x1 { 1 } else { -1 };
+        let sy: i64 = if y2 >= y1 { 1 } else { -1 };
 
-        let mut cx = x1;
-        let mut cy = y1;
+        // Walk whichever axis moves faster; the other is derived from it.
+        let x_major = adx >= ady;
+        let (bx_lo, bx_hi, by_lo, by_hi) = Self::line_bounds(fb, clip.as_ref());
+        let (major_0, major_dir, minor_0, minor_dir, b_lo, b_hi) = if x_major {
+            (x1, sx, y1, sy, bx_lo, bx_hi)
+        } else {
+            (y1, sy, x1, sx, by_lo, by_hi)
+        };
 
-        loop {
-            // Plot pixel if within clip bounds.
-            if cx >= 0 && cy >= 0 {
-                let in_clip = match &clip {
-                    Some(c) => c.contains(cx, cy),
-                    None => true,
-                };
-                if in_clip {
-                    fb.blend_pixel(cx as u32, cy as u32, color, opacity);
-                }
-            }
+        // Steps whose major coordinate `major_0 + major_dir·k` lands in bounds.
+        // All four operands are within i32 range, so these differences are far
+        // inside i64 and the saturating forms are exact.
+        let (raw_lo, raw_hi) = if major_dir > 0 {
+            (b_lo.saturating_sub(major_0), b_hi.saturating_sub(major_0))
+        } else {
+            (major_0.saturating_sub(b_hi), major_0.saturating_sub(b_lo))
+        };
+        if raw_hi < 0 {
+            return;
+        }
+        let k_lo = raw_lo.max(0) as u64;
+        let k_hi = (raw_hi as u64).min(steps);
+        if k_lo > k_hi {
+            return;
+        }
 
-            if cx == x2 && cy == y2 {
-                break;
-            }
+        // minor(k) = floor((2·k·minor_len + major_len) / (2·major_len)), i.e.
+        // round-half-up of k·minor_len/major_len, which is what the error
+        // accumulator in the classic loop computes.
+        let (minor_len, major_len) = if x_major { (ady, adx) } else { (adx, ady) };
+        let two_major = u128::from(major_len).saturating_mul(2);
+        let num = u128::from(k_lo)
+            .saturating_mul(2)
+            .saturating_mul(u128::from(minor_len))
+            .saturating_add(u128::from(major_len));
+        let mut q = (num / two_major) as u64;
+        let mut rem = (num % two_major) as u64;
+        // `2·minor_len <= 2·major_len`, so a step can push `rem` past
+        // `two_major` at most once — no inner loop is needed.
+        let (step, wrap) = (minor_len.saturating_mul(2), two_major as u64);
 
-            let e2 = 2 * err;
-            if e2 >= dy {
-                err += dy;
-                cx += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                cy += sy;
+        for k in k_lo..=k_hi {
+            let major = major_0.saturating_add(major_dir.saturating_mul(k as i64));
+            let minor = minor_0.saturating_add(minor_dir.saturating_mul(q as i64));
+            let (px, py) = if x_major { (major, minor) } else { (minor, major) };
+            Self::plot_line_pixel(fb, px, py, clip.as_ref(), color, opacity);
+
+            rem = rem.saturating_add(step);
+            if rem >= wrap {
+                rem = rem.saturating_sub(wrap);
+                q = q.saturating_add(1);
             }
         }
     }
@@ -2929,11 +3022,7 @@ impl Compositor {
     pub fn new(width: u32, height: u32, refresh_rate: u32) -> CompositorResult<Self> {
         let framebuffer = Framebuffer::new(width, height)?;
         let display_manager = DisplayManager::new(width, height, refresh_rate);
-        let frame_interval = Duration::from_micros(if refresh_rate == 0 {
-            16_667
-        } else {
-            1_000_000 / refresh_rate as u64
-        });
+        let frame_interval = frame_interval_for(refresh_rate);
 
         Ok(Self {
             windows: Vec::new(),
@@ -4947,7 +5036,18 @@ impl Compositor {
 // Tests
 // ---------------------------------------------------------------------------
 
+// The five defensive lints the workspace turns on are for production code:
+// a test that indexes a fixed-size fixture, or unwraps a value it just
+// constructed, is *asserting*, and rewriting that assertion as a `let else`
+// only hides which line failed. CLAUDE.md's lint policy says as much.
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 mod tests {
     use super::*;
 
@@ -5603,11 +5703,114 @@ mod tests {
         assert_eq!(comp.detect_border_drag(&win, x, y), None);
     }
 
+    /// The line rasteriser exactly as it stood before it was clipped and
+    /// widened to `i64` — the reference the new one must agree with.
+    ///
+    /// Only called with endpoints small enough that the original could not
+    /// overflow, which is the whole domain on which it had a defined answer.
+    ///
+    /// Deliberately a character-for-character transcription — do not tidy the
+    /// arithmetic here. Its value as a reference is that it *is* the old code;
+    /// an improved reference would prove nothing about what shipped.
+    fn unclipped_bresenham(x1: i32, y1: i32, x2: i32, y2: i32) -> Vec<(i32, i32)> {
+        let dx = (x2 - x1).abs();
+        let dy = -(y2 - y1).abs();
+        let sx: i32 = if x1 < x2 { 1 } else { -1 };
+        let sy: i32 = if y1 < y2 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let (mut cx, mut cy) = (x1, y1);
+        let mut out = Vec::new();
+        loop {
+            out.push((cx, cy));
+            if cx == x2 && cy == y2 {
+                return out;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                cx += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                cy += sy;
+            }
+        }
+    }
+
+    #[test]
+    fn line_matches_the_unclipped_bresenham_walk() {
+        // Clipping a line to the screen is only allowed to drop pixels that
+        // were invisible anyway. Every endpoint pair in a grid that fits
+        // entirely on the framebuffer must therefore light exactly the pixels
+        // the original loop did — every octant, both diagonals, both axes,
+        // and the degenerate single-point case.
+        let engine = RenderEngine::new();
+        for x1 in 0..7i32 {
+            for y1 in 0..7i32 {
+                for x2 in 0..7i32 {
+                    for y2 in 0..7i32 {
+                        let mut fb = Framebuffer::new(7, 7).expect("framebuffer");
+                        fb.clear(0xFF_00_00_00);
+                        engine.draw_line(&mut fb, x1, y1, x2, y2, 0xFF_FF_FF_FF, 1.0);
+
+                        let mut want = vec![vec![false; 7]; 7];
+                        for (px, py) in unclipped_bresenham(x1, y1, x2, y2) {
+                            if let Some(row) = want.get_mut(py as usize) {
+                                if let Some(cell) = row.get_mut(px as usize) {
+                                    *cell = true;
+                                }
+                            }
+                        }
+                        for py in 0..7u32 {
+                            for px in 0..7u32 {
+                                let lit = fb.get_pixel(px, py) == Some(0xFF_FF_FF_FF);
+                                let expect = want[py as usize][px as usize];
+                                assert_eq!(
+                                    lit, expect,
+                                    "({x1},{y1})->({x2},{y2}) at pixel ({px},{py})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_across_the_whole_coordinate_space_neither_hangs_nor_overflows() {
+        // A client can send any f32 endpoints it likes; these are what they
+        // saturate to. The old loop needed 2^32 iterations to reach the screen
+        // and panicked in `.abs()` before it got there.
+        let engine = RenderEngine::new();
+        let mut fb = Framebuffer::new(64, 64).expect("framebuffer");
+        let far = [
+            (i32::MIN, i32::MIN, i32::MAX, i32::MAX),
+            (i32::MIN, 5, i32::MAX, 6),
+            (i32::MAX, i32::MIN, i32::MIN, i32::MAX),
+            (i32::MIN, i32::MAX, 32, 32),
+            // Wholly off-screen: must draw nothing rather than walk there.
+            (-9000, -9000, -8000, -8000),
+        ];
+        for (x1, y1, x2, y2) in far {
+            fb.clear(0xFF_00_00_00);
+            engine.draw_line(&mut fb, x1, y1, x2, y2, 0xFF_FF_FF_FF, 1.0);
+        }
+        // The last case crosses no framebuffer pixel at all.
+        assert!(
+            (0..64).all(|y| (0..64).all(|x| fb.get_pixel(x, y) == Some(0xFF_00_00_00))),
+            "an off-screen line painted something"
+        );
+    }
+
     /// Start a border drag on `id` at `(x, y)` and move the pointer by
     /// `(dx, dy)`, as the user would.
     fn drag_border(comp: &mut Compositor, id: WindowId, x: i32, y: i32, dx: i32, dy: i32) {
         comp.handle_mouse_button(MouseButton::Left, true, x, y);
-        assert!(comp.drag.is_some(), "no drag started at ({x}, {y})");
+        let Some(drag) = comp.drag.as_ref() else {
+            panic!("no drag started at ({x}, {y})");
+        };
+        assert_eq!(drag.window_id, id, "the drag grabbed the wrong window");
         comp.handle_mouse_move(x.saturating_add(dx), y.saturating_add(dy));
     }
 

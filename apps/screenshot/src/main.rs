@@ -2224,9 +2224,8 @@ mod tests {
     ///
     /// This does **not** verify that `write_bmp` routes through `safeio`:
     /// `fs::write` leaves no litter either, so this test passes with the
-    /// non-atomic write restored (checked by injection). The truncate-then-fail
-    /// guarantee is `safeio`'s and is tested there. See `known-issues.md`
-    /// "safeio adoption is not enforced by any test" for the gap.
+    /// non-atomic write restored (checked by injection). That is
+    /// `a_save_goes_through_safeio`'s job.
     #[test]
     fn a_save_leaves_no_temporary_files_behind() {
         let dir = temp_dir("litter");
@@ -2247,6 +2246,41 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(after, vec!["shot.bmp".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A screenshot is written through `safeio`, not `std::fs::write`.
+    ///
+    /// The distinction is invisible in the result — both leave the same bytes
+    /// at the same path — and only shows up when the write is interrupted,
+    /// which no portable test can stage. So the routing itself is what gets
+    /// asserted, via `safeio`'s `audit` counters. Without this, swapping
+    /// `write_bmp` back to `fs::write` leaves every other test in this file
+    /// green, which is exactly what an earlier injection found.
+    ///
+    /// A 4K capture is ~33 MB, so a save that dies part-way is a realistic
+    /// failure here rather than a theoretical one: with `fs::write` it would
+    /// leave the user with neither the new screenshot nor the one already on
+    /// disk, because `fs::write` empties the target before it writes.
+    ///
+    /// The counters are process-global and tests run in parallel, so this
+    /// compares a before and after reading rather than an absolute, and
+    /// asserts `>=` on the increment — another test's save may land in
+    /// between.
+    #[test]
+    fn a_save_goes_through_safeio() {
+        let dir = temp_dir("routing");
+        let path = dir.join("shot.bmp");
+
+        let before = safeio::writes_performed();
+        write_bmp(&path, 4, 4, &[0xFF00_00FFu32; 16]).expect("save");
+        let after = safeio::writes_performed();
+
+        assert!(
+            after > before,
+            "the save did not go through safeio (writes_performed stayed at {before}) \
+             -- write_bmp must not use std::fs::write"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

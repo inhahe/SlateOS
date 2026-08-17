@@ -28168,7 +28168,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 5 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 6 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28370,6 +28370,45 @@ and at most one more), and a digit reaching getopt at all produces
 Within the word, `b` is both a unit and a ×512 multiplier, applied in two
 different places: `tail -b` is 5120 *bytes* (the default scaled), `tail -2b` is
 1024 (the digits handed to `xstrtoumax` with `"b"` as the suffix list).
+
+`cut` is the sixth (`scripts/cut-diff.sh`: 238 passed, 0 differed, 3 differ on
+purpose). Its parser was not merely missing options — its *data structure* could
+not express the answer, which is the trap worth carrying forward:
+
+- **A hand-written parser can be wrong in the shape of what it stores, not just
+  in what it accepts.** Shipped `cut` kept the selection as a `Vec` of expanded
+  indices, so `cut -f2-` — every field from the second on — parsed to the single
+  index 2, and `cut -b1-` printed one byte. No amount of adding options fixes
+  that; the list has to be a list of *ranges* with an open-ended marker
+  (`u64::MAX` here, as upstream uses `SIZE_MAX`). Before converting a utility,
+  check that the representation can hold what the grammar can say.
+- **Ranges that *overlap* merge; ranges that merely *touch* do not.** `-b1-2,3-4`
+  and `-b1-2,2-4` select the same four bytes and are not the same selection:
+  with `--output-delimiter=.` the first prints `ab.cd` and the second `abcd`.
+  The delimiter goes between *ranges*, not between bytes, so the merge rule is
+  observable. Nothing in `cut --help` hints at this and no black-box probe
+  suggests looking for it; it came out of reading `set-fields.c`. The
+  complement (`--complement`) has the mirror rule — it must not emit an empty
+  gap between two touching ranges.
+- **`-c` selects bytes.** GNU 9.4 falls `--characters` straight through to
+  `--bytes`, so `cut -c1` on a two-byte character prints half of it. The only
+  thing `-c` changes is the wording of the diagnostics (`invalid byte/character
+  position` rather than `invalid field value`), which is per-mode and has three
+  distinct spellings. `-n` — documented as "do not split multi-byte characters"
+  — is accepted and does nothing at all, including where it would matter.
+- **Post-loop cross-checks have an order, and the order is observable.**
+  `cut -b1 -d: -s` reports the delimiter, not the suppression, because upstream
+  tests them in that sequence; `cut -d: -s` with no list at all reports the
+  missing list first. A conversion that validates as it parses gets a different
+  sentence from the same command line. Port the checks where upstream put them —
+  after the option loop, in upstream's order.
+
+`cut`'s reading loop is a port of C's `getc`/`ungetc`/`getndelim2` rather than
+anything `BufRead` offers, because the one-byte lookahead is load-bearing in two
+places: `-d $'\n'` (where the delimiter *is* the terminator, and a trailing
+newline must end the input rather than open another field) and the
+`buffer_first_field` fork, where whether field 1 is selected decides which of
+two code paths runs. `Input` in `cut.rs` is that shape.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 

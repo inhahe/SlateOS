@@ -1915,7 +1915,48 @@ QEMU_START_EPOCH=$(date +%s)
 # nvme controller.  A bare `-drive` would be auto-assigned to the q35 AHCI bus
 # and change which disk is which, which is the sort of thing that turns a
 # coverage improvement into a mysterious rootfs failure.
+#
+# --- The three NICs ---------------------------------------------------------
+#
+# Until now the boot test attached no NIC at all, and got one anyway: with no
+# -netdev/-nic/-net on the command line QEMU silently creates a default NIC,
+# which on q35 is an e1000e (8086:10d3).  So e1000.rs was tested by accident,
+# and rtl8139.rs and virtio/net.rs printed "no device" on every boot and had
+# never executed a single line past their PCI scan.
+#
+# All three are now named explicitly, each on its own user-mode netdev.  Being
+# explicit is the point: the implicit default is a QEMU policy that changes by
+# machine type and by version, so a test that depends on it is a test that
+# reports on QEMU as much as on us.  `e1000e` is named rather than `e1000`
+# because 8086:10d3 is what the default produced, so this keeps the device the
+# e1000 driver has actually been running against rather than quietly swapping
+# it for an 82540EM (8086:100e).
+#
+# Distinct MACs are required, not cosmetic: `net::interface::init` takes the
+# MAC of whichever NIC it selects, and two NICs answering to the same address
+# on one user-net segment would make ARP results depend on arrival order.
+#
+# What this actually tests is the transmit datapath.  Each of the three
+# drivers now sends one inert frame in its self-test (addressed to itself,
+# with the IEEE 802 local-experimental EtherType 0x88B5) and waits for the
+# hardware to hand the descriptor back -- e1000's DD bit, the RTL8139's OWN
+# bit, virtio's used ring.  That needs no peer on the wire and proves what no
+# register read-back can: that the ring lives where the device was told, that
+# the addresses programmed into it are physical, and that the doorbell write
+# reached the right register.
+#
+# Note that adding virtio-net changes which NIC the *stack* uses:
+# `net::send_frame` and `net::interface::init` both prefer virtio-net, then
+# e1000, then rtl8139.  That is a deliberate consequence -- it puts the virtio
+# path under the existing DHCP/ARP/ICMP tests, while e1000 and rtl8139 keep
+# their own direct datapath coverage regardless of which one is primary.
 "$QEMU" \
+    -netdev user,id=net0 \
+    -device e1000e,netdev=net0,mac=52:54:00:12:34:56 \
+    -netdev user,id=net1 \
+    -device rtl8139,netdev=net1,mac=52:54:00:12:34:57 \
+    -netdev user,id=net2 \
+    -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58 \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
     -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \
     -device virtio-blk-pci,drive=swap-disk \

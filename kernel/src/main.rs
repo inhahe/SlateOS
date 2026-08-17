@@ -5347,6 +5347,13 @@ extern "C" fn kernel_main() -> ! {
     // Realtek RTL8139 NIC self-test.
     rtl8139::self_test();
 
+    // Virtio-net self-test.  Sited with the other two NICs rather than among
+    // the virtio devices below, because all three now transmit a frame and
+    // their datapath results are worth reading as one block.
+    if let Err(e) = virtio::net::self_test() {
+        serial_println!("[virtio-net] Self-test failed: {e:?} (non-fatal)");
+    }
+
     // Intel HD Audio self-test.
     if let Err(e) = hda::self_test() {
         serial_println!("[hda] Self-test failed: {:?} (non-fatal)", e);

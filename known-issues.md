@@ -28168,7 +28168,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 12 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 13 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28694,6 +28694,69 @@ line has no analogue. The parallel-mode companion — `opened_stdin &&
 have_read_stdin` → `paste: standard input is closed` — *is* reproduced, guarded
 by a `#[cfg(unix)]` file-descriptor check that can never fire on the Windows
 host this harness runs on.
+
+### Progress (appended 2026-08-17, `comm`)
+
+`comm` is the thirteenth (`scripts/comm-diff.sh`: 195 passed, 0 differed, 7
+differ on purpose — **zero differences on the harness's first run**; 61 differ
+when pointed at MSYS2's `comm`, which is the harness proving it still
+discriminates). The shipped version had no `--total`, no `--output-delimiter`,
+no `-z`, no order checking at all, took `--check-order` and `--` as filenames,
+and read its input as UTF-8 text. Five things worth carrying forward:
+
+- **The locale decides what the program *computes*, not just how it words a
+  complaint — so this harness runs under `C` end to end.** Its twelve siblings
+  run under `C.UTF-8` and drop to `C` only for the gnulib-quoted diagnostics
+  (B-Q2). `comm` cannot: `order = hard_LC_COLLATE ? xmemcoll (…) : memcmp2 (…)`,
+  and `hard_locale` is false for exactly `C` and `POSIX`. Under any other locale
+  GNU pairs lines by `strcoll`, where case can be secondary and two different
+  byte strings can compare *equal*. Ours compares bytes always. Under `C` that
+  is GNU's rule and the agreement is by construction; under `C.UTF-8` it would
+  have been a coincidence of codepoint order matching byte order, and a harness
+  that ran there would have been certifying the coincidence. A closing section
+  re-runs five ASCII comparison cases under `C.UTF-8` to *bound* the claim
+  rather than hide it; the divergence itself is filed against the same
+  collation entry as the `oils` funmap listing.
+- **The default order check is not "warn on descent" — it is armed by something
+  else entirely.** `check_order` fires only when
+  `check != DISABLED && (check == ENABLED || seen_unpairable)`. So `comm D D`
+  over a file that is thoroughly out of order is *silent and exits 0*: every
+  line pairs, nothing ever sets `seen_unpairable`, and the descent is never
+  looked at. Add `--check-order` and the same command line becomes a fatal error
+  after one line of output. That pair of rows is in the harness precisely
+  because an implementation written from the option's *name* passes every other
+  order-checking test and fails these two.
+- **The three columns are made of separators, not of padding.** `writeline`
+  writes zero separators before a column-1 line, one before column 2 *if
+  column 1 is shown*, and two before column 3 *counting only the shown columns*.
+  So `-1` does not blank a column, it removes a tab from every remaining line —
+  which is why stdout is compared through `od -An -c` and why all ten
+  suppression spellings are separate rows.
+- **`--output-delimiter=` is a NUL, not nothing.** `col_sep` keeps pointing at
+  `""` while `col_sep_len = *optarg ? strlen (optarg) : 1` forces the length to
+  1, so each boundary emits one zero byte. Repeating the option is allowed only
+  with an *identical* argument, and the comparison is against the argument **as
+  typed** — which is why `Settings` stores the raw bytes and derives the
+  effective separator, rather than storing the separator and losing the
+  distinction between `=` and `=\0`.
+- **Upstream's four-buffer-per-file rotation collapses to two owned lines, and
+  the one behavioural difference is provably invisible.** `lba[2][4]` +
+  `alt[2][3]` exist so the EOF path can re-check the last two lines; ours keeps
+  `prev` and `prev2`. After exactly one line has been read upstream's "two back"
+  *aliases* that same line, so its re-check compares a line with itself and
+  stays silent — where ours skips the re-check because `prev2` is `None`. Same
+  silence, reached two ways. The argument is written out on `Column::prev2` so
+  the next reader does not have to reconstruct it from the C.
+
+One asymmetry is deliberately *not* reproduced. `comm - -` merges one stream
+against itself — well defined, and both sides get the output right — but GNU
+then closes both files, and both are `stdin`, so the second `fclose` runs on an
+already-closed stream. That is undefined behaviour; on glibc it sets the error
+indicator and `close_stdout` reports `comm: -: Bad file descriptor` and exits 1.
+Reproducing the diagnostic would mean reproducing a double free, so the case is
+an xfail in the harness with the reasoning attached, alongside the two host
+xfails (a directory operand, which a Windows `File::open` refuses outright) and
+the four `--help`/`--version` ones.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 

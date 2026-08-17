@@ -160,9 +160,10 @@ impl BtrfsFs {
             let reader = TreeReader::new(src.as_ref(), &map, nodesize);
             let key = Key::new(FS_TREE_OBJECTID, ROOT_ITEM_KEY, 0);
             let path = reader.search(sb.root, Some(sb.generation), &key)?;
-            let found = path.current_key().ok().filter(|k| {
-                k.objectid == FS_TREE_OBJECTID && k.item_type == ROOT_ITEM_KEY
-            });
+            let found = path
+                .current_key()
+                .ok()
+                .filter(|k| k.objectid == FS_TREE_OBJECTID && k.item_type == ROOT_ITEM_KEY);
             if found.is_none() {
                 return Err(KernelError::NotFound);
             }
@@ -340,7 +341,13 @@ impl BtrfsFs {
     /// written. Both must read as zeroes, and starting from zeroes means
     /// neither needs a special case — only extents that actually hold data
     /// write into the buffer.
-    fn read_range(&self, ino: u64, inode: &InodeItem, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    fn read_range(
+        &self,
+        ino: u64,
+        inode: &InodeItem,
+        offset: u64,
+        len: usize,
+    ) -> KernelResult<Vec<u8>> {
         if offset >= inode.size || len == 0 {
             return Ok(Vec::new());
         }
@@ -350,7 +357,9 @@ impl BtrfsFs {
             .min(avail);
         let want_usize = usize::try_from(want).map_err(|_| KernelError::FileTooLarge)?;
         let mut out = vec![0u8; want_usize];
-        let end = offset.checked_add(want).ok_or(KernelError::InvalidArgument)?;
+        let end = offset
+            .checked_add(want)
+            .ok_or(KernelError::InvalidArgument)?;
 
         let reader = self.reader()?;
         let (root, generation) = self.fs_tree();
@@ -437,17 +446,23 @@ impl BtrfsFs {
             .map_err(|_| KernelError::InvalidArgument)?;
         let skip = copy_start.saturating_sub(file_off);
         let dst_end = dst_off.checked_add(n).ok_or(KernelError::InvalidArgument)?;
-        let dst = out.get_mut(dst_off..dst_end).ok_or(KernelError::InternalError)?;
+        let dst = out
+            .get_mut(dst_off..dst_end)
+            .ok_or(KernelError::InternalError)?;
 
         match extent {
             FileExtent::Inline { .. } => {
                 let data = inline.ok_or(KernelError::InternalError)?;
                 let skip_usize = usize::try_from(skip).map_err(|_| KernelError::InvalidArgument)?;
-                let src_end = skip_usize.checked_add(n).ok_or(KernelError::InvalidArgument)?;
+                let src_end = skip_usize
+                    .checked_add(n)
+                    .ok_or(KernelError::InvalidArgument)?;
                 // An inline extent's stored bytes may be shorter than
                 // `ram_bytes` only if the item is truncated, which is
                 // corruption rather than an implicit tail of zeroes.
-                let src = data.get(skip_usize..src_end).ok_or(KernelError::InvalidArgument)?;
+                let src = data
+                    .get(skip_usize..src_end)
+                    .ok_or(KernelError::InvalidArgument)?;
                 dst.copy_from_slice(src);
             }
             FileExtent::Regular {

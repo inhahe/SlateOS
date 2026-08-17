@@ -226,7 +226,9 @@ pub fn parse_attributes(region: &[u8]) -> KernelResult<Vec<Attribute>> {
         if length == 0 || length % 8 != 0 {
             return Err(KernelError::CorruptedData);
         }
-        let end = offset.checked_add(length).ok_or(KernelError::CorruptedData)?;
+        let end = offset
+            .checked_add(length)
+            .ok_or(KernelError::CorruptedData)?;
         if end > region.len() {
             return Err(KernelError::CorruptedData);
         }
@@ -351,7 +353,8 @@ pub fn decode_runlist(data: &[u8], start_vcn: u64) -> KernelResult<Vec<DataRun>>
         }
 
         let len_start = offset.checked_add(1).ok_or(KernelError::CorruptedData)?;
-        let length = read_unsigned_le(data, len_start, len_size).ok_or(KernelError::CorruptedData)?;
+        let length =
+            read_unsigned_le(data, len_start, len_size).ok_or(KernelError::CorruptedData)?;
         if length == 0 {
             return Err(KernelError::CorruptedData);
         }
@@ -368,7 +371,9 @@ pub fn decode_runlist(data: &[u8], start_vcn: u64) -> KernelResult<Vec<DataRun>>
         } else {
             let delta =
                 read_signed_le(data, off_start, off_size).ok_or(KernelError::CorruptedData)?;
-            let abs = prev_lcn.checked_add(delta).ok_or(KernelError::CorruptedData)?;
+            let abs = prev_lcn
+                .checked_add(delta)
+                .ok_or(KernelError::CorruptedData)?;
             if abs < 0 {
                 return Err(KernelError::CorruptedData);
             }
@@ -462,9 +467,13 @@ impl StandardInformation {
     pub fn parse(value: &[u8]) -> KernelResult<Self> {
         Ok(Self {
             created_ns: filetime_to_unix_ns(u64_at(value, 0x00).ok_or(KernelError::CorruptedData)?),
-            modified_ns: filetime_to_unix_ns(u64_at(value, 0x08).ok_or(KernelError::CorruptedData)?),
+            modified_ns: filetime_to_unix_ns(
+                u64_at(value, 0x08).ok_or(KernelError::CorruptedData)?,
+            ),
             changed_ns: filetime_to_unix_ns(u64_at(value, 0x10).ok_or(KernelError::CorruptedData)?),
-            accessed_ns: filetime_to_unix_ns(u64_at(value, 0x18).ok_or(KernelError::CorruptedData)?),
+            accessed_ns: filetime_to_unix_ns(
+                u64_at(value, 0x18).ok_or(KernelError::CorruptedData)?,
+            ),
             dos_flags: u32_at(value, 0x20).ok_or(KernelError::CorruptedData)?,
         })
     }
@@ -569,8 +578,7 @@ impl FileNameAttr {
         let data_size = u64_at(value, 0x30).ok_or(KernelError::CorruptedData)?;
         let dos_flags = u32_at(value, 0x38).ok_or(KernelError::CorruptedData)?;
         let name_len = usize::from(u8_at(value, 0x40).ok_or(KernelError::CorruptedData)?);
-        let namespace =
-            NameSpace::from_raw(u8_at(value, 0x41).ok_or(KernelError::CorruptedData)?);
+        let namespace = NameSpace::from_raw(u8_at(value, 0x41).ok_or(KernelError::CorruptedData)?);
         let name =
             utf16le_at(value, FILE_NAME_HEADER_LEN, name_len).ok_or(KernelError::CorruptedData)?;
 
@@ -633,9 +641,8 @@ pub fn parse_attribute_list(value: &[u8]) -> KernelResult<Vec<AttributeListEntry
             break;
         }
 
-        let entry_len = usize::from(
-            u16_at(value, offset.saturating_add(4)).ok_or(KernelError::CorruptedData)?,
-        );
+        let entry_len =
+            usize::from(u16_at(value, offset.saturating_add(4)).ok_or(KernelError::CorruptedData)?);
         if entry_len < 0x18 {
             return Err(KernelError::CorruptedData);
         }

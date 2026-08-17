@@ -279,7 +279,9 @@ impl Inode {
     /// Byte offset of `i_addr[n]` within the inode block.
     fn addr_slot_off(&self, n: u32) -> KernelResult<usize> {
         let extra = usize::from(self.extra_isize);
-        let base = I_ADDR_OFF.checked_add(extra).ok_or(KernelError::InternalError)?;
+        let base = I_ADDR_OFF
+            .checked_add(extra)
+            .ok_or(KernelError::InternalError)?;
         let idx = usize::try_from(n).map_err(|_| KernelError::InternalError)?;
         base.checked_add(idx.checked_mul(4).ok_or(KernelError::InternalError)?)
             .ok_or(KernelError::InternalError)
@@ -561,7 +563,12 @@ pub fn resolve_block(nat: &Nat<'_>, inode: &Inode, block: u64) -> KernelResult<u
 /// Read file block `block` of `inode`, zero-filling holes.
 ///
 /// Always returns exactly [`BLOCK_SIZE`] bytes.
-pub fn read_file_block(nat: &Nat<'_>, sb: &SuperBlock, inode: &Inode, block: u64) -> KernelResult<Vec<u8>> {
+pub fn read_file_block(
+    nat: &Nat<'_>,
+    sb: &SuperBlock,
+    inode: &Inode,
+    block: u64,
+) -> KernelResult<Vec<u8>> {
     let addr = resolve_block(nat, inode, block)?;
     if addr == NULL_ADDR || addr == NEW_ADDR {
         return Ok(vec![0u8; BLOCK_SIZE]);

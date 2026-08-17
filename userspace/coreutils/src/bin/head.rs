@@ -26,7 +26,7 @@
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
-use coreutils::quote::quoteaf;
+use coreutils::quote::{quote, quoteaf};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
@@ -473,12 +473,17 @@ const SUFFIXES: &[(u8, u32)] = &[
 ///
 /// A number that does not parse, or one that overflows `u64`.
 fn parse_count(text: &[u8], unit: Unit) -> Result<u64, getopt::Error> {
-    let invalid = || HEAD.usage(format!("{}: {}", unit.invalid_number(), quoteaf(text)));
+    // `quote`, not `quoteaf`: gnulib's `xdectoumax` echoes the offending text
+    // with `quote()`, whose escaping is C's rather than the shell's. The two
+    // agree on everything without a quote or a backslash in it, which is why
+    // this was invisible until a value was passed one — `head -n "a'b"` must
+    // say `'a\'b'` and not `"a'b"`.
+    let invalid = || HEAD.usage(format!("{}: {}", unit.invalid_number(), quote(text)));
     let overflow = || {
         HEAD.usage(format!(
             "{}: {}: Value too large for defined data type",
             unit.invalid_number(),
-            quoteaf(text)
+            quote(text)
         ))
     };
 

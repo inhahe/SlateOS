@@ -225,6 +225,29 @@ pub struct OperationPlan {
 }
 
 impl OperationPlan {
+    /// A fingerprint of this plan, used to tell whether a journal found in the
+    /// destination directory belongs to it.
+    ///
+    /// Not a cryptographic hash and does not need to be: it exists to catch a
+    /// journal left behind by a *different* operation, not one forged by an
+    /// attacker. It covers what makes two plans different work — the operation
+    /// and every source/destination pair, in order — so a plan that resumes
+    /// really is the plan that was interrupted.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", self.operation).hash(&mut hasher);
+        self.actions.len().hash(&mut hasher);
+        for action in &self.actions {
+            action.index.hash(&mut hasher);
+            action.src.hash(&mut hasher);
+            action.dest.hash(&mut hasher);
+            action.is_dir.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// Build a plan for copying `sources` into `dest_dir`.
     pub fn plan_copy(
         sources: &[PathBuf],
@@ -381,43 +404,98 @@ impl OperationPlan {
 /// Crash-safe journal that records completed actions so an interrupted
 /// operation can be resumed without re-doing work.
 ///
-/// The journal is a simple line-oriented text file stored at
-/// `<dest_dir>/.fileop-journal`. Each line records the index of a completed
-/// action. On resume the journal is read and already-completed indices are
-/// skipped.
+/// The journal is a line-oriented text file stored at
+/// `<dest_dir>/.fileop-journal`. The first line is `plan <id>`; each later line
+/// is the index of a finished action, with ` skip` appended when the action
+/// finished *without* transferring anything. On resume the journal is read and
+/// already-finished indices are skipped.
+///
+/// # Why the header exists
+///
+/// The journal lives in the destination directory and its indices are
+/// plan-relative, so without an identity check a journal left behind by one
+/// operation would be read as progress for the *next* operation into the same
+/// directory — and every action whose index collided would be silently treated
+/// as already done, i.e. never copied. A journal that cannot be attributed to
+/// the plan being run is therefore discarded rather than trusted.
+///
+/// # Why the skip flag exists
+///
+/// A Move deletes each source after its copy succeeds. An action skipped by
+/// conflict policy did *not* copy anything — the file at the destination is
+/// some pre-existing file, not this source — so deleting the source would
+/// destroy the only copy of the user's data.
 pub struct OperationJournal {
     path: PathBuf,
+    /// Action index -> whether it actually transferred data.
     completed: HashMap<u32, bool>,
 }
 
 impl OperationJournal {
-    /// Create or open a journal at `dir/.fileop-journal`.
-    pub fn open(dir: &Path) -> io::Result<Self> {
+    /// Create or open the journal for `plan_id` at `dir/.fileop-journal`.
+    ///
+    /// A journal belonging to a different plan — or one with no header, which
+    /// is the same thing as far as trust goes — is deleted and started over.
+    pub fn open(dir: &Path, plan_id: u64) -> io::Result<Self> {
         let path = dir.join(".fileop-journal");
         let mut completed = HashMap::new();
 
         if path.exists() {
             let file = fs::File::open(&path)?;
             let reader = io::BufReader::new(file);
-            for line in reader.lines() {
-                let line = line?;
-                if let Ok(idx) = line.trim().parse::<u32>() {
-                    completed.insert(idx, true);
+            let mut lines = reader.lines();
+            let header = lines.next().transpose()?.unwrap_or_default();
+            if header.strip_prefix("plan ").and_then(|id| id.trim().parse::<u64>().ok())
+                == Some(plan_id)
+            {
+                for line in lines {
+                    let line = line?;
+                    let (idx, transferred) = match line.trim().strip_suffix(" skip") {
+                        Some(rest) => (rest.trim(), false),
+                        None => (line.trim(), true),
+                    };
+                    if let Ok(idx) = idx.parse::<u32>() {
+                        completed.insert(idx, transferred);
+                    }
                 }
+            } else {
+                // Not ours. Removing it is safe: the worst case is redoing
+                // work, whereas trusting it means skipping work that was never
+                // done.
+                fs::remove_file(&path)?;
             }
+        }
+
+        if !path.exists() {
+            let mut file = fs::File::create(&path)?;
+            writeln!(file, "plan {plan_id}")?;
+            file.flush()?;
         }
 
         Ok(Self { path, completed })
     }
 
-    /// Record that action `index` is complete.
+    /// Record that action `index` finished and transferred its data.
     pub fn mark_complete(&mut self, index: u32) -> io::Result<()> {
-        self.completed.insert(index, true);
+        self.record(index, true)
+    }
+
+    /// Record that action `index` finished *without* transferring anything.
+    pub fn mark_skipped(&mut self, index: u32) -> io::Result<()> {
+        self.record(index, false)
+    }
+
+    fn record(&mut self, index: u32, transferred: bool) -> io::Result<()> {
+        self.completed.insert(index, transferred);
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        writeln!(file, "{index}")?;
+        if transferred {
+            writeln!(file, "{index}")?;
+        } else {
+            writeln!(file, "{index} skip")?;
+        }
         file.flush()?;
         Ok(())
     }
@@ -425,6 +503,14 @@ impl OperationJournal {
     /// Check whether action `index` was already completed (in a prior run).
     pub fn is_complete(&self, index: u32) -> bool {
         self.completed.contains_key(&index)
+    }
+
+    /// Whether action `index` actually copied its data to the destination.
+    ///
+    /// The question a Move must ask before deleting a source. `false` for an
+    /// action that was skipped, that failed, or that has not run.
+    pub fn transferred(&self, index: u32) -> bool {
+        self.completed.get(&index) == Some(&true)
     }
 
     /// Remove the journal file (called on successful completion).
@@ -613,7 +699,8 @@ impl OperationExecutor {
         self.progress.state = OperationState::Running;
 
         let dest_dir = self.journal_dir();
-        let journal = match OperationJournal::open(&dest_dir) {
+        let plan_id = self.plan.id();
+        let journal = match OperationJournal::open(&dest_dir, plan_id) {
             Ok(j) => j,
             Err(e) => {
                 self.progress.state = OperationState::Failed;
@@ -693,6 +780,8 @@ impl OperationExecutor {
 
             match result {
                 Ok(ActionOutcome::Done) => {
+                    // A journal write that fails only costs redone work on a
+                    // resume, which is why it does not abort the operation.
                     let _ = journal.mark_complete(action.index);
                     if !action.is_dir {
                         self.progress.completed_files += 1;
@@ -701,7 +790,9 @@ impl OperationExecutor {
                     }
                 }
                 Ok(ActionOutcome::Skipped) => {
-                    let _ = journal.mark_complete(action.index);
+                    // Recorded as a *skip*: nothing was copied, so a Move must
+                    // not delete this source. See `OperationJournal`.
+                    let _ = journal.mark_skipped(action.index);
                     self.skipped += 1;
                     if !action.is_dir {
                         self.progress.completed_files += 1;
@@ -742,9 +833,11 @@ impl OperationExecutor {
                                     FileOperation::Restore => self.execute_restore_action(action),
                                 };
                                 if let Ok(outcome) = retry {
-                                    let _ = journal.mark_complete(action.index);
                                     if matches!(outcome, ActionOutcome::Skipped) {
+                                        let _ = journal.mark_skipped(action.index);
                                         self.skipped += 1;
+                                    } else {
+                                        let _ = journal.mark_complete(action.index);
                                     }
                                     if !action.is_dir {
                                         self.progress.completed_files += 1;
@@ -771,19 +864,61 @@ impl OperationExecutor {
                 .push(FileOpEvent::Progress(self.progress.clone()));
         }
 
-        // For Move: after all copies succeed, delete sources.
+        // For Move: delete the sources whose data actually reached the
+        // destination.
+        //
+        // The condition is `journal.transferred(..)`, not "the operation did
+        // not fail". A Move is a copy followed by a delete, and the delete is
+        // only ever safe for an action whose copy *transferred data*. Three
+        // kinds of action reach this point having transferred nothing:
+        //
+        //   - skipped by conflict policy (`ConflictPolicy::Skip`, or
+        //     `OverwriteIfNewer` where the source was not newer) — the file
+        //     sitting at the destination is some pre-existing file, not this
+        //     source;
+        //   - failed and continued past under `ErrorPolicy::SkipAndContinue`;
+        //   - failed every retry under `ErrorPolicy::RetryN`.
+        //
+        // This used to delete all three, which destroyed the user's only copy
+        // of the data. Deleting only what was transferred degrades those cases
+        // to "the file stayed where it was", which is recoverable.
         if operation == FileOperation::Move && self.progress.state != OperationState::Failed {
+            // Whether anything was left behind. A source directory that is
+            // still non-empty is *expected* when something under it was left
+            // behind, and an anomaly worth reporting when nothing was.
+            let anything_left_behind = actions
+                .iter()
+                .any(|action| !action.is_dir && !journal.transferred(action.index));
+
             for action in &actions {
                 if action.is_dir {
                     // Directories are removed in reverse order (children first).
                     continue;
                 }
-                let _ = fs::remove_file(&action.src);
+                if !journal.transferred(action.index) {
+                    continue;
+                }
+                if let Err(e) = fs::remove_file(&action.src) {
+                    // A failed removal silently turned the Move into a Copy
+                    // before this was reported: the summary said "moved" while
+                    // the source was still there.
+                    self.report_move_cleanup_failure(&action.src, &e);
+                }
             }
             // Remove source directories in reverse order.
             for action in actions.iter().rev() {
-                if action.is_dir {
-                    let _ = fs::remove_dir(&action.src);
+                if !action.is_dir || !journal.transferred(action.index) {
+                    continue;
+                }
+                if let Err(e) = fs::remove_dir(&action.src) {
+                    // Leaving a directory behind because its contents were
+                    // left behind is a consequence already reported against
+                    // the files themselves; reporting it again would bury the
+                    // real error under one line per ancestor directory.
+                    if anything_left_behind && Self::dir_is_non_empty(&action.src) {
+                        continue;
+                    }
+                    self.report_move_cleanup_failure(&action.src, &e);
                 }
             }
         }
@@ -794,6 +929,32 @@ impl OperationExecutor {
         }
         if let Some(start) = self.started {
             self.progress.update_rates(start.elapsed());
+        }
+
+        // Clean up the journal on success — before the summary is built, so a
+        // failure to remove it is counted in it.
+        //
+        // A leftover journal is not cosmetic. Its action indices are relative
+        // to a *plan*, so the next operation writing into this same directory
+        // would read them as its own progress and treat every colliding index
+        // as already done — i.e. never copy those files, and report success.
+        // `OperationJournal::open` now discards a journal whose `plan` header
+        // does not match, which contains the damage, but a journal we cannot
+        // delete is still a symptom (a read-only or vanished destination) that
+        // the user needs to see rather than have swallowed.
+        if self.progress.state == OperationState::Completed {
+            let journal_path = journal.path().to_path_buf();
+            if let Err(e) = journal.remove() {
+                let message = format!("failed to remove operation journal: {e}");
+                self.events.push(FileOpEvent::Error {
+                    path: journal_path.clone(),
+                    error: message.clone(),
+                });
+                self.errors.push(FileOpError {
+                    path: journal_path,
+                    message,
+                });
+            }
         }
 
         let elapsed = self.started.map_or(Duration::ZERO, |s| s.elapsed());
@@ -811,11 +972,35 @@ impl OperationExecutor {
                 errors: self.errors.clone(),
             },
         });
+    }
 
-        // Clean up journal on success.
-        if self.progress.state == OperationState::Completed {
-            let _ = journal.remove();
-        }
+    /// Report a source that a Move copied but could not then remove.
+    ///
+    /// The copy succeeded, so this does not fail the operation — the user's
+    /// data is at the destination. What it must not do is stay quiet: an
+    /// unreported removal failure turns a Move into a Copy while the summary
+    /// still says the files were moved, and the user finds two copies later
+    /// with no record of which is which.
+    fn report_move_cleanup_failure(&mut self, src: &Path, error: &io::Error) {
+        let message = format!("moved, but the source could not be removed: {error}");
+        self.events.push(FileOpEvent::Error {
+            path: src.to_path_buf(),
+            error: message.clone(),
+        });
+        self.errors.push(FileOpError {
+            path: src.to_path_buf(),
+            message,
+        });
+    }
+
+    /// Whether `dir` still holds at least one entry.
+    ///
+    /// A directory that cannot be read is treated as non-empty: the caller
+    /// uses this only to decide whether a `remove_dir` failure is the expected
+    /// consequence of something being left behind, and guessing "empty" there
+    /// would report a spurious error.
+    fn dir_is_non_empty(dir: &Path) -> bool {
+        fs::read_dir(dir).map_or(true, |mut entries| entries.next().is_some())
     }
 
     fn execute_copy_action(
@@ -942,7 +1127,12 @@ impl OperationExecutor {
         );
         let tmp_path = parent.join(tmp_name);
 
-        fs::copy(src, &tmp_path)?;
+        // A copy that fails part-way still leaves a partial temporary behind,
+        // so it is cleaned up on the error path too.
+        if let Err(e) = fs::copy(src, &tmp_path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
+        }
 
         // Attempt to preserve modification timestamp.
         if let Ok(src_meta) = fs::metadata(src)
@@ -954,7 +1144,17 @@ impl OperationExecutor {
         }
 
         // Atomic rename into final position.
-        fs::rename(&tmp_path, dest)?;
+        //
+        // On failure the temporary must go: it is a full-size copy of the
+        // source sitting in the user's destination directory under a name they
+        // never asked for, and leaving it behind meant a failed copy of a large
+        // file silently consumed its own size in disk space. Its removal is
+        // best-effort — if it cannot be removed the original error is still the
+        // one worth reporting.
+        if let Err(e) = fs::rename(&tmp_path, dest) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
+        }
         Ok(())
     }
 }
@@ -1623,7 +1823,7 @@ mod tests {
         let dir = temp_dir("journal_rw");
 
         {
-            let mut j = OperationJournal::open(&dir).unwrap();
+            let mut j = OperationJournal::open(&dir, 42).unwrap();
             assert_eq!(j.completed_count(), 0);
             j.mark_complete(0).unwrap();
             j.mark_complete(3).unwrap();
@@ -1631,7 +1831,7 @@ mod tests {
         }
 
         // Re-open and verify.
-        let j2 = OperationJournal::open(&dir).unwrap();
+        let j2 = OperationJournal::open(&dir, 42).unwrap();
         assert_eq!(j2.completed_count(), 3);
         assert!(j2.is_complete(0));
         assert!(j2.is_complete(3));
@@ -1642,18 +1842,68 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A finished action records *whether it transferred data*, because that
+    /// is the question a Move has to ask before deleting a source.
     #[test]
-    fn journal_resume_skips_completed() {
-        let src_dir = temp_dir("journal_resume_src");
-        let dst_dir = temp_dir("journal_resume_dst");
+    fn journal_distinguishes_a_skip_from_a_copy() {
+        let dir = temp_dir("journal_skip_flag");
+
+        {
+            let mut j = OperationJournal::open(&dir, 7).unwrap();
+            j.mark_complete(0).unwrap();
+            j.mark_skipped(1).unwrap();
+        }
+
+        let j2 = OperationJournal::open(&dir, 7).unwrap();
+        // Both count as "done" — neither should be re-run on a resume.
+        assert!(j2.is_complete(0));
+        assert!(j2.is_complete(1));
+        // Only one of them put the data at the destination.
+        assert!(j2.transferred(0));
+        assert!(!j2.transferred(1));
+        // An action that never ran transferred nothing either.
+        assert!(!j2.transferred(2));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A journal left behind by a *different* plan must be discarded, not read
+    /// as this plan's progress. Its indices are plan-relative, so honouring it
+    /// would mark unrelated actions as already done and silently never copy
+    /// them.
+    #[test]
+    fn a_journal_from_another_plan_is_discarded() {
+        let dir = temp_dir("journal_stale");
+
+        {
+            let mut j = OperationJournal::open(&dir, 1).unwrap();
+            j.mark_complete(0).unwrap();
+            j.mark_complete(1).unwrap();
+        }
+
+        let j2 = OperationJournal::open(&dir, 2).unwrap();
+        assert_eq!(j2.completed_count(), 0);
+        assert!(!j2.is_complete(0));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The end-to-end form of the above: a stale journal in the destination
+    /// directory must not cause files to be silently left uncopied.
+    #[test]
+    fn a_stale_journal_does_not_swallow_a_copy() {
+        let src_dir = temp_dir("journal_stale_e2e_src");
+        let dst_dir = temp_dir("journal_stale_e2e_dst");
 
         write_file(&src_dir.join("a.txt"), "aaa");
         write_file(&src_dir.join("b.txt"), "bbb");
 
-        // Pre-write a journal marking action 0 (the first file) as done.
+        // A journal from some earlier, unrelated operation into this directory.
         {
-            let mut j = OperationJournal::open(&dst_dir).unwrap();
+            let mut j = OperationJournal::open(&dst_dir, 0xDEAD_BEEF).unwrap();
             j.mark_complete(0).unwrap();
+            j.mark_complete(1).unwrap();
+            j.mark_complete(2).unwrap();
         }
 
         let plan = OperationPlan::plan_copy(
@@ -1665,6 +1915,39 @@ mod tests {
         .unwrap();
 
         let mut executor = OperationExecutor::new(plan);
+        executor.execute();
+
+        assert!(dst_dir.join("a.txt").exists(), "a.txt was never copied");
+        assert!(dst_dir.join("b.txt").exists(), "b.txt was never copied");
+
+        let _ = fs::remove_dir_all(&src_dir);
+        let _ = fs::remove_dir_all(&dst_dir);
+    }
+
+    #[test]
+    fn journal_resume_skips_completed() {
+        let src_dir = temp_dir("journal_resume_src");
+        let dst_dir = temp_dir("journal_resume_dst");
+
+        write_file(&src_dir.join("a.txt"), "aaa");
+        write_file(&src_dir.join("b.txt"), "bbb");
+
+        let plan = OperationPlan::plan_copy(
+            &[src_dir.join("a.txt"), src_dir.join("b.txt")],
+            &dst_dir,
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+
+        // Pre-write a journal for *this* plan marking action 0 (a.txt) as done,
+        // as an interrupted earlier run would have left behind.
+        {
+            let mut j = OperationJournal::open(&dst_dir, plan.id()).unwrap();
+            j.mark_complete(0).unwrap();
+        }
+
+        let mut executor = OperationExecutor::new(plan);
         let events = executor.execute();
 
         // Should complete without error.
@@ -1672,6 +1955,13 @@ mod tests {
             .iter()
             .find(|e| matches!(e, FileOpEvent::Complete { .. }));
         assert!(complete.is_some());
+
+        // The resumed run re-did only the unfinished action.
+        assert!(
+            !dst_dir.join("a.txt").exists(),
+            "action 0 was journalled as done and should not have been redone"
+        );
+        assert!(dst_dir.join("b.txt").exists());
 
         let _ = fs::remove_dir_all(&src_dir);
         let _ = fs::remove_dir_all(&dst_dir);
@@ -1681,7 +1971,7 @@ mod tests {
     fn journal_remove_on_completion() {
         let dir = temp_dir("journal_remove");
 
-        let mut j = OperationJournal::open(&dir).unwrap();
+        let mut j = OperationJournal::open(&dir, 99).unwrap();
         j.mark_complete(0).unwrap();
         let jpath = j.path().to_path_buf();
         assert!(jpath.exists());
@@ -1690,6 +1980,203 @@ mod tests {
         assert!(!jpath.exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ----------------------------------------------------------------
+    // Move: a source is deleted only when its data reached the destination
+    // ----------------------------------------------------------------
+
+    /// A Move whose copy was skipped by conflict policy must leave the source
+    /// alone. Deleting it would destroy the only copy of that data — the file
+    /// at the destination is a *different*, pre-existing file.
+    #[test]
+    fn a_skipped_move_does_not_delete_the_source() {
+        let src_dir = temp_dir("move_skip_src");
+        let dst_dir = temp_dir("move_skip_dst");
+
+        let src = src_dir.join("a.txt");
+        write_file(&src, "the original");
+        // A different file already occupies the destination name.
+        write_file(&dst_dir.join("a.txt"), "something else");
+
+        let plan = OperationPlan::plan_move(
+            std::slice::from_ref(&src),
+            &dst_dir,
+            ConflictPolicy::Skip,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .unwrap();
+
+        let mut executor = OperationExecutor::new(plan);
+        executor.execute();
+
+        assert!(
+            src.exists(),
+            "the source was deleted even though nothing was copied"
+        );
+        assert_eq!(fs::read_to_string(&src).unwrap(), "the original");
+        // And the destination still holds what was already there.
+        assert_eq!(
+            fs::read_to_string(dst_dir.join("a.txt")).unwrap(),
+            "something else"
+        );
+
+        let _ = fs::remove_dir_all(&src_dir);
+        let _ = fs::remove_dir_all(&dst_dir);
+    }
+
+    /// The same guarantee when the copy *failed* rather than being skipped:
+    /// `SkipAndContinue` keeps the operation running, but a source whose copy
+    /// failed has not been transferred anywhere.
+    #[test]
+    fn a_failed_move_does_not_delete_the_source() {
+        let src_dir = temp_dir("move_fail_src");
+        let dst_dir = temp_dir("move_fail_dst");
+
+        let good = src_dir.join("good.txt");
+        let bad = src_dir.join("bad.txt");
+        write_file(&good, "kept");
+        write_file(&bad, "must survive");
+
+        // Make the copy of `bad.txt` fail while leaving its source intact: put
+        // a *directory* at the destination path. The final rename of the
+        // temporary onto it fails on every platform, and — unlike removing the
+        // source or fiddling with permissions — it is portable and leaves the
+        // source exactly where the deletion loop would find it.
+        fs::create_dir_all(dst_dir.join("bad.txt")).unwrap();
+
+        let plan = OperationPlan::plan_move(
+            &[good.clone(), bad.clone()],
+            &dst_dir,
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .unwrap();
+
+        let mut executor = OperationExecutor::new(plan);
+        let events = executor.execute();
+
+        // The action that succeeded was moved...
+        assert!(!good.exists(), "the successful move left its source behind");
+        assert!(dst_dir.join("good.txt").exists());
+        // ...and the one that failed kept its source. This is the data-loss
+        // regression: the deletion phase used to run over *every* planned
+        // action regardless of whether its copy had transferred anything.
+        assert!(
+            bad.exists(),
+            "the source of a failed copy was deleted — its only copy is gone"
+        );
+        assert_eq!(fs::read_to_string(&bad).unwrap(), "must survive");
+
+        // The failure is reported, not swallowed.
+        let summary = events
+            .iter()
+            .find_map(|e| match e {
+                FileOpEvent::Complete { summary } => Some(summary),
+                _ => None,
+            })
+            .expect("no completion summary");
+        assert!(summary.failed >= 1, "the failed copy was not reported");
+
+        // And the temporary the failed copy created was cleaned up rather than
+        // left in the user's destination directory.
+        let leftovers: Vec<_> = fs::read_dir(&dst_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".fileop-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporaries left behind: {leftovers:?}");
+
+        let _ = fs::remove_dir_all(&src_dir);
+        let _ = fs::remove_dir_all(&dst_dir);
+    }
+
+    /// A Move that copies successfully still deletes its source — the fix must
+    /// not have turned every Move into a Copy.
+    #[test]
+    fn a_successful_move_still_deletes_the_source() {
+        let src_dir = temp_dir("move_ok_src");
+        let dst_dir = temp_dir("move_ok_dst");
+
+        let src = src_dir.join("a.txt");
+        write_file(&src, "moving day");
+
+        let plan = OperationPlan::plan_move(
+            std::slice::from_ref(&src),
+            &dst_dir,
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+
+        let mut executor = OperationExecutor::new(plan);
+        executor.execute();
+
+        assert!(!src.exists(), "the source survived a successful move");
+        assert_eq!(
+            fs::read_to_string(dst_dir.join("a.txt")).unwrap(),
+            "moving day"
+        );
+
+        let _ = fs::remove_dir_all(&src_dir);
+        let _ = fs::remove_dir_all(&dst_dir);
+    }
+
+    /// Moving a directory whose contents were partly skipped must leave the
+    /// skipped file *and* the directory holding it, and must not report the
+    /// non-empty directory as a separate failure.
+    #[test]
+    fn a_partly_skipped_directory_move_keeps_what_it_did_not_copy() {
+        let root = temp_dir("move_dir_partial_src");
+        let dst_dir = temp_dir("move_dir_partial_dst");
+
+        let src_dir = root.join("folder");
+        fs::create_dir_all(&src_dir).unwrap();
+        write_file(&src_dir.join("copied.txt"), "new");
+        write_file(&src_dir.join("skipped.txt"), "the original");
+
+        // Pre-place a conflicting file so `skipped.txt` is skipped.
+        let dst_folder = dst_dir.join("folder");
+        fs::create_dir_all(&dst_folder).unwrap();
+        write_file(&dst_folder.join("skipped.txt"), "something else");
+
+        let plan = OperationPlan::plan_move(
+            std::slice::from_ref(&src_dir),
+            &dst_dir,
+            ConflictPolicy::Skip,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .unwrap();
+
+        let mut executor = OperationExecutor::new(plan);
+        let events = executor.execute();
+
+        assert!(
+            src_dir.join("skipped.txt").exists(),
+            "the skipped file's source was deleted"
+        );
+        assert!(
+            src_dir.exists(),
+            "the source directory holding a skipped file was removed"
+        );
+        assert!(!src_dir.join("copied.txt").exists());
+
+        // The still-populated source directory is a consequence of the skip,
+        // already reported against the file, so it must not add an error.
+        let summary = events.iter().find_map(|e| match e {
+            FileOpEvent::Complete { summary } => Some(summary),
+            _ => None,
+        });
+        let summary = summary.expect("no completion summary");
+        assert_eq!(
+            summary.failed, 0,
+            "a directory left non-empty by a skip was reported as a failure: {:?}",
+            summary.errors
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     // ----------------------------------------------------------------

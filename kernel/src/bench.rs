@@ -3310,6 +3310,8 @@ pub fn run_all() {
     bench_crypto_hmac_sha256();
     bench_crypto_chacha20_1k();
     bench_crypto_poly1305_1k();
+    bench_crypto_crc32c_4k();
+    bench_crypto_crc32_4k();
     bench_crypto_chacha20_poly1305_1k();
     bench_crypto_x25519();
     bench_crypto_ed25519_sign();
@@ -6454,6 +6456,71 @@ fn bench_crypto_poly1305_1k() {
         }
     );
     score("crypto_poly1305_1KiB", &result, 30000);
+}
+
+/// CRC32C (Castagnoli) over 4 KiB — ext4 and Btrfs metadata verification.
+///
+/// 4 KiB because that is the unit this actually runs on: every ext4 metadata
+/// block and every Btrfs tree node is checksummed in full before a single
+/// field of it is trusted, so this cost is paid on the read path of every
+/// directory lookup and every file open, not just at mount.
+///
+/// This benchmark exists because `crypto.rs` had no CRC coverage at all while
+/// three filesystems depend on it. The `crypto_*` benchmarks around it measure
+/// ChaCha20, Poly1305 and the SHA family — none of which share a line of code
+/// with the CRC tables. So the boot harness's "perf-critical file changed,
+/// benchmark it" advisory could fire on a CRC change and be discharged by a
+/// suite that never executed one, which is worse than having no advisory: it
+/// reports the question answered.
+fn bench_crypto_crc32c_4k() {
+    use crate::crypto;
+
+    let data = [0x5Au8; 4096];
+    let result = run("crypto_crc32c_4KiB", 1000, || {
+        let _ = core::hint::black_box(crypto::crc32c(core::hint::black_box(&data)));
+    });
+
+    serial_println!(
+        "[bench]   crypto_crc32c_4KiB: min {}ns ({}cy)  [{} MiB/s]",
+        result.min_ns,
+        result.min_cycles,
+        if result.min_ns > 0 {
+            1_000_000_000u64 / result.min_ns * 4096 / (1024 * 1024)
+        } else {
+            0
+        }
+    );
+    score("crypto_crc32c_4KiB", &result, 60000);
+}
+
+/// CRC-32 (ISO 3309) over 4 KiB — F2FS metadata verification.
+///
+/// A separate benchmark from `crypto_crc32c_4KiB` rather than an assumed
+/// equivalent: the two share their loop shape but not their table, and F2FS
+/// reaches the polynomial through `crc32_raw` (no inversion on either end)
+/// while ext4 and Btrfs go through the conventionally-framed `crc32c`. Timing
+/// one and inferring the other would hide a regression confined to whichever
+/// table fell out of cache, which is precisely the failure a shared-lookup
+/// consolidation can introduce.
+fn bench_crypto_crc32_4k() {
+    use crate::crypto;
+
+    let data = [0xA5u8; 4096];
+    let result = run("crypto_crc32_4KiB", 1000, || {
+        let _ = core::hint::black_box(crypto::crc32(core::hint::black_box(&data)));
+    });
+
+    serial_println!(
+        "[bench]   crypto_crc32_4KiB: min {}ns ({}cy)  [{} MiB/s]",
+        result.min_ns,
+        result.min_cycles,
+        if result.min_ns > 0 {
+            1_000_000_000u64 / result.min_ns * 4096 / (1024 * 1024)
+        } else {
+            0
+        }
+    );
+    score("crypto_crc32_4KiB", &result, 60000);
 }
 
 /// ChaCha20-Poly1305 AEAD encrypt of 1 KiB (TLS 1.3 / SSH record layer).

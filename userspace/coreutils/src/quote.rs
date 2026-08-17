@@ -21,35 +21,46 @@
 //! whether that is one name with a space or the start of a sentence, and a
 //! trailing space or a control character is invisible entirely.
 //!
-//! ## The two styles, and which to use
+//! ## The three styles, and which to use
 //!
-//! GNU coreutils has exactly two, and the difference is visible enough that
+//! GNU coreutils has exactly three, and the difference is visible enough that
 //! matching it matters — a test or a script that reads our diagnostic next to
 //! GNU's should see the same bytes.
 //!
 //! | Function | GNU's name | Used for | `abc` | `a b` | `a'b` |
 //! |---|---|---|---|---|---|
-//! | [`quotef`] | `quotef` | **file names** | `abc` | `'a b'` | `"a'b"` |
+//! | [`quotef`] | `quotef` | a name that **ends the message** | `abc` | `'a b'` | `"a'b"` |
+//! | [`quoteaf`] | `quoteaf` | a name **inside a sentence** | `'abc'` | `'a b'` | `"a'b"` |
 //! | [`quote`] | `quote` | **option arguments**, and anything else | `'abc'` | `'a b'` | `'a\'b'` |
 //!
-//! [`quotef`] quotes only when a shell would need it, so the common case — an
-//! ordinary name — reads as itself, and what it produces can be pasted back
-//! into a shell to name the same file. [`quote`] always quotes, and escapes in
-//! C rather than shell style; it is for text that was never a shell word to
-//! begin with, where the quotes are punctuation marking where the quoted thing
-//! starts and stops.
+//! The first two produce a shell word: what they print can be pasted back into
+//! a shell to name the same file. They differ only in whether an already-safe
+//! name keeps its quotes, and **which one to use is decided by the sentence,
+//! not by the utility**:
 //!
-//! Use [`quotef`] for a path and [`quote`] for everything else. That is the
-//! rule GNU follows and the reason `sort: cannot read: missing.txt` has no
-//! quotes while `sort: invalid argument 'bogus' for '--sort'` does.
+//! ```text
+//! wc:   missing.txt: No such file or directory                    <- quotef
+//! head: cannot open 'missing.txt' for reading: No such file ...   <- quoteaf
+//! ```
+//!
+//! A name that ends the message can be bare, because nothing follows it to run
+//! into; one with words after it cannot, because `cannot open missing files
+//! for reading` reads as a phrase rather than as a name. So the rule is: use
+//! [`quotef`] where the name is the last thing on the line before the `:
+//! reason`, [`quoteaf`] where anything follows it.
+//!
+//! [`quote`] always quotes, and escapes in C rather than shell style; it is for
+//! text that was never a shell word to begin with, where the quotes are
+//! punctuation marking where the quoted thing starts and stops. That is why
+//! `sort: invalid argument 'bogus' for '--sort'` uses it.
 //!
 //! ## Where the rules come from
 //!
 //! Every table and every branch below was **measured**, not recalled: see
-//! `scripts/quote-probe.py`, which drives GNU `sort` over every byte in every
-//! position that turns out to matter and records what came out. The result is
-//! `tests/quotearg-gnu.txt`, 5557 rows, and `tests/quotearg.rs` asserts this
-//! module reproduces all of them.
+//! `scripts/quote-probe.py`, which drives GNU `sort` and `head` over every
+//! byte in every position that turns out to matter and records what came out.
+//! The result is `tests/quotearg-gnu.txt`, 8333 rows, and `tests/quotearg.rs`
+//! asserts this module reproduces all of them.
 //!
 //! That method is the whole point. Reading gnulib's `quotearg.c` and
 //! reimplementing what it appears to say produces something that looks right
@@ -171,7 +182,46 @@ pub fn quote(arg: &[u8]) -> String {
 /// ```
 #[must_use]
 pub fn quotef(name: &[u8]) -> String {
-    if !name.is_empty() && name.iter().enumerate().all(|(i, &b)| bare_ok(name, i, b)) {
+    render(name, true)
+}
+
+/// Render `name` the way GNU's `quoteaf()` does: the same shell-pasteable form
+/// as [`quotef`], except that the quotes are never left off.
+///
+/// The choice between this and [`quotef`] is made by the *shape of the
+/// sentence*, not by the utility. A name that ends the message can be bare,
+/// because nothing follows it to run into:
+///
+/// ```text
+/// wc: missing.txt: No such file or directory
+/// ```
+///
+/// A name embedded in a sentence cannot, because a bare one would blur into
+/// the words around it — `cannot open missing files for reading` reads as a
+/// phrase rather than as a name:
+///
+/// ```text
+/// head: cannot open 'missing.txt' for reading: No such file or directory
+/// ```
+///
+/// ```
+/// use coreutils::quote::quoteaf;
+/// assert_eq!(quoteaf(b"notes.txt"), "'notes.txt'");
+/// assert_eq!(quoteaf(b"my notes.txt"), "'my notes.txt'");
+/// assert_eq!(quoteaf(b"it's"), "\"it's\"");
+/// assert_eq!(quoteaf(b""), "''");
+/// ```
+#[must_use]
+pub fn quoteaf(name: &[u8]) -> String {
+    render(name, false)
+}
+
+/// The body of both shell-escaping styles. `allow_bare` is the whole
+/// difference between them: gnulib calls it "elide outer quotes", and it is a
+/// property of the sentence the name is going into, not of the name.
+fn render(name: &[u8], allow_bare: bool) -> String {
+    if allow_bare && !name.is_empty() && name.iter().enumerate().all(|(i, &b)| bare_ok(name, i, b))
+    {
         // Safe as it stands. This is the overwhelmingly common case and the
         // reason `quotef` exists rather than everything using `quote`.
         return name.iter().map(|&b| b as char).collect();
@@ -298,6 +348,18 @@ pub fn quotef_os(s: &std::ffi::OsStr) -> String {
     quotef(&os_bytes(s))
 }
 
+/// [`quoteaf`] for a path or any other `OsStr`.
+///
+/// ```
+/// use coreutils::quote::quoteaf_os;
+/// use std::ffi::OsStr;
+/// assert_eq!(quoteaf_os(OsStr::new("a.txt")), "'a.txt'");
+/// ```
+#[must_use]
+pub fn quoteaf_os(s: &std::ffi::OsStr) -> String {
+    quoteaf(&os_bytes(s))
+}
+
 /// [`quote`] for an `OsStr`.
 #[must_use]
 pub fn quote_os(s: &std::ffi::OsStr) -> String {
@@ -400,8 +462,30 @@ mod tests {
     }
 
     #[test]
-    fn the_empty_string_is_a_pair_of_quotes_in_both_styles() {
+    fn the_empty_string_is_a_pair_of_quotes_in_every_style() {
         assert_eq!(quotef(b""), "''");
+        assert_eq!(quoteaf(b""), "''");
         assert_eq!(quote(b""), "''");
+    }
+
+    #[test]
+    fn quoteaf_differs_from_quotef_only_where_quotef_would_go_bare() {
+        // The one case: a name that needs nothing.
+        assert_eq!(quotef(b"notes.txt"), "notes.txt");
+        assert_eq!(quoteaf(b"notes.txt"), "'notes.txt'");
+        // Everywhere else the two agree, because once a name needs quoting at
+        // all there is no "outer quote" left to elide.
+        for name in [
+            &b"a b"[..],
+            b"it's",
+            b"a\nb",
+            b"a'z$",
+            b"#a",
+            b"{",
+            b"a\x01'z",
+            b"",
+        ] {
+            assert_eq!(quotef(name), quoteaf(name), "{name:?}");
+        }
     }
 }

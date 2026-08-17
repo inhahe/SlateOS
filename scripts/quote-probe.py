@@ -10,12 +10,24 @@ Two GNU diagnostics are used as instruments, each of which renders its
 argument with one of the two styles and nothing else:
 
     sort -- NAME        ->  "sort: cannot read: <quotef NAME>: ..."
+    head -- NAME        ->  "head: cannot open <quoteaf NAME> for reading: ..."
     sort --sort=WORD    ->  "sort: invalid argument <quote WORD> for ..."
 
-`quotef` is gnulib's `shell_escape_quoting_style` (quote only when the shell
-would need it) and is what a file name goes through; `quote` is
-`locale_quoting_style` (always quote, C escapes) and is what an option
-argument goes through.
+Both instruments only ever *open* their argument, which matters: the corpus
+holds `.` and `..`, and an instrument that walks a directory instead of
+opening it -- `du` renders `quoteaf` too, and was tried first -- spends the
+run traversing the tree it was started in rather than measuring anything.
+The probe also runs in a fresh empty directory for the same reason: it should
+not be able to read, or be slowed by, whatever happens to be around it.
+
+The three are gnulib's `shell_escape_quoting_style` (quote only when the shell
+would need it), `shell_escape_always_quoting_style` (the same, but never bare)
+and `locale_quoting_style` (always quote, C escapes). Which a utility uses is
+decided by the shape of the sentence, not by the utility: a name that ends the
+message, as in `wc: NAME: No such file`, gets `quotef`, while one embedded in a
+sentence, as in `rm: cannot remove 'NAME': ...`, gets `quoteaf`, because there
+a bare name would run into the words around it. Option arguments and other
+non-file text get `quote`.
 """
 
 import os
@@ -23,6 +35,7 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 
 ENV = dict(os.environ, LC_ALL="C")
 INVALID = re.compile(rb"^sort: (?:invalid|ambiguous) argument ")
@@ -47,6 +60,32 @@ def quotef(name: bytes) -> bytes | None:
     # The tail is ": <strerror>"; a rendered name never ends in one, because
     # every byte that could forge one is either escaped or quoted.
     return line[m.end():].rsplit(b": ", 1)[0]
+
+
+OPEN_FAILED = re.compile(rb"^head: cannot open ")
+READ_FAILED = re.compile(rb"^head: error reading ")
+
+
+def quoteaf(name: bytes) -> bytes | None:
+    """How GNU renders `name` when the name sits inside a sentence.
+
+    `None` when `head` had nothing to complain about -- `-` is standard
+    input, which succeeds.
+    """
+    r = subprocess.run([b"head", b"--", name], capture_output=True, env=ENV,
+                       stdin=subprocess.DEVNULL)
+    line = r.stderr.split(b"\n")[0]
+    # A name that does not exist gets the first sentence, a directory the
+    # second; both render the name with `quoteaf`. `rsplit` takes the last
+    # occurrence, so a name that itself contains the suffix -- `a for
+    # reading: z` -- still splits in the right place.
+    m = OPEN_FAILED.match(line)
+    if m:
+        return line[m.end():].rsplit(b" for reading: ", 1)[0]
+    m = READ_FAILED.match(line)
+    if m:
+        return line[m.end():].rsplit(b": ", 1)[0]
+    return None
 
 
 def quote(arg: bytes) -> bytes | None:
@@ -97,6 +136,11 @@ def corpus() -> list[bytes]:
 
 def main() -> int:
     dest = sys.argv[1] if len(sys.argv) > 1 else "-"
+    if dest != "-":
+        dest = os.path.abspath(dest)
+    # Measure from an empty directory: the corpus contains `.` and `..`, and
+    # a name that happens to exist would be opened rather than reported.
+    os.chdir(tempfile.mkdtemp(prefix="quote-probe-"))
     lines = [
         "# GNU coreutils quoting, measured. Do not hand-edit.",
         "# Produced by scripts/quote-probe.py under:",
@@ -111,6 +155,7 @@ def main() -> int:
 
     for name in corpus():
         row("quotef", quotef, name)
+        row("quoteaf", quoteaf, name)
         row("quote", quote, name)
     # Every byte, in every position that has been observed to matter: alone,
     # leading, trailing and interior, and each of those again beside a single
@@ -121,6 +166,7 @@ def main() -> int:
             name = shape.replace(b"%c", bytes([b]))
             if b != 0x2F:
                 row("quotef", quotef, name)
+                row("quoteaf", quoteaf, name)
             row("quote", quote, name)
     text = "\n".join(lines) + "\n"
     if dest == "-":

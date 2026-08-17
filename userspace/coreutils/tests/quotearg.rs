@@ -1,10 +1,10 @@
-//! `quote` / `quotef` against GNU coreutils, row for row.
+//! `quote` / `quotef` / `quoteaf` against GNU coreutils, row for row.
 //!
 //! The expectations are not written by hand and are not derived from reading
-//! gnulib. They were *measured*: `scripts/quote-probe.py` runs GNU `sort`
-//! under `LC_ALL=C` over every byte in every position that matters, plus an
-//! adversarial and a random corpus, and records what GNU printed. This test
-//! replays that recording.
+//! gnulib. They were *measured*: `scripts/quote-probe.py` runs GNU `sort` and
+//! `head` under `LC_ALL=C` over every byte in every position that matters,
+//! plus an adversarial and a random corpus, and records what GNU printed.
+//! This test replays that recording.
 //!
 //! Recording rather than shelling out to GNU at test time is deliberate. The
 //! development host is Windows, where the only GNU coreutils available run
@@ -23,7 +23,7 @@
 //! A row that changes is a finding, not a nuisance: look at what moved before
 //! adjusting anything.
 
-use coreutils::quote::{quote, quotef};
+use coreutils::quote::{quote, quoteaf, quotef};
 
 const FIXTURE: &str = include_str!("quotearg-gnu.txt");
 
@@ -41,6 +41,7 @@ fn unhex(s: &str) -> Vec<u8> {
 #[test]
 fn matches_gnu_coreutils_row_for_row() {
     let mut checked = 0usize;
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut wrong = Vec::new();
     for (lineno, line) in FIXTURE.lines().enumerate() {
         if line.starts_with('#') || line.is_empty() {
@@ -55,9 +56,11 @@ fn matches_gnu_coreutils_row_for_row() {
         let got = match style {
             "quote" => quote(&input),
             "quotef" => quotef(&input),
+            "quoteaf" => quoteaf(&input),
             other => panic!("line {}: unknown style {other:?}", lineno + 1),
         };
         checked += 1;
+        *seen.entry(style).or_default() += 1;
         if got != want {
             if wrong.len() < 20 {
                 wrong.push(format!(
@@ -70,8 +73,19 @@ fn matches_gnu_coreutils_row_for_row() {
         }
     }
     // A fixture that silently shrank to nothing would let this pass while
-    // testing nothing at all.
-    assert!(checked > 5000, "fixture only had {checked} rows");
+    // testing nothing at all. The floor is a little under the real count
+    // (8333) so that adding a probe case is not also a test edit, while a
+    // fixture that lost a whole style still trips it.
+    assert!(checked > 8000, "fixture only had {checked} rows");
+    // Each style must be present: a dispatch arm that silently matched
+    // nothing would look exactly like a passing test.
+    for style in ["quote", "quotef", "quoteaf"] {
+        assert!(
+            *seen.get(style).unwrap_or(&0) > 500,
+            "fixture has only {:?} rows for {style}",
+            seen.get(style)
+        );
+    }
     assert!(
         wrong.is_empty(),
         "{} of {checked} rows differ from GNU:\n{}",

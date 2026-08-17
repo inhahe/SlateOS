@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use osfont::select::Query;
 pub use osfont::shape::Affinity;
+use osfont::shape::Hit;
 use osfont::system::{Family, FontCache, Weight};
 
 use crate::color::Color;
@@ -927,6 +928,92 @@ pub fn cursor_at_in(
     }
 }
 
+/// The cursor one step to the left of `at` on the *screen*, or `None` when
+/// there is nothing further left — the caller's cue to leave the field, wrap to
+/// the previous line, or do nothing.
+///
+/// This is what the left arrow key means, and it is not `byte - 1`. Byte order
+/// is the order the text is stored in; the arrow key is about the order it is
+/// drawn in, and the two part company the moment a line mixes directions. In
+/// `ab` followed by a right-to-left `HR` followed by `cd` — drawn `a b R H c d`
+/// — pressing left from the end visits the offsets 5, 4, 2, 3, 1, 0. The pair
+/// in the middle *increases* while the caret moves left, because crossing `R`
+/// leftward moves later in the string. Decrementing the offset instead walks 5,
+/// 4, 3, 2, 1, 0, which lands the caret on the far side of the right-to-left
+/// word on the first press and back on the second: it teleports rather than
+/// steps.
+///
+/// The returned affinity is not decoration. Where two directions meet, one gap
+/// on the screen has two byte offsets, and only the affinity says which of them
+/// this caret is. Store the whole cursor, not its `byte()`, or the next
+/// [`caret_x`] will draw it at the other end of the run.
+pub fn caret_left(
+    text: &str,
+    at: TextCursor,
+    size: f32,
+    weight: FontWeightHint,
+) -> Option<TextCursor> {
+    caret_left_in(text, at, size, weight, FontFamily::Ui)
+}
+
+/// The family-aware form of [`caret_left`].
+pub fn caret_left_in(
+    text: &str,
+    at: TextCursor,
+    size: f32,
+    weight: FontWeightHint,
+    family: FontFamily,
+) -> Option<TextCursor> {
+    with_font(size, weight, family, |font| {
+        font.shape(text).caret_left(
+            Hit {
+                offset: at.byte,
+                affinity: at.affinity,
+            },
+            text.len(),
+        )
+    })
+    .map(|hit| TextCursor {
+        byte: hit.offset,
+        affinity: hit.affinity,
+    })
+}
+
+/// The cursor one step to the right of `at` on the screen, or `None` at the
+/// right end. The mirror of [`caret_left`]; see it for why this is not
+/// `byte + 1`.
+pub fn caret_right(
+    text: &str,
+    at: TextCursor,
+    size: f32,
+    weight: FontWeightHint,
+) -> Option<TextCursor> {
+    caret_right_in(text, at, size, weight, FontFamily::Ui)
+}
+
+/// The family-aware form of [`caret_right`].
+pub fn caret_right_in(
+    text: &str,
+    at: TextCursor,
+    size: f32,
+    weight: FontWeightHint,
+    family: FontFamily,
+) -> Option<TextCursor> {
+    with_font(size, weight, family, |font| {
+        font.shape(text).caret_right(
+            Hit {
+                offset: at.byte,
+                affinity: at.affinity,
+            },
+            text.len(),
+        )
+    })
+    .map(|hit| TextCursor {
+        byte: hit.offset,
+        affinity: hit.affinity,
+    })
+}
+
 /// The character index in `text` nearest to `offset` pixels from its start.
 ///
 /// This is what a click on a line of text means: the caret goes to the closest
@@ -1189,6 +1276,160 @@ mod tests {
             );
             offset += 1.0;
         }
+    }
+
+    /// `ab` + two Hebrew letters + `cd`. The Hebrew runs the other way, so it
+    /// is drawn `a b <bet> <aleph> c d` — the two middle letters swap. The byte
+    /// offsets are `a`=0, `b`=1, aleph=2..4, bet=4..6, `c`=6, `d`=7, end 8.
+    ///
+    /// Nothing here depends on the host owning a Hebrew font: the direction is
+    /// a property of the characters, decided before a glyph is chosen, so a
+    /// machine that draws these as blank boxes still draws them in this order.
+    const MIXED: &str = "ab\u{05D0}\u{05D1}cd";
+
+    /// Walk the caret with the arrow key until it runs out, collecting where it
+    /// stopped and what it was drawn at. Bounded so a motion that fails to
+    /// terminate fails the test rather than the machine.
+    fn walk(text: &str, from: TextCursor, right: bool) -> Vec<(usize, f32)> {
+        let mut out = Vec::new();
+        let mut at = from;
+        for _ in 0..64 {
+            let step = if right {
+                caret_right(text, at, 16.0, FontWeightHint::Regular)
+            } else {
+                caret_left(text, at, 16.0, FontWeightHint::Regular)
+            };
+            let Some(next) = step else { return out };
+            out.push((
+                next.byte,
+                caret_x(text, next, 16.0, FontWeightHint::Regular),
+            ));
+            at = next;
+        }
+        panic!("caret motion did not terminate on {text:?}");
+    }
+
+    /// The bug this exists to fix, stated as the user sees it: pressing the
+    /// right arrow moves the caret rightwards *on the screen*, every press,
+    /// including across the direction boundary where the byte offsets go
+    /// backwards.
+    #[test]
+    fn the_right_arrow_always_moves_the_caret_rightwards() {
+        let stops = walk(MIXED, TextCursor::from(0), true);
+        assert_eq!(
+            stops.iter().map(|&(b, _)| b).collect::<Vec<_>>(),
+            vec![1, 2, 4, 2, 7, 8],
+            "the offsets the right arrow visits"
+        );
+        // 4 then 2: the offset *decreases* while the caret moves right. This is
+        // the assertion an `offset + 1` cursor cannot satisfy, and the reason
+        // the whole visual-order walk exists.
+        for pair in stops.windows(2) {
+            assert!(
+                pair[1].1 > pair[0].1,
+                "the right arrow moved leftwards: {stops:?}"
+            );
+        }
+    }
+
+    /// The mirror. Note the start: a caller holding only the text length has no
+    /// affinity to offer, and must still be able to walk back from the end.
+    #[test]
+    fn the_left_arrow_always_moves_the_caret_leftwards() {
+        let stops = walk(MIXED, TextCursor::from(MIXED.len()), false);
+        assert_eq!(
+            stops.iter().map(|&(b, _)| b).collect::<Vec<_>>(),
+            vec![7, 6, 4, 6, 1, 0],
+            "the offsets the left arrow visits"
+        );
+        for pair in stops.windows(2) {
+            assert!(
+                pair[1].1 < pair[0].1,
+                "the left arrow moved rightwards: {stops:?}"
+            );
+        }
+    }
+
+    /// A step and its reverse return to the same *place*. The byte offset may
+    /// come back as the other of the boundary's two names — where two
+    /// directions meet, one gap on the screen genuinely has two offsets — so
+    /// the pixel is what must round trip, and does.
+    #[test]
+    fn a_step_and_its_reverse_return_to_the_same_pixel() {
+        let mut at = TextCursor::from(0);
+        while let Some(right) = caret_right(MIXED, at, 16.0, FontWeightHint::Regular) {
+            let there = caret_x(MIXED, at, 16.0, FontWeightHint::Regular);
+            let back = caret_left(MIXED, right, 16.0, FontWeightHint::Regular)
+                .expect("a caret that stepped right can always step back");
+            let x = caret_x(MIXED, back, 16.0, FontWeightHint::Regular);
+            assert!(
+                (x - there).abs() < 0.001,
+                "stepped right from {there} and back to {x} (byte {} -> {})",
+                at.byte,
+                back.byte
+            );
+            at = right;
+        }
+    }
+
+    /// Motion reports running out rather than silently staying put, so a widget
+    /// can tell "the caret moved" from "the caret is already at the edge" and
+    /// hand the keypress on to whatever wraps lines or leaves the field.
+    #[test]
+    fn motion_stops_at_the_edges_and_says_so() {
+        assert!(caret_left(MIXED, TextCursor::from(0), 16.0, FontWeightHint::Regular).is_none());
+        assert!(
+            caret_right(
+                MIXED,
+                TextCursor::from(MIXED.len()),
+                16.0,
+                FontWeightHint::Regular
+            )
+            .is_none()
+        );
+        // Empty text has one caret slot and no cluster to cross.
+        assert!(caret_left("", TextCursor::from(0), 16.0, FontWeightHint::Regular).is_none());
+        assert!(caret_right("", TextCursor::from(0), 16.0, FontWeightHint::Regular).is_none());
+    }
+
+    /// On the text almost every widget actually holds, the arrow key is the
+    /// next character and nothing surprising happens. This is the case the old
+    /// `offset ± 1` got right, and which must keep working.
+    #[test]
+    fn on_one_direction_text_the_arrows_are_the_next_character() {
+        let text = "hello";
+        assert_eq!(
+            walk(text, TextCursor::from(0), true)
+                .iter()
+                .map(|&(b, _)| b)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            walk(text, TextCursor::from(text.len()), false)
+                .iter()
+                .map(|&(b, _)| b)
+                .collect::<Vec<_>>(),
+            vec![4, 3, 2, 1, 0]
+        );
+    }
+
+    /// A character wider than one byte is crossed whole. The old arithmetic
+    /// would have landed inside it.
+    #[test]
+    fn a_multi_byte_character_is_crossed_whole() {
+        let text = "aéb";
+        for &(b, _) in &walk(text, TextCursor::from(0), true) {
+            assert!(text.is_char_boundary(b), "byte {b} splits a character");
+        }
+        assert_eq!(
+            walk(text, TextCursor::from(0), true)
+                .iter()
+                .map(|&(b, _)| b)
+                .collect::<Vec<_>>(),
+            vec![1, 3, 4],
+            "é occupies bytes 1..3"
+        );
     }
 
     /// A byte offset alone still names a caret, because the default affinity is

@@ -746,6 +746,14 @@ pub fn init() {
         }
     }
 
+    // Probe for a legacy ATI display device and check its register map against
+    // the hardware. No backend is registered yet — this device is not driving
+    // the console, and the probe deliberately does not reprogram a CRTC it does
+    // not own. What it buys is the one thing a self-test cannot: confirmation
+    // from a real (or emulated) device that the offsets in `ati::regs` name the
+    // registers they claim to.
+    ati::probe_hardware();
+
     // Enable hotplug detection now that all backends are registered.
     hotplug::enable();
 

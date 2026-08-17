@@ -35,10 +35,12 @@
 //! - [`timing`] — the VESA DMT mode table and the full timing type the generic
 //!   [`super::mode::DrmMode`] does not carry.
 //! - [`tests`] — the boot-time self-test over both of the above.
-//!
-//! MMIO probing and the [`super::DrmBackend`] integration land on top of this
-//! layer, and are validated against QEMU's `ati-vga` rather than by assertion.
+//! - [`mmio`] — BAR mapping and register I/O. Impure by nature, so it is
+//!   validated by *running* it against QEMU's `ati-vga` rather than by
+//!   assertion. See that module's documentation for what that does and does
+//!   not establish.
 
+pub mod mmio;
 pub mod regs;
 pub mod tests;
 pub mod timing;
@@ -128,4 +130,39 @@ pub fn identify(vendor_id: u16, device_id: u16) -> Option<&'static AsicInfo> {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[ati] Running self-test...");
     tests::run()
+}
+
+/// Probe the PCI bus for a supported ATI display device and check its
+/// register map.
+///
+/// Called from [`super::init`]. Reads only — see [`mmio`] for why nothing here
+/// touches the CRTC.
+///
+/// Reports rather than propagates, because a machine without an ATI card is
+/// the overwhelmingly common case and is not a failure of anything. The
+/// distinction that matters is preserved in the log: "no device" and "device
+/// present but its registers disagree with the register map" say different
+/// things, and the second is a bug in [`regs`] that a silent skip would hide.
+pub fn probe_hardware() {
+    match mmio::probe() {
+        Ok(None) => {
+            serial_println!("[ati] No supported ATI display device present");
+        }
+        Ok(Some(dev)) => {
+            if let Err(e) = mmio::verify(&dev) {
+                serial_println!(
+                    "[ati] WARNING: register-map verification failed: {:?} — offsets in regs.rs are suspect",
+                    e
+                );
+            } else {
+                serial_println!(
+                    "[ati] {} register map verified against hardware",
+                    dev.info.name
+                );
+            }
+        }
+        Err(e) => {
+            serial_println!("[ati] WARNING: probe failed: {:?}", e);
+        }
+    }
 }

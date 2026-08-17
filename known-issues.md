@@ -30003,10 +30003,17 @@ structurally incapable of moving. That is why the edge count is now printed
 next to the class count -- and it is why the follow-up below matters more than
 the attribution this entry got wrong.
 
-**Follow-up, still open:** add a `lock_tracked_nested` benchmark that acquires a
-second lock while holding a first, so the per-nested-acquire cost is measured
-directly instead of being inferred from whichever unrelated benchmark happens
-to take nested locks.
+**Follow-up, now closed (2026-08-17):** `lock_tracked_nested` exists. It takes
+`TRACKED_B` while holding `TRACKED`, so `held.depth > 0` and `record_edge`
+actually runs inside the measurement; it is `track`ed into
+`bench/history.jsonl` and diffed run-over-run. Boot #21 measured **721ns for 2
+nested acquires vs 522ns for 2 flat = 199ns of lockdep dependency work per
+nested acquire**, against a flat-path lockdep cost that now measures **0ns**
+(tracked 261ns vs no-lockdep 263ns). Both numbers together are the point: the
+old suite, pointed squarely at lockdep, would have reported the subsystem as
+free, because the only path it could see was the one lockdep does no work on.
+Note that 199ns is the *steady-state* cost -- the edge is already in the bitmap
+after the first iteration, so this measures the lookup, not the one-off insert.
 
 ### A-LOCKDEP-RECORD-EDGE-WAS-A-LINEAR-SCAN — FOLLOW-UP 2026-08-17 — `page_fault_anonymous` recovered on its own; there was no regression
 

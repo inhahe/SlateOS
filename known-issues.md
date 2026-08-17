@@ -28101,7 +28101,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 3 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 4 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28211,3 +28211,42 @@ locale GNU quotes option arguments with `‘…’` rather than `'…'`. Confine
 `quote()`/`argmatch` — `quotef`, `quoteaf` and getopt's own sentences are ASCII
 in every locale. Left as-is and queued for the operator: `open-questions.md` →
 **B-Q2**.
+
+`head` is the fourth (`scripts/head-diff.sh`). It is the first conversion where
+the getopt swap was the *smaller* half: the parser it replaced knew `-n` and
+nothing else — no `-c`, no `-q`/`-v`, no `-z`, no negative count, no multiplier
+suffix — and it silently substituted 10 for any count it could not parse, so
+`head -n 5O f` (letter O) printed ten lines rather than saying so. It also read
+input as UTF-8 `String` lines, which reported a non-UTF-8 line as an I/O error
+and truncated the file there, and re-emitted `\r\n` as `\n` because
+`BufRead::lines` strips the carriage return. Four more traps for the remaining
+81:
+
+- **A utility may have a second option syntax that getopt never sees.**
+  `head -3 f` is the pre-POSIX form, and upstream parses it by hand off `argv[1]`
+  alone, *before* `getopt_long` runs. The position rule is observable and nobody
+  would guess it: `head -3 -q f` works, `head -q -3 f` answers
+  `invalid trailing option -- 3`. It falls out of the digits `0123456789` being
+  listed in the short-option string, so a digit reaching getopt at all proves it
+  was not first. `tail` has the same form; check for one before assuming argv is
+  getopt's alone.
+- **The obsolete form's letters are not flags.** In `head -2k`, `k` is a
+  *multiplier suffix* appended to the digits before parsing, so it means 2048
+  lines. `c` selects bytes and clears the multiplier; `l` selects lines and does
+  **not** clear it, so `-2kl` is 2048 lines. Reproduced rather than tidied.
+- **Numeric arguments go through gnulib's `xstrtoumax`, which is a specification
+  in itself.** Leading whitespace and `+` accepted, trailing whitespace not; a
+  bare suffix means one of it (`head -n K` is 1024) but only if it is the very
+  first byte, so `head -n ' K'` is an error; a second suffix switches the base
+  (`1K`=1024, `1kB`=1000, `1KiB`=1024, a lone `1Ki` invalid); and **a bad suffix
+  outranks an overflow**, so `head -n 99999999999999999999X` reports an invalid
+  number rather than a value too large. The caller's own suffix list narrows
+  gnulib's, which is why `head -n 1w` is refused though `w` exists in the same
+  function. `head.rs` → `parse_count` is the shape to copy; `tail`, `split`,
+  `fold`, `cut` and `nl` all reach the same code upstream.
+- **Streaming is a correctness requirement, not an optimisation.** `wc` reads
+  each input whole; `head` must not, because `yes | head -n1` has to terminate.
+  The two eliding forms (`-n -N`, `-c -N`) do have to see the end, and buffer
+  only the tail they might still drop. Note the rule the streaming loop cannot
+  apply until EOF: an unterminated final line *counts* as a line for `-n -N`
+  (so `printf 'a\nb' | head -n -1` prints `a\n`) but is never itself printed.

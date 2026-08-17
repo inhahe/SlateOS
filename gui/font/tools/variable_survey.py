@@ -30,14 +30,31 @@ Three things worth knowing before reading the code:
   finds. Counted here so the Rust reader's validation has a real number to be
   measured against rather than an assumed one.
 
+`--normalize` is the part the Rust reader is actually checked against. It
+prints, for each named instance of each variable face, the F2Dot14 coordinates
+that instance normalizes to *after* `avar` — the numbers pasted into
+`installed_variable_fonts_normalize_named_instances` in
+`gui/font/tests/host_fonts.rs`.
+
+The endpoints of an axis are the same with and without `avar` (the format
+requires the three identity points), so a test that only checks -1/0/+1 passes
+on a reader that never found `avar` at all. Named instances are the cheapest
+real oracle for the bent interior: they are chosen by the designer, they sit at
+the round user-space values where `avar`'s correction is largest, and they are
+in the file already. This code is written from the specification rather than
+transcribed from `var.rs`, which is the only reason comparing the two means
+anything.
+
 Usage:
 
     python gui/font/tools/variable_survey.py [--fonts DIR] [--verbose]
+    python gui/font/tools/variable_survey.py --normalize [--fonts DIR]
 """
 
 import argparse
 import collections
 import glob
+import math
 import os
 import struct
 import sys
@@ -145,6 +162,118 @@ def read_avar_axis_count(data, off):
     if off + 8 > len(data):
         return None
     return u16(data, off + 6)
+
+
+def read_fvar_instances(data, off, length, axis_count):
+    """Named instances as (subfamily_name_id, [user coordinate per axis])."""
+    if off + 16 > len(data) or length < 16:
+        return []
+    axes_off = off + u16(data, off + 4)
+    axis_size = u16(data, off + 10)
+    inst_count = u16(data, off + 12)
+    inst_size = u16(data, off + 14)
+    # A record is nameID + flags + one Fixed per axis, optionally + psNameID.
+    if inst_size < 4 + 4 * axis_count:
+        return []
+    base = axes_off + axis_count * axis_size
+    out = []
+    for i in range(inst_count):
+        rec = base + i * inst_size
+        if rec + 4 + 4 * axis_count > len(data):
+            break
+        out.append(
+            (
+                u16(data, rec),
+                [fixed(data, rec + 4 + 4 * a) for a in range(axis_count)],
+            )
+        )
+    return out
+
+
+def read_avar_segments(data, off, axis_count):
+    """`avar`'s per-axis segment maps as lists of (fromCoord, toCoord) in F2Dot14.
+
+    Returns None when the table disagrees with `fvar` about how many axes there
+    are, because pairing curve *k* with axis *k* across a mismatch applies the
+    weight correction to the width -- a wrong answer that still looks like a
+    font.
+    """
+    if off + 8 > len(data) or u16(data, off) != 1:
+        return None
+    if u16(data, off + 6) != axis_count:
+        return None
+    pos = off + 8
+    maps = []
+    for _ in range(axis_count):
+        if pos + 2 > len(data):
+            return None
+        n = u16(data, pos)
+        pos += 2
+        pts = []
+        for _ in range(n):
+            if pos + 4 > len(data):
+                return None
+            pts.append((i16(data, pos), i16(data, pos + 2)))
+            pos += 4
+        # An out-of-order curve cannot be searched; the identity is what the
+        # absence of the table would have meant, so use that for this axis.
+        if any(pts[j][0] >= pts[j + 1][0] for j in range(len(pts) - 1)):
+            pts = []
+        maps.append(pts)
+    return maps
+
+
+def normalize_user(axis, value):
+    """The specification's normalization: clamp, then scale each side alone."""
+    _tag, lo, df, hi = axis
+    if value != value:  # NaN
+        return 0.0
+    value = max(lo, min(hi, value))
+    if value < df:
+        return -1.0 if df == lo else (value - df) / (df - lo)
+    if value > df:
+        return 1.0 if hi == df else (value - df) / (hi - df)
+    return 0.0
+
+
+def apply_segment_map(pts, value):
+    """Piecewise-linear `avar` correction, in F2Dot14, with truncating division.
+
+    The truncation matters: HarfBuzz divides this way, and a reader that rounds
+    disagrees by one unit on some inputs. Reproduced here so a disagreement
+    between this and the Rust means a real bug rather than a rounding choice.
+    """
+    if len(pts) < 2:
+        return value
+    if value <= pts[0][0]:
+        return pts[0][1]
+    if value >= pts[-1][0]:
+        return pts[-1][1]
+    i = 1
+    while i < len(pts):
+        if value == pts[i][0]:
+            return pts[i][1]
+        if value < pts[i][0]:
+            break
+        i += 1
+    lo_from, lo_to = pts[i - 1]
+    hi_from, hi_to = pts[i]
+    span = hi_from - lo_from
+    if span == 0:
+        return lo_to
+    rise = hi_to - lo_to
+    run = value - lo_from
+    prod = rise * run
+    # C-style truncation toward zero, which Python's `//` does not do.
+    delta = int(prod / span)
+    return max(-16384, min(16384, lo_to + delta))
+
+
+def f2dot14(x):
+    """Round a normalized float to F2Dot14, half away from zero as `roundf`."""
+    scaled = x * 16384.0
+    rounded = math.floor(scaled + 0.5) if scaled >= 0 else math.ceil(scaled - 0.5)
+    return max(-16384, min(16384, int(rounded)))
 
 
 def read_gvar_axis_count(data, off):
@@ -332,10 +461,57 @@ def survey(paths, verbose):
             print(f"  {name}: {spec}; {inst_count} named instances; {'+'.join(present)}")
 
 
+def normalize_report(paths):
+    """Print each variable face's named instances in normalized F2Dot14.
+
+    Emitted in a shape that can be pasted into the Rust test with only the
+    surrounding brackets changed, so transcribing it cannot quietly drop a
+    value.
+    """
+    for path in paths:
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        tabs = tables(data)
+        if tabs is None or "fvar" not in tabs:
+            continue
+        parsed = read_fvar(data, *tabs["fvar"])
+        if parsed is None:
+            continue
+        axes, _ = parsed
+        segments = None
+        if "avar" in tabs:
+            segments = read_avar_segments(data, tabs["avar"][0], len(axes))
+        instances = read_fvar_instances(data, *tabs["fvar"], len(axes))
+
+        name = os.path.basename(path)
+        tags_ = "/".join(a[0] for a in axes)
+        print(f'// {name}: {tags_}, avar {"yes" if segments else "no"}')
+        print(f'    ("{name}", &[')
+        for _name_id, user in instances:
+            coords = []
+            for i, axis in enumerate(axes):
+                c = f2dot14(normalize_user(axis, user[i]))
+                if segments is not None:
+                    c = apply_segment_map(segments[i], c)
+                coords.append(c)
+            shown = ", ".join(str(c) for c in coords)
+            user_shown = ", ".join(f"{v:g}" for v in user)
+            print(f"        &[{shown}],  // {user_shown}")
+        print("    ]),")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--fonts", default=r"C:\Windows\Fonts")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument(
+        "--normalize",
+        action="store_true",
+        help="print named instances in normalized F2Dot14 instead of surveying",
+    )
     args = ap.parse_args()
 
     paths = []
@@ -346,7 +522,10 @@ def main():
     if not paths:
         print(f"no fonts found under {args.fonts}", file=sys.stderr)
         return 1
-    survey(paths, args.verbose)
+    if args.normalize:
+        normalize_report(paths)
+    else:
+        survey(paths, args.verbose)
     return 0
 
 

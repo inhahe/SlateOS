@@ -70,6 +70,7 @@ use crate::lang::Lang;
 use crate::mark::MarkPositioning;
 use crate::otl;
 use crate::script::ScriptTags;
+use crate::var;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -184,7 +185,7 @@ pub(crate) fn u32_at(d: &[u8], off: usize) -> Option<u32> {
     Some(u32::from_be_bytes(b))
 }
 
-fn tag_at(d: &[u8], off: usize) -> Option<[u8; 4]> {
+pub(crate) fn tag_at(d: &[u8], off: usize) -> Option<[u8; 4]> {
     let end = off.checked_add(4)?;
     d.get(off..end)?.try_into().ok()
 }
@@ -544,6 +545,16 @@ pub struct Face {
     /// `hb_ot_layout_table_select_script` reads the ScriptList and nothing
     /// else, and so does this.
     gsub_scripts: Vec<[u8; 4]>,
+    /// The axes this face can vary along, from `fvar`, with `avar`'s correction
+    /// folded in. `None` for the 549 of this host's 556 faces that are not
+    /// variable, and also for a variable face whose `fvar` is unreadable — a
+    /// malformed variation table costs the face its variability, not its
+    /// ability to draw.
+    ///
+    /// Named apart from [`variations`](Self::variations), which is the `cmap`
+    /// format-14 Unicode Variation *Sequences* subtable and an unrelated
+    /// feature that the specification unhelpfully gave a near-identical name.
+    variation_axes: Option<var::Variations>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -643,6 +654,8 @@ impl Face {
         let mut gpos = None;
         let mut gsub = None;
         let mut kern = None;
+        let mut fvar = None;
+        let mut avar = None;
         let mut has_cff2 = false;
 
         for i in 0..usize::from(num_tables) {
@@ -677,6 +690,8 @@ impl Face {
                 b"GPOS" => gpos = Some(span),
                 b"GSUB" => gsub = Some(span),
                 b"kern" => kern = Some(span),
+                b"fvar" => fvar = Some(span),
+                b"avar" => avar = Some(span),
                 b"CFF2" => has_cff2 = true,
                 _ => {}
             }
@@ -782,6 +797,12 @@ impl Face {
         gsub_scripts.sort_unstable();
         gsub_scripts.dedup();
 
+        // `avar` without `fvar` is not a lesser variable face, it is nothing at
+        // all: `avar` corrects a normalized coordinate per axis, and without
+        // `fvar` there are no axes to normalize against. Reached through
+        // `and_then` for that reason rather than parsed on its own.
+        let variation_axes = fvar.and_then(|span| var::Variations::parse(&data, span, avar));
+
         Ok(Self {
             metrics: FaceMetrics {
                 ascender,
@@ -805,6 +826,7 @@ impl Face {
             has_positioning: gpos.is_some(),
             gpos_scripts,
             gsub_scripts,
+            variation_axes,
             data,
         })
     }
@@ -1630,6 +1652,23 @@ impl Face {
     #[must_use]
     pub fn has_positioning(&self) -> bool {
         self.has_positioning
+    }
+
+    /// The face's variation axes, or `None` if it is not a variable font.
+    ///
+    /// Returning the whole [`Variations`](var::Variations) rather than just the
+    /// axis list is deliberate: normalizing a user coordinate needs `avar`'s
+    /// correction as well as the axis bounds, and splitting the two across two
+    /// accessors invites a caller to normalize with only half of them -- which
+    /// produces a plausible number that is wrong by exactly the amount the
+    /// designer added `avar` to fix.
+    ///
+    /// The face itself is *not* at any instance. A chosen position along these
+    /// axes belongs to the scaled font, so that one parsed face can serve two
+    /// weights at once without being re-read.
+    #[must_use]
+    pub fn variation_axes(&self) -> Option<&var::Variations> {
+        self.variation_axes.as_ref()
     }
 
     /// Whether the face's `GPOS` ScriptList names `tag` itself.

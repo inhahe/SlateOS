@@ -206,10 +206,121 @@ pub fn probe_hardware() -> Option<backend::AtiBackend> {
         backend.aperture().memory_type().name(),
         backend.aperture().is_cached()
     );
+    report_write_combining(&backend);
 
     exercise_modeset(&mut backend);
     backend.report();
     Some(backend)
+}
+
+/// Prove write-combining is actually in force, by measuring it.
+///
+/// The PAT self-test can only show that the table says `WC` and that the flag
+/// selects the slot we think it does. It cannot show that the CPU is combining,
+/// because a wrong slot index yields a different *valid* memory type rather than
+/// a fault, and `UC` and `WC` answer every question this driver can ask
+/// identically. The difference is visible only as speed, so it is measured:
+/// the same fill, over the same bytes, with the page tables saying `WC` and then
+/// saying `UC`.
+///
+/// Reported rather than enforced. A ratio near 1.0 means no speedup was
+/// observed, but the right response to that is not to fail the boot -- an
+/// uncached framebuffer is *correct*, merely slow, and refusing to boot over it
+/// would trade a working slow display for no display at all. It is logged
+/// loudly instead, with the number that shows it.
+///
+/// "No speedup observed" is also not the same claim as "write-combining is
+/// broken", and which one applies depends on the platform rather than on
+/// anything this driver can see in the number. Under QEMU's TCG the ratio is
+/// pinned near 1.0 by construction -- it emulates no cache and no store buffer,
+/// so `WC` and `UC` are the same host code path -- and the measurement is
+/// inconclusive, not failing. The verdict below therefore branches on
+/// [`crate::hypervisor::Hypervisor::models_memory_types`], and only warns where
+/// a low ratio is capable of meaning something.
+///
+/// Skipped on a card holding the console, for the same reason
+/// [`exercise_modeset`] is: the measured region is overwritten, and on the
+/// console's card those bytes are what the operator is looking at.
+fn report_write_combining(backend: &backend::AtiBackend) {
+    if backend.owns_console() {
+        serial_println!(
+            "[ati]   SKIP write-combining measurement: would overwrite the console framebuffer"
+        );
+        return;
+    }
+    // SAFETY: probe time on the BSP. No scanout buffer has been allocated yet,
+    // no other CPU has a handle to this aperture, and the card is not being
+    // scanned out -- `owns_console()` is false and no mode has been set. The
+    // region's contents are therefore not live.
+    let (wc, uc, bytes) = match unsafe { backend.aperture().measure_write_combining() } {
+        Ok(v) => v,
+        Err(e) => {
+            serial_println!("[ati]   write-combining measurement unavailable: {e:?}");
+            return;
+        }
+    };
+    if wc == 0 || uc == 0 {
+        serial_println!(
+            "[ati]   write-combining measurement produced no timing (wc={wc}, uc={uc})"
+        );
+        return;
+    }
+    // Fixed-point hundredths. Integer division only, and `wc` is non-zero above:
+    // the kernel has no float, and a ratio printed as "3.87x" is the number a
+    // reader of this line is actually after.
+    let ratio_x100 = uc.saturating_mul(100).checked_div(wc).unwrap_or(0);
+    let whole = ratio_x100 / 100;
+    let frac = ratio_x100 % 100;
+    serial_println!(
+        "[ati]   Write-combining measured over {} KiB: WC {} cycles vs UC {} cycles \
+         = {}.{:02}x",
+        bytes / 1024,
+        wc,
+        uc,
+        whole,
+        frac
+    );
+    // 1.5x is well below any plausible real speedup and well above timing noise
+    // on a 1 MiB fill, so it separates "combining" from "not" without asserting
+    // a specific factor that would differ between QEMU and metal.
+    if ratio_x100 >= 150 {
+        return;
+    }
+    // A low ratio means one of two entirely different things, and the kernel
+    // already knows which -- it identified the platform at boot, ~1600 serial
+    // lines before this point. Emitting the same WARNING for both would make the
+    // line worthless: under TCG it fires on every single boot, and a warning that
+    // always fires trains its reader to skip the one time it means something.
+    let hv = crate::hypervisor::detected();
+    if !hv.models_memory_types() {
+        serial_println!(
+            "[ati]   write-combining is not measurable on {} (ratio {}.{:02}x): it models no \
+             cache and no store buffer, so a WC and a UC mapping execute the identical host \
+             code path. The aperture is mapped WC and that is correct; this ratio is evidence \
+             about the emulator, not about the mapping",
+            hv.name(),
+            whole,
+            frac
+        );
+        return;
+    }
+    // Deliberately does *not* say "check that PAT slot 1 is selected": the line
+    // logged just above this one printed the decoded memory type as WC, so the
+    // slot index and the table contents are already established. Naming them as
+    // the suspect would send a reader to re-verify the one thing already proven.
+    // The type a page actually gets is the *combination* of its PAT type and any
+    // MTRR covering the range, and for MTRR=UC the combined result is UC no
+    // matter what PAT says (Intel SDM Vol. 3, Table 11-7) -- which is how a
+    // correctly-programmed WC mapping still ends up uncached on real hardware.
+    serial_println!(
+        "[ati]   WARNING: write-combining is not taking effect (ratio {}.{:02}x) on {} -- PAT \
+         slot 1 is selected and decodes as WC, so suspect an MTRR covering {:#x} that says UC \
+         and overrides it, not the PAT programming",
+        whole,
+        frac,
+        hv.name(),
+        backend.aperture().phys()
+    );
 }
 
 /// Program a mode onto the card and confirm the registers hold it.

@@ -687,16 +687,26 @@ pub(crate) fn pair_values(
     let index = coverage_index(data, coverage, left)?;
     let value1 = u16_at(data, sub.checked_add(4)?)?;
     let value2 = u16_at(data, sub.checked_add(6)?)?;
-    let at = match format {
+    // A value record's device offsets are measured from its *immediate parent*
+    // table, and the two formats do not have the same parent: format 1 keeps its
+    // records inside a `PairSet`, so they are measured from that set, where
+    // format 2 keeps them in the subtable itself. Measuring both from the
+    // subtable is not a near miss — the two bases are thousands of bytes apart
+    // in a real font, so the offset lands in the middle of some unrelated table
+    // and still decodes to a plausible-looking device table rather than simply
+    // failing. Reem Kufi's `w`/`a` kern is the worked example: from the set the
+    // offset names the one real correction in the face; from the subtable it
+    // names a format-3 device table covering 6934..7012 ppem.
+    let (base, at) = match format {
         1 => pair_record_1(data, sub, index, right, value1, value2)?,
-        2 => pair_record_2(data, sub, left, right, value1, value2)?,
+        2 => (sub, pair_record_2(data, sub, left, right, value1, value2)?),
         _ => return None,
     };
     Some((
-        Value::read(data, sub, at, value1, ppem),
+        Value::read(data, base, at, value1, ppem),
         Value::read(
             data,
-            sub,
+            base,
             at.checked_add(value_size(value1))?,
             value2,
             ppem,
@@ -707,8 +717,9 @@ pub(crate) fn pair_values(
 
 /// Format 1: one explicit list of second glyphs per covered first glyph.
 ///
-/// Returns the offset of the pair's value records, which begin just past the
-/// second glyph id.
+/// Returns the pair's `PairSet` — the base its device offsets are measured
+/// from — and the offset of its value records, which begin just past the second
+/// glyph id.
 fn pair_record_1(
     data: &[u8],
     sub: usize,
@@ -716,7 +727,7 @@ fn pair_record_1(
     right: u16,
     value1: u16,
     value2: u16,
-) -> Option<usize> {
+) -> Option<(usize, usize)> {
     if index >= u16_at(data, sub.checked_add(8)?)? {
         return None;
     }
@@ -736,9 +747,10 @@ fn pair_record_1(
         let rec = records.checked_add(i.checked_mul(stride)?)?;
         Some(u16_at(data, rec)?.cmp(&right))
     })?;
-    records
+    let at = records
         .checked_add(found.checked_mul(stride)?)?
-        .checked_add(2)
+        .checked_add(2)?;
+    Some((set, at))
 }
 
 /// Format 2: a grid indexed by two glyph classes, which is how a font expresses
@@ -1274,6 +1286,83 @@ mod tests {
         out.extend_from_slice(&cov);
         out.extend_from_slice(&set);
         out
+    }
+
+    /// The same, but the pair's advance carries a device table — and the bytes
+    /// are laid out so that the *wrong* base also decodes.
+    ///
+    /// A real font's two bases are thousands of bytes apart, so reading from the
+    /// subtable lands in some unrelated table and still parses. A fixture whose
+    /// wrong base merely ran off the end would be passed by a reader that
+    /// silently dropped the correction, which is the one failure this must
+    /// catch. So a *valid decoy* device table sits where the subtable-relative
+    /// offset reaches, correcting the opposite way, and the real one sits where
+    /// the `PairSet`-relative offset reaches.
+    fn pair_pos1_device(left: u16, right: u16, first: i16) -> Vec<u8> {
+        let cov = coverage1(&[left]);
+        let cov_at = 12usize;
+        let set_at = cov_at + cov.len();
+        // pairValueCount, then one record of (glyph, xAdvance, xAdvDeviceOffset).
+        let set_len = 2 + 6;
+
+        // Measured from the set, so the decoy lands at `offset` and the real
+        // table at `set_at + offset`. Both must clear the set itself.
+        let offset = set_at + set_len;
+        let decoy_at = offset;
+        let real_at = set_at + offset;
+        assert!(decoy_at >= set_at + set_len && real_at > decoy_at);
+
+        let decoy = crate::device::table(10, 12, 2, &[-7, -7, -7]);
+        let real = crate::device::table(10, 12, 2, &[3, 3, 3]);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1));
+        out.extend_from_slice(&be16(u16::try_from(cov_at).unwrap()));
+        out.extend_from_slice(&be16(X_ADVANCE | X_ADVANCE_DEVICE));
+        out.extend_from_slice(&be16(0));
+        out.extend_from_slice(&be16(1));
+        out.extend_from_slice(&be16(u16::try_from(set_at).unwrap()));
+        out.extend_from_slice(&cov);
+        assert_eq!(out.len(), set_at);
+        out.extend_from_slice(&be16(1));
+        out.extend_from_slice(&be16(right));
+        out.extend_from_slice(&first.to_be_bytes());
+        out.extend_from_slice(&be16(u16::try_from(offset).unwrap()));
+        assert_eq!(out.len(), set_at + set_len);
+
+        out.resize(decoy_at, 0);
+        out.extend_from_slice(&decoy);
+        out.resize(real_at, 0);
+        out.extend_from_slice(&real);
+        out
+    }
+
+    #[test]
+    fn a_pairs_device_offset_is_measured_from_its_pair_set() {
+        // The spec puts a value record's device offsets relative to its
+        // *immediate parent* table. Format 1 keeps its records inside a
+        // `PairSet`, so that set is the base — not the subtable, which is the
+        // base only for format 2. Getting it wrong does not fail loudly: the
+        // offset lands somewhere else that still parses as a device table, so
+        // the pair is corrected by an amount taken from unrelated bytes.
+        let data = pair_pos1_device(1, 2, -60);
+        let run = glyphs(&[1, 2]);
+        let defs = Definitions::default();
+
+        // With no size no device table is consulted at all, so this only pins
+        // that the fixture kerns the way `pair_pos1`'s does.
+        let mut out = alloc::vec![Adjust::plain(500); 2];
+        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX, Joiners::POSITIONING);
+        pair(&data, 0, skip, &run, 0, &mut out, Ppem::NONE);
+        assert_eq!(out[0].x_advance, 440);
+
+        // At 11px the real table says +3 pixels. The decoy says -7; reading it
+        // instead would give 440 - 7 * 1000 / 11, which is a different answer
+        // from both the right one and from having found no table at all.
+        let mut out = alloc::vec![Adjust::plain(500); 2];
+        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX, Joiners::POSITIONING);
+        pair(&data, 0, skip, &run, 0, &mut out, Ppem::new(11.0, 1000));
+        assert_eq!(out[0].x_advance, 440 + 3 * 1000 / 11);
     }
 
     #[test]

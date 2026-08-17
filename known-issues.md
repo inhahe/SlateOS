@@ -26655,3 +26655,320 @@ crash state explicitly.
 Clippy: 150 non-test warnings before, 150 after (the first draft added three
 `clippy::arithmetic_side_effects` from `Instant + Duration`, which panics on
 overflow; rewritten to `Instant::elapsed` and `Duration::saturating_sub`).
+
+## B-EXPLORER-RESTORING-FROM-THE-RECYCLE-BIN-DESTROYED-THE-FILE-IN-ITS-PLACE (lane C, 2026-08-16) — FIXED
+
+**In short:** you delete `notes.txt`, then later make a *new* `notes.txt` in the
+same folder, then change your mind and restore the old one from the recycle
+bin. The old file landed on top of the new one and the new one was gone — not
+to the recycle bin, just gone. The recycle bin is the feature whose entire
+promise is "deleting is undoable"; it was the thing doing the undoable
+deleting. Fixed: a restore that finds something already at the original path
+now lands beside it as `notes (2).txt`, and reports where it actually put the
+file.
+
+### The bug
+
+`RecycleBin::restore` in `apps/explorer/src/fileops.rs` moved the recycled data
+straight to the path recorded at delete time:
+
+```rust
+pub fn restore(&self, entry_id: &str) -> io::Result<()> {
+    let entry = self.read_entry(entry_id)?;
+    let data_path = self.root.join(entry_id).join("data");
+    if let Some(parent) = entry.original_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    move_path(&data_path, &entry.original_path)?;   // <-- unconditional
+    …
+}
+```
+
+Nothing checked whether `original_path` was still free. `move_path` overwrites,
+so whatever occupied the path was destroyed in place.
+
+The rest of the explorer already knew better — `resolve_rename` (same file) is
+exactly the "pick a free `name (2)` variant" helper the copy/move engine uses on
+a name collision, and had been for as long as the engine has existed. The
+recycle bin simply never called it. This is the same shape as
+`B-EXPLORER-RENAME-OVERWROTE-AND-ESCAPED` above: the conflict policy existed and
+one code path did not consult it.
+
+Two aggravating details:
+
+- **The window is unbounded.** A copy/move collision happens while the user is
+  watching a progress dialog. A restore collision happens an arbitrary time
+  after the delete, against a file the user made in between and has no reason to
+  associate with the recycle bin at all.
+- **The destroyed file did not go to the recycle bin either.** There was nothing
+  left to recover from anywhere.
+
+### The fix
+
+`restore` now returns `io::Result<PathBuf>` — **where the file actually landed**,
+which is what the caller must show the user:
+
+```rust
+let dest = if entry.original_path.exists() {
+    resolve_rename(&entry.original_path)
+} else {
+    entry.original_path.clone()
+};
+move_path(&data_path, &dest)?;
+```
+
+Returning the path rather than silently relocating matters: a restore that puts
+your file somewhere other than where you asked, and does not say so, is only
+marginally better than one that overwrites.
+
+The gap between the `exists()` check and the move is a genuine race that `std`
+alone cannot close — there is no "rename only if the destination is free" in the
+standard library. The same tradeoff is already documented on the engine's
+conflict handling; narrowing it needs a platform primitive we do not have yet.
+
+While in there, the entry-directory cleanup after a successful restore stopped
+discarding its errors. A `meta.txt` that outlives its `data` leaves an entry
+`list` still shows and `restore` can never satisfy again, and the user's only
+clue would be the failure of some restore attempted much later.
+
+### Verification
+
+Three tests in `apps/explorer/src/fileops.rs`:
+`restoring_over_a_newer_file_of_the_same_name_keeps_both`,
+`restoring_to_a_free_path_uses_the_original_name`, and
+`restoring_a_directory_does_not_merge_into_one_that_is_in_the_way`.
+
+Re-introducing the bug (`let dest = entry.original_path.clone();`) turned
+exactly two of them red — the newer-file one and the directory one — and only
+those, out of 207 (205 passed / 2 failed). Green again on revert.
+`restoring_to_a_free_path_uses_the_original_name` passes *with* the bug, as it
+must: on a free path the two implementations are identical. That is the
+happy-path blindness that let this survive.
+
+Clippy: explorer 46 non-test warnings before, 46 after.
+
+## B-EXPLORER-THE-DROP-ONTO-MY-OWN-SUBFOLDER-CHECK-COULD-BE-WALKED-AROUND (lane C, 2026-08-16) — FIXED
+
+**In short:** dragging a folder onto a folder inside itself is refused, because
+doing it would move a directory into its own descendant and lose the whole
+subtree. The refusal compared the two paths as *text*, so writing the same
+destination a different way — `photos/2024/../2024/summer`, or via a symlink —
+slipped past it. Fixed by resolving both paths on the filesystem before
+comparing.
+
+### The bug
+
+`check_nested_drop` in `apps/explorer/src/dropzone.rs`:
+
+```rust
+for src in sources {
+    if src == target_dir { … }
+    if target_dir.starts_with(src) { … }
+}
+```
+
+`Path::starts_with` is a component-wise *textual* comparison. It does not
+resolve `..`, and it does not know what a symlink points at. So
+`check_nested_drop(&["/a/b"], "/a/b/c/../c")` is refused (the prefix is still
+literally there) but `check_nested_drop(&["/a/b"], "/a/x/../b/c")` is not — the
+literal prefix is `/a/x`, while the real target is `/a/b/c`, inside the source.
+
+### The fix
+
+Both sides are canonicalized before comparison, falling back to the literal path
+when the filesystem cannot answer (a target that does not exist yet, a
+permission error) — a check that refuses to run is worse than one that runs on
+the text:
+
+```rust
+let real_target = canonical_or_literal(target_dir);
+for src in sources {
+    let real_src = canonical_or_literal(src);
+    …
+}
+```
+
+Error messages still quote the path the *user* typed or dragged, not its
+canonical form; being told about `/mnt/data/photos` when you dragged
+`~/photos` is a worse message even though it is a truer path.
+
+### Status and scope
+
+`apps/explorer/src/dropzone.rs` is **dead code today** — the module carries
+`#![allow(dead_code)]`, `main.rs` has only `mod dropzone;`, and nothing calls
+`check_nested_drop`. It is the drag-and-drop plumbing waiting on the toolkit's
+drop events. Fixed now rather than when it is wired up, because the wiring is
+where attention will be on the event flow, not on a containment predicate that
+already looks correct.
+
+### Verification
+
+`nested_drop_sees_through_a_parent_component`, in the same file: builds a real
+directory tree, then aims a drop at the source's own child written with a `..`
+detour, and asserts it is refused. It fails against the old textual comparison.
+
+## B-BACKUP-`prune`-DELETED-THE-BACKUP-EVERY-BACKUP-IT-KEPT-DEPENDED-ON (lane C, 2026-08-16) — FIXED
+
+**In short:** `backup prune --keep-last 3` said it kept your three newest
+backups. Two of those three could not be restored afterwards, and the data was
+physically deleted from disk. The three newest are usually *incremental* —
+each stores only what changed since the one before, so restoring any of them
+needs the older full backup at the start of the chain. Pruning by age deleted
+exactly that one, then deleted its file contents as unreferenced, printed
+"Prune complete" and exited 0. You would find out the next time you tried to
+restore. Fixed: pruning now keeps the whole chain a kept backup depends on, and
+says so.
+
+### The bug
+
+`compute_retention` in `apps/backup/src/main.rs` selected purely by age —
+`keep_last`, `keep_daily`, `keep_weekly`, `keep_monthly` — and knew nothing
+about `parent_id`. For the standard usage pattern (one full backup, then
+incrementals forever) that is precisely the wrong selection: the newest N are
+all incrementals, and the one thing they all need is the oldest.
+
+Then `cmd_prune`'s garbage collector removed every blob no *surviving* manifest
+referenced. The full backup's blobs — which is to say, the actual file contents
+— were referenced only by the manifest just deleted.
+
+The two halves compound. Deleting the base manifest alone would be recoverable
+in principle, since the blobs would still be there. Deleting the blobs too is
+not recoverable by anything.
+
+### A second, independent way the same GC destroyed data
+
+```rust
+if let Ok(manifest) = load_manifest(&opts.dest, &meta.id) {
+    for entry in &manifest.files { referenced_hashes.insert(entry.hash.clone()); }
+}
+```
+
+A manifest that failed to load contributed **no hashes**, so every blob only it
+referenced was collected as an orphan. One unreadable manifest — a transient
+I/O error, a permissions problem, a partial write — silently destroyed the file
+contents of a backup that was being *kept*. The `if let Ok` reads as caution;
+it is the opposite.
+
+### The fix
+
+`compute_retention` now returns a `Retention` struct, and runs `keep_ancestors`
+over the policy's selection: walk `parent_id` from every selected backup and
+hold everything on the way to the root. A `parent_id` naming a backup not
+present is deliberately **not** invented — keeping a phantom id would report
+that we are holding a backup that does not exist. It is returned as a broken
+chain and reported to the user, because its child cannot be restored either
+way and that is worth saying out loud rather than keeping a corpse.
+
+`insert` returning false is also what terminates a `parent_id` cycle in
+hand-edited or corrupt metadata.
+
+The manifest read in the GC is now propagated, with a message naming the
+consequence:
+
+> refusing to collect unreferenced blobs: cannot read the manifest for backup
+> {id}: {e}. Blobs it references would be deleted as orphans.
+
+Refusing to prune is recoverable; deleting blobs is not. That asymmetry is the
+whole argument.
+
+`prune` reports both `Keeping N older backup(s) that newer ones are built on
+top of:` and any broken chains. For a purely linear chain this can make `prune`
+a near no-op — which is the correct behaviour, and is now visible rather than
+silent.
+
+### Verification
+
+Five tests. Neutralising `keep_ancestors` turns exactly the four chain tests
+red out of 63, and only those. `independent_full_backups_are_pruned_as_the_policy_says`
+stays green, as it must: with no chains the two implementations agree, which is
+exactly why this survived — anyone testing prune with standalone full backups
+sees correct behaviour.
+
+Also covered: a `parent_id` cycle does not hang the prune, and a parent that is
+already gone is reported rather than invented.
+
+## B-BACKUP-`restore`-WROTE-OUTSIDE-ITS-DESTINATION-AND-EXITED-0-AFTER-FAILING (lane C, 2026-08-16) — FIXED
+
+**In short:** `backup restore --dest /tmp/check` was supposed to put everything
+under `/tmp/check`. Some entries were written to absolute paths instead — a
+backup of `/etc` could restore straight over the live `/etc`. Separately, a
+restore in which every single file failed still printed a summary and exited 0,
+so `backup restore … && rm -rf original/` would delete the original after
+restoring nothing. Both fixed; the restore now refuses out-of-destination paths
+and returns an error when anything failed.
+
+### The bug
+
+Three defects in `cmd_restore`, `apps/backup/src/main.rs`.
+
+**1. `Path::join` replaces its base when the argument is absolute.**
+
+```rust
+let dest_path = opts.restore_dest.join(&entry.path);
+```
+
+`Path::new("/tmp/check").join("/etc/passwd")` is `/etc/passwd`. This is the
+classic archive-traversal ("zip slip") vector, and it is *not* hypothetical
+here — the backup program puts absolute paths in its own manifests.
+`relative_path` is `full.strip_prefix(base).unwrap_or(full)`: whenever the
+prefix does not match, the full absolute path is stored. `..` components were
+equally unchecked, and reach anywhere the absolute case does.
+
+**2. Failure was reported as success.**
+
+```rust
+println!("\nRestore complete:");
+println!("  Files restored: {restored}");
+if errors > 0 { println!("  Errors: {errors}"); }
+Ok(())
+```
+
+Exit status 0, and the word "complete", after restoring nothing. Any script
+that guards a deletion on the restore succeeding was guarding on a constant.
+
+**3. Symlink creation results were discarded.**
+
+```rust
+std::os::unix::fs::symlink(target, &dest_path).ok();
+restored += 1;
+```
+
+Counted as restored whether or not the link was made, so a restore that
+dropped every symlink reported complete success. An `is_symlink` entry with no
+`link_target` was silently skipped and also counted.
+
+### The fix
+
+A new pure function, `restore_path_within(dest_root, rel) -> Option<PathBuf>`,
+walks the components and **refuses** — returns `None` — for `ParentDir`,
+`RootDir` or `Prefix`, and for a path with no `Normal` component at all (which
+names the destination directory itself, not a file).
+
+Refusing rather than sanitising is the deliberate choice, and it is specific to
+*restore*. Silently rewriting `/etc/passwd` to `<dest>/etc/passwd` would put
+the user's data somewhere they did not ask for with no way to notice; a
+refusal, counted as an error, is visible and the restore of everything else
+still proceeds.
+
+Failures are counted per entry and the run returns `io::Error` at the end if
+any occurred. Directory-creation failures stay counted rather than propagated —
+one unwritable directory must not strand the other several thousand files —
+but they now reach the exit status.
+
+### Verification
+
+Five tests for `restore_path_within`: the ordinary relative case (including `.`
+noise), an absolute entry, a `..` climb, an entry naming no file at all, and a
+Windows drive prefix (`#[cfg(windows)]`).
+
+Clippy: this work also converted the file's path formatting from `{:?}` to
+`.display()` and the restore counters to `saturating_add`, taking backup-app
+from 198 non-test warnings to 183.
+
+### Still open in this program
+
+- **The blob GC can delete the blobs of an *in-progress* backup.** `meta.json`
+  is written last, so a backup still being written is invisible to
+  `list_backups`, and a concurrent `prune` sees its already-stored blobs as
+  unreferenced. Needs the same kind of liveness primitive the indexer now uses
+  (an OS-held lock on the destination), not a marker file. Not fixed.

@@ -4,12 +4,24 @@
 //! implementation.  Individual device types (blk, net, etc.) are in
 //! submodules.
 //!
-//! ## Transport
+//! ## Two transports, and how to pick one
 //!
-//! We use the legacy I/O port transport (BAR0) because:
-//! - QEMU's default virtio-pci devices support it
-//! - It avoids MMIO BAR mapping and capability parsing
-//! - It's the simplest path to a working driver
+//! This module implements the **legacy** (0.9.5) I/O-port transport: a fixed
+//! register block at BAR0, addressed with `in`/`out`.  [`modern`] implements
+//! the **modern** (1.0+) MMIO transport, in which the device advertises its
+//! config regions through vendor-specific PCI capabilities.
+//!
+//! Legacy is the simpler of the two and is what `blk` and `net` use, because
+//! QEMU's virtio-blk-pci and virtio-net-pci are *transitional* devices that
+//! still expose the legacy register block.  **That is not a property of virtio
+//! in general.**  Devices standardised after 1.0 — virtio-gpu and virtio-sound
+//! among them — are modern-only: they have no I/O BAR at all, so a legacy
+//! driver bound to one gets as far as "BAR0 is not I/O space" and stops.
+//!
+//! So: a *new* driver should reach for [`modern`] unless it has a specific
+//! reason to want legacy, and a driver that reports "BAR0 is not I/O space"
+//! against hardware that plainly exists is not looking at a missing device —
+//! it is looking at a modern one through the wrong transport.
 //!
 //! ## References
 //!
@@ -18,6 +30,7 @@
 
 pub mod blk;
 pub mod gpu;
+pub mod modern;
 pub mod net;
 pub mod queue;
 pub mod sound;

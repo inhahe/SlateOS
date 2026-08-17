@@ -18,6 +18,7 @@ use super::mmio;
 use super::modeset;
 use super::regs::{self, CrtcTiming, PixWidth};
 use super::timing::{self, DMT_MODES, ModeTiming};
+use super::vram;
 use crate::drm::mode::PixelFormat;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -967,6 +968,230 @@ fn test_modeset_plan(c: &mut Check) {
 }
 
 // ---------------------------------------------------------------------------
+// VRAM suballocation
+// ---------------------------------------------------------------------------
+
+/// Assert an allocator's free list still satisfies its invariants.
+///
+/// Called after every mutation below rather than only at the end. An allocator
+/// that returns correct offsets while its list quietly stops being sorted is
+/// correct until it is catastrophically not, and the boundary between the two
+/// is the operation that broke the invariant — which is only identifiable if
+/// the invariants are checked at every step.
+fn vram_intact(c: &mut Check, what: &str, a: &vram::VramAllocator) {
+    if let Err(e) = a.check_invariants() {
+        c.fail();
+        serial_println!("[ati]   FAIL: free list broken after {}: {:?}", what, e);
+    } else {
+        c.pass();
+    }
+}
+
+/// [`vram::VramAllocator`]: allocation, alignment, freeing, and coalescing.
+#[allow(clippy::too_many_lines)]
+fn test_vram(c: &mut Check) {
+    // 16 MiB, which is what QEMU's ati-vga reports by default and what the
+    // probe reads out of CNFG_MEMSIZE on the boot test.
+    const TOTAL: u32 = 16 * 1024 * 1024;
+
+    let Some(mut a) = c.expect_ok(
+        "VramAllocator::new(16 MiB)",
+        vram::VramAllocator::new(TOTAL),
+    ) else {
+        return;
+    };
+    c.eq_u32("fresh allocator is entirely free", a.free_bytes(), TOTAL);
+    c.eq_u32("fresh allocator is one run", a.largest_free(), TOTAL);
+    vram_intact(c, "new", &a);
+
+    // A card that reports no memory is not an allocator with nothing free; it
+    // is a card that was never configured, and must be refused up front.
+    c.is_err(
+        "zero-sized VRAM refused",
+        vram::VramAllocator::new(0),
+        KernelError::InvalidArgument,
+    );
+
+    // First allocation comes from offset 0 — first fit over a single free run.
+    let fb0 = c.expect_ok("alloc 640x480 scanout", a.alloc(1_228_800, 256));
+    c.eq_u32("first allocation starts at 0", fb0.unwrap_or(u32::MAX), 0);
+    c.eq_u32(
+        "free bytes drop by exactly the request",
+        a.free_bytes(),
+        TOTAL.saturating_sub(1_228_800),
+    );
+    vram_intact(c, "first alloc", &a);
+
+    // A second allocation with a coarser alignment must skip forward to the
+    // aligned offset, and the skipped bytes must stay free rather than being
+    // consumed. 1_228_800 is 16 KiB-aligned already (it is 75 * 16384), so pick
+    // a size that is not, to make the padding real.
+    let odd = c.expect_ok("alloc an unaligned-length buffer", a.alloc(1000, 4));
+    c.eq_u32(
+        "second allocation follows the first",
+        odd.unwrap_or(u32::MAX),
+        1_228_800,
+    );
+    vram_intact(c, "unaligned-length alloc", &a);
+
+    let aligned = c.expect_ok("alloc at 16 KiB alignment", a.alloc(4096, 16384));
+    // 1_228_800 + 1000 = 1_229_800; rounded up to 16384 gives 1_245_184.
+    c.eq_u32(
+        "alignment padding is skipped, not silently absorbed",
+        aligned.unwrap_or(u32::MAX),
+        1_245_184,
+    );
+    // The padding must have been returned to the free list as its own run:
+    // 1_229_800 .. 1_245_184 is 15_384 bytes that are still allocatable.
+    c.is_true(
+        "alignment padding stayed free",
+        a.free_bytes()
+            == TOTAL
+                .saturating_sub(1_228_800)
+                .saturating_sub(1000)
+                .saturating_sub(4096),
+    );
+    c.is_true("free list split into two runs", a.region_count() == 2);
+    vram_intact(c, "aligned alloc", &a);
+
+    // And it must actually be usable, not merely counted. 15_384 bytes are
+    // free at 1_229_800; a 4-byte-aligned request for 15_384 fits exactly.
+    let hole = c.expect_ok("alloc exactly fills the padding hole", a.alloc(15_384, 8));
+    c.eq_u32(
+        "padding hole reused at its own offset",
+        hole.unwrap_or(u32::MAX),
+        1_229_800,
+    );
+    c.is_true("filling the hole rejoins the list", a.region_count() == 1);
+    vram_intact(c, "hole refill", &a);
+
+    // Freeing the middle of three adjacent allocations must not merge with
+    // anything — the neighbours are still live.
+    let before = a.region_count();
+    c.expect_ok("free the middle allocation", a.free(1_228_800, 1000));
+    c.is_true(
+        "freeing an isolated run adds a list entry",
+        a.region_count() == before.saturating_add(1),
+    );
+    vram_intact(c, "isolated free", &a);
+
+    // Freeing it again must be refused. This is the check the allocator exists
+    // to make: a double free that succeeded would hand the same VRAM to two
+    // scanout buffers.
+    c.is_err(
+        "double free refused",
+        a.free(1_228_800, 1000),
+        KernelError::AlreadyExists,
+    );
+    // As must a free of a range that merely overlaps a free one.
+    c.is_err(
+        "overlapping free refused",
+        a.free(1_228_000, 2000),
+        KernelError::AlreadyExists,
+    );
+    // ... and one that runs off the end of VRAM.
+    c.is_err(
+        "free past the end of VRAM refused",
+        a.free(TOTAL.saturating_sub(16), 32),
+        KernelError::InvalidArgument,
+    );
+    c.is_err(
+        "zero-length free refused",
+        a.free(0, 0),
+        KernelError::InvalidArgument,
+    );
+    vram_intact(c, "rejected frees", &a);
+
+    // Freeing the two neighbours must coalesce all three runs — plus the large
+    // tail — back into one, which is the invariant that stops a mode change
+    // from fragmenting VRAM into unusable slivers.
+    c.expect_ok("free the first allocation", a.free(0, 1_228_800));
+    vram_intact(c, "free neighbour 1", &a);
+    c.expect_ok(
+        "free the padding-hole allocation",
+        a.free(1_229_800, 15_384),
+    );
+    vram_intact(c, "free neighbour 2", &a);
+    c.expect_ok("free the aligned allocation", a.free(1_245_184, 4096));
+    vram_intact(c, "free neighbour 3", &a);
+    c.eq_u32(
+        "everything freed means everything free",
+        a.free_bytes(),
+        TOTAL,
+    );
+    c.is_true(
+        "everything freed coalesces to a single run",
+        a.region_count() == 1,
+    );
+    c.eq_u32("and that run is the whole card", a.largest_free(), TOTAL);
+
+    // Exhaustion. A request one byte larger than the card is refused as out of
+    // memory, not as a bad argument: the caller asked for something coherent
+    // and this card cannot provide it.
+    c.is_err(
+        "request larger than VRAM is OutOfMemory",
+        a.alloc(TOTAL.saturating_add(1), 1),
+        KernelError::OutOfMemory,
+    );
+    // A request for exactly the whole card succeeds and leaves nothing.
+    let whole = c.expect_ok("alloc the entire card", a.alloc(TOTAL, 256));
+    c.eq_u32(
+        "whole-card allocation is at 0",
+        whole.unwrap_or(u32::MAX),
+        0,
+    );
+    c.eq_u32("nothing left", a.free_bytes(), 0);
+    c.is_true("empty free list", a.region_count() == 0);
+    vram_intact(c, "full allocation", &a);
+    c.is_err(
+        "allocation from an empty card refused",
+        a.alloc(1, 1),
+        KernelError::OutOfMemory,
+    );
+    c.expect_ok("free the whole card back", a.free(0, TOTAL));
+    c.eq_u32("card fully restored", a.free_bytes(), TOTAL);
+    vram_intact(c, "full free", &a);
+
+    // Argument validation.
+    c.is_err(
+        "zero-length allocation refused",
+        a.alloc(0, 256),
+        KernelError::InvalidArgument,
+    );
+    c.is_err(
+        "zero alignment refused",
+        a.alloc(16, 0),
+        KernelError::InvalidArgument,
+    );
+    c.is_err(
+        "non-power-of-two alignment refused",
+        a.alloc(16, 96),
+        KernelError::InvalidArgument,
+    );
+
+    // An alignment larger than the card cannot be satisfied, and must report
+    // that rather than overflowing to a small offset that appears to fit.
+    c.is_err(
+        "alignment beyond the card is OutOfMemory",
+        a.alloc(16, 0x8000_0000),
+        KernelError::OutOfMemory,
+    );
+    vram_intact(c, "rejected allocations", &a);
+
+    // The scanout alignment the mode-set planner requires must be satisfiable,
+    // since every framebuffer this driver displays has to meet it.
+    let scanout = c.expect_ok(
+        "alloc at SCANOUT_ALIGN",
+        a.alloc(1024, modeset::SCANOUT_ALIGN),
+    );
+    c.is_true(
+        "SCANOUT_ALIGN allocation is scanout-aligned",
+        scanout.unwrap_or(1).is_multiple_of(modeset::SCANOUT_ALIGN),
+    );
+    vram_intact(c, "scanout-aligned alloc", &a);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -990,6 +1215,7 @@ pub fn run() -> KernelResult<()> {
     test_identify(&mut c);
     test_mmio_offsets(&mut c);
     test_modeset_plan(&mut c);
+    test_vram(&mut c);
 
     serial_println!("[ati] Self-test: {} passed, {} failed.", c.passed, c.failed);
     if c.failed > 0 {

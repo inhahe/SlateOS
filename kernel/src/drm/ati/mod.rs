@@ -45,6 +45,7 @@ pub mod modeset;
 pub mod regs;
 pub mod tests;
 pub mod timing;
+pub mod vram;
 
 use crate::error::KernelResult;
 use crate::serial_println;

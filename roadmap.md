@@ -5717,12 +5717,22 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
           `AtiDevice::owns_console()`, an address comparison against the
           bootloader framebuffer, so the driver never retimes the one screen
           the operator is looking at.
+    - [x] `drm/ati/vram.rs` — first-fit suballocator over the card's video
+          memory, with a coalesced free list. VRAM cannot come from the buddy
+          allocator (it is not RAM and cannot hold kernel structures), and a
+          bump allocator would leak a whole scanout buffer per mode change —
+          about seven changes before 16 MiB is exhausted, reported as an
+          out-of-memory error on a resolution the card can obviously display.
+          Rejects double and overlapping frees rather than corrupting the list.
+          Pure, so the self-test checks the list invariants after every
+          mutation, not just the return values.
     - [ ] `DrmBackend::Ati` — a registered backend: BAR0 aperture mapping, GEM
           objects resident in VRAM, `page_flip` as a `CRTC_OFFSET` write rather
           than a memcpy. Note that `GemObject::free_backing` returns
-          `phys_frames` to the buddy allocator, so VRAM-backed objects need
-          their own allocator and their own destroy path — reusing
-          `LimineBackend`'s would hand card memory to the system allocator.
+          `phys_frames` to the buddy allocator, so VRAM-backed objects must be
+          released through `vram::VramAllocator::free` — reusing
+          `LimineBackend`'s destroy path would hand card memory to the system
+          allocator, which is silent corruption rather than a leak.
 - [ ] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
 - [ ] `[A]` NVIDIA: defer until open-source driver matures, or use Linux compat layer later
 

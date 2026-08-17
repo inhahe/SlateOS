@@ -1478,7 +1478,7 @@ fn scan_dir_recursive(
     let read_dir = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) => {
-            eprintln!("warning: cannot read directory {:?}: {}", dir, e);
+            eprintln!("warning: cannot read directory {}: {}", dir.display(), e);
             return Ok(());
         }
     };
@@ -1504,7 +1504,7 @@ fn scan_dir_recursive(
             match fs::metadata(&path) {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("warning: cannot stat {:?}: {}", path, e);
+                    eprintln!("warning: cannot stat {}: {}", path.display(), e);
                     continue;
                 }
             }
@@ -1512,7 +1512,7 @@ fn scan_dir_recursive(
             match fs::symlink_metadata(&path) {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("warning: cannot stat {:?}: {}", path, e);
+                    eprintln!("warning: cannot stat {}: {}", path.display(), e);
                     continue;
                 }
             }
@@ -1531,7 +1531,7 @@ fn scan_dir_recursive(
             let hash = match sha256_file(&path) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("warning: cannot hash {:?}: {}", path, e);
+                    eprintln!("warning: cannot hash {}: {}", path.display(), e);
                     continue;
                 }
             };
@@ -1744,7 +1744,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     let source = opts.source.canonicalize().map_err(|e| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("source path {:?}: {}", opts.source, e),
+            format!("source path {}: {}", opts.source.display(), e),
         )
     })?;
 
@@ -1786,8 +1786,10 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     };
 
     println!(
-        "Creating {} backup of {:?} -> {:?}",
-        effective_type, source, opts.dest
+        "Creating {} backup of {} -> {}",
+        effective_type,
+        source.display(),
+        opts.dest.display()
     );
 
     // Estimate for progress
@@ -1838,7 +1840,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
             Ok(true) => new_blobs += 1,
             Ok(false) => dedup_blobs += 1,
             Err(e) => {
-                eprintln!("warning: failed to store {:?}: {}", entry.path, e);
+                eprintln!("warning: failed to store {}: {}", entry.path.display(), e);
                 continue;
             }
         }
@@ -1920,8 +1922,9 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
     let store = ContentStore::new(&opts.backup_dest);
 
     println!(
-        "Restoring backup {} to {:?}",
-        opts.backup_id, opts.restore_dest
+        "Restoring backup {} to {}",
+        opts.backup_id,
+        opts.restore_dest.display()
     );
     println!("  Type: {}", meta.backup_type);
     println!("  Files in manifest: {}", manifest.files.len());
@@ -1954,26 +1957,57 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
     let mut errors = 0u64;
 
     for entry in &files_to_restore {
-        let dest_path = opts.restore_dest.join(&entry.path);
+        let Some(dest_path) = restore_path_within(&opts.restore_dest, &entry.path) else {
+            eprintln!(
+                "error: refusing to restore {}: it names a location outside {}",
+                entry.path.display(),
+                opts.restore_dest.display()
+            );
+            errors = errors.saturating_add(1);
+            continue;
+        };
 
-        if let Some(parent) = dest_path.parent() {
-            fs::create_dir_all(parent)?;
+        if let Some(parent) = dest_path.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            // Counted rather than propagated: one directory the user cannot
+            // write must not strand the other several thousand files.
+            eprintln!("error: cannot create {}: {}", parent.display(), e);
+            errors = errors.saturating_add(1);
+            continue;
         }
 
         if entry.is_symlink {
-            if let Some(ref target) = entry.link_target {
-                // Create symlink (platform-dependent, best-effort)
-                #[cfg(unix)]
-                {
-                    std::os::unix::fs::symlink(target, &dest_path).ok();
-                }
-                #[cfg(not(unix))]
-                {
-                    // On non-Unix, write the target path as file content
-                    fs::write(&dest_path, target.as_os_str().as_encoded_bytes())?;
+            let Some(ref target) = entry.link_target else {
+                eprintln!(
+                    "error: {} is recorded as a symlink but the manifest gives no target",
+                    entry.path.display()
+                );
+                errors = errors.saturating_add(1);
+                continue;
+            };
+
+            // Whether the link was made used to be discarded with `.ok()`,
+            // and the entry counted as restored either way — so a restore
+            // that silently dropped every symlink reported complete success.
+            #[cfg(unix)]
+            let made = std::os::unix::fs::symlink(target, &dest_path);
+            // No symlinks here: the target is written as file content so the
+            // information survives the round trip, but it is no longer a link.
+            #[cfg(not(unix))]
+            let made = fs::write(&dest_path, target.as_os_str().as_encoded_bytes());
+
+            match made {
+                Ok(()) => restored = restored.saturating_add(1),
+                Err(e) => {
+                    eprintln!(
+                        "error: cannot restore symlink {}: {}",
+                        entry.path.display(),
+                        e
+                    );
+                    errors = errors.saturating_add(1);
                 }
             }
-            restored += 1;
             continue;
         }
 
@@ -1984,10 +2018,12 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
                 let actual_hash = sha256_hex(&data);
                 if actual_hash != entry.hash {
                     eprintln!(
-                        "error: hash mismatch for {:?}: expected {}, got {}",
-                        entry.path, entry.hash, actual_hash
+                        "error: hash mismatch for {}: expected {}, got {}",
+                        entry.path.display(),
+                        entry.hash,
+                        actual_hash
                     );
-                    errors += 1;
+                    errors = errors.saturating_add(1);
                     continue;
                 }
                 // Crash-safe: a restore usually writes *over* a file the user
@@ -1995,23 +2031,80 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
                 // restore destroyed the existing file and failed to supply
                 // the replacement — the one outcome a restore must never
                 // produce.
-                safeio::write_atomically(&dest_path, &data)?;
-                restored += 1;
+                if let Err(e) = safeio::write_atomically(&dest_path, &data) {
+                    eprintln!("error: cannot write {}: {}", dest_path.display(), e);
+                    errors = errors.saturating_add(1);
+                } else {
+                    restored = restored.saturating_add(1);
+                }
             }
             Err(e) => {
-                eprintln!("error: cannot read blob for {:?}: {}", entry.path, e);
-                errors += 1;
+                eprintln!(
+                    "error: cannot read blob for {}: {}",
+                    entry.path.display(),
+                    e
+                );
+                errors = errors.saturating_add(1);
             }
         }
     }
 
-    println!("\nRestore complete:");
-    println!("  Restored: {} files", restored);
+    println!(
+        "\nRestore finished: {} of {} files restored",
+        restored,
+        files_to_restore.len()
+    );
+
     if errors > 0 {
-        println!("  Errors: {}", errors);
+        // A restore that could not deliver every file has not restored the
+        // backup, and the exit status is the only thing a script can see. It
+        // used to print an error count under the heading "Restore complete:"
+        // and return `Ok(())`, so `backup restore … && rm -rf original/` was
+        // a way to lose data.
+        return Err(io::Error::other(format!(
+            "{errors} file(s) could not be restored"
+        )));
     }
 
     Ok(())
+}
+
+/// Join a manifest-supplied path onto the restore destination, refusing
+/// anything that would land outside it.
+///
+/// `Path::join` **replaces** its base when given an absolute path, so an
+/// absolute entry in a manifest silently redirects a restore away from the
+/// directory the user named and onto that absolute path — `backup restore
+/// --to /tmp/check` writing over `/etc`. A `..` component escapes upward the
+/// same way. This is not hypothetical input: [`relative_path`] falls back to
+/// `unwrap_or(full)` when `strip_prefix` fails, so this program writes absolute
+/// paths into its own manifests whenever that happens.
+///
+/// A manifest is parsed data — hand-editable, corruptible, and often from a
+/// backup someone else made — so it is untrusted, and the check belongs at the
+/// point of use rather than at the point it was written.
+///
+/// Refused rather than sanitised: quietly relocating a file during a *restore*
+/// puts the user's data somewhere they did not ask for and gives them no way
+/// to notice. The caller reports the path and counts it as an error.
+fn restore_path_within(dest_root: &Path, rel: &Path) -> Option<PathBuf> {
+    let mut out = dest_root.to_path_buf();
+    let mut pushed = false;
+    for comp in rel.components() {
+        match comp {
+            Component::Normal(part) => {
+                out.push(part);
+                pushed = true;
+            }
+            Component::CurDir => {}
+            // `RootDir`/`Prefix` are how an absolute path presents itself;
+            // `ParentDir` is the classic archive traversal.
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    // An empty or `.`-only path names the destination directory itself, which
+    // is not a file the restore can write.
+    pushed.then_some(out)
 }
 
 /// Reconstruct the full file list by walking back through parent backups.
@@ -2169,9 +2262,38 @@ fn cmd_prune(opts: PruneOptions) -> io::Result<()> {
         return Ok(());
     }
 
-    let keep_set = compute_retention(&metas, &opts);
+    let retention = compute_retention(&metas, &opts);
 
-    let to_remove: Vec<&BackupMeta> = metas.iter().filter(|m| !keep_set.contains(&m.id)).collect();
+    let to_remove: Vec<&BackupMeta> = metas
+        .iter()
+        .filter(|m| !retention.keep.contains(&m.id))
+        .collect();
+
+    if !retention.held_by_chain.is_empty() {
+        println!(
+            "Keeping {} older backup(s) that newer ones are built on top of:",
+            retention.held_by_chain.len()
+        );
+        for id in &retention.held_by_chain {
+            println!("  = {id}");
+        }
+    }
+
+    if !retention.broken_chains.is_empty() {
+        // Not caused by this prune — the link was already gone. Said out loud
+        // because the alternative is keeping a backup that `backup restore`
+        // will refuse, and letting the user find out during a recovery.
+        eprintln!(
+            "warning: {} kept backup(s) cannot be restored: their parent is missing",
+            retention.broken_chains.len()
+        );
+        for (child, parent) in &retention.broken_chains {
+            eprintln!(
+                "  ! {child} refers to parent {parent}, which is not in {}",
+                opts.dest.display()
+            );
+        }
+    }
 
     if to_remove.is_empty() {
         println!("No backups to prune (all match retention policy).");
@@ -2200,10 +2322,24 @@ fn cmd_prune(opts: PruneOptions) -> io::Result<()> {
     let remaining_metas = list_backups(&opts.dest)?;
     let mut referenced_hashes = std::collections::HashSet::new();
     for meta in &remaining_metas {
-        if let Ok(manifest) = load_manifest(&opts.dest, &meta.id) {
-            for entry in &manifest.files {
-                referenced_hashes.insert(entry.hash.clone());
-            }
+        // Propagated, not skipped. A manifest that will not load used to be
+        // treated as referencing nothing, so every blob only that backup used
+        // was deleted as an orphan — one unreadable file turning a transient
+        // error into permanent, silent data loss. Refusing to prune leaves the
+        // store exactly as it was, which is always recoverable; deleting the
+        // blobs is not.
+        let manifest = load_manifest(&opts.dest, &meta.id).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "refusing to collect unreferenced blobs: cannot read the manifest \
+                     for backup {}: {e}. Blobs it references would be deleted as orphans.",
+                    meta.id
+                ),
+            )
+        })?;
+        for entry in &manifest.files {
+            referenced_hashes.insert(entry.hash.clone());
         }
     }
 
@@ -2224,8 +2360,87 @@ fn cmd_prune(opts: PruneOptions) -> io::Result<()> {
     Ok(())
 }
 
+/// What a retention policy decided.
+struct Retention {
+    /// Every backup id that must survive the prune.
+    keep: std::collections::HashSet<String>,
+    /// Ids the policy did *not* select, but which a kept backup descends from.
+    /// Reported so a prune that removes fewer backups than asked can say why.
+    held_by_chain: Vec<String>,
+    /// `(child, missing parent)` for every kept backup whose chain does not
+    /// reach a full backup. These are already unrestorable — the link was gone
+    /// before this prune ran — so they are reported, not silently kept as if
+    /// they were data.
+    broken_chains: Vec<(String, String)>,
+}
+
 /// Compute which backup IDs to keep based on retention policy.
-fn compute_retention(
+fn compute_retention(metas: &[BackupMeta], opts: &PruneOptions) -> Retention {
+    let mut keep = retention_by_policy(metas, opts);
+    let (held_by_chain, broken_chains) = keep_ancestors(metas, &mut keep);
+    Retention {
+        keep,
+        held_by_chain,
+        broken_chains,
+    }
+}
+
+/// Add to `keep` every backup that a kept backup descends from, returning the
+/// ids that were added.
+///
+/// An incremental backup stores only the difference from its parent: restoring
+/// one walks `parent_id` back to the full backup at the root of its chain, and
+/// [`reconstruct_full_manifest`] fails outright when a link is missing. The
+/// policies below select purely by *age*, and for the usual full-then-many-
+/// incrementals chain that selects the newest and drops the full base they all
+/// depend on.
+///
+/// So `backup prune --keep-last 3` used to delete the one backup that made the
+/// three it kept restorable — and then, because nothing referenced its blobs
+/// any more, garbage-collect the file contents too. It printed "Prune
+/// complete" and exited 0. Every surviving backup was unrestorable, the data
+/// was physically gone, and the first anyone would learn of it is the next
+/// time they tried to restore.
+///
+/// Returns `(ids added to keep, broken links found)`. A `parent_id` naming a
+/// backup that is not in `metas` is *not* added: keeping a phantom id would
+/// tell the user we are holding a backup that does not exist. It is returned as
+/// a broken link instead, because its child cannot be restored either way.
+fn keep_ancestors(
+    metas: &[BackupMeta],
+    keep: &mut std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let parents: BTreeMap<&str, &str> = metas
+        .iter()
+        .filter_map(|m| m.parent_id.as_deref().map(|p| (m.id.as_str(), p)))
+        .collect();
+    let known: std::collections::HashSet<&str> = metas.iter().map(|m| m.id.as_str()).collect();
+
+    let mut added = Vec::new();
+    let mut broken = Vec::new();
+    let mut pending: Vec<String> = keep.iter().cloned().collect();
+    while let Some(id) = pending.pop() {
+        let Some(parent) = parents.get(id.as_str()) else {
+            continue;
+        };
+        if !known.contains(*parent) {
+            broken.push((id, (*parent).to_string()));
+            continue;
+        }
+        // `insert` returning false is also what terminates a `parent_id` cycle
+        // in a hand-edited or corrupt set of metadata.
+        if keep.insert((*parent).to_string()) {
+            added.push((*parent).to_string());
+            pending.push((*parent).to_string());
+        }
+    }
+    added.sort();
+    broken.sort();
+    (added, broken)
+}
+
+/// Apply the age-based retention policies, ignoring backup chains.
+fn retention_by_policy(
     metas: &[BackupMeta],
     opts: &PruneOptions,
 ) -> std::collections::HashSet<String> {
@@ -3413,7 +3628,7 @@ mod tests {
             keep_monthly: None,
         };
 
-        let keep = compute_retention(&metas, &opts);
+        let keep = compute_retention(&metas, &opts).keep;
         assert!(!keep.contains("1"));
         assert!(keep.contains("2"));
         assert!(keep.contains("3"));
@@ -3477,7 +3692,7 @@ mod tests {
             keep_monthly: None,
         };
 
-        let keep = compute_retention(&metas, &opts);
+        let keep = compute_retention(&metas, &opts).keep;
         // Should keep the most recent backup from the 2 most recent days
         assert!(keep.contains("d3_a")); // day 12
         assert!(keep.contains("d2_a")); // day 11
@@ -3521,7 +3736,7 @@ mod tests {
             keep_monthly: None,
         };
 
-        let keep = compute_retention(&metas, &opts);
+        let keep = compute_retention(&metas, &opts).keep;
         assert!(keep.contains("1"));
         assert!(keep.contains("2"));
     }
@@ -3884,5 +4099,234 @@ mod tests {
         // Pattern matches just the filename component
         let patterns = vec![".gitignore".to_string()];
         assert!(is_excluded(Path::new("project/.gitignore"), &patterns));
+    }
+
+    // ---- Retention and Backup Chains ----
+
+    fn chain_meta(id: &str, parent: Option<&str>, timestamp: u64) -> BackupMeta {
+        BackupMeta {
+            id: id.to_string(),
+            backup_type: if parent.is_some() {
+                BackupType::Incremental
+            } else {
+                BackupType::Full
+            },
+            timestamp,
+            source: "/src".to_string(),
+            parent_id: parent.map(str::to_string),
+            file_count: 0,
+            total_size: 0,
+            new_blobs: 0,
+            dedup_blobs: 0,
+        }
+    }
+
+    /// The ordinary shape of a backup set: one full, then incrementals on top.
+    /// `--keep-last 2` selects the two newest incrementals — and used to delete
+    /// the full backup they are both differences *from*, leaving two backups
+    /// that could not be restored and whose file contents had been
+    /// garbage-collected along with it.
+    #[test]
+    fn pruning_a_chain_keeps_the_full_backup_the_kept_ones_are_built_on() {
+        let metas = vec![
+            chain_meta("full", None, 100),
+            chain_meta("inc1", Some("full"), 200),
+            chain_meta("inc2", Some("inc1"), 300),
+            chain_meta("inc3", Some("inc2"), 400),
+        ];
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: Some(2),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let retention = compute_retention(&metas, &opts);
+
+        for id in ["inc3", "inc2"] {
+            assert!(retention.keep.contains(id), "{id} was selected by policy");
+        }
+        assert!(
+            retention.keep.contains("inc1"),
+            "inc2 is a difference from inc1; deleting inc1 makes inc2 unrestorable"
+        );
+        assert!(
+            retention.keep.contains("full"),
+            "and the whole chain is a difference from the full backup at its root"
+        );
+        assert_eq!(
+            retention.held_by_chain,
+            vec!["full".to_string(), "inc1".to_string()],
+            "the two the policy dropped and the chain reinstated must be reported"
+        );
+    }
+
+    /// Independent full backups have nothing to hold on to, so the policy is
+    /// applied exactly as written — chain-awareness must not make prune a no-op.
+    #[test]
+    fn independent_full_backups_are_pruned_as_the_policy_says() {
+        let metas = vec![
+            chain_meta("f1", None, 100),
+            chain_meta("f2", None, 200),
+            chain_meta("f3", None, 300),
+        ];
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: Some(2),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let retention = compute_retention(&metas, &opts);
+        assert!(!retention.keep.contains("f1"));
+        assert!(retention.keep.contains("f2") && retention.keep.contains("f3"));
+        assert!(retention.held_by_chain.is_empty());
+    }
+
+    /// Two chains, and only one of them has a kept member: the other chain's
+    /// base must still go.
+    #[test]
+    fn an_ancestor_of_nothing_kept_is_still_pruned() {
+        let metas = vec![
+            chain_meta("oldfull", None, 100),
+            chain_meta("oldinc", Some("oldfull"), 150),
+            chain_meta("newfull", None, 300),
+            chain_meta("newinc", Some("newfull"), 400),
+        ];
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: Some(1),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let retention = compute_retention(&metas, &opts);
+        assert!(retention.keep.contains("newinc"));
+        assert!(retention.keep.contains("newfull"), "its chain is held");
+        assert!(!retention.keep.contains("oldfull"), "nothing kept needs it");
+        assert!(!retention.keep.contains("oldinc"));
+    }
+
+    /// Corrupt or hand-edited metadata can name a parent that is itself a
+    /// descendant. Walking that must terminate.
+    #[test]
+    fn a_cycle_in_the_parent_links_does_not_hang_the_prune() {
+        let metas = vec![
+            chain_meta("a", Some("b"), 100),
+            chain_meta("b", Some("a"), 200),
+        ];
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: Some(1),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let retention = compute_retention(&metas, &opts);
+        assert!(retention.keep.contains("a") && retention.keep.contains("b"));
+    }
+
+    /// A `parent_id` naming a backup that no longer exists cannot be reinstated,
+    /// and must not stop the prune either.
+    #[test]
+    fn a_parent_that_is_already_gone_is_not_invented() {
+        let metas = vec![chain_meta("orphan", Some("vanished"), 100)];
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: Some(1),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let retention = compute_retention(&metas, &opts);
+        assert!(retention.keep.contains("orphan"));
+        assert!(
+            !retention.keep.contains("vanished"),
+            "keeping an id that names no backup would report holding data that does not exist"
+        );
+        assert!(retention.held_by_chain.is_empty());
+        assert_eq!(
+            retention.broken_chains,
+            vec![("orphan".to_string(), "vanished".to_string())],
+            "the user has to be told the kept backup is unrestorable"
+        );
+    }
+
+    // ---- Restore Path Containment ----
+
+    #[test]
+    fn an_ordinary_relative_entry_lands_under_the_destination() {
+        let dest = Path::new("/tmp/restore");
+        assert_eq!(
+            restore_path_within(dest, Path::new("docs/notes.txt")),
+            Some(PathBuf::from("/tmp/restore/docs/notes.txt"))
+        );
+        assert_eq!(
+            restore_path_within(dest, Path::new("./a/./b.txt")),
+            Some(PathBuf::from("/tmp/restore/a/b.txt")),
+            "`.` components are noise, not an escape"
+        );
+    }
+
+    /// `Path::join` replaces its base when the argument is absolute, so this
+    /// used to write straight to `/etc/passwd` no matter what destination the
+    /// user gave. `relative_path` emits absolute paths whenever its
+    /// `strip_prefix` fails, so this reaches a manifest without anyone
+    /// tampering with it.
+    #[test]
+    fn an_absolute_entry_is_refused_rather_than_redirecting_the_restore() {
+        let dest = Path::new("/tmp/restore");
+        assert_eq!(restore_path_within(dest, Path::new("/etc/passwd")), None);
+        assert_eq!(restore_path_within(dest, Path::new("/")), None);
+    }
+
+    #[test]
+    fn a_parent_component_cannot_climb_out_of_the_destination() {
+        let dest = Path::new("/tmp/restore");
+        assert_eq!(
+            restore_path_within(dest, Path::new("../../etc/passwd")),
+            None
+        );
+        assert_eq!(
+            restore_path_within(dest, Path::new("docs/../../../etc/passwd")),
+            None
+        );
+        assert_eq!(
+            restore_path_within(dest, Path::new("docs/../notes.txt")),
+            None,
+            "a `..` that happens to stay inside is still refused: resolving it \
+             would mean trusting the manifest to be honest about symlinks"
+        );
+    }
+
+    #[test]
+    fn an_entry_naming_no_file_at_all_is_refused() {
+        let dest = Path::new("/tmp/restore");
+        assert_eq!(restore_path_within(dest, Path::new("")), None);
+        assert_eq!(restore_path_within(dest, Path::new(".")), None);
+    }
+
+    /// Windows drive prefixes are the platform's own way to spell "absolute",
+    /// and a manifest written on Windows records them.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_drive_prefix_is_refused() {
+        let dest = Path::new("C:\\restore");
+        assert_eq!(
+            restore_path_within(
+                dest,
+                Path::new("C:\\Windows\\System32\\drivers\\etc\\hosts")
+            ),
+            None
+        );
+        assert_eq!(
+            restore_path_within(dest, Path::new("\\\\server\\share\\file.txt")),
+            None
+        );
     }
 }

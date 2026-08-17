@@ -856,10 +856,7 @@ fn parse_hex_float(text: &str) -> Option<f64> {
         None => (digits, None),
     };
     let (whole, fraction) = match mantissa.find('.') {
-        Some(at) => (
-            mantissa.get(..at)?,
-            mantissa.get(at.saturating_add(1)..)?,
-        ),
+        Some(at) => (mantissa.get(..at)?, mantissa.get(at.saturating_add(1)..)?),
         None => (mantissa, ""),
     };
     if whole.is_empty() && fraction.is_empty() {
@@ -1036,13 +1033,23 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
     }
 
     if options.forever {
-        follow(&mut watched, &mut out, &options, print_headers, &mut first_header);
+        follow(
+            &mut watched,
+            &mut out,
+            &options,
+            print_headers,
+            &mut first_header,
+        );
     }
 
     if out.flush().is_err() {
         return ExitCode::from(1);
     }
-    if ok { ExitCode::SUCCESS } else { ExitCode::from(1) }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
 
 /// Open one operand and print the part of it that was asked for — upstream's
@@ -1092,7 +1099,11 @@ fn start_file(
             return true;
         }
         Err(e) => {
-            eprintln!("tail: error reading {}: {}", quoteaf(&w.label), strerror(&e));
+            eprintln!(
+                "tail: error reading {}: {}",
+                quoteaf(&w.label),
+                strerror(&e)
+            );
             false
         }
     };
@@ -1101,7 +1112,11 @@ fn start_file(
         match file.metadata() {
             Ok(m) => {
                 if tailable(&m) {
-                    w.trouble = if ok { Trouble::None } else { Trouble::NotAnErrno };
+                    w.trouble = if ok {
+                        Trouble::None
+                    } else {
+                        Trouble::NotAnErrno
+                    };
                     remember(w, &m, &mut file);
                     w.file = Some(file);
                     return ok;
@@ -1123,7 +1138,11 @@ fn start_file(
             Err(e) => {
                 ok = false;
                 w.trouble = Trouble::Io(e.kind());
-                eprintln!("tail: error reading {}: {}", quoteaf(&w.label), strerror(&e));
+                eprintln!(
+                    "tail: error reading {}: {}",
+                    quoteaf(&w.label),
+                    strerror(&e)
+                );
             }
         }
     }
@@ -1220,7 +1239,12 @@ fn skip_bytes(source: &mut impl Read, out: &mut impl Write, n: u64) -> io::Resul
 ///
 /// Works on any input, seekable or not: unlike counting from the end, counting
 /// from the start needs no lookahead.
-fn skip_lines(source: &mut impl Read, out: &mut impl Write, n: u64, line_end: u8) -> io::Result<()> {
+fn skip_lines(
+    source: &mut impl Read,
+    out: &mut impl Write,
+    n: u64,
+    line_end: u8,
+) -> io::Result<()> {
     let mut left = n;
     let mut buf = vec![0u8; CHUNK];
     while left > 0 {
@@ -1231,7 +1255,10 @@ fn skip_lines(source: &mut impl Read, out: &mut impl Write, n: u64, line_end: u8
         let chunk = buf.get(..got).unwrap_or_default();
         let mut at = 0usize;
         while left > 0 {
-            match chunk.get(at..).and_then(|t| t.iter().position(|&b| b == line_end)) {
+            match chunk
+                .get(at..)
+                .and_then(|t| t.iter().position(|&b| b == line_end))
+            {
                 Some(rel) => {
                     at = at.saturating_add(rel).saturating_add(1);
                     left = left.saturating_sub(1);
@@ -1424,7 +1451,9 @@ fn follow(
     loop {
         let mut any_input = false;
         for i in 0..watched.len() {
-            let Some(w) = watched.get_mut(i) else { continue };
+            let Some(w) = watched.get_mut(i) else {
+                continue;
+            };
             if w.ignore {
                 continue;
             }
@@ -1540,7 +1569,11 @@ fn poll_one(
             read != 0
         }
         Err(e) => {
-            eprintln!("tail: error reading {}: {}", quoteaf(&w.label), strerror(&e));
+            eprintln!(
+                "tail: error reading {}: {}",
+                quoteaf(&w.label),
+                strerror(&e)
+            );
             false
         }
     }
@@ -2046,11 +2079,14 @@ mod tests {
     fn a_short_cluster_takes_its_value_from_the_rest_or_the_next_argument() {
         assert_eq!(parse(&["-qn2"]).n_units, 2);
         assert_eq!(parse(&["-qn", "2"]).n_units, 2);
-        assert_eq!(parse(&["-vz"]), Options {
-            headers: Headers::Always,
-            line_end: 0,
-            ..Options::default()
-        });
+        assert_eq!(
+            parse(&["-vz"]),
+            Options {
+                headers: Headers::Always,
+                line_end: 0,
+                ..Options::default()
+            }
+        );
         // `-c2n`: the whole rest of the cluster is `c`'s argument, so the `n`
         // is part of the number and the number is bad.
         assert_eq!(body(&fail(&["-c2n"])), "invalid number of bytes: '2n'");
@@ -2100,34 +2136,46 @@ mod tests {
         assert_eq!(body(&fail(&["-c"])), "option requires an argument -- 'c'");
         // But `-f`, `-b` and `-l` have no digits and are still the obsolete
         // form, which is how `tail -b` means 5120 bytes.
-        assert_eq!(parse(&["-f"]), Options {
-            forever: true,
-            ..Options::default()
-        });
-        assert_eq!(parse(&["-b"]), Options {
-            unit: Unit::Bytes,
-            n_units: 5120,
-            ..Options::default()
-        });
+        assert_eq!(
+            parse(&["-f"]),
+            Options {
+                forever: true,
+                ..Options::default()
+            }
+        );
+        assert_eq!(
+            parse(&["-b"]),
+            Options {
+                unit: Unit::Bytes,
+                n_units: 5120,
+                ..Options::default()
+            }
+        );
         assert_eq!(parse(&["-l"]), Options::default());
     }
 
     #[test]
     fn the_obsolete_letters_are_units_and_b_is_also_a_multiplier() {
         // With digits, `b` multiplies the digits …
-        assert_eq!(parse(&["-2b"]), Options {
-            unit: Unit::Bytes,
-            n_units: 1024,
-            ..Options::default()
-        });
+        assert_eq!(
+            parse(&["-2b"]),
+            Options {
+                unit: Unit::Bytes,
+                n_units: 1024,
+                ..Options::default()
+            }
+        );
         // … while without them it multiplies the default, which is the same
         // rule applied in a different place and gives 10 × 512.
         assert_eq!(parse(&["-b"]).n_units, 5120);
-        assert_eq!(parse(&["-2c"]), Options {
-            unit: Unit::Bytes,
-            n_units: 2,
-            ..Options::default()
-        });
+        assert_eq!(
+            parse(&["-2c"]),
+            Options {
+                unit: Unit::Bytes,
+                n_units: 2,
+                ..Options::default()
+            }
+        );
         assert_eq!(parse(&["-2l"]).n_units, 2);
         assert_eq!(parse(&["-2l"]).unit, Unit::Lines);
         // A trailing `f` is `-f`, and only there.
@@ -2136,10 +2184,7 @@ mod tests {
         assert!(parse(&["+2bf"]).forever);
         // `k` and `m` are *not* suffixes in this form — they are junk, which
         // makes the word not obsolete at all, so the digit reaches getopt.
-        assert_eq!(
-            body(&fail(&["-2k"])),
-            "option used in invalid context -- 2"
-        );
+        assert_eq!(body(&fail(&["-2k"])), "option used in invalid context -- 2");
     }
 
     #[test]
@@ -2183,8 +2228,14 @@ mod tests {
     fn a_bad_count_is_quoted_the_way_gnulib_quotes_it() {
         // `quote()`, whose escaping is C's and not the shell's — the two agree
         // on everything without a quote or a backslash in it.
-        assert_eq!(body(&fail(&["-n", "a'b"])), "invalid number of lines: 'a\\'b'");
-        assert_eq!(body(&fail(&["-n", "a\\b"])), "invalid number of lines: 'a\\\\b'");
+        assert_eq!(
+            body(&fail(&["-n", "a'b"])),
+            "invalid number of lines: 'a\\'b'"
+        );
+        assert_eq!(
+            body(&fail(&["-n", "a\\b"])),
+            "invalid number of lines: 'a\\\\b'"
+        );
         assert_eq!(body(&fail(&["-c", "x"])), "invalid number of bytes: 'x'");
         // The sign is stripped for `-` and kept for `+`, so the same bad text
         // is echoed back two different ways.
@@ -2240,10 +2291,16 @@ mod tests {
         assert_eq!(parse(&["-s", "0x1.8p3"]).sleep_interval, 12.0);
         assert_eq!(parse(&["-s", "0x10"]).sleep_interval, 16.0);
         assert_eq!(body(&fail(&["-s", "x"])), "invalid number of seconds: 'x'");
-        assert_eq!(body(&fail(&["-s", "-1"])), "invalid number of seconds: '-1'");
+        assert_eq!(
+            body(&fail(&["-s", "-1"])),
+            "invalid number of seconds: '-1'"
+        );
         // NaN parses and is then rejected by `0 <= s`, every comparison
         // against it being false.
-        assert_eq!(body(&fail(&["-s", "nan"])), "invalid number of seconds: 'nan'");
+        assert_eq!(
+            body(&fail(&["-s", "nan"])),
+            "invalid number of seconds: 'nan'"
+        );
         // Infinity is not rejected: it is not negative.
         assert!(parse(&["-s", "inf"]).sleep_interval.is_infinite());
     }
@@ -2381,9 +2438,20 @@ mod tests {
     fn the_help_text_mentions_every_option_it_has() {
         let help = help_text();
         for name in [
-            "--bytes", "--follow", "-F", "--lines", "--max-unchanged-stats", "--pid",
-            "--quiet", "--silent", "--retry", "--sleep-interval", "--verbose",
-            "--zero-terminated", "--help", "--version",
+            "--bytes",
+            "--follow",
+            "-F",
+            "--lines",
+            "--max-unchanged-stats",
+            "--pid",
+            "--quiet",
+            "--silent",
+            "--retry",
+            "--sleep-interval",
+            "--verbose",
+            "--zero-terminated",
+            "--help",
+            "--version",
         ] {
             assert!(help.contains(name), "{name} is missing from --help");
         }

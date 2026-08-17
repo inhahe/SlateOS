@@ -1,4 +1,5 @@
-//! Arbitrary-precision signed integers, in base-10^9 limbs.
+//! Arbitrary-precision signed integers, in base-10^9 limbs, and the fixed-point
+//! [`Decimal`] the calculators build on top of them.
 //!
 //! ## Why this is a crate and not a copy
 //!
@@ -19,6 +20,16 @@
 //! decimal base wins on the operation that dominates. 10^9 is the largest power
 //! of ten whose square still fits in a `u64`, which is what lets `mul`
 //! accumulate limb products without splitting them.
+//!
+//! ## The decimals live here too
+//!
+//! [`decimal::Decimal`] is a [`BigInt`] mantissa plus a decimal scale — the
+//! number type `bc` and `dc` compute in. It is in this crate for the same
+//! reason the integers are: the two calculators are one calculator with two
+//! syntaxes, and two implementations of their shared number type is two answers
+//! to a question that has one. See that module's own docs for why scale is an
+//! argument rather than a property, and why the failing operations return a
+//! `Result` where `bc`'s originals returned zero.
 //!
 //! ## What it does not do
 //!
@@ -53,6 +64,10 @@
 //!   18 to spare — this is exactly why the base is 10^9 and not 10^18;
 //! * `carry * LIMB_BASE + limb` is likewise below 10^18 whenever `carry` is
 //!   itself limb-sized, which is what long division needs.
+
+pub mod decimal;
+
+pub use decimal::{Decimal, DecimalError};
 
 /// Base for each limb -- 10^9 fits comfortably in u32 and makes
 /// decimal conversion trivial (each limb is exactly 9 decimal digits).
@@ -887,7 +902,7 @@ mod tests {
             state ^= state << 17;
             state
         };
-        let mut digits = |n: usize, rng: &mut dyn FnMut() -> u64| {
+        let digits = |n: usize, rng: &mut dyn FnMut() -> u64| {
             let mut s = String::new();
             while s.len() < n {
                 s.push_str(&format!("{:019}", rng()));

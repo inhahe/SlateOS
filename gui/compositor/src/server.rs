@@ -48,6 +48,7 @@ use std::time::{Duration, Instant};
 use guiremote::client::Transport;
 use guiremote::socket::{Listener, Socket};
 
+use crate::present::{Headless, Present};
 use crate::wire::ClientLink;
 use crate::{Compositor, Display, WindowId};
 
@@ -379,7 +380,7 @@ impl Server {
         }
     }
 
-    /// Composite one frame and present it. Reports whether anything was drawn.
+    /// Composite one frame. Reports whether anything was drawn.
     ///
     /// Separate from [`Self::tick`] because a caller driving the loop itself may
     /// want to compose on its own schedule — but it belongs to the *server*
@@ -389,34 +390,81 @@ impl Server {
     /// frame count of zero while the screen was demonstrably being drawn: a
     /// statistic that is only true for one of its two callers is a statistic
     /// that will eventually be believed by the other.
+    ///
+    /// This composes and stops. [`Self::show`] is what puts the result on a
+    /// display; they are separate calls because a frame that was not redrawn
+    /// still has to be *kept* on screen by some displays and not by others, and
+    /// that is the display's business rather than the compositor's.
     pub fn compose(&mut self, compositor: &mut Compositor) -> bool {
         if !compositor.compose_frame() {
             return false;
         }
         self.stats.frames = self.stats.frames.saturating_add(1);
-        // The composited pixels. Presenting them needs a framebuffer device or a
-        // DRM plane, which this build does not have; see `known-issues.md` →
-        // `TD-COMPOSITOR-HAS-NO-SCANOUT`. Everything up to the last copy is
-        // real.
-        let _presented = compositor.front_buffer();
         true
     }
 
+    /// Hand the last composited frame to a display.
+    ///
+    /// Uses [`Compositor::present_pixels`] rather than
+    /// [`front_buffer`](Compositor::front_buffer): when the last frame was a
+    /// fullscreen direct-scanout bypass the front buffer is stale, and showing
+    /// it would put the previous frame on the screen — the one bug in this area
+    /// that no pixel assertion in this crate would catch, because every such
+    /// test reads the same stale buffer it asserts on.
+    pub fn show<P: Present>(compositor: &Compositor, present: &mut P) {
+        let (width, height) = compositor.frame_size();
+        present.show(compositor.present_pixels(), width, height);
+    }
+
     /// Serve clients and composite for ever, at the display's refresh rate.
+    ///
+    /// Equivalent to [`Self::run_with`] against [`Headless`] — the composited
+    /// frame is produced and discarded, which is the correct behaviour for a
+    /// compositor serving only remote clients, and the only behaviour available
+    /// on a platform this crate cannot draw on.
     ///
     /// # Errors
     ///
     /// Only a failure of the listening socket, which ends the server. Every
     /// per-client failure ends that client instead.
     pub fn run(&mut self, compositor: &mut Compositor) -> io::Result<()> {
+        self.run_with(compositor, &mut Headless)
+    }
+
+    /// Serve clients and composite for ever, onto `present`.
+    ///
+    /// The loop, in order: take whatever the user did and give it to the
+    /// compositor, serve the clients (so that a click which raised a window is
+    /// reflected in the events those clients are told about *this* frame, not
+    /// next), composite, and show the result. Input first is the whole reason
+    /// the ordering is written down here rather than left to look arbitrary.
+    ///
+    /// Returns when the display goes away — a closed host window — which is a
+    /// normal end and not an error. A [`Headless`] display never goes away, so
+    /// [`Self::run`] does not return.
+    ///
+    /// # Errors
+    ///
+    /// Only a failure of the listening socket, which ends the server. Every
+    /// per-client failure ends that client instead.
+    pub fn run_with<P: Present>(
+        &mut self,
+        compositor: &mut Compositor,
+        present: &mut P,
+    ) -> io::Result<()> {
         let interval = compositor
             .display_manager()
             .primary()
             .map_or(Duration::from_micros(16_667), Display::frame_interval);
-        loop {
+        while present.is_open() {
             let began = Instant::now();
+            for event in present.input() {
+                compositor.handle_input(event);
+            }
             self.tick(compositor)?;
-            self.compose(compositor);
+            if self.compose(compositor) {
+                Self::show(compositor, present);
+            }
             // Whatever is left of the frame. Subtracting the work already done
             // rather than sleeping a flat interval, so a tick that took eight
             // milliseconds does not push the next frame to twenty-four.
@@ -424,6 +472,7 @@ impl Server {
                 std::thread::sleep(rest);
             }
         }
+        Ok(())
     }
 }
 
@@ -446,6 +495,8 @@ mod tests {
     use guitk::render::RenderTree;
 
     use super::*;
+    use crate::InputEvent;
+    use crate::present::Recording;
 
     /// A server on a kernel-chosen port, and a compositor for it to drive.
     ///
@@ -694,5 +745,121 @@ mod tests {
         }
         assert_eq!(server.client_count(), 0);
         assert_eq!(server.stats().accepted, 0);
+    }
+
+    #[test]
+    fn a_composited_frame_reaches_the_display() {
+        // The gap this closes, stated plainly: everything in this crate was
+        // real up to the last step and then stopped. `compose_frame` blended a
+        // desktop into a buffer and `front_buffer` handed out pixels nothing
+        // looked at, so no test in the tree could tell a working compositor
+        // from one that composited into a void.
+        let (mut server, mut compositor, _addr) = server();
+        compositor.create_window("Visible".to_owned(), 400, 300, 1);
+
+        let mut screen = Recording::closing_after(4);
+        server.run_with(&mut compositor, &mut screen).expect("run");
+
+        assert_eq!(screen.ticks(), 4, "the loop ran exactly as long as told");
+        assert!(screen.shown() > 0, "nothing ever reached the display");
+        let (width, height, pixels) = screen.last_frame().expect("a frame");
+        assert_eq!(
+            (width, height),
+            compositor.frame_size(),
+            "the display was told the wrong shape for the pixels it was given"
+        );
+        assert_eq!(pixels.len(), width as usize * height as usize);
+        assert!(
+            server.stats().frames >= screen.shown(),
+            "more frames were shown than were composed"
+        );
+    }
+
+    #[test]
+    fn what_the_user_does_at_the_display_reaches_the_compositor() {
+        // The other half of the same gap, and it had the same cause: the hosted
+        // build has no keyboard or mouse driver, so `handle_input` was reachable
+        // from a test and from nothing else. A display that hands back input is
+        // what connects a real device to it.
+        let (mut server, mut compositor, _addr) = server();
+        let before = compositor.cursor_position();
+
+        let mut screen = Recording::closing_after(3);
+        screen.feed(vec![InputEvent::MouseMove { x: 640, y: 400 }]);
+        server.run_with(&mut compositor, &mut screen).expect("run");
+
+        assert_ne!(before, (640, 400), "the test would prove nothing");
+        assert_eq!(
+            compositor.cursor_position(),
+            (640, 400),
+            "the pointer never moved, so the display's input went nowhere"
+        );
+    }
+
+    #[test]
+    fn a_display_that_is_already_closed_serves_nothing_and_returns() {
+        // `run` is a loop that ends only when the display goes away, so the
+        // degenerate case is worth pinning: it must return rather than
+        // composing one last frame onto a screen that is not there.
+        let (mut server, mut compositor, _addr) = server();
+        let mut screen = Recording::new();
+        screen.open = false;
+        server.run_with(&mut compositor, &mut screen).expect("run");
+        assert_eq!(screen.shown(), 0);
+        assert_eq!(screen.ticks(), 0);
+        assert_eq!(server.stats().frames, 0);
+    }
+
+    #[test]
+    fn a_keystroke_at_the_display_is_routed_to_the_focused_client() {
+        // End to end within one process: a real socket, a real window, a key
+        // arriving the way a keyboard driver will deliver it, and the client
+        // being told about it. Every link in that chain existed before this;
+        // the first one had no far end.
+        let (mut server, mut compositor, addr) = server();
+        let mut conn = dial(&mut server, &mut compositor, addr);
+        let seq = conn
+            .send(RequestBody::CreateWindow(WindowSpec::new(
+                "Typing", 640, 480,
+            )))
+            .expect("send");
+        let ResponseBody::WindowCreated { window } =
+            await_reply(&mut server, &mut compositor, &mut conn, seq)
+        else {
+            panic!("no window");
+        };
+
+        // 0x1E is `a` in scan code set 1 — the set both the keymap and the host
+        // window speak, which is what lets a harness drive the real translation.
+        let mut screen = Recording::new();
+        screen.feed(vec![InputEvent::KeyDown {
+            scancode: 0x1E,
+            character: Some('a'),
+        }]);
+        screen.close_after = Some(2);
+        server.run_with(&mut compositor, &mut screen).expect("run");
+
+        assert!(
+            server.stats().routed_events > 0,
+            "the keystroke was not routed to anyone: {:?}",
+            server.stats()
+        );
+
+        // And it reached the client, not merely the router. The scancode is the
+        // one the display reported, unchanged: it is carried alongside the
+        // translated key so that a game can ask for the physical position.
+        for _ in 0..1000 {
+            server.tick(&mut compositor).expect("tick");
+            conn.pump().expect("pump");
+            if conn
+                .drain_events()
+                .iter()
+                .any(|e| e.window == window && e.scancode == Some(0x1E))
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the client was never told about the keystroke");
     }
 }

@@ -75,6 +75,12 @@ pub use wire::{ClientLink, WireError};
 // what lets the translation be tested without a network.
 mod server;
 pub use server::{Disconnect, Server, ServerStats};
+// Where a finished frame goes and where input comes from. Everything above this
+// line composites into a buffer nothing looked at, and routes input that never
+// arrived; `present` is the one seam that closes both, because both had the
+// same cause — the compositor owned no device.
+pub mod present;
+pub use present::{Headless, Present, Recording};
 // Remote draw-command streaming uses the shared `guiremote` crate's scene
 // protocol (multi-window deltas built on its single-window RenderCommand wire
 // codec), rather than a compositor-local duplicate.
@@ -4573,6 +4579,16 @@ impl Compositor {
         self.cursor_shape
     }
 
+    /// Where the pointer is, in screen pixels.
+    ///
+    /// The cheapest evidence that input reached the compositor at all: a caller
+    /// that fed a [`InputEvent::MouseMove`] can check it landed without
+    /// composing a frame and hunting for a cursor in the pixels.
+    #[must_use]
+    pub const fn cursor_position(&self) -> (i32, i32) {
+        (self.cursor_x, self.cursor_y)
+    }
+
     /// Get a reference to the framebuffer's front buffer (the composited
     /// surface). Note: when the last frame was a direct-scanout bypass this is
     /// *stale* — use [`present_pixels`](Compositor::present_pixels) for the
@@ -4596,6 +4612,18 @@ impl Compositor {
             return buf.pixels();
         }
         self.framebuffer.front_buffer()
+    }
+
+    /// The size of a composited frame, in pixels, as `(width, height)`.
+    ///
+    /// [`present_pixels`](Compositor::present_pixels) returns `width * height`
+    /// values and says nothing about their shape; anything drawing them on a
+    /// display needs both, and asking the primary [`Display`] instead would be
+    /// the wrong question — a display describes the *hardware* mode, and the
+    /// framebuffer is what was actually composited into.
+    #[must_use]
+    pub const fn frame_size(&self) -> (u32, u32) {
+        (self.framebuffer.width, self.framebuffer.height)
     }
 
     /// How the last presented frame was produced.

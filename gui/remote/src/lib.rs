@@ -24,6 +24,11 @@
 //! duplex transport fails on its first four bytes instead of decoding into
 //! plausible nonsense.
 //!
+//! [`client`] joins the two into the loop an application actually runs: read
+//! input, dispatch it, draw one frame. It lives here rather than in `guitk`
+//! because it needs both directions of this protocol, and `guiremote` already
+//! depends on `guitk` — putting the loop there would close the cycle.
+//!
 //! ## Frame format
 //!
 //! Each frame is a self-contained, length-prefixed envelope:
@@ -82,6 +87,9 @@ pub use input::{
     INPUT_MAGIC, INPUT_VERSION, InputEvent, decode_input_frame, encode_input_frame,
     encode_input_frame_into, try_decode_input_frame,
 };
+
+pub mod client;
+pub use client::{App, Client, ClientError, Response, Transport};
 
 // ============================================================================
 // Protocol constants

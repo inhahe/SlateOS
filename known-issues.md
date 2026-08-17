@@ -29910,9 +29910,27 @@ cost of a mismatch is small.
   channel to its owning process, and until that exists `main()` builds the frame
   and drops it. Also `TD-ONLY-ONE-KEYBOARD-LAYOUT`: the structure supports
   layouts, and exactly one table occupies it.
-- **(d) Write the client-side loop once, in `guitk`,** not once per app: connect,
-  block on events, dispatch to a handler, push a `RenderTree` per frame. 138
-  hand-written loops is 138 chances to get the seam subtly different.
+- **(d) Write the client-side loop once,** not once per app: read events,
+  dispatch to a handler, push a `RenderTree` per frame. 138 hand-written loops
+  is 138 chances to get the seam subtly different. — **DONE 2026-08-17.**
+  `gui\remote\src\client.rs`. Note the correction to this step's own text: it
+  said "in `guitk`", which is impossible — the loop needs both directions of the
+  `guiremote` wire format and `guiremote` already depends on `guitk`, so putting
+  it in `guitk` closes a dependency cycle. A third crate was the other option
+  and is not available to lane C, which may not edit the workspace-root
+  `Cargo.toml`. So it lives in `guiremote`.
+
+  An app implements `App` (`on_event` → `Idle`/`Redraw`/`Exit`, plus `render`);
+  the transport is a second trait, so the loop is testable without a kernel
+  channel and can later sit on a channel, a socket or a pipe unchanged. The
+  behaviours worth naming, each pinned by a test: a batch of events produces
+  **at most one** frame (ten mouse moves are not ten frames); a `Resize` is
+  applied *before* the frame that answers it, and the very first paint folds
+  into the first batch for that same reason — painting first would draw the
+  window at a size it does not have; a `CloseRequested` the app ignores still
+  closes, because a close button that does nothing is worse than an app that
+  wanted to stay; an event addressed to another window is counted, not
+  dispatched. 19 tests.
 - **(e) Wire `apps/editor` to it** as the first real client, calling
   `ensure_cursor_visible` and `ensure_caret_visible_horizontally` after any
   cursor movement. Its demo `main()` should become an example or a test, not be

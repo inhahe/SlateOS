@@ -26,7 +26,8 @@
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
-use coreutils::quote::{quote, quoteaf};
+use coreutils::quote::quoteaf;
+use coreutils::xnum::xdectoumax;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
@@ -425,33 +426,26 @@ fn set_count(unit: Unit, value: &[u8], options: &mut Options) -> Result<(), geto
     Ok(())
 }
 
-/// The multiplier suffixes `head` accepts, and the power of the base each
-/// stands for.
+/// The suffix list `head` hands to gnulib, verbatim from upstream's two
+/// `xdectoumax` calls.
 ///
-/// This is upstream's `"bkKmMGTPEZYRQ"` — gnulib's `xstrtoumax` knows more
-/// (`c`, `w`, `g`, `t`, `B`, `D`), but a suffix outside the caller's list is
-/// rejected, which is why `head -n 1w` is an error even though `dd`-style `w`
-/// exists in the same function.
-const SUFFIXES: &[(u8, u32)] = &[
-    (b'b', 0), // 512 exactly, handled below rather than as a power
-    (b'k', 1),
-    (b'K', 1),
-    (b'm', 2),
-    (b'M', 2),
-    (b'G', 3),
-    (b'T', 4),
-    (b'P', 5),
-    (b'E', 6),
-    (b'Z', 7),
-    (b'Y', 8),
-    (b'R', 9),
-    (b'Q', 10),
-];
+/// gnulib's `xstrtoumax` knows more suffixes than this (`c`, `w`, `g`, `t`),
+/// but one outside the caller's list is rejected — which is why `head -n 1w` is
+/// an error even though `dd`-style `w` exists in the same function. The
+/// trailing `0` is not a suffix: it is gnulib's flag enabling the *second*
+/// suffix, so that `B`/`D` switch the base to 1000 and `iB` pins it at 1024.
+const SUFFIXES: &[u8] = b"bkKmMGTPEZYRQ0";
 
 /// gnulib's `xdectoumax` as `head` calls it: a decimal count with an optional
 /// multiplier suffix.
 ///
-/// The rules that are not guessable, all measured against glibc:
+/// The grammar itself lives in [`coreutils::xnum`], shared with `fold`, `nl`
+/// and every other utility that reads a number through gnulib — this function
+/// is only the two things that are `head`'s own: which suffixes are allowed,
+/// and which half of the diagnostic names the unit.
+///
+/// The rules that are not guessable, all measured against glibc and all tested
+/// in `xnum`:
 ///
 /// - **Leading whitespace and a leading `+` are accepted** (`strtoumax` skips
 ///   them), but trailing whitespace is not: `head -n "  5"` works, `head -n "5 "`
@@ -467,105 +461,21 @@ const SUFFIXES: &[(u8, u32)] = &[
 ///   alone would overflow — so the suffix must be validated before the
 ///   magnitude is reported.
 ///
+/// `head`'s range is the whole of `u64`, so the `xdectoumax` bound check can
+/// never fire and the only tail this can produce is the overflow one. That is
+/// why there is no `Numerical result out of range` here and there is one in
+/// `fold`: the sentence is chosen by the value, and `head` has no value it
+/// rejects for being too small.
+///
 /// # Errors
 ///
 /// A number that does not parse, or one that overflows `u64`.
 fn parse_count(text: &[u8], unit: Unit) -> Result<u64, getopt::Error> {
-    // `quote`, not `quoteaf`: gnulib's `xdectoumax` echoes the offending text
-    // with `quote()`, whose escaping is C's rather than the shell's. The two
-    // agree on everything without a quote or a backslash in it, which is why
-    // this was invisible until a value was passed one — `head -n "a'b"` must
-    // say `'a\'b'` and not `"a'b"`.
-    let invalid = || HEAD.usage(format!("{}: {}", unit.invalid_number(), quote(text)));
-    let overflow = || {
-        HEAD.usage(format!(
-            "{}: {}: Value too large for defined data type",
-            unit.invalid_number(),
-            quote(text)
-        ))
-    };
-
-    let mut at = 0usize;
-    while text.get(at).is_some_and(u8::is_ascii_whitespace) {
-        at = at.saturating_add(1);
-    }
-    if text.get(at) == Some(&b'+') {
-        at = at.saturating_add(1);
-    }
-    let digits_from = at;
-    let mut value: u64 = 0;
-    let mut overflowed = false;
-    while let Some(d) = text.get(at).filter(|c| c.is_ascii_digit()) {
-        at = at.saturating_add(1);
-        let digit = u64::from(d.wrapping_sub(b'0'));
-        match value.checked_mul(10).and_then(|v| v.checked_add(digit)) {
-            Some(v) => value = v,
-            // `strtoumax` keeps consuming digits after ERANGE and returns
-            // UINTMAX_MAX; the suffix that follows still has to be valid, which
-            // is the `99999999999999999999X` case.
-            None => overflowed = true,
-        }
-    }
-    if at == digits_from {
-        // Nothing was consumed. gnulib's fallback looks at `nptr[0]` — the
-        // first byte of the *whole* string, not of what is left after the
-        // whitespace it just skipped — so a suffix behind a space does not
-        // qualify.
-        if !text.first().is_some_and(|c| is_suffix(*c)) {
-            return Err(invalid());
-        }
-        at = 0;
-        value = 1;
-    }
-    if overflowed {
-        value = u64::MAX;
-    }
-
-    // The suffix, if any.
-    if let Some(&first) = text.get(at) {
-        let Some(power) = suffix_power(first) else {
-            return Err(invalid());
-        };
-        at = at.saturating_add(1);
-        let base = match (text.get(at), text.get(at.saturating_add(1))) {
-            // `iB` — explicitly binary, and the only use of a lone `i`.
-            (Some(b'i'), Some(b'B')) => {
-                at = at.saturating_add(2);
-                1024u64
-            }
-            // `B` and the obsolescent `D` — decimal.
-            (Some(b'B' | b'D'), _) => {
-                at = at.saturating_add(1);
-                1000u64
-            }
-            _ => 1024u64,
-        };
-        if at != text.len() {
-            return Err(invalid());
-        }
-        let factor = if first == b'b' {
-            // `b` is 512 flat and takes no second suffix — it is not in the
-            // base-switching group at all.
-            512u64
-        } else {
-            base.checked_pow(power).ok_or_else(overflow)?
-        };
-        value = value.checked_mul(factor).ok_or_else(overflow)?;
-    } else if overflowed {
-        return Err(overflow());
-    }
-    if overflowed {
-        return Err(overflow());
-    }
-    Ok(value)
-}
-
-fn is_suffix(c: u8) -> bool {
-    suffix_power(c).is_some()
-}
-
-fn suffix_power(c: u8) -> Option<u32> {
-    SUFFIXES.iter().find(|(s, _)| *s == c).map(|(_, p)| *p)
+    // `xdectoumax` quotes the offending text with `quote()`, whose escaping is
+    // C's rather than the shell's. The two agree on everything without a quote
+    // or a backslash in it, which is why the difference was invisible until a
+    // value was passed one — `head -n "a'b"` must say `'a\'b'`, not `"a'b"`.
+    xdectoumax(text, 0, u64::MAX, Some(SUFFIXES), unit.invalid_number()).map_err(|m| HEAD.usage(m))
 }
 
 // --------------------------------------------------------------- printing ---

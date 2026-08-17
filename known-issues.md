@@ -28168,7 +28168,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 10 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 13 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -28580,6 +28580,183 @@ upstream C source rather than a black-box probe:
   everything past column 4 alone. Writing the expectation from intuition and
   the code from the C source, then reconciling, is what caught these; writing
   both from intuition would have produced a self-consistent wrong utility.
+
+`fold` is the eleventh (`scripts/fold-diff.sh`: 272 passed, 0 differed, 5 differ
+on purpose — the directory operand, `--help`, `--version`, and the two
+*abbreviations* of the latter pair, which are xfails rather than plain cases so
+that what they certify is "`--he` resolves at all", not the help text we already
+know differs). The old implementation was wrong in six ways a one-line command
+would show — a column was always a byte, input was decoded as UTF-8 through
+`lines()` (so a non-UTF-8 file stopped at the first bad byte, CRs vanished, and
+an unterminated last line *gained* a newline), `-w bogus` silently became
+`-w 80` via `parse().unwrap_or(80)`, `-w 0` meant "don't wrap" where GNU refuses
+it, every exit was 0, and `-b`/`--width=N`/`-40`/`--` were all read as
+filenames. Four things worth carrying forward:
+
+- **Measuring the *next* utility found a bug in the *last* one.** Probing
+  `fold --width 5` to establish its grammar is what exposed that `expand
+  --tabs 4` and `unexpand --tabs 4` — shipped an hour earlier — printed
+  `option '--tabs' requires an argument`. A long option with a *required*
+  argument takes the next word when there is no `=`; both files had been
+  written from the opposite belief, and *both harnesses lacked the row that
+  would have caught it*, so the harnesses were part of the fix (commit
+  `2a70349c7`). Every other converted utility already got this right, which is
+  the tell: when one conversion disagrees with seven, suspect the one.
+  Generalise: a utility with a required-argument long option needs the
+  separated spelling in its harness, not only the `=` one.
+- **A sixth shared module, `xnum.rs`,** rather than a third hand-rolled copy of
+  gnulib's `xstrtoumax`/`xdectoint`. `nl` and `head` had each already written a
+  partial one, disagreeing exactly where two partial copies would, and `fold
+  -w` would have been the third. The grammar is much larger than "a decimal
+  integer": leading whitespace, an accepted `+`, a suffix table with two
+  possible bases, a bare suffix meaning *one* of it (`head -c K` is 1024), and
+  — the part no one reinvents correctly — a choice between two different
+  `strerror` sentences for out-of-range decided by a heuristic on the *value*
+  (`INT_MAX / 2`) rather than on the bound that was violated. The suffix table
+  was certified against GNU `head -c` rather than against my reading of it.
+  `fold` passes `Some(b"")` (no suffixes at all), which is why `fold -w 1K` is
+  an error though `head -c 1K` is not: one function, different caller lists.
+- **The over-wide character does not reset the column.** When a character alone
+  exceeds the width, upstream emits it on its own line via `if (offset_out ==
+  0) { line_out[offset_out++] = c; continue; }` — and that `continue` skips the
+  `column = offset_out = 0` that every *other* break performs. So `printf
+  'a\tb\n' | fold -w 4` is `a\n\t\nb\n`, not the intuitive `a\n\tb\n`: the tab
+  lands alone at column 8, and `b` is therefore column 9 and breaks again. Both
+  halves of the unit test asserting the intuitive answer were wrong and GNU was
+  right, at width 8 as well as at width 4.
+- **`fold` is per-file where `expand` is one stream.** `column` and
+  `offset_out` are locals of `fold_file`, so a file not ending in a newline has
+  its partial line flushed *without* one and the next operand starts at column
+  zero. `expand`'s operands are a single continuous stream. The two utilities
+  are neighbours, share a harness shape, and differ here — which is precisely
+  why `half1.txt`/`half2.txt` exist in both harnesses with opposite
+  expectations.
+
+### Progress (appended 2026-08-17, `paste`)
+
+`paste` is the twelfth (`scripts/paste-diff.sh`: 200 passed, 0 differed, 6
+differ on purpose; 37 differ when pointed at MSYS2's `paste`, which is the
+harness proving it still discriminates). The shipped version recognised only
+`-d` and `-s`, did not cycle the delimiter list, did not collapse its escapes,
+had no `-z`, treated `-` as a file called `-`, split input as UTF-8 text, and
+exited 0 whatever happened. Five things worth carrying forward:
+
+- **A whole gnulib quoting style had to be built first, and it was built by
+  reading the C, not by guessing.** `paste`'s trailing-backslash diagnostic uses
+  `quotearg_n_style_colon (0, c_maybe_quoting_style, …)` — deliberately *not*
+  the usual `quote()`, because that "would double the number of displayed
+  backslashes, making the diagnostic look bogus." Nothing else in our tree had
+  `c_maybe`. It is now `quote_c_maybe`/`quote_c_maybe_colon` in `quote.rs`
+  (`a465d3b29`), settled by reading `lib/quotearg.c` and then *measured* against
+  two independent GNU oracles — `ls --quoting-style=c-maybe` for the plain form
+  and `paste -d 'ARG\'` for the colon one — over every byte in three positions
+  (`scripts/c-maybe-probe.py` → `tests/c-maybe-gnu.txt`, 1590 rows,
+  `tests/c_maybe.rs`). **All 1590 matched on the first run**, which is the value
+  of doing both: source-reading and black-box measurement agreeing is evidence,
+  either one alone is a belief. Three inputs no oracle can express (NUL, the
+  empty string, and `/` for the `ls` oracle) are unit tests marked *unmeasured*
+  rather than quietly folded in with the rest.
+- **The two modes are not two spellings of one algorithm, and the difference is
+  in the *error* rules, not the merge.** Parallel opens every operand up front
+  with `error (EXIT_FAILURE, …)` — fatal, before a byte of stdout, and only the
+  first bad operand is ever named. Serial opens as it goes with `error (0, …)` —
+  names every one and continues. So `paste A nosuch B` and `paste -s A nosuch B`
+  differ in stdout, stderr *and* their interleaving. Every missing-file row in
+  the harness therefore runs both ways; a harness that tested one mode's failure
+  path would have certified the other's as identical.
+- **A read error is reported one output line *after* the read that failed.**
+  Upstream leaves it in the stream's `ferror` flag and only looks when it closes
+  the file, which is the next time round the loop — and in the meantime the
+  failed stream keeps answering "end of file", so the line it was part of still
+  finishes and still gets its delimiter. `Source::failed` exists to reproduce
+  that delay rather than to store an error, and the unit test drives a reader
+  that yields one byte and then fails, because nothing else exhibits it.
+- **`\0` and "no delimiter" are the same value, which is why `-d ''` is not the
+  empty list.** `#define EMPTY_DELIM '\0'`, so a NUL cannot be *used* as a
+  delimiter; `main` rewrites an empty `-d` argument to the two characters `\0`
+  so the list has one position that emits nothing. The position is still spent:
+  `-d 'x\0y'` puts `x` between columns 1|2, nothing between 2|3, and `y`
+  between 3|4 — a list that merely dropped the position would put `y` at 2|3.
+  This is exactly the kind of rule a plausible implementation gets wrong and a
+  whitespace-tolerant harness never catches.
+- **The delimiter diagnostic is raised between the option loop and the opens**,
+  which pins it in a two-sided way no single test states: a later `-d` rescues
+  an earlier bad one and any getopt error preempts it (both are raised inside
+  the loop), yet it preempts a missing file (the opens come after). Three
+  harness rows and one unit test hold that position from both sides.
+
+One asymmetry is deliberately *not* reproduced and is recorded here instead.
+With standard input closed, `paste -s - A 0<&-` prints `paste: -: Bad file
+descriptor` **twice**: once from the per-file read and once from `main`'s
+closing `if (have_read_stdin && fclose (stdin) == EOF)`. Rust has no
+`fclose (stdin)` and surfaces a read error where the read happens, so the second
+line has no analogue. The parallel-mode companion — `opened_stdin &&
+have_read_stdin` → `paste: standard input is closed` — *is* reproduced, guarded
+by a `#[cfg(unix)]` file-descriptor check that can never fire on the Windows
+host this harness runs on.
+
+### Progress (appended 2026-08-17, `comm`)
+
+`comm` is the thirteenth (`scripts/comm-diff.sh`: 195 passed, 0 differed, 7
+differ on purpose — **zero differences on the harness's first run**; 61 differ
+when pointed at MSYS2's `comm`, which is the harness proving it still
+discriminates). The shipped version had no `--total`, no `--output-delimiter`,
+no `-z`, no order checking at all, took `--check-order` and `--` as filenames,
+and read its input as UTF-8 text. Five things worth carrying forward:
+
+- **The locale decides what the program *computes*, not just how it words a
+  complaint — so this harness runs under `C` end to end.** Its twelve siblings
+  run under `C.UTF-8` and drop to `C` only for the gnulib-quoted diagnostics
+  (B-Q2). `comm` cannot: `order = hard_LC_COLLATE ? xmemcoll (…) : memcmp2 (…)`,
+  and `hard_locale` is false for exactly `C` and `POSIX`. Under any other locale
+  GNU pairs lines by `strcoll`, where case can be secondary and two different
+  byte strings can compare *equal*. Ours compares bytes always. Under `C` that
+  is GNU's rule and the agreement is by construction; under `C.UTF-8` it would
+  have been a coincidence of codepoint order matching byte order, and a harness
+  that ran there would have been certifying the coincidence. A closing section
+  re-runs five ASCII comparison cases under `C.UTF-8` to *bound* the claim
+  rather than hide it; the divergence itself is filed against the same
+  collation entry as the `oils` funmap listing.
+- **The default order check is not "warn on descent" — it is armed by something
+  else entirely.** `check_order` fires only when
+  `check != DISABLED && (check == ENABLED || seen_unpairable)`. So `comm D D`
+  over a file that is thoroughly out of order is *silent and exits 0*: every
+  line pairs, nothing ever sets `seen_unpairable`, and the descent is never
+  looked at. Add `--check-order` and the same command line becomes a fatal error
+  after one line of output. That pair of rows is in the harness precisely
+  because an implementation written from the option's *name* passes every other
+  order-checking test and fails these two.
+- **The three columns are made of separators, not of padding.** `writeline`
+  writes zero separators before a column-1 line, one before column 2 *if
+  column 1 is shown*, and two before column 3 *counting only the shown columns*.
+  So `-1` does not blank a column, it removes a tab from every remaining line —
+  which is why stdout is compared through `od -An -c` and why all ten
+  suppression spellings are separate rows.
+- **`--output-delimiter=` is a NUL, not nothing.** `col_sep` keeps pointing at
+  `""` while `col_sep_len = *optarg ? strlen (optarg) : 1` forces the length to
+  1, so each boundary emits one zero byte. Repeating the option is allowed only
+  with an *identical* argument, and the comparison is against the argument **as
+  typed** — which is why `Settings` stores the raw bytes and derives the
+  effective separator, rather than storing the separator and losing the
+  distinction between `=` and `=\0`.
+- **Upstream's four-buffer-per-file rotation collapses to two owned lines, and
+  the one behavioural difference is provably invisible.** `lba[2][4]` +
+  `alt[2][3]` exist so the EOF path can re-check the last two lines; ours keeps
+  `prev` and `prev2`. After exactly one line has been read upstream's "two back"
+  *aliases* that same line, so its re-check compares a line with itself and
+  stays silent — where ours skips the re-check because `prev2` is `None`. Same
+  silence, reached two ways. The argument is written out on `Column::prev2` so
+  the next reader does not have to reconstruct it from the C.
+
+One asymmetry is deliberately *not* reproduced. `comm - -` merges one stream
+against itself — well defined, and both sides get the output right — but GNU
+then closes both files, and both are `stdin`, so the second `fclose` runs on an
+already-closed stream. That is undefined behaviour; on glibc it sets the error
+indicator and `close_stdout` reports `comm: -: Bad file descriptor` and exits 1.
+Reproducing the diagnostic would mean reproducing a double free, so the case is
+an xfail in the harness with the reasoning attached, alongside the two host
+xfails (a directory operand, which a Windows `File::open` refuses outright) and
+the four `--help`/`--version` ones.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
@@ -29728,6 +29905,315 @@ on it. `cargo clippy -p kernel` exits 0 with **54** warnings naming
 `lockdep.rs`, against a 55 baseline -- one fewer, none new, despite the module
 growing by a static array, a helper and a test.
 
+## A-LOCKDEP-RECORD-EDGE-WAS-A-LINEAR-SCAN-ON-EVERY-NESTED-ACQUIRE (lane A, 2026-08-17) - **fixed**
+
+> **Read the CORRECTION at the end of this entry before believing anything here
+> about `page_fault_anonymous`.** The fix described below is real and was kept;
+> the *cause* it is attributed to was tested afterwards and refuted. The
+> performance claims in this entry stand as a recorded hypothesis, not a finding.
+
+**In short:** the lock-order checker answered the question "have I seen this
+pair of locks nested before?" by scanning its entire list of previously-seen
+pairs, every single time one lock was taken while another was held. The list
+only ever grows, so taking a lock got slower the longer the machine had been
+running. This stayed hidden for a long time because the checker was only
+switched on near the *end* of boot, where little had accumulated; moving it to
+the *start* of boot -- done earlier the same day for unrelated diagnostic
+reasons -- exposed it, and the anonymous page-fault benchmark more than doubled.
+
+**Where:** `kernel/src/lockdep.rs`, `record_edge` and `has_cycle`; the missing
+instrumentation is `kernel/src/bench.rs` `bench_lock_primitives`.
+
+**The cost.** `lock_acquire` loops over every lock the CPU already holds (up to
+`MAX_DEPTH` = 16) and calls `record_edge(held, acquiring)` for each. The old
+`record_edge` opened with:
+
+```rust
+let count = EDGE_COUNT.load(Ordering::Relaxed) as usize;
+for i in 0..count.min(MAX_EDGES) {          // <-- O(edges), every nested acquire
+    let e = unsafe { EDGES[i] };
+    if e.from == from && e.to == to { return false; }
+}
+```
+
+so a nested acquire cost `O(held_depth x edges)`, with `edges` monotonically
+increasing for the whole uptime of the machine. `has_cycle` was worse per call
+-- `O(V x E)`, rescanning the entire edge table once per BFS node -- but it only
+runs when an edge is genuinely new, so it is not the hot cost.
+
+**How it surfaced.** `page_fault_anonymous`, from `bench/history.jsonl`:
+
+| Runs | Commit(s) | ns |
+|---|---|---|
+| 34 consecutive | `fcd066231` .. `d542299e2` | 2057-2801 (median ~2090) |
+| 1 | `7342d57ea` | 3510 |
+| 2 | `78affced4` | 4333, 4978 |
+
+**The first step is not this bug and not any bug.** `d542299e2..7342d57ea`
+touches `bench/boot-history.jsonl` and `bench/history.jsonl` and nothing else --
+zero kernel source -- and that commit's own message records the run as an A/A
+comparison (same commit both sides) that the harness called clean. So
+2158 -> 3510 (+63%) happened with a byte-identical kernel. That is a real
+statement about this benchmark's environmental spread, and it is why the harness
+was right to say "treat with suspicion".
+
+**The second step is.** `78affced4` is the merge that carried the
+`lockdep::init()` move. The bench harness's own context line, which had read
+`43 lockdep classes registered` (or 44) on **ten** previous runs across
+`build/baseline-boot.log`, `bench-capquery.log`, `bisect-86a923fe1.log` and
+seven others, now read:
+
+```
+[bench]   lock context: 128 lockdep classes registered
+```
+
+128 is `MAX_CLASSES` **exactly** -- the table was not merely fuller, it was
+*full*, and had been silently discarding every class past the 128th. With ~3x
+the classes registered before the benchmarks run, the edge table is
+correspondingly larger and every nested acquire pays a proportionally longer
+scan.
+
+**Why the harness could not see it, and this is the part worth keeping.** The
+bench suite *does* measure lockdep overhead -- `lock overhead: total +241ns =
+lockdep 32ns + ...` -- and that number stayed flat across the regression. It
+stayed flat because every lock benchmark
+(`lock_raw_spin`, `lock_tracked`, `lock_no_lockdep`, `lock_tracked_no_stats`)
+takes **one** lock with nothing else held:
+
+```rust
+let tracked = run("lock_tracked", 2000, || {
+    let mut g = TRACKED.lock();          // held.depth == 0 at this point
+    *g = core::hint::black_box(*g).wrapping_add(1);
+});
+```
+
+With `held.depth == 0` the `for i in 0..held.depth` loop in `lock_acquire` has
+no iterations, so `record_edge` is **never called** and the scan being measured
+is not in the measurement. The instrument pointed at lockdep was, by
+construction, blind to the only part of lockdep whose cost was superlinear. An
+overhead figure that cannot vary is not a control.
+
+**Fix.** The edge list is now an adjacency bitmap, `ADJ: [[AtomicU64;
+ADJ_WORDS]; MAX_CLASSES]` -- row `from`, bit `to`:
+
+* `record_edge` is one `fetch_or`. `O(1)`, independent of edge count, and
+  race-free in a way the old code was not: two CPUs could previously both
+  finish the scan before either appended, then both append the same edge and
+  both report it as new. Exactly one CPU now observes the bit as clear.
+* `has_cycle` enumerates a node's successors from its own row -- `ADJ_WORDS`
+  (= 4) word loads, iterating only set bits -- instead of scanning the whole
+  table per BFS node.
+* It is **smaller** than what it replaced (256x256 bits = 8 KiB, against a
+  512-entry edge list that could hold 512 of 65536 possible edges) and it
+  deletes the "edge table full" case outright. That case was a silent one:
+  past 512 edges the old code stopped recording dependencies, so cycle
+  detection went blind on a long-running kernel with no indication.
+* `MAX_CLASSES` raised 128 -> 256, and `CLASS_HASH_SHIFT` 9 -> 10 with it, to
+  hold the hash index at the 25% load factor its comment claims.
+* Overflow is no longer silent: `report_class_table_full` prints once, because
+  a dropped class is a lock the validator stops checking, and the absence of a
+  warning then stops meaning "no violation".
+
+**Tests.** `lockdep::self_test` gains "Test 10: edge bitmap", asserting that
+`record_edge` reports an edge as new exactly once, that the count does not move
+on a duplicate, that `from -> to` and `to -> from` are distinct edges (a bitmap
+indexed by the wrong operand would make them look symmetric), that
+out-of-range indices are refused rather than aliasing onto a real row, and that
+`has_cycle` finds the 2-cycle just built. It removes its own synthetic edges
+afterwards so the real graph is unperturbed.
+
+**Instrumentation.** The bench context line now prints the edge count beside
+the class count. The class count alone said nothing about the cost of a nested
+acquire, which is why `128` -- a number equal to the cap -- was printed twice
+and read as unremarkable.
+
+**Still open, deliberately.** Two things this entry does *not* claim:
+
+1. That the fix restores `page_fault_anonymous` to ~2090ns. The first step in
+   the table above proves this benchmark can move +63% with identical code, so
+   a single post-fix run cannot settle it either way.
+2. That 256 classes is enough. The true number of distinct lock classes in this
+   kernel is still unknown -- it was masked by the old cap for as long as the
+   cap has existed. `report_class_table_full` is what will say.
+
+A follow-up worth doing: add a *nested* lock benchmark
+(`lock_tracked_nested`), so the cost that regressed here is measured directly
+rather than inferred from a page-fault benchmark that happens to take nested
+locks.
+
+### A-LOCKDEP-RECORD-EDGE-WAS-A-LINEAR-SCAN — CORRECTION 2026-08-17 — the fix is right, the attribution above was wrong
+
+**In short:** the fix landed and is worth keeping, but the claim above that this
+bug caused the `page_fault_anonymous` regression is **not supported by the
+measurement that tested it**. The section headed "The second step is" should be
+read as a hypothesis that was then refuted, not as a finding. Recorded rather
+than rewritten, because an attribution that survived a whole implementation
+before failing its test is worth being able to find again.
+
+**What boot #17 (PASS, clean streak 7, `--bench`) actually showed.** The new
+instrumentation answered the question the old line could not:
+
+```
+[bench]   lock context: 138 lockdep classes registered, 132 dependency edges
+[bench] page_fault_anonymous: min=15344 cycles (4138ns) ... [200 iters]
+```
+
+Two things follow, and they point opposite ways.
+
+**1. The class overflow was real — this half is confirmed.** With the cap
+raised to 256 the true count is **138**. The old cap was 128. So 10 lock
+classes were being silently discarded on every boot after `lockdep::init()`
+moved earlier, and every lock in those 10 classes was invisible to the deadlock
+validator. That is a genuine correctness defect and it is fixed.
+
+**2. The performance attribution was wrong.** The edge table held only **132**
+edges — nowhere near the 512-entry cap, and far short of what the entry above
+assumed when it reasoned that "the edge table is correspondingly larger". A
+132-entry scan is not free, but it is not 2900ns of TCG work either. And the
+decisive check: making `record_edge` `O(1)` moved `page_fault_anonymous` from
+4333/4978ns only to **4138ns**, against a pre-shift baseline of ~2090ns. If the
+edge scan had been the cause, removing it entirely would have restored the
+baseline. It did not.
+
+**So what is wrong with `page_fault_anonymous`? Still unknown, and it is
+probably not code.** The strongest single piece of evidence remains the one
+already in this entry: the first +63% step (2158 -> 3510ns) happened across
+`d542299e2..7342d57ea`, which changes `bench/boot-history.jsonl` and
+`bench/history.jsonl` and *nothing else* -- a byte-identical kernel, in a run
+that commit's own message records as a clean A/A comparison. A benchmark that
+moves +63% with identical code can move the rest of the way for the same
+reason, whatever that reason is. Ruled out so far:
+
+| Candidate | Ruled out by |
+|---|---|
+| `record_edge` linear scan | this correction: fixed, benchmark did not recover |
+| `mm/page_table.rs` changes in the fence | diff is `const` values and doc comments only; no function body changed |
+| PAT reprogramming mis-typing kernel memory | no mapping site hard-codes the `PWT` bit; `WRITE_THROUGH` was relocated to slot 7 and `NO_CACHE` left on slot 2, so named-constant users keep their memory type |
+| `lockdep::init()` move enabling lockdep during benchmarks | it was already enabled -- `bench::run_all()` runs at main.rs:5775+, after *both* the old init site (5374) and the new one (1530) |
+
+Not yet ruled out, and the next thing to try: **code layout under TCG**, via
+`python scripts/straddle-check.py --compare <old-elf> <new-elf>`. The merge at
+`78affced4` added ~6365 lines, which re-rolls the layout lottery for every
+function; the harness's own prior for this is
+`A-CRYPTO-BENCHMARKS-STEPPED-58-PERCENT-WITH-BYTE-IDENTICAL-CRYPTO-SOURCE`,
+whose verdict was "code layout under TCG. Not a regression." Note this cannot
+explain the *first* step, where the binary did not change at all.
+
+**`isr_latency` is settled and is noise.** Boot #17 reported it "+66% vs
+suite", but the same benchmark has a **2.34x spread within a single commit**
+(`3f733c39c`: 19065 and 44619ns) and a 1.69x spread within another
+(`d542299e2`: 40756 and 24064ns). A metric whose same-binary spread exceeds the
+movement being flagged cannot support a regression claim. No action.
+
+**The fix stands on its own merits regardless of the attribution**, and would
+be worth keeping even if `page_fault_anonymous` had never moved:
+
+* `record_edge` is `O(1)` instead of `O(edges)` on a path that runs on every
+  nested lock acquire — CLAUDE.md forbids linear scans on hot paths, and this
+  one grew with uptime.
+* It closes a real race: two CPUs could previously both finish the scan before
+  either appended, then both append the same edge and both report it as new.
+* It removes two silent-degradation modes — the 512-edge cap (past which cycle
+  detection stopped recording dependencies with no indication) and the 128-class
+  cap (which was *actually being hit*, at 138).
+* `has_cycle` is now complete. It previously abandoned the search after 32
+  nodes, so a deadlock whose cycle ran through a 33rd lock class was never
+  reported; raising `MAX_CLASSES` to 256 would have widened that hole.
+
+**Lesson worth keeping.** The instrument that should have caught this was
+pointed at the right subsystem and still could not see it: the bench suite
+measures lockdep overhead using a lock taken with nothing else held, so
+`held.depth == 0`, so `record_edge` is never called in the measurement at all.
+The overhead figure stayed flat at ~32-36ns throughout because it was
+structurally incapable of moving. That is why the edge count is now printed
+next to the class count -- and it is why the follow-up below matters more than
+the attribution this entry got wrong.
+
+**Follow-up, now closed (2026-08-17):** `lock_tracked_nested` exists. It takes
+`TRACKED_B` while holding `TRACKED`, so `held.depth > 0` and `record_edge`
+actually runs inside the measurement; it is `track`ed into
+`bench/history.jsonl` and diffed run-over-run. Boot #21 measured **721ns for 2
+nested acquires vs 522ns for 2 flat = 199ns of lockdep dependency work per
+nested acquire**, against a flat-path lockdep cost that now measures **0ns**
+(tracked 261ns vs no-lockdep 263ns). Both numbers together are the point: the
+old suite, pointed squarely at lockdep, would have reported the subsystem as
+free, because the only path it could see was the one lockdep does no work on.
+Note that 199ns is the *steady-state* cost -- the edge is already in the bitmap
+after the first iteration, so this measures the lookup, not the one-off insert.
+
+### A-LOCKDEP-RECORD-EDGE-WAS-A-LINEAR-SCAN — FOLLOW-UP 2026-08-17 — `page_fault_anonymous` recovered on its own; there was no regression
+
+**In short:** the benchmark went back to normal by itself. Boot #18 measured
+`page_fault_anonymous` at **2105ns**, inside the 2057-2158ns band it held for
+eight consecutive runs before the excursion — on a kernel whose page-fault code
+is **identical** to the one that measured 4138ns a run earlier. Nothing was
+fixed in between. The question the CORRECTION above left open ("still unknown,
+and it is probably not code") is now answered as far as it can be: **there was
+no code regression here.**
+
+**The series, in full.** Each row is one recorded run:
+
+| Commit | `page_fault` | Note |
+|---|---|---|
+| `602fc62e0` | 2062, 2084 | |
+| `86a923fe1` | 2076 | |
+| `9ecef3188` | 2057, 2139 | |
+| `d542299e2` | 2097, 2158 | |
+| `7342d57ea` | **3510** | diff vs previous is *two bench JSONL files* |
+| `78affced4` | **4333, 4978** | the +6365-line merge |
+| `e3ae7bae1` | **4138** | `record_edge` made O(1) — barely moved |
+| `71fa87ab7` | **2105** | recovered; **no kernel file changed** |
+| `71fa87ab7` | **2110** | A/A control, byte-identical binary |
+
+**Why the last two rows settle it.** `git diff --stat e3ae7bae1 origin/main --
+kernel/` is *empty*: the merge that preceded the recovery touched `gui/`,
+`apps/` and shared documents, and not one file under `kernel/`. The only
+kernel-side change between 4138ns and 2105ns is inside `lockdep::self_test` —
+a test that runs once at boot and cannot be reached from the page-fault path.
+It is dead code with respect to what was measured. A benchmark that halves
+across a change it cannot observe is not measuring that change.
+
+The A/A control then rules out the other explanation. Re-running the *same*
+tree produced 2110ns against 2105ns — **0.2% apart**. `kernel/build.rs` emits
+no `cargo:rustc-env`, no git hash and no timestamp, so the rebuild is
+reproducible and this really is the same binary twice. Therefore:
+
+| Reading | Predicts | Verdict |
+|---|---|---|
+| Run-to-run noise | same binary lands in either band | **ruled out** — 2105 vs 2110 |
+| Code layout under TCG | the band is a property of the build | consistent with everything |
+
+Layout also matches this harness's own precedent,
+`A-CRYPTO-BENCHMARKS-STEPPED-58-PERCENT-WITH-BYTE-IDENTICAL-CRYPTO-SOURCE`
+("code layout under TCG. Not a regression."). Under TCG a translation block
+ends at a guest page boundary, so a hot loop whose backward branch straddles a
+4 KiB boundary pays a dispatcher round-trip per iteration — ~1.7x on this
+project, against ~2x here.
+
+**The one loose end.** Layout cannot explain the *first* step
+(`d542299e2` 2158 -> `7342d57ea` 3510), whose commit changes only
+`bench/boot-history.jsonl` and `bench/history.jsonl`. If the kernel there was
+byte-identical then its layout did not move either, so that step is something
+else — most likely host interference, which this harness cannot see
+(`B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING`). Worth noting that boot #18 was
+flagged `RUN CONTAMINATED` on wall time (178s vs a 132s median) while producing
+the *fast* number: the contamination flag and the direction of the error are
+not correlated the way one would assume.
+
+**Action: none, and none is warranted.** No page-fault code changed in the
+window and the value is back to baseline. What did come out of the
+investigation is in the entry above and stands on its own: a real class-table
+overflow (138 classes against a 128 cap, so 10 lock classes went untracked), an
+O(1) `record_edge`, a fixed double-report race, and a complete `has_cycle`.
+
+**The reusable lesson.** The harness printed this metric's own range —
+`0-7274ns`, median 2834ns over 8 runs — on every run of the investigation. That
+spread is wider than the "regression" that was chased through an entire
+implementation. The rule that would have saved the effort: **before attributing
+a movement to a change, check whether the metric's own same-binary spread
+already covers it.** It is the same test that correctly dismissed
+`isr_latency`, applied one metric to the left.
+
 ## TD-SPANS-ARE-LAID-OUT-END-TO-END (lane C, 2026-08-17)
 
 **What.** Three more places have the defect `TD-EDITOR-IS-NOT-BIDIRECTIONAL`
@@ -30195,3 +30681,122 @@ thing that is much cheaper to design in than to retrofit, because they change
 
 **Where.** `gui/compositor/src/keymap.rs` — the `key_for_scancode` table, and
 `Modifiers` in `gui/toolkit/src/event.rs:185` for the AltGr gap.
+
+## A-JOB-CONTROL-SELF-STOP-LOST-A-RACING-SIGCONT (lane A, 2026-08-17) - **fixed**
+
+**In short:** when a program stopped itself for job control (what a shell does
+on Ctrl-Z), it told its parent "I have stopped" *before* it actually went to
+sleep. If the parent answered "carry on" in that gap, the wake-up was thrown
+away, because the kernel's resume call quietly does nothing to a thread that is
+not asleep yet. The program then went to sleep with nobody left to wake it, and
+hung forever.
+
+**Where:** `kernel/src/syscall/handlers.rs` `stop_process_for_signal`, and
+`kernel/src/sched/mod.rs` `suspend`/`resume`.
+
+**How it was found.** Boot #19's ring-3 fixture `ctest-jobctl` failed with
+`expected Zombie, got Some(Running)`. The serial log gives the interleaving
+directly:
+
+```
+[signal] Process 164 stopped by signal 20
+[signal] Process 164 continued
+[sched] Suspended task 131
+```
+
+The suspend commits *after* the continue has already come and gone. Note the
+fixture's own failure message had pre-enumerated the three possible causes
+("the parent parked in waitpid() for a stop the child never reported ... the
+child still suspended because SIGCONT never resumed it ..."), which is what
+made the log ordering legible at a glance. Diagnostics that name their own
+candidate causes pay for themselves.
+
+**Why it existed.** The ordering was deliberate and the doc comment said so:
+the parent's `waitpid` must be able to observe the stop *without* waiting for
+the stopping thread to be resumed — that is what `WUNTRACED` means. So the
+announcement genuinely has to precede the park. But `sched::resume` returns
+early unless the target is already `Suspended`, so anything that arrives in the
+window between announcement and park is silently discarded. The losing
+interleaving:
+
+1. the child records the stop and wakes the parent;
+2. the parent wakes, observes the stop, sends `SIGCONT`;
+3. `continue_process` calls `sched::resume` on a thread that is still
+   `Running` — a no-op, and the wakeup is gone;
+4. the child parks, and nothing will ever resume it.
+
+**Frequency.** Intermittent — 4 `SELFTEST_FAIL`s in 50 recorded boots, and the
+immediately preceding boot passed on a byte-identical binary. This is the
+failure mode that is easiest to dismiss as flakiness and most expensive to
+leave in: it is a real hang, it just needs the scheduler to interleave two
+threads a particular way.
+
+**The fix: a two-phase park.** Reordering is not available (see above), so the
+park was split so that the *intent* to sleep is published before the
+announcement:
+
+* `sched::suspend_pending(tid)` commits the task to `Suspended` **without**
+  yielding. The thread keeps running, but its scheduler state now says
+  Suspended, so a concurrent `resume` takes effect instead of being dropped.
+* `sched::park_if_suspended()` yields only if the task is *still* Suspended. If
+  a resume landed in the window, it returns without parking — a `SIGCONT` that
+  overtakes its own `SIGSTOP` correctly leaves the process running.
+
+`sched::suspend` is now these two composed, so the single-call path is
+unchanged for every other caller.
+
+**The subtlety that the fix had to handle.** When a resume wins the race it
+does not merely flip the state — it also *enqueues* the task, on the assumption
+that a Suspended task is parked. But this task never parked; it is executing
+right now. Returning from `park_if_suspended` while it sits in a run queue
+would publish a task that is already on a CPU, and another CPU could pick it up
+and run the same task concurrently. So the cancel path dequeues it and restores
+`Running`. This is the kind of bug the original would have traded for, and it
+is worth stating explicitly because "resume cancels the park" sounds complete
+and is not.
+
+**Test.** `sched::test_two_phase_self_suspend` (self-test 2b) reproduces the
+race deterministically by calling `resume` inside the window on purpose — no
+second CPU and no timing luck needed — then asserts all three properties: the
+resume is observed, the park is declined, and the task is left `Running` and
+**not** queued (checked via `queue_length`, so the dequeue is actually
+verified rather than assumed). Testing it at this level rather than through the
+ring-3 fixture is the point: the fixture found the bug once in fifty boots.
+
+## TD-BACKGROUND-TASK-LOGS-ARE-UNBOUNDED (lane B, 2026-08-17) — **mitigated once; the cause is unfixed**
+
+**In short:** commands we start in the background write everything they print
+to a log file on the C: drive, and nothing ever truncates or deletes those
+files. One of them reached **40 GB** and filled the system disk, at which point
+unrelated things started failing with `could not write to temporary response
+file`. Deleting dead logs got the disk from 11 GB free back to 52 GB, but
+nothing stops it happening again.
+
+**Where it lives.** `%LOCALAPPDATA%\Temp\claude\<project>\<session>\tasks\*.output`
+— one file per backgrounded Bash call, written by the agent harness, never
+rotated. On 2026-08-17 the OS project's directory held 2491 of them totalling
+43 GB across four sessions, of which a single file (`bf8dfbpnv.output`, 6
+Aug, another lane's session) was 40 GB on its own: a command whose output was
+neither bounded nor filtered, left running.
+
+**Reproduce.** Background anything that prints without limit — a `cargo build`
+with a stuck dependency retrying, a QEMU run with `-d int`, a test loop that
+prints per iteration — and leave it. The file grows at the process's write
+rate with no ceiling.
+
+**The proper fix, in order of preference:**
+
+1. **Bound the output at the source.** A backgrounded command should end in a
+   filter that cannot grow without limit — `| tail -c 10M`, `| grep -E …`, or
+   for a known-chatty run `2>&1 | head -5000`. This is the one an agent can
+   apply today and costs nothing.
+2. **Cap the log.** If the harness ever grows a per-task output limit, use it.
+   Not ours to change from here.
+3. **Sweep on a schedule.** `find … -name '*.output' -mtime +7 -delete` is what
+   was run by hand this time. A weekly sweep would have kept the disk from ever
+   reaching 100%, but it treats the symptom.
+
+**Note for whoever reads this next:** the 40 GB file was *another lane's*, and
+deleting an eleven-day-old write-once log is safe, but do not delete a `.output`
+file for a task that may still be running — read the task list first. Files
+under `-mtime +7` are unambiguously dead.

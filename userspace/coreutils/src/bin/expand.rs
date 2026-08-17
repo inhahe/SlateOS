@@ -450,7 +450,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
             // A lone `-` is standard input, which is an operand.
             files.push(arg.clone());
         } else if let Some(body) = bytes.strip_prefix(b"--") {
-            if let Some(request) = long_option(body, &bytes, &mut settings)? {
+            if let Some(request) = long_option(body, &bytes, args, &mut at, &mut settings)? {
                 return Ok(request);
             }
         } else {
@@ -466,10 +466,15 @@ fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
     Ok(Request::Run(settings, files))
 }
 
-/// One `--name` or `--name=value` argument.
+/// One `--name`, `--name=value` or `--name value` argument.
+///
+/// `next` is the caller's position in `args`, advanced when `--tabs` has to
+/// reach forward for a separated argument.
 fn long_option(
     body: &[u8],
     whole: &[u8],
+    args: &[OsString],
+    next: &mut usize,
     settings: &mut Settings,
 ) -> Result<Option<Request>, Refusal> {
     // Split before resolving, so the *name* is what gets matched and the whole
@@ -491,13 +496,21 @@ fn long_option(
 
     match which {
         Long::Tabs => {
-            // `--tabs` takes a required argument, and a long option's required
-            // argument may only be written attached — `--tabs 8` leaves `8` an
-            // operand, so glibc reports the option as missing its argument.
-            let Some(value) = inline else {
-                return Err(Refusal::Getopt(EXPAND.long_missing_argument(name)));
+            // A long option's *required* argument may be written either way:
+            // `--tabs=8` or `--tabs 8`. (An *optional* one may not — it only
+            // ever comes from the `=` form — but `expand` has none.) Only the
+            // last argument on the line can leave it genuinely missing.
+            let value = match inline {
+                Some(value) => value.to_vec(),
+                None => {
+                    let Some(separate) = args.get(*next) else {
+                        return Err(Refusal::Getopt(EXPAND.long_missing_argument(name)));
+                    };
+                    *next = next.saturating_add(1);
+                    arg_bytes(separate)
+                }
             };
-            settings.tabs.parse(value).map_err(Refusal::Tabs)?;
+            settings.tabs.parse(&value).map_err(Refusal::Tabs)?;
         }
         Long::Initial | Long::Help | Long::Version => {
             if inline.is_some() {
@@ -618,12 +631,31 @@ mod tests {
     }
 
     #[test]
-    fn the_three_spellings_of_a_tab_size_agree() {
+    fn the_five_spellings_of_a_tab_size_agree() {
         let expected = b"ab  c\n".to_vec();
         assert_eq!(run(&["-t4"], b"ab\tc\n"), expected);
         assert_eq!(run(&["-t", "4"], b"ab\tc\n"), expected);
         assert_eq!(run(&["--tabs=4"], b"ab\tc\n"), expected);
+        // The separated long form. This was the one that was wrong: a long
+        // option with a *required* argument takes the next word if there is no
+        // `=`, exactly as the short form does, and only the last argument on
+        // the line can leave it genuinely missing.
+        assert_eq!(run(&["--tabs", "4"], b"ab\tc\n"), expected);
         assert_eq!(run(&["-4"], b"ab\tc\n"), expected);
+    }
+
+    #[test]
+    fn a_separated_long_argument_is_consumed_rather_than_left_an_operand() {
+        let args: Vec<OsString> = ["--tabs", "4", "file"].iter().map(OsString::from).collect();
+        let Ok(Request::Run(_, files)) = parse_args(&args) else {
+            panic!("expected a run");
+        };
+        assert_eq!(files, vec![OsString::from("file")]);
+        // …and with nothing after it, it really is missing.
+        assert_eq!(
+            refuse(&["--tabs"]),
+            vec!["option '--tabs' requires an argument".to_string()]
+        );
     }
 
     #[test]
@@ -778,11 +810,20 @@ mod tests {
     }
 
     #[test]
-    fn a_long_option_needs_its_argument_attached() {
+    fn a_long_option_is_missing_its_argument_only_when_nothing_follows() {
+        // This test used to assert that `--tabs 4` *itself* was the missing
+        // argument — the wrong belief that shipped a bug. A required argument
+        // is missing only when there is no next word at all.
         assert_eq!(
-            refuse(&["--tabs", "4"]),
+            refuse(&["--tabs"]),
             ["option '--tabs' requires an argument"]
         );
+        assert_eq!(
+            refuse(&["-i", "--tabs"]),
+            ["option '--tabs' requires an argument"]
+        );
+        // The converse still holds: an option that takes *no* argument rejects
+        // one written with `=`.
         assert_eq!(
             refuse(&["--initial=4"]),
             ["option '--initial' doesn't allow an argument"]

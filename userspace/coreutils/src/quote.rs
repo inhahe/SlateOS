@@ -21,17 +21,22 @@
 //! whether that is one name with a space or the start of a sentence, and a
 //! trailing space or a control character is invisible entirely.
 //!
-//! ## The three styles, and which to use
+//! ## The styles, and which to use
 //!
-//! GNU coreutils has exactly three, and the difference is visible enough that
-//! matching it matters — a test or a script that reads our diagnostic next to
-//! GNU's should see the same bytes.
+//! Three of these are the ones nearly every diagnostic reaches for, and the
+//! difference between them is visible enough that matching it matters — a test
+//! or a script that reads our diagnostic next to GNU's should see the same
+//! bytes.
 //!
 //! | Function | GNU's name | Used for | `abc` | `a b` | `a'b` |
 //! |---|---|---|---|---|---|
 //! | [`quotef`] | `quotef` | a name that **ends the message** | `abc` | `'a b'` | `"a'b"` |
 //! | [`quoteaf`] | `quoteaf` | a name **inside a sentence** | `'abc'` | `'a b'` | `"a'b"` |
 //! | [`quote`] | `quote` | **option arguments**, and anything else | `'abc'` | `'a b'` | `'a\'b'` |
+//!
+//! The fourth, [`quote_c_maybe_colon`], is a C-string rendering rather than a
+//! shell one, and is rare: `paste` uses it for its delimiter list and `ls`
+//! offers it as `--quoting-style=c-maybe`. See its own documentation.
 //!
 //! The first two produce a shell word: what they print can be pasted back into
 //! a shell to name the same file. They differ only in whether an already-safe
@@ -159,6 +164,104 @@ pub fn quote(arg: &[u8]) -> String {
         }
     }
     out.push('\'');
+    out
+}
+
+/// Render `text` the way GNU's `c_maybe_quoting_style` does: as a **C string
+/// literal**, with the outer `"` left off when nothing inside needed them.
+///
+/// This is not a shell rendering. Where [`quotef`] produces something you
+/// could paste back into a shell, this produces something you could paste into
+/// a C or Rust source file, and the two disagree loudly: a space, a `'`, a
+/// `$`, a `` ` `` and even a backslash are all left bare here, because none of
+/// them means anything to a C compiler outside quotes.
+///
+/// The only bytes that pull the quotes back on are the ones a C literal could
+/// not hold as itself: `"`, and anything unprintable — which in the C locale
+/// is everything below `0x20` plus `0x7f` and up. Once the quotes are on,
+/// *everything* is escaped C-style, including the backslash that was bare a
+/// moment earlier.
+///
+/// ```
+/// use coreutils::quote::quote_c_maybe;
+/// assert_eq!(quote_c_maybe(br"a b\"), r"a b\");
+/// assert_eq!(quote_c_maybe(b"a'b"), "a'b");
+/// assert_eq!(quote_c_maybe(br#"a"b\"#), r#""a\"b\\""#);
+/// assert_eq!(quote_c_maybe(b"a\tb"), r#""a\tb""#);
+/// assert_eq!(quote_c_maybe(b"a:b"), "a:b");
+/// ```
+#[must_use]
+pub fn quote_c_maybe(text: &[u8]) -> String {
+    c_maybe(text, b"")
+}
+
+/// [`quote_c_maybe`], plus `:` in the set of bytes that force the quotes on.
+///
+/// This is the combination GNU actually uses — `quotearg_n_style_colon (0,
+/// c_maybe_quoting_style, …)` — and it is the one to reach for. The colon is
+/// added for a reason worth restating: these renderings go into diagnostics
+/// whose shape is `prog: what happened: THING`, so a `THING` holding a colon
+/// of its own would read as another layer of that structure. Quoting it makes
+/// the boundary unambiguous.
+///
+/// ```
+/// use coreutils::quote::quote_c_maybe_colon;
+/// assert_eq!(quote_c_maybe_colon(br"a b\"), r"a b\");
+/// assert_eq!(quote_c_maybe_colon(br"a:b\"), r#""a:b\\""#);
+/// assert_eq!(quote_c_maybe_colon(b":"), r#"":""#);
+/// ```
+#[must_use]
+pub fn quote_c_maybe_colon(text: &[u8]) -> String {
+    c_maybe(text, b":")
+}
+
+/// The body of both, parameterised by gnulib's `quote_these_too` set.
+///
+/// gnulib expresses "maybe" by rendering optimistically and restarting from
+/// scratch the moment it meets a byte it cannot render bare (`goto
+/// force_outer_quoting_style`). The two-pass shape below is the same thing
+/// said forwards: decide first, then render once. It can be, because the
+/// optimistic pass emits every byte unchanged, so its output is the input and
+/// there is nothing to keep from it.
+fn c_maybe(text: &[u8], quote_these_too: &[u8]) -> String {
+    let bare = |b: u8| b != b'"' && printable(b) && !quote_these_too.contains(&b);
+    if text.iter().all(|&b| bare(b)) {
+        return text.iter().map(|&b| b as char).collect();
+    }
+    c_always(text)
+}
+
+/// The forced pass: gnulib's `c_quoting_style` with the outer quotes present.
+///
+/// Note what `quote_these_too` does *not* do here. gnulib drops it on the
+/// restart — "don't reuse quote_these_too, since the addition of outer quotes
+/// sufficiently quotes the specified characters" — so a `:` that forced the
+/// quotes on then appears inside them as a plain colon, not as an escape.
+fn c_always(text: &[u8]) -> String {
+    let mut out = String::with_capacity(text.len().saturating_add(2));
+    out.push('"');
+    for (i, &b) in text.iter().enumerate() {
+        match b {
+            b'"' | b'\\' => {
+                out.push('\\');
+                out.push(b as char);
+            }
+            0 => {
+                // `\0` is padded to `\000` before a digit, because `\0` then
+                // `7` would read back as the single byte `\07`.
+                out.push_str("\\0");
+                if text
+                    .get(i.saturating_add(1))
+                    .is_some_and(u8::is_ascii_digit)
+                {
+                    out.push_str("00");
+                }
+            }
+            _ if printable(b) => out.push(b as char),
+            _ => c_escape(b, &mut out),
+        }
+    }
+    out.push('"');
     out
 }
 
@@ -477,6 +580,72 @@ mod tests {
         assert_eq!(quotef(b""), "''");
         assert_eq!(quoteaf(b""), "''");
         assert_eq!(quote(b""), "''");
+    }
+
+    #[test]
+    fn c_maybe_leaves_bare_what_a_shell_style_would_not() {
+        // The whole point of the style: it renders a C literal, so the bytes
+        // that matter to a *shell* are irrelevant to it. Contrast with
+        // `quotef`, which quotes every one of these.
+        for text in [&b"a b"[..], b"a'b", b"a$b", b"a`b", b"a|b", b"a*b", b"a\\b"] {
+            assert_eq!(
+                quote_c_maybe(text),
+                String::from_utf8_lossy(text),
+                "{text:?}"
+            );
+            assert_ne!(quotef(text), String::from_utf8_lossy(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn c_maybe_forces_quotes_for_exactly_the_unrenderable_bytes() {
+        // Measured set, from `scripts/c-maybe-probe.py`: a `"` (which would
+        // close the literal) and anything the C locale calls unprintable.
+        for b in 1u8..=255 {
+            let forced = quote_c_maybe(&[b]).starts_with('"');
+            let expected = b == b'"' || !(0x20..0x7f).contains(&b);
+            assert_eq!(forced, expected, "byte {b:#04x} -> {}", quote_c_maybe(&[b]));
+        }
+    }
+
+    #[test]
+    fn c_maybe_handles_the_inputs_no_gnu_oracle_could_be_given() {
+        // NOT measured: an `argv` string cannot hold a NUL and a file name can
+        // hold neither a NUL nor a `/`, so neither `paste` nor `ls` can be
+        // asked about these. They come from reading `quotearg.c`, and are
+        // written down here so that is visible rather than assumed.
+        //
+        // The empty string elides its quotes: gnulib's "is the result empty?"
+        // retry is guarded by `quoting_style == shell_always_quoting_style`,
+        // so it does not fire for this style.
+        assert_eq!(quote_c_maybe(b""), "");
+        assert_eq!(quote_c_maybe_colon(b""), "");
+        // A NUL is unprintable, so it forces the quotes; inside them it is
+        // `\0` — padded to `\000` before a digit, because `\0` then `7` would
+        // read back as the one byte `\07`.
+        assert_eq!(quote_c_maybe(b"a\0b"), r#""a\0b""#);
+        assert_eq!(quote_c_maybe(b"a\0" as &[u8]), r#""a\0""#);
+        assert_eq!(quote_c_maybe(b"a\x007b"), r#""a\0007b""#);
+        // Which is *not* the rule the shell styles use: `quote` pads every
+        // octal escape to three digits unconditionally.
+        assert_eq!(quote(b"a\0" as &[u8]), r"'a\000'");
+        // A `/` is nothing special to a C literal.
+        assert_eq!(quote_c_maybe(b"a/b"), "a/b");
+        assert_eq!(quote_c_maybe(b"a/\tb"), r#""a/\tb""#);
+    }
+
+    #[test]
+    fn c_maybe_escapes_everything_once_the_quotes_are_on() {
+        // The backslash is the surprise: bare a moment ago, escaped now.
+        assert_eq!(quote_c_maybe(b"a b\\"), "a b\\");
+        assert_eq!(quote_c_maybe(b"a\tb\\"), r#""a\tb\\""#);
+        assert_eq!(
+            quote_c_maybe(b"\x07\x08\x09\x0a\x0b\x0c\x0d"),
+            r#""\a\b\t\n\v\f\r""#
+        );
+        assert_eq!(quote_c_maybe(b"\xff"), r#""\377""#);
+        assert_eq!(quote_c_maybe(b"\x7f"), r#""\177""#);
+        assert_eq!(quote_c_maybe(b"a\"b"), "\"a\\\"b\"");
     }
 
     #[test]

@@ -70,6 +70,7 @@ use crate::lang::Lang;
 use crate::mark::MarkPositioning;
 use crate::otl;
 use crate::script::ScriptTags;
+use crate::gvar;
 use crate::var;
 
 // ---------------------------------------------------------------------------
@@ -555,6 +556,13 @@ pub struct Face {
     /// format-14 Unicode Variation *Sequences* subtable and an unrelated
     /// feature that the specification unhelpfully gave a near-identical name.
     variation_axes: Option<var::Variations>,
+    /// The per-glyph outline deltas from `gvar`, if this face has both a
+    /// readable `fvar` and a `gvar` that agrees with it about the axes.
+    ///
+    /// Holds only the table's header and offset array; a glyph's own tuples are
+    /// read on demand, because a face varies thousands of glyphs and a run
+    /// draws a few dozen.
+    gvar: Option<gvar::Gvar>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -656,6 +664,7 @@ impl Face {
         let mut kern = None;
         let mut fvar = None;
         let mut avar = None;
+        let mut gvar_span = None;
         let mut has_cff2 = false;
 
         for i in 0..usize::from(num_tables) {
@@ -692,6 +701,7 @@ impl Face {
                 b"kern" => kern = Some(span),
                 b"fvar" => fvar = Some(span),
                 b"avar" => avar = Some(span),
+                b"gvar" => gvar_span = Some(span),
                 b"CFF2" => has_cff2 = true,
                 _ => {}
             }
@@ -803,6 +813,16 @@ impl Face {
         // `and_then` for that reason rather than parsed on its own.
         let variation_axes = fvar.and_then(|span| var::Variations::parse(&data, span, avar));
 
+        // Deliberately gated on `variation_axes` rather than on `fvar`: `gvar`'s
+        // tuples are indexed by axis position, so reading it needs the axis
+        // *count*, and the count only exists once `fvar` has actually parsed. A
+        // face whose `fvar` was rejected therefore also declines `gvar`, which
+        // is the right outcome — deltas applied against axes we could not read
+        // would deform the glyph rather than vary it.
+        let gvar = variation_axes.as_ref().and_then(|v| {
+            gvar_span.and_then(|span| gvar::Gvar::parse(&data, span, v.axes().len(), num_glyphs))
+        });
+
         Ok(Self {
             metrics: FaceMetrics {
                 ascender,
@@ -827,6 +847,7 @@ impl Face {
             gpos_scripts,
             gsub_scripts,
             variation_axes,
+            gvar,
             data,
         })
     }
@@ -1890,6 +1911,131 @@ impl Face {
         Ok(out)
     }
 
+    /// Extract a glyph's outline at a variable-font instance.
+    ///
+    /// `coords` are normalized axis coordinates, as produced by
+    /// [`Variations::normalize`](crate::var::Variations::normalize). Identical
+    /// to [`outline`](Self::outline) when this face does not vary, when it has
+    /// no `gvar`, or when `coords` is the default instance — the last of which
+    /// is not merely an optimization: the default instance is *defined* as the
+    /// outline in `glyf`, and every tuple's scalar is zero there, so taking the
+    /// short path and taking the long one must agree, and the short one cannot
+    /// be wrong.
+    ///
+    /// # Errors
+    ///
+    /// As [`outline`](Self::outline). A `gvar` that is unreadable for this
+    /// particular glyph is *not* an error: it yields the default outline, on
+    /// the same reasoning as [`Gvar::parse`](crate::gvar::Gvar) returning
+    /// `None` — a face that fails to vary still draws.
+    pub fn outline_at(&self, gid: u16, coords: &var::Coords) -> Result<Outline, SfntError> {
+        let Some(gvar) = self.gvar.as_ref() else {
+            return self.outline(gid);
+        };
+        if coords.is_default() || !matches!(self.outlines, Outlines::Glyf { .. }) {
+            return self.outline(gid);
+        }
+        let mut out = Outline::default();
+        let phantom = self.outline_into_at(gvar, gid, coords.as_slice(), &mut out, 0)?;
+        // The outline is placed so that the left side bearing point lands on
+        // the origin. That point moves with the glyph, so the shift computed
+        // from the *default* `xMin` has to be corrected by however far `gvar`
+        // moved it — which is exactly the first phantom point's horizontal
+        // delta. Getting this wrong shifts the varied glyph sideways relative
+        // to its neighbours rather than deforming it, which is the sort of bug
+        // that looks like bad kerning.
+        out.translate_x(self.glyf_shift(gid) - phantom);
+        Ok(out)
+    }
+
+    /// Build one glyph at `coords`, returning the horizontal delta of its left
+    /// phantom point so the caller can correct the side-bearing shift.
+    ///
+    /// Recursive calls discard that return value: a component is placed by the
+    /// parent's transform, and the parent's phantom points — not the child's —
+    /// are what position the finished glyph.
+    fn outline_into_at(
+        &self,
+        gvar: &gvar::Gvar,
+        gid: u16,
+        coords: &[i16],
+        out: &mut Outline,
+        depth: u8,
+    ) -> Result<f32, SfntError> {
+        if depth > MAX_COMPOSITE_DEPTH {
+            return Err(SfntError::CompositeTooDeep);
+        }
+        let Some(span) = self.glyph_span(gid)? else {
+            return Ok(0.0);
+        };
+        let end = span.off.checked_add(span.len).ok_or(SfntError::TooShort)?;
+        let g = self
+            .data
+            .get(span.off..end)
+            .ok_or(SfntError::MalformedTable("glyf"))?;
+        let num_contours = i16_at(g, 0).ok_or(SfntError::MalformedTable("glyf"))?;
+        let body = g.get(10..).ok_or(SfntError::MalformedTable("glyf"))?;
+        if num_contours >= 0 {
+            let n = usize::try_from(num_contours).map_err(|_| SfntError::MalformedTable("glyf"))?;
+            let Some(mut glyph) = read_simple_glyph(body, n)? else {
+                return Ok(0.0);
+            };
+            let phantom = match gvar.deltas(&self.data, gid, coords, &glyph.points, &glyph.ends) {
+                Some(deltas) => {
+                    for (pt, &(dx, dy)) in glyph.points.iter_mut().zip(deltas.iter()) {
+                        pt.p.x += dx;
+                        pt.p.y += dy;
+                    }
+                    deltas.get(glyph.points.len()).map_or(0.0, |&(dx, _)| dx)
+                }
+                None => 0.0,
+            };
+            emit_glyph(&glyph, out);
+            Ok(phantom)
+        } else {
+            let mut components = read_components(body)?;
+            // A composite's variation point array has one entry per component,
+            // holding that component's placement offset. There are no contours,
+            // so `ends` is empty and no interpolation happens — a component the
+            // font did not name simply does not move.
+            let placements: Vec<GlyphPoint> = components
+                .iter()
+                .map(|c| GlyphPoint {
+                    p: Point::new(c.xform.e, c.xform.f),
+                    on_curve: true,
+                })
+                .collect();
+            let phantom = match gvar.deltas(&self.data, gid, coords, &placements, &[]) {
+                Some(deltas) => {
+                    for (c, &(dx, dy)) in components.iter_mut().zip(deltas.iter()) {
+                        // Only an offset-placed component may move: a
+                        // point-matched one is anchored to the parent's own
+                        // geometry, which has already varied, so adding the
+                        // delta here would move it a second time.
+                        if c.offset_placed {
+                            c.xform.e += dx;
+                            c.xform.f += dy;
+                        }
+                    }
+                    deltas.get(components.len()).map_or(0.0, |&(dx, _)| dx)
+                }
+                None => 0.0,
+            };
+            for c in components {
+                let mut child = Outline::default();
+                self.outline_into_at(
+                    gvar,
+                    c.gid,
+                    coords,
+                    &mut child,
+                    depth.checked_add(1).ok_or(SfntError::CompositeTooDeep)?,
+                )?;
+                out.extend_transformed(&child, &c.xform);
+            }
+            Ok(phantom)
+        }
+    }
+
     fn outline_into(&self, gid: u16, out: &mut Outline, depth: u8) -> Result<(), SfntError> {
         if depth > MAX_COMPOSITE_DEPTH {
             return Err(SfntError::CompositeTooDeep);
@@ -1919,98 +2065,131 @@ impl Face {
         out: &mut Outline,
         depth: u8,
     ) -> Result<(), SfntError> {
-        const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
-        const ARGS_ARE_XY_VALUES: u16 = 0x0002;
-        const WE_HAVE_A_SCALE: u16 = 0x0008;
-        const MORE_COMPONENTS: u16 = 0x0020;
-        const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
-        const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
-
-        let mut pos = 0usize;
-        loop {
-            let flags = u16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?;
-            let component = u16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
-                .ok_or(SfntError::MalformedTable("glyf"))?;
-            pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
-
-            let (arg1, arg2) = if flags & ARG_1_AND_2_ARE_WORDS == 0 {
-                let lo = *data.get(pos).ok_or(SfntError::MalformedTable("glyf"))?;
-                let hi = *data
-                    .get(pos.checked_add(1).ok_or(SfntError::TooShort)?)
-                    .ok_or(SfntError::MalformedTable("glyf"))?;
-                pos = pos.checked_add(2).ok_or(SfntError::TooShort)?;
-                // Byte args are *signed* when they are offsets.
-                #[allow(clippy::cast_possible_wrap)]
-                (f32::from(lo as i8), f32::from(hi as i8))
-            } else {
-                let lo = i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?;
-                let hi = i16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
-                    .ok_or(SfntError::MalformedTable("glyf"))?;
-                pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
-                (f32::from(lo), f32::from(hi))
-            };
-
-            // Point-matching placement (args are point indices, not offsets)
-            // is vanishingly rare and needs the parent's point list, which we
-            // have already collapsed into path commands. Treat it as no
-            // translation rather than mis-placing the component.
-            let (tx, ty) = if flags & ARGS_ARE_XY_VALUES == 0 {
-                (0.0, 0.0)
-            } else {
-                (arg1, arg2)
-            };
-
-            let mut xform = Transform {
-                e: tx,
-                f: ty,
-                ..Transform::IDENTITY
-            };
-            if flags & WE_HAVE_A_SCALE != 0 {
-                let scale = f2dot14(i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?);
-                pos = pos.checked_add(2).ok_or(SfntError::TooShort)?;
-                xform.a = scale;
-                xform.d = scale;
-            } else if flags & WE_HAVE_AN_X_AND_Y_SCALE != 0 {
-                xform.a = f2dot14(i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?);
-                xform.d = f2dot14(
-                    i16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
-                        .ok_or(SfntError::MalformedTable("glyf"))?,
-                );
-                pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
-            } else if flags & WE_HAVE_A_TWO_BY_TWO != 0 {
-                let read = |k: usize| -> Result<f32, SfntError> {
-                    let at = pos
-                        .checked_add(k.checked_mul(2).ok_or(SfntError::TooShort)?)
-                        .ok_or(SfntError::TooShort)?;
-                    Ok(f2dot14(
-                        i16_at(data, at).ok_or(SfntError::MalformedTable("glyf"))?,
-                    ))
-                };
-                xform.a = read(0)?;
-                xform.b = read(1)?;
-                xform.c = read(2)?;
-                xform.d = read(3)?;
-                pos = pos.checked_add(8).ok_or(SfntError::TooShort)?;
-            }
-
+        for c in read_components(data)? {
             // Recurse into the component and splice its (transformed) path in.
             // Building the child separately is what makes nested composites
             // work: the child's own component transforms compose naturally
             // because they were already applied when it was built.
             let mut child = Outline::default();
             self.outline_into(
-                component,
+                c.gid,
                 &mut child,
                 depth.checked_add(1).ok_or(SfntError::CompositeTooDeep)?,
             )?;
-            out.extend_transformed(&child, &xform);
-
-            if flags & MORE_COMPONENTS == 0 {
-                break;
-            }
+            out.extend_transformed(&child, &c.xform);
         }
         Ok(())
     }
+}
+
+/// One entry of a composite glyph: which glyph, and where it goes.
+///
+/// Split out of the drawing loop because `gvar` varies a composite by moving
+/// its components: each component contributes exactly one point to the glyph's
+/// variation point array, and that point is this transform's translation. The
+/// default instance and a varied one therefore differ only in `xform.e` and
+/// `xform.f`, and both paths can share the reading.
+#[derive(Clone, Copy)]
+pub(crate) struct Component {
+    pub(crate) gid: u16,
+    pub(crate) xform: Transform,
+    /// Whether the placement came from an (x, y) offset rather than a pair of
+    /// point indices. `gvar` may only move the offset kind — a point-matched
+    /// component is positioned by the *parent's* geometry, which has already
+    /// moved, so adding a delta on top would move it twice.
+    pub(crate) offset_placed: bool,
+}
+
+/// Read a composite glyph's component list.
+fn read_components(data: &[u8]) -> Result<Vec<Component>, SfntError> {
+    const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
+    const ARGS_ARE_XY_VALUES: u16 = 0x0002;
+    const WE_HAVE_A_SCALE: u16 = 0x0008;
+    const MORE_COMPONENTS: u16 = 0x0020;
+    const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
+    const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+
+    // A composite with more components than a face has glyphs is malformed;
+    // the bound stops a corrupt `MORE_COMPONENTS` chain from looping until the
+    // data runs out, which on a large `glyf` is a long time.
+    const MAX_COMPONENTS: usize = 4096;
+
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    loop {
+        let flags = u16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?;
+        let component = u16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
+            .ok_or(SfntError::MalformedTable("glyf"))?;
+        pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
+
+        let (arg1, arg2) = if flags & ARG_1_AND_2_ARE_WORDS == 0 {
+            let lo = *data.get(pos).ok_or(SfntError::MalformedTable("glyf"))?;
+            let hi = *data
+                .get(pos.checked_add(1).ok_or(SfntError::TooShort)?)
+                .ok_or(SfntError::MalformedTable("glyf"))?;
+            pos = pos.checked_add(2).ok_or(SfntError::TooShort)?;
+            // Byte args are *signed* when they are offsets.
+            #[allow(clippy::cast_possible_wrap)]
+            (f32::from(lo as i8), f32::from(hi as i8))
+        } else {
+            let lo = i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?;
+            let hi = i16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
+                .ok_or(SfntError::MalformedTable("glyf"))?;
+            pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
+            (f32::from(lo), f32::from(hi))
+        };
+
+        // Point-matching placement (args are point indices, not offsets)
+        // is vanishingly rare and needs the parent's point list, which we
+        // have already collapsed into path commands. Treat it as no
+        // translation rather than mis-placing the component.
+        let offset_placed = flags & ARGS_ARE_XY_VALUES != 0;
+        let (tx, ty) = if offset_placed { (arg1, arg2) } else { (0.0, 0.0) };
+
+        let mut xform = Transform {
+            e: tx,
+            f: ty,
+            ..Transform::IDENTITY
+        };
+        if flags & WE_HAVE_A_SCALE != 0 {
+            let scale = f2dot14(i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?);
+            pos = pos.checked_add(2).ok_or(SfntError::TooShort)?;
+            xform.a = scale;
+            xform.d = scale;
+        } else if flags & WE_HAVE_AN_X_AND_Y_SCALE != 0 {
+            xform.a = f2dot14(i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?);
+            xform.d = f2dot14(
+                i16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
+                    .ok_or(SfntError::MalformedTable("glyf"))?,
+            );
+            pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
+        } else if flags & WE_HAVE_A_TWO_BY_TWO != 0 {
+            let read = |k: usize| -> Result<f32, SfntError> {
+                let at = pos
+                    .checked_add(k.checked_mul(2).ok_or(SfntError::TooShort)?)
+                    .ok_or(SfntError::TooShort)?;
+                Ok(f2dot14(
+                    i16_at(data, at).ok_or(SfntError::MalformedTable("glyf"))?,
+                ))
+            };
+            xform.a = read(0)?;
+            xform.b = read(1)?;
+            xform.c = read(2)?;
+            xform.d = read(3)?;
+            pos = pos.checked_add(8).ok_or(SfntError::TooShort)?;
+        }
+
+        out.push(Component {
+            gid: component,
+            xform,
+            offset_placed,
+        });
+
+        if flags & MORE_COMPONENTS == 0 || out.len() >= MAX_COMPONENTS {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -2019,9 +2198,9 @@ impl Face {
 
 /// A decoded `glyf` point, before it becomes a path command.
 #[derive(Clone, Copy)]
-struct GlyphPoint {
-    p: Point,
-    on_curve: bool,
+pub(crate) struct GlyphPoint {
+    pub(crate) p: Point,
+    pub(crate) on_curve: bool,
 }
 
 /// Read one axis of a simple glyph's delta-encoded coordinates.
@@ -2068,7 +2247,57 @@ fn read_coord_deltas(
     Ok(out)
 }
 
+/// One simple glyph as the file stores it: points, and where each contour ends.
+///
+/// This is the shape `gvar` needs and path commands are not. A variation delta
+/// is addressed by *point index*, and the points a tuple does not mention are
+/// filled in by interpolating between the ones it does — both of which require
+/// the point array to still exist, and to still be divided into contours, since
+/// the interpolation wraps within a contour and never across one.
+///
+/// So the outline is built in two steps rather than one: read the points, then
+/// (after any deltas are applied) turn them into path commands. The default
+/// instance goes through both back to back, which is why nothing outside this
+/// module notices.
+pub(crate) struct SimpleGlyph {
+    pub(crate) points: Vec<GlyphPoint>,
+    /// Index one past the last point of each contour, so contour *i* is
+    /// `points[ends[i-1]..ends[i]]`. Kept as the exclusive end rather than the
+    /// file's inclusive last index, because every use here is a slice bound.
+    pub(crate) ends: Vec<usize>,
+}
+
+/// Turn a point array back into path commands, one contour at a time.
+fn emit_glyph(glyph: &SimpleGlyph, out: &mut Outline) {
+    let mut start = 0usize;
+    for &end in &glyph.ends {
+        let Some(contour) = glyph.points.get(start..end) else {
+            // Only reachable if `ends` and `points` disagree, which
+            // `read_simple_glyph` has already ruled out. Stopping is right
+            // regardless: the contours read so far are correct.
+            return;
+        };
+        emit_contour(contour, out);
+        start = end;
+    }
+}
+
 fn parse_simple_glyph(d: &[u8], num_contours: usize, out: &mut Outline) -> Result<(), SfntError> {
+    let Some(glyph) = read_simple_glyph(d, num_contours)? else {
+        return Ok(());
+    };
+    emit_glyph(&glyph, out);
+    Ok(())
+}
+
+/// Read a simple glyph's points without collapsing them into a path.
+///
+/// `Ok(None)` for a glyph with no contours, which is a real and common thing —
+/// the space glyph is one.
+pub(crate) fn read_simple_glyph(
+    d: &[u8],
+    num_contours: usize,
+) -> Result<Option<SimpleGlyph>, SfntError> {
     const ON_CURVE: u8 = 0x01;
     const X_SHORT: u8 = 0x02;
     const Y_SHORT: u8 = 0x04;
@@ -2077,7 +2306,7 @@ fn parse_simple_glyph(d: &[u8], num_contours: usize, out: &mut Outline) -> Resul
     const Y_SAME_OR_POS: u8 = 0x20;
 
     if num_contours == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
     let mut end_pts = Vec::with_capacity(num_contours);
@@ -2144,18 +2373,23 @@ fn parse_simple_glyph(d: &[u8], num_contours: usize, out: &mut Outline) -> Resul
         })
         .collect();
 
+    // Validate every contour bound now, so that `emit_glyph` and the `gvar`
+    // interpolation can both slice by them without re-checking — and so that a
+    // malformed file is an error here rather than a silently-short outline
+    // three call frames away.
+    let mut ends = Vec::with_capacity(num_contours);
     let mut start = 0usize;
     for end in &end_pts {
         let end_idx = usize::from(*end)
             .checked_add(1)
             .ok_or(SfntError::TooShort)?;
-        let contour = points
-            .get(start..end_idx)
-            .ok_or(SfntError::MalformedTable("glyf"))?;
-        emit_contour(contour, out);
+        if end_idx > points.len() || end_idx < start {
+            return Err(SfntError::MalformedTable("glyf"));
+        }
+        ends.push(end_idx);
         start = end_idx;
     }
-    Ok(())
+    Ok(Some(SimpleGlyph { points, ends }))
 }
 
 /// Turn one contour's points into path commands.
@@ -2800,6 +3034,162 @@ pub(crate) mod tests {
         gpos
     }
 
+    /// The fixture plus an `fvar` with one `wght` axis and a `gvar` that moves
+    /// all four glyphs.
+    ///
+    /// This exists because **no font installed on this host can test the
+    /// interesting half of `gvar`**. A sweep of every variable face here
+    /// (`tools/variable_survey.py`, and the phantom probe written alongside
+    /// `installed_variable_fonts_vary_their_outlines`) found that all seven
+    /// carry `HVAR`, express their advance and side-bearing variation *there*,
+    /// and therefore leave every phantom point's delta at zero — in 400 glyphs
+    /// per face, not one moved. Real files likewise rarely exercise IUP in a way
+    /// that a bounding box would notice, and none of them varies a composite's
+    /// component offset. Those three paths are the ones a reader gets wrong, so
+    /// they are built here by hand where the expected answer can be computed on
+    /// paper rather than trusted from a second implementation.
+    ///
+    /// The axis is `wght` 100/400/700, so user weight 700 is normalized +1.0
+    /// (every tuple at full strength) and 550 is exactly +0.5 (every tuple
+    /// halved) — two instances whose arithmetic is exact in `f32` and so can be
+    /// asserted without a tolerance.
+    pub(crate) fn build_variable_test_font() -> Vec<u8> {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.push((*b"fvar", variable_fvar()));
+        tables.push((*b"gvar", variable_gvar()));
+        tables.sort_by_key(|(tag, _)| *tag);
+        assemble(&tables)
+    }
+
+    /// One `wght` axis, 100 to 700 with the default at 400, and one named
+    /// instance at the top of it.
+    fn variable_fvar() -> Vec<u8> {
+        fn fixed(v: f32) -> [u8; 4] {
+            #[allow(clippy::cast_possible_truncation)]
+            let raw = (v * 65536.0) as i32;
+            raw.to_be_bytes()
+        }
+        let mut fvar = Vec::new();
+        fvar.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+        fvar.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+        fvar.extend_from_slice(&16u16.to_be_bytes()); // axesArrayOffset
+        fvar.extend_from_slice(&2u16.to_be_bytes()); // reserved
+        fvar.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        fvar.extend_from_slice(&20u16.to_be_bytes()); // axisSize
+        fvar.extend_from_slice(&1u16.to_be_bytes()); // instanceCount
+        fvar.extend_from_slice(&8u16.to_be_bytes()); // instanceSize
+        fvar.extend_from_slice(b"wght");
+        fvar.extend_from_slice(&fixed(100.0));
+        fvar.extend_from_slice(&fixed(400.0));
+        fvar.extend_from_slice(&fixed(700.0));
+        fvar.extend_from_slice(&0u16.to_be_bytes()); // flags
+        fvar.extend_from_slice(&256u16.to_be_bytes()); // axisNameID
+        fvar.extend_from_slice(&257u16.to_be_bytes()); // subfamilyNameID
+        fvar.extend_from_slice(&0u16.to_be_bytes()); // flags
+        fvar.extend_from_slice(&fixed(700.0));
+        fvar
+    }
+
+    /// Variation data for glyphs 1, 2 and 3, each chosen to exercise one thing
+    /// the host's own fonts cannot.
+    ///
+    /// * **Glyph 1** names every point, including the phantoms, and gives the
+    ///   left phantom a delta of +5. That is the only way to check that the
+    ///   varied side-bearing correction is subtracted rather than added; with a
+    ///   zero phantom the two signs are indistinguishable.
+    /// * **Glyph 2** carries two tuples, one peaking at each end of the axis,
+    ///   so at every instance one of them scores zero and must still be stepped
+    ///   over byte for byte. The bold one names points 0 and 2 of a three-point
+    ///   contour and leaves point 1 — the off-curve control — to IUP, which
+    ///   must place it at the interpolated x and refuse to move it in y (its
+    ///   two neighbours share a y, so there is no ratio). The light one names
+    ///   point 1 alone, which is the case that translates a contour bodily.
+    /// * **Glyph 3** is the composite, whose single variation point is its
+    ///   component's placement offset.
+    fn variable_gvar() -> Vec<u8> {
+        // Glyph 1: eight points (four contour, four phantom), all named, so the
+        // tuple carries a full delta array and no point list.
+        let mut g1 = Vec::new();
+        g1.extend_from_slice(&1u16.to_be_bytes()); // tupleVariationCount
+        g1.extend_from_slice(&10u16.to_be_bytes()); // dataOffset
+        g1.extend_from_slice(&18u16.to_be_bytes()); // variationDataSize
+        g1.extend_from_slice(&0x8000u16.to_be_bytes()); // EMBEDDED_PEAK_TUPLE
+        g1.extend_from_slice(&16384u16.to_be_bytes()); // peak: wght at +1
+        // A byte run of eight, twice: x then y. Point 4 is the left phantom.
+        g1.extend_from_slice(&[0x07, 10, 20, 30, 40, 5, 0, 0, 0]);
+        g1.extend_from_slice(&[0x07, 1, 2, 3, 4, 0, 0, 0, 0]);
+        assert_eq!(g1.len(), 28, "glyph 1's variation data is 10 + 18 bytes");
+
+        // Glyph 2: seven points and *two* tuples, one peaking at each end of
+        // the axis, so that at either instance exactly one of them scores zero.
+        // The zero-scoring one is not merely inert — its bytes still have to be
+        // stepped over, because the next tuple's data begins where this one's
+        // ends and not where its own header says. The two tuples are given
+        // different point lists and wildly different deltas precisely so that
+        // reading the second at the first's offset produces a wrong glyph
+        // rather than a read error, which a test can tell apart from a
+        // reader that declined to vary at all.
+        let mut g2 = Vec::new();
+        g2.extend_from_slice(&2u16.to_be_bytes()); // tupleVariationCount
+        g2.extend_from_slice(&16u16.to_be_bytes()); // dataOffset: past both headers
+        // EMBEDDED_PEAK_TUPLE | PRIVATE_POINT_NUMBERS, twice.
+        g2.extend_from_slice(&7u16.to_be_bytes()); // variationDataSize
+        g2.extend_from_slice(&0xA000u16.to_be_bytes());
+        g2.extend_from_slice(&0xC000u16.to_be_bytes()); // peak: wght at -1
+        g2.extend_from_slice(&10u16.to_be_bytes()); // variationDataSize
+        g2.extend_from_slice(&0xA000u16.to_be_bytes());
+        g2.extend_from_slice(&0x4000u16.to_be_bytes()); // peak: wght at +1
+        // Tuple 1 (light): names point 1 alone and moves it by (100,100), which
+        // — being the contour's only named point — translates the whole contour.
+        g2.extend_from_slice(&[0x01, 0x00, 0x01]);
+        g2.extend_from_slice(&[0x00, 100]);
+        g2.extend_from_slice(&[0x00, 100]);
+        // Tuple 2 (bold): names points 0 and 2, stored as deltas from the
+        // previous point number: 0, then +2.
+        g2.extend_from_slice(&[0x02, 0x01, 0x00, 0x02]);
+        g2.extend_from_slice(&[0x01, 0, 100]); // x deltas for those two
+        g2.extend_from_slice(&[0x01, 0, 0]); // y deltas
+        assert_eq!(g2.len(), 33, "glyph 2's variation data is 16 + 7 + 10 bytes");
+
+        // Glyph 3: one component plus four phantoms.
+        let mut g3 = Vec::new();
+        g3.extend_from_slice(&1u16.to_be_bytes());
+        g3.extend_from_slice(&10u16.to_be_bytes());
+        g3.extend_from_slice(&12u16.to_be_bytes()); // variationDataSize
+        g3.extend_from_slice(&0x8000u16.to_be_bytes());
+        g3.extend_from_slice(&16384u16.to_be_bytes());
+        g3.extend_from_slice(&[0x04, 25, 0, 0, 0, 0]);
+        #[allow(clippy::cast_sign_loss)]
+        g3.extend_from_slice(&[0x04, -35i8 as u8, 0, 0, 0, 0]);
+        assert_eq!(g3.len(), 22, "glyph 3's variation data is 10 + 12 bytes");
+
+        let mut body = Vec::new();
+        let mut offsets = alloc::vec![0u32]; // glyph 0 does not vary
+        for g in [&g1, &g2, &g3] {
+            offsets.push(u32::try_from(body.len()).unwrap());
+            body.extend_from_slice(g);
+        }
+        offsets.push(u32::try_from(body.len()).unwrap());
+
+        // The offset array is `glyphCount + 1` long and sits immediately after
+        // the twenty-byte header, so the data array starts at 20 + 4 * 5.
+        let data_array = 20 + 4 * u32::try_from(offsets.len()).unwrap();
+        let mut gvar = Vec::new();
+        gvar.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+        gvar.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+        gvar.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        gvar.extend_from_slice(&0u16.to_be_bytes()); // sharedTupleCount
+        gvar.extend_from_slice(&0u32.to_be_bytes()); // sharedTuplesOffset
+        gvar.extend_from_slice(&4u16.to_be_bytes()); // glyphCount
+        gvar.extend_from_slice(&1u16.to_be_bytes()); // flags: long offsets
+        gvar.extend_from_slice(&data_array.to_be_bytes());
+        for off in offsets {
+            gvar.extend_from_slice(&off.to_be_bytes());
+        }
+        gvar.extend_from_slice(&body);
+        gvar
+    }
+
     /// Lay out tables into a valid sfnt container.
     fn assemble(tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
         let n = u16::try_from(tables.len()).unwrap();
@@ -3188,6 +3578,179 @@ pub(crate) mod tests {
         assert_eq!(b.y_min, 200.0);
         assert_eq!(b.x_max, 700.0);
         assert_eq!(b.y_max, 300.0);
+    }
+
+    // --- gvar: the fixture at a non-default instance ---------------------
+    //
+    // Every expected outline below is computed on paper from the tuple bytes
+    // in `variable_gvar`, not taken from a run. The axis is arranged so that
+    // both instances used here have a scalar that is exact in `f32` (1.0 and
+    // 0.5), so these compare without a tolerance.
+
+    fn variable_face() -> Face {
+        Face::parse(build_variable_test_font()).expect("the variable fixture must parse")
+    }
+
+    /// The fixture at user weight `w`.
+    fn at_weight(f: &Face, w: f32) -> var::Coords {
+        f.variation_axes()
+            .expect("the variable fixture has an fvar")
+            .normalize(&[w])
+    }
+
+    #[test]
+    fn the_variable_fixture_offers_one_weight_axis() {
+        let f = variable_face();
+        let v = f.variation_axes().unwrap();
+        assert_eq!(v.axes().len(), 1);
+        assert_eq!(v.axes()[0].tag, *b"wght");
+        assert_eq!(v.axes()[0].default, 400.0);
+        // Normalization has to land on these two exactly for the assertions
+        // below to be exact rather than approximate.
+        assert_eq!(at_weight(&f, 700.0).as_slice(), &[16384]);
+        assert_eq!(at_weight(&f, 550.0).as_slice(), &[8192]);
+    }
+
+    #[test]
+    fn the_default_instance_draws_exactly_what_glyf_holds() {
+        // The default instance is *defined* as the stored outline, so this must
+        // hold command for command — a tolerance here would hide a delta that
+        // was applied when every tuple's scalar is zero.
+        let f = variable_face();
+        for gid in 0..4 {
+            let plain = f.outline(gid).unwrap();
+            let varied = f.outline_at(gid, &f.variation_axes().unwrap().default_coords()).unwrap();
+            assert_eq!(varied.commands, plain.commands, "glyph {gid}");
+        }
+    }
+
+    #[test]
+    fn a_phantom_delta_corrects_the_varied_side_bearing() {
+        // Glyph 1's tuple moves its four corners by (10,1) (20,2) (30,3) (40,4)
+        // and its *left phantom point* by (5,0). The phantom is the left side
+        // bearing point, so the whole outline slides back by 5 to keep that
+        // point on the origin: a corner at 100+10 draws at 105, not 110.
+        let f = variable_face();
+        let o = f.outline_at(1, &at_weight(&f, 700.0)).unwrap();
+        assert_eq!(
+            o.commands,
+            vec![
+                PathCmd::MoveTo(Point::new(105.0, 1.0)),
+                PathCmd::LineTo(Point::new(215.0, 2.0)),
+                PathCmd::LineTo(Point::new(225.0, 103.0)),
+                PathCmd::LineTo(Point::new(135.0, 104.0)),
+                PathCmd::LineTo(Point::new(105.0, 1.0)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_half_strength_tuple_moves_points_half_as_far() {
+        // Weight 550 is exactly half way from the default to the peak, so every
+        // delta — the phantom's included — is halved. This is the assertion
+        // that a scalar is applied at all rather than a tuple being all or
+        // nothing.
+        let f = variable_face();
+        let o = f.outline_at(1, &at_weight(&f, 550.0)).unwrap();
+        assert_eq!(
+            o.commands,
+            vec![
+                PathCmd::MoveTo(Point::new(102.5, 0.5)),
+                PathCmd::LineTo(Point::new(207.5, 1.0)),
+                PathCmd::LineTo(Point::new(212.5, 101.5)),
+                PathCmd::LineTo(Point::new(117.5, 102.0)),
+                PathCmd::LineTo(Point::new(102.5, 0.5)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_point_the_tuple_did_not_name_is_interpolated_not_left_behind() {
+        // Glyph 2 is (0,0) — (50,200) off-curve — (100,0). The tuple names only
+        // the two ends, moving the second by (100,0). Point 1 sits half way
+        // between them in x, so IUP gives it half the movement: 50, putting the
+        // control point at 100. Leaving it at 50 — the bug this test exists
+        // for — would tear the curve away from its own endpoints.
+        //
+        // In y the two named points share a coordinate and a delta, so there is
+        // no ratio to interpolate along and the answer is that shared delta,
+        // which is zero.
+        let f = variable_face();
+        let o = f.outline_at(2, &at_weight(&f, 700.0)).unwrap();
+        assert_eq!(
+            o.commands,
+            vec![
+                PathCmd::MoveTo(Point::new(0.0, 0.0)),
+                PathCmd::QuadTo(Point::new(100.0, 200.0), Point::new(200.0, 0.0)),
+                PathCmd::LineTo(Point::new(0.0, 0.0)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tuple_peaking_on_the_far_side_of_the_default_applies_only_there() {
+        // Glyph 2's other tuple peaks at wght -1 and names point 1 alone. At
+        // weight 100 it is at full strength and the bold tuple is at zero, so
+        // the contour translates bodily by (100,100) — the single-named-point
+        // case, where IUP has no second point to interpolate against and every
+        // unnamed point takes the named one's delta whole.
+        //
+        // This is also the assertion that a zero-scoring tuple still occupies
+        // its bytes. At *either* instance one tuple is skipped, and a reader
+        // that skipped its data as well as its arithmetic would read the
+        // surviving tuple's deltas from the wrong offset and draw neither of
+        // these two shapes.
+        let f = variable_face();
+        let o = f.outline_at(2, &at_weight(&f, 100.0)).unwrap();
+        assert_eq!(
+            o.commands,
+            vec![
+                PathCmd::MoveTo(Point::new(100.0, 100.0)),
+                PathCmd::QuadTo(Point::new(150.0, 300.0), Point::new(200.0, 100.0)),
+                PathCmd::LineTo(Point::new(100.0, 100.0)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_composites_component_offset_varies() {
+        // Glyph 3 places glyph 1 at (500,200); its one variation point is that
+        // offset, moved by (25,-35) to (525,165). The component *also* varies
+        // in its own right, so the corners are glyph 1's varied points — the
+        // unshifted ones, since the parent's bearing correction applies once to
+        // the finished glyph and not again to each part.
+        let f = variable_face();
+        let o = f.outline_at(3, &at_weight(&f, 700.0)).unwrap();
+        assert_eq!(
+            o.commands,
+            vec![
+                PathCmd::MoveTo(Point::new(635.0, 166.0)),
+                PathCmd::LineTo(Point::new(745.0, 167.0)),
+                PathCmd::LineTo(Point::new(755.0, 268.0)),
+                PathCmd::LineTo(Point::new(665.0, 269.0)),
+                PathCmd::LineTo(Point::new(635.0, 166.0)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_face_without_gvar_draws_the_same_outline_at_every_instance() {
+        // The plain fixture has neither table. Asking it for an instance must
+        // not fail and must not differ — a caller should be able to route every
+        // glyph through `outline_at` without first asking whether it will help.
+        let f = face();
+        let coords = var::Coords::default();
+        for gid in 0..4 {
+            assert_eq!(
+                f.outline_at(gid, &coords).unwrap().commands,
+                f.outline(gid).unwrap().commands
+            );
+        }
     }
 
     #[test]

@@ -25196,7 +25196,31 @@ the same exposure — the build directory is on the search path for the whole
 workspace, not just for `oils`. If you write such a test, take `hostpath` with
 it rather than re-deriving it.
 
-## B-`dc`-CLAIMS-ARBITRARY-PRECISION-AND-COMPUTES-IN-`f64` (lane B, 2026-08-16) — **open**
+## B-`dc`-CLAIMS-ARBITRARY-PRECISION-AND-COMPUTES-IN-`f64` (lane B, 2026-08-16) — **fixed 2026-08-16** (`62bd49957`, `2ccf4029a`; see `design-decisions.md` §324)
+
+**Resolution:** `dc`'s numeric core is `bignum::Decimal`, the same type `bc`
+computes on. `2 200 ^ p` prints all sixty-one digits exactly; 30! via the
+standard factorial macro is exact; 22 expressions written in both syntaxes were
+run through both programs and agree digit for digit. The two "fix during the
+lift" items below were both done: `div`/`modulo`/`sqrt` return
+`Result<_, DecimalError>` and no longer print-and-return-zero, and the parse and
+format paths were hardened along with the rest of the crate under
+`[lints] workspace = true` — which `bc` and `dc` had *both* been missing from
+their manifests, so 31 defensive-lint warnings had never been reported for `bc`.
+
+Moving `dc` onto the shared type immediately found three defects in it that
+`bc`'s tests had not: the formatter trimmed trailing fractional zeros (making
+`scale` unobservable — `5k 1 10 /` and `1k 1 10 /` printed the same string), the
+base-ten parser scored `F` as 22 instead of 15 (so `FF` read as 242), and a
+fraction read in a non-decimal base kept an inflated scale. Those were `bc` bugs
+too. A fourth, in `dc` itself and inherited from the `f64` version: the
+comparison commands were reversed, which turned every `dc` loop into a single
+pass (30! answered 870). See the follow-on entry below for what remains
+unverified.
+
+**Original report follows.**
+
+
 
 **In short:** `dc` is the desk calculator whose entire reason to exist is exact
 arithmetic on numbers too big for a machine word. Its own first line of
@@ -25244,6 +25268,54 @@ differential run and should be labelled as such wherever the result is claimed.
 **Until then** `dc` is quietly wrong rather than loudly broken, which is the bad
 kind: a script that uses it for big-integer work gets a rounded answer with no
 diagnostic. Nothing in the tree depends on `dc` yet, so it is not blocking.
+
+---
+
+## B-CALCULATOR-OUTPUT-DETAILS-NEVER-CHECKED-AGAINST-A-REAL-`bc` (lane B, 2026-08-16) — **open**
+
+**In short:** our `bc` and `dc` now compute the right *numbers* — that part is
+tested against hand-computed values and against each other. What is not verified
+is how they *write* those numbers down, because this machine has no real `bc` or
+`dc` to compare against. Three formatting details were decided from memory of
+what the traditional tools do. If any is wrong, every script that reads our
+calculators' output parses something slightly different from what it expects.
+
+**Where:** `userspace/bignum/src/decimal.rs` — `format_base10` and `format`.
+
+**The three, most-likely-wrong first:**
+
+| Detail | Ours prints | Traditional `bc`/`dc` print | Confidence |
+|---|---|---|---|
+| A value below one | `0.5` | `.5` (no leading zero) | **Low — ours is probably wrong.** That `bc` omits the leading zero is a common enough surprise to be a recurring question wherever shell scripting is discussed. |
+| Zero at a non-zero scale | `0` | `0` believed; possibly `.000` | Medium |
+| Line length | unlimited | wrapped at 70 columns with a trailing `\` | **Ours is definitely wrong** — the wrap is specified, and we do not do it. See below. |
+
+**The leading zero is the one that matters** and it is not a cosmetic
+preference: `$(echo "scale=2;1/2" | bc)` yields `.50` on every traditional
+implementation, and a script that does `[ "$x" = ".50" ]`, or that feeds the
+value back to a tool with a stricter number parser, breaks on `0.50`. Changing
+it is a two-line edit in `format_base10` plus a sweep of the two crates' test
+expectations; the reason it was not done in the same commit is only that it is
+a user-visible output change and deserves to be revertible on its own.
+
+**The 70-column wrap is separately specified and simply missing.** POSIX says
+`bc` output longer than the line length is split with a backslash-newline.
+`2 200 ^ p` prints one 61-character line here and one wrapped line elsewhere,
+so any golden-output comparison against a real `bc` fails on long numbers
+regardless of how the digits come out.
+
+**Also still missing from `dc`:** the `a` command (turn the top of the stack
+into a one-character string). Everything else in POSIX `dc` is implemented.
+
+**The proper fix** is a differential harness, which needs a real `bc`/`dc` on
+the development host — the same thing that settled `grep`, `sed`, `awk`, `expr`
+and `cat`. Failing that, the leading-zero change should be made on the strength
+of the documentary evidence, since "every other implementation does X" is the
+whole specification for a compatibility utility.
+
+**Until then** the numbers are right and the punctuation around them may not be.
+Nothing in the tree consumes `bc` or `dc` output yet, so this is not blocking;
+it becomes blocking the moment a shell script does arithmetic through them.
 
 ---
 

@@ -317,6 +317,87 @@ pub fn measure_in(text: &str, size: f32, weight: FontWeightHint, family: FontFam
     with_font(size, weight, family, |font| font.measure(text))
 }
 
+/// An ARGB pixel buffer an application can draw text into directly.
+///
+/// # Why this exists
+///
+/// Almost everything draws text by emitting a [`RenderCommand::Text`] and
+/// letting the compositor rasterize it. A few things cannot: an app that
+/// produces an *image file* — a screenshot with annotations baked in, a chart
+/// exported to disk — owns the pixels itself and has no compositor in the
+/// loop. Before this existed those apps had two options, and both were wrong:
+/// drop the text from the output (silently losing what the user typed), or add
+/// a direct `osfont` dependency and rasterize with a *different* font cache
+/// than the one that measured the layout — which is the exact drift this
+/// module exists to prevent.
+pub struct Surface<'a> {
+    /// The pixel buffer, `0xAARRGGBB` per pixel, row-major and top-down.
+    pub pixels: &'a mut [u32],
+    /// Pixels per row.
+    pub width: u32,
+    /// Rows in the buffer.
+    pub height: u32,
+}
+
+/// Draws `text` into `surface` with its **baseline** at `baseline_y`, starting
+/// at pen position `x`, and returns the pen position after the last glyph.
+///
+/// Uses the same font cache as [`measure`], so the drawn width is the measured
+/// width. Anything falling outside the surface is clipped, including negative
+/// coordinates; a buffer shorter than `width * height` is rejected outright
+/// rather than drawing into whatever part of it exists, because a partial
+/// surface means the caller's stride is wrong and every row after the first
+/// would land in the wrong place.
+///
+/// The colour's alpha scales the glyph coverage, so a translucent colour
+/// blends rather than replacing.
+pub fn draw_into(
+    surface: &mut Surface<'_>,
+    text: &str,
+    x: f32,
+    baseline_y: f32,
+    size: f32,
+    weight: FontWeightHint,
+    color: Color,
+) -> f32 {
+    draw_into_family(surface, text, x, baseline_y, size, weight, FontFamily::Ui, color)
+}
+
+/// The family-aware form of [`draw_into`].
+// Eight arguments, kept positional for the same reason `RenderTree`'s text
+// primitives are: the parameters are exactly the ones every other function in
+// this module takes, in the same order, and a bag struct here would read worse
+// than the siblings it has to sit beside.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_into_family(
+    surface: &mut Surface<'_>,
+    text: &str,
+    x: f32,
+    baseline_y: f32,
+    size: f32,
+    weight: FontWeightHint,
+    family: FontFamily,
+    color: Color,
+) -> f32 {
+    let needed = (surface.width as usize).saturating_mul(surface.height as usize);
+    if surface.pixels.len() < needed {
+        return x;
+    }
+    let argb = (u32::from(color.a) << 24)
+        | (u32::from(color.r) << 16)
+        | (u32::from(color.g) << 8)
+        | u32::from(color.b);
+    let mut target = osfont::scaled::Target {
+        buffer: surface.pixels,
+        stride: surface.width,
+        height: surface.height,
+        color: argb,
+    };
+    with_font(size, weight, family, |font| {
+        font.draw_text(text, &mut target, x, baseline_y)
+    })
+}
+
 /// The advance of one fixed-pitch cell: the width every glyph occupies in
 /// [`FontFamily::Mono`].
 ///
@@ -877,6 +958,144 @@ pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A surface pre-filled with an obvious background, so any changed pixel
+    /// is unambiguously something the text drew.
+    fn blank(width: u32, height: u32) -> Vec<u32> {
+        vec![0xFF00_0000; (width as usize) * (height as usize)]
+    }
+
+    fn changed(before: &[u32], after: &[u32]) -> usize {
+        before
+            .iter()
+            .zip(after)
+            .filter(|(a, b)| a != b)
+            .count()
+    }
+
+    #[test]
+    fn drawing_into_a_surface_marks_pixels() {
+        let (w, h) = (120_u32, 32_u32);
+        let before = blank(w, h);
+        let mut pixels = before.clone();
+        let mut surface = Surface {
+            pixels: &mut pixels,
+            width: w,
+            height: h,
+        };
+        let end = draw_into(
+            &mut surface,
+            "Hi",
+            2.0,
+            22.0,
+            16.0,
+            FontWeightHint::Regular,
+            Color::WHITE,
+        );
+        assert!(end > 2.0, "the pen must advance past the start, got {end}");
+        assert!(
+            changed(&before, &pixels) > 0,
+            "drawing 'Hi' left the surface untouched"
+        );
+    }
+
+    /// The property the whole module exists for: what is drawn is as wide as
+    /// what was measured, because both come from one font cache.
+    #[test]
+    fn the_pen_advance_equals_the_measured_width() {
+        let (w, h) = (400_u32, 40_u32);
+        let mut pixels = blank(w, h);
+        let mut surface = Surface {
+            pixels: &mut pixels,
+            width: w,
+            height: h,
+        };
+        let end = draw_into(
+            &mut surface,
+            "Widths must agree",
+            10.0,
+            28.0,
+            16.0,
+            FontWeightHint::Regular,
+            Color::WHITE,
+        );
+        let measured = measure("Widths must agree", 16.0, FontWeightHint::Regular);
+        assert!(
+            (end - 10.0 - measured).abs() < 0.01,
+            "drew to {end} from x=10 but measured {measured}"
+        );
+    }
+
+    /// Off-surface text must be clipped, not wrapped into the rows above — the
+    /// failure mode of a stride-based blit that forgets to bounds-check.
+    #[test]
+    fn text_placed_outside_the_surface_draws_nothing() {
+        let (w, h) = (60_u32, 20_u32);
+        let before = blank(w, h);
+        let mut pixels = before.clone();
+        let mut surface = Surface {
+            pixels: &mut pixels,
+            width: w,
+            height: h,
+        };
+        draw_into(
+            &mut surface,
+            "offscreen",
+            0.0,
+            500.0,
+            16.0,
+            FontWeightHint::Regular,
+            Color::WHITE,
+        );
+        assert_eq!(changed(&before, &pixels), 0, "text below the surface drew");
+    }
+
+    /// A buffer that does not hold `width * height` pixels means the caller's
+    /// stride is wrong; drawing anyway would put every row after the first in
+    /// the wrong place.
+    #[test]
+    fn an_undersized_buffer_is_refused_rather_than_drawn_into() {
+        let mut pixels = vec![0xFF00_0000_u32; 10];
+        let before = pixels.clone();
+        let mut surface = Surface {
+            pixels: &mut pixels,
+            width: 100,
+            height: 100,
+        };
+        let end = draw_into(
+            &mut surface,
+            "nope",
+            0.0,
+            10.0,
+            16.0,
+            FontWeightHint::Regular,
+            Color::WHITE,
+        );
+        assert_eq!(end, 0.0, "the pen must not advance when nothing was drawn");
+        assert_eq!(pixels, before);
+    }
+
+    #[test]
+    fn a_fully_transparent_colour_draws_nothing() {
+        let (w, h) = (100_u32, 30_u32);
+        let before = blank(w, h);
+        let mut pixels = before.clone();
+        let mut surface = Surface {
+            pixels: &mut pixels,
+            width: w,
+            height: h,
+        };
+        draw_into(
+            &mut surface,
+            "invisible",
+            2.0,
+            20.0,
+            16.0,
+            FontWeightHint::Regular,
+            Color::TRANSPARENT,
+        );
+        assert_eq!(changed(&before, &pixels), 0);
+    }
 
     #[test]
     fn measuring_counts_characters_not_bytes() {

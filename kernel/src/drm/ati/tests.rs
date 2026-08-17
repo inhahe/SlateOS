@@ -1169,14 +1169,51 @@ fn test_vram(c: &mut Check) {
         KernelError::InvalidArgument,
     );
 
-    // An alignment larger than the card cannot be satisfied, and must report
-    // that rather than overflowing to a small offset that appears to fit.
+    // Offset 0 satisfies every alignment, so an outsized alignment request
+    // against a whole-card free run succeeds — at 0. This is asserted rather
+    // than assumed: it is a property of the rounding arithmetic, and a version
+    // of it that wrapped would get exactly this case wrong.
+    let huge = c.expect_ok(
+        "outsized alignment is satisfiable at offset 0",
+        a.alloc(16, 0x8000_0000),
+    );
+    c.eq_u32("...and lands there", huge.unwrap_or(u32::MAX), 0);
+    // With offset 0 taken, the same alignment cannot be met anywhere on a
+    // 16 MiB card — the next multiple of 2 GiB is far past the end. That must
+    // be OutOfMemory, not an offset that appears to fit.
     c.is_err(
         "alignment beyond the card is OutOfMemory",
         a.alloc(16, 0x8000_0000),
         KernelError::OutOfMemory,
     );
+    c.expect_ok("free the outsized-alignment allocation", a.free(0, 16));
+    c.eq_u32("card restored again", a.free_bytes(), TOTAL);
     vram_intact(c, "rejected allocations", &a);
+
+    // Rounding a free run's start up to a huge alignment can overflow 32 bits,
+    // and the run must then be skipped rather than wrapping to a small offset
+    // that looks like a fit. Unreachable on a 16 MiB card, so it takes an
+    // allocator spanning the whole 32-bit range to reach: with [0, 16) taken,
+    // 2 GiB alignment lands at 0x8000_0000, and rounding the *remaining* run at
+    // 0x8000_0010 up to the next 2 GiB boundary is what overflows.
+    if let Some(mut wide) = c.expect_ok(
+        "allocator over the full 32-bit range",
+        vram::VramAllocator::new(u32::MAX),
+    ) {
+        c.expect_ok("take the front of the range", wide.alloc(16, 1));
+        let high = c.expect_ok("2 GiB-aligned allocation", wide.alloc(16, 0x8000_0000));
+        c.eq_u32(
+            "lands on the 2 GiB boundary",
+            high.unwrap_or(0),
+            0x8000_0000,
+        );
+        c.is_err(
+            "alignment that overflows on rounding is OutOfMemory",
+            wide.alloc(16, 0x8000_0000),
+            KernelError::OutOfMemory,
+        );
+        vram_intact(c, "overflow-rounding allocation", &wide);
+    }
 
     // The scanout alignment the mode-set planner requires must be satisfiable,
     // since every framebuffer this driver displays has to meet it.

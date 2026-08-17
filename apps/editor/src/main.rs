@@ -56,15 +56,30 @@ pub struct Document {
     pub selection_anchor: Option<(usize, usize)>,
     /// Scroll offset (first visible line).
     pub scroll_line: usize,
-    /// Horizontal scroll offset — a **byte** offset into the line, the same
-    /// units as [`Document::cursor_col`].
+    /// Horizontal scroll offset, in **pixels** from the left edge of the line.
     ///
-    /// It has to be, because the two are subtracted from one another to place
-    /// the caret and to clip a highlighted token to the visible part of its
-    /// line. A character count and a byte offset only agree on ASCII, and the
-    /// disagreement is silent: the caret lands beside the character it is on,
-    /// by one pixel per byte of accumulated difference.
-    pub scroll_col: usize,
+    /// **It used to be a byte offset, and that was wrong at the root rather
+    /// than in the arithmetic.** Scrolling by a byte offset means drawing
+    /// `line[scroll..]` — and the visible part of a bidirectional line is not
+    /// the shaping of a suffix of it. Cutting a line at byte *n* and shaping
+    /// what is left re-orders the remainder against itself: the bidi algorithm
+    /// resolves paragraph direction and embedding levels from the *whole* run,
+    /// so a suffix can come out in a different visual order than those same
+    /// characters have in the complete line. Scrolling would rearrange the
+    /// text, not merely slide it.
+    ///
+    /// A pixel offset has no such failure mode, because it moves the drawn run
+    /// instead of shortening it: the line is shaped once, whole, and then
+    /// translated left by `scroll_px` with a clip rectangle hiding what falls
+    /// outside the text area. What is on screen is then a *window onto* the
+    /// correctly-ordered line rather than a separate, differently-ordered
+    /// shaping of part of it.
+    ///
+    /// It also removes a whole class of bug outright: there is no longer any
+    /// slice, so there is no character to land in the middle of, and no
+    /// `snap_to_boundary` call standing between the scroll position and a
+    /// panic.
+    pub scroll_px: f32,
     /// Undo history.
     pub undo_stack: VecDeque<EditAction>,
     /// Redo history.
@@ -244,16 +259,19 @@ fn snap_to_boundary(line: &str, col: usize) -> usize {
     col
 }
 
-/// A byte offset into a whole line, expressed against a line drawn from `start`.
+/// A token's byte offset as a [`TextSpan`] end.
 ///
-/// Saturating in both directions rather than panicking, because this feeds a
-/// [`TextSpan`] and a wrong span mis-colours where a panic takes the editor
-/// down. An offset before `start` clamps to 0 — the span is then empty, which
-/// is what a token entirely left of the scroll position should contribute — and
-/// a line longer than 4 GiB clamps to `u32::MAX`, past every glyph, which
-/// colours the rest of the line in that token's colour rather than losing it.
-fn rebase(offset: usize, start: usize) -> u32 {
-    u32::try_from(offset.saturating_sub(start)).unwrap_or(u32::MAX)
+/// Saturating rather than panicking, because this feeds a span and a wrong
+/// span mis-colours where a panic takes the editor down: a line longer than
+/// 4 GiB clamps to `u32::MAX`, which is past every glyph and so colours the
+/// rest of the line in that token's colour rather than losing the line.
+///
+/// It takes no scroll position because there is none to take. Spans are
+/// offsets into the whole line, always — horizontal scrolling moves the drawn
+/// run rather than slicing it, so there is nothing to rebase against. See
+/// [`Document::scroll_px`].
+fn span_end(offset: usize) -> u32 {
+    u32::try_from(offset).unwrap_or(u32::MAX)
 }
 
 impl Default for Document {
@@ -273,7 +291,7 @@ impl Document {
             cursor_col: 0,
             selection_anchor: None,
             scroll_line: 0,
-            scroll_col: 0,
+            scroll_px: 0.0,
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
             line_ending: LineEnding::Lf,
@@ -323,7 +341,7 @@ impl Document {
             cursor_col: 0,
             selection_anchor: None,
             scroll_line: 0,
-            scroll_col: 0,
+            scroll_px: 0.0,
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
             line_ending,
@@ -1512,9 +1530,10 @@ impl EditorState {
     /// Draw one line as a single shaped run whose glyphs carry the colours of
     /// the tokens they came from.
     ///
-    /// `scroll_col` is a byte offset into `line`; the line is drawn from there,
-    /// and the renderer stops at `right`, so a line thousands of columns wide
-    /// costs a screenful of glyphs rather than one command per token.
+    /// The whole line is drawn, shifted left by `scroll_px` and clipped to the
+    /// band `left..right` at `y`, so a line thousands of columns wide costs one
+    /// command rather than one per token — and the renderer still stops at
+    /// `right`, so it rasterizes a screenful of glyphs rather than all of them.
     ///
     /// **This used to emit one `Text` command per token, each positioned at the
     /// sum of the previous tokens' widths, and that was wrong in a way no amount
@@ -1536,25 +1555,28 @@ impl EditorState {
     /// ordinary line of code — measured 2.3x the cost of shaping it whole. See
     /// `known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL`.
     ///
-    /// Still outstanding: `scroll_col` slices the line at a byte offset, and the
-    /// visible portion of a bidirectional line is not the shaping of a substring
-    /// of it. That is item 3 of the same entry, and a separate change.
+    /// **Horizontal scrolling moves the run rather than shortening it**, which
+    /// is the other half of the same argument. Drawing `line[scroll..]` would
+    /// re-shape a *suffix*, and the bidi algorithm resolves visual order from
+    /// the whole paragraph — so the suffix can come out ordered differently
+    /// from the way those same characters sit in the complete line, and
+    /// scrolling would rearrange the text instead of sliding it. Translating a
+    /// single whole-line shaping and clipping it cannot do that. It also
+    /// deletes the entire "scrolled into the middle of a character" family of
+    /// bugs, because nothing is sliced any more.
     #[allow(clippy::too_many_arguments)]
     fn draw_tokens(
         tree: &mut RenderTree,
         line: &str,
         tokens: &[StyledToken],
-        scroll_col: usize,
+        scroll_px: f32,
         left: f32,
         y: f32,
         right: f32,
+        line_height: f32,
         font_size: f32,
     ) {
-        let start = snap_to_boundary(line, scroll_col);
-        let Some(text) = line.get(start..) else {
-            return;
-        };
-        if text.is_empty() {
+        if line.is_empty() || right <= left {
             return;
         }
         let plain = DEFAULT_THEME.color_for(Token::Plain);
@@ -1565,34 +1587,39 @@ impl EditorState {
         // asserts there are no gaps; this is what keeps a future one from
         // mis-colouring rather than deleting the user's text off the screen.
         let mut spans: Vec<TextSpan> = Vec::with_capacity(tokens.len());
-        let mut covered = start;
+        let mut covered = 0usize;
         for token in tokens {
             if token.end <= covered {
                 continue;
             }
             if token.start > covered {
                 spans.push(TextSpan {
-                    end: rebase(token.start, start),
+                    end: span_end(token.start),
                     color: plain,
                 });
             }
             spans.push(TextSpan {
-                end: rebase(token.end, start),
+                end: span_end(token.end),
                 color: DEFAULT_THEME.color_for(token.kind),
             });
             covered = token.end;
         }
+
+        // The clip is what makes the leftward shift a scroll rather than a
+        // spill: without it the glyphs scrolled off the left would paint over
+        // the line-number gutter. `max_width` handles only the right edge —
+        // the renderer computes `x + max_width`, so it has to be measured from
+        // the shifted `x` to still land on `right`.
+        // Clamped at zero so `right - x` — the width handed to the renderer —
+        // is positive by construction rather than by an argument about who set
+        // the scroll position. A negative scroll would mean the line starts
+        // right of the text area, which is not a state worth representing.
+        let x = left - scroll_px.max(0.0);
+        tree.clip(left, y, right - left, line_height);
         // Bytes past the last span take the fallback colour, so the tail the
         // tokens did not reach needs no span of its own.
-        tree.rich_text_clipped(
-            left,
-            y,
-            (right - left).max(0.0),
-            text,
-            spans,
-            plain,
-            font_size,
-        );
+        tree.rich_text_clipped(x, y, right - x, line, spans, plain, font_size);
+        tree.unclip();
     }
 
     fn render_editor(&self, tree: &mut RenderTree) {
@@ -1637,17 +1664,18 @@ impl EditorState {
                 );
             }
 
-            // Line text, one drawn run per syntax token.
+            // Line text: one shaped run, coloured per glyph.
             let line = doc.lines.get(i).map_or("", String::as_str);
             let tokens = highlight::highlight_line(line, doc.language, &mut state);
             Self::draw_tokens(
                 tree,
                 line,
                 &tokens,
-                doc.scroll_col,
+                doc.scroll_px,
                 self.text_x(),
                 y + 3.0,
                 w,
+                self.line_height,
                 self.font_size,
             );
         }
@@ -1661,18 +1689,76 @@ impl EditorState {
         if doc.cursor_line >= doc.scroll_line && doc.cursor_line < end_line {
             let cursor_y =
                 editor_y + (doc.cursor_line - doc.scroll_line) as f32 * self.line_height;
-            let before_cursor = doc.lines.get(doc.cursor_line).map_or("", |line| {
-                // Both offsets are bytes, and both are snapped, so the slice
-                // cannot land inside a character even if the caller left the
-                // scroll offset somewhere odd.
-                let from = snap_to_boundary(line, doc.scroll_col);
-                let to = snap_to_boundary(line, doc.cursor_col.max(from));
-                line.get(from..to).unwrap_or("")
-            });
-            let cursor_x = self.text_x()
-                + text::measure(before_cursor, self.font_size, FontWeightHint::Regular);
+            // Measured from the start of the line and then shifted by the
+            // scroll, rather than measured from the scroll position: the text
+            // is one shaping of the whole line, so the caret has to be placed
+            // in that same coordinate system or it disagrees with the glyphs
+            // by whatever kerning crosses the scroll boundary.
+            let cursor_x =
+                self.text_x() - doc.scroll_px.max(0.0) + self.caret_offset_px(doc);
+            // Clipped for the same reason the text is: a caret scrolled off the
+            // left belongs behind the gutter, not drawn over the line numbers.
+            tree.clip(self.text_x(), cursor_y, w - self.text_x(), self.line_height);
             tree.fill_rect(cursor_x, cursor_y + 2.0, 2.0, self.line_height - 4.0, Color::from_hex(0x89B4FA));
+            tree.unclip();
         }
+    }
+
+    /// How far along its line the caret sits, in pixels from the line's start.
+    ///
+    /// Ignores the scroll position on purpose — this is the caret's place *in
+    /// the line*, and where that lands on screen is the caller's business.
+    ///
+    /// Still a prefix measurement, and so still wrong for a bidirectional line:
+    /// the caret between two characters of a right-to-left run is not at the
+    /// summed width of the bytes before it. Fixing that needs the shaped run's
+    /// cluster positions rather than a width, which is item 5 (step (e)) of
+    /// `known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL`. It is at least now
+    /// wrong in one place instead of two, and consistently with nothing.
+    fn caret_offset_px(&self, doc: &Document) -> f32 {
+        let before = doc.lines.get(doc.cursor_line).map_or("", |line| {
+            // Snapped, not merely clamped: `cursor_col` is a byte offset and
+            // slicing inside a character panics.
+            let to = snap_to_boundary(line, doc.cursor_col);
+            line.get(..to).unwrap_or("")
+        });
+        text::measure(before, self.font_size, FontWeightHint::Regular)
+    }
+
+    /// Scroll horizontally so the caret is inside the text area.
+    ///
+    /// The companion to [`Document::ensure_cursor_visible`], and the reason
+    /// [`Document::scroll_px`] is ever non-zero: without it a caret moved past
+    /// the right edge of a long line simply vanishes, with no way to bring it
+    /// back.
+    ///
+    /// Scrolls by whole *pixels* rather than to a character boundary, because
+    /// there is no boundary to snap to any more — the run is translated, not
+    /// sliced. A margin keeps the caret off the very edge, so typing at the end
+    /// of a long line shows some of what comes before it rather than pinning the
+    /// caret to the last column.
+    pub fn ensure_caret_visible_horizontally(&mut self) {
+        const MARGIN: f32 = 24.0;
+
+        let width = self.window_width as f32 - self.text_x();
+        if width <= 0.0 {
+            return;
+        }
+        let caret = self.caret_offset_px(self.active_document());
+        let doc = self.active_document_mut();
+        let scroll = doc.scroll_px.max(0.0);
+
+        // Left first, then right, so that on a viewport narrower than the
+        // margins the caret ends up at the left edge — visible — rather than
+        // oscillating between two unsatisfiable bounds.
+        let scroll = if caret < scroll + MARGIN {
+            (caret - MARGIN).max(0.0)
+        } else if caret > scroll + width - MARGIN {
+            (caret - width + MARGIN).max(0.0)
+        } else {
+            scroll
+        };
+        doc.scroll_px = scroll;
     }
 
     fn render_status_bar(&self, tree: &mut RenderTree) {
@@ -2020,6 +2106,15 @@ mod caret_tests {
         editor
     }
 
+    /// Whether the line is at its unscrolled resting position.
+    ///
+    /// Exact zero is what the code produces (`.max(0.0)` of a negative is
+    /// exactly `0.0`), but comparing floats with `==` is the habit that makes
+    /// the *next* such assertion wrong, so it is spelled as a tolerance.
+    fn unscrolled(editor: &EditorState) -> bool {
+        editor.active_document().scroll_px.abs() < f32::EPSILON
+    }
+
     /// The x of the caret in a rendered frame.
     fn caret_x(editor: &EditorState) -> f32 {
         let tree = editor.render();
@@ -2085,19 +2180,93 @@ mod caret_tests {
         );
     }
 
+    /// A horizontal scroll slides the caret by exactly the scrolled distance.
+    ///
+    /// The old model measured `line[scroll..cursor]` and so had to agree with a
+    /// *re-shaping* of the visible suffix; this one measures the whole prefix
+    /// once and subtracts, which is the same coordinate system the glyphs are
+    /// drawn in.
     #[test]
-    fn a_horizontally_scrolled_line_measures_only_what_is_shown() {
+    fn a_horizontal_scroll_slides_the_caret_by_the_scrolled_distance() {
+        let unscrolled = caret_x(&editor_with("hello world", 8));
+
         let mut editor = editor_with("hello world", 8);
-        editor.active_document_mut().scroll_col = 6;
-        // Columns 6..8 are "wo": the caret is two characters into the visible
-        // text, not eight.
-        let expected = editor.gutter_width
-            + 8.0
-            + text::measure("wo", editor.font_size, FontWeightHint::Regular);
+        editor.active_document_mut().scroll_px = 37.0;
+        assert!(
+            (caret_x(&editor) - (unscrolled - 37.0)).abs() < 0.01,
+            "a 37px scroll moved the caret from {unscrolled} to {}, not by 37",
+            caret_x(&editor)
+        );
+    }
+
+    /// The caret is measured from the start of the line, not from the scroll
+    /// position — so it keeps whatever kerning crosses the scroll boundary, and
+    /// agrees with the single whole-line shaping the glyphs come from.
+    #[test]
+    fn the_caret_is_measured_over_the_whole_prefix_not_the_visible_part() {
+        let mut editor = editor_with("hello world", 8);
+        editor.active_document_mut().scroll_px = 20.0;
+        let expected = editor.gutter_width + 8.0 - 20.0
+            + text::measure("hello wo", editor.font_size, FontWeightHint::Regular);
         assert!(
             (caret_x(&editor) - expected).abs() < 0.01,
-            "a scrolled line put the caret at {}, not {expected}",
+            "the caret is at {}, but the whole prefix ends at {expected}",
             caret_x(&editor)
+        );
+    }
+
+    /// Horizontal auto-scroll: a caret past the right edge brings the view to
+    /// it. Without this a long line's end is simply unreachable.
+    #[test]
+    fn a_caret_past_the_right_edge_scrolls_the_view_to_it() {
+        let line = "x".repeat(4000);
+        let mut editor = editor_with(&line, 4000);
+        assert!(unscrolled(&editor), "a fresh document starts scrolled");
+
+        editor.ensure_caret_visible_horizontally();
+        let scroll = editor.active_document().scroll_px;
+        assert!(scroll > 0.0, "a caret 4000 characters along did not scroll");
+
+        let caret = caret_x(&editor);
+        assert!(
+            caret >= editor.text_x() && caret <= editor.window_width as f32,
+            "after scrolling, the caret is at {caret}, outside the text area \
+             {}..{}",
+            editor.text_x(),
+            editor.window_width
+        );
+    }
+
+    /// And back again: the same call scrolls left when the caret is behind the
+    /// view, and lands on exactly zero at the start of the line rather than a
+    /// negative offset that would leave a gap at the left edge.
+    #[test]
+    fn a_caret_before_the_left_edge_scrolls_back_and_stops_at_zero() {
+        let line = "x".repeat(4000);
+        let mut editor = editor_with(&line, 4000);
+        editor.ensure_caret_visible_horizontally();
+        assert!(editor.active_document().scroll_px > 0.0);
+
+        editor.active_document_mut().cursor_col = 0;
+        editor.ensure_caret_visible_horizontally();
+        assert!(
+            unscrolled(&editor),
+            "a caret at column 0 left the line scrolled by {}",
+            editor.active_document().scroll_px,
+        );
+    }
+
+    /// A caret already comfortably inside the view does not move the view at
+    /// all — auto-scroll that fires on every keystroke would make the text
+    /// crawl sideways as the user types.
+    #[test]
+    fn a_caret_already_in_view_does_not_scroll() {
+        let mut editor = editor_with("hello world", 5);
+        editor.ensure_caret_visible_horizontally();
+        assert!(
+            unscrolled(&editor),
+            "a caret in plain view scrolled the line by {}",
+            editor.active_document().scroll_px,
         );
     }
 
@@ -2414,16 +2583,21 @@ mod highlight_render_tests {
         check(&doc, "replacing the whole buffer");
     }
 
-    /// `scroll_col` is a byte offset. Slicing a line at one that is not a
-    /// character boundary panics, and a line scrolled into the middle of a
-    /// multi-byte character is not hypothetical — a horizontal scroll lands
-    /// wherever the arithmetic puts it.
+    /// A scroll position can no longer land inside a character, because it is
+    /// no longer an offset into the text — but `cursor_col` still is, and the
+    /// caret measurement slices the line at it. This walks both across a line
+    /// with a multi-byte character in it.
+    ///
+    /// The old version of this test drove `scroll_col` through every byte to
+    /// prove the *slice* did not panic. There is no slice now; what is left to
+    /// prove is that an arbitrary pixel scroll and an arbitrary byte cursor
+    /// still render.
     #[test]
-    fn a_line_scrolled_into_the_middle_of_a_character_does_not_panic() {
+    fn an_arbitrary_scroll_and_cursor_position_does_not_panic() {
         let mut editor = editor_showing("caf\u{e9} au lait", Language::Plain);
-        for scroll in 0..16 {
-            editor.active_document_mut().scroll_col = scroll;
-            editor.active_document_mut().cursor_col = scroll;
+        for i in 0..16 {
+            editor.active_document_mut().scroll_px = i as f32 * 7.5;
+            editor.active_document_mut().cursor_col = i;
             drop(editor.render());
         }
     }
@@ -2448,48 +2622,95 @@ mod highlight_render_tests {
 
     // ---- syntax colouring is per glyph, not per drawn substring ------------
 
-    /// `draw_tokens` output as (text, spans, max_width), or a panic naming what
+    /// The one `RichText` command `draw_tokens` emits, or a panic naming what
     /// it emitted instead.
-    fn tokens_drawn(
-        line: &str,
-        language: Language,
-        scroll_col: usize,
-        right: f32,
-    ) -> (String, Vec<TextSpan>, Option<f32>) {
+    ///
+    /// `left` is 20.0 rather than 0.0 so a scroll actually has somewhere to
+    /// move the run *to*: at `left == 0` a correct shift and a clamped-to-zero
+    /// one are indistinguishable.
+    struct Drawn {
+        x: f32,
+        text: String,
+        spans: Vec<TextSpan>,
+        max_width: Option<f32>,
+    }
+
+    const TEST_LEFT: f32 = 20.0;
+
+    fn tokens_drawn(line: &str, language: Language, scroll_px: f32, right: f32) -> Drawn {
         let mut tree = RenderTree::new();
         let mut state = HighlightState::Normal;
         let tokens = highlight::highlight_line(line, language, &mut state);
-        EditorState::draw_tokens(&mut tree, line, &tokens, scroll_col, 0.0, 0.0, right, 14.0);
-        match tree.commands.first() {
-            Some(guitk::render::RenderCommand::RichText {
+        EditorState::draw_tokens(
+            &mut tree, line, &tokens, scroll_px, TEST_LEFT, 0.0, right, 18.0, 14.0,
+        );
+        first_rich(&tree)
+    }
+
+    /// The `RichText` command in a tree, wherever the clip put it.
+    fn first_rich(tree: &RenderTree) -> Drawn {
+        let found = tree.commands.iter().find_map(|c| match c {
+            guitk::render::RenderCommand::RichText {
+                x,
                 text,
                 spans,
                 max_width,
                 ..
-            }) => (text.clone(), spans.clone(), *max_width),
-            other => panic!("expected one RichText command, got {other:?}"),
+            } => Some(Drawn {
+                x: *x,
+                text: text.clone(),
+                spans: spans.clone(),
+                max_width: *max_width,
+            }),
+            _ => None,
+        });
+        match found {
+            Some(d) => d,
+            None => panic!("expected a RichText command, got {:?}", tree.commands),
         }
     }
 
     /// **The regression this exists to prevent.** A highlighted line must be
-    /// *one* command: one command is one shaping, and one shaping is the only
-    /// arrangement under which a right-to-left run can be ordered correctly. A
-    /// command per token is the assumption that screen order is byte order, and
-    /// no amount of care inside the loop repairs it.
+    /// *one* text command: one command is one shaping, and one shaping is the
+    /// only arrangement under which a right-to-left run can be ordered
+    /// correctly. A command per token is the assumption that screen order is
+    /// byte order, and no amount of care inside the loop repairs it.
+    ///
+    /// The clip around it is not a text command and does not count — but it is
+    /// asserted here too, because a clip that went missing would turn the
+    /// horizontal scroll into a spill over the line-number gutter.
     #[test]
     fn a_highlighted_line_is_drawn_as_one_shaped_run() {
+        use guitk::render::RenderCommand as Rc;
+
         let mut tree = RenderTree::new();
         let line = "fn main() { let x: u32 = 0x1F; /* hi */ }";
         let mut state = HighlightState::Normal;
         let tokens = highlight::highlight_line(line, Language::Rust, &mut state);
         assert!(tokens.len() > 4, "this line should tokenize into several runs");
-        EditorState::draw_tokens(&mut tree, line, &tokens, 0, 0.0, 0.0, 800.0, 14.0);
+        EditorState::draw_tokens(
+            &mut tree, line, &tokens, 0.0, TEST_LEFT, 0.0, 800.0, 18.0, 14.0,
+        );
+
+        let texts = tree
+            .commands
+            .iter()
+            .filter(|c| matches!(c, Rc::Text { .. } | Rc::RichText { .. }))
+            .count();
         assert_eq!(
-            tree.len(),
-            1,
-            "a {}-token line produced {} commands; it must produce one",
+            texts, 1,
+            "a {}-token line produced {texts} text commands; it must produce one",
             tokens.len(),
-            tree.len(),
+        );
+        assert!(
+            matches!(tree.commands.first(), Some(Rc::PushClip { x, width, .. })
+                if (*x - TEST_LEFT).abs() < 0.01 && (*width - (800.0 - TEST_LEFT)).abs() < 0.01),
+            "the run is not clipped to the text area: {:?}",
+            tree.commands.first(),
+        );
+        assert!(
+            matches!(tree.commands.last(), Some(Rc::PopClip)),
+            "the clip is not popped",
         );
     }
 
@@ -2499,7 +2720,7 @@ mod highlight_render_tests {
     #[test]
     fn every_byte_resolves_to_its_own_token_colour() {
         let line = "fn main() { let x: u32 = 0x1F; /* hi */ }";
-        let (text, spans, _) = tokens_drawn(line, Language::Rust, 0, 800.0);
+        let Drawn { text, spans, .. } = tokens_drawn(line, Language::Rust, 0.0, 800.0);
         assert_eq!(text, line);
 
         let mut state = HighlightState::Normal;
@@ -2515,24 +2736,38 @@ mod highlight_render_tests {
         }
     }
 
-    /// Span offsets are into the *drawn* string, which starts at `scroll_col` —
-    /// not into the whole line. Getting this wrong shifts every colour by the
-    /// scroll position, which looks like working code until someone scrolls.
+    /// **Spans are offsets into the whole line, at every scroll position.**
+    ///
+    /// This is the assertion that the scroll no longer slices: a scrolled line
+    /// draws the *same string* with the *same spans* as an unscrolled one, and
+    /// differs only in where it is put. The previous model drew `line[scroll..]`
+    /// and rebased every span against it, which is what made a scrolled
+    /// bidirectional line a differently-ordered shaping rather than the same
+    /// line moved.
     #[test]
-    fn spans_are_offsets_into_the_drawn_text_not_the_whole_line() {
+    fn a_scroll_changes_only_where_the_line_is_drawn_not_what() {
         let line = "let alpha = \"beta\";";
-        let scroll = 4;
-        let (text, spans, _) = tokens_drawn(line, Language::Rust, scroll, 800.0);
-        assert_eq!(text, line[scroll..]);
+        let at_rest = tokens_drawn(line, Language::Rust, 0.0, 800.0);
+        let scrolled = tokens_drawn(line, Language::Rust, 60.0, 800.0);
+
+        assert_eq!(scrolled.text, line, "a scroll sliced the line");
+        assert_eq!(scrolled.text, at_rest.text);
+        assert_eq!(scrolled.spans, at_rest.spans, "a scroll rebased the spans");
+        assert!(
+            (scrolled.x - (at_rest.x - 60.0)).abs() < 0.01,
+            "a 60px scroll moved the run from {} to {}, not by 60",
+            at_rest.x,
+            scrolled.x,
+        );
 
         let mut state = HighlightState::Normal;
         let tokens = highlight::highlight_line(line, Language::Rust, &mut state);
         for token in &tokens {
-            for byte in token.start.max(scroll)..token.end {
+            for byte in token.start..token.end {
                 assert_eq!(
-                    TextSpan::color_at(&spans, byte - scroll),
+                    TextSpan::color_at(&scrolled.spans, byte),
                     Some(DEFAULT_THEME.color_for(token.kind)),
-                    "byte {byte} of {line:?} resolved wrongly at scroll {scroll}",
+                    "byte {byte} of {line:?} resolved wrongly while scrolled",
                 );
             }
         }
@@ -2541,38 +2776,67 @@ mod highlight_render_tests {
     /// The bound is what lets the renderer stop: without it a line thousands of
     /// columns wide costs a glyph per column every frame, of which a screenful
     /// is visible.
+    ///
+    /// It is measured from the *shifted* x, because the renderer computes its
+    /// stopping point as `x + max_width`. Getting this wrong is invisible until
+    /// someone scrolls, and then truncates the line early by exactly the scroll
+    /// distance.
     #[test]
     fn the_drawn_run_is_bounded_by_the_viewport() {
-        let (_, _, max_width) = tokens_drawn("let x = 1;", Language::Rust, 0, 640.0);
-        assert_eq!(max_width, Some(640.0));
+        let d = tokens_drawn("let x = 1;", Language::Rust, 0.0, 640.0);
+        assert_eq!(d.max_width, Some(640.0 - TEST_LEFT));
+
+        let s = tokens_drawn("let x = 1;", Language::Rust, 100.0, 640.0);
+        assert_eq!(
+            s.max_width,
+            Some(640.0 - TEST_LEFT + 100.0),
+            "a scrolled run stops short of the viewport's right edge",
+        );
+        // The bound is only correct if it *lands* on the viewport edge once the
+        // shift is applied, which is the property the arithmetic exists for.
+        let stop = s.x + 640.0 - TEST_LEFT + 100.0;
+        assert!(
+            (stop - 640.0).abs() < 0.01,
+            "the scrolled run stops at {stop}, not at the viewport edge 640",
+        );
     }
 
-    /// A scroll position past the end of the line draws nothing rather than
-    /// panicking or emitting an empty run. `scroll_col` is clamped elsewhere,
-    /// but this is the cheap guard against the clamp being wrong.
+    /// A scroll past the end of the line still draws it — off to the left,
+    /// where the clip hides it. There is nothing to slice and so nothing to
+    /// clamp, which is the point: the failure mode the old `scroll_col` needed
+    /// guarding against does not exist here.
     #[test]
-    fn scrolling_past_the_end_of_a_line_draws_nothing() {
-        let line = "short";
+    fn scrolling_past_the_end_of_a_line_draws_it_off_to_the_left() {
+        let d = tokens_drawn("short", Language::Rust, 9_000.0, 800.0);
+        assert_eq!(d.text, "short");
+        assert!(d.x < 0.0, "a 9000px scroll left the run at x={}", d.x);
+    }
+
+    /// An empty line draws nothing at all — no clip, no run. A zero-width
+    /// viewport likewise, which is what a window narrower than its own gutter
+    /// produces.
+    #[test]
+    fn an_empty_line_or_viewport_draws_nothing() {
+        let mut tree = RenderTree::new();
+        EditorState::draw_tokens(&mut tree, "", &[], 0.0, TEST_LEFT, 0.0, 800.0, 18.0, 14.0);
+        assert_eq!(tree.len(), 0, "an empty line drew {:?}", tree.commands);
+
         let mut tree = RenderTree::new();
         let mut state = HighlightState::Normal;
-        let tokens = highlight::highlight_line(line, Language::Rust, &mut state);
-        EditorState::draw_tokens(&mut tree, line, &tokens, 999, 0.0, 0.0, 800.0, 14.0);
-        assert_eq!(tree.len(), 0);
+        let tokens = highlight::highlight_line("x", Language::Rust, &mut state);
+        EditorState::draw_tokens(&mut tree, "x", &tokens, 0.0, 800.0, 0.0, 800.0, 18.0, 14.0);
+        assert_eq!(tree.len(), 0, "a zero-width viewport drew {:?}", tree.commands);
     }
 
-    /// `scroll_col` may land mid-character — it is a byte offset carried from
-    /// another line — and slicing there panics. It snaps back to a boundary, and
-    /// the spans must be rebased against the *snapped* offset, not the asked-for
-    /// one.
+    /// A multi-byte line is never sliced, at any scroll position — the whole
+    /// class of "scrolled into the middle of a character" bug is gone, not
+    /// merely guarded against.
     #[test]
-    fn a_scroll_offset_inside_a_character_snaps_back() {
+    fn a_multi_byte_line_is_drawn_whole_at_every_scroll_position() {
         let line = "日本語 x";
-        for scroll in 1..line.len() {
-            let (text, _, _) = tokens_drawn(line, Language::Rust, scroll, 800.0);
-            assert!(
-                line.ends_with(text.as_str()),
-                "scroll {scroll} drew {text:?}, which is not a suffix of {line:?}",
-            );
+        for i in 0..line.len() {
+            let d = tokens_drawn(line, Language::Rust, i as f32 * 3.5, 800.0);
+            assert_eq!(d.text, line, "scroll {i} drew {:?}, not the whole line", d.text);
         }
     }
 
@@ -2597,11 +2861,10 @@ mod highlight_render_tests {
             },
         ];
         let mut tree = RenderTree::new();
-        EditorState::draw_tokens(&mut tree, line, &tokens, 0, 0.0, 0.0, 800.0, 14.0);
-        let Some(guitk::render::RenderCommand::RichText { spans, .. }) = tree.commands.first()
-        else {
-            panic!("expected RichText");
-        };
+        EditorState::draw_tokens(
+            &mut tree, line, &tokens, 0.0, TEST_LEFT, 0.0, 800.0, 18.0, 14.0,
+        );
+        let spans = &first_rich(&tree).spans;
         let plain = DEFAULT_THEME.color_for(Token::Plain);
         assert_eq!(
             TextSpan::color_at(spans, 0),
@@ -2627,24 +2890,22 @@ mod highlight_render_tests {
             kind: Token::Keyword,
         }];
         let mut tree = RenderTree::new();
-        EditorState::draw_tokens(&mut tree, line, &tokens, 0, 0.0, 0.0, 800.0, 14.0);
-        let Some(guitk::render::RenderCommand::RichText { spans, text, .. }) =
-            tree.commands.first()
-        else {
-            panic!("expected RichText");
-        };
-        assert_eq!(text, line);
-        assert_eq!(TextSpan::color_at(spans, 2), None);
+        EditorState::draw_tokens(
+            &mut tree, line, &tokens, 0.0, TEST_LEFT, 0.0, 800.0, 18.0, 14.0,
+        );
+        let d = first_rich(&tree);
+        assert_eq!(d.text, line);
+        assert_eq!(TextSpan::color_at(&d.spans, 2), None);
     }
 
-    /// `rebase` is what keeps a wrong offset a colouring bug rather than a
-    /// crash: it saturates at both ends instead of underflowing or truncating.
+    /// `span_end` is what keeps an out-of-range offset a colouring bug rather
+    /// than a crash: it saturates instead of truncating to a wrapped-around
+    /// value that would colour the wrong part of the line.
     #[test]
-    fn rebasing_an_offset_before_the_scroll_position_yields_zero() {
-        assert_eq!(rebase(3, 10), 0);
-        assert_eq!(rebase(10, 10), 0);
-        assert_eq!(rebase(14, 10), 4);
-        assert_eq!(rebase(usize::MAX, 0), u32::MAX);
+    fn a_span_end_past_the_u32_range_saturates() {
+        assert_eq!(span_end(0), 0);
+        assert_eq!(span_end(14), 14);
+        assert_eq!(span_end(usize::MAX), u32::MAX);
     }
 }
 

@@ -420,12 +420,18 @@ impl PathBar {
             self.selection_anchor = Some(self.cursor.byte);
         }
 
-        if self.cursor.byte > 0 {
-            // Move back one character (handle UTF-8).
-            let s = &self.edit_text[..self.cursor.byte];
-            if let Some(ch) = s.chars().next_back() {
-                self.cursor = (self.cursor.byte - ch.len_utf8()).into();
-            }
+        // Leftwards on the *screen*, not backwards through the bytes: on a path
+        // holding a right-to-left directory name those are different steps, and
+        // the byte one makes the caret jump over the whole name and back. Same
+        // size and weight the caret is drawn with, or motion and drawing would
+        // disagree about where the gaps are.
+        if let Some(next) = crate::text::caret_left(
+            &self.edit_text,
+            self.cursor,
+            FONT_SIZE,
+            FontWeightHint::Regular,
+        ) {
+            self.cursor = next;
         }
     }
 
@@ -440,11 +446,13 @@ impl PathBar {
             self.selection_anchor = Some(self.cursor.byte);
         }
 
-        if self.cursor.byte < self.edit_text.len() {
-            let s = &self.edit_text[self.cursor.byte..];
-            if let Some(ch) = s.chars().next() {
-                self.cursor = (self.cursor.byte + ch.len_utf8()).into();
-            }
+        if let Some(next) = crate::text::caret_right(
+            &self.edit_text,
+            self.cursor,
+            FONT_SIZE,
+            FontWeightHint::Regular,
+        ) {
+            self.cursor = next;
         }
     }
 

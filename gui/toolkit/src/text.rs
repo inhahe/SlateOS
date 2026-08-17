@@ -1414,6 +1414,38 @@ mod tests {
         );
     }
 
+    /// Why a widget must store the whole cursor and not just `.byte()`: rebuild
+    /// the cursor from its offset each step and the caret skips the reordered
+    /// run entirely, in one press, silently.
+    ///
+    /// The offset `2` where `b` meets the Hebrew is one gap on the screen with
+    /// two names — the trailing edge of `b` and the trailing edge of the last
+    /// Hebrew letter are the same pixels — and dropping the affinity throws
+    /// away which of them the caret is. This is a *test of the failure*, kept
+    /// so that a widget refactor which regresses to a bare `usize` is caught by
+    /// this file rather than by a user typing Hebrew.
+    #[test]
+    fn dropping_the_affinity_between_steps_skips_the_reordered_run() {
+        let mut byte = 0usize;
+        let mut visited = vec![];
+        for _ in 0..8 {
+            let Some(next) = caret_right(MIXED, byte.into(), 16.0, FontWeightHint::Regular) else {
+                break;
+            };
+            byte = next.byte(); // The mistake: the affinity is discarded here.
+            visited.push(byte);
+        }
+        assert_eq!(
+            visited,
+            vec![1, 2, 7, 8],
+            "an affinity-less walk should visibly skip the Hebrew; if this now \
+             matches the full walk, the loose fallback changed and the widgets \
+             may no longer need to carry a TextCursor"
+        );
+        // The same walk carrying the cursor visits six places, not four.
+        assert_eq!(walk(MIXED, TextCursor::from(0), true).len(), 6);
+    }
+
     /// A character wider than one byte is crossed whole. The old arithmetic
     /// would have landed inside it.
     #[test]

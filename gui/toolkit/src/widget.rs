@@ -19,6 +19,7 @@ use crate::layout::{
 };
 use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::{Borders, CornerRadii, Edges, FontWeight, Style};
+use crate::text::TextCursor;
 
 /// Unique widget identifier. Used to track persistent state across frames.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -71,7 +72,13 @@ pub enum WidgetKind {
     TextInput {
         value: String,
         placeholder: String,
-        cursor_pos: usize,
+        /// Where the caret is — a byte offset *and* which side of a direction
+        /// boundary it belongs to. Not a bare `usize`: an offset where two
+        /// directions meet names two different places on the screen, and a
+        /// caret rebuilt from the offset alone steps straight over a
+        /// right-to-left word instead of through it. See
+        /// `text::dropping_the_affinity_between_steps_skips_the_reordered_run`.
+        cursor: TextCursor,
         selection: Option<(usize, usize)>,
     },
     /// Multi-line text area.
@@ -181,7 +188,7 @@ impl Widget {
             kind: WidgetKind::TextInput {
                 value: value.to_string(),
                 placeholder: placeholder.to_string(),
-                cursor_pos: value.len(),
+                cursor: TextCursor::from(value.len()),
                 selection: None,
             },
             style: Style {
@@ -793,47 +800,63 @@ impl Widget {
             return EventResult::Ignored;
         }
 
+        // Read before `self.kind` is borrowed mutably. Motion must be measured
+        // with the size the text is drawn at — the gaps between glyphs are a
+        // property of the shaped run, so measuring at another size would move
+        // the caret to a place this widget never drew.
+        let font_size = self.style.font_size;
         match &mut self.kind {
-            WidgetKind::TextInput {
-                value, cursor_pos, ..
-            } => {
+            WidgetKind::TextInput { value, cursor, .. } => {
                 if let Some(ch) = key.text {
-                    value.insert(*cursor_pos, ch);
-                    *cursor_pos += ch.len_utf8();
+                    value.insert(cursor.byte(), ch);
+                    // Typing lands the caret after what was typed, which is the
+                    // downstream side of the new boundary whichever way the
+                    // surrounding text runs.
+                    *cursor = TextCursor::from(cursor.byte() + ch.len_utf8());
                     return EventResult::Consumed;
                 }
-                // `cursor_pos` is a *byte* offset: `String::insert` and
-                // `String::remove` index by bytes, and both panic outright on
-                // an offset that is not a character boundary. So every move
-                // below steps by the width of a character in bytes and never by
-                // one — a one-byte step lands inside an `é` and the next edit
-                // takes the window down.
                 match key.key {
+                    // Backspace is a *logical* edit, not a visual move: it
+                    // deletes the character before this one in the string,
+                    // which is what a reader of that script expects even where
+                    // that character is drawn to the right. So this one still
+                    // steps by bytes — and by a whole character's worth, since
+                    // `String::remove` panics on an offset mid-character.
                     crate::event::Key::Backspace => {
                         if let Some(ch) = value
-                            .get(..*cursor_pos)
+                            .get(..cursor.byte())
                             .and_then(|before| before.chars().next_back())
                         {
-                            *cursor_pos -= ch.len_utf8();
-                            value.remove(*cursor_pos);
+                            let at = cursor.byte() - ch.len_utf8();
+                            value.remove(at);
+                            *cursor = TextCursor::from(at);
                         }
                         EventResult::Consumed
                     }
+                    // The arrows are the opposite: they are about the screen.
+                    // Left means left, whichever way the text under the caret
+                    // runs, so they step through the drawn order and carry the
+                    // affinity that tells the two sides of a direction boundary
+                    // apart.
                     crate::event::Key::Left => {
-                        if let Some(ch) = value
-                            .get(..*cursor_pos)
-                            .and_then(|before| before.chars().next_back())
-                        {
-                            *cursor_pos -= ch.len_utf8();
+                        if let Some(next) = crate::text::caret_left(
+                            value,
+                            *cursor,
+                            font_size,
+                            FontWeightHint::Regular,
+                        ) {
+                            *cursor = next;
                         }
                         EventResult::Consumed
                     }
                     crate::event::Key::Right => {
-                        if let Some(ch) = value
-                            .get(*cursor_pos..)
-                            .and_then(|after| after.chars().next())
-                        {
-                            *cursor_pos += ch.len_utf8();
+                        if let Some(next) = crate::text::caret_right(
+                            value,
+                            *cursor,
+                            font_size,
+                            FontWeightHint::Regular,
+                        ) {
+                            *cursor = next;
                         }
                         EventResult::Consumed
                     }
@@ -961,35 +984,35 @@ mod tests {
     /// `String::remove` indexes by bytes and panics on an offset inside a
     /// character. Any non-ASCII input — `café`, Cyrillic, CJK — was a crash one
     /// keystroke later.
+    fn typed(ch: char) -> KeyEvent {
+        KeyEvent {
+            // The `key` code is irrelevant: a character arrives in `text`, and
+            // `Key` has no per-character variant.
+            key: crate::event::Key::Unknown(0),
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: Some(ch),
+        }
+    }
+
+    fn pressed(key: crate::event::Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: None,
+        }
+    }
+
+    fn state(w: &Widget) -> (&str, usize) {
+        match &w.kind {
+            WidgetKind::TextInput { value, cursor, .. } => (value.as_str(), cursor.byte()),
+            _ => panic!("not a text input"),
+        }
+    }
+
     #[test]
     fn a_text_input_survives_a_multi_byte_character() {
-        fn typed(ch: char) -> KeyEvent {
-            KeyEvent {
-                // The `key` code is irrelevant: a character arrives in
-                // `text`, and `Key` has no per-character variant.
-                key: crate::event::Key::Unknown(0),
-                pressed: true,
-                modifiers: crate::event::Modifiers::NONE,
-                text: Some(ch),
-            }
-        }
-        fn pressed(key: crate::event::Key) -> KeyEvent {
-            KeyEvent {
-                key,
-                pressed: true,
-                modifiers: crate::event::Modifiers::NONE,
-                text: None,
-            }
-        }
-        fn state(w: &Widget) -> (&str, usize) {
-            match &w.kind {
-                WidgetKind::TextInput {
-                    value, cursor_pos, ..
-                } => (value.as_str(), *cursor_pos),
-                _ => panic!("not a text input"),
-            }
-        }
-
         let mut input = Widget::text_input("caf", "");
         input.handle_key(&typed('é'));
         assert_eq!(state(&input), ("café", 5));
@@ -1010,5 +1033,53 @@ mod tests {
         empty.handle_key(&pressed(crate::event::Key::Left));
         empty.handle_key(&pressed(crate::event::Key::Right));
         assert_eq!(state(&empty), ("", 0));
+    }
+
+    /// The arrows walk the screen, not the string. `ab` + two Hebrew letters +
+    /// `cd` is drawn `a b <bet> <aleph> c d`, so a caret pressed left from the
+    /// end crosses the Hebrew one letter at a time — visiting the byte offsets
+    /// 7, 6, 4, 6, 1, 0, which go *up* in the middle because moving left there
+    /// moves later in the string.
+    ///
+    /// The widget can only do this because it stores a whole `TextCursor`. Made
+    /// to hold a bare offset again, it would visit 7, 6, 1, 0 and skip the
+    /// Hebrew entirely.
+    #[test]
+    fn the_arrows_cross_a_right_to_left_word_one_letter_at_a_time() {
+        let text = "ab\u{05D0}\u{05D1}cd";
+        let mut input = Widget::text_input(text, "");
+        let mut seen = vec![];
+        for _ in 0..6 {
+            input.handle_key(&pressed(crate::event::Key::Left));
+            seen.push(state(&input).1);
+        }
+        assert_eq!(seen, vec![7, 6, 4, 6, 1, 0]);
+        // And back out again the other way.
+        let mut seen = vec![];
+        for _ in 0..6 {
+            input.handle_key(&pressed(crate::event::Key::Right));
+            seen.push(state(&input).1);
+        }
+        assert_eq!(seen, vec![1, 2, 4, 2, 7, 8]);
+        // Pressed past the end it stays put rather than wrapping or panicking.
+        input.handle_key(&pressed(crate::event::Key::Right));
+        assert_eq!(state(&input), (text, text.len()));
+    }
+
+    /// Backspace stays a *logical* edit even though the arrows are visual: it
+    /// removes the character before this one in the string, which is what a
+    /// reader of that script means by "the previous character" regardless of
+    /// which side of the caret it is drawn on.
+    #[test]
+    fn backspace_deletes_the_previous_character_in_the_string() {
+        let mut input = Widget::text_input("ab\u{05D0}\u{05D1}cd", "");
+        // Caret at the end; backspace twice takes `d` then `c`.
+        input.handle_key(&pressed(crate::event::Key::Backspace));
+        assert_eq!(state(&input), ("ab\u{05D0}\u{05D1}c", 7));
+        input.handle_key(&pressed(crate::event::Key::Backspace));
+        assert_eq!(state(&input), ("ab\u{05D0}\u{05D1}", 6));
+        // Now the Hebrew, whole characters at a time and never half of one.
+        input.handle_key(&pressed(crate::event::Key::Backspace));
+        assert_eq!(state(&input), ("ab\u{05D0}", 4));
     }
 }

@@ -5466,6 +5466,54 @@ mod tests {
         assert_eq!(doc.name, "Untitled");
     }
 
+    /// Both save paths go through `safeio`, not `std::fs::write`.
+    ///
+    /// A successful atomic write and a successful truncating write leave
+    /// identical bytes at an identical path; they differ only when the write
+    /// is interrupted, which no portable test can stage. So the routing itself
+    /// is asserted, via `safeio`'s `audit` counters. Without this, restoring
+    /// `fs::write` leaves every other test in this file green.
+    ///
+    /// `save` and `save_as` are checked separately because they are separate
+    /// call sites: fixing one and missing the other is the likely regression,
+    /// and a test that only covered `save` would not notice.
+    ///
+    /// The counters are process-global and tests run in parallel, so each
+    /// check compares a before and after reading rather than an absolute.
+    #[test]
+    fn both_save_paths_go_through_safeio() {
+        // save_as: writes to the path it is handed and adopts it.
+        let as_path = temp_path("routing_save_as");
+        let mut doc = Document::new();
+        doc.lines = vec!["# notes".to_string(), "body".to_string()];
+
+        let before = safeio::writes_performed();
+        doc.save_as(&as_path).expect("save_as");
+        assert!(
+            safeio::writes_performed() > before,
+            "save_as did not go through safeio -- it must not use std::fs::write"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&as_path).expect("read back save_as"),
+            "# notes\nbody"
+        );
+
+        // save: writes to the path adopted above.
+        doc.lines.push("more".to_string());
+        let before = safeio::writes_performed();
+        doc.save().expect("save");
+        assert!(
+            safeio::writes_performed() > before,
+            "save did not go through safeio -- it must not use std::fs::write"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&as_path).expect("read back save"),
+            "# notes\nbody\nmore"
+        );
+
+        let _ = std::fs::remove_file(&as_path);
+    }
+
     #[test]
     fn test_document_from_template_blank() {
         let doc = Document::from_template(Template::Blank);

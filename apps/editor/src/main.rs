@@ -2744,6 +2744,43 @@ mod external_merge_tests {
         assert_eq!(d.buffer_text(), "one\ntwo\nthree");
     }
 
+    /// A save goes through `safeio`, not `std::fs::write`.
+    ///
+    /// The two are indistinguishable in the result — identical bytes at an
+    /// identical path — and differ only when the write is interrupted, which
+    /// no portable test can stage. So the routing itself is asserted, via
+    /// `safeio`'s `audit` counters. Without this, restoring `fs::write` in
+    /// `save` leaves every other test in this file green.
+    ///
+    /// This matters more for an editor than for most adopters: the file being
+    /// overwritten is the user's only copy of their document, so a truncating
+    /// write that dies part-way destroys the very thing the save was meant to
+    /// preserve.
+    ///
+    /// The counters are process-global and tests run in parallel, so this
+    /// compares a before and after reading rather than an absolute.
+    #[test]
+    fn a_save_goes_through_safeio() {
+        let path = temp_path("routing");
+        let mut d = loaded_doc("some text the user would hate to lose");
+        d.path = Some(path.clone());
+
+        let before = safeio::writes_performed();
+        d.save().expect("save");
+        let after = safeio::writes_performed();
+
+        assert!(
+            after > before,
+            "the save did not go through safeio (writes_performed stayed at {before}) \
+             -- Document::save must not use std::fs::write"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            "some text the user would hate to lose"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn disk_changed_unchanged_when_no_path() {
         let d = loaded_doc("hello");

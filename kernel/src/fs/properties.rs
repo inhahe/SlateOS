@@ -348,20 +348,14 @@ pub fn compute_checksums(path: impl AsRef<Path>) -> KernelResult<ChecksumPropert
     })
 }
 
-/// Simple CRC32 computation (IEEE polynomial).
+/// CRC32 (IEEE polynomial) of a file's contents, for the properties dialog.
+///
+/// Forwards to the one table-driven implementation in [`crate::crypto`]; this
+/// was its own bit-at-a-time loop until F2FS needed a seeded variant and the
+/// duplicates were consolidated. Being table-driven now matters here more
+/// than elsewhere: this one runs over whole files at a user's request.
 fn compute_crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
+    crate::crypto::crc32(data)
 }
 
 // ---------------------------------------------------------------------------

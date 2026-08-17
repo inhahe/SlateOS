@@ -1540,21 +1540,13 @@ pub fn gunzip(data: &[u8]) -> KernelResult<Vec<u8>> {
 ///
 /// This is the polynomial used by gzip, PNG, ZIP, and Ethernet.
 /// Different from CRC32C used by ext4 and our `crypto::crc32c()`.
+///
+/// Forwards to [`crate::crypto::crc32`]. This used to be a private
+/// bit-at-a-time loop, and so did the identical functions in `rar.rs`,
+/// `sevenz.rs` and `properties.rs` — four copies of one polynomial, none of
+/// them table-driven and none of them covered by a check-value test.
 fn crc32_iso(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            if (crc & 1) != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-
-    crc ^ 0xFFFF_FFFF
+    crate::crypto::crc32(data)
 }
 
 /// Public wrapper for CRC-32 ISO (gzip/ZIP/PNG polynomial).

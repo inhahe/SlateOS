@@ -4727,6 +4727,9 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = crypto::self_test_crc32c() {
         serial_println!("WARNING: CRC32C self-test failed: {:?}", e);
     }
+    if let Err(e) = crypto::self_test_crc32() {
+        serial_println!("WARNING: CRC-32 self-test failed: {:?}", e);
+    }
     if let Err(e) = crypto::self_test_tls_crypto() {
         serial_println!("WARNING: TLS crypto self-test failed: {:?}", e);
     }

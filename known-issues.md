@@ -31387,6 +31387,49 @@ save and the handler's own frames onto the *same* kernel stack. `spawn_process`
    nothing in the tree could answer - despite every stack already being
    painted with a sentinel that answers it for free.
 
+### First census results (2026-08-17) - the headroom is smaller than assumed
+
+The census ran on the next green boot and answered the question directly:
+
+```
+[sched]   Stack peak this boot: 43896 bytes (66% of 65536) by task 283 (spawn-test-glibc-forkexec)
+[sched]   Stack census: 5 live task(s) with allocated stacks, deepest first
+[sched]     task 397  kworker                   42424 bytes ( 64% of 65536)
+[sched]     task 396  kswapd                     5048 bytes (  7% of 65536)
+[sched]     task 406  efd-to-test                4904 bytes (  7% of 65536)
+[sched]     task 407  svc-accept                 4552 bytes (  6% of 65536)
+[sched]     task 408  cgroup-e2e                 4200 bytes (  6% of 65536)
+```
+
+Three things in that are worth reading carefully.
+
+**The deepest stack of the boot belonged to a task that was already dead** -
+task 283 was reaped long before the census ran, and is visible only because
+the reaper folds each dying task's watermark into the peak before freeing its
+stack. A census of live tasks alone would have reported 64% and missed the
+real maximum. This is the half that makes the instrument honest, and it is
+also the half that was easiest to leave out.
+
+**`kworker` sits at 64% at steady state, and it is long-lived.** The peak is
+not a one-off spike in a short-lived spawn task; a permanent kernel worker is
+routinely two-thirds of the way down its stack. The distance from there to the
+canary is about 23 KiB.
+
+**The deep tasks are the spawn family** - `spawn-test-glibc-forkexec` at the
+peak, and `spawn-test-linux-sysv` is the task whose canary failed. Same family
+of paths (`spawn_process` -> ELF parse -> page-table work), which is what
+hypothesis (a) predicted.
+
+What this does *not* yet do is prove (a). 23 KiB is a large amount for one
+interrupt to consume, so a single badly-timed IRQ at `kworker`'s depth does not
+obviously reach the canary; nested interrupts, or a spawn path deeper than any
+seen in these boots, would be needed. The census will show that as a rising
+number, which is the point of printing it every boot: the next occurrence now
+arrives with both a `VERDICT:` line and a depth history to compare against.
+
+No task crossed the 75% warning line on this boot, so the threshold has not yet
+been exercised in anger.
+
 ### Generalisation
 
 Two rules fell out of this one.

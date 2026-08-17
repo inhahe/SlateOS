@@ -411,7 +411,9 @@ mod tests {
     /// why.
     #[test]
     fn test_bypass_syscalls_are_not_silently_wrapped() {
-        for n in [SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_EXECVE, SYS_FORK, SYS_EXIT] {
+        for n in [
+            SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_EXECVE, SYS_FORK, SYS_EXIT,
+        ] {
             errno::set_errno(0);
             assert_eq!(call0(n), -1, "syscall({n}) must not dispatch");
             assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -447,7 +449,8 @@ mod tests {
     #[test]
     fn test_getrandom_returns_a_count_not_a_status() {
         let mut buf = [0u8; 16];
-        let addr = SyscallArg::try_from(buf.as_mut_ptr().expose_provenance()).expect("address fits");
+        let addr =
+            SyscallArg::try_from(buf.as_mut_ptr().expose_provenance()).expect("address fits");
         let n = syscall(
             SyscallArg::try_from(SYS_GETRANDOM).expect("fits"),
             addr,

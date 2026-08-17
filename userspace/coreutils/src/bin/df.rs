@@ -11,6 +11,7 @@
 //! is not in mingw-w64; `stat_fs` falls back to a stub error so the
 //! crate still builds for `cargo test` on the dev machine.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::io::{self, Write};
 use std::process;
@@ -67,7 +68,7 @@ fn main() {
                 let _ = writeln!(out, "{row}");
             }
             Err(e) => {
-                eprintln!("df: {path}: {e}");
+                eprintln!("df: {}: {e}", quotef_os(path));
                 exit_code = 1;
             }
         }

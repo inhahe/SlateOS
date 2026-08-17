@@ -4,6 +4,7 @@
 //!   -n COUNT  print last COUNT lines (default 10)
 //!   If no FILE or FILE is "-", read from standard input.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -34,7 +35,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("tail: {path}: {e}");
+                    eprintln!("tail: {}: {e}", quotef_os(path));
                     continue;
                 }
             }
@@ -46,7 +47,7 @@ fn main() {
             .map_while(|r| match r {
                 Ok(l) => Some(l),
                 Err(e) => {
-                    eprintln!("tail: {path}: {e}");
+                    eprintln!("tail: {}: {e}", quotef_os(path));
                     None
                 }
             })

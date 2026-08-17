@@ -78,6 +78,8 @@ use std::io::{self, Read, Write};
 use std::process;
 
 use coreutils::errmsg::strerror;
+use coreutils::getopt::{self, Program, Takes};
+use coreutils::quote::{quote, quoteaf_os, quotef_os};
 use keydef::{Blanks, KeySpec, Kind, parse_key, parse_obsolete_end, parse_obsolete_start};
 use order::Ignore;
 
@@ -205,7 +207,7 @@ fn main() {
                     ReadFailure::Open(_) => "cannot read",
                     ReadFailure::Read(_) => "read failed",
                 },
-                path.to_string_lossy(),
+                quotef_os(path),
                 strerror(failure.cause())
             )),
         }
@@ -384,10 +386,10 @@ fn read_file(path: &OsString) -> Result<Vec<u8>, ReadFailure> {
 fn read_files0(list: &OsString) -> Result<Vec<OsString>, String> {
     let bytes = read_file(list).map_err(|failure| match failure {
         ReadFailure::Open(e) => {
-            format!("open failed: {}: {}", list.to_string_lossy(), strerror(&e))
+            format!("open failed: {}: {}", quotef_os(list), strerror(&e))
         }
         ReadFailure::Read(_) => {
-            format!("cannot read file names from '{}'", list.to_string_lossy())
+            format!("cannot read file names from {}", quoteaf_os(list))
         }
     })?;
     // A list may or may not end with a separator; both are the same list, so
@@ -435,7 +437,7 @@ fn write_out(cfg: &Config, lines: &[&[u8]]) -> io::Result<()> {
         Some(path) => Box::new(io::BufWriter::new(File::create(path).map_err(|e| {
             io::Error::new(
                 e.kind(),
-                format!("open failed: {}: {}", path.to_string_lossy(), strerror(&e)),
+                format!("open failed: {}: {}", quotef_os(path), strerror(&e)),
             )
         })?)),
         None => Box::new(io::BufWriter::new(io::stdout().lock())),
@@ -459,21 +461,25 @@ fn write_out(cfg: &Config, lines: &[&[u8]]) -> io::Result<()> {
 
 /// A command line that cannot be run, and the status to exit with.
 ///
-/// Almost every such failure is status 2, but a bad *argument to* an option
-/// (`--sort=bogus`, `--check=bogus`) is 1 in GNU: those go through gnulib's
-/// `argmatch`, which dies with the generic `EXIT_FAILURE` rather than `sort`'s
-/// own `SORT_FAILURE`. It reads like an oversight upstream and it is what a
-/// script testing `$?` will see, so it is reproduced rather than tidied.
-#[cfg_attr(test, derive(Debug))]
-struct Fatal {
-    message: String,
-    status: i32,
-}
+/// This is [`coreutils::getopt::Error`], under the name the rest of this file
+/// already used for it. The status split it carries — 2 for a bad option, 1 for
+/// a bad argument *to* an option — is documented there, and is why the type is
+/// shared rather than reimplemented per utility.
+type Fatal = getopt::Error;
 
-impl From<String> for Fatal {
-    fn from(message: String) -> Self {
-        Fatal { message, status: 2 }
-    }
+/// Every hand-written message in this file becomes a `Fatal` through here, so
+/// `sort`'s status lives only in [`SORT`] and cannot be typed out again with
+/// the wrong number.
+///
+/// It covers I/O failures as well as usage errors because `sort` makes no
+/// distinction: measured, both `sort -k0` and `sort --files0-from=/nonexistent`
+/// exit 2, which is upstream's single `SORT_FAILURE`.
+///
+/// There is deliberately no `From<String>` for [`getopt::Error`] doing this
+/// implicitly: the status is per-utility, so a blanket conversion would have to
+/// pick one number and be silently wrong for every utility of the other kind.
+fn fatal(message: String) -> Fatal {
+    SORT.usage(message)
 }
 
 /// Parse argv. `Ok(None)` means `--help` or `--version` has already answered.
@@ -520,7 +526,7 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
                         .copied()
                         .is_some_and(|c| c.is_ascii_digit())
                 {
-                    parse_obsolete_end(&next_bytes, &mut key)?;
+                    parse_obsolete_end(&next_bytes, &mut key).map_err(fatal)?;
                     i = i.saturating_add(1);
                 }
             }
@@ -537,11 +543,13 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
             rest.remove(0);
             // An option that takes a value takes the rest of this bundle, or
             // the next argument if the bundle is exhausted.
-            let mut take_value = |rest: &mut Vec<u8>| -> Result<Vec<u8>, String> {
+            let mut take_value = |rest: &mut Vec<u8>| -> Result<Vec<u8>, Fatal> {
                 if !rest.is_empty() {
                     return Ok(std::mem::take(rest));
                 }
-                let value = raw.get(i).ok_or_else(|| missing_argument(flag as char))?;
+                let value = raw
+                    .get(i)
+                    .ok_or_else(|| SORT.short_missing_argument(flag))?;
                 i = i.saturating_add(1);
                 Ok(arg_bytes(value))
             };
@@ -559,8 +567,10 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
                 b'c' => cfg.check = Some(Check::Diagnose),
                 b'C' => cfg.check = Some(Check::Quiet),
                 b'z' => cfg.delim = 0,
-                b'k' => cfg.keys.push(parse_key(&take_value(&mut rest)?)?),
-                b't' => cfg.tab = Some(parse_tab(&take_value(&mut rest)?, cfg.tab)?),
+                b'k' => cfg
+                    .keys
+                    .push(parse_key(&take_value(&mut rest)?).map_err(fatal)?),
+                b't' => cfg.tab = Some(parse_tab(&take_value(&mut rest)?, cfg.tab).map_err(fatal)?),
                 b'o' => cfg.output = Some(os_from_bytes(&take_value(&mut rest)?)),
                 // Resource hints. This sort holds the whole input in memory, so
                 // there are no temporary files to place, no external program to
@@ -569,8 +579,11 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
                 b'S' | b'T' | b'y' => {
                     let _ = take_value(&mut rest)?;
                 }
-                b'R' => return Err(RANDOM_UNIMPLEMENTED.to_string().into()),
-                other => return Err(unknown_option(&(other as char).to_string()).into()),
+                b'R' => return Err(fatal(RANDOM_UNIMPLEMENTED.to_string())),
+                // `other` is a byte, not a `char`: `other as char` would map
+                // 0xC3 to `Ã` and re-encode it as two bytes, so a bundle like
+                // `-é` would be reported as an option nobody typed.
+                other => return Err(SORT.invalid_option(other)),
             }
         }
     }
@@ -580,21 +593,17 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
         // than picking one: a command line that used both meant something the
         // reader cannot guess.
         if let Some(extra) = cfg.files.first() {
-            return Err(format!(
-                "extra operand '{}'\nfile operands cannot be combined with --files0-from\n\
+            return Err(fatal(format!(
+                "extra operand {}\nfile operands cannot be combined with --files0-from\n\
                  Try 'sort --help' for more information.",
-                extra.to_string_lossy()
-            )
-            .into());
+                quoteaf_os(extra)
+            )));
         }
-        cfg.files = read_files0(&list)?;
+        cfg.files = read_files0(&list).map_err(fatal)?;
     }
     if cfg.check.is_some() && cfg.files.len() > 1 {
-        let extra = cfg
-            .files
-            .get(1)
-            .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
-        return Err(format!("extra operand '{extra}' not allowed with -c").into());
+        let extra = cfg.files.get(1).map_or_else(String::new, quoteaf_os);
+        return Err(fatal(format!("extra operand {extra} not allowed with -c")));
     }
     if cfg.files.is_empty() {
         cfg.files.push(OsString::from("-"));
@@ -622,18 +631,15 @@ enum Answered {
     No,
 }
 
-/// Whether a long option takes a value.
+/// The name every diagnostic below is stamped with, and the status a bad
+/// command line exits with, both bound once.
 ///
-/// `Optional` is `getopt_long`'s `optional_argument`, and the distinction from
-/// `Required` is observable: an optional value must be written `--check=quiet`,
-/// because `--check quiet` leaves `quiet` an operand — which is why GNU answers
-/// that command line with `open failed: quiet`, not with a check.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Takes {
-    Nothing,
-    Required,
-    Optional,
-}
+/// The 2 is measured and is the minority: almost every GNU utility exits 1 for
+/// a usage error, but `sort` has already given 1 a meaning — `sort -c` exits 1
+/// when it finds the input unsorted — so it uses 2. `ls` and `grep` do the same
+/// for the same reason. Note this does *not* extend to a bad argument to an
+/// option: `sort --sort=bogus` is 1, which `getopt::argmatch` handles.
+const SORT: Program = Program::new("sort", 2);
 
 /// Every long option `sort` knows, with what it takes.
 ///
@@ -642,60 +648,52 @@ enum Takes {
 /// ambiguous: without `--debug` in it, `--d` would resolve to
 /// `--dictionary-order` instead of being refused, and a user who typed `--d`
 /// meaning `--debug` would silently get a dictionary sort.
+///
+/// **The order is load-bearing and is GNU's, not alphabetical**, because
+/// `getopt_long` lists an ambiguous prefix's candidates in table order:
+///
+/// ```text
+/// $ sort --r
+/// sort: option '--r' is ambiguous; possibilities: '--random-sort' '--random-source' '--reverse'
+/// ```
+///
+/// It was measured rather than recalled, because recall got it wrong —
+/// `--random-sort` precedes `--random-source`, which is not the order anyone
+/// would guess. The instrument is one command: an empty prefix matches every
+/// option, so `sort --=x` prints the whole table in declaration order. See
+/// [`Program::resolve_long`], which is what makes the order observable.
 const LONG_OPTIONS: &[(&str, Takes)] = &[
-    ("batch-size", Takes::Required),
-    ("buffer-size", Takes::Required),
+    ("ignore-leading-blanks", Takes::Nothing),
     ("check", Takes::Optional),
     ("compress-program", Takes::Required),
     ("debug", Takes::Nothing),
     ("dictionary-order", Takes::Nothing),
-    ("field-separator", Takes::Required),
+    ("ignore-case", Takes::Nothing),
     ("files0-from", Takes::Required),
     ("general-numeric-sort", Takes::Nothing),
-    ("help", Takes::Nothing),
-    ("human-numeric-sort", Takes::Nothing),
-    ("ignore-case", Takes::Nothing),
-    ("ignore-leading-blanks", Takes::Nothing),
     ("ignore-nonprinting", Takes::Nothing),
     ("key", Takes::Required),
     ("merge", Takes::Nothing),
     ("month-sort", Takes::Nothing),
     ("numeric-sort", Takes::Nothing),
-    ("output", Takes::Required),
-    ("parallel", Takes::Required),
+    ("human-numeric-sort", Takes::Nothing),
+    ("version-sort", Takes::Nothing),
     ("random-sort", Takes::Nothing),
     ("random-source", Takes::Required),
-    ("reverse", Takes::Nothing),
     ("sort", Takes::Required),
+    ("output", Takes::Required),
+    ("reverse", Takes::Nothing),
     ("stable", Takes::Nothing),
+    ("batch-size", Takes::Required),
+    ("buffer-size", Takes::Required),
+    ("field-separator", Takes::Required),
     ("temporary-directory", Takes::Required),
     ("unique", Takes::Nothing),
-    ("version", Takes::Nothing),
-    ("version-sort", Takes::Nothing),
     ("zero-terminated", Takes::Nothing),
+    ("parallel", Takes::Required),
+    ("help", Takes::Nothing),
+    ("version", Takes::Nothing),
 ];
-
-/// `getopt_long`'s name resolution: an exact match wins outright, otherwise the
-/// name must be a prefix of exactly one option.
-///
-/// The exact-match rule is not redundant with the prefix rule — `--version` is
-/// a prefix of `--version-sort`, so without it every `sort --version` would be
-/// refused as ambiguous.
-fn resolve_long(name: &str) -> Result<(&'static str, Takes), String> {
-    if let Some(hit) = LONG_OPTIONS.iter().find(|(n, _)| *n == name) {
-        return Ok(*hit);
-    }
-    let mut matches = LONG_OPTIONS.iter().filter(|(n, _)| n.starts_with(name));
-    let Some(first) = matches.next() else {
-        return Err(unknown_option(name));
-    };
-    if matches.next().is_some() {
-        return Err(format!(
-            "ambiguous option -- {name}\nTry 'sort --help' for more information."
-        ));
-    }
-    Ok(*first)
-}
 
 fn long_option(
     bytes: &[u8],
@@ -713,23 +711,21 @@ fn long_option(
         None => (body, None),
     };
     // A long option's name is ASCII; anything else cannot match one, and
-    // reporting it as unknown is what GNU's byte comparison amounts to.
-    let typed = std::str::from_utf8(typed).map_err(|_| unknown_option(&show(typed)))?;
-    let (name, takes) = resolve_long(typed)?;
+    // reporting it as unrecognized is what GNU's byte comparison amounts to.
+    let typed = std::str::from_utf8(typed).map_err(|_| SORT.unrecognized_option(bytes))?;
+    let (name, takes) = SORT.resolve_long(typed, bytes, LONG_OPTIONS)?;
 
     if takes == Takes::Nothing && inline.is_some() {
-        return Err(format!(
-            "option doesn't take an argument -- {typed}\n\
-             Try 'sort --help' for more information."
-        )
-        .into());
+        return Err(SORT.long_unwanted_argument(name));
     }
     // A required value may be written `--key=2` or `--key 2`; an optional one
     // only ever comes from the `=` form.
     let value: Option<Vec<u8>> = match (takes, inline) {
         (_, Some(v)) => Some(v.to_vec()),
         (Takes::Required, None) => {
-            let next = raw.get(*i).ok_or_else(|| missing_argument(typed))?;
+            let next = raw
+                .get(*i)
+                .ok_or_else(|| SORT.long_missing_argument(name))?;
             *i = i.saturating_add(1);
             Some(arg_bytes(next))
         }
@@ -767,57 +763,48 @@ fn long_option(
         "sort" => global.kind = parse_sort_word(&need())?,
         "check" => {
             cfg.check = Some(match value.as_deref() {
-                None | Some(b"diagnose-first") => Check::Diagnose,
-                Some(b"quiet" | b"silent") => Check::Quiet,
-                Some(other) => {
-                    return Err(bad_argument(
-                        other,
-                        "--check",
-                        "  - 'quiet', 'silent'\n  - 'diagnose-first'",
-                    ));
-                }
+                None => Check::Diagnose,
+                Some(word) => SORT.argmatch(word, "--check", CHECK_WORDS)?,
             });
         }
-        "key" => cfg.keys.push(parse_key(&need())?),
-        "field-separator" => cfg.tab = Some(parse_tab(&need(), cfg.tab)?),
+        "key" => cfg.keys.push(parse_key(&need()).map_err(fatal)?),
+        "field-separator" => cfg.tab = Some(parse_tab(&need(), cfg.tab).map_err(fatal)?),
         "output" => cfg.output = Some(os_from_bytes(&need())),
         "files0-from" => cfg.files0_from = Some(os_from_bytes(&need())),
-        "random-sort" => return Err(RANDOM_UNIMPLEMENTED.to_string().into()),
-        "debug" => return Err(DEBUG_UNIMPLEMENTED.to_string().into()),
+        "random-sort" => return Err(fatal(RANDOM_UNIMPLEMENTED.to_string())),
+        "debug" => return Err(fatal(DEBUG_UNIMPLEMENTED.to_string())),
         // Accepted and ignored, as for their short forms.
         _ => {}
     }
     Ok(Answered::No)
 }
 
+/// `--check`'s words. `quiet` and `silent` are two spellings of one answer,
+/// which `argmatch` can see because they carry the same value — that is what
+/// stops a prefix matching only those two from being called ambiguous, and what
+/// makes them share a line in the "Valid arguments are" list.
+const CHECK_WORDS: &[(&str, Check)] = &[
+    ("quiet", Check::Quiet),
+    ("silent", Check::Quiet),
+    ("diagnose-first", Check::Diagnose),
+];
+
+/// `--sort`'s words. `random` is spelled `None` because we recognise it — it is
+/// a real ordering and must not be reported as an invalid argument — but cannot
+/// perform it yet.
+const SORT_WORDS: &[(&str, Option<Kind>)] = &[
+    ("general-numeric", Some(Kind::General)),
+    ("human-numeric", Some(Kind::Human)),
+    ("month", Some(Kind::Month)),
+    ("numeric", Some(Kind::Numeric)),
+    ("random", None),
+    ("version", Some(Kind::Version)),
+];
+
 /// `--sort=WORD`, the long spelling of the ordering options.
 fn parse_sort_word(word: &[u8]) -> Result<Kind, Fatal> {
-    match word {
-        b"general-numeric" => Ok(Kind::General),
-        b"human-numeric" => Ok(Kind::Human),
-        b"month" => Ok(Kind::Month),
-        b"numeric" => Ok(Kind::Numeric),
-        b"version" => Ok(Kind::Version),
-        b"random" => Err(RANDOM_UNIMPLEMENTED.to_string().into()),
-        other => Err(bad_argument(
-            other,
-            "--sort",
-            "  - 'general-numeric'\n  - 'human-numeric'\n  - 'month'\n  - 'numeric'\n  \
-             - 'random'\n  - 'version'",
-        )),
-    }
-}
-
-/// gnulib `argmatch`'s diagnostic, including its status-1 exit.
-fn bad_argument(given: &[u8], option: &str, valid: &str) -> Fatal {
-    Fatal {
-        message: format!(
-            "invalid argument '{}' for '{option}'\nValid arguments are:\n{valid}\n\
-             Try 'sort --help' for more information.",
-            show(given)
-        ),
-        status: 1,
-    }
+    SORT.argmatch(word, "--sort", SORT_WORDS)?
+        .ok_or_else(|| fatal(RANDOM_UNIMPLEMENTED.to_string()))
 }
 
 /// The two options we accept into the parser and then refuse, each with the
@@ -828,21 +815,6 @@ const RANDOM_UNIMPLEMENTED: &str =
     "random sort is not implemented: it needs a keyed hash this system does not have yet";
 const DEBUG_UNIMPLEMENTED: &str = "--debug is not implemented";
 
-/// The four option diagnostics, in the one shape GNU uses for all of them.
-fn unknown_option(name: &str) -> String {
-    format!("unknown option -- {name}\nTry 'sort --help' for more information.")
-}
-
-fn missing_argument(name: impl std::fmt::Display) -> String {
-    format!("option requires an argument -- {name}\nTry 'sort --help' for more information.")
-}
-
-/// A byte string for a diagnostic. Not a substitute for shell quoting — see the
-/// `TD-COREUTILS-DIAGNOSTICS-DO-NOT-QUOTE-FILE-NAMES` entry in `known-issues.md`.
-fn show(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
 /// `-t`'s argument: one byte, or the two characters `\0` for NUL.
 fn parse_tab(value: &[u8], existing: Option<u8>) -> Result<u8, String> {
     let tab = match value {
@@ -850,10 +822,7 @@ fn parse_tab(value: &[u8], existing: Option<u8>) -> Result<u8, String> {
         [one] => *one,
         b"\\0" => 0,
         other => {
-            return Err(format!(
-                "multi-character tab '{}'",
-                String::from_utf8_lossy(other)
-            ));
+            return Err(format!("multi-character tab {}", quote(other)));
         }
     };
     // Two different `-t`s are a contradiction, not a last-one-wins.
@@ -1004,7 +973,7 @@ mod tests {
             parse_args(&raw).unwrap_err()
         };
         let err = |args: &[&str]| fail(args).message;
-        assert!(err(&["-q"]).starts_with("unknown option -- q"));
+        assert!(err(&["-q"]).starts_with("invalid option -- 'q'"));
         assert_eq!(err(&["-t", ""]), "empty tab");
         assert_eq!(err(&["-t", "ab"]), "multi-character tab 'ab'");
         assert_eq!(err(&["-t:", "-t;"]), "incompatible tabs");
@@ -1020,6 +989,18 @@ mod tests {
         assert_eq!(fail(&["--check=bogus"]).status, 1);
     }
 
+    fn fail_msg(args: &[&str]) -> String {
+        let raw: Vec<OsString> = args.iter().map(OsString::from).collect();
+        #[allow(clippy::unwrap_used)]
+        let message = parse_args(&raw).unwrap_err().message;
+        // Every getopt and argmatch diagnostic ends with the same referral;
+        // dropping it keeps the assertions to the sentence under test.
+        message
+            .strip_suffix("\nTry 'sort --help' for more information.")
+            .unwrap_or(&message)
+            .to_string()
+    }
+
     /// `getopt_long` resolves an abbreviation only when it is unambiguous, and
     /// an exact match always wins even when it is a prefix of something longer.
     /// Both were read off GNU: `sort --rev` reverses, `sort --r` is refused as
@@ -1027,16 +1008,15 @@ mod tests {
     /// about `--version-sort`.
     #[test]
     fn long_options_abbreviate_the_way_getopt_long_does() {
-        let fail = |args: &[&str]| {
-            let raw: Vec<OsString> = args.iter().map(OsString::from).collect();
-            parse_args(&raw).unwrap_err().message
-        };
         assert!(cfg_of(&["--rev"]).reverse);
-        assert!(fail(&["--r"]).starts_with("ambiguous option -- r"));
-        assert!(fail(&["--d"]).starts_with("ambiguous option -- d"));
-        assert!(fail(&["--rev=x"]).starts_with("option doesn't take an argument -- rev"));
-        assert!(fail(&["--bogus"]).starts_with("unknown option -- bogus"));
-        assert!(fail(&["--key"]).starts_with("option requires an argument -- key"));
+        assert_eq!(
+            fail_msg(&["--r"]),
+            "option '--r' is ambiguous; possibilities: '--random-sort' '--random-source' '--reverse'"
+        );
+        assert_eq!(
+            fail_msg(&["--d"]),
+            "option '--d' is ambiguous; possibilities: '--debug' '--dictionary-order'"
+        );
         // An option that takes a value takes it from the next argument too.
         assert_eq!(cfg_of(&["--key", "2"]).keys.len(), 1);
         assert_eq!(cfg_of(&["--sort", "numeric"]).keys.len(), 1);
@@ -1045,6 +1025,114 @@ mod tests {
         let cfg = cfg_of(&["--check", "quiet"]);
         assert_eq!(cfg.check, Some(Check::Diagnose));
         assert_eq!(cfg.files, vec![OsString::from("quiet")]);
+    }
+
+    /// Every getopt sentence, against what glibc actually prints.
+    ///
+    /// These were wrong for a long time and the differential harness passed
+    /// anyway, because the `sort` it compared against was MSYS2's — a Cygwin
+    /// derivative whose getopt is not glibc's and which says `unknown option --
+    /// bogus` where glibc says `unrecognized option '--bogus'`. The literals
+    /// below are from glibc, and are here rather than only in the harness so
+    /// that they are checked on a host with no reference sort at all.
+    #[test]
+    fn every_getopt_sentence_matches_glibc() {
+        // A short option and a long one get different sentences.
+        assert_eq!(fail_msg(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(fail_msg(&["-k"]), "option requires an argument -- 'k'");
+        assert_eq!(fail_msg(&["--fo"]), "unrecognized option '--fo'");
+        // The two that failed to resolve echo what was typed, `=VALUE` and all.
+        assert_eq!(fail_msg(&["--fo=bar"]), "unrecognized option '--fo=bar'");
+        // The two that resolved name the *resolution*: `--k` is reported as
+        // `--key`, and `--stab=x` as `--stable`.
+        assert_eq!(fail_msg(&["--k"]), "option '--key' requires an argument");
+        assert_eq!(
+            fail_msg(&["--stab=x"]),
+            "option '--stable' doesn't allow an argument"
+        );
+        assert_eq!(
+            fail_msg(&["--sort"]),
+            "option '--sort' requires an argument"
+        );
+        // The ambiguous list is in the order the options are declared, which is
+        // GNU's array order and not alphabetical: `--random-sort` precedes
+        // `--random-source`, and an empty prefix matches every option.
+        let all = fail_msg(&["--=x"]);
+        assert!(all.starts_with(
+            "option '--=x' is ambiguous; possibilities: \
+             '--ignore-leading-blanks' '--check' '--compress-program' '--debug'"
+        ));
+        assert!(all.ends_with("'--parallel' '--help' '--version'"));
+        assert_eq!(all.matches("' '").count(), LONG_OPTIONS.len() - 1);
+    }
+
+    /// The names in these diagnostics are quoted, which is where this parts
+    /// company with GNU on purpose.
+    ///
+    /// glibc puts the option between two literal `'` and escapes nothing, so a
+    /// file called `--fo\nsort: /etc/shadow: Permission denied`, picked up by
+    /// `sort *`, makes GNU print a second line that `sort` never wrote. Ours
+    /// renders it on one line. For every option a person would type the two are
+    /// byte-identical, which the test above is what checks.
+    #[test]
+    fn an_option_name_cannot_forge_a_second_diagnostic_line() {
+        let forged = fail_msg(&["--fo\nsort: /etc/shadow: Permission denied"]);
+        assert_eq!(
+            forged,
+            r#"unrecognized option '--fo\nsort: /etc/shadow: Permission denied'"#
+        );
+        assert!(!forged.contains('\n'));
+        // A short option too, and a byte that is not ASCII at all: reported as
+        // the byte it was, not re-encoded through `char`.
+        assert_eq!(fail_msg(&["-\n"]), r"invalid option -- '\n'");
+        assert_eq!(fail_msg(&["-\u{e9}"]), r"invalid option -- '\303'");
+    }
+
+    /// `argmatch` resolves an option's *argument* by prefix, exactly as getopt
+    /// resolves the option's name — `--sort=hum` and `--check=q` both work.
+    /// This implementation did not do it at all until the getopt sweep; both
+    /// commands were refused as invalid arguments.
+    #[test]
+    fn an_option_argument_abbreviates_too() {
+        assert_eq!(
+            cfg_of(&["--sort=hum"]).keys.first().map(|k| k.kind),
+            Some(Kind::Human)
+        );
+        assert_eq!(
+            cfg_of(&["--sort=n"]).keys.first().map(|k| k.kind),
+            Some(Kind::Numeric)
+        );
+        assert_eq!(cfg_of(&["--check=q"]).check, Some(Check::Quiet));
+        assert_eq!(cfg_of(&["--check=d"]).check, Some(Check::Diagnose));
+        // An exact match wins over any longer word it is a prefix of.
+        assert_eq!(cfg_of(&["--check=quiet"]).check, Some(Check::Quiet));
+    }
+
+    /// argmatch's two sentences differ in one word, and which one you get turns
+    /// on whether the candidates *mean* different things rather than on how
+    /// many there are.
+    #[test]
+    fn an_ambiguous_option_argument_is_a_different_sentence_from_an_invalid_one() {
+        let valid = "\nValid arguments are:\n  - 'quiet', 'silent'\n  - 'diagnose-first'";
+        assert_eq!(
+            fail_msg(&["--check=bogus"]),
+            format!("invalid argument 'bogus' for '--check'{valid}")
+        );
+        // The empty string is a prefix of all three words, which disagree.
+        assert_eq!(
+            fail_msg(&["--check="]),
+            format!("ambiguous argument '' for '--check'{valid}")
+        );
+        // `quiet` and `silent` share a value, so they share a line in the list
+        // above — and a prefix matching only those two would *not* be
+        // ambiguous, because there would be nothing to disambiguate. `--sort`
+        // has no two words with one value, so every word gets its own line.
+        assert!(fail_msg(&["--sort="]).contains("  - 'month'\n  - 'numeric'\n"));
+        // A word that is not valid UTF-8 cannot prefix any of these ASCII
+        // words, so it takes the invalid-argument path rather than erroring.
+        assert!(
+            fail_msg(&["--sort=\u{e9}"]).starts_with(r"invalid argument '\303\251' for '--sort'")
+        );
     }
 
     #[test]

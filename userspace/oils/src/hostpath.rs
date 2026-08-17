@@ -64,7 +64,11 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| {
         let s = p.to_string_lossy().replace('\\', "/");
         let s = s.strip_suffix('/').map_or(s.clone(), str::to_string);
-        if cfg!(windows) { s.to_ascii_lowercase() } else { s }
+        if cfg!(windows) {
+            s.to_ascii_lowercase()
+        } else {
+            s
+        }
     };
     norm(a) == norm(b)
 }
@@ -78,12 +82,12 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// different profile, or a cross-compilation triple.
 pub fn injected_dirs() -> Vec<PathBuf> {
     let mut injected = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(deps) = exe.parent() {
-            injected.push(deps.to_path_buf());
-            if let Some(profile) = deps.parent() {
-                injected.push(profile.to_path_buf());
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(deps) = exe.parent()
+    {
+        injected.push(deps.to_path_buf());
+        if let Some(profile) = deps.parent() {
+            injected.push(profile.to_path_buf());
         }
     }
     injected
@@ -134,10 +138,8 @@ mod tests {
         // Striking out cargo's two entries must not disturb the rest: a test
         // that could not find the host's `sh` or `sed` would fail for a reason
         // of this module's own making.
-        let ambient: Vec<PathBuf> = std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        )
-        .collect();
+        let ambient: Vec<PathBuf> =
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
         let injected = injected_dirs();
         let kept: Vec<PathBuf> = std::env::split_paths(&host_path()).collect();
         let expected = ambient

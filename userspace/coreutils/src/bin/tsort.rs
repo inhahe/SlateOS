@@ -13,6 +13,7 @@
 //!   0  success
 //!   1  cycle detected (partial output is still produced)
 
+use coreutils::quote::quotef_os;
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs::File;
@@ -129,7 +130,7 @@ fn main() {
         match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("tsort: {path}: {e}");
+                eprintln!("tsort: {}: {e}", quotef_os(path));
                 process::exit(1);
             }
         }

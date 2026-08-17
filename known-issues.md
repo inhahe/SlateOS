@@ -23390,15 +23390,21 @@ keypress, which is a separate and worse bug; see
 `GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES` below.
 
 The arrow-key half — **visual-order motion**, the left arrow moving left on
-the screen whichever way the text runs — was out of scope here and was picked
-up on 2026-08-17 under `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER` below, which
-is now itself fixed for the toolkit widgets. The affinity added here turned out
-to be a prerequisite in a stronger sense than "useful": a caret rebuilt from
-its byte offset each keypress does not merely land on the wrong side of a
-boundary, it steps over an entire right-to-left run in one press. That is why
-`TextInput` and `InputDialog`, called out four paragraphs above as needing no
-affinity *because they never draw one*, in fact needed one as soon as they had
-to **move**.
+the screen whichever way the text runs — was out of scope here. On 2026-08-17
+the *machinery* for it was built (`ShapedRun::caret_left`/`caret_right` in the
+font crate, `text::caret_left`/`caret_right` in the toolkit), but the arrow keys
+were **not** switched over to it: whether they should move visually or logically
+is an open operator question, `open-questions.md` → **C-Q2**, and both answers
+are defensible. See `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER` below, which
+remains OPEN and now records exactly what changes when C-Q2 is answered.
+
+The affinity added here turned out to be a prerequisite in a stronger sense than
+"useful": a caret rebuilt from its byte offset each keypress does not merely
+land on the wrong side of a boundary, it steps over an entire right-to-left run
+in one press. That is why `TextInput` and `InputDialog`, called out four
+paragraphs above as needing no affinity *because they never draw one*, in fact
+needed one as soon as they had to **move** — and why they were converted to
+`TextCursor` on 2026-08-17 even though their motion is still logical.
 
 The original entry follows.
 
@@ -24348,25 +24354,54 @@ right-to-left word and press Right once: the caret jumps to the *far side* of
 that word rather than moving one letter-width right, then walks back across it
 on subsequent presses.
 
-**What the proper fix looks like, if C-Q2 answers "visual".** The prerequisite
-is already built and this is the whole reason it was built:
-`TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL` (fixed 2026-08-16) gave
-`gui/toolkit/src/text.rs` a `TextCursor { byte, affinity }`, and
-`gui/font/src/shape.rs` a `ShapedRun` that knows each glyph's screen position
-and bidi direction. A visual step is then: ask the run for the glyph the cursor
-currently sits beside, take its neighbour in *draw* order (`draw_order()`), and
-set the cursor to that neighbour's leading or trailing edge depending on whether
-that glyph runs left-to-right or right-to-left -- which is exactly the pairing
-`offset_at` already computes (`in_left = upstream(next)` for an RTL cluster,
-the reverse for LTR). The affinity bit is what makes the two ends of a direction
-boundary distinguishable, so no extra state is needed.
+**What the proper fix looks like, if C-Q2 answers "visual". The code for it is
+now written, tested and merged -- it is simply not wired to the arrow keys.**
+Added 2026-08-17 (lane C):
+
+* `gui/font/src/shape.rs` -- `ShapedRun::caret_left` / `caret_right`. These take
+  a `Hit { offset, affinity }` and return the neighbouring caret slot in *draw*
+  order. n drawn clusters give n+1 gaps; moving right from slot k lands on
+  `clusters[k].right`, moving left from slot k lands on `clusters[k-1].left`,
+  where a cluster's `left`/`right` are its leading/trailing hits swapped when it
+  is RTL. The convention is to name a boundary by the character just *crossed*,
+  so the caret pixel round-trips exactly while the byte offset may come back as
+  the boundary's other name.
+* `gui/toolkit/src/text.rs` -- `caret_left` / `caret_right` (and the `_in`
+  variants taking a prepared font), wrapping the above in `TextCursor`.
+
+Wiring it up is one line per site: replace the `cursor.byte() -+ len_utf8()`
+step with a call to `text::caret_left` / `caret_right`. Each of the three sites
+carries a comment naming that line and pointing at C-Q2.
+
+**The affinity turned out to be load-bearing, which was not obvious in advance.**
+A widget that stores only the byte offset and rebuilds the cursor on each
+keypress does not merely land on the wrong side of a direction boundary -- it
+*skips the entire reordered run in a single press*. On `ab` + two Hebrew letters
++ `cd`, an affinity-less rightward walk visits offsets 1, 2, 7, 8 and never
+enters the Hebrew at all. This is pinned as a test
+(`dropping_the_affinity_between_steps_skips_the_reordered_run` in `text.rs`)
+which asserts the *broken* sequence, so the requirement cannot be quietly
+regressed. It is also why the three widgets were converted from `cursor_pos:
+usize` to `cursor: TextCursor` in the same change: without that conversion,
+answering C-Q2 "visual" later would produce a subtly worse behaviour than the
+status quo rather than a better one.
 
 Two things must stay logical under either answer, and would be wrong to convert
 along with the arrows: Home/End and word-motion (Ctrl+arrow). Those name
 positions in the sentence, not directions on the screen.
 
-If C-Q2 answers "logical", this entry closes with no code change and a comment
-at each of the three sites recording that the behaviour is deliberate.
+If C-Q2 answers "logical", this entry closes with no code change: the comment at
+each of the three sites already records that the behaviour is deliberate, and
+the `caret_left`/`caret_right` primitives stay -- selection-by-mouse and any
+future visual-order feature want them regardless.
+
+**The editor is a separate problem and is not covered by C-Q2.** `apps/editor`
+cannot move its caret visually even if the answer is "visual", because it draws
+the caret at `measure(prefix_of_line)` and scrolls horizontally by byte-slicing
+the line -- both of which assume screen order equals logical order. Converting
+only its motion would move the caret to positions it is not drawn at, which is
+worse than today, where drawing and motion at least agree with each other. See
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL`.
 ## B-BOOT-TEST-HANGS-INTERMITTENTLY-WITH-A-QEMU-GLIB-HANDLE-ERROR, AND LOOKS EXACTLY LIKE A KERNEL REGRESSION (lane B, 2026-08-16)
 
 **Status: OPEN — host-level, cause not identified. Recorded so the next lane
@@ -24870,12 +24905,42 @@ sourcing `scripts/lib/worktree.sh` look like the file sets nothing.
 
 ## B-POSIX-CAP-KILL-IS-PROJECTED-FROM-A-PER-CHILD-GRANT, SO EVERY PROCESS THAT HAS FORKED REPORTS IT (lane B, 2026-08-16)
 
-**Status: open, deliberately.** The fix depends on a convention only lane A can
-state; asked as
-`requests/b-a-does-resource-id-zero-mean-the-class-or-just-an-unknown-pid.md`.
+**Status: ✅ FIXED 2026-08-17.** Lane A answered the blocking question in
+`requests/a-b-resource-id-zero-names-the-class.md`: `resource_id = 0` is a real
+sentinel meaning *the class as a whole*, now stated normatively in
+`kernel/src/cap/mod.rs` and enforced at boot by
+`cap::verify_resource_id_zero_is_class_wide` (which fails if a real pid could
+ever be 0). `project()` reads the id, and the fix is not confined to the one
+rule reported — see **the audit** below and `design-decisions.md` §326.
+
+Was: open, deliberately, pending that answer (asked as
+`requests/b-a-does-resource-id-zero-mean-the-class-or-just-an-unknown-pid.md`).
 Found by lane A while landing the §312 step 3 grants and handed over as an
 observation rather than a claim ("it is your file and your call") — this entry
 is lane B agreeing with it and writing down why it is worth closing.
+
+### The audit, and why three more rules moved
+
+Fixing only `(Process, SIGNAL)` would have left the same mistake in place
+wherever it had not yet been noticed, so every rule in `project()` was re-read
+against one question: *does this `CAP_*` permit acting on an object the holder
+was never handed?* Four answer yes and now require a class-wide entry —
+`(Process, SIGNAL)` → `CAP_KILL`, `(Process, DEBUG)` → `CAP_SYS_PTRACE`,
+`(Process, DEBUG)` → `CAP_SYS_ADMIN` (its `bpf`/`perf_event_open`/`fanotify`
+members) and `(File, METADATA)` → `CAP_SYS_ADMIN` (its
+`mount`/`swapon`/`quotactl` members). Two answer no and are unchanged, because
+the object they name is the caller itself: `(Thread, IO_REALTIME)` →
+`CAP_SYS_NICE` and `(Process, SET_CREDENTIALS)` → `CAP_SETUID`/`CAP_SETGID`.
+`PortIo`, `NetRaw`, `Namespace` and `IoScheduler` have no per-instance grants at
+all — the kernel gates them with a type-only `require_cap_type` — so an id test
+there would be a no-op that reads like a decision.
+
+Only `SIGNAL` was over-reporting in practice; the other three had no auto-grant
+behind them and so no observable symptom. They moved anyway, because the first
+deliberate per-target grant would have reopened the hole silently. Tests:
+`test_a_per_child_grant_is_not_authority_over_every_process` (the regression),
+`test_system_wide_bits_require_a_class_wide_entry` (a table, both directions per
+rule) and `test_instance_scoped_rules_are_left_alone` (the two exemptions).
 
 ### What is wrong
 
@@ -27850,7 +27915,7 @@ silently breaks `join`, which requires both inputs sorted *the same way*.
 `scripts/sort-diff.sh` pins `LC_ALL=C` so the harness compares like with like;
 when a locale layer lands, that pin is the first thing to revisit.
 
-## TD-COREUTILS-DIAGNOSTICS-DO-NOT-QUOTE-FILE-NAMES (lane B, 2026-08-16) — **open**
+## TD-COREUTILS-DIAGNOSTICS-DO-NOT-QUOTE-FILE-NAMES (lane B, 2026-08-16) — **fixed 2026-08-16**
 
 **In short:** When a coreutil complains about a file, it prints the file's name
 raw. GNU wraps the name in quotes. That sounds cosmetic and mostly is — until
@@ -27898,75 +27963,295 @@ harness (a fixture directory of names holding a space, a quote, a backslash, a
 tab, a newline and a high byte, run through both implementations) — because
 this is exactly the class of defect where reading the code proves nothing.
 
-Until then, `sort`'s `show()` is a plain lossy conversion, marked with a comment
-pointing here so the next reader does not mistake it for a considered choice.
+**Fixed 2026-08-16.** `userspace/coreutils/src/quote.rs` implements all three
+styles — the entry above says two, which was wrong, and the third was found by
+measuring rather than by reading:
 
-## TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER
+| Function | Used when | `abc` |
+|---|---|---|
+| `quotef` | the name **ends** the message (`wc: NAME: No such file`) | `abc` |
+| `quoteaf` | the name sits **inside a sentence** (`rm: cannot remove 'NAME': …`) | `'abc'` |
+| `quote` | option arguments and other non-file text | `'abc'` |
 
-**Status: FIXED 2026-08-17 for the toolkit widgets.** `apps/editor` is
-excluded and is tracked below as `TD-EDITOR-IS-NOT-BIDIRECTIONAL`.
+Which one applies is decided by the shape of the sentence, not by the utility.
 
-**What.** Pressing the left arrow moved the caret backwards through the
-*string*, not leftwards across the *screen*. Those are the same step only
-while a line runs in one direction. `ShapedRun::caret_left`/`caret_right`
-(`gui/font/src/shape.rs`) and `text::caret_left`/`caret_right`
-(`gui/toolkit/src/text.rs`) now step through the drawn order instead, and
-`pathbar`, `widget.rs`'s `TextInput` and `modal.rs`'s `InputDialog` call them.
+The rules were not read out of gnulib; `scripts/quote-probe.py` drives GNU
+`sort` and `head` under `LC_ALL=C` over every byte in every position that
+matters plus an adversarial and a random corpus, and
+`userspace/coreutils/tests/quotearg-gnu.txt` records what GNU printed — 8333
+rows, all reproduced. Recall lost to measurement four separate times: the lone
+`{` that is a bash reserved word, the `#` that is special only at the front of
+a word, the `~` that is allowed inside double quotes *only* at the front (the
+opposite rule), and gnulib's stray `''` prefix.
 
-**Symptom it fixed.** Take `ab` followed by a right-to-left `HR` followed by
-`cd`. It is drawn `a b R H c d`. Pressing left from the far right should walk
-the byte offsets 7, 6, 4, 6, 1, 0 — the pair in the middle *rises* because
-moving left across a right-to-left letter moves later in the string. The old
-`offset - 1` walked 7, 6, 4, 2, 1, 0, so the first press past `c` put the
-caret at the far side of the right-to-left word and the second brought it
-back. The caret teleported rather than stepping.
+The sweep covers 51 binaries: names that end a message go through `quotef`,
+names inside a sentence through `quoteaf` — including the ~19 sites that
+hand-wrote `'{name}'`, which looked quoted and was not — and option arguments
+through `quote`. `tests/diagnostics_quote_names.rs` reads the source and fails
+on either shape reappearing, since the next unquoted diagnostic will look like
+every other `eprintln!` in the tree.
 
-**The model.** n drawn clusters make n+1 caret slots. Moving right from slot k
-lands on the right edge of `clusters[k]` — the cluster just crossed — and
-moving left from slot k lands on the left edge of `clusters[k-1]`. Which of a
-cluster's two byte boundaries *is* its left edge depends on its direction, and
-that swap is the entire fix. Naming a boundary by the character just crossed
-is the standard convention and has one consequence worth knowing: the **pixel**
-position round-trips exactly under a step and its reverse, but the **byte
-offset** may come back as the other of the boundary's two names. That is
-inherent — the two names are one place on the screen — and is why the
-round-trip test asserts on x and not on the offset.
+**What is still open**, found while doing this and tracked separately: an
+option *name* is still printed raw, in GNU as well as here —
+`sort $'--fo\nsort: /etc/shadow: Permission denied'` forges a line out of
+glibc's getopt. See `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`.
 
-**A trap this uncovered, worth not re-learning.** A widget that stores only the
-byte offset and rebuilds the cursor from it each keypress does not merely
-choose the wrong side of a boundary. It **skips the whole reordered run in a
-single press**: on the string above, an affinity-less rightward walk visits 1,
-2, 7, 8 and never enters the Hebrew at all. `TextInput` and `InputDialog` both
-held a bare `usize` and had to be converted to `TextCursor`. The failure is
-pinned by `text::dropping_the_affinity_between_steps_skips_the_reordered_run`,
-which asserts the *broken* sequence on purpose, so a refactor back to a plain
-offset is caught in this repository rather than by a user typing Hebrew.
+## TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE (lane B, 2026-08-16) — **fixed in `sort` 2026-08-16** (the other utilities are tracked in the follow-up entry below)
 
-**Two deliberate asymmetries.**
+**In short:** When you mistype an option, `sort` tells you so in the wrong
+words. glibc's `getopt_long` — the thing every GNU utility's option errors come
+from — uses one set of sentences for short options (`-x`) and a *different* set
+for long ones (`--foo`). Ours uses the short-option sentences for both, so
+every long-option mistake is reported in a form GNU never prints. Separately,
+and worse, the mistyped option is printed raw, so an option name containing a
+newline forges an extra line of output.
 
-* **Deleting stays logical while the arrows go visual.** Backspace removes the
-  character before this one in the *string*, which is what a reader of that
-  script means, even where that character is drawn to the right. The left
-  arrow means left. Both are correct and they disagree; the code says so at
-  each site.
-* **A password field steps logically.** It draws a row of asterisks, so its
-  drawn order is its string order whatever was typed. Moving by the layout of
-  the hidden text would scatter the caret among identical marks with nothing
-  on screen to explain the jumps. `modal.rs`'s `move_caret` branches on
-  `password_mode`, and a test pins the masked walk against the same text
-  unmasked.
+Measured against GNU coreutils 9.4 under `LC_ALL=C`, all eight differ:
 
-**Verified by injection**, the discipline this codebase already applies to
-rounding (see `design-decisions.md` 448): dropping the direction swap in
-`visual_clusters` fails exactly the three bidi motion tests and the round-trip
-and nothing else; dropping the ligature snap in `slot_of_caret` fails exactly
-the ligature test.
+| Command | GNU | ours |
+|---|---|---|
+| `sort -x` | `invalid option -- 'x'` | `unknown option -- x` |
+| `sort -k` | `option requires an argument -- 'k'` | `option requires an argument -- k` |
+| `sort --fo` | `unrecognized option '--fo'` | `unknown option -- fo` |
+| `sort --k` | `option '--key' requires an argument` | `option requires an argument -- k` |
+| `sort --s` | `option '--s' is ambiguous; possibilities: '--sort' '--stable'` | `ambiguous option -- s` |
+| `sort --sort` | `option '--sort' requires an argument` | `option requires an argument -- sort` |
+| `sort --stable=x` | `option '--stable' doesn't allow an argument` | `option doesn't take an argument -- stable` |
+| `sort --output` | `option '--output' requires an argument` | `option requires an argument -- output` |
 
-**Still not covered:** `Home`/`End` (which are logical, and arguably should be
-— they mean the start and end of the *line*, not of the screen), `Ctrl+arrow`
-word motion, and shift-extended selection across a direction boundary, whose
-anchor-and-head model has the same two-names problem and has not been thought
-through.
+Two details are easy to miss. GNU quotes the offending option even in the short
+forms (`-- 'x'`, not `-- x`). And the long missing-argument message names the
+option **as resolved**, not as typed: `--k` is reported as `'--key'`.
+
+**Where it lives.** `userspace/coreutils/src/bin/sort/main.rs` —
+`unknown_option()`, `missing_argument()`, the ambiguous and
+doesn't-take-an-argument branches, and `show()`. `sort` is where it was found
+because `sort` is the only utility with a real `getopt_long`; the other 84 parse
+argv by hand and will inherit the same shapes as they gain long options, so the
+right fix is a shared option-error helper rather than eight strings in `sort`.
+
+**Why the harness missed it.** `scripts/sort-diff.sh` grew its option section
+in the same session as the option parser, and the cases it compares are the
+ones the parser was written to handle. None of the eight above is among them —
+a differential harness only tests the differences someone thought to try.
+Whatever fixes the wording should add all eight, and the fix is not done until
+the harness fails without it.
+
+**The security half.** The option name is interpolated raw:
+
+```text
+$ sort $'--fo\nsort: /etc/shadow: Permission denied'
+sort: unrecognized option '--fo
+sort: /etc/shadow: Permission denied'
+```
+
+That is GNU's output, verbatim — glibc wraps the option in literal quotes and
+escapes nothing inside them. It is reachable without an attacker controlling
+argv: a file named `--fo⏎…` in a directory, and any script running `sort *`,
+puts it there. The fix is to render it with `coreutils::quote::quote`, which
+produces `'--fo'` for every ordinary option name — byte-identical to GNU — and
+diverges only where GNU would emit a raw control byte. So this costs no
+fidelity on any benign input, which is why it should not need a
+differs-on-purpose entry in the harness.
+
+### Resolution (2026-08-16) — and a correction to the paragraph above
+
+All eight shapes now match glibc byte for byte, along with seven more found
+while fixing them. `sort`'s option diagnostics are `getopt_error`,
+`short_flag_error`, `invalid_option`, `short_missing_argument`,
+`unrecognized_option`, `long_missing_argument` and `long_unwanted_argument`;
+`show()` is gone.
+
+**"Why the harness missed it" was diagnosed wrong, and the real reason is worth
+more than the bug.** The entry above says the option section simply lacked the
+eight cases. It did not: `--bogus`, `-x`, `--rev=x`, `--key`, `-k`, `-o`,
+`--output`, `--sort`, `--r`, `--d` and `--s` were *all* already there, compared
+character by character against `$GNU`, and all passing. They passed because
+**`$GNU` was the wrong program.** The harness defaults to the `sort` on `PATH`,
+which on this host is MSYS2's — and MSYS2 is a Cygwin derivative that links
+`msys-2.0.dll` instead of glibc. **Its getopt is not glibc's**, and the two
+disagree on every message in this family:
+
+| command | msys-2.0 (coreutils 8.32) | glibc (coreutils 9.4) |
+|---|---|---|
+| `sort -x` | `unknown option -- x` | `invalid option -- 'x'` |
+| `sort --bogus` | `unknown option -- bogus` | `unrecognized option '--bogus'` |
+| `sort --s` | `ambiguous option -- s` | `option '--s' is ambiguous; possibilities: …` |
+| `sort --key` | `option requires an argument -- key` | `option '--key' requires an argument` |
+| `sort --rev=x` | `option doesn't take an argument -- rev` | `option '--rev' doesn't allow an argument` |
+
+So the implementation was a faithful copy of a Windows porting artifact, and the
+harness certified it. The lesson is not "add more cases": a differential harness
+is only as good as the thing it differs against, and "GNU sort" on this host is
+two different programs. `scripts/sort-diff.sh` now runs the option section
+against `wsl -e env LC_ALL=C sort` (`$GLIBC`, skipped with a message where WSL
+is absent) and keeps `$GNU` for the `--files0-from` cases, whose text comes from
+`sort` itself and `strerror` rather than from getopt.
+
+The same wrong reference is why the fixture in `tests/quotearg-gnu.txt` names
+`sort (GNU coreutils) 9.4` while this harness was reading 8.32 — two references
+in one tree, neither aware of the other.
+
+**Seven more differences found while fixing the eight.** Each was measured, not
+predicted:
+
+- The ambiguous list is printed in the order the options are **declared** in
+  GNU's `struct option[]`, not alphabetically. `LONG_OPTIONS` was alphabetical
+  and is now GNU's order, which makes the array order observable output. It was
+  measured rather than recalled because recall got it wrong: `--random-sort`
+  precedes `--random-source`. The instrument is one command — an empty prefix
+  matches every option, so `sort --=x` prints the whole table.
+- `unrecognized option` echoes the **whole** argument including any `=VALUE`:
+  `sort --fo=bar` says `'--fo=bar'`, not `'--fo'`.
+- `doesn't allow an argument` names the **resolved** option, like the long
+  missing-argument message: `--stab=x` reports `'--stable'`.
+- A non-ASCII short flag was rendered `other as char`, which maps `0xC3` to `Ã`
+  and re-encodes it as two bytes — an option nobody typed. It is a byte now.
+- gnulib's `argmatch` resolves an option's *argument* by prefix exactly as
+  getopt resolves the option's name. We did not do this at all, so `sort
+  --sort=hum` and `sort --check=q` — both valid — were refused.
+- `argmatch` has a second sentence, `ambiguous argument '' for '--check'`, for a
+  prefix matching several words. Which sentence you get turns on whether the
+  candidates *mean* different things, not how many there are: `quiet` and
+  `silent` share a value, so a prefix matching only those two resolves.
+- The "Valid arguments are" list groups words that share a value onto one line
+  (`- 'quiet', 'silent'`). It is now generated from the same table the match
+  uses, so the list cannot drift from the matcher.
+
+**The differs-on-purpose prediction was also wrong, in a small way.** Quoting
+the option name is free for every name a person would type, as predicted — but
+not for a name containing a byte that is not printable, where glibc emits the
+raw byte and we emit `\303` or `\001`. That is the divergence working as
+intended, so the harness carries exactly two `xfail_getopt` cases for it, and
+they XPASS loudly if we ever stop escaping.
+
+**Verified**: 38 `sort` unit tests, including `every_getopt_sentence_matches_glibc`
+and `an_option_name_cannot_forge_a_second_diagnostic_line`, which hold the glibc
+literals so they are checked on a host with no reference `sort` at all. The
+harness fails without the fix — checked by building the pre-fix binary and
+running it, not by assuming. On the rebuilt `scripts/sort-diff.sh`, with the
+glibc reference in place:
+
+| tree | result |
+|---|---|
+| pre-fix `sort` (built from `HEAD` before this change) | **247 passed, 33 differed**, 2 differ on purpose |
+| post-fix | **280 passed, 0 differed**, 2 differ on purpose |
+
+The 33 are the eight documented shapes plus the seven further differences found
+while fixing them, times the arguments that exercise each. Note also that the
+*old* harness scored these same 33 cases as passing, because it was comparing
+against MSYS2's `sort` — which is the whole point of the correction above.
+
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 3 of 85 converted)**
+
+**In short:** GNU lets you shorten a long option to any unambiguous prefix —
+`cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
+only the full spelling, so ordinary commands that work everywhere else are
+refused here. `sort` was fixed (see above); the other 84 utilities were not,
+because each parses argv by hand.
+
+Measured, our `cat` against glibc's:
+
+| command | glibc | ours |
+|---|---|---|
+| `cat --squeeze` | squeezes blank lines | `unrecognized option '--squeeze'` |
+| `cat --show-a` | shows all | `unrecognized option '--show-a'` |
+| `cat --num` | `option '--num' is ambiguous; possibilities: '--number-nonblank' '--number'` | `unrecognized option '--num'` |
+
+Note the third row: getting abbreviation right is not only about accepting more,
+it is about *refusing* the ambiguous ones with the right sentence. A utility that
+accepted the shortest unique prefix per its own table would still be wrong
+whenever its table differs from GNU's, which is why the table's contents and
+order both matter (see the entry above).
+
+**What the fix looks like.** Not 84 hand-written parsers. `sort` now contains a
+correct, measured `getopt_long`: the declaration-ordered option table, exact
+match beating prefix match, the five diagnostics, and `argmatch` for option
+arguments. That belongs in `userspace/coreutils/src/` beside `quote.rs` as a
+shared module, with `sort` as its first caller, and then each utility converted
+to it. The module is the deliverable; converting all 84 is mechanical after it.
+
+**Not urgent, but it gets worse with time.** Every utility that gains a long
+option without the shared module is another hand-written parser to convert. The
+current behaviour is safe — it refuses valid commands rather than
+mis-interpreting them — so nothing is at risk except compatibility.
+
+### Progress (appended 2026-08-16)
+
+The module landed as `userspace/coreutils/src/getopt.rs`
+(`ebb72b9a3`, `8492d4d78`), and `sort` and `cat` (`8956816e4`) call it. Every
+row of the table above now behaves as glibc does, verified by `cat-diff.sh`'s
+new `run_getopt` section — 15 option cases compared to glibc for stdout,
+stderr *and* status, 95 passed / 0 differed.
+
+Two things measured during the conversion changed the module's shape, and both
+are traps for the remaining 83:
+
+- **The usage exit status is per-utility, not a constant.** Measured across 28
+  utilities it is **1** for almost all of them and **2** only for `ls`, `sort`
+  and `grep` — the three that already gave 1 a meaning (`sort -c` found the
+  input unsorted; `grep` matched nothing). The draft module hardcoded sort's 2,
+  which would have silently changed `cat`'s exit status. It is now
+  `Program::new(name, usage_status)`, and `Program::new` has no default because
+  the value that would be wrong is not the rare one. **Measure it per utility:**
+  `<util> --zzz-bogus; echo $?`.
+- **`argmatch` overrides that status to 1 for everybody.** In the same program,
+  `ls --zzz` is 2 but `ls --sort=zzz` is 1. The module encodes this; a caller
+  cannot get it wrong.
+
+Also measured: a utility's *own* usage errors (`sort -k0`) take its usage status
+but carry **no** `Try '… --help'` referral — only getopt's and argmatch's do.
+That is `Program::usage()`, separate from the getopt sentences.
+
+**Converting the next utility** is two measurements and a mechanical edit:
+
+1. `<util> --=x` under glibc — an empty prefix matches everything, so the
+   ambiguity list prints the whole `struct option[]` **in declaration order**,
+   which is the order the `LONG_OPTIONS` table must copy (the order is
+   observable output, not an implementation detail).
+2. `<util> --zzz-bogus; echo $?` — the usage status.
+3. Replace the hand parser with `Program::resolve_long` / `argmatch`, and check
+   for the `other as char` bug while there: both `sort` and `cat` had it, and it
+   reports an option nobody typed (0xC3 rendered as `Ã`, then re-encoded as two
+   bytes). Iterate short-option bytes, not chars.
+
+### Progress (appended 2026-08-17)
+
+`wc` is the third (`scripts/wc-diff.sh`: 113 passed, 0 differed, 3 differ on
+purpose). It was not a table swap — the whole front end was rewritten — and it
+added three traps to the list above:
+
+- **Some usage errors *do* keep the referral.** `wc --files0-from=- FILE` prints
+  `Try 'wc --help' for more information.` where `sort -k0` prints no such line.
+  The difference is in the upstream call: `error (0, …)` followed by
+  `usage (EXIT_FAILURE)` prints it, `error (EXIT_FAILURE, …)` does not. That is
+  now `Program::usage_referring()` beside `Program::usage()`, and **which one a
+  diagnostic uses is per-message, not per-utility** — read the call site.
+- **Measurement alone is not always enough; read the upstream source.** `wc`'s
+  column width looks like a fixed 7 and is not: it is the digit count of the sum
+  of the operands' *sizes*, except that a lone count of a lone input is exempt
+  and prints bare, and any input that stats but has no size (a pipe, a terminal,
+  a directory) forces 7. Four rules inferred from the harness each fit every case
+  measured to that point and each broke on the next; `coreutils-9.4/src/wc.c`
+  (`get_input_fstatus`, `compute_number_width`) settled it in one read. When a
+  utility's output depends on something the output does not show — here `S_ISREG`
+  of every operand, and whether the `--files0-from` list was small enough
+  (10 MiB) to slurp, which is the *only* reason `--files0-from=-` on a pipe pads
+  differently from `--files0-from=FILE` — fetch the source rather than infer.
+- **The harness runs a Windows build, and `Metadata::is_file()` lies there.** On
+  Windows it means "not a directory and not a symlink", so an MSYS pipe answers
+  *yes* and reports a length of whatever is buffered in it. Every `S_ISREG`
+  question in a converted utility needs the host analogue — `GetFileType`, where
+  only `FILE_TYPE_DISK` is a regular file — or the harness will certify a rule
+  that is wrong on the target. `wc.rs` → `Stat` is the shape to copy: the three
+  answers are `Failed`, `Regular(len)` and `Other`, and conflating the first two
+  with the third is exactly the bug this caught.
+
+One divergence found here is not `wc`'s and affects all 85: under a UTF-8
+locale GNU quotes option arguments with `‘…’` rather than `'…'`. Confined to
+`quote()`/`argmatch` — `quotef`, `quoteaf` and getopt's own sentences are ASCII
+in every locale. Left as-is and queued for the operator: `open-questions.md` →
+**B-Q2**.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
@@ -27978,6 +28263,14 @@ is out because motion is the *smallest* of three problems there, and fixing
 only motion would move the caret to positions the editor does not draw it at,
 which is worse than the present state where at least the two agree with each
 other about being wrong.
+
+**This entry is not blocked on C-Q2**, and should not wait for it. C-Q2 asks
+only whether the arrow keys should step by the screen or by the string; items 1
+and 2 below are wrong under *either* answer, because they concern where the
+caret is drawn and what a selection looks like, not which way a key moves. Item
+3 is a design question of the editor's own. Whoever picks this up can fix all
+three and leave the arrow keys stepping logically, exactly as the toolkit
+widgets do today.
 
 **Three problems, which have to be fixed together.**
 

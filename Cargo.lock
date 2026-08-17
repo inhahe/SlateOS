@@ -1445,6 +1445,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "charwidth"
+version = "0.1.0"
+
+[[package]]
 name = "chattr"
 version = "0.1.0"
 
@@ -1855,6 +1859,7 @@ name = "coreutils"
 version = "0.1.0"
 dependencies = [
  "bignum",
+ "charwidth",
  "ere",
 ]
 
@@ -7257,6 +7262,7 @@ name = "oils"
 version = "0.1.0"
 dependencies = [
  "bstr",
+ "charwidth",
  "ere",
  "tzrules",
 ]

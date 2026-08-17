@@ -4,6 +4,7 @@
 //!   -w N   wrap at width N (default: 80)
 //!   -s     break at spaces when possible
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -43,7 +44,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("fold: {path}: {e}");
+                    eprintln!("fold: {}: {e}", quotef_os(path));
                     continue;
                 }
             }

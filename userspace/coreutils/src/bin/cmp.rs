@@ -5,6 +5,7 @@
 //!   -s  silent: only return exit status
 //!   Exit 0 if identical, 1 if different, 2 on error.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -33,7 +34,7 @@ fn main() {
         Ok(f) => f,
         Err(e) => {
             if !silent {
-                eprintln!("cmp: {}: {e}", files[0]);
+                eprintln!("cmp: {}: {e}", quotef_os(files[0]));
             }
             process::exit(2);
         }
@@ -43,7 +44,7 @@ fn main() {
         Ok(f) => f,
         Err(e) => {
             if !silent {
-                eprintln!("cmp: {}: {e}", files[1]);
+                eprintln!("cmp: {}: {e}", quotef_os(files[1]));
             }
             process::exit(2);
         }
@@ -63,7 +64,7 @@ fn main() {
             Ok(n) => n,
             Err(e) => {
                 if !silent {
-                    eprintln!("cmp: {}: {e}", files[0]);
+                    eprintln!("cmp: {}: {e}", quotef_os(files[0]));
                 }
                 process::exit(2);
             }
@@ -72,7 +73,7 @@ fn main() {
             Ok(n) => n,
             Err(e) => {
                 if !silent {
-                    eprintln!("cmp: {}: {e}", files[1]);
+                    eprintln!("cmp: {}: {e}", quotef_os(files[1]));
                 }
                 process::exit(2);
             }

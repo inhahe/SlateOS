@@ -6,6 +6,7 @@
 //!   -f FIELDS  select fields (comma-separated, e.g. 1,3 or 1-3)
 //!   -c CHARS   select characters (comma-separated ranges)
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -66,7 +67,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("cut: {path}: {e}");
+                    eprintln!("cut: {}: {e}", quotef_os(path));
                     continue;
                 }
             }

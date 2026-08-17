@@ -6,6 +6,7 @@
 //!   -h  human-readable sizes (K, M, G) in long format
 //!   -1  one entry per line (default when output is not a terminal)
 
+use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -121,7 +122,7 @@ fn list_dir(out: &mut impl Write, path: &str, opts: &Options) {
                 show_entry(out, path, Path::new(path), opts);
                 return;
             }
-            eprintln!("ls: cannot access '{path}': {e}");
+            eprintln!("ls: cannot access {}: {e}", quoteaf_os(path));
             return;
         }
     };

@@ -485,8 +485,8 @@ fn reported_caps_effective() -> (u32, u32) {
 /// [`current_caps_effective`].
 pub mod kernel_view {
     use super::{
-        CAP_KILL, CAP_NET_RAW, CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN, CAP_SYS_NICE, CAP_SYS_PTRACE,
-        CAP_SYS_RAWIO, CAP_LAST_CAP, store,
+        CAP_KILL, CAP_LAST_CAP, CAP_NET_RAW, CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN, CAP_SYS_NICE,
+        CAP_SYS_PTRACE, CAP_SYS_RAWIO, store,
     };
 
     /// Kernel `ResourceType` discriminants.
@@ -615,7 +615,10 @@ pub mod kernel_view {
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
         );
-        usize::try_from(n).ok().filter(|&n| n <= buf.len()).ok_or(())
+        usize::try_from(n)
+            .ok()
+            .filter(|&n| n <= buf.len())
+            .ok_or(())
     }
 
     /// Does the process hold any capability of type `ty`?
@@ -629,10 +632,38 @@ pub mod kernel_view {
     /// Any-of rather than all-of because the predicates in §312 read that way
     /// ("any `PortIo` handle with `READ` **or** `WRITE`"), and because a
     /// single-bit mask makes the two identical anyway.
+    ///
+    /// Says nothing about `resource_id`; [`holds_class_with`] is the one that
+    /// does. The rules still using this form are the ones for which the
+    /// distinction is empty or wrong: `PortIo`, `NetRaw`, `Namespace` and
+    /// `IoScheduler` have no per-instance grants at all — the kernel gates them
+    /// with a type-only `require_cap_type` and every grant site passes `0` — and
+    /// `Thread`'s is instance-scoped on purpose. §326.
     fn holds_with(entries: &[CapEntryInfo], ty: u16, any_of: u64) -> bool {
         entries
             .iter()
             .any(|e| e.resource_type == ty && (e.rights & any_of) != 0)
+    }
+
+    /// Does the process hold a **class-wide** capability of type `ty` carrying
+    /// any of `any_of`?
+    ///
+    /// `resource_id == 0` is the kernel's sentinel for "no particular instance
+    /// — the class as a whole". It is a real sentinel and not a placeholder for
+    /// an id the grant site did not know: no process can *have* pid 0
+    /// (`pcb::NEXT_PID` starts at 1 and only increments, and pid 0 is the
+    /// kernel, which is never granted a capability), and
+    /// `cap::verify_resource_id_zero_is_class_wide` fails the boot if that ever
+    /// stops holding. See `kernel/src/cap/mod.rs`, `design-decisions.md` §212,
+    /// and lane A's `requests/a-b-resource-id-zero-names-the-class.md`.
+    ///
+    /// This is the predicate for every `CAP_*` that means authority **over the
+    /// system**, as opposed to authority over one object. See §326 for which
+    /// rules use which, and why the answer is not "all of them".
+    fn holds_class_with(entries: &[CapEntryInfo], ty: u16, any_of: u64) -> bool {
+        entries
+            .iter()
+            .any(|e| e.resource_type == ty && e.resource_id == 0 && (e.rights & any_of) != 0)
     }
 
     /// A 64-bit capability set being assembled, as Linux's two `u32` words.
@@ -672,18 +703,38 @@ pub mod kernel_view {
         if holds_with(entries, res::PORT_IO, rights::READ | rights::WRITE) {
             m.set(CAP_SYS_RAWIO);
         }
-        // SIGNAL on a Process is precisely "may signal that process"; kill(2)
-        // to a process we hold no handle for is what CAP_KILL overrides.
-        if holds_with(entries, res::PROCESS, rights::SIGNAL) {
+        // SIGNAL on a Process is precisely "may signal *that* process"; kill(2)
+        // to a process we hold no handle for is what CAP_KILL overrides. So the
+        // entry has to be class-wide: an instance grant is the narrow authority
+        // CAP_KILL exists to go around, not the broad one.
+        //
+        // Without the id test this bit read true for very nearly every process
+        // on the system. `spawn.rs` step 5b and `fork.rs` step 8 both hand the
+        // parent `…|SIGNAL|…` over *each child*, so anything that had ever
+        // forked or spawned reported CAP_KILL — authority the kernel would
+        // refuse, which is the one direction §312 does not permit.
+        if holds_class_with(entries, res::PROCESS, rights::SIGNAL) {
             m.set(CAP_KILL);
         }
         // DEBUG is unilateral introspection — the target does not consent —
-        // which is the authority ptrace(2) actually is.
-        if holds_with(entries, res::PROCESS, rights::DEBUG) {
+        // which is the authority ptrace(2) actually is. Class-wide for the same
+        // reason as SIGNAL, and visible in the kernel's own gate: it authorises
+        // a ptrace with `has_capability_for(debugger, Process, target, DEBUG)`,
+        // an *instance* check, so a handle on one target is permission to debug
+        // that target and nothing else. Nothing confers DEBUG automatically
+        // today, so this changes no observed behaviour — it is here so the
+        // first deliberate per-target grant does not silently reopen the hole
+        // SIGNAL just had.
+        if holds_class_with(entries, res::PROCESS, rights::DEBUG) {
             m.set(CAP_SYS_PTRACE);
         }
         // Raising priority is the only direction CAP_SYS_NICE gates, and
         // IO_REALTIME is the kernel's name for permission to do so.
+        //
+        // Deliberately *not* class-wide, unlike the two above: an instance
+        // grant here names one of the caller's own threads, and raising your
+        // own priority is the whole of what the gate sites ask for. Requiring
+        // id 0 would refuse the case the capability was granted for. §326.
         if holds_with(entries, res::THREAD, rights::IO_REALTIME) {
             m.set(CAP_SYS_NICE);
         }
@@ -702,9 +753,16 @@ pub mod kernel_view {
         // claim a distinction the kernel cannot enforce; if they ever do
         // diverge, split the *right* instead.
         //
-        // Unlike SIGNAL below, this bit is never granted automatically: no
-        // spawn or fork path confers it, so holding it is always a deliberate
-        // act and the predicate needs no `resource_id` qualification.
+        // Unlike SIGNAL and DEBUG above, this predicate is *not* qualified by
+        // `resource_id`, and the reason is the object it names rather than the
+        // absence of an auto-grant. CAP_SETUID is authority over the *caller* —
+        // `SYS_PROCESS_SET_CREDENTIALS` rewrites the calling process's own uid
+        // and gid — so a grant naming a specific pid, if one is ever written,
+        // will be naming the holder itself and will be the entire authority.
+        // Requiring id 0 there would refuse the grant it was written for. (No
+        // spawn or fork path confers SET_CREDENTIALS today, so the two readings
+        // are not yet distinguishable in practice; lane A asked for the check
+        // to stay id-agnostic until a grant site exists to settle it. §326.)
         if holds_with(entries, res::PROCESS, rights::SET_CREDENTIALS) {
             m.set(CAP_SETUID);
             m.set(CAP_SETGID);
@@ -752,7 +810,14 @@ pub mod kernel_view {
         // (process.rs), swapon, swapoff (unistd.rs), quotactl (sys_quota.rs).
         // All of them reshape the filesystem rather than read or write within
         // it, which is what METADATA on a File capability names.
-        || holds_with(entries, res::FILE, rights::METADATA)
+        //
+        // Class-wide, because these reshape the filesystem *as a whole*: a
+        // METADATA handle on one file is permission to chmod that file, and
+        // reading it as permission to mount would be the same over-report the
+        // SIGNAL rule had. The class-wide form is what a caller actually
+        // writes — `(File, 0, READ|WRITE)` in `SpawnOptions.capabilities` — so
+        // requiring id 0 narrows this member rather than disabling it. §326.
+        || holds_class_with(entries, res::FILE, rights::METADATA)
         // ioprio_set(IOPRIO_CLASS_RT) (process.rs) — the one site with an
         // exact preimage: IO_REALTIME on the I/O scheduler is literally the
         // permission being requested.
@@ -761,7 +826,10 @@ pub mod kernel_view {
         // (linux_perf_event.rs), fanotify_init (linux_fanotify.rs).  Each
         // watches processes other than the caller without their consent,
         // which is DEBUG on a Process handle.
-        || holds_with(entries, res::PROCESS, rights::DEBUG)
+        //
+        // Class-wide: all three observe the *system*, not one named process,
+        // so a per-target debug handle is not the authority they need. §326.
+        || holds_class_with(entries, res::PROCESS, rights::DEBUG)
         // madvise(MADV_HWPOISON | MADV_SOFT_OFFLINE) (mman.rs) — retiring a
         // physical page is hardware authority, not memory-management
         // authority, so it rides on raw port access rather than on any
@@ -1093,13 +1161,27 @@ mod projection_tests {
     use super::kernel_view::{CapEntryInfo, project, res, rights};
     use super::*;
 
-    /// A capability of `ty` carrying `r`.
+    /// A **class-wide** capability of `ty` carrying `r` — `resource_id == 0`,
+    /// the sentinel for "no particular instance".
+    ///
+    /// The default for these tests because it is the form a caller writes
+    /// deliberately (`(Process, 0, SET_CREDENTIALS)` in
+    /// `SpawnOptions.capabilities`), and because it is the form the four
+    /// system-wide rules require. Use [`cap_on`] for the other kind.
     fn cap(ty: u16, r: u64) -> CapEntryInfo {
+        cap_on(ty, 0, r)
+    }
+
+    /// A capability of `ty` over the **one instance** `id`, carrying `r`.
+    ///
+    /// This is what `spawn.rs` step 5b and `fork.rs` step 8 hand a parent over
+    /// each child, and what the kernel's own ptrace gate checks for.
+    fn cap_on(ty: u16, id: u64, r: u64) -> CapEntryInfo {
         CapEntryInfo {
             resource_type: ty,
             reserved: [0; 3],
             rights: r,
-            resource_id: 1,
+            resource_id: id,
         }
     }
 
@@ -1297,6 +1379,89 @@ mod projection_tests {
     }
 
     #[test]
+    fn test_a_per_child_grant_is_not_authority_over_every_process() {
+        // The regression test for
+        // known-issues.md -> B-POSIX-CAP-KILL-IS-PROJECTED-FROM-A-PER-CHILD-GRANT.
+        //
+        // `spawn.rs` step 5b and `fork.rs` step 8 give a parent SIGNAL over
+        // *each child*, naming the child's real pid. Read without the id that
+        // made every process that had ever forked report CAP_KILL — "may signal
+        // anything, overriding the uid check" — from a handle that says "may
+        // signal pid 4271". They are different authorities, and the narrow one
+        // is handed out automatically to nearly everything.
+        let per_child = project(&[cap_on(
+            res::PROCESS,
+            4271,
+            rights::READ | rights::WRITE | rights::SIGNAL,
+        )]);
+        assert!(!is_set(per_child, CAP_KILL));
+
+        // The deliberate, class-wide form still projects it. Both halves
+        // matter: a rule that never fires is not conservative, it is broken.
+        assert!(is_set(
+            project(&[cap(res::PROCESS, rights::SIGNAL)]),
+            CAP_KILL
+        ));
+    }
+
+    #[test]
+    fn test_system_wide_bits_require_a_class_wide_entry() {
+        // Every `CAP_*` that means "over the system" rather than "over this
+        // object" reads the `resource_id`. Kept as one table so that a new
+        // system-wide rule added without the id test fails here rather than in
+        // a boot two months later. See design-decisions.md §326.
+        for (ty, right, c, what) in [
+            (res::PROCESS, rights::SIGNAL, CAP_KILL, "signal any process"),
+            (
+                res::PROCESS,
+                rights::DEBUG,
+                CAP_SYS_PTRACE,
+                "ptrace any process",
+            ),
+            (
+                res::PROCESS,
+                rights::DEBUG,
+                CAP_SYS_ADMIN,
+                "observe the system (bpf, perf_event_open, fanotify)",
+            ),
+            (
+                res::FILE,
+                rights::METADATA,
+                CAP_SYS_ADMIN,
+                "reshape the filesystem (mount, swapon, quotactl)",
+            ),
+        ] {
+            assert!(
+                is_set(project(&[cap(ty, right)]), c),
+                "class-wide {ty}/{right:#x} did not project cap {c} ({what})"
+            );
+            assert!(
+                !is_set(project(&[cap_on(ty, 99, right)]), c),
+                "a handle on one instance projected cap {c} ({what})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_instance_scoped_rules_are_left_alone() {
+        // The id test is not blanket policy — two rules are instance-scoped on
+        // purpose, because the object they name *is* the caller. Requiring
+        // id 0 there would refuse the grant the capability was written for.
+        //
+        // CAP_SYS_NICE: raising the priority of one of your own threads.
+        assert!(is_set(
+            project(&[cap_on(res::THREAD, 7, rights::IO_REALTIME)]),
+            CAP_SYS_NICE
+        ));
+        // CAP_SETUID/CAP_SETGID: `SYS_PROCESS_SET_CREDENTIALS` rewrites the
+        // *calling* process's uid and gid, so a grant naming a pid names the
+        // holder.
+        let w = project(&[cap_on(res::PROCESS, 42, rights::SET_CREDENTIALS)]);
+        assert!(is_set(w, CAP_SETUID));
+        assert!(is_set(w, CAP_SETGID));
+    }
+
+    #[test]
     fn test_sys_admin_union_members() {
         // Each member on its own must suffice — the union is an OR, and a
         // member that never fires is a gate site with no way to pass.
@@ -1350,7 +1515,10 @@ mod projection_tests {
         store::store_projection(plo, phi);
         let (lo, hi) = reported_caps_effective();
         assert!(is_set((lo, hi), CAP_KILL));
-        assert!(!is_set((lo, hi), CAP_SYS_RAWIO), "not granted by the kernel");
+        assert!(
+            !is_set((lo, hi), CAP_SYS_RAWIO),
+            "not granted by the kernel"
+        );
 
         // Now the process drops CAP_KILL itself.  Still not held.
         let mut c = current_caps();

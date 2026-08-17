@@ -23,6 +23,12 @@ bstr = { version = "1.13.0", default-features = false, features = ["std"] }
 # character model (`ere::ch`) that `bytes` re-exports, for the same reason.
 ere = { path = "../ere" }
 
+# `wcwidth`, shared with the coreutils. It was the bulk of `src/width.rs` here
+# until `wc -L` needed the same answer. A `select` menu and a `wc -L` count are
+# measuring the same terminal, so a second copy of the Unicode tables would be a
+# second opinion about how wide U+4E00 is. Same reasoning as `ere` above.
+charwidth = { path = "../charwidth" }
+
 # The POSIX `TZ`-string engine, shared verbatim with the libc (`posix`). osh
 # renders broken-down time itself — `printf '%(FMT)T'` and the `\D{…}` prompt
 # escapes never call `strftime` — so without a shared engine the shell and every

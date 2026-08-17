@@ -3,6 +3,7 @@
 //! Usage: tee [-a] [FILE...]
 //!   -a  append to files instead of overwriting
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -28,7 +29,7 @@ fn main() {
         match file {
             Ok(f) => files.push(f),
             Err(e) => {
-                eprintln!("tee: {path}: {e}");
+                eprintln!("tee: {}: {e}", quotef_os(path));
             }
         }
     }

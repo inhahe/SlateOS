@@ -3,6 +3,7 @@
 //! Usage: expand [-t N] [FILE...]
 //!   -t N   set tab width (default: 8)
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -37,7 +38,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("expand: {path}: {e}");
+                    eprintln!("expand: {}: {e}", quotef_os(path));
                     continue;
                 }
             }

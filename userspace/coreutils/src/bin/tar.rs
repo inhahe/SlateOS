@@ -13,6 +13,7 @@
 //! (`parse_args`, `parse_octal`, `extract_string`, `TarHeader`,
 //! `list_archive`) are exercised by unit tests on every host.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -228,7 +229,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) {
         Some(path) => match File::create(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("tar: {path}: {e}");
+                eprintln!("tar: {}: {e}", quotef_os(path));
                 process::exit(1);
             }
         },
@@ -240,7 +241,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) {
         let meta = match fs::metadata(path) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("tar: {name}: {e}");
+                eprintln!("tar: {}: {e}", quotef_os(name));
                 return;
             }
         };
@@ -328,7 +329,7 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("tar: {path}: {e}");
+                eprintln!("tar: {}: {e}", quotef_os(path));
                 process::exit(1);
             }
         },
@@ -338,7 +339,7 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
     if let Some(dir) = directory
         && let Err(e) = env::set_current_dir(dir)
     {
-        eprintln!("tar: {dir}: {e}");
+        eprintln!("tar: {}: {e}", quotef_os(dir));
         process::exit(1);
     }
 
@@ -388,7 +389,7 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
 
                 file_data.truncate(usize::try_from(size).unwrap_or(0));
                 if let Err(e) = fs::write(&name, &file_data) {
-                    eprintln!("tar: {name}: {e}");
+                    eprintln!("tar: {}: {e}", quotef_os(name));
                 }
             }
             _ => {
@@ -409,7 +410,7 @@ fn do_list_main(archive_file: &Option<String>) {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("tar: {path}: {e}");
+                eprintln!("tar: {}: {e}", quotef_os(path));
                 process::exit(1);
             }
         },

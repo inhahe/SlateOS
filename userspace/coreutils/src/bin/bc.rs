@@ -27,6 +27,7 @@
 //!   0  normal exit
 //!   1  error
 
+use coreutils::quote::quotef_os;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -2013,7 +2014,7 @@ fn main() {
                 }
             }
             Err(e) => {
-                eprintln!("bc: {path}: {e}");
+                eprintln!("bc: {}: {e}", quotef_os(path));
                 process::exit(1);
             }
         }

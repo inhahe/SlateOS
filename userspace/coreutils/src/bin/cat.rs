@@ -84,6 +84,8 @@
 //!   files are still copied; the exit status is 1 at the end.
 
 use coreutils::errmsg::strerror;
+use coreutils::getopt::{self, Program, Takes};
+use coreutils::quote::quotef_os;
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;
@@ -134,10 +136,11 @@ fn main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(r) => r,
-        Err(message) => {
-            eprintln!("cat: {message}");
-            eprintln!("Try 'cat --help' for more information.");
-            return ExitCode::FAILURE;
+        Err(e) => {
+            // The referral is part of the message, and only the first line
+            // carries the `cat: ` prefix — which is what GNU prints.
+            eprintln!("cat: {e}");
+            return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
 
@@ -176,7 +179,7 @@ fn main() -> ExitCode {
                 // A file we cannot open is not a reason to abandon the ones we
                 // can: `cat a b > out` with `a` missing should still contain
                 // `b`. The status carries the failure instead.
-                eprintln!("cat: {}: {}", path.to_string_lossy(), strerror(&e));
+                eprintln!("cat: {}: {}", quotef_os(path), strerror(&e));
                 failed = true;
                 continue;
             }
@@ -239,7 +242,7 @@ impl Failure {
         if self.on_write {
             "write error".to_string()
         } else {
-            path.to_string_lossy().into_owned()
+            quotef_os(path)
         }
     }
 }
@@ -387,12 +390,58 @@ fn render_visible(b: u8, out: &mut Vec<u8>) {
     }
 }
 
+/// The name every diagnostic is stamped with, and the status a bad command
+/// line exits with, both bound once.
+///
+/// The 1 is measured (`cat --zzz-bogus; echo $?`) and is the common case;
+/// `sort`'s 2 is the exception, so this is a number to check rather than copy
+/// from whichever utility was converted last.
+const CAT: Program = Program::new("cat", 1);
+
+/// Every long option `cat` knows, with what it takes — which is nothing, in
+/// every case.
+///
+/// **The order is GNU's declaration order, not alphabetical**, because
+/// `getopt_long` lists an ambiguous prefix's candidates in table order. It was
+/// measured rather than recalled, with the one command that shows the whole
+/// table — an empty prefix matches every option:
+///
+/// ```text
+/// $ cat --=x
+/// cat: option '--=x' is ambiguous; possibilities: '--number-nonblank' '--number'
+///      '--squeeze-blank' '--show-nonprinting' '--show-ends' '--show-tabs'
+///      '--show-all' '--help' '--version'
+/// ```
+///
+/// Note `--number-nonblank` precedes `--number`, which is what makes `cat --num`
+/// ambiguous rather than a match for `--number`.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("number-nonblank", Takes::Nothing),
+    ("number", Takes::Nothing),
+    ("squeeze-blank", Takes::Nothing),
+    ("show-nonprinting", Takes::Nothing),
+    ("show-ends", Takes::Nothing),
+    ("show-tabs", Takes::Nothing),
+    ("show-all", Takes::Nothing),
+    // `--help` and `--version` are in the table rather than special-cased
+    // ahead of it, because getopt sees them too: they appear among an
+    // ambiguous prefix's possibilities, and `cat --help=x` is measured to be
+    // `option '--help' doesn't allow an argument`, not a printed usage.
+    ("help", Takes::Nothing),
+    ("version", Takes::Nothing),
+];
+
 /// Parse `cat`'s argv.
 ///
 /// Errors rather than guessing: an operand starting with `-` that is not an
 /// option it knows is a mistake, and the old behaviour of treating it as a
 /// filename turned every typo into a silent success.
-fn parse_args(args: &[OsString]) -> Result<Request, String> {
+///
+/// Option resolution is [`coreutils::getopt`]'s, so long options abbreviate to
+/// any unambiguous prefix the way every GNU utility's do — `cat --squeeze` and
+/// `cat --show-a` work, and `cat --num` is refused as ambiguous rather than
+/// silently taken for `--number`.
+fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut options = Options::default();
     let mut files: Vec<OsString> = Vec::new();
     let mut only_operands = false;
@@ -402,28 +451,43 @@ fn parse_args(args: &[OsString]) -> Result<Request, String> {
             files.push(arg.clone());
             continue;
         }
-        // A name that is not valid Unicode cannot be an option — every option
-        // is ASCII — so it goes straight through as an operand without the
-        // lossy conversion being able to affect what is opened.
-        let Some(text) = arg.to_str() else {
-            files.push(arg.clone());
-            continue;
-        };
+        let bytes = arg_bytes(arg);
 
-        if text == "--" {
+        if bytes == b"--" {
             only_operands = true;
-        } else if text == "-" || !text.starts_with('-') {
+        } else if bytes == b"-" || bytes.first() != Some(&b'-') {
             // A lone `-` is standard input, which is an operand, not an option.
             files.push(arg.clone());
-        } else if let Some(long) = text.strip_prefix("--") {
-            match long {
+        } else if let Some(body) = bytes.strip_prefix(b"--") {
+            // `--name=value`: split before resolving, so the name is what gets
+            // matched and the whole argument is what gets echoed back when it
+            // resolves to nothing.
+            let (typed, inline) = match body.iter().position(|&c| c == b'=') {
+                Some(at) => (
+                    body.get(..at).unwrap_or_default(),
+                    Some(body.get(at.saturating_add(1)..).unwrap_or_default()),
+                ),
+                None => (body, None),
+            };
+            // Every option is ASCII, so a name that is not UTF-8 matches none
+            // of them; it takes the unrecognised path rather than erroring
+            // differently, and is reported as the bytes that were typed.
+            let typed = std::str::from_utf8(typed).map_err(|_| CAT.unrecognized_option(&bytes))?;
+            let (name, _) = CAT.resolve_long(typed, &bytes, LONG_OPTIONS)?;
+            if inline.is_some() {
+                // Every one of cat's options is `Takes::Nothing`.
+                return Err(CAT.long_unwanted_argument(name));
+            }
+            match name {
                 "help" => return Ok(Request::Help),
                 "version" => return Ok(Request::Version),
-                _ => apply_long(long, &mut options)?,
+                _ => apply_long(name, &mut options),
             }
         } else {
-            for c in text.chars().skip(1) {
-                apply_short(c, &mut options)?;
+            // Bytes, not `char`s: `-é` is two bytes, and iterating `char`s
+            // would report `invalid option -- 'é'`, an option nobody typed.
+            for &b in bytes.get(1..).unwrap_or_default() {
+                apply_short(b, &mut options)?;
             }
         }
     }
@@ -431,7 +495,9 @@ fn parse_args(args: &[OsString]) -> Result<Request, String> {
     Ok(Request::Run(options, files))
 }
 
-fn apply_long(name: &str, options: &mut Options) -> Result<(), String> {
+/// Apply an option [`LONG_OPTIONS`] already resolved, so the name is one of
+/// that table's and there is no failure left to report.
+fn apply_long(name: &str, options: &mut Options) {
     match name {
         "number" => options.number = true,
         "number-nonblank" => options.number_nonblank = true,
@@ -444,38 +510,50 @@ fn apply_long(name: &str, options: &mut Options) -> Result<(), String> {
             options.show_ends = true;
             options.show_tabs = true;
         }
-        _ => return Err(format!("unrecognized option '--{name}'")),
+        // `--help` and `--version` are answered by the caller, and every other
+        // name in the table is above; an unknown one cannot reach here.
+        _ => {}
     }
-    Ok(())
 }
 
-fn apply_short(c: char, options: &mut Options) -> Result<(), String> {
+fn apply_short(c: u8, options: &mut Options) -> Result<(), getopt::Error> {
     match c {
-        'n' => options.number = true,
-        'b' => options.number_nonblank = true,
-        's' => options.squeeze = true,
-        'E' => options.show_ends = true,
-        'T' => options.show_tabs = true,
-        'v' => options.show_nonprinting = true,
-        'A' => {
+        b'n' => options.number = true,
+        b'b' => options.number_nonblank = true,
+        b's' => options.squeeze = true,
+        b'E' => options.show_ends = true,
+        b'T' => options.show_tabs = true,
+        b'v' => options.show_nonprinting = true,
+        b'A' => {
             options.show_nonprinting = true;
             options.show_ends = true;
             options.show_tabs = true;
         }
-        'e' => {
+        b'e' => {
             options.show_nonprinting = true;
             options.show_ends = true;
         }
-        't' => {
+        b't' => {
             options.show_nonprinting = true;
             options.show_tabs = true;
         }
         // POSIX requires `-u` to be accepted and permits it to do nothing; the
         // output here is flushed at exit either way.
-        'u' => {}
-        _ => return Err(format!("invalid option -- '{c}'")),
+        b'u' => {}
+        _ => return Err(CAT.invalid_option(c)),
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn arg_bytes(a: &OsString) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    a.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn arg_bytes(a: &OsString) -> Vec<u8> {
+    a.to_string_lossy().into_owned().into_bytes()
 }
 
 #[cfg(test)]
@@ -571,9 +649,103 @@ mod tests {
         // The whole point of the rewrite: this used to look for a file called
         // `-Z`, fail to find it, and exit 0.
         let e = parse_args(&args(&["-Z", "f"])).unwrap_err();
-        assert!(e.contains("invalid option"), "{e}");
+        assert!(e.message.contains("invalid option"), "{e}");
         let e = parse_args(&args(&["--nope"])).unwrap_err();
-        assert!(e.contains("unrecognized option"), "{e}");
+        assert!(e.message.contains("unrecognized option"), "{e}");
+    }
+
+    /// The literals are glibc's, measured from `cat` under `LC_ALL=C`.
+    fn fail_msg(items: &[&str]) -> String {
+        let e = parse_args(&args(items)).unwrap_err();
+        // Every one of these is status 1 for `cat` — not `sort`'s 2.
+        assert_eq!(e.status, 1, "{e}");
+        e.message
+            .strip_suffix("\nTry 'cat --help' for more information.")
+            .expect("every option diagnostic ends with the referral")
+            .to_string()
+    }
+
+    #[test]
+    fn long_options_abbreviate_the_way_getopt_long_does() {
+        // These three were all refused before `cat` used the shared getopt,
+        // which is the bug the module was written for.
+        assert!(parse(&["--squeeze"]).0.squeeze);
+        let (o, _) = parse(&["--show-a"]);
+        assert!(o.show_nonprinting && o.show_ends && o.show_tabs);
+        assert!(parse(&["--number-non"]).0.number_nonblank);
+        // An exact match wins over the prefix rule: `--number` is a prefix of
+        // nothing here, but `--show-all` is reached exactly while `--show` is
+        // ambiguous.
+        assert!(parse(&["--number"]).0.number);
+        assert_eq!(
+            fail_msg(&["--show"]),
+            "option '--show' is ambiguous; possibilities: \
+             '--show-nonprinting' '--show-ends' '--show-tabs' '--show-all'"
+        );
+        // `--num` is ambiguous rather than `--number`, because
+        // `--number-nonblank` is declared first and also starts with it.
+        assert_eq!(
+            fail_msg(&["--num"]),
+            "option '--num' is ambiguous; possibilities: '--number-nonblank' '--number'"
+        );
+    }
+
+    #[test]
+    fn every_getopt_sentence_matches_glibc() {
+        assert_eq!(fail_msg(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(fail_msg(&["--nope"]), "unrecognized option '--nope'");
+        // A name that resolved nothing is echoed whole, `=VALUE` included.
+        assert_eq!(fail_msg(&["--nope=1"]), "unrecognized option '--nope=1'");
+        // A name that resolved something is reported by its resolution.
+        assert_eq!(
+            fail_msg(&["--sq=1"]),
+            "option '--squeeze-blank' doesn't allow an argument"
+        );
+        assert_eq!(
+            fail_msg(&["--show-e=1"]),
+            "option '--show-ends' doesn't allow an argument"
+        );
+        // Ambiguity is settled before the value is complained about, so an
+        // ambiguous name with a value is an ambiguity — and is echoed whole,
+        // since there is no resolution to name. Measured; it is not obvious
+        // which of the two checks glibc runs first.
+        assert_eq!(
+            fail_msg(&["--numb=1"]),
+            "option '--numb=1' is ambiguous; possibilities: '--number-nonblank' '--number'"
+        );
+        // `--help` is an ordinary table entry, so it gets the ordinary refusal
+        // rather than printing the usage.
+        assert_eq!(
+            fail_msg(&["--help=x"]),
+            "option '--help' doesn't allow an argument"
+        );
+        // The empty prefix matches everything: this is the instrument the
+        // table's order was measured with, so it is also what pins the order.
+        assert_eq!(
+            fail_msg(&["--=x"]),
+            "option '--=x' is ambiguous; possibilities: '--number-nonblank' \
+             '--number' '--squeeze-blank' '--show-nonprinting' '--show-ends' \
+             '--show-tabs' '--show-all' '--help' '--version'"
+        );
+    }
+
+    #[test]
+    fn an_option_name_cannot_forge_a_second_diagnostic_line() {
+        // A file picked up by `cat *` may be named anything but `/` and NUL,
+        // so a raw newline here would let it write a line `cat` never wrote.
+        let e = fail_msg(&["--fo\ncat: /etc/shadow: Permission denied"]);
+        assert_eq!(
+            e,
+            r#"unrecognized option '--fo\ncat: /etc/shadow: Permission denied'"#
+        );
+        assert_eq!(e.lines().count(), 1);
+    }
+
+    #[test]
+    fn a_short_option_is_named_by_the_byte_not_the_char() {
+        // `-é` is two bytes. Iterating `char`s reported `'é'`, an option
+        // nobody typed; each byte is now named as itself.
+        assert_eq!(fail_msg(&["-\u{e9}"]), r"invalid option -- '\303'");
     }
 
     #[test]

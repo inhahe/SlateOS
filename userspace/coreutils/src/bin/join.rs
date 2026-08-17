@@ -15,6 +15,7 @@
 //!   0  success
 //!   1  error
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -147,7 +148,7 @@ fn open_input(path: &str) -> Box<dyn Read> {
         match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("join: {path}: {e}");
+                eprintln!("join: {}: {e}", quotef_os(path));
                 process::exit(1);
             }
         }

@@ -765,7 +765,11 @@ fn waitid_target(idtype: i32, id: PidT) -> Option<WaitTarget> {
             // Linux: `if (upid <= 0) return -EINVAL;`.  Without this, id 0
             // would reach the kernel as "my process group" and id -5 as
             // "process group 5".
-            if id <= 0 { None } else { Some(WaitTarget::Selector(id)) }
+            if id <= 0 {
+                None
+            } else {
+                Some(WaitTarget::Selector(id))
+            }
         }
         // Linux: `if (upid < 0) return -EINVAL;` and `upid == 0` means the
         // caller's own group.  0 goes straight through — under `WPGID` the

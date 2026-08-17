@@ -15,3 +15,9 @@ ere = { path = "../ere" }
 # GNU `expr` is arbitrary-precision — `expr 9223372036854775807 + 1` answers
 # 9223372036854775808 — and a shell script reaches those sizes by accident.
 bignum = { path = "../bignum" }
+# One `wcwidth`, shared with the shell. `wc -L` reports a *display* width, not a
+# character count — U+4E00 takes two columns and a combining mark takes none —
+# and so do `expand`, `fold`, `nl` and `column`. All of them are laying text out
+# on the same terminal as osh's `select` menu, so a disagreement about how wide
+# a character is shows up as a misaligned screen. See `userspace/charwidth`.
+charwidth = { path = "../charwidth" }

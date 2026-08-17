@@ -22,6 +22,7 @@
 //!   - Logical operators: && and ||
 //!   - Script execution: source / .
 
+use coreutils::quote::quotef_os;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -57,7 +58,7 @@ fn main() {
                     process::exit(exit_code);
                 }
                 Err(e) => {
-                    eprintln!("sh: {path}: {e}");
+                    eprintln!("sh: {}: {e}", quotef_os(path));
                     process::exit(127);
                 }
             }
@@ -401,7 +402,7 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
                 match fs::read_to_string(path) {
                     Ok(content) => execute_script(&content, state),
                     Err(e) => {
-                        eprintln!("sh: {path}: {e}");
+                        eprintln!("sh: {}: {e}", quotef_os(path));
                         1
                     }
                 }

@@ -557,6 +557,74 @@ two models already disagree about what a page range is, and each additional
 edit to either makes the eventual merge harder. Detail in `known-issues.md` →
 "`apps/pdfviewer` can print nothing at all — the whole model is unwired".
 
+## B-Q2 — [B] GNU's error messages use curly quotation marks — `‘zzz’` — on any system set to UTF-8, and ours use straight ones. Follow GNU, or keep straight quotes? — Status: OPEN
+
+**In short:** When a command-line utility complains about something you typed, it
+puts quotation marks around the offending text so you can see exactly where it
+starts and stops. GNU picks *which* marks to use based on the system's character
+set: on an old-style ASCII system it prints `'zzz'`, and on a UTF-8 system — which
+is every modern one, and the only kind SlateOS will ever be — it prints `‘zzz’`
+with the curly typographic marks. Ours always print the straight ones. So today,
+side by side:
+
+```text
+GNU:   sort: invalid argument ‘zzz’ for ‘--sort’
+ours:  sort: invalid argument 'zzz' for '--sort'
+```
+
+Nothing is broken either way; the question is which of the two SlateOS should
+print, since we otherwise match GNU's diagnostics word for word on purpose.
+
+**Terms:**
+
+- **UTF-8** — the character encoding that can represent every writing system.
+  SlateOS uses it everywhere and has no alternative (your decision, Q38: "osh's
+  string layer is UTF-8, full stop").
+- **A *diagnostic*** — the line a utility writes to the error stream when it
+  cannot do what was asked.
+- **The straight marks** are `'` (U+0027), the one on your keyboard. **The curly
+  marks** are `‘` (U+2018) and `’` (U+2019), the ones a typesetter uses.
+
+**How narrow this is.** GNU has three ways of quoting, and only one of them
+changes with the character set — measured, not assumed:
+
+| What is being quoted | Example | Changes under UTF-8? |
+|---|---|---|
+| An **option's argument**, and other non-file text | `invalid argument ‘zzz’ for ‘--sort’` | **Yes** — this is the whole of the question |
+| A **file name inside a sentence** | `cannot open 'missing.txt' for reading` | No — straight, in every locale |
+| A **file name ending the message** | `wc: missing.txt: No such file …` | No — usually unquoted at all |
+| Text from the **option parser itself** | `unrecognized option '--nope'` | No — that text is glibc's, not GNU coreutils' |
+
+So this affects the "invalid argument" / "ambiguous argument" family and very
+little else. File names — the things most likely to be copied back into a shell
+or matched by a script — are unaffected either way.
+
+| Option | *What changes:* | Cost |
+|---|---|---|
+| **A — Keep straight quotes** | `invalid argument 'zzz' for '--total'`, forever, on every utility | Free; it is what 85 utilities and an 8333-row measured fixture already do. But it is a deliberate, permanent departure from the reference we otherwise match exactly, and every future utility's differential test carries an entry saying so |
+| **B — Follow GNU: curly marks in that one family** | `invalid argument ‘zzz’ for ‘--total’` | Faithful, and consistent with Q38's "we are a UTF-8 system, so measure against a UTF-8 reference". Costs a change to `coreutils::quote::quote` and a re-measure of the fixture rows that use it. A script matching our error text with `grep "'"` would stop matching — but such a script is already GNU-incompatible, since GNU has printed the curly marks on desktop Linux for over a decade |
+
+**Claude's recommendation: B**, weakly. The reason the differential harnesses
+exist is that guessing at GNU's behaviour produces something that looks right and
+differs in a dozen corners; this is one of those corners, found the same way as
+the rest. And the objection that curly marks are hard to type into a `grep`
+applies with equal force to real GNU, where people have lived with it since
+2009. But it is a visible change to every error message in the system, it makes
+our output *look* less like a plain-ASCII Unix, and reasonable people prefer
+straight quotes on principle — so it is not mine to settle.
+
+**If never answered:** nothing breaks and nothing decays. Option A is the
+current behaviour and it is self-consistent; the only running cost is that each
+converted utility's `*-diff.sh` gains a handful of cases marked "differs on
+purpose" pointing back here, which is noise in an otherwise clean harness.
+
+**Where it bites:** `userspace/coreutils/src/quote.rs` → `quote` (the delimiters
+it emits; `quotef`/`quoteaf` are unaffected), `userspace/coreutils/src/getopt.rs`
+→ `argmatch` (its only caller that matters), and the fixture
+`userspace/coreutils/tests/quotearg-gnu.txt` with its generator
+`scripts/quote-probe.py`, which was run under `LC_ALL=C` and would need
+re-running under `C.UTF-8`. First observed by `scripts/wc-diff.sh`, where three
+cases are marked `xfail` with the reason `quote-marks-under-a-utf8-locale`.
 
 ---
 

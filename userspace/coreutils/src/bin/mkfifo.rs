@@ -3,6 +3,9 @@
 //! Usage: mkfifo [-m MODE] NAME...
 //!   -m MODE   set permission mode (default: 0666, modified by umask)
 
+// Only the Linux branch below reports a failure, so only it names a file.
+#[cfg(target_os = "linux")]
+use coreutils::quote::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -72,7 +75,7 @@ fn main() {
             // SAFETY: c_path is a valid null-terminated string, mode is a u32.
             let ret = unsafe { mkfifo(c_path.as_ptr(), parsed.mode) };
             if ret != 0 {
-                eprintln!("mkfifo: cannot create fifo '{name}'");
+                eprintln!("mkfifo: cannot create fifo {}", quoteaf_os(name));
                 exit_code = 1;
             }
         }

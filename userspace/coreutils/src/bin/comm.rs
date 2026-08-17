@@ -5,6 +5,7 @@
 //!   -2  suppress lines unique to FILE2
 //!   -3  suppress lines common to both
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -128,7 +129,7 @@ fn read_lines(path: &str) -> Vec<String> {
         match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("comm: {path}: {e}");
+                eprintln!("comm: {}: {e}", quotef_os(path));
                 process::exit(1);
             }
         }

@@ -4,6 +4,7 @@
 //!   -t N   tab width (default: 8)
 //!   -a     convert all sequences of spaces, not just leading
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -43,7 +44,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("unexpand: {path}: {e}");
+                    eprintln!("unexpand: {}: {e}", quotef_os(path));
                     continue;
                 }
             }

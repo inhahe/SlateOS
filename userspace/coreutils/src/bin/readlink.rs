@@ -5,6 +5,7 @@
 //!   With -f: canonicalize the entire path (resolve all symlinks,
 //!            make absolute). Like `realpath`.
 
+use coreutils::quote::quotef_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -30,7 +31,7 @@ fn main() {
             match fs::canonicalize(path_str) {
                 Ok(p) => println!("{}", p.display()),
                 Err(e) => {
-                    eprintln!("readlink: {path_str}: {e}");
+                    eprintln!("readlink: {}: {e}", quotef_os(path_str));
                     exit_code = 1;
                 }
             }
@@ -38,7 +39,7 @@ fn main() {
             match fs::read_link(path_str) {
                 Ok(target) => println!("{}", target.display()),
                 Err(e) => {
-                    eprintln!("readlink: {path_str}: {e}");
+                    eprintln!("readlink: {}: {e}", quotef_os(path_str));
                     exit_code = 1;
                 }
             }

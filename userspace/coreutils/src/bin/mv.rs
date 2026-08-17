@@ -3,6 +3,7 @@
 //! Usage: mv [-f] SOURCE... DEST
 //!   -f  force: do not report errors when overwriting existing files
 
+use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -70,7 +71,7 @@ fn main() {
     let dest_is_dir = dest_path.is_dir();
 
     if sources.len() > 1 && !dest_is_dir {
-        eprintln!("mv: target '{dest}' is not a directory");
+        eprintln!("mv: target {} is not a directory", quoteaf_os(dest));
         process::exit(1);
     }
 
@@ -82,7 +83,11 @@ fn main() {
         if let Err(e) = fs::rename(src, &target) {
             // rename() can fail across filesystems; fall back to copy + remove.
             if src.is_dir() {
-                eprintln!("mv: cannot move '{src_str}' to '{}': {e}", target.display());
+                eprintln!(
+                    "mv: cannot move {} to {}: {e}",
+                    quoteaf_os(src_str),
+                    quoteaf_os(&target)
+                );
                 failed = true;
             } else {
                 match fs::copy(src, &target).and_then(|_| fs::remove_file(src)) {

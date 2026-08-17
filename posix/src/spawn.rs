@@ -1921,7 +1921,10 @@ mod tests {
 
         assert_eq!(posix_spawnattr_setsigdefault(attr, &raw const def), 0);
         assert_eq!(posix_spawnattr_setsigmask(attr, &raw const mask), 0);
-        assert_eq!(posix_spawnattr_setschedpolicy(attr, crate::sched::SCHED_RR), 0);
+        assert_eq!(
+            posix_spawnattr_setschedpolicy(attr, crate::sched::SCHED_RR),
+            0
+        );
         let param = crate::sched::SchedParam { sched_priority: 42 };
         assert_eq!(posix_spawnattr_setschedparam(attr, &raw const param), 0);
 
@@ -1969,7 +1972,11 @@ mod tests {
         // them leaves the object initialised for every field type here
         // (integers and `[u64; 16]`, all valid for any bit pattern).
         unsafe {
-            core::ptr::write_bytes(attr.cast::<u8>(), 0xa5, core::mem::size_of::<PosixSpawnattrT>());
+            core::ptr::write_bytes(
+                attr.cast::<u8>(),
+                0xa5,
+                core::mem::size_of::<PosixSpawnattrT>(),
+            );
         }
         assert_eq!(posix_spawnattr_init(attr), 0);
         let mut got = crate::signal::SigsetT { bits: [0xdead; 16] };

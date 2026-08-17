@@ -149,8 +149,7 @@ pub extern "C" fn openpty(
         errno::set_errno(e);
         return -1;
     }
-    if !winp.is_null()
-        && crate::ioctl::ioctl(slave, TIOCSWINSZ, winp.cast::<u8>().cast_mut()) != 0
+    if !winp.is_null() && crate::ioctl::ioctl(slave, TIOCSWINSZ, winp.cast::<u8>().cast_mut()) != 0
     {
         let e = errno::get_errno();
         crate::file::close(slave);

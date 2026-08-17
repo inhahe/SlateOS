@@ -14,8 +14,9 @@
 //! formula says, including a wrong one. Every value here is independent of the
 //! code that produces it.
 
+use super::mmio;
 use super::regs::{self, CrtcTiming, PixWidth};
-use super::timing::{self, ModeTiming, DMT_MODES};
+use super::timing::{self, DMT_MODES, ModeTiming};
 use crate::drm::mode::PixelFormat;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -89,7 +90,12 @@ impl Check {
             Err(e) if e == want => self.pass(),
             Err(e) => {
                 self.fail();
-                serial_println!("[ati]   FAIL: {}: wrong error {:?}, want {:?}", what, e, want);
+                serial_println!(
+                    "[ati]   FAIL: {}: wrong error {:?}, want {:?}",
+                    what,
+                    e,
+                    want
+                );
             }
             Ok(_) => {
                 self.fail();
@@ -249,7 +255,10 @@ fn test_dmt_table(c: &mut Check) {
     for m in DMT_MODES {
         // The table's declared resolution must match the timing it carries;
         // a mismatch would make `lookup` return a timing for a different mode.
-        c.is_true("DMT width matches timing hdisplay", m.width == m.timing.hdisplay);
+        c.is_true(
+            "DMT width matches timing hdisplay",
+            m.width == m.timing.hdisplay,
+        );
         c.is_true(
             "DMT height matches timing vdisplay",
             m.height == m.timing.vdisplay,
@@ -294,9 +303,17 @@ fn test_encoding_quirks(c: &mut Check) {
             "h_total is not the unbiased quotient",
             (t.h_total_disp & 0x3FF) != 100,
         );
-        c.eq_u32("h_disp is biased by one", (t.h_total_disp >> 16) & 0x1FF, 79);
+        c.eq_u32(
+            "h_disp is biased by one",
+            (t.h_total_disp >> 16) & 0x1FF,
+            79,
+        );
         c.eq_u32("v_total is biased by one", t.v_total_disp & 0xFFF, 524);
-        c.eq_u32("v_disp is biased by one", (t.v_total_disp >> 16) & 0xFFF, 479);
+        c.eq_u32(
+            "v_disp is biased by one",
+            (t.v_total_disp >> 16) & 0xFFF,
+            479,
+        );
     }
 
     // --- Quirk 2: horizontal sync start is split, pixel offset in bits 0-2 -
@@ -414,7 +431,11 @@ fn test_rejections(c: &mut Check) {
     let mut m = base_mode();
     m.hdisplay = 644;
     m.hsync_start = 656;
-    c.is_err("hdisplay not a multiple of 8", CrtcTiming::from_mode(&m), bad);
+    c.is_err(
+        "hdisplay not a multiple of 8",
+        CrtcTiming::from_mode(&m),
+        bad,
+    );
 
     // Edge ordering: display <= sync_start < sync_end <= total, both axes.
     let mut m = base_mode();
@@ -423,7 +444,11 @@ fn test_rejections(c: &mut Check) {
 
     let mut m = base_mode();
     m.hsync_end = 656; // equal to start: zero-width sync
-    c.is_err("hsync_end equals hsync_start", CrtcTiming::from_mode(&m), bad);
+    c.is_err(
+        "hsync_end equals hsync_start",
+        CrtcTiming::from_mode(&m),
+        bad,
+    );
 
     let mut m = base_mode();
     m.hsync_end = 808; // past htotal
@@ -435,7 +460,11 @@ fn test_rejections(c: &mut Check) {
 
     let mut m = base_mode();
     m.vsync_end = 490; // equal to start
-    c.is_err("vsync_end equals vsync_start", CrtcTiming::from_mode(&m), bad);
+    c.is_err(
+        "vsync_end equals vsync_start",
+        CrtcTiming::from_mode(&m),
+        bad,
+    );
 
     // vsync_start is moved up with it so the resulting pulse is only 10 lines
     // wide: overshooting vtotal from the baseline start of 490 would also
@@ -467,7 +496,11 @@ fn test_rejections(c: &mut Check) {
     m.hsync_start = 4112;
     m.hsync_end = 4120;
     m.htotal = 4200;
-    c.is_err("hdisplay overflows its field", CrtcTiming::from_mode(&m), bad);
+    c.is_err(
+        "hdisplay overflows its field",
+        CrtcTiming::from_mode(&m),
+        bad,
+    );
 
     let mut m = base_mode();
     m.vtotal = 4098; // 4097, one past the 12-bit field
@@ -480,7 +513,11 @@ fn test_rejections(c: &mut Check) {
     let mut m = base_mode();
     m.vsync_end = 530; // 40 lines, past the 5-bit field
     m.vtotal = 600;
-    c.is_err("vsync width overflows its field", CrtcTiming::from_mode(&m), bad);
+    c.is_err(
+        "vsync width overflows its field",
+        CrtcTiming::from_mode(&m),
+        bad,
+    );
 
     // A sync pulse wider than 63 characters (504 pixels) is not a rounding
     // problem, so unlike the 44-pixel case it is refused rather than clamped.
@@ -488,22 +525,35 @@ fn test_rejections(c: &mut Check) {
     m.hsync_start = 648;
     m.hsync_end = 1168; // 520 pixels = 65 characters
     m.htotal = 1176;
-    c.is_err("hsync width overflows its field", CrtcTiming::from_mode(&m), bad);
+    c.is_err(
+        "hsync width overflows its field",
+        CrtcTiming::from_mode(&m),
+        bad,
+    );
 }
 
 /// Pixel-format mapping, including the formats that must be refused.
 fn test_pix_width(c: &mut Check) {
     c.is_true(
         "Xrgb8888 maps to 32bpp",
-        matches!(PixWidth::from_format(PixelFormat::Xrgb8888), Ok(PixWidth::Bpp32)),
+        matches!(
+            PixWidth::from_format(PixelFormat::Xrgb8888),
+            Ok(PixWidth::Bpp32)
+        ),
     );
     c.is_true(
         "Argb8888 maps to 32bpp",
-        matches!(PixWidth::from_format(PixelFormat::Argb8888), Ok(PixWidth::Bpp32)),
+        matches!(
+            PixWidth::from_format(PixelFormat::Argb8888),
+            Ok(PixWidth::Bpp32)
+        ),
     );
     c.is_true(
         "Rgb565 maps to 16bpp",
-        matches!(PixWidth::from_format(PixelFormat::Rgb565), Ok(PixWidth::Bpp16)),
+        matches!(
+            PixWidth::from_format(PixelFormat::Rgb565),
+            Ok(PixWidth::Bpp16)
+        ),
     );
 
     // The channel-swapped formats are refused rather than aliased onto their
@@ -551,10 +601,22 @@ fn test_pitch(c: &mut Check) {
 
     let bad = KernelError::InvalidArgument;
     c.is_err("zero bytes-per-pixel", regs::encode_pitch(7680, 0), bad);
-    c.is_err("pitch not a whole pixel count", regs::encode_pitch(7681, 4), bad);
-    c.is_err("pitch not a whole character count", regs::encode_pitch(16, 4), bad);
+    c.is_err(
+        "pitch not a whole pixel count",
+        regs::encode_pitch(7681, 4),
+        bad,
+    );
+    c.is_err(
+        "pitch not a whole character count",
+        regs::encode_pitch(16, 4),
+        bad,
+    );
     // 16384 pixels = 2048 characters, past the 11-bit field.
-    c.is_err("pitch overflows its field", regs::encode_pitch(65_536, 4), bad);
+    c.is_err(
+        "pitch overflows its field",
+        regs::encode_pitch(65_536, 4),
+        bad,
+    );
 }
 
 /// Refresh-rate computation, in centi-hertz.
@@ -605,7 +667,10 @@ fn test_refresh(c: &mut Check) {
     let mut m = base_mode();
     m.htotal = 0;
     m.vtotal = 0;
-    c.is_true("degenerate mode has no refresh rate", m.refresh_centihz().is_none());
+    c.is_true(
+        "degenerate mode has no refresh rate",
+        m.refresh_centihz().is_none(),
+    );
 }
 
 /// `ModeTiming::new` validation and table lookup.
@@ -635,7 +700,10 @@ fn test_mode_lookup(c: &mut Check) {
     // Lookup returns the exact mode asked for, or nothing.  A near match is
     // worse than no match: the caller would program a timing it did not ask
     // for and could not tell apart from the one it wanted.
-    c.is_true("lookup finds 1024x768@60", timing::lookup(1024, 768, 60).is_some());
+    c.is_true(
+        "lookup finds 1024x768@60",
+        timing::lookup(1024, 768, 60).is_some(),
+    );
     c.is_true(
         "lookup misses an absent resolution",
         timing::lookup(1366, 768, 60).is_none(),
@@ -649,7 +717,10 @@ fn test_mode_lookup(c: &mut Check) {
 /// PCI device identification.
 fn test_identify(c: &mut Check) {
     match super::identify(super::ATI_VENDOR_ID, 0x5046) {
-        Some(info) => c.is_true("Rage 128 Pro identifies", info.family == super::AsicFamily::Rage128),
+        Some(info) => c.is_true(
+            "Rage 128 Pro identifies",
+            info.family == super::AsicFamily::Rage128,
+        ),
         None => {
             c.fail();
             serial_println!("[ati]   FAIL: 0x5046 not identified");
@@ -677,6 +748,101 @@ fn test_identify(c: &mut Check) {
     );
 }
 
+/// Register-offset validation, the one part of the MMIO layer that is
+/// decidable without a device.
+///
+/// Worth testing on every boot rather than reasoning about once: this function
+/// is the sole thing standing between a caller's arbitrary `u32` and a
+/// `read_volatile` through a raw pointer, so a hole in it is not a wrong
+/// picture, it is a stray access outside the aperture — into whichever
+/// device's registers happen to be mapped next.
+fn test_mmio_offsets(c: &mut Check) {
+    /// A 16 KiB aperture, matching what [`super::mmio`] maps.
+    const LEN: u64 = 16 * 1024;
+
+    // Every register this driver names must be accepted.
+    for (label, off) in [
+        ("MM_INDEX", regs::MM_INDEX),
+        ("MM_DATA", regs::MM_DATA),
+        ("CNFG_MEMSIZE", regs::CNFG_MEMSIZE),
+        ("CRTC_GEN_CNTL", regs::CRTC_GEN_CNTL),
+        ("CRTC_H_TOTAL_DISP", regs::CRTC_H_TOTAL_DISP),
+        ("CRTC_H_SYNC_STRT_WID", regs::CRTC_H_SYNC_STRT_WID),
+        ("CRTC_V_TOTAL_DISP", regs::CRTC_V_TOTAL_DISP),
+        ("CRTC_V_SYNC_STRT_WID", regs::CRTC_V_SYNC_STRT_WID),
+        ("CRTC_OFFSET", regs::CRTC_OFFSET),
+        ("CRTC_PITCH", regs::CRTC_PITCH),
+    ] {
+        match mmio::check_offset(off, LEN) {
+            Ok(got) => c.eq_u32(label, u32::try_from(got).unwrap_or(u32::MAX), off),
+            Err(_) => {
+                c.fail();
+                serial_println!(
+                    "[ati]   FAIL: {} ({:#x}) rejected by check_offset",
+                    label,
+                    off
+                );
+            }
+        }
+    }
+
+    // Misalignment is refused. x86 would not fault on these, which is exactly
+    // why the check has to exist in software: a byte-offset read would be split
+    // across two registers and quietly do something to both.
+    c.is_err(
+        "offset 1 is refused (misaligned)",
+        mmio::check_offset(1, LEN),
+        KernelError::InvalidArgument,
+    );
+    c.is_err(
+        "offset 0x202 is refused (2-byte aligned, not 4)",
+        mmio::check_offset(0x202, LEN),
+        KernelError::InvalidArgument,
+    );
+
+    // The boundary. `LEN - 4` is the last whole `u32` in the aperture and must
+    // be accepted; `LEN` is one past the end. `LEN - 2` is the case a naive
+    // `offset < len` test lets through — in range itself, but naming four bytes
+    // that are not — and it is also misaligned, so it is checked alongside an
+    // aligned out-of-range offset that isolates the range check on its own.
+    match mmio::check_offset(
+        u32::try_from(LEN).unwrap_or(u32::MAX).saturating_sub(4),
+        LEN,
+    ) {
+        Ok(_) => c.pass(),
+        Err(_) => {
+            c.fail();
+            serial_println!("[ati]   FAIL: last aligned u32 in the aperture was rejected");
+        }
+    }
+    c.is_err(
+        "offset == len is refused",
+        mmio::check_offset(u32::try_from(LEN).unwrap_or(u32::MAX), LEN),
+        KernelError::InvalidArgument,
+    );
+    c.is_err(
+        "offset len-2 is refused (u32 would straddle the end)",
+        mmio::check_offset(
+            u32::try_from(LEN).unwrap_or(u32::MAX).saturating_sub(2),
+            LEN,
+        ),
+        KernelError::InvalidArgument,
+    );
+    c.is_err(
+        "a far out-of-range aligned offset is refused",
+        mmio::check_offset(0x8000_0000, LEN),
+        KernelError::InvalidArgument,
+    );
+
+    // A zero-length aperture accepts nothing, including offset zero. This is
+    // the state a failed mapping would leave behind, and it must not read.
+    c.is_err(
+        "offset 0 is refused against a zero-length aperture",
+        mmio::check_offset(0, 0),
+        KernelError::InvalidArgument,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -699,6 +865,7 @@ pub fn run() -> KernelResult<()> {
     test_refresh(&mut c);
     test_mode_lookup(&mut c);
     test_identify(&mut c);
+    test_mmio_offsets(&mut c);
 
     serial_println!("[ati] Self-test: {} passed, {} failed.", c.passed, c.failed);
     if c.failed > 0 {

@@ -2645,12 +2645,40 @@ pub fn dimensions() -> (u32, u32) {
 pub fn self_test() {
     crate::serial_println!("[console] Running self-test...");
 
+    // A machine with no framebuffer has no console to test, and that is a
+    // legitimate configuration rather than a fault: a serial-only server, or a
+    // display adapter the firmware has no driver for, leaves the bootloader
+    // with no framebuffer to hand us. `fb::self_test` already treats exactly
+    // this condition as non-fatal; asserting on it here made the two disagree,
+    // and the disagreement was a kernel panic on any headless boot.
+    //
+    // What is deliberately *not* softened: a console that failed to come up
+    // while a framebuffer is present. That is a real bug with no benign
+    // reading, so it still panics — and now says so, instead of reporting the
+    // same "console not initialized" for two unrelated situations.
+    //
+    // The flag is copied out and the guard dropped before either branch: the
+    // panic path writes to the console, so panicking while still holding this
+    // lock would deadlock and replace the message with a hang.
+    let (initialized, cols, rows) = {
+        let con = CONSOLE.lock_irqsave();
+        (con.initialized, con.cols, con.rows)
+    };
+    if !initialized {
+        assert!(
+            !crate::fb::is_initialized(),
+            "console not initialized despite a working framebuffer"
+        );
+        crate::serial_println!(
+            "[console]   SKIP: no framebuffer on this machine, console is not in use"
+        );
+        return;
+    }
+
     // Test 1: Basic initialization state.
     {
-        let con = CONSOLE.lock_irqsave();
-        assert!(con.initialized, "console not initialized");
-        assert!(con.cols > 0 && con.rows > 0, "invalid dimensions");
-        crate::serial_println!("[console]   Dimensions: {}x{} OK", con.cols, con.rows);
+        assert!(cols > 0 && rows > 0, "invalid dimensions");
+        crate::serial_println!("[console]   Dimensions: {}x{} OK", cols, rows);
     }
 
     // Test 2: Cursor positioning via CSI H.

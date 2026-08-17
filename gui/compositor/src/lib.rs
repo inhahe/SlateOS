@@ -859,7 +859,9 @@ impl Framebuffer {
             return Err(CompositorError::FramebufferTooLarge { width, height });
         }
 
-        let size = width as usize * height as usize;
+        // Bounded by the MAX_FB_* check just above; saturating so the bound is
+        // enforced by the code rather than only by the reader.
+        let size = (width as usize).saturating_mul(height as usize);
         Ok(Self {
             width,
             height,
@@ -914,6 +916,82 @@ impl Framebuffer {
             Some(c) => c.contains(x as i32, y as i32),
             None => true,
         }
+    }
+
+    /// Index of pixel (`x`, `y`) in a row-major buffer of `stride` pixels/row.
+    ///
+    /// Saturating, and that is not a compromise: **every** index this produces
+    /// is consumed by `get`/`get_mut`, so a saturated one names no pixel and is
+    /// declined — exactly what already happens to an out-of-range one. A
+    /// wrapped one would name a real pixel in the wrong place and silently
+    /// scramble the frame, which is far worse than a dropped write.
+    ///
+    /// In practice it cannot saturate: [`new`](Self::new) and
+    /// [`resize`](Self::resize) cap the dimensions at
+    /// [`MAX_FB_WIDTH`] × [`MAX_FB_HEIGHT`] ≈ 33 Mpx, which fits in a `u32`.
+    /// But that cap is enforced two functions away, so the proof lives here —
+    /// one place to re-check if the cap ever moves — rather than being redone
+    /// at each of the dozen sites that used to compute this inline.
+    #[inline]
+    const fn pixel_index(stride: usize, x: usize, y: usize) -> usize {
+        y.saturating_mul(stride).saturating_add(x)
+    }
+
+    /// The `get`/`get_mut` range covering columns `[x_lo, x_hi)` of row `y`.
+    ///
+    /// Empty when `x_hi <= x_lo`, which slicing handles without a guard.
+    #[inline]
+    const fn row_range(
+        stride: usize,
+        y: usize,
+        x_lo: usize,
+        x_hi: usize,
+    ) -> std::ops::Range<usize> {
+        let lo = Self::pixel_index(stride, x_lo, y);
+        lo..lo.saturating_add(x_hi.saturating_sub(x_lo))
+    }
+
+    /// One channel of a source-over blend: `src` at alpha `a`, over `dst`.
+    ///
+    /// The per-pixel alpha bound lives here, once, instead of being re-assumed
+    /// by the three channel expressions in each of the three blend loops.
+    /// Taking `u8`s is the whole trick: `src*a + dst*(255-a)` is then at most
+    /// 255 × 255 = 65 025 whatever the caller passes, so the saturating forms
+    /// below can never actually saturate. The old `u32` call sites had the same
+    /// bound but only by convention, and a caller that broke it would have
+    /// panicked the display server rather than been rejected by the compiler.
+    #[inline]
+    const fn blend_channel(src: u8, dst: u8, a: u8) -> u32 {
+        let a = a as u32;
+        let inv = 255u32.saturating_sub(a);
+        (src as u32)
+            .saturating_mul(a)
+            .saturating_add((dst as u32).saturating_mul(inv))
+            / 255
+    }
+
+    /// How many whole scanlines of `width` pixels a row-band chunk holds.
+    ///
+    /// `width` is never zero — [`new`](Self::new) and [`resize`](Self::resize)
+    /// both reject a zero dimension — but the division is written total anyway,
+    /// because "the constructor rejects it" is an invariant three call frames
+    /// away and a zero here would take down the display server.
+    #[inline]
+    fn rows_in(chunk: &[u32], width: u32) -> u32 {
+        let rows = chunk.len().checked_div(width as usize).unwrap_or(0);
+        u32::try_from(rows).unwrap_or(u32::MAX)
+    }
+
+    /// The effective source alpha of `color` drawn at `opacity`, as the byte
+    /// the blend math wants.
+    ///
+    /// Returning `u8` rather than `u32` is the point: this is the one place the
+    /// "alpha is a byte" bound is established, so [`blend_channel`] can take it
+    /// from the type instead of from a comment at every call site.
+    #[inline]
+    fn effective_alpha(color: u32, opacity: f32) -> u8 {
+        let raw = ((color >> 24) & 0xFF) as f32;
+        (raw * opacity).clamp(0.0, 255.0) as u8
     }
 
     /// Swap front and back buffers.
@@ -999,9 +1077,9 @@ impl Framebuffer {
                     }
                 }
             }
-            let row_base = r as usize * width_usize;
+            let row = r as usize;
             if spans.is_empty() {
-                if let Some(s) = buf.get_mut(row_base..row_base + width_usize) {
+                if let Some(s) = buf.get_mut(Self::row_range(width_usize, row, 0, width_usize)) {
                     s.fill(color);
                 }
                 continue;
@@ -1011,18 +1089,16 @@ impl Framebuffer {
             let mut cursor = 0u32;
             for &(a, b) in &spans {
                 if a > cursor {
-                    let lo = row_base + cursor as usize;
-                    let hi = row_base + a as usize;
-                    if let Some(s) = buf.get_mut(lo..hi) {
+                    let gap = Self::row_range(width_usize, row, cursor as usize, a as usize);
+                    if let Some(s) = buf.get_mut(gap) {
                         s.fill(color);
                     }
                 }
                 cursor = cursor.max(b);
             }
             if cursor < width {
-                let lo = row_base + cursor as usize;
-                let hi = row_base + width_usize;
-                if let Some(s) = buf.get_mut(lo..hi) {
+                let tail = Self::row_range(width_usize, row, cursor as usize, width_usize);
+                if let Some(s) = buf.get_mut(tail) {
                     s.fill(color);
                 }
             }
@@ -1036,12 +1112,14 @@ impl Framebuffer {
         let x_end = (rect.x.saturating_add(rect.width as i32) as u32).min(self.width);
         let y_end = (rect.y.saturating_add(rect.height as i32) as u32).min(self.height);
 
+        // Per row rather than per pixel: the span is contiguous, so one `fill`
+        // does what a column loop of bounds-checked single stores did, and
+        // lowers to a memset instead of `width` branches.
+        let stride = self.width as usize;
         for row in y_start..y_end {
-            let row_offset = row as usize * self.width as usize;
-            for col in x_start..x_end {
-                if let Some(pixel) = self.back.get_mut(row_offset + col as usize) {
-                    *pixel = color;
-                }
+            let span = Self::row_range(stride, row as usize, x_start as usize, x_end as usize);
+            if let Some(s) = self.back.get_mut(span) {
+                s.fill(color);
             }
         }
     }
@@ -1081,11 +1159,11 @@ impl Framebuffer {
         // a non-overlapping `&mut [u32]` (via chunks_mut), so the scoped threads
         // never alias — safe parallel fill with no `unsafe`.
         let rows_per_band = height.div_ceil(workers as u32);
-        let band_stride = rows_per_band as usize * width as usize;
+        let band_stride = Self::pixel_index(width as usize, 0, rows_per_band as usize);
         std::thread::scope(|s| {
             for (band_idx, chunk) in self.back.chunks_mut(band_stride).enumerate() {
-                let y0 = band_idx as u32 * rows_per_band;
-                let band_rows = (chunk.len() / width as usize) as u32;
+                let y0 = (band_idx as u32).saturating_mul(rows_per_band);
+                let band_rows = Self::rows_in(chunk, width);
                 s.spawn(move || {
                     Self::fill_uncovered_band(chunk, y0, band_rows, width, color, covered, height);
                 });
@@ -1097,7 +1175,7 @@ impl Framebuffer {
     #[inline]
     pub fn set_pixel(&mut self, x: u32, y: u32, color: u32) {
         if self.clip_allows(x, y) {
-            let idx = y as usize * self.width as usize + x as usize;
+            let idx = Self::pixel_index(self.width as usize, x as usize, y as usize);
             if let Some(pixel) = self.back.get_mut(idx) {
                 *pixel = color;
             }
@@ -1108,7 +1186,7 @@ impl Framebuffer {
     #[inline]
     pub fn get_pixel(&self, x: u32, y: u32) -> Option<u32> {
         if x < self.width && y < self.height {
-            let idx = y as usize * self.width as usize + x as usize;
+            let idx = Self::pixel_index(self.width as usize, x as usize, y as usize);
             self.back.get(idx).copied()
         } else {
             None
@@ -1122,14 +1200,13 @@ impl Framebuffer {
             return;
         }
 
-        let idx = y as usize * self.width as usize + x as usize;
+        let idx = Self::pixel_index(self.width as usize, x as usize, y as usize);
         let dst = match self.back.get(idx) {
             Some(&val) => val,
             None => return,
         };
 
-        let src_a_raw = ((src_color >> 24) & 0xFF) as f32;
-        let src_a = ((src_a_raw * window_opacity) as u32).min(255);
+        let src_a = Self::effective_alpha(src_color, window_opacity);
 
         if src_a == 255 {
             // Fully opaque — just write.
@@ -1142,19 +1219,11 @@ impl Framebuffer {
             return;
         }
 
-        let inv_a = 255 - src_a;
-
-        let src_r = (src_color >> 16) & 0xFF;
-        let src_g = (src_color >> 8) & 0xFF;
-        let src_b = src_color & 0xFF;
-
-        let dst_r = (dst >> 16) & 0xFF;
-        let dst_g = (dst >> 8) & 0xFF;
-        let dst_b = dst & 0xFF;
-
-        let out_r = (src_r * src_a + dst_r * inv_a) / 255;
-        let out_g = (src_g * src_a + dst_g * inv_a) / 255;
-        let out_b = (src_b * src_a + dst_b * inv_a) / 255;
+        // `as u8` is the channel extraction: it keeps the low byte, which is
+        // exactly what the `>> n & 0xFF` pairs used to spell out.
+        let out_r = Self::blend_channel((src_color >> 16) as u8, (dst >> 16) as u8, src_a);
+        let out_g = Self::blend_channel((src_color >> 8) as u8, (dst >> 8) as u8, src_a);
+        let out_b = Self::blend_channel(src_color as u8, dst as u8, src_a);
 
         if let Some(pixel) = self.back.get_mut(idx) {
             *pixel = 0xFF_00_00_00 | (out_r << 16) | (out_g << 8) | out_b;
@@ -1186,7 +1255,12 @@ impl Framebuffer {
         if dst_x >= self.width as usize {
             return;
         }
-        let count = (src.len() - src_off).min(self.width as usize - dst_x);
+        // Both subtractions are guarded above (`skip >= src.len()` and
+        // `dst_x >= width` both returned), so saturating is exact here.
+        let count = src
+            .len()
+            .saturating_sub(src_off)
+            .min((self.width as usize).saturating_sub(dst_x));
         if count == 0 {
             return;
         }
@@ -1194,15 +1268,18 @@ impl Framebuffer {
         // source forward by however much the left edge moved, so the two stay
         // in step (a clip that trimmed only the destination would smear the
         // source sideways).
-        let Some((x_lo, x_hi)) = self.clip_span(y, dst_x as u32, (dst_x + count) as u32) else {
+        let dst_end = u32::try_from(dst_x.saturating_add(count)).unwrap_or(u32::MAX);
+        let Some((x_lo, x_hi)) = self.clip_span(y, dst_x as u32, dst_end) else {
             return;
         };
-        let src_off = src_off + (x_lo as usize - dst_x);
-        let count = (x_hi - x_lo) as usize;
-        let row_off = y as usize * self.width as usize + x_lo as usize;
+        // `clip_span` only ever narrows, so x_lo >= dst_x and x_hi > x_lo; the
+        // saturating forms are exact and merely make that visible.
+        let src_off = src_off.saturating_add((x_lo as usize).saturating_sub(dst_x));
+        let count = (x_hi.saturating_sub(x_lo)) as usize;
+        let row = Self::row_range(self.width as usize, y as usize, x_lo as usize, x_hi as usize);
         if let (Some(dst), Some(s)) = (
-            self.back.get_mut(row_off..row_off + count),
-            src.get(src_off..src_off + count),
+            self.back.get_mut(row),
+            src.get(src_off..src_off.saturating_add(count)),
         ) {
             dst.copy_from_slice(s);
         }
@@ -1230,7 +1307,7 @@ impl Framebuffer {
         let width = self.width;
         let height = self.height;
         // Work proportional to the visible pixel count; reuse the fill heuristic.
-        let workers = Self::fill_worker_count(rows as usize * cols as usize);
+        let workers = Self::fill_worker_count((rows as usize).saturating_mul(cols as usize));
         let clip = self.frame_clip;
         if workers <= 1 {
             Self::blit_opaque_band(
@@ -1248,11 +1325,11 @@ impl Framebuffer {
             return;
         }
         let rows_per_band = height.div_ceil(workers as u32);
-        let band_stride = rows_per_band as usize * width as usize;
+        let band_stride = Self::pixel_index(width as usize, 0, rows_per_band as usize);
         std::thread::scope(|s| {
             for (band_idx, chunk) in self.back.chunks_mut(band_stride).enumerate() {
-                let by0 = band_idx as u32 * rows_per_band;
-                let band_rows = (chunk.len() / width as usize) as u32;
+                let by0 = (band_idx as u32).saturating_mul(rows_per_band);
+                let band_rows = Self::rows_in(chunk, width);
                 s.spawn(move || {
                     Self::blit_opaque_band(
                         chunk, by0, band_rows, width, buf, win_x, win_y, cols, rows, clip,
@@ -1330,7 +1407,11 @@ impl Framebuffer {
             if dst_x >= width_usize {
                 continue;
             }
-            let count = (src.len() - src_off).min(width_usize - dst_x);
+            // Both subtractions are guarded above, so saturating is exact.
+            let count = src
+                .len()
+                .saturating_sub(src_off)
+                .min(width_usize.saturating_sub(dst_x));
             if count == 0 {
                 continue;
             }
@@ -1343,21 +1424,29 @@ impl Framebuffer {
                         continue;
                     }
                     let lo = (dst_x as u32).max(cx0);
-                    let hi = ((dst_x + count) as u32).min(cx1);
+                    let dst_end = u32::try_from(dst_x.saturating_add(count)).unwrap_or(u32::MAX);
+                    let hi = dst_end.min(cx1);
                     if hi <= lo {
                         continue;
                     }
                     (
-                        src_off + (lo as usize - dst_x),
+                        src_off.saturating_add((lo as usize).saturating_sub(dst_x)),
                         lo as usize,
-                        (hi - lo) as usize,
+                        hi.saturating_sub(lo) as usize,
                     )
                 }
             };
-            let row_off = (sy - by0) as usize * width_usize + dst_x;
+            // `sy >= by0` was established above, so the row is band-local.
+            let band_row = sy.saturating_sub(by0) as usize;
+            let dst_span = Self::row_range(
+                width_usize,
+                band_row,
+                dst_x,
+                dst_x.saturating_add(count),
+            );
             if let (Some(dst), Some(s)) = (
-                band.get_mut(row_off..row_off + count),
-                src.get(src_off..src_off + count),
+                band.get_mut(dst_span),
+                src.get(src_off..src_off.saturating_add(count)),
             ) {
                 dst.copy_from_slice(s);
             }
@@ -1380,10 +1469,8 @@ impl Framebuffer {
         let Some((x_lo, x_hi)) = self.clip_span(y, x_start, x_end) else {
             return;
         };
-        let row_base = y as usize * self.width as usize;
-        let lo = row_base + x_lo as usize;
-        let hi = row_base + x_hi as usize;
-        if let Some(span) = self.back.get_mut(lo..hi) {
+        let row = Self::row_range(self.width as usize, y as usize, x_lo as usize, x_hi as usize);
+        if let Some(span) = self.back.get_mut(row) {
             span.fill(color | 0xFF_00_00_00);
         }
     }
@@ -1394,30 +1481,28 @@ impl Framebuffer {
     /// OPT: hoists the alpha computation and per-pixel branch/float conversion out
     /// of the inner loop (versus calling `blend_pixel` per pixel). Only the integer
     /// channel blend runs per pixel. Caller guarantees `0 < src_a < 255`.
+    ///
+    /// The `src * a` products used to be hoisted by hand; they are now inside
+    /// [`blend_channel`](Self::blend_channel), which is a `#[inline] const fn`
+    /// of two loop-invariant arguments, so LLVM hoists them itself. Taking
+    /// `src_a` as a `u8` also puts half the caller's contract into the type.
     #[inline]
-    fn blend_row(&mut self, y: u32, x_start: u32, x_end: u32, src_color: u32, src_a: u32) {
+    fn blend_row(&mut self, y: u32, x_start: u32, x_end: u32, src_color: u32, src_a: u8) {
         let Some((x_lo, x_hi)) = self.clip_span(y, x_start, x_end) else {
             return;
         };
-        let inv_a = 255 - src_a;
-        let src_r = (src_color >> 16) & 0xFF;
-        let src_g = (src_color >> 8) & 0xFF;
-        let src_b = src_color & 0xFF;
-        let sr = src_r * src_a;
-        let sg = src_g * src_a;
-        let sb = src_b * src_a;
-        let row_base = y as usize * self.width as usize;
-        let lo = row_base + x_lo as usize;
-        let hi = row_base + x_hi as usize;
-        if let Some(span) = self.back.get_mut(lo..hi) {
+        let (src_r, src_g, src_b) = (
+            (src_color >> 16) as u8,
+            (src_color >> 8) as u8,
+            src_color as u8,
+        );
+        let row = Self::row_range(self.width as usize, y as usize, x_lo as usize, x_hi as usize);
+        if let Some(span) = self.back.get_mut(row) {
             for pixel in span {
                 let dst = *pixel;
-                let dst_r = (dst >> 16) & 0xFF;
-                let dst_g = (dst >> 8) & 0xFF;
-                let dst_b = dst & 0xFF;
-                let out_r = (sr + dst_r * inv_a) / 255;
-                let out_g = (sg + dst_g * inv_a) / 255;
-                let out_b = (sb + dst_b * inv_a) / 255;
+                let out_r = Self::blend_channel(src_r, (dst >> 16) as u8, src_a);
+                let out_g = Self::blend_channel(src_g, (dst >> 8) as u8, src_a);
+                let out_b = Self::blend_channel(src_b, dst as u8, src_a);
                 *pixel = 0xFF_00_00_00 | (out_r << 16) | (out_g << 8) | out_b;
             }
         }
@@ -1437,7 +1522,9 @@ impl Framebuffer {
             return Err(CompositorError::FramebufferTooLarge { width, height });
         }
 
-        let size = width as usize * height as usize;
+        // Bounded by the MAX_FB_* check just above; saturating so the bound is
+        // enforced by the code rather than only by the reader.
+        let size = (width as usize).saturating_mul(height as usize);
         self.width = width;
         self.height = height;
         self.back = vec![0xFF_00_00_00; size];
@@ -2473,8 +2560,7 @@ impl RenderEngine {
         // and pick a per-row fast path instead of blending pixel-by-pixel.
         // OPT (BENCH-COMPOSITOR-SLOW): opaque fills become a single slice memset
         // per row; translucent fills hoist the alpha math out of the inner loop.
-        let src_a_raw = ((color >> 24) & 0xFF) as f32;
-        let src_a = ((src_a_raw * opacity) as u32).min(255);
+        let src_a = Framebuffer::effective_alpha(color, opacity);
         if src_a == 0 {
             return;
         }

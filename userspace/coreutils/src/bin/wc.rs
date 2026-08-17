@@ -945,16 +945,13 @@ mod tests {
         items.iter().map(OsString::from).collect()
     }
 
-    /// The diagnostic without its `Try 'wc --help'` referral, which every
-    /// getopt sentence carries and which would triple the length of each
+    /// The diagnostic's own sentence, without the `Try 'wc --help'` referral
+    /// every getopt sentence carries and which would triple the length of each
     /// expectation below.
     fn fail_msg(items: &[&str]) -> String {
         let e = parse_args(&args(items)).unwrap_err();
         assert_eq!(e.status, 1, "wc exits 1 on a bad command line, not 2");
-        e.message
-            .strip_suffix("\nTry 'wc --help' for more information.")
-            .unwrap_or(&e.message)
-            .to_string()
+        e.sentence
     }
 
     fn opts(items: &[&str]) -> Options {
@@ -1124,7 +1121,7 @@ mod tests {
     fn a_bad_total_argument_is_argmatchs_sentence_not_getopts() {
         let e = parse_args(&args(&["--total=zzz"])).unwrap_err();
         assert_eq!(
-            e.message,
+            e.message(),
             "invalid argument 'zzz' for '--total'\nValid arguments are:\n  \
              - 'auto'\n  - 'always'\n  - 'only'\n  - 'never'\n\
              Try 'wc --help' for more information."
@@ -1135,7 +1132,7 @@ mod tests {
         // …and one that fits two does not.
         let e = parse_args(&args(&["--total=a"])).unwrap_err();
         assert!(
-            e.message
+            e.sentence
                 .starts_with("ambiguous argument 'a' for '--total'")
         );
     }
@@ -1146,7 +1143,7 @@ mod tests {
         // the referral, so it is checked with the referral attached.
         let e = parse_args(&args(&["--files0-from=-", "w1"])).unwrap_err();
         assert_eq!(
-            e.message,
+            e.message(),
             "extra operand 'w1'\nfile operands cannot be combined with \
              --files0-from\nTry 'wc --help' for more information."
         );

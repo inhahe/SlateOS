@@ -1127,12 +1127,10 @@ mod tests {
         }
     }
 
-    /// A diagnostic without its `Try '…'` referral, which every one of these
-    /// carries and none of them is about.
+    /// A diagnostic's own sentence, which is what these assertions are about —
+    /// the `Try '…'` referral every one of them carries is not.
     fn body(e: &getopt::Error) -> String {
-        e.message
-            .split_once("\nTry '")
-            .map_or_else(|| e.message.clone(), |(head, _)| head.to_string())
+        e.sentence.clone()
     }
 
     /// Run the utility over `input` and return exactly what it wrote.

@@ -649,9 +649,9 @@ mod tests {
         // The whole point of the rewrite: this used to look for a file called
         // `-Z`, fail to find it, and exit 0.
         let e = parse_args(&args(&["-Z", "f"])).unwrap_err();
-        assert!(e.message.contains("invalid option"), "{e}");
+        assert!(e.sentence.contains("invalid option"), "{e}");
         let e = parse_args(&args(&["--nope"])).unwrap_err();
-        assert!(e.message.contains("unrecognized option"), "{e}");
+        assert!(e.sentence.contains("unrecognized option"), "{e}");
     }
 
     /// The literals are glibc's, measured from `cat` under `LC_ALL=C`.
@@ -659,10 +659,12 @@ mod tests {
         let e = parse_args(&args(items)).unwrap_err();
         // Every one of these is status 1 for `cat` — not `sort`'s 2.
         assert_eq!(e.status, 1, "{e}");
-        e.message
-            .strip_suffix("\nTry 'cat --help' for more information.")
-            .expect("every option diagnostic ends with the referral")
-            .to_string()
+        assert_eq!(
+            e.referral,
+            Some("cat"),
+            "every option diagnostic ends with the referral"
+        );
+        e.sentence
     }
 
     #[test]

@@ -1167,12 +1167,10 @@ mod tests {
         }
     }
 
-    /// A diagnostic without its `Try '…'` referral, which most of these carry
-    /// and none of them is about.
+    /// A diagnostic's own sentence, which is what these assertions are about —
+    /// the `Try '…'` referral most of them carry is not.
     fn body(e: &getopt::Error) -> String {
-        e.message
-            .split_once("\nTry '")
-            .map_or_else(|| e.message.clone(), |(head, _)| head.to_string())
+        e.sentence.clone()
     }
 
     /// Run the utility over `input` and return exactly what it wrote.
@@ -1218,7 +1216,7 @@ mod tests {
         // Alphabetically `--check-chars` precedes `--count`, and `--skip-chars`
         // precedes `--skip-fields`. Neither does here, which is what would
         // catch a table someone had tidied into alphabetical order.
-        let all = fail(&["--=x"]).message;
+        let all = fail(&["--=x"]).sentence;
         assert!(all.find("'--count'") < all.find("'--check-chars'"), "{all}");
         assert!(all.find("'--group'") < all.find("'--unique'"), "{all}");
     }
@@ -1415,10 +1413,7 @@ mod tests {
         assert_eq!(body(&e), "extra operand 'c'");
         // This one *does* refer to --help: upstream reports it and then calls
         // usage(), where the number diagnostics exit on the spot.
-        assert!(
-            e.message
-                .ends_with("Try 'uniq --help' for more information.")
-        );
+        assert_eq!(e.referral, Some("uniq"));
         assert_eq!(e.status, 1);
     }
 
@@ -1432,13 +1427,13 @@ mod tests {
             ("-w", "x: invalid number of bytes to compare"),
         ] {
             let e = fail(&[option, "x"]);
-            assert_eq!(e.message, expected, "{option}");
-            assert!(!e.message.contains("Try '"), "{option}: {e}");
+            assert_eq!(e.sentence, expected, "{option}");
+            assert_eq!(e.referral, None, "{option}: {e}");
             assert_eq!(e.status, 1);
         }
         // Not quoted at all — the format string is a bare `"%s: %s"`.
         assert_eq!(
-            fail(&["-f", "a b"]).message,
+            fail(&["-f", "a b"]).sentence,
             "a b: invalid number of fields to skip"
         );
     }

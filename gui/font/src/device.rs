@@ -21,19 +21,34 @@
 //! the difference between an accent sitting on a letter and sitting in it. A
 //! face that ships one has explicitly said the scaled value is wrong there.
 //!
-//! # What is not here
+//! # The other thing that can occupy the slot
 //!
 //! `deltaFormat` `0x8000` marks a `VariationIndex` rather than a device table:
-//! the same eight bytes, but the first four are indices into a variable font's
-//! `ItemVariationStore` instead of a pixel range. This crate does not read
-//! variation stores, and — this is the point — a `VariationIndex` read *as* a
-//! device table is not a wrong correction but an arbitrary one, since the
-//! indices would be interpreted as a start and end ppem that happen to bracket
-//! the current size. [`Ppem::delta`] checks the format before the range for
-//! exactly that reason, and returns no correction. See
-//! `TD-FONT-DOES-NOT-READ-VARIATION-STORES`.
+//! the same slot and the same six-byte header, but the first four bytes are
+//! indices into a variable font's
+//! `ItemVariationStore` instead of a pixel range, and the correction they name
+//! depends on the *instance* rather than on the size. A `VariationIndex` read
+//! *as* a device table is not a wrong correction but an arbitrary one, since
+//! the indices would be interpreted as a start and end ppem that happen to
+//! bracket the current size — so the format is checked before the range.
+//!
+//! The two are read by two types, because they need different things and one
+//! caller has only the first: [`Ppem`] is the pixel size alone and answers
+//! device tables, [`Corrections`] adds the instance and answers both. A caller
+//! that knows a size but not an instance is not making an error, so
+//! `Corrections` is constructible from a bare `Ppem`.
+//!
+//! Note that the two corrections are *not* in the same units. A device table's
+//! delta is in **pixels** and must be converted back through the em; a
+//! `VariationIndex`'s is already in **font units**, so it is applied as-is —
+//! and consequently applies at [`Ppem::NONE`] too, where a device table
+//! correctly contributes nothing. That asymmetry is the specification's, and
+//! matches HarfBuzz, whose `VariationDevice::get_x_delta` scales the store's
+//! value by the font scale where `DeviceTable::get_x_delta` scales it by
+//! `x_ppem`.
 
 use crate::sfnt::u16_at;
+use crate::varstore::VarStore;
 
 /// `deltaFormat` value marking a `VariationIndex` table. Not a bit count.
 const VARIATION_INDEX: u16 = 0x8000;
@@ -130,13 +145,120 @@ impl Ppem {
     }
 }
 
+/// Everything needed to read whichever of the two tables occupies a `Device`
+/// slot: the pixel size a device table is indexed by, and the instance a
+/// `VariationIndex` is evaluated at.
+///
+/// Carries borrows, so it is built at the point a run is positioned and passed
+/// down by value rather than stored. [`NONE`](Self::NONE) — no size, default
+/// instance — is what an unscaled [`Face`](crate::sfnt::Face) asks with, and
+/// reads every correction as zero.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Corrections<'a> {
+    /// The size, for the device-table half. May be [`Ppem::NONE`]; a
+    /// `VariationIndex` is still read then, because its delta does not depend
+    /// on the size.
+    ppem: Ppem,
+    /// `GDEF`'s `ItemVariationStore`, if the face has one *and* the caller is
+    /// asking at a non-default instance. `None` means every `VariationIndex`
+    /// reads as no correction, which is the right answer at the default
+    /// instance — where all the deltas are zero anyway — and the only possible
+    /// one for a face with no store.
+    store: Option<&'a VarStore>,
+    /// The normalized F2Dot14 coordinates, one per `fvar` axis. Empty when
+    /// [`store`](Self::store) is `None`.
+    coords: &'a [i16],
+}
+
+impl<'a> Corrections<'a> {
+    /// No size and no instance: every correction reads as zero.
+    pub(crate) const NONE: Self = Self {
+        ppem: Ppem::NONE,
+        store: None,
+        coords: &[],
+    };
+
+    /// A size, at the default instance.
+    ///
+    /// What a caller with a scaled font but no variation axes asks with — and
+    /// deliberately *not* an error, since a non-variable face drawn at 11px is
+    /// exactly this case.
+    pub(crate) const fn at(ppem: Ppem) -> Self {
+        Self {
+            ppem,
+            store: None,
+            coords: &[],
+        }
+    }
+
+    /// A size *and* an instance.
+    ///
+    /// `store` is `None` for a face that has no `GDEF` store; `coords` is the
+    /// normalized vector, which the caller is expected to have already
+    /// suppressed to empty at the default instance so that the common case
+    /// does no work.
+    pub(crate) const fn varying(
+        ppem: Ppem,
+        store: Option<&'a VarStore>,
+        coords: &'a [i16],
+    ) -> Self {
+        Self {
+            ppem,
+            store,
+            coords,
+        }
+    }
+
+    /// The correction the table at `from + offset` makes, in font units,
+    /// whichever of the two kinds it turns out to be.
+    ///
+    /// Same contract as [`Ppem::delta`]: `0` is the NULL offset, `from` is
+    /// whatever the format measures the offset from, and it is infallible
+    /// because a malformed correction is worth less than the placement it
+    /// would otherwise abort.
+    pub(crate) fn delta(self, data: &[u8], from: usize, offset: u16) -> i16 {
+        if offset == 0 {
+            return 0;
+        }
+        let Some(at) = from.checked_add(usize::from(offset)) else {
+            return 0;
+        };
+        // The format word decides which reader applies, and must be consulted
+        // before either one touches the first four bytes: those are a ppem
+        // range in one table and a pair of store indices in the other.
+        let format = at.checked_add(4).and_then(|o| u16_at(data, o));
+        if format == Some(VARIATION_INDEX) {
+            return self.variation_delta(data, at);
+        }
+        self.ppem.delta(data, from, offset)
+    }
+
+    /// The `ItemVariationStore` delta the `VariationIndex` at `at` names.
+    ///
+    /// Already in font units — no `to_font_units` — which is why this does not
+    /// consult the ppem at all and answers just as well at [`Ppem::NONE`].
+    fn variation_delta(self, data: &[u8], at: usize) -> i16 {
+        let Some(store) = self.store else { return 0 };
+        let (Some(outer), Some(inner)) = (
+            u16_at(data, at),
+            at.checked_add(2).and_then(|o| u16_at(data, o)),
+        ) else {
+            return 0;
+        };
+        store
+            .delta(data, outer, inner, self.coords)
+            .map_or(0, crate::varstore::round_to_i16)
+    }
+}
+
 /// The pixel correction one device table makes at `ppem`, or `None` when it
 /// makes none.
 ///
 /// `None` covers four different situations that all mean the same thing to the
-/// caller: the table is a `VariationIndex` this cannot read, its `deltaFormat`
-/// is one the spec does not define, `ppem` is outside the range it covers, or
-/// the delta array is truncated.
+/// caller: the table is a `VariationIndex`, which is not a device table and is
+/// [`Corrections`]' business rather than this one's; its `deltaFormat` is one
+/// the spec does not define; `ppem` is outside the range it covers; or the
+/// delta array is truncated.
 fn pixel_delta(data: &[u8], at: usize, ppem: u16) -> Option<i32> {
     // Format first, and only then the range: in a `VariationIndex` the two
     // fields read here as a start and end size are variation-store indices, so
@@ -349,5 +471,135 @@ mod tests {
         let t = at_four(&device(11, 12, 3, &[10, 20]));
         assert_eq!(Ppem::new(11.6, 1000).delta(&t, 0, 4), units(20, 1000, 12));
         assert_eq!(Ppem::new(11.4, 1000).delta(&t, 0, 4), units(10, 1000, 11));
+    }
+
+    // --- the other table that can occupy the slot ---
+
+    /// `F2Dot14` for 1.0 and 0.5 — the axis positions the fixture store's one
+    /// region is defined against.
+    const ONE: i16 = 16384;
+    const HALF: i16 = 8192;
+
+    /// A `VariationIndex` naming `(outer, inner)`, as the six bytes a font
+    /// hangs off a value record's field.
+    fn variation_index(outer: u16, inner: u16) -> Vec<u8> {
+        let mut t = Vec::new();
+        t.extend(outer.to_be_bytes());
+        t.extend(inner.to_be_bytes());
+        t.extend(VARIATION_INDEX.to_be_bytes());
+        t
+    }
+
+    /// A buffer with `table` at offset 4 and a one-axis store after it, plus
+    /// the parsed store.
+    ///
+    /// Laid out this way so the store is at a different offset from the table
+    /// that indexes into it — a reader that confused the two would still pass
+    /// if both lived at zero.
+    fn with_store(table: &[u8], rows: &[i32]) -> (Vec<u8>, VarStore) {
+        let store_at = 4 + table.len();
+        let mut data = alloc::vec![0u8; 4];
+        data.extend_from_slice(table);
+        data.extend_from_slice(&crate::varstore::one_axis_store(rows));
+        let store = VarStore::parse(&data, store_at, 1).expect("the fixture store parses");
+        (data, store)
+    }
+
+    #[test]
+    fn a_variation_index_is_read_through_the_store() {
+        let (data, store) = with_store(&variation_index(0, 1), &[7, 40]);
+        // The fixture's one region peaks at the far end of its one axis, so
+        // the delta is the stored row scaled by where the caller sits on it.
+        for (coord, want) in [(0i16, 0i16), (HALF, 20), (ONE, 40)] {
+            let coords = [coord];
+            let c = Corrections::varying(Ppem::NONE, Some(&store), &coords);
+            assert_eq!(c.delta(&data, 0, 4), want, "at coord {coord}");
+        }
+        // And the inner index really selects the row, rather than every index
+        // landing on the first one.
+        let c = Corrections::varying(Ppem::NONE, Some(&store), &[ONE]);
+        assert_eq!(c.delta(&data, 0, 4), 40);
+        let (data, store) = with_store(&variation_index(0, 0), &[7, 40]);
+        let c = Corrections::varying(Ppem::NONE, Some(&store), &[ONE]);
+        assert_eq!(c.delta(&data, 0, 4), 7);
+    }
+
+    #[test]
+    fn a_variation_index_is_in_font_units_rather_than_pixels() {
+        // The whole difference between the two tables. A device table's 40
+        // would be 40 *pixels*, i.e. 40 * upem / ppem font units — nearly 4000
+        // at 11px on a 1000-unit em. A VariationIndex's 40 is 40 font units,
+        // at every size and at no size at all.
+        let (data, store) = with_store(&variation_index(0, 1), &[7, 40]);
+        for ppem in [Ppem::NONE, Ppem::new(11.0, 1000), Ppem::new(96.0, 2048)] {
+            let c = Corrections::varying(ppem, Some(&store), &[ONE]);
+            assert_eq!(c.delta(&data, 0, 4), 40, "at {ppem:?}");
+        }
+    }
+
+    #[test]
+    fn a_variation_index_rounds_the_way_the_other_stores_round() {
+        // 41 at half the axis is 20.5, which goes to 21 — away from zero, not
+        // to the even neighbour. Shared with HVAR and MVAR so that three
+        // tables reading one store cannot disagree about a half unit.
+        let (data, store) = with_store(&variation_index(0, 0), &[41]);
+        let c = Corrections::varying(Ppem::NONE, Some(&store), &[HALF]);
+        assert_eq!(c.delta(&data, 0, 4), 21);
+        let (data, store) = with_store(&variation_index(0, 0), &[-41]);
+        let c = Corrections::varying(Ppem::NONE, Some(&store), &[HALF]);
+        assert_eq!(c.delta(&data, 0, 4), -21);
+    }
+
+    #[test]
+    fn a_variation_index_without_a_store_is_no_correction() {
+        // What a non-variable face drawn at 11px asks with, and what a
+        // variable one at its default instance asks with. Not an error: a
+        // VariationIndex in a face we hold no store for has no value to give.
+        let (data, _store) = with_store(&variation_index(0, 1), &[7, 40]);
+        assert_eq!(Corrections::at(Ppem::new(11.0, 1000)).delta(&data, 0, 4), 0);
+        assert_eq!(Corrections::NONE.delta(&data, 0, 4), 0);
+        assert_eq!(Corrections::default().delta(&data, 0, 4), 0);
+    }
+
+    #[test]
+    fn a_pair_naming_no_row_is_no_correction() {
+        let (data, store) = with_store(&variation_index(0, 9), &[7, 40]);
+        let c = Corrections::varying(Ppem::NONE, Some(&store), &[ONE]);
+        assert_eq!(c.delta(&data, 0, 4), 0);
+        let (data, store) = with_store(&variation_index(3, 0), &[7, 40]);
+        let c = Corrections::varying(Ppem::NONE, Some(&store), &[ONE]);
+        assert_eq!(c.delta(&data, 0, 4), 0);
+    }
+
+    #[test]
+    fn a_device_table_still_reads_when_a_store_is_present() {
+        // The two arms must not cross: holding a store does not turn a device
+        // table into a variation index, and the pixel conversion still applies
+        // to it. The device table's first four bytes (9, 12) would name a
+        // perfectly plausible (outer, inner) pair if they were misread.
+        let (data, store) = with_store(&device(9, 12, 1, &[1, 0, -1, -2]), &[7, 40]);
+        let c = Corrections::varying(Ppem::new(9.0, 1000), Some(&store), &[ONE]);
+        assert_eq!(c.delta(&data, 0, 4), units(1, 1000, 9));
+        // And a size outside the table's range is still uncorrected, rather
+        // than falling through to the store.
+        let c = Corrections::varying(Ppem::new(20.0, 1000), Some(&store), &[ONE]);
+        assert_eq!(c.delta(&data, 0, 4), 0);
+    }
+
+    #[test]
+    fn a_null_offset_is_no_table_of_either_kind() {
+        let (data, store) = with_store(&variation_index(0, 1), &[7, 40]);
+        let c = Corrections::varying(Ppem::new(11.0, 1000), Some(&store), &[ONE]);
+        assert_eq!(c.delta(&data, 0, 0), 0);
+    }
+
+    #[test]
+    fn a_truncated_variation_index_declines_rather_than_reading_past() {
+        let (full, store) = with_store(&variation_index(0, 1), &[7, 40]);
+        // Cut so the format word is gone: what is left is not a table at all,
+        // and must not be read as the device table its first bytes resemble.
+        let cut = &full[..6];
+        let c = Corrections::varying(Ppem::new(11.0, 1000), Some(&store), &[ONE]);
+        assert_eq!(c.delta(cut, 0, 4), 0);
     }
 }

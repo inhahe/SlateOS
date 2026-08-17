@@ -43,12 +43,20 @@ use osfont::raster::rasterize;
 use osfont::scaled::{ScaledFont, Target};
 use osfont::script::ScriptTags;
 use osfont::shape::{Affinity, TAB_WIDTH_IN_SPACES};
-use osfont::sfnt::{name_id, Face, PathCmd, SfntError};
+use osfont::sfnt::{name_id, Face, Outline, PathCmd, Point, SfntError};
 
 /// Every glyph these tests substitute came from Latin text, so Latin is the
 /// script its features must be chosen under. Spelled once, because passing the
 /// wrong script here would silently disable every ligature in the file and the
 /// tests would still pass — they would just stop testing anything.
+/// A glyph outline boiled down for comparison: command count, bounding box,
+/// and the sums of every x and every y the path touches.
+type OutlineRecord = (usize, f32, f32, f32, f32, f32, f32);
+/// One `the_outline_oracle_agrees_about_unvaried_glyphs` row: file, glyph, record.
+type DefaultOutline = (&'static str, u16, usize, f32, f32, f32, f32, f32, f32);
+/// One `installed_variable_fonts_vary_their_outlines` row, with the instance.
+type VariedOutline = (&'static str, u16, usize, usize, f32, f32, f32, f32, f32, f32);
+
 const LATIN: Option<ScriptTags> = Some(ScriptTags {
     preferred: *b"latn",
     fallback: *b"latn",
@@ -2567,4 +2575,1385 @@ fn a_paragraph_direction_can_be_given_and_changes_the_answer() {
 
     println!("faces checked: {checked}");
     assert!(checked >= 1, "no installed face has `(`, `)` and `a` distinctly");
+}
+
+/// Whether the sfnt table directory names `tag`, read without the parser under
+/// test.
+///
+/// Deliberately minimal and deliberately duplicated: its whole value is that it
+/// shares no code with `Face::parse`, so the two cannot agree by both being
+/// wrong in the same way.
+fn directory_has_table(data: &[u8], tag: &[u8; 4]) -> bool {
+    fn be32(data: &[u8], off: usize) -> Option<u32> {
+        Some(u32::from_be_bytes(data.get(off..off + 4)?.try_into().ok()?))
+    }
+    fn inner(data: &[u8], tag: &[u8; 4]) -> Option<bool> {
+        // A collection puts the real directory at an offset in its own header;
+        // face 0 is the one `Face::parse` reads.
+        let base = if be32(data, 0) == Some(0x7474_6366) {
+            usize::try_from(be32(data, 12)?).ok()?
+        } else {
+            0
+        };
+        let count = u16::from_be_bytes(data.get(base + 4..base + 6)?.try_into().ok()?);
+        Some((0..usize::from(count)).any(|i| {
+            let rec = base + 12 + i * 16;
+            data.get(rec..rec + 4).is_some_and(|t| t == tag)
+        }))
+    }
+    inner(data, tag).unwrap_or(false)
+}
+
+/// Read the axes of every variable face installed on this host, and check them
+/// against what an independent reader found in the same files.
+///
+/// The unit tests in `var.rs` run against fixtures whose bytes this crate also
+/// wrote, so they prove the reader is self-consistent and nothing more. The
+/// expectations below come from `gui/font/tools/variable_survey.py`, a separate
+/// implementation in a different language that walks the same table directory —
+/// so a shared misreading of the format has to be made twice, independently, to
+/// go unnoticed. (It nearly did once in the other direction: the survey first
+/// reported faces with fifty thousand axes, because it read `GDEF`'s
+/// `ItemVariationStore` offset by counting fields instead of checking the table
+/// version.)
+///
+/// The faces are named rather than detected. Detecting them would make the test
+/// pass on a host where the reader had stopped recognising `fvar` entirely,
+/// which is the exact regression it exists to catch.
+///
+/// Two of these are worth the space they take:
+///
+/// * **ReemKufi** ships `wght 400..400..700` — the below-default side has zero
+///   width. The normalization formula divides by `default - min`, so this face
+///   is a division by zero in any reader that implements the formula as
+///   written. It is not a synthetic edge case; it is installed on this machine.
+/// * **bahnschrift** ships `wdth 75..100..100`, the same degeneracy on the
+///   other side.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_variable_fonts_report_their_axes() {
+    use osfont::var::tags;
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    /// One axis as `fvar` describes it: tag, minimum, default, maximum.
+    type AxisSpec = ([u8; 4], f32, f32, f32);
+    /// One face's expected axis list, keyed by file name.
+    type FaceAxes<'a> = (&'a str, &'a [AxisSpec]);
+
+    // Exactly as the Python survey read them, in the order `fvar` stores them —
+    // the order is part of the contract, since a normalized coordinate array is
+    // positional and an axis list that came back permuted would apply the
+    // weight to the width.
+    let expected: &[FaceAxes<'_>] = &[
+        ("CascadiaCode.ttf", &[(tags::WGHT, 200.0, 400.0, 700.0)]),
+        ("CascadiaMono.ttf", &[(tags::WGHT, 200.0, 400.0, 700.0)]),
+        ("ReemKufi.ttf", &[(tags::WGHT, 400.0, 400.0, 700.0)]),
+        (
+            "SegUIVar.ttf",
+            &[
+                (tags::WGHT, 300.0, 400.0, 700.0),
+                (tags::OPSZ, 5.0, 10.5, 36.0),
+            ],
+        ),
+        (
+            "SitkaVF.ttf",
+            &[
+                (tags::OPSZ, 6.0, 11.0, 27.5),
+                (tags::WGHT, 400.0, 400.0, 700.0),
+            ],
+        ),
+        (
+            "SitkaVF-Italic.ttf",
+            &[
+                (tags::OPSZ, 6.0, 11.0, 27.5),
+                (tags::WGHT, 400.0, 400.0, 700.0),
+            ],
+        ),
+        (
+            "bahnschrift.ttf",
+            &[
+                (tags::WGHT, 300.0, 400.0, 700.0),
+                (tags::WDTH, 75.0, 100.0, 100.0),
+            ],
+        ),
+    ];
+
+    let mut checked = 0usize;
+    for path in &files {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let Some((_, want)) = expected.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) else {
+            continue;
+        };
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let vars = face
+            .variation_axes()
+            .unwrap_or_else(|| panic!("{name}: carries `fvar` but reports no axes"));
+
+        let got: Vec<_> = vars
+            .axes()
+            .iter()
+            .map(|a| (a.tag, a.min, a.default, a.max))
+            .collect();
+        assert_eq!(got.as_slice(), *want, "{name}: axes");
+
+        // Every axis must be reachable by tag, and reachable at the position
+        // the coordinate array uses. This is the lookup a caller asking for
+        // "weight 700" actually goes through.
+        for (i, (tag, _, _, _)) in want.iter().enumerate() {
+            assert_eq!(vars.axis_index(tag), Some(i), "{name}: index of {tag:?}");
+        }
+
+        // The default instance normalizes to all zeros, by definition of the
+        // normalized space — and `is_default` must agree with the bytes, since
+        // it is what decides whether the variation machinery runs at all.
+        let defaults: Vec<f32> = want.iter().map(|(_, _, d, _)| *d).collect();
+        let at_default = vars.normalize(&defaults);
+        assert!(
+            at_default.as_slice().iter().all(|&c| c == 0),
+            "{name}: default instance is not the origin: {:?}",
+            at_default.as_slice()
+        );
+        assert!(at_default.is_default(), "{name}: is_default disagrees");
+        assert_eq!(at_default, vars.default_coords(), "{name}: default_coords");
+
+        // The ends. `avar` may bend the interior of an axis, but it is required
+        // to fix the three endpoints, so -1/0/+1 survive it on every face —
+        // which makes this the one cross-face assertion that can be exact.
+        for (i, (_, min, _, max)) in want.iter().enumerate() {
+            let mut low = defaults.clone();
+            let mut high = defaults.clone();
+            low[i] = *min;
+            high[i] = *max;
+            // A degenerate side (ReemKufi's `wght` minimum, bahnschrift's
+            // `wdth` maximum) is *equal* to the default, so its end is the
+            // origin rather than ±1. Reading it as ±1 would be a reader
+            // inventing a design space the font does not have.
+            let want_low = if *min == defaults[i] { 0 } else { -16384 };
+            let want_high = if *max == defaults[i] { 0 } else { 16384 };
+            assert_eq!(
+                vars.normalize(&low).get(i),
+                Some(want_low),
+                "{name}: axis {i} at its minimum"
+            );
+            assert_eq!(
+                vars.normalize(&high).get(i),
+                Some(want_high),
+                "{name}: axis {i} at its maximum"
+            );
+        }
+
+        // Named instances must land inside the design space. A coordinate
+        // outside [-1, 1] means the instance record was read at the wrong
+        // stride — the failure mode a `Fixed` misread produces, and one that
+        // otherwise shows up only as a garbled glyph much later.
+        assert!(
+            !vars.instances().is_empty(),
+            "{name}: a shipping variable face with no named instances"
+        );
+        for (n, inst) in vars.instances().iter().enumerate() {
+            assert_eq!(
+                inst.coords.len(),
+                want.len(),
+                "{name}: instance {n} has the wrong coordinate count"
+            );
+            let coords = vars
+                .instance_coords(n)
+                .unwrap_or_else(|| panic!("{name}: instance {n} does not normalize"));
+            assert_eq!(coords.len(), want.len(), "{name}: instance {n} normalized");
+            for (axis, &c) in coords.as_slice().iter().enumerate() {
+                assert!(
+                    (-16384..=16384).contains(&c),
+                    "{name}: instance {n} axis {axis} normalizes to {c}, outside the design space"
+                );
+            }
+        }
+
+        println!(
+            "{name}: {} axes, {} named instances, avar {}",
+            vars.axes().len(),
+            vars.instances().len(),
+            if vars.has_avar() { "yes" } else { "no" }
+        );
+        checked += 1;
+    }
+
+    assert_eq!(
+        checked,
+        expected.len(),
+        "expected all {} named variable faces to be installed; found {checked}",
+        expected.len()
+    );
+}
+
+/// No non-variable face may claim to be variable, and every variable one must
+/// survive being asked for a nonsense instance.
+///
+/// This is the other half of the named-face test above: that one proves the
+/// seven known faces read correctly, this one proves the other 549 are not
+/// being handed a `Variations` built out of whatever happened to sit at the
+/// `fvar` offset. A reader that mistakes an unrelated table for `fvar` fails
+/// here and nowhere else — the face still draws, it just quietly acquires axes,
+/// and the first symptom is a glyph deformed by a delta applied to a font that
+/// has none.
+///
+/// The converse is *not* asserted. A face with an `fvar` this reader declines
+/// is allowed to come back as `None`: a malformed variation table costs the
+/// face its variability, not its ability to draw, and that is the whole point
+/// of `parse` returning an `Option` rather than an error.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn no_installed_face_invents_variation_axes() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut variable = 0usize;
+    let mut total = 0usize;
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        // Whether the file has an `fvar` at all, read independently of the
+        // parser under test: four bytes in the table directory, which is the
+        // one thing both readers must agree on for the comparison to mean
+        // anything.
+        let has_fvar = directory_has_table(&data, b"fvar");
+        let Ok(face) = Face::parse(data) else { continue };
+        total += 1;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        let Some(vars) = face.variation_axes() else {
+            continue;
+        };
+        assert!(has_fvar, "{name}: reports axes but has no `fvar` table");
+        assert!(!vars.axes().is_empty(), "{name}: an `fvar` with no axes");
+        // A design space of more than a handful of axes on a shipping desktop
+        // font is a misread, not a font. The largest ever published carries
+        // around eight.
+        assert!(
+            vars.axes().len() <= 8,
+            "{name}: {} axes is a misread, not a font",
+            vars.axes().len()
+        );
+        // Nonsense in must not be nonsense out. These are the values a caller
+        // reaches by arithmetic on a slider, and every one of them must land
+        // inside the design space.
+        for probe in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1e30, 1e30] {
+            let user = vec![probe; vars.axes().len()];
+            let coords = vars.normalize(&user);
+            for &c in coords.as_slice() {
+                assert!(
+                    (-16384..=16384).contains(&c),
+                    "{name}: {probe} normalizes to {c}"
+                );
+            }
+        }
+        // Too few user values leaves the rest at their defaults; too many drops
+        // the extras. Both are the caller's mistake and neither may panic or
+        // resize the coordinate array, which is indexed positionally by
+        // everything downstream.
+        assert_eq!(vars.normalize(&[]).len(), vars.axes().len(), "{name}: empty");
+        assert!(vars.normalize(&[]).is_default(), "{name}: empty is default");
+        let too_many = vec![400.0f32; vars.axes().len() + 5];
+        assert_eq!(
+            vars.normalize(&too_many).len(),
+            vars.axes().len(),
+            "{name}: over-long user coordinates resized the array"
+        );
+        variable += 1;
+    }
+
+    println!("{variable} variable of {total} faces");
+    // The survey counted seven on this host. Fewer means the reader has stopped
+    // recognising something it used to.
+    assert!(
+        variable >= 7,
+        "only {variable} variable faces found; the survey counted 7"
+    );
+}
+
+/// Every named instance of every installed variable face, normalized, against
+/// an independent implementation.
+///
+/// This is the test that can tell whether `avar` was read at all.
+/// [`installed_variable_fonts_report_their_axes`] cannot: the format requires
+/// `avar` to fix the three identity points, so an axis's minimum, default and
+/// maximum normalize to -1, 0 and +1 whether the correction is applied or not.
+/// The bend is entirely in the interior -- and the interior is exactly where
+/// the designer put the named instances.
+///
+/// Concretely, on this host: Cascadia's "SemiBold" is user weight 600, which a
+/// reader with no `avar` normalizes to 10923 and one that applies it to 9830.
+/// Segoe UI Variable's 600 is 8192 against a linear 10923, a third of the way
+/// off. Both faces still draw, still report the right axes, and still hit
+/// -1/0/+1 at the ends. A test built only from the ends is green for both
+/// readers.
+///
+/// The expected values come from `variable_survey.py --normalize`, written from
+/// the specification rather than transcribed from `var.rs` -- including the
+/// round-half-away-from-zero of its fixed-point division, so a disagreement
+/// here is a real bug and not a rounding preference. That said, this test did
+/// *not* catch the truncation bug `777a040ff` fixed, because a named instance
+/// almost always sits on a segment endpoint where the interpolation is exact;
+/// the unit tests in `var.rs` are what pin the rounding. Regenerate with:
+///
+/// ```text
+/// python gui/font/tools/variable_survey.py --normalize
+/// ```
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_variable_fonts_normalize_named_instances() {
+    // (file name, one normalized coordinate array per named instance, in the
+    // order `fvar` stores them). The trailing comment on each row is the
+    // user-space position it came from.
+    let expected: &[(&str, &[&[i16]])] = &[
+        // CascadiaCode.ttf: wght, avar yes
+        ("CascadiaCode.ttf", &[
+            &[-16384],  // 200
+            &[-10923],  // 300
+            &[-5461],  // 350
+            &[0],  // 400
+            &[9830],  // 600
+            &[16384],  // 700
+        ]),
+        // CascadiaMono.ttf: wght, avar yes
+        ("CascadiaMono.ttf", &[
+            &[-16384],  // 200
+            &[-10923],  // 300
+            &[-5461],  // 350
+            &[0],  // 400
+            &[9830],  // 600
+            &[16384],  // 700
+        ]),
+        // ReemKufi.ttf: wght, avar no
+        ("ReemKufi.ttf", &[
+            &[0],  // 400
+            &[5461],  // 500
+            &[10923],  // 600
+            &[16384],  // 700
+        ]),
+        // SegUIVar.ttf: wght/opsz, avar yes
+        ("SegUIVar.ttf", &[
+            &[-16384, -7447],  // 300, 8
+            &[-8192, -7447],  // 350, 8
+            &[0, -7447],  // 400, 8
+            &[8192, -7447],  // 600, 8
+            &[16384, -7447],  // 700, 8
+            &[-16384, 0],  // 300, 10.5
+            &[-8192, 0],  // 350, 10.5
+            &[0, 0],  // 400, 10.5
+            &[8192, 0],  // 600, 10.5
+            &[16384, 0],  // 700, 10.5
+            &[-16384, 16384],  // 300, 36
+            &[-8192, 16384],  // 350, 36
+            &[0, 16384],  // 400, 36
+            &[8192, 16384],  // 600, 36
+            &[16384, 16384],  // 700, 36
+        ]),
+        // SitkaVF-Italic.ttf: opsz/wght, avar yes
+        ("SitkaVF-Italic.ttf", &[
+            &[-16384, 0],  // 6, 400
+            &[-16384, 9885],  // 6, 600
+            &[-16384, 16384],  // 6, 700
+            &[0, 0],  // 11, 400
+            &[0, 9885],  // 11, 600
+            &[0, 16384],  // 11, 700
+            &[5699, 0],  // 16.7391, 400
+            &[5699, 9885],  // 16.7391, 600
+            &[5699, 16384],  // 16.7391, 700
+            &[9973, 0],  // 21.0434, 400
+            &[9973, 9885],  // 21.0434, 600
+            &[9973, 16384],  // 21.0434, 700
+            &[13534, 0],  // 24.6303, 400
+            &[13534, 9885],  // 24.6303, 600
+            &[13534, 16384],  // 24.6303, 700
+            &[16384, 0],  // 27.5, 400
+            &[16384, 9885],  // 27.5, 600
+            &[16384, 16384],  // 27.5, 700
+        ]),
+        // SitkaVF.ttf: opsz/wght, avar yes
+        ("SitkaVF.ttf", &[
+            &[-16384, 0],  // 6, 400
+            &[-16384, 9885],  // 6, 600
+            &[-16384, 16384],  // 6, 700
+            &[0, 0],  // 11, 400
+            &[0, 9885],  // 11, 600
+            &[0, 16384],  // 11, 700
+            &[5699, 0],  // 16.7391, 400
+            &[5699, 9885],  // 16.7391, 600
+            &[5699, 16384],  // 16.7391, 700
+            &[9973, 0],  // 21.0434, 400
+            &[9973, 9885],  // 21.0434, 600
+            &[9973, 16384],  // 21.0434, 700
+            &[13534, 0],  // 24.6303, 400
+            &[13534, 9885],  // 24.6303, 600
+            &[13534, 16384],  // 24.6303, 700
+            &[16384, 0],  // 27.5, 400
+            &[16384, 9885],  // 27.5, 600
+            &[16384, 16384],  // 27.5, 700
+        ]),
+        // bahnschrift.ttf: wght/wdth, avar yes
+        ("bahnschrift.ttf", &[
+            &[-16384, 0],  // 300, 100
+            &[-8192, 0],  // 350, 100
+            &[0, 0],  // 400, 100
+            &[8192, 0],  // 600, 100
+            &[16384, 0],  // 700, 100
+            &[-16384, -8192],  // 300, 87.5
+            &[-8192, -8192],  // 350, 87.5
+            &[0, -8192],  // 400, 87.5
+            &[8192, -8192],  // 600, 87.5
+            &[16384, -8192],  // 700, 87.5
+            &[-16384, -16384],  // 300, 75
+            &[-8192, -16384],  // 350, 75
+            &[0, -16384],  // 400, 75
+            &[8192, -16384],  // 600, 75
+            &[16384, -16384],  // 700, 75
+        ]),
+    ];
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    files.sort();
+
+    let mut checked = 0usize;
+    for path in &files {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let Some((_, want)) = expected.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) else {
+            continue;
+        };
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let vars = face
+            .variation_axes()
+            .unwrap_or_else(|| panic!("{name}: carries `fvar` but reports no axes"));
+
+        // The count first, and separately: a reader that lost an instance to a
+        // stride error would otherwise fail on whichever row happened to shift,
+        // which reads as an arithmetic bug rather than the truncation it is.
+        assert_eq!(
+            vars.instances().len(),
+            want.len(),
+            "{name}: named instance count"
+        );
+        for (n, want_coords) in want.iter().enumerate() {
+            let got = vars
+                .instance_coords(n)
+                .unwrap_or_else(|| panic!("{name}: instance {n} does not normalize"));
+            assert_eq!(
+                got.as_slice(),
+                *want_coords,
+                "{name}: instance {n} (user {:?})",
+                vars.instances()[n].coords
+            );
+        }
+        checked += 1;
+    }
+
+    assert_eq!(
+        checked,
+        expected.len(),
+        "expected all {} named variable faces to be installed; found {checked}",
+        expected.len()
+    );
+    println!(
+        "{checked} faces, {} named instances",
+        expected.iter().map(|(_, i)| i.len()).sum::<usize>()
+    );
+}
+
+
+/// A glyph outline reduced to the few numbers a test can compare across two
+/// independent implementations.
+///
+/// The command count catches a structural change, the bounding box catches a
+/// shift or a scale, and the two coordinate sums catch a single wrong point
+/// anywhere -- including an interior one that never touches the box. Storing
+/// every coordinate instead would be thousands of numbers per face and no more
+/// conclusive; a hash would be as compact but could only ever say "wrong",
+/// never "wrong how".
+fn outline_record(o: &Outline) -> OutlineRecord {
+    let mut sum_x = 0.0f32;
+    let mut sum_y = 0.0f32;
+    let mut add = |p: Point| {
+        sum_x += p.x;
+        sum_y += p.y;
+    };
+    for cmd in &o.commands {
+        match *cmd {
+            PathCmd::MoveTo(p) | PathCmd::LineTo(p) => add(p),
+            PathCmd::QuadTo(a, b) => {
+                add(a);
+                add(b);
+            }
+            PathCmd::CurveTo(a, b, c) => {
+                add(a);
+                add(b);
+                add(c);
+            }
+            PathCmd::Close => {}
+        }
+    }
+    let b = o.bbox().expect("a non-empty outline has a bounding box");
+    (
+        o.commands.len(),
+        b.x_min,
+        b.y_min,
+        b.x_max,
+        b.y_max,
+        sum_x,
+        sum_y,
+    )
+}
+
+/// Compare one glyph against the oracle, naming the field that disagreed.
+///
+/// The tolerances exist because the two sides accumulate in different
+/// precisions -- `f32` here, float64 in the Python -- and the expectations are
+/// printed to one decimal. A test that demanded bit equality would be reporting
+/// on IEEE 754 rather than on `gvar`.
+fn assert_outline_matches(what: &str, got: OutlineRecord, want: OutlineRecord) {
+    assert_eq!(got.0, want.0, "{what}: path command count");
+    let near = |a: f32, b: f32, tol: f32, field: &str| {
+        assert!(
+            (a - b).abs() <= tol,
+            "{what}: {field} is {a}, oracle says {b}"
+        );
+    };
+    near(got.1, want.1, 0.5, "x_min");
+    near(got.2, want.2, 0.5, "y_min");
+    near(got.3, want.3, 0.5, "x_max");
+    near(got.4, want.4, 0.5, "y_max");
+    // The sums run to tens of thousands of font units, where `f32` itself has
+    // only about four fractional bits left, so they get a proportional slack.
+    let slack = |v: f32| (v.abs() * 1e-4).max(0.5);
+    near(got.5, want.5, slack(want.5), "sum of x");
+    near(got.6, want.6, slack(want.6), "sum of y");
+}
+
+/// Every glyph of every variable face, drawn at its own default coordinates,
+/// is the glyph `glyf` already held.
+///
+/// This is the one property of variable-font rendering that admits no
+/// tolerance: the default instance *is* the outline in `glyf`, and every
+/// tuple's scalar is zero there by construction, so the varying path and the
+/// plain one must agree exactly. `Face::outline_at` takes a short cut at the
+/// default coordinates and this pins that the short cut tells the truth --
+/// which is also why the sweep is over every glyph rather than a handful: the
+/// cheap assertion is the one that can afford to be exhaustive.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn a_variable_face_at_its_default_instance_draws_the_default_outline() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    files.sort();
+
+    let mut faces = 0usize;
+    let mut glyphs = 0usize;
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        if !directory_has_table(&data, b"gvar") {
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        let Ok(face) = Face::parse(data) else { continue };
+        let Some(vars) = face.variation_axes() else {
+            continue;
+        };
+        let default = vars.default_coords();
+        assert!(default.is_default(), "{name}: default coords are not default");
+
+        // A sample rather than the whole face: 600 glyphs reaches composites and
+        // unusual contours in every one of these fonts, and Sitka alone is 3000
+        // glyphs across two faces.
+        for gid in 0..face.num_glyphs().min(600) {
+            let Ok(plain) = face.outline(gid) else { continue };
+            let varied = face
+                .outline_at(gid, &default)
+                .unwrap_or_else(|e| panic!("{name}: glyph {gid} at default: {e:?}"));
+            assert_eq!(
+                plain.commands, varied.commands,
+                "{name}: glyph {gid} differs at the default instance"
+            );
+            glyphs += 1;
+        }
+        faces += 1;
+    }
+    assert!(faces >= 7, "expected at least 7 faces with `gvar`; saw {faces}");
+    println!("{faces} faces, {glyphs} glyphs identical at the default instance");
+}
+
+/// The oracle's own `glyf` reader agrees with the crate's.
+///
+/// `gvar_oracle.py` has to read `glyf` and turn points into a path before it
+/// can say anything about variation, and those two parts necessarily follow the
+/// same rules this crate does -- a slip in either would look exactly like a
+/// variation bug. So they are pinned separately, here, at the default instance
+/// where `gvar` provably contributes nothing. A failure in this test is a
+/// transcription error in the tool; a failure in
+/// [`installed_variable_fonts_vary_their_outlines`] while this one passes is a
+/// real disagreement about variation.
+///
+/// Regenerate with:
+///
+/// ```text
+/// python gui/font/tools/gvar_oracle.py
+/// ```
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn the_outline_oracle_agrees_about_unvaried_glyphs() {
+    // (file, glyph id, command count, x_min, y_min, x_max, y_max, sum x, sum y)
+    let expected: &[DefaultOutline] = &[
+    ("CascadiaCode.ttf", 0, 24, 128.0, 0.0, 1072.0, 1420.0, 10844.0, 12590.0),
+    ("CascadiaCode.ttf", 1, 16, 45.0, 0.0, 1155.0, 1420.0, 7460.0, 7446.0),
+    ("CascadiaCode.ttf", 2, 22, 45.0, 0.0, 1155.0, 1830.0, 10759.0, 15846.0),
+    ("CascadiaMono.ttf", 0, 24, 128.0, 0.0, 1072.0, 1420.0, 10844.0, 12590.0),
+    ("CascadiaMono.ttf", 1, 16, 45.0, 0.0, 1155.0, 1420.0, 7460.0, 7446.0),
+    ("CascadiaMono.ttf", 2, 22, 45.0, 0.0, 1155.0, 1830.0, 10759.0, 15846.0),
+    ("ReemKufi.ttf", 2, 16, 28.0, 0.0, 672.0, 755.0, 4454.0, 3921.0),
+    ("ReemKufi.ttf", 27, 28, 11.0, 0.0, 890.0, 725.0, 14189.5, 10469.0),
+    ("ReemKufi.ttf", 3, 22, 28.0, 0.0, 672.0, 918.0, 6564.0, 8243.0),
+    ("SegUIVar.ttf", 0, 12, 166.0, 0.0, 1156.0, 1398.0, 5768.0, 5740.0),
+    ("SegUIVar.ttf", 3, 16, 175.0, -18.0, 407.0, 1434.0, 6475.0, 6628.0),
+    ("SegUIVar.ttf", 110, 6, 144.0, 506.0, 690.0, 635.0, 1812.0, 2788.0),
+    ("SitkaVF-Italic.ttf", 0, 12, 0.0, 0.0, 1024.0, 1434.0, 4174.0, 7245.0),
+    ("SitkaVF-Italic.ttf", 4, 30, -107.0, 0.0, 1362.0, 1456.0, 20710.0, 12304.5),
+    ("SitkaVF-Italic.ttf", 30, 41, -107.0, 0.0, 1362.0, 1904.0, 33682.0, 41008.0),
+    ("SitkaVF.ttf", 0, 12, 0.0, 0.0, 1024.0, 1434.0, 5035.0, 5818.0),
+    ("SitkaVF.ttf", 4, 29, -1.0, 0.0, 1449.0, 1456.0, 21197.5, 12052.5),
+    ("SitkaVF.ttf", 30, 40, -1.0, 0.0, 1449.0, 1904.0, 30794.0, 40489.5),
+    ("bahnschrift.ttf", 0, 12, 180.0, 0.0, 1288.0, 1454.0, 7515.0, 7095.0),
+    ("bahnschrift.ttf", 2, 15, 40.0, 0.0, 1286.0, 1454.0, 7646.0, 6064.0),
+    ("bahnschrift.ttf", 3, 21, 40.0, 0.0, 1286.0, 1917.0, 11401.0, 14541.0),
+    ];
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    files.sort();
+
+    let mut checked = 0usize;
+    for path in &files {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !expected.iter().any(|r| r.0.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        for &(_, gid, cmds, x0, y0, x1, y1, sx, sy) in
+            expected.iter().filter(|r| r.0.eq_ignore_ascii_case(name))
+        {
+            let outline = face
+                .outline(gid)
+                .unwrap_or_else(|e| panic!("{name}: glyph {gid}: {e:?}"));
+            assert_outline_matches(
+                &format!("{name} glyph {gid}"),
+                outline_record(&outline),
+                (cmds, x0, y0, x1, y1, sx, sy),
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, expected.len(), "not every named face was installed");
+    println!("{checked} unvaried glyphs agree with the oracle");
+}
+
+/// `gvar` moves the points where an independent reader says it should.
+///
+/// This is the test the whole `gvar` module exists to pass. The expectations
+/// come from `gvar_oracle.py`, written from the OpenType specification rather
+/// than transcribed from `gui/font/src/gvar.rs`, so agreement means the format
+/// was read correctly twice, independently -- a shared misreading has to be
+/// made twice, the same way, to survive.
+///
+/// Three named instances per face (the first, the middle and the last) rather
+/// than all of them: the ends of each axis are where a tuple is at full
+/// strength, and the middle is where it tapers and where `avar` bends the
+/// coordinate, which between them reach every branch of the scalar.
+///
+/// Regenerate with:
+///
+/// ```text
+/// python gui/font/tools/gvar_oracle.py
+/// ```
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_variable_fonts_vary_their_outlines() {
+    // (file, glyph id, named instance, command count, bbox, sum x, sum y).
+    // The trailing comment is the instance's user-space position.
+    let expected: &[VariedOutline] = &[
+    ("CascadiaCode.ttf", 0, 0, 24, 154.0, 0.0, 1046.0, 1420.0, 11018.0, 12692.0),  // 200
+    ("CascadiaCode.ttf", 1, 0, 16, 69.0, 0.0, 1131.0, 1420.0, 7484.0, 7687.0),  // 200
+    ("CascadiaCode.ttf", 2, 0, 22, 69.0, 0.0, 1131.0, 1830.0, 10888.0, 16087.0),  // 200
+    ("CascadiaCode.ttf", 0, 3, 24, 128.0, 0.0, 1072.0, 1420.0, 10844.0, 12590.0),  // 400
+    ("CascadiaCode.ttf", 1, 3, 16, 45.0, 0.0, 1155.0, 1420.0, 7460.0, 7446.0),  // 400
+    ("CascadiaCode.ttf", 2, 3, 22, 45.0, 0.0, 1155.0, 1830.0, 10759.0, 15846.0),  // 400
+    ("CascadiaCode.ttf", 0, 5, 24, 111.0, 0.0, 1089.0, 1420.0, 10756.0, 12537.0),  // 700
+    ("CascadiaCode.ttf", 1, 5, 16, 28.0, 0.0, 1172.0, 1420.0, 7443.0, 6819.0),  // 700
+    ("CascadiaCode.ttf", 2, 5, 22, 28.0, 0.0, 1172.0, 1855.0, 10793.0, 15269.0),  // 700
+    ("CascadiaMono.ttf", 0, 0, 24, 154.0, 0.0, 1046.0, 1420.0, 11018.0, 12692.0),  // 200
+    ("CascadiaMono.ttf", 1, 0, 16, 69.0, 0.0, 1131.0, 1420.0, 7484.0, 7687.0),  // 200
+    ("CascadiaMono.ttf", 2, 0, 22, 69.0, 0.0, 1131.0, 1830.0, 10888.0, 16087.0),  // 200
+    ("CascadiaMono.ttf", 0, 3, 24, 128.0, 0.0, 1072.0, 1420.0, 10844.0, 12590.0),  // 400
+    ("CascadiaMono.ttf", 1, 3, 16, 45.0, 0.0, 1155.0, 1420.0, 7460.0, 7446.0),  // 400
+    ("CascadiaMono.ttf", 2, 3, 22, 45.0, 0.0, 1155.0, 1830.0, 10759.0, 15846.0),  // 400
+    ("CascadiaMono.ttf", 0, 5, 24, 111.0, 0.0, 1089.0, 1420.0, 10756.0, 12537.0),  // 700
+    ("CascadiaMono.ttf", 1, 5, 16, 28.0, 0.0, 1172.0, 1420.0, 7443.0, 6819.0),  // 700
+    ("CascadiaMono.ttf", 2, 5, 22, 28.0, 0.0, 1172.0, 1855.0, 10793.0, 15269.0),  // 700
+    ("ReemKufi.ttf", 2, 0, 16, 28.0, 0.0, 672.0, 755.0, 4454.0, 3921.0),  // 400
+    ("ReemKufi.ttf", 27, 0, 28, 11.0, 0.0, 890.0, 725.0, 14189.5, 10469.0),  // 400
+    ("ReemKufi.ttf", 3, 0, 22, 28.0, 0.0, 672.0, 918.0, 6564.0, 8243.0),  // 400
+    ("ReemKufi.ttf", 2, 2, 16, 17.3, 0.0, 680.0, 761.7, 4438.7, 3816.3),  // 600
+    ("ReemKufi.ttf", 27, 2, 28, 7.0, 0.0, 904.7, 732.3, 14551.5, 10359.7),  // 600
+    ("ReemKufi.ttf", 3, 2, 22, 17.3, 0.0, 680.0, 932.0, 6594.7, 8207.0),  // 600
+    ("ReemKufi.ttf", 2, 3, 16, 12.0, 0.0, 684.0, 765.0, 4431.0, 3764.0),  // 700
+    ("ReemKufi.ttf", 27, 3, 28, 5.0, 0.0, 912.0, 736.0, 14732.5, 10305.0),  // 700
+    ("ReemKufi.ttf", 3, 3, 22, 12.0, 0.0, 684.0, 939.0, 6610.0, 8189.0),  // 700
+    ("SegUIVar.ttf", 0, 0, 12, 176.0, 0.0, 1166.0, 1398.0, 5868.0, 5740.0),  // 300, 8
+    ("SegUIVar.ttf", 3, 0, 16, 206.9, -18.0, 397.1, 1434.0, 6697.4, 6302.4),  // 300, 8
+    ("SegUIVar.ttf", 110, 0, 6, 154.5, 541.8, 701.1, 647.3, 1865.8, 2920.0),  // 300, 8
+    ("SegUIVar.ttf", 0, 7, 12, 166.0, 0.0, 1156.0, 1398.0, 5768.0, 5740.0),  // 400, 10.5
+    ("SegUIVar.ttf", 3, 7, 16, 175.0, -18.0, 407.0, 1434.0, 6475.0, 6628.0),  // 400, 10.5
+    ("SegUIVar.ttf", 110, 7, 6, 144.0, 506.0, 690.0, 635.0, 1812.0, 2788.0),  // 400, 10.5
+    ("SegUIVar.ttf", 0, 14, 12, 156.0, 0.0, 1146.0, 1398.0, 5668.0, 5740.0),  // 700, 36
+    ("SegUIVar.ttf", 3, 14, 16, 142.0, -23.0, 508.0, 1434.0, 7321.0, 7742.0),  // 700, 36
+    ("SegUIVar.ttf", 110, 14, 6, 133.0, 436.0, 680.0, 657.0, 1759.0, 2622.0),  // 700, 36
+    ("SitkaVF-Italic.ttf", 0, 0, 12, 0.0, 0.0, 1024.0, 1484.0, 4185.0, 7506.0),  // 6, 400
+    ("SitkaVF-Italic.ttf", 4, 0, 30, -91.0, 0.0, 1449.0, 1506.0, 22435.0, 12897.0),  // 6, 400
+    ("SitkaVF-Italic.ttf", 30, 0, 41, -91.0, 0.0, 1449.0, 1997.0, 36432.0, 42958.0),  // 6, 400
+    ("SitkaVF-Italic.ttf", 0, 9, 12, 0.0, 0.0, 1024.0, 1399.9, 4174.0, 7074.6),  // 21.0434, 400
+    ("SitkaVF-Italic.ttf", 4, 9, 30, -144.1, 0.0, 1251.8, 1421.3, 18260.9, 11676.0),  // 21.0434, 400
+    ("SitkaVF-Italic.ttf", 30, 9, 41, -144.1, 0.0, 1251.8, 1840.7, 30079.7, 39488.1),  // 21.0434, 400
+    ("SitkaVF-Italic.ttf", 0, 17, 12, 0.0, 0.0, 1024.0, 1378.0, 4179.0, 6970.0),  // 27.5, 700
+    ("SitkaVF-Italic.ttf", 4, 17, 30, -179.0, 0.0, 1282.0, 1399.0, 17639.5, 11438.5),  // 27.5, 700
+    ("SitkaVF-Italic.ttf", 30, 17, 41, -179.0, 0.0, 1282.0, 1864.0, 28250.0, 39451.0),  // 27.5, 700
+    ("SitkaVF.ttf", 0, 0, 12, 0.0, 0.0, 1024.0, 1484.0, 5035.0, 6018.0),  // 6, 400
+    ("SitkaVF.ttf", 4, 0, 29, 16.0, 0.0, 1534.0, 1506.0, 22748.5, 12614.5),  // 6, 400
+    ("SitkaVF.ttf", 30, 0, 40, 16.0, 0.0, 1534.0, 1997.0, 33293.0, 42365.5),  // 6, 400
+    ("SitkaVF.ttf", 0, 9, 12, 0.0, 0.0, 1024.0, 1399.9, 5035.0, 5681.7),  // 21.0434, 400
+    ("SitkaVF.ttf", 4, 9, 29, -35.1, 0.0, 1346.1, 1421.3, 19098.7, 11475.4),  // 21.0434, 400
+    ("SitkaVF.ttf", 30, 9, 40, -35.1, 0.0, 1346.1, 1840.7, 27925.5, 39063.9),  // 21.0434, 400
+    ("SitkaVF.ttf", 0, 17, 12, 0.0, 0.0, 1024.0, 1378.0, 5035.0, 5594.0),  // 27.5, 700
+    ("SitkaVF.ttf", 4, 17, 29, -73.0, 0.0, 1358.0, 1399.0, 18252.5, 11091.0),  // 27.5, 700
+    ("SitkaVF.ttf", 30, 17, 40, -73.0, 0.0, 1358.0, 1858.0, 26836.5, 38771.5),  // 27.5, 700
+    ("bahnschrift.ttf", 0, 0, 12, 180.0, 0.0, 1288.0, 1454.0, 7480.0, 7130.0),  // 300, 100
+    ("bahnschrift.ttf", 2, 0, 15, 40.0, 0.0, 1286.0, 1454.0, 7646.0, 6244.0),  // 300, 100
+    ("bahnschrift.ttf", 3, 0, 21, 40.0, 0.0, 1286.0, 1877.0, 11351.0, 14611.0),  // 300, 100
+    ("bahnschrift.ttf", 0, 7, 12, 140.0, 0.0, 1088.0, 1454.0, 6312.5, 7100.0),  // 400, 87.5
+    ("bahnschrift.ttf", 2, 7, 15, 35.0, 0.0, 1081.0, 1454.0, 6467.0, 6035.5),  // 400, 87.5
+    ("bahnschrift.ttf", 3, 7, 21, 35.0, 0.0, 1081.0, 1914.0, 9649.0, 14487.0),  // 400, 87.5
+    ("bahnschrift.ttf", 0, 14, 12, 89.0, 0.0, 899.0, 1454.0, 5168.0, 7042.0),  // 700, 75
+    ("bahnschrift.ttf", 2, 14, 15, 19.0, 0.0, 887.0, 1454.0, 5257.0, 5455.0),  // 700, 75
+    ("bahnschrift.ttf", 3, 14, 21, 19.0, 0.0, 887.0, 1957.0, 7844.0, 13978.0),  // 700, 75
+    ];
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    files.sort();
+
+    let mut checked = 0usize;
+    let mut moved = 0usize;
+    for path in &files {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !expected.iter().any(|r| r.0.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let vars = face
+            .variation_axes()
+            .unwrap_or_else(|| panic!("{name}: carries `fvar` but reports no axes"));
+
+        for &(_, gid, instance, cmds, x0, y0, x1, y1, sx, sy) in
+            expected.iter().filter(|r| r.0.eq_ignore_ascii_case(name))
+        {
+            let coords = vars
+                .instance_coords(instance)
+                .unwrap_or_else(|| panic!("{name}: no named instance {instance}"));
+            let outline = face
+                .outline_at(gid, &coords)
+                .unwrap_or_else(|e| panic!("{name}: glyph {gid} at instance {instance}: {e:?}"));
+            assert_outline_matches(
+                &format!("{name} glyph {gid} at instance {instance}"),
+                outline_record(&outline),
+                (cmds, x0, y0, x1, y1, sx, sy),
+            );
+            // A row at a non-default instance must actually differ from the
+            // unvaried glyph. Without this the whole comparison could be
+            // satisfied by a reader that ignores `gvar` and an oracle that
+            // agrees with it about nothing.
+            if !coords.is_default() {
+                let plain = face
+                    .outline(gid)
+                    .unwrap_or_else(|e| panic!("{name}: glyph {gid}: {e:?}"));
+                assert_ne!(
+                    plain.commands, outline.commands,
+                    "{name}: glyph {gid} did not move at instance {instance}"
+                );
+                moved += 1;
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, expected.len(), "not every named face was installed");
+    assert!(
+        moved * 4 >= checked * 3,
+        "only {moved} of {checked} rows actually varied; the sample is too weak"
+    );
+    println!("{checked} varied glyphs agree with the oracle ({moved} moved)");
+}
+
+/// A weight axis reaches the pixels, on real files.
+///
+/// `installed_variable_fonts_vary_their_outlines` proves the deltas are read
+/// correctly; this proves they are *plumbed* — that a caller who says "weight
+/// 700" gets a heavier 'H' out of `ScaledFont` rather than the default one.
+/// Those are different failures: an unwired `ScaledFont` would still pass every
+/// outline test in this file.
+///
+/// Rasterizing rather than comparing outlines is the point. It is the only
+/// check that survives the whole pipeline — instance to coordinates to deltas
+/// to path to coverage — and the only one a user could have noticed.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn a_weight_axis_reaches_the_rasterized_glyph() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    files.sort();
+
+    let mut checked = 0usize;
+    for path in &files {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let Some(vars) = face.variation_axes() else {
+            continue;
+        };
+        let Some(axis) = vars.axes().iter().find(|a| a.tag == *b"wght") else {
+            continue;
+        };
+        // A degenerate axis — one whose ends coincide — has nothing to prove
+        // and would fail for the right reason in the wrong test.
+        if axis.min >= axis.max {
+            continue;
+        }
+        let (heaviest, default_weight) = (axis.max, axis.default);
+        let face = std::sync::Arc::new(face);
+        // 64 pixels: large enough that a weight difference is several pixels of
+        // ink rather than one of antialiasing, so this is not a test of the
+        // rasterizer's rounding.
+        let mut font = ScaledFont::shared(std::sync::Arc::clone(&face), 64.0).unwrap();
+        let gid = font.glyph_id('H');
+        if gid == 0 {
+            continue;
+        }
+        let light = font.glyph(gid).unwrap().mask.clone();
+        font.set_axes(&[(*b"wght", heaviest)]);
+        let heavy = font.glyph(gid).unwrap().mask.clone();
+
+        // Heavier means more ink. Comparing total coverage rather than the
+        // bitmaps says *which way* it moved, which is what distinguishes a
+        // wired-up axis from one that is merely different.
+        let ink = |m: &osfont::raster::GlyphMask| -> u64 {
+            m.coverage.iter().map(|&c| u64::from(c)).sum()
+        };
+        assert!(
+            ink(&heavy) > ink(&light),
+            "{name}: weight {} should put more ink on the page than {}: {} vs {}",
+            heaviest,
+            default_weight,
+            ink(&heavy),
+            ink(&light)
+        );
+
+        // And going back to the default reproduces the original exactly, which
+        // is the check that the instance is a *view* and nothing was mutated.
+        font.set_axes(&[(*b"wght", default_weight)]);
+        let again = font.glyph(gid).unwrap().mask.clone();
+        assert_eq!(
+            again.coverage, light.coverage,
+            "{name}: returning to the default weight did not reproduce the default glyph"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 4,
+        "only {checked} faces with a usable weight axis were found; expected the \
+         host's variable fonts"
+    );
+    println!("{checked} faces put more ink on the page at their heaviest weight");
+}
+
+/// Every named instance of every variable face, advance by advance, against an
+/// independent reader of `HVAR`.
+///
+/// This is the test that can tell whether `HVAR` was read at all. Until it
+/// existed a varied glyph was drawn at its varied shape and spaced at its
+/// *default* width, and nothing in the suite noticed: the outline tests all
+/// compare shapes, and the shape is right. What is wrong is the gap after it,
+/// which accumulates along a line -- a heavy instance of Segoe UI Variable is
+/// up to 15% wider per glyph than its default, so a line of forty characters
+/// ends several glyphs short of where it belongs.
+///
+/// Two of the seven faces here (Cascadia Code and Mono) are in the table with
+/// every row identical, and that is not padding: their `HVAR` has a null
+/// advance index map, which means the *implicit* map (outer 0, inner = glyph
+/// id) rather than "no variation". A reader that treated the null offset as an
+/// absent feature would still pass this, because their store happens to vary
+/// nothing -- which is exactly why `varstore.rs`'s unit tests carry a synthetic
+/// fixture for that path. What these two rows do pin is that the null offset is
+/// not read as an *error* that costs the face its advances entirely.
+///
+/// The glyphs sampled are the eight the oracle takes, spread across the whole
+/// glyph order rather than clustered in the Latin block at the front.
+/// Regenerate with:
+///
+/// ```text
+/// python gui/font/tools/varstore_oracle.py --hvar
+/// ```
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_variable_fonts_vary_their_advances() {
+    // (file name, one advance row per instance: the default first, then the
+    // named instances in `fvar` order).
+    let expected: &[(&str, &[&[u16]])] = &[
+        ("CascadiaCode.ttf", &[
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // default
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 200
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 300
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 350
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 400
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 600
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 700
+        ]),  // gids [0, 222, 444, 666, 888, 1110, 1332, 1554]
+        ("CascadiaMono.ttf", &[
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // default
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 200
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 300
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 350
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 400
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 600
+            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 700
+        ]),  // gids [0, 222, 444, 666, 888, 1110, 1332, 1554]
+        ("ReemKufi.ttf", &[
+            &[500, 806, 591, 549, 850, 720, 460, 0],  // default
+            &[500, 806, 591, 549, 850, 720, 460, 0],  // 400
+            &[500, 805, 599, 556, 850, 720, 466, 0],  // 500
+            &[500, 804, 606, 564, 850, 720, 473, 0],  // 600
+            &[500, 803, 614, 571, 850, 720, 479, 0],  // 700
+        ]),  // gids [0, 101, 202, 303, 404, 505, 606, 707]
+        ("SegUIVar.ttf", &[
+            &[1322, 1168, 813, 1200, 1073, 1042, 256, 861],  // default
+            &[1342, 1187, 786, 1209, 1027, 1061, 256, 906],  // 300, 8
+            &[1342, 1190, 816, 1218, 1064, 1072, 206, 908],  // 350, 8
+            &[1342, 1195, 846, 1246, 1098, 1085, 256, 915],  // 400, 8
+            &[1342, 1224, 902, 1272, 1123, 1108, 256, 970],  // 600, 8
+            &[1342, 1257, 965, 1302, 1150, 1135, 256, 1026],  // 700, 8
+            &[1322, 1167, 734, 1149, 962, 1012, 256, 868],  // 300, 10.5
+            &[1322, 1167, 773, 1155, 1017, 1026, 164, 864],  // 350, 10.5
+            &[1322, 1168, 813, 1200, 1073, 1042, 256, 861],  // 400, 10.5
+            &[1322, 1202, 877, 1230, 1101, 1069, 256, 926],  // 600, 10.5
+            &[1322, 1243, 955, 1266, 1135, 1102, 256, 992],  // 700, 10.5
+            &[1302, 1109, 746, 1109, 939, 971, 256, 886],  // 300, 36
+            &[1302, 1129, 756, 1146, 961, 996, 256, 916],  // 350, 36
+            &[1302, 1112, 804, 1195, 1053, 1014, 256, 920],  // 400, 36
+            &[1302, 1146, 867, 1226, 1081, 1045, 256, 981],  // 600, 36
+            &[1302, 1187, 943, 1263, 1115, 1082, 256, 1055],  // 700, 36
+        ]),  // gids [0, 316, 632, 948, 1264, 1580, 1896, 2212]
+        ("SitkaVF-Italic.ttf", &[
+            &[1024, 1651, 1225, 763, 1024, 1310, 1342, 1321],  // default
+            &[1024, 1771, 1320, 836, 1047, 1408, 1437, 1432],  // 6, 400
+            &[1024, 1807, 1366, 873, 1047, 1439, 1509, 1462],  // 6, 600
+            &[1024, 1830, 1396, 898, 1047, 1459, 1556, 1482],  // 6, 700
+            &[1024, 1651, 1225, 763, 1024, 1310, 1342, 1321],  // 11, 400
+            &[1024, 1682, 1268, 802, 1024, 1343, 1405, 1362],  // 11, 600
+            &[1024, 1703, 1296, 828, 1024, 1364, 1447, 1389],  // 11, 700
+            &[1024, 1559, 1150, 701, 1024, 1234, 1269, 1230],  // 16.7391, 400
+            &[1024, 1586, 1190, 743, 1024, 1269, 1326, 1284],  // 16.7391, 600
+            &[1024, 1604, 1217, 771, 1024, 1293, 1363, 1320],  // 16.7391, 700
+            &[1024, 1490, 1093, 654, 1024, 1177, 1215, 1162],  // 21.0434, 400
+            &[1024, 1514, 1132, 698, 1024, 1215, 1266, 1226],  // 21.0434, 600
+            &[1024, 1530, 1158, 728, 1024, 1239, 1300, 1268],  // 21.0434, 700
+            &[1024, 1433, 1046, 615, 1024, 1130, 1169, 1105],  // 24.6303, 400
+            &[1024, 1454, 1084, 661, 1024, 1169, 1216, 1177],  // 24.6303, 600
+            &[1024, 1468, 1109, 692, 1024, 1195, 1247, 1225],  // 24.6303, 700
+            &[1024, 1387, 1008, 584, 1024, 1092, 1133, 1060],  // 27.5, 400
+            &[1024, 1406, 1045, 632, 1024, 1132, 1176, 1138],  // 27.5, 600
+            &[1024, 1419, 1070, 663, 1024, 1159, 1205, 1190],  // 27.5, 700
+        ]),  // gids [0, 148, 296, 444, 592, 740, 888, 1036]
+        ("SitkaVF.ttf", &[
+            &[1024, 1650, 1255, 764, 1024, 1318, 1442, 1321],  // default
+            &[1024, 1770, 1354, 835, 1047, 1416, 1553, 1432],  // 6, 400
+            &[1024, 1799, 1400, 873, 1047, 1468, 1602, 1462],  // 6, 600
+            &[1024, 1818, 1430, 898, 1047, 1502, 1634, 1482],  // 6, 700
+            &[1024, 1650, 1255, 764, 1024, 1318, 1442, 1321],  // 11, 400
+            &[1024, 1681, 1298, 803, 1024, 1367, 1491, 1362],  // 11, 600
+            &[1024, 1701, 1327, 829, 1024, 1399, 1524, 1389],  // 11, 700
+            &[1024, 1558, 1177, 705, 1024, 1242, 1355, 1230],  // 16.7391, 400
+            &[1024, 1591, 1218, 746, 1024, 1289, 1406, 1284],  // 16.7391, 600
+            &[1024, 1613, 1245, 773, 1024, 1319, 1439, 1320],  // 16.7391, 700
+            &[1024, 1489, 1118, 661, 1024, 1185, 1290, 1162],  // 21.0434, 400
+            &[1024, 1524, 1158, 703, 1024, 1230, 1342, 1226],  // 21.0434, 600
+            &[1024, 1547, 1184, 730, 1024, 1260, 1376, 1268],  // 21.0434, 700
+            &[1024, 1432, 1069, 624, 1024, 1137, 1236, 1105],  // 24.6303, 400
+            &[1024, 1468, 1108, 667, 1024, 1181, 1289, 1177],  // 24.6303, 600
+            &[1024, 1492, 1133, 695, 1024, 1210, 1323, 1225],  // 24.6303, 700
+            &[1024, 1386, 1030, 595, 1024, 1099, 1193, 1060],  // 27.5, 400
+            &[1024, 1423, 1067, 638, 1024, 1142, 1246, 1138],  // 27.5, 600
+            &[1024, 1448, 1092, 667, 1024, 1170, 1281, 1190],  // 27.5, 700
+        ]),  // gids [0, 148, 296, 444, 592, 740, 888, 1036]
+        ("bahnschrift.ttf", &[
+            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // default
+            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // 300, 100
+            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // 350, 100
+            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // 400, 100
+            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // 600, 100
+            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // 700, 100
+            &[1228, 982, 986, 1038, 1297, 661, 1268, 964],  // 300, 87.5
+            &[1228, 982, 986, 1038, 1297, 661, 1268, 964],  // 350, 87.5
+            &[1228, 982, 986, 1038, 1297, 661, 1268, 964],  // 400, 87.5
+            &[1228, 982, 986, 1038, 1297, 661, 1268, 964],  // 600, 87.5
+            &[1228, 982, 986, 1038, 1297, 661, 1268, 964],  // 700, 87.5
+            &[988, 802, 834, 868, 1130, 566, 1094, 792],  // 300, 75
+            &[988, 802, 834, 868, 1130, 566, 1094, 792],  // 350, 75
+            &[988, 802, 834, 868, 1130, 566, 1094, 792],  // 400, 75
+            &[988, 802, 834, 868, 1130, 566, 1094, 792],  // 600, 75
+            &[988, 802, 834, 868, 1130, 566, 1094, 792],  // 700, 75
+        ]),  // gids [0, 120, 240, 360, 480, 600, 720, 840]
+    ];
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    files.sort();
+
+    let mut checked = 0usize;
+    let mut faces_that_move = 0usize;
+    for (name, want) in expected {
+        let Some(path) = files
+            .iter()
+            .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(*name))
+        else {
+            continue;
+        };
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let vars = face
+            .variation_axes()
+            .unwrap_or_else(|| panic!("{name}: opened but reports no axes"));
+        assert_eq!(
+            want.len(),
+            vars.instances().len() + 1,
+            "{name}: named instance count"
+        );
+
+        let n = face.num_glyphs();
+        let step = usize::from((n / 8).max(1));
+        let gids: Vec<u16> = (0..n).step_by(step).take(8).collect();
+
+        let mut rows: Vec<Vec<u16>> = Vec::new();
+        for (row, want_row) in want.iter().enumerate() {
+            let coords = if row == 0 {
+                vars.default_coords()
+            } else {
+                vars.instance_coords(row - 1)
+                    .unwrap_or_else(|| panic!("{name}: instance {row} does not normalize"))
+            };
+            let got: Vec<u16> = gids
+                .iter()
+                .map(|&g| {
+                    face.advance_at(g, &coords)
+                        .unwrap_or_else(|e| panic!("{name}: glyph {g} advance: {e:?}"))
+                })
+                .collect();
+            assert_eq!(got.as_slice(), *want_row, "{name}: instance row {row}");
+            rows.push(got);
+        }
+        // A differential test needs a liveness assertion, or the null
+        // implementation -- "the advance never varies" -- passes it.
+        if rows[1..].iter().any(|r| *r != rows[0]) {
+            faces_that_move += 1;
+        }
+        checked += 1;
+    }
+
+    assert_eq!(
+        checked,
+        expected.len(),
+        "expected all {} faces with `HVAR` to be installed; found {checked}",
+        expected.len()
+    );
+    assert!(
+        faces_that_move >= 5,
+        "only {faces_that_move} faces actually changed an advance; five of the \
+         seven should (both Cascadias vary nothing)"
+    );
+    println!("{checked} faces read through HVAR, {faces_that_move} of them varying");
+}
+
+/// The face-wide metrics `MVAR` corrects, per named instance, against the same
+/// independent reader.
+///
+/// `MVAR` is the third way into one `ItemVariationStore` and the only one whose
+/// index is a *tag* rather than an ordinal, so this is where a mistake in the
+/// sorted-record binary search would show. It is also the only one of the three
+/// whose store hangs off an **Offset16** -- `HVAR` and `GDEF` both use an
+/// Offset32 -- and a reader that used four bytes here would land in the record
+/// array and compute an offset in the tens of thousands.
+///
+/// Sitka is the interesting face: it varies on optical size as well as weight,
+/// and its x-height correction reaches -166 units at the small-text end. A
+/// scalar product that smeared the two axes together would still produce
+/// *something* on every row, which is why the expectations are per-instance
+/// rather than a range.
+///
+/// Regenerate with:
+///
+/// ```text
+/// python gui/font/tools/varstore_oracle.py --mvar
+/// ```
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_variable_fonts_vary_their_global_metrics() {
+    /// (file name, the tags that face carries, one correction row per
+    /// instance: the default first, then the named instances in `fvar` order).
+    type Expectation<'a> = (&'a str, &'a [[u8; 4]], &'a [&'a [i16]]);
+
+    let expected: &[Expectation<'_>] = &[
+        ("ReemKufi.ttf", &[*b"xhgt", *b"cpht"], &[
+            &[0, 0],  // default
+            &[0, 0],  // 400
+            &[6, 4],  // 500
+            &[13, 7],  // 600
+            &[19, 11],  // 700
+        ]),
+        ("SegUIVar.ttf", &[*b"xhgt"], &[
+            &[0],  // default
+            &[25],  // 300, 8
+            &[25],  // 350, 8
+            &[25],  // 400, 8
+            &[25],  // 600, 8
+            &[25],  // 700, 8
+            &[0],  // 300, 10.5
+            &[0],  // 350, 10.5
+            &[0],  // 400, 10.5
+            &[0],  // 600, 10.5
+            &[0],  // 700, 10.5
+            &[0],  // 300, 36
+            &[0],  // 350, 36
+            &[0],  // 400, 36
+            &[0],  // 600, 36
+            &[0],  // 700, 36
+        ]),
+        ("SitkaVF-Italic.ttf", &[*b"xhgt", *b"cpht", *b"undo", *b"unds"], &[
+            &[0, 0, 0, 0],  // default
+            &[0, 0, 0, 0],  // 6, 400
+            &[0, 0, 0, 0],  // 6, 600
+            &[0, 0, 0, 0],  // 6, 700
+            &[0, 0, 0, 0],  // 11, 400
+            &[-35, -30, 5, -2],  // 11, 600
+            &[-58, -50, 8, -4],  // 11, 700
+            &[-56, -37, 3, -1],  // 16.7391, 400
+            &[-80, -57, 6, -3],  // 16.7391, 600
+            &[-96, -69, 8, -4],  // 16.7391, 700
+            &[-99, -65, 5, -2],  // 21.0434, 400
+            &[-114, -76, 7, -3],  // 21.0434, 600
+            &[-124, -84, 8, -4],  // 21.0434, 700
+            &[-134, -88, 7, -3],  // 24.6303, 400
+            &[-142, -93, 7, -4],  // 24.6303, 600
+            &[-147, -96, 8, -4],  // 24.6303, 700
+            &[-162, -106, 8, -4],  // 27.5, 400
+            &[-164, -106, 8, -4],  // 27.5, 600
+            &[-166, -106, 8, -4],  // 27.5, 700
+        ]),
+        ("SitkaVF.ttf", &[*b"xhgt", *b"cpht", *b"undo", *b"unds"], &[
+            &[0, 0, 0, 0],  // default
+            &[57, 50, -4, 2],  // 6, 400
+            &[57, 50, 44, -29],  // 6, 600
+            &[57, 50, 76, -50],  // 6, 700
+            &[0, 0, 0, 0],  // 11, 400
+            &[-1, 0, 48, -31],  // 11, 600
+            &[-1, 0, 79, -52],  // 11, 700
+            &[-37, -19, 0, 0],  // 16.7391, 400
+            &[-38, -19, 48, -31],  // 16.7391, 600
+            &[-38, -19, 79, -52],  // 16.7391, 700
+            &[-65, -34, 0, 0],  // 21.0434, 400
+            &[-65, -34, 48, -31],  // 21.0434, 600
+            &[-66, -34, 79, -52],  // 21.0434, 700
+            &[-88, -46, 0, 0],  // 24.6303, 400
+            &[-88, -46, 48, -31],  // 24.6303, 600
+            &[-89, -46, 79, -52],  // 24.6303, 700
+            &[-107, -56, 0, 0],  // 27.5, 400
+            &[-107, -56, 48, -31],  // 27.5, 600
+            &[-107, -56, 79, -52],  // 27.5, 700
+        ]),
+    ];
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    files.sort();
+
+    let mut checked = 0usize;
+    let mut faces_that_move = 0usize;
+    for (name, tags, want) in expected {
+        let Some(path) = files
+            .iter()
+            .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(*name))
+        else {
+            continue;
+        };
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let vars = face
+            .variation_axes()
+            .unwrap_or_else(|| panic!("{name}: opened but reports no axes"));
+        assert_eq!(
+            want.len(),
+            vars.instances().len() + 1,
+            "{name}: named instance count"
+        );
+
+        let mut rows: Vec<Vec<i16>> = Vec::new();
+        for (row, want_row) in want.iter().enumerate() {
+            let coords = if row == 0 {
+                vars.default_coords()
+            } else {
+                vars.instance_coords(row - 1)
+                    .unwrap_or_else(|| panic!("{name}: instance {row} does not normalize"))
+            };
+            let got: Vec<i16> = tags.iter().map(|&t| face.metric_delta(t, &coords)).collect();
+            assert_eq!(got.as_slice(), *want_row, "{name}: instance row {row}");
+            rows.push(got);
+        }
+        // The default instance's metrics *are* the stored metrics, so row 0
+        // must be all zeroes -- on every face, with no exceptions to carve out.
+        assert!(
+            rows[0].iter().all(|&d| d == 0),
+            "{name}: the default instance corrects its own metrics"
+        );
+        if rows[1..].iter().any(|r| r.iter().any(|&d| d != 0)) {
+            faces_that_move += 1;
+        }
+        checked += 1;
+    }
+
+    assert_eq!(
+        checked,
+        expected.len(),
+        "expected all {} faces with a readable `MVAR` to be installed; found {checked}",
+        expected.len()
+    );
+    assert!(
+        faces_that_move >= 4,
+        "only {faces_that_move} faces actually corrected a metric"
+    );
+    println!("{checked} faces read through MVAR, {faces_that_move} of them varying");
+}
+
+/// A `GPOS` kern whose correction is a `VariationIndex` follows the instance.
+///
+/// A `Device` slot in a value record holds one of two tables. A device table is
+/// indexed by pixel size; a `VariationIndex` names an `(outer, inner)` pair in
+/// `GDEF`'s `ItemVariationStore` and depends on the *instance* instead. Reem
+/// Kufi puts one on 1333 of its cmapped `PairPosFormat1` records, so its kerning
+/// is almost entirely instance-driven: at the default weight the corrections are
+/// all zero and the stored value is the whole answer, and they grow to the full
+/// stored delta at 700.
+///
+/// `kern_across` is the assertion rather than a shaped run, deliberately. A
+/// shaped advance folds in `HVAR`, so a run that moved would not say *which* of
+/// the two variation paths moved it; `kern_across` reads the pair value and
+/// nothing else, so a difference here can only have come through the store.
+///
+/// The font is opened at its own em (1000px) so the scale is exactly 1 and the
+/// numbers below are design units rather than pixels. That also puts the size
+/// far outside any real device table's ppem range, which is the second half of
+/// the isolation: nothing but a `VariationIndex` can contribute at 1000px.
+///
+/// Every pair below carries a nonzero stored value *and* a correction, which is
+/// the arrangement that hides a broken reader: drop the correction and the kern
+/// is still roughly right, so only exact numbers catch it. `w`/`a` is the pair
+/// whose device offset first showed that format 1 measures from its `PairSet`
+/// and not from the subtable — from the subtable its offset decodes as a
+/// format-3 device table claiming to cover 6934..7012 ppem.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn a_variation_index_kern_follows_the_instance() {
+    // (left gid, right gid, [default, wght=550, wght=700]).
+    //
+    // The stored values are -41, -27, -42 and -15; the store adds -9, -3, -18
+    // and -5 at the top of the axis. Weight 550 is exactly half way up Reem
+    // Kufi's 400..700 axis and its one region peaks at the top, so every delta
+    // is halved and then rounded half away from zero: -9 -> -5 rather than -4,
+    // -3 -> -2 rather than -1, -5 -> -3 rather than -2. Truncating, or rounding
+    // half to even, disagrees with three of these four middle entries.
+    let expected: &[(u16, u16, [f32; 3])] = &[
+        (2, 30, [-41.0, -46.0, -50.0]),    // A / C
+        (2, 62, [-27.0, -29.0, -30.0]),    // A / G
+        (2, 69, [-42.0, -51.0, -60.0]),    // A / Hbar
+        (374, 196, [-15.0, -18.0, -20.0]), // w / a
+    ];
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    let Some(path) = files
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some("ReemKufi.ttf"))
+    else {
+        panic!("ReemKufi.ttf is not installed on this host");
+    };
+    let data = fs::read(path).expect("ReemKufi.ttf is readable");
+
+    for (col, weight) in [None, Some(550.0), Some(700.0)].into_iter().enumerate() {
+        let mut font = ScaledFont::from_bytes(data.clone(), 1000.0).expect("ReemKufi scales");
+        assert_eq!(font.units_per_em(), 1000, "the em this test assumes");
+        if let Some(w) = weight {
+            font.set_axes(&[(*b"wght", w)]);
+        }
+        for &(left, right, want) in expected {
+            let got = font.kern_across(left, right, &[]);
+            assert!(
+                (got - want[col]).abs() < 0.001,
+                "{left}/{right} at {weight:?}: kern {got}, expected {}",
+                want[col]
+            );
+        }
+    }
+
+    // And the direction of travel, stated once so a fixture that somehow
+    // pinned three identical columns could not pass: every one of these pairs
+    // must actually move between the two ends of the axis.
+    let mut light = ScaledFont::from_bytes(data.clone(), 1000.0).expect("scales");
+    light.set_axes(&[(*b"wght", 400.0)]);
+    let mut bold = ScaledFont::from_bytes(data, 1000.0).expect("scales");
+    bold.set_axes(&[(*b"wght", 700.0)]);
+    for &(left, right, _) in expected {
+        assert!(
+            light.kern_across(left, right, &[]) != bold.kern_across(left, right, &[]),
+            "{left}/{right} does not move across the weight axis"
+        );
+    }
+    println!("{} Reem Kufi pairs corrected through GDEF's store", expected.len());
 }

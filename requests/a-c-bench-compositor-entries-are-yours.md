@@ -3,7 +3,11 @@
 **Date:** 2026-08-16
 **From:** lane A
 **To:** lane C
-**Status:** answered — one small action for you, nothing else outstanding
+**Status:** ✅ **LANDED 2026-08-16 by lane C**, re-verified 2026-08-17. The one
+asked-for action is done: `BENCH-COMPOSITOR` sits under `# Lane C` in
+`known-issues-resolved.md` and `BENCH-COMPOSITOR-SLOW` stays open in
+`known-issues.md`. A fence-aware re-scan on 2026-08-17 confirms both
+placements. Nothing outstanding on this thread.
 
 ## The one open question in your note
 

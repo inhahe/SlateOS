@@ -926,6 +926,65 @@ Roadmap:
   lines). Still open, and wanting its own entry: arrow keys move in *logical*
   order, so a caret crossing a direction boundary jumps across the screen
   rather than stepping. Vello itself waits on `[A]`'s GPU driver.
+  **Variable fonts are done** (§448, §449, §450, §451): all four steps
+  `TD-FONT-DOES-NOT-READ-VARIATION-STORES` mandates have
+  landed: `gui/font/src/var.rs` reads `fvar`/`avar` and turns "weight 600" into
+  the normalized coordinates the format works in — bit for bit what HarfBuzz
+  computes, which means `avar`'s segment map **rounds half away from zero**;
+  it was written truncating, on the mistaken belief that HarfBuzz truncates
+  there too (it truncates in `Device::get_delta`, but the segment map goes
+  through `roundf`), and `777a040ff` fixed it. Bit-for-bit matters because this
+  crate is checked against HarfBuzz everywhere else and a one-unit
+  disagreement here would come back as an
+  unattributable sub-pixel difference in a *shape*; `gui/font/src/gvar.rs`
+  applies the per-glyph outline deltas (tuple scalars, interpolation of
+  unnamed points, phantom points, composite component offsets) behind
+  `Face::outline_at`; and `ScaledFont::shared_at`/`set_axes` put the chosen
+  instance on the **scaled** font rather than the face, so one loaded file
+  draws bold and regular at the same time. What survived that is worth
+  knowing: **no font installed on this machine exercises a third of `gvar`** —
+  all 7 variable faces express advance and side-bearing variation in `HVAR`
+  and leave every one of ~2,800 glyphs' phantom deltas at zero, and none
+  varies a composite's component offset, so flipping the sign of the phantom
+  side-bearing correction left all 25 host tests passing. Those paths are
+  covered instead by a variable font hand-assembled inside `sfnt.rs`'s test
+  module, whose axis is arranged so both tested instances have scalars of
+  exactly 1.0 and 0.5 and every expected outline is computable on paper with
+  no tolerance. Step 4 is the `ItemVariationStore`, and its shared reader now
+  exists: `gui/font/src/varstore.rs` (regions, subtables, `DeltaSetIndexMap`)
+  serves `HVAR` behind `Face::advance_at` — every advance `ScaledFont` takes
+  now varies, so a glyph is spaced at the width it is drawn at, from `HVAR`
+  rather than from `gvar`'s phantoms, which would have been a second source of
+  truth for one number — and `MVAR` behind `Face::metrics_at`, which moves
+  ascender/descender/line-gap. Cap-height and x-height are *not* read from
+  `MVAR` even though 4 faces carry them: they stay measured off the varied
+  outline, which is what the non-variable path does and is ground truth.
+  Cross-checked against an independently-written oracle
+  (`tools/varstore_oracle.py`) over every named instance of every host face: 7
+  faces read through `HVAR`, 5 varying; 4 through `MVAR`, all varying. The
+  three paths no installed font reaches — a null advance map meaning the
+  *implicit* map, `LONG_WORDS` doubling both column widths, and a degenerate
+  region scoring 1.0 (0 of 199 region axes here are degenerate) — are covered
+  by synthetic stores instead. The `GDEF` store the entry is named for — the
+  last step — landed too (§451, `2ee86901d`): `device.rs`'s declining
+  `VariationIndex` arm became `Corrections<'a>`, which carries the size *and*
+  the instance, so a `GPOS` anchor or kern naming an `(outer, inner)` delta
+  pair now reads it. A `VariationIndex` delta is in **font units, not pixels**,
+  so it applies even where a device table contributes nothing — which is why
+  size and instance had to become two arguments rather than one. Two bugs only
+  that arm could reach came out with it: a `PairPosFormat1` value record's
+  device offsets are measured from its **`PairSet`**, not from the subtable
+  (`8a70341eb` — on Reem Kufi the wrong base named a format-3 device table
+  covering 6934..7012 ppem), and mark positioning measured its fallback ink box
+  from the `glyf` header, which describes the *default* instance only, so a
+  heavy instance put its accents where the light glyph's ink had been
+  (`1f542b478`, `Face::glyph_bbox_at`). Pinned on the host by
+  `a_variation_index_kern_follows_the_instance`, whose four expected kerns were
+  computed from the font's own bytes rather than snapshotted from our output.
+  The lesson §451 records: the HarfBuzz sweep had been green over 556 faces the
+  whole time, because it only ever asked about the **default** instance — a
+  differential test proves only the questions it asks. Still out of scope:
+  `CFF2`, which no installed face carries.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

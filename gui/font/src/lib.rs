@@ -48,6 +48,7 @@ mod fallback;
 mod fixture;
 mod gpos;
 pub mod gsub;
+mod gvar;
 mod hangul;
 mod indic;
 mod indic_machine;
@@ -80,6 +81,8 @@ mod thai;
 mod universal;
 mod universal_machine;
 mod universal_tables;
+pub mod var;
+mod varstore;
 mod would;
 
 use alloc::collections::BTreeMap;

@@ -50,7 +50,7 @@
 
 use alloc::vec::Vec;
 
-use crate::device::Ppem;
+use crate::device::Corrections;
 use crate::otl::{coverage_index, feature_subtables, glyph_class};
 use crate::sfnt::{Span, i16_at, u16_at};
 
@@ -200,7 +200,7 @@ impl Marked {
 /// `None` when the subtable is a format this cannot read, when the mark is not
 /// covered, or when the mark's class is out of range — all of which mean the
 /// same thing to a caller: this subtable has nothing to say about this mark.
-fn marked(data: &[u8], sub: usize, mark: u16, ppem: Ppem) -> Option<Marked> {
+fn marked(data: &[u8], sub: usize, mark: u16, corr: Corrections<'_>) -> Option<Marked> {
     if u16_at(data, sub)? != 1 {
         return None;
     }
@@ -231,7 +231,7 @@ fn marked(data: &[u8], sub: usize, mark: u16, ppem: Ppem) -> Option<Marked> {
         classes,
         to_array,
         class,
-        at: anchor(data, mark_array, u16_at(data, record.checked_add(2)?)?, ppem)?,
+        at: anchor(data, mark_array, u16_at(data, record.checked_add(2)?)?, corr)?,
     })
 }
 
@@ -249,9 +249,9 @@ pub(crate) fn attachment(
     sub: usize,
     base: u16,
     mark: u16,
-    ppem: Ppem,
+    corr: Corrections<'_>,
 ) -> Option<(i16, i16)> {
-    let m = marked(data, sub, mark, ppem)?;
+    let m = marked(data, sub, mark, corr)?;
     let base_index = usize::from(coverage_index(data, m.to_coverage, base)?);
 
     // BaseArray / Mark2Array: a count, then a dense row of `classes` anchor
@@ -261,7 +261,7 @@ pub(crate) fn attachment(
         return None;
     }
     let record = m.cell(m.to_array.checked_add(2)?, base_index)?;
-    m.displacement(anchor(data, m.to_array, u16_at(data, record)?, ppem)?)
+    m.displacement(anchor(data, m.to_array, u16_at(data, record)?, corr)?)
 }
 
 /// Read one MarkLigPos subtable: where a mark goes on one *component* of a
@@ -285,9 +285,9 @@ pub(crate) fn lig_attachment(
     lig: u16,
     mark: u16,
     component: u8,
-    ppem: Ppem,
+    corr: Corrections<'_>,
 ) -> Option<(i16, i16)> {
-    let m = marked(data, sub, mark, ppem)?;
+    let m = marked(data, sub, mark, corr)?;
     let lig_index = usize::from(coverage_index(data, m.to_coverage, lig)?);
 
     // LigatureArray: a count, then one offset per covered ligature, each to a
@@ -317,7 +317,7 @@ pub(crate) fn lig_attachment(
         n => n.min(components).checked_sub(1)?,
     };
     let record = m.cell(attach.checked_add(2)?, row)?;
-    m.displacement(anchor(data, attach, u16_at(data, record)?, ppem)?)
+    m.displacement(anchor(data, attach, u16_at(data, record)?, corr)?)
 }
 
 /// One `Anchor` table at `from + offset`, or `None` for the NULL offset.
@@ -330,9 +330,9 @@ pub(crate) fn lig_attachment(
 /// unless its font functions can report a hinted contour point.
 ///
 /// Format 3 adds a device table per axis, and those *are* read; see
-/// [`device`](crate::device). At [`Ppem::NONE`] they read as no correction, so
+/// [`device`](crate::device). At [`Corrections::NONE`] they read as no correction, so
 /// a caller with no size still gets the design-unit anchor.
-pub(crate) fn anchor(data: &[u8], from: usize, offset: u16, ppem: Ppem) -> Option<(i16, i16)> {
+pub(crate) fn anchor(data: &[u8], from: usize, offset: u16, corr: Corrections<'_>) -> Option<(i16, i16)> {
     if offset == 0 {
         return None;
     }
@@ -350,8 +350,8 @@ pub(crate) fn anchor(data: &[u8], from: usize, offset: u16, ppem: Ppem) -> Optio
     // from whatever array the anchor was reached through — which is why `at`
     // and not `from` is the base here. A format 3 anchor whose offsets are
     // missing entirely is still a usable anchor: the coordinates were read.
-    let dx = u16_at(data, at.checked_add(6)?).map_or(0, |o| ppem.delta(data, at, o));
-    let dy = u16_at(data, at.checked_add(8)?).map_or(0, |o| ppem.delta(data, at, o));
+    let dx = u16_at(data, at.checked_add(6)?).map_or(0, |o| corr.delta(data, at, o));
+    let dy = u16_at(data, at.checked_add(8)?).map_or(0, |o| corr.delta(data, at, o));
     Some((x.saturating_add(dx), y.saturating_add(dy)))
 }
 
@@ -394,6 +394,7 @@ fn glyph_class_def(data: &[u8], gdef: Span) -> Option<usize> {
 )]
 mod tests {
     use super::*;
+    use crate::device::Ppem;
 
     fn be16(v: u16) -> [u8; 2] {
         v.to_be_bytes()
@@ -461,22 +462,22 @@ mod tests {
         let dy = crate::device::table(10, 12, 2, &[1, 0, -1]);
         let data = reached_at_sixteen(&anchor3(500, 700, &dx, &dy));
 
-        assert_eq!(anchor(&data, 0, 16, Ppem::NONE), Some((500, 700)));
+        assert_eq!(anchor(&data, 0, 16, Corrections::NONE), Some((500, 700)));
         assert_eq!(
-            anchor(&data, 0, 16, Ppem::new(10.0, 1000)),
+            anchor(&data, 0, 16, Corrections::at(Ppem::new(10.0, 1000))),
             Some((500 - 4 * 1000 / 10, 700 + 1000 / 10))
         );
         assert_eq!(
-            anchor(&data, 0, 16, Ppem::new(11.0, 1000)),
+            anchor(&data, 0, 16, Corrections::at(Ppem::new(11.0, 1000))),
             Some((500, 700))
         );
         assert_eq!(
-            anchor(&data, 0, 16, Ppem::new(12.0, 1000)),
+            anchor(&data, 0, 16, Corrections::at(Ppem::new(12.0, 1000))),
             Some((500 + 4 * 1000 / 12, 700 - 1000 / 12))
         );
         // Past the range the table covers, the anchor is where it was drawn.
         assert_eq!(
-            anchor(&data, 0, 16, Ppem::new(20.0, 1000)),
+            anchor(&data, 0, 16, Corrections::at(Ppem::new(20.0, 1000))),
             Some((500, 700))
         );
     }
@@ -486,7 +487,7 @@ mod tests {
         let dy = crate::device::table(10, 10, 3, &[9]);
         let data = reached_at_sixteen(&anchor3(500, 700, &[], &dy));
         assert_eq!(
-            anchor(&data, 0, 16, Ppem::new(10.0, 1000)),
+            anchor(&data, 0, 16, Corrections::at(Ppem::new(10.0, 1000))),
             Some((500, 700 + 9 * 1000 / 10))
         );
     }
@@ -502,7 +503,7 @@ mod tests {
         t.extend_from_slice(&700i16.to_be_bytes());
         t.extend_from_slice(&be16(14)); // contour point
         let data = reached_at_sixteen(&t);
-        assert_eq!(anchor(&data, 0, 16, Ppem::new(10.0, 1000)), Some((500, 700)));
+        assert_eq!(anchor(&data, 0, 16, Corrections::at(Ppem::new(10.0, 1000))), Some((500, 700)));
     }
 
     /// An attachment point, `(x, y)` in font units.
@@ -653,14 +654,14 @@ mod tests {
     #[test]
     fn a_mark_lands_on_the_component_it_belongs_to() {
         let data = lam_alef();
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 1, Ppem::NONE), Some((100, 700)));
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 2, Ppem::NONE), Some((700, 700)));
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 1, Corrections::NONE), Some((100, 700)));
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 2, Corrections::NONE), Some((700, 700)));
     }
 
     #[test]
     fn an_unknown_component_falls_back_to_the_last() {
         let data = lam_alef();
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 0, Ppem::NONE), Some((700, 700)));
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 0, Corrections::NONE), Some((700, 700)));
     }
 
     #[test]
@@ -669,7 +670,7 @@ mod tests {
         // font's `componentCount` and the substitution disagreeing — must not
         // read a neighbouring table.
         let data = lam_alef();
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 9, Ppem::NONE), Some((700, 700)));
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 9, Corrections::NONE), Some((700, 700)));
     }
 
     #[test]
@@ -679,15 +680,15 @@ mod tests {
             &[(2, 0, (100, 0))],
             &[(1, vec![vec![None], vec![Some((800, 700))]])],
         );
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 1, Ppem::NONE), None);
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 2, Ppem::NONE), Some((700, 700)));
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 1, Corrections::NONE), None);
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 2, Corrections::NONE), Some((700, 700)));
     }
 
     #[test]
     fn an_uncovered_ligature_or_mark_attaches_to_nothing() {
         let data = lam_alef();
-        assert_eq!(lig_attachment(&data, 0, 3, 2, 1, Ppem::NONE), None);
-        assert_eq!(lig_attachment(&data, 0, 1, 3, 1, Ppem::NONE), None);
+        assert_eq!(lig_attachment(&data, 0, 3, 2, 1, Corrections::NONE), None);
+        assert_eq!(lig_attachment(&data, 0, 1, 3, 1, Corrections::NONE), None);
     }
 
     #[test]
@@ -705,10 +706,10 @@ mod tests {
                 ],
             )],
         );
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 1, Ppem::NONE), Some((200, 700)));
-        assert_eq!(lig_attachment(&data, 0, 1, 3, 1, Ppem::NONE), Some((200, -100)));
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 2, Ppem::NONE), Some((800, 700)));
-        assert_eq!(lig_attachment(&data, 0, 1, 3, 2, Ppem::NONE), Some((800, -100)));
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 1, Corrections::NONE), Some((200, 700)));
+        assert_eq!(lig_attachment(&data, 0, 1, 3, 1, Corrections::NONE), Some((200, -100)));
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 2, Corrections::NONE), Some((800, 700)));
+        assert_eq!(lig_attachment(&data, 0, 1, 3, 2, Corrections::NONE), Some((800, -100)));
     }
 
     #[test]
@@ -717,8 +718,8 @@ mod tests {
         // the one input that would make the fallback's "last component"
         // underflow.
         let data = lig_subtable(1, &[(2, 0, (100, 0))], &[(1, vec![])]);
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 0, Ppem::NONE), None);
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 1, Ppem::NONE), None);
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 0, Corrections::NONE), None);
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 1, Corrections::NONE), None);
     }
 
     /// Where `gpos_table` puts its subtable. Fixed, so that a test that has to
@@ -776,7 +777,7 @@ mod tests {
     /// reader, so these two helpers do the one thing the walk would do with a
     /// fixture that has exactly one lookup: try each subtable in order.
     fn on_base(m: &MarkPositioning, data: &[u8], base: u16, mark: u16) -> Option<(i16, i16)> {
-        on_base_at(m, data, base, mark, Ppem::NONE)
+        on_base_at(m, data, base, mark, Corrections::NONE)
     }
 
     /// The same, at a known pixel size, so that a device table applies.
@@ -785,18 +786,18 @@ mod tests {
         data: &[u8],
         base: u16,
         mark: u16,
-        ppem: Ppem,
+        corr: Corrections<'_>,
     ) -> Option<(i16, i16)> {
         m.base
             .iter()
-            .find_map(|&sub| attachment(data, sub, base, mark, ppem))
+            .find_map(|&sub| attachment(data, sub, base, mark, corr))
     }
 
     /// The same, for a mark stacked on another mark.
     fn on_mark(m: &MarkPositioning, data: &[u8], below: u16, mark: u16) -> Option<(i16, i16)> {
         m.mkmk
             .iter()
-            .find_map(|&sub| attachment(data, sub, below, mark, Ppem::NONE))
+            .find_map(|&sub| attachment(data, sub, below, mark, Corrections::NONE))
     }
 
     /// Base glyph 1 with an anchor at (500, 700); mark glyph 2 whose own

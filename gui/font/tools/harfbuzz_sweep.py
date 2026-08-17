@@ -3,7 +3,7 @@
 Run from anywhere:
 
     python gui/font/tools/harfbuzz_sweep.py [--corpus FILE] [--fonts DIR]
-                                            [--ppem N]
+                                            [--ppem N] [--axes wght=700]
 
 Needs `uharfbuzz`. Builds and runs the `shape_dump` example, shapes the same
 corpus with HarfBuzz, and reports every (face, string) pair the two disagree
@@ -43,6 +43,25 @@ in — HarfBuzz computes a delta as `pixels * scale / ppem` with `scale` the em,
 which is exactly what a reader converting pixels to font units does. Nothing
 else in either half changes with the size, so a difference under `--ppem` that
 is not there without it is a device table and nothing else.
+
+Asking at an instance
+---------------------
+
+A variable face stores one outline and a pile of deltas, and by default both
+halves read it at its *default* instance — where every delta is multiplied by
+zero. Three of a `GPOS` face's numbers vary with the instance and with nothing
+else: an advance through `HVAR`, a mark anchor through a `GDEF`
+`VariationIndex`, a kern the same way. None of them is reachable without
+asking somewhere other than the default, so a sweep without `--axes` agrees
+about them by both sides doing nothing at all.
+
+`--axes wght=700` (or `wght=300,wdth=75`) fixes that. It sets
+`hb_font_set_variations` on the HarfBuzz side and `ScaledFont::set_axes` on
+ours, both in *user* coordinates, so each half normalizes through its own
+`fvar`/`avar` — which is itself part of what is being compared. Axes a spec
+does not name stay at their defaults, and a face with no `fvar` ignores it
+entirely, so the flag can be given for a whole-directory sweep without
+throwing the static faces out.
 
 Reading the output
 ------------------
@@ -506,12 +525,14 @@ def font_files(root):
     return sorted(out)
 
 
-def ours(corpus, fonts, ppem=None):
+def ours(corpus, fonts, ppem=None, axes=""):
     """`{(path, index): ((lgids, lpos), (vgids, vpos))}` from this crate.
 
     `l` is logical order, `v` is the order rule L2 draws in, and a position is
     `(advance, dx, dy)` in font units. `ppem`, if given, is the pixel size the
     face is opened at; the positions come back in font units either way.
+    `axes` is a `tag=value,...` instance, passed through untouched so that both
+    halves are parsing the same text rather than two readings of it.
     """
     with tempfile.NamedTemporaryFile(
         "w", suffix=".txt", delete=False, encoding="utf-8", newline="\n"
@@ -547,7 +568,14 @@ def ours(corpus, fonts, ppem=None):
         )
         if not os.path.exists(exe):
             exe = exe[: -len(".exe")]
-        argv = [exe, input_path] + ([str(ppem)] if ppem else [])
+        # The size is positional and the instance follows it, so an instance
+        # asked for without a size still needs the slot filled: `0` is how
+        # `shape_dump` spells "no size".
+        argv = [exe, input_path]
+        if ppem or axes:
+            argv.append(str(ppem or 0))
+        if axes:
+            argv.append(axes)
         run = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8")
         if run.returncode != 0:
             sys.exit(run.stderr or "shape_dump failed")
@@ -575,7 +603,32 @@ def positions(field):
     return [tuple(int(n) for n in p.split(";")) for p in field.split(",") if p]
 
 
-def theirs(path, questions, ppem=None):
+def parse_axes(spec):
+    """`{"wght": 700.0, ...}` from `tag=value,tag=value`, matching `axes()` in
+    `shape_dump.rs`.
+
+    A malformed spec stops the run. Falling back to the default instance would
+    produce a whole sweep of agreements about deltas neither half applied,
+    which reads exactly like success.
+    """
+    out = {}
+    for part in spec.split(","):
+        if not part.strip():
+            continue
+        if "=" not in part:
+            sys.exit(f"not a tag=value pair: {part!r}")
+        tag, value = part.split("=", 1)
+        tag = tag.strip()
+        if not 1 <= len(tag) <= 4:
+            sys.exit(f"not an axis tag: {tag!r}")
+        try:
+            out[tag.ljust(4)] = float(value)
+        except ValueError:
+            sys.exit(f"not an axis value: {value!r}")
+    return out
+
+
+def theirs(path, questions, ppem=None, axes=None):
     """`[([gid, ...], [(adv, dx, dy), ...], rtl), ...]`, or `None` if it will
     not open.
 
@@ -604,6 +657,11 @@ def theirs(path, questions, ppem=None):
     that are still in font units. Setting the scale as well would give a 26.6
     number that has to be divided back, and the division is where a comparison
     starts arguing about rounding instead of about shaping.
+
+    `axes` is a `{tag: user value}` instance. HarfBuzz normalizes it through
+    the face's own `fvar` and `avar` exactly as this crate does, and ignores a
+    tag the face does not have — so a whole-directory sweep can name an axis
+    only some of the faces carry.
     """
     try:
         with open(path, "rb") as f:
@@ -612,6 +670,8 @@ def theirs(path, questions, ppem=None):
         font = hb.Font(face)
         if ppem:
             font.ppem = (ppem, ppem)
+        if axes:
+            font.set_variations(axes)
     except Exception:  # noqa: BLE001 - a face HarfBuzz rejects is not a result
         return None
 
@@ -725,7 +785,15 @@ def main():
         help="pixel size to ask both halves at, which is what reaches GPOS "
         "device tables (default: none, i.e. design units only)",
     )
+    ap.add_argument(
+        "--axes",
+        default="",
+        help="variation instance to ask both halves at, as tag=value pairs in "
+        "user coordinates (e.g. wght=700), which is what reaches HVAR and the "
+        "GDEF variation store (default: none, i.e. the default instance)",
+    )
     args = ap.parse_args()
+    instance = parse_axes(args.axes) if args.axes else None
 
     corpus, mixed_entries = CORPUS, MIXED
     if args.corpus:
@@ -743,8 +811,10 @@ def main():
 
     questions = [(lang_of(entry), unescape(string_of(entry))) for entry in corpus]
     at = f" at {args.ppem}ppem" if args.ppem else ""
+    if instance:
+        at += " at " + ",".join(f"{t.strip()}={v:g}" for t, v in instance.items())
     print(f"{len(fonts)} faces x {len(questions)} strings{at}")
-    mine = ours(corpus, fonts, args.ppem)
+    mine = ours(corpus, fonts, args.ppem, args.axes)
 
     agree = 0
     order_only = Counter()
@@ -755,7 +825,7 @@ def main():
     placed_examples = {}
     skipped = 0
     for path in fonts:
-        hb_out = theirs(path, questions, args.ppem)
+        hb_out = theirs(path, questions, args.ppem, instance)
         if hb_out is None:
             skipped += 1
             continue

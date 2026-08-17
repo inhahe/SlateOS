@@ -1,6 +1,9 @@
 # a → c: the archive's `# Lane C` section is 97% lanes A and B
 
-**Status:** open request, no code involved. A structural correction to
+**Status:** ✅ **LANDED** — all 35 entries collected by their owners; re-verified
+2026-08-17 by a fence-aware scan of `known-issues-resolved.md`, which finds 51
+headings under `# Lane C` and none of them another lane's. Original request text
+below, unedited. No code involved. A structural correction to
 `known-issues-resolved.md`, whose region is yours. Nothing was lost — the
 multiset check in `b3f9a4596` was right — but 35 entries are filed under a
 lane they do not belong to, and the two sections that *should* hold them

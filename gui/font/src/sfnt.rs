@@ -61,7 +61,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::device::Ppem;
+use crate::device::{Corrections, Ppem};
 use crate::gpos::{Adjust, Positioning, Run};
 use crate::gsub::{SubGlyph, Substitutions};
 use crate::indic_shape::{self, Script};
@@ -70,6 +70,9 @@ use crate::lang::Lang;
 use crate::mark::MarkPositioning;
 use crate::otl;
 use crate::script::ScriptTags;
+use crate::gvar;
+use crate::var;
+use crate::varstore;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -184,7 +187,7 @@ pub(crate) fn u32_at(d: &[u8], off: usize) -> Option<u32> {
     Some(u32::from_be_bytes(b))
 }
 
-fn tag_at(d: &[u8], off: usize) -> Option<[u8; 4]> {
+pub(crate) fn tag_at(d: &[u8], off: usize) -> Option<[u8; 4]> {
     let end = off.checked_add(4)?;
     d.get(off..end)?.try_into().ok()
 }
@@ -544,6 +547,46 @@ pub struct Face {
     /// `hb_ot_layout_table_select_script` reads the ScriptList and nothing
     /// else, and so does this.
     gsub_scripts: Vec<[u8; 4]>,
+    /// The axes this face can vary along, from `fvar`, with `avar`'s correction
+    /// folded in. `None` for the 549 of this host's 556 faces that are not
+    /// variable, and also for a variable face whose `fvar` is unreadable — a
+    /// malformed variation table costs the face its variability, not its
+    /// ability to draw.
+    ///
+    /// Named apart from [`variations`](Self::variations), which is the `cmap`
+    /// format-14 Unicode Variation *Sequences* subtable and an unrelated
+    /// feature that the specification unhelpfully gave a near-identical name.
+    variation_axes: Option<var::Variations>,
+    /// The per-glyph outline deltas from `gvar`, if this face has both a
+    /// readable `fvar` and a `gvar` that agrees with it about the axes.
+    ///
+    /// Holds only the table's header and offset array; a glyph's own tuples are
+    /// read on demand, because a face varies thousands of glyphs and a run
+    /// draws a few dozen.
+    gvar: Option<gvar::Gvar>,
+    /// The per-glyph advance-width deltas from `HVAR`, on the same terms as
+    /// [`gvar`](Self::gvar): present only when `fvar` parsed and the store
+    /// agrees with it about the axis count.
+    ///
+    /// Without this a varied glyph is drawn at its varied shape but spaced at
+    /// its default width, which shows up as text growing progressively more
+    /// crowded (or gappier) along a line as a weight axis moves.
+    hvar: Option<varstore::Hvar>,
+    /// The face-wide metric deltas from `MVAR` — ascender, descender, line
+    /// gap, x-height, cap height and the underline.
+    ///
+    /// Distinct from `HVAR` in *what* it varies, identical in *how*: both are
+    /// an `ItemVariationStore` reached through a different index.
+    mvar: Option<varstore::Mvar>,
+    /// `GDEF`'s `ItemVariationStore` — the deltas a `GPOS` `VariationIndex`
+    /// points into, which is how a variable face varies its *positions*
+    /// (mark anchors, kerns) rather than its shapes or its advances.
+    ///
+    /// The bare store, not a wrapper like [`Hvar`](varstore::Hvar) or
+    /// [`Mvar`](varstore::Mvar), because `GDEF` has no index of its own: the
+    /// outer/inner pair arrives in the `VariationIndex`'s own first four bytes,
+    /// so there is nothing between the caller and `VarStore::delta`.
+    gdef_store: Option<varstore::VarStore>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -643,6 +686,11 @@ impl Face {
         let mut gpos = None;
         let mut gsub = None;
         let mut kern = None;
+        let mut fvar = None;
+        let mut avar = None;
+        let mut gvar_span = None;
+        let mut hvar_span = None;
+        let mut mvar_span = None;
         let mut has_cff2 = false;
 
         for i in 0..usize::from(num_tables) {
@@ -677,6 +725,11 @@ impl Face {
                 b"GPOS" => gpos = Some(span),
                 b"GSUB" => gsub = Some(span),
                 b"kern" => kern = Some(span),
+                b"fvar" => fvar = Some(span),
+                b"avar" => avar = Some(span),
+                b"gvar" => gvar_span = Some(span),
+                b"HVAR" => hvar_span = Some(span),
+                b"MVAR" => mvar_span = Some(span),
                 b"CFF2" => has_cff2 = true,
                 _ => {}
             }
@@ -782,6 +835,37 @@ impl Face {
         gsub_scripts.sort_unstable();
         gsub_scripts.dedup();
 
+        // `avar` without `fvar` is not a lesser variable face, it is nothing at
+        // all: `avar` corrects a normalized coordinate per axis, and without
+        // `fvar` there are no axes to normalize against. Reached through
+        // `and_then` for that reason rather than parsed on its own.
+        let variation_axes = fvar.and_then(|span| var::Variations::parse(&data, span, avar));
+
+        // Deliberately gated on `variation_axes` rather than on `fvar`: `gvar`'s
+        // tuples are indexed by axis position, so reading it needs the axis
+        // *count*, and the count only exists once `fvar` has actually parsed. A
+        // face whose `fvar` was rejected therefore also declines `gvar`, which
+        // is the right outcome — deltas applied against axes we could not read
+        // would deform the glyph rather than vary it.
+        let gvar = variation_axes.as_ref().and_then(|v| {
+            gvar_span.and_then(|span| gvar::Gvar::parse(&data, span, v.axes().len(), num_glyphs))
+        });
+
+        // Gated on `variation_axes` for the same reason `gvar` is, and with an
+        // extra edge: an `ItemVariationStore` names its axes only by position,
+        // so a store read against the wrong axis count silently pairs axis *k*
+        // with a coordinate that meant a different axis. `VarStore::parse`
+        // refuses a count mismatch outright rather than reading it anyway.
+        let hvar = variation_axes.as_ref().and_then(|v| {
+            hvar_span.and_then(|span| varstore::Hvar::parse(&data, span.off, v.axes().len()))
+        });
+        let mvar = variation_axes.as_ref().and_then(|v| {
+            mvar_span.and_then(|span| varstore::Mvar::parse(&data, span.off, v.axes().len()))
+        });
+        let gdef_store = variation_axes
+            .as_ref()
+            .and_then(|v| gdef.and_then(|span| Self::gdef_var_store(&data, span, v.axes().len())));
+
         Ok(Self {
             metrics: FaceMetrics {
                 ascender,
@@ -805,8 +889,36 @@ impl Face {
             has_positioning: gpos.is_some(),
             gpos_scripts,
             gsub_scripts,
+            variation_axes,
+            gvar,
+            hvar,
+            mvar,
+            gdef_store,
             data,
         })
+    }
+
+    /// `GDEF`'s `ItemVariationStore`, if this `GDEF` is new enough to have one.
+    ///
+    /// The offset is an `Offset32` at `GDEF + 14`, and — unlike every other
+    /// field in that header — it exists only from **version 1.3**. Earlier
+    /// `GDEF`s simply stop before it, so reading it unconditionally would
+    /// interpret whichever subtable happens to follow the header as an offset
+    /// and index the font from an arbitrary place. The version check is the
+    /// whole safety of this function; the bounds checks below only stop it
+    /// reading off the end once it has already gone wrong.
+    fn gdef_var_store(data: &[u8], gdef: Span, axis_count: usize) -> Option<varstore::VarStore> {
+        let major = u16_at(data, gdef.off)?;
+        let minor = u16_at(data, gdef.off.checked_add(2)?)?;
+        if (major, minor) < (1, 3) {
+            return None;
+        }
+        let offset = u32_at(data, gdef.off.checked_add(14)?)?;
+        if offset == 0 {
+            return None;
+        }
+        let at = gdef.off.checked_add(usize::try_from(offset).ok()?)?;
+        varstore::VarStore::parse(data, at, axis_count)
     }
 
     /// Decode the face's place in its family from `OS/2`, falling back to
@@ -1286,6 +1398,68 @@ impl Face {
         u16_at(&self.data, off).ok_or(SfntError::MalformedTable("hmtx"))
     }
 
+    /// Horizontal advance for a glyph at a variable-font instance, in font
+    /// units.
+    ///
+    /// The `hmtx` advance corrected by `HVAR`. Identical to
+    /// [`advance`](Self::advance) when the face does not vary, carries no
+    /// `HVAR`, or is asked for the default instance — the last because the
+    /// default instance's advance *is* what `hmtx` stores, so every delta is
+    /// zero there by construction.
+    ///
+    /// The result is clamped at zero rather than allowed to wrap: a negative
+    /// advance would drag the rest of the line backwards over the glyph, which
+    /// is a far more visible failure than one glyph being a shade too narrow.
+    ///
+    /// # Errors
+    ///
+    /// As [`advance`](Self::advance). An `HVAR` that names no row for this
+    /// glyph is *not* an error — it contributes zero, which is the common case
+    /// for a font's unmapped tail.
+    pub fn advance_at(&self, gid: u16, coords: &var::Coords) -> Result<u16, SfntError> {
+        let base = self.advance(gid)?;
+        let Some(hvar) = self.hvar.as_ref() else {
+            return Ok(base);
+        };
+        if coords.is_default() {
+            return Ok(base);
+        }
+        let delta = hvar.advance_delta(&self.data, gid, coords.as_slice());
+        Ok(u16::try_from(i32::from(base).saturating_add(i32::from(delta)).max(0)).unwrap_or(u16::MAX))
+    }
+
+    /// The correction `MVAR` applies to the face-wide metric `tag` at `coords`,
+    /// in font units.
+    ///
+    /// Zero when the face has no `MVAR`, does not carry that tag, or is at its
+    /// default instance. Tags are the four-byte names the `MVAR` specification
+    /// defines: `hasc`, `hdsc`, `hlgp`, `xhgt`, `cpht`, `undo` and so on.
+    #[must_use]
+    pub fn metric_delta(&self, tag: [u8; 4], coords: &var::Coords) -> i16 {
+        if coords.is_default() {
+            return 0;
+        }
+        self.mvar
+            .as_ref()
+            .map_or(0, |m| m.metric_delta(&self.data, tag, coords.as_slice()))
+    }
+
+    /// The face's vertical metrics at a variable-font instance.
+    ///
+    /// Only the three `hhea`-derived numbers vary through `MVAR`; the units
+    /// per em is a design constant and the maximum advance is a bound over the
+    /// whole face, which `MVAR` has no tag for.
+    #[must_use]
+    pub fn metrics_at(&self, coords: &var::Coords) -> FaceMetrics {
+        let mut m = self.metrics;
+        m.ascender = m.ascender.saturating_add(self.metric_delta(*b"hasc", coords));
+        m.descender = m
+            .descender
+            .saturating_add(self.metric_delta(*b"hdsc", coords));
+        m.line_gap = m.line_gap.saturating_add(self.metric_delta(*b"hlgp", coords));
+        m
+    }
+
     /// How much to add to `left`'s advance when `right` follows it, in font
     /// units. Negative pulls the pair closer, which is the common case.
     ///
@@ -1315,30 +1489,45 @@ impl Face {
     /// which is the one that matches how the text will actually be drawn.
     #[must_use]
     pub fn kern_across(&self, left: u16, right: u16, between: &[u16]) -> i16 {
-        self.kern_across_at(left, right, between, Ppem::NONE)
+        self.kern_across_at(left, right, between, Corrections::NONE)
     }
 
-    /// The same, at a known pixel size, so that device-table corrections apply.
+    /// The same, at a known size and instance, so that device-table and
+    /// `VariationIndex` corrections apply.
     pub(crate) fn kern_across_at(
         &self,
         left: u16,
         right: u16,
         between: &[u16],
-        ppem: Ppem,
+        corr: Corrections<'_>,
     ) -> i16 {
         self.kerning
             .as_ref()
-            .map_or(0, |k| k.pair(&self.data, left, right, between, ppem))
+            .map_or(0, |k| k.pair(&self.data, left, right, between, corr))
     }
 
-    /// The pixel size a device table should be read at when this face is drawn
-    /// at `px_per_em`.
+    /// What `GPOS`'s device tables and variation indices should be read with
+    /// when this face is drawn at `px_per_em` at instance `coords`.
     ///
-    /// Here rather than in [`device`](crate::device) because the em a pixel
-    /// correction is converted back through is the face's, and this is what
-    /// holds it.
-    pub(crate) fn ppem(&self, px_per_em: f32) -> Ppem {
-        Ppem::new(px_per_em, self.metrics.units_per_em)
+    /// Here rather than in [`device`](crate::device) because both halves are
+    /// the face's to supply: the em a pixel correction is converted back
+    /// through, and the `GDEF` store a `VariationIndex` points into.
+    ///
+    /// The store is withheld at the default instance. Every delta there
+    /// evaluates to zero anyway — a region's scalar is a product of factors
+    /// that are all zero at coordinate zero — so this is the same answer
+    /// reached without walking the store, and it keeps the non-variable path
+    /// free of variable-font work.
+    pub(crate) fn corrections<'a>(
+        &'a self,
+        px_per_em: f32,
+        coords: &'a var::Coords,
+    ) -> Corrections<'a> {
+        let ppem = Ppem::new(px_per_em, self.metrics.units_per_em);
+        if coords.is_default() {
+            return Corrections::at(ppem);
+        }
+        Corrections::varying(ppem, self.gdef_store.as_ref(), coords.as_slice())
     }
 
     /// Whether this face carries any pair kerning this can read.
@@ -1632,6 +1821,23 @@ impl Face {
         self.has_positioning
     }
 
+    /// The face's variation axes, or `None` if it is not a variable font.
+    ///
+    /// Returning the whole [`Variations`](var::Variations) rather than just the
+    /// axis list is deliberate: normalizing a user coordinate needs `avar`'s
+    /// correction as well as the axis bounds, and splitting the two across two
+    /// accessors invites a caller to normalize with only half of them -- which
+    /// produces a plausible number that is wrong by exactly the amount the
+    /// designer added `avar` to fix.
+    ///
+    /// The face itself is *not* at any instance. A chosen position along these
+    /// axes belongs to the scaled font, so that one parsed face can serve two
+    /// weights at once without being re-read.
+    #[must_use]
+    pub fn variation_axes(&self) -> Option<&var::Variations> {
+        self.variation_axes.as_ref()
+    }
+
     /// Whether the face's `GPOS` ScriptList names `tag` itself.
     ///
     /// Deliberately not "would a run of `tag` reach any lookup": no fallback
@@ -1687,6 +1893,37 @@ impl Face {
             x_max: f32::from(i16_at(g, 6)?) + dx,
             y_max: f32::from(i16_at(g, 8)?),
         })
+    }
+
+    /// The same at a variable-font instance, which is not the same box.
+    ///
+    /// The box a `glyf` glyph states in its header describes the *default*
+    /// outline and nothing else — `gvar` moves the points without rewriting it,
+    /// and there is no per-instance box anywhere in the format. So away from the
+    /// default instance the outline has to be built and measured, which is what
+    /// FreeType and HarfBuzz both do: HarfBuzz reads the stated box only while
+    /// `font->num_coords` is zero.
+    ///
+    /// That makes the answer very slightly *looser* off the default instance —
+    /// the hull of the control points rather than the tight box around the
+    /// curves — because that is the only box a point walk can produce, and it is
+    /// the one HarfBuzz produces there too. A caller comparing the two instances
+    /// is comparing two different measurements, not one measurement of two
+    /// shapes; the boxes are used to stack accents, where a few units of slack
+    /// off the default weight is invisible and disagreeing with HarfBuzz about
+    /// where the accent goes is not.
+    #[must_use]
+    pub fn glyph_bbox_at(&self, gid: u16, coords: &var::Coords) -> Option<BBox> {
+        if coords.is_default() || self.gvar.is_none() {
+            return self.glyph_bbox(gid);
+        }
+        const EMPTY: BBox = BBox {
+            x_min: 0.0,
+            y_min: 0.0,
+            x_max: 0.0,
+            y_max: 0.0,
+        };
+        Some(self.outline_at(gid, coords).ok()?.bbox().unwrap_or(EMPTY))
     }
 
     /// How far a `glyf` glyph's ink has to move right for it to start at the
@@ -1851,6 +2088,131 @@ impl Face {
         Ok(out)
     }
 
+    /// Extract a glyph's outline at a variable-font instance.
+    ///
+    /// `coords` are normalized axis coordinates, as produced by
+    /// [`Variations::normalize`](crate::var::Variations::normalize). Identical
+    /// to [`outline`](Self::outline) when this face does not vary, when it has
+    /// no `gvar`, or when `coords` is the default instance — the last of which
+    /// is not merely an optimization: the default instance is *defined* as the
+    /// outline in `glyf`, and every tuple's scalar is zero there, so taking the
+    /// short path and taking the long one must agree, and the short one cannot
+    /// be wrong.
+    ///
+    /// # Errors
+    ///
+    /// As [`outline`](Self::outline). A `gvar` that is unreadable for this
+    /// particular glyph is *not* an error: it yields the default outline, on
+    /// the same reasoning as [`Gvar::parse`](crate::gvar::Gvar) returning
+    /// `None` — a face that fails to vary still draws.
+    pub fn outline_at(&self, gid: u16, coords: &var::Coords) -> Result<Outline, SfntError> {
+        let Some(gvar) = self.gvar.as_ref() else {
+            return self.outline(gid);
+        };
+        if coords.is_default() || !matches!(self.outlines, Outlines::Glyf { .. }) {
+            return self.outline(gid);
+        }
+        let mut out = Outline::default();
+        let phantom = self.outline_into_at(gvar, gid, coords.as_slice(), &mut out, 0)?;
+        // The outline is placed so that the left side bearing point lands on
+        // the origin. That point moves with the glyph, so the shift computed
+        // from the *default* `xMin` has to be corrected by however far `gvar`
+        // moved it — which is exactly the first phantom point's horizontal
+        // delta. Getting this wrong shifts the varied glyph sideways relative
+        // to its neighbours rather than deforming it, which is the sort of bug
+        // that looks like bad kerning.
+        out.translate_x(self.glyf_shift(gid) - phantom);
+        Ok(out)
+    }
+
+    /// Build one glyph at `coords`, returning the horizontal delta of its left
+    /// phantom point so the caller can correct the side-bearing shift.
+    ///
+    /// Recursive calls discard that return value: a component is placed by the
+    /// parent's transform, and the parent's phantom points — not the child's —
+    /// are what position the finished glyph.
+    fn outline_into_at(
+        &self,
+        gvar: &gvar::Gvar,
+        gid: u16,
+        coords: &[i16],
+        out: &mut Outline,
+        depth: u8,
+    ) -> Result<f32, SfntError> {
+        if depth > MAX_COMPOSITE_DEPTH {
+            return Err(SfntError::CompositeTooDeep);
+        }
+        let Some(span) = self.glyph_span(gid)? else {
+            return Ok(0.0);
+        };
+        let end = span.off.checked_add(span.len).ok_or(SfntError::TooShort)?;
+        let g = self
+            .data
+            .get(span.off..end)
+            .ok_or(SfntError::MalformedTable("glyf"))?;
+        let num_contours = i16_at(g, 0).ok_or(SfntError::MalformedTable("glyf"))?;
+        let body = g.get(10..).ok_or(SfntError::MalformedTable("glyf"))?;
+        if num_contours >= 0 {
+            let n = usize::try_from(num_contours).map_err(|_| SfntError::MalformedTable("glyf"))?;
+            let Some(mut glyph) = read_simple_glyph(body, n)? else {
+                return Ok(0.0);
+            };
+            let phantom = match gvar.deltas(&self.data, gid, coords, &glyph.points, &glyph.ends) {
+                Some(deltas) => {
+                    for (pt, &(dx, dy)) in glyph.points.iter_mut().zip(deltas.iter()) {
+                        pt.p.x += dx;
+                        pt.p.y += dy;
+                    }
+                    deltas.get(glyph.points.len()).map_or(0.0, |&(dx, _)| dx)
+                }
+                None => 0.0,
+            };
+            emit_glyph(&glyph, out);
+            Ok(phantom)
+        } else {
+            let mut components = read_components(body)?;
+            // A composite's variation point array has one entry per component,
+            // holding that component's placement offset. There are no contours,
+            // so `ends` is empty and no interpolation happens — a component the
+            // font did not name simply does not move.
+            let placements: Vec<GlyphPoint> = components
+                .iter()
+                .map(|c| GlyphPoint {
+                    p: Point::new(c.xform.e, c.xform.f),
+                    on_curve: true,
+                })
+                .collect();
+            let phantom = match gvar.deltas(&self.data, gid, coords, &placements, &[]) {
+                Some(deltas) => {
+                    for (c, &(dx, dy)) in components.iter_mut().zip(deltas.iter()) {
+                        // Only an offset-placed component may move: a
+                        // point-matched one is anchored to the parent's own
+                        // geometry, which has already varied, so adding the
+                        // delta here would move it a second time.
+                        if c.offset_placed {
+                            c.xform.e += dx;
+                            c.xform.f += dy;
+                        }
+                    }
+                    deltas.get(components.len()).map_or(0.0, |&(dx, _)| dx)
+                }
+                None => 0.0,
+            };
+            for c in components {
+                let mut child = Outline::default();
+                self.outline_into_at(
+                    gvar,
+                    c.gid,
+                    coords,
+                    &mut child,
+                    depth.checked_add(1).ok_or(SfntError::CompositeTooDeep)?,
+                )?;
+                out.extend_transformed(&child, &c.xform);
+            }
+            Ok(phantom)
+        }
+    }
+
     fn outline_into(&self, gid: u16, out: &mut Outline, depth: u8) -> Result<(), SfntError> {
         if depth > MAX_COMPOSITE_DEPTH {
             return Err(SfntError::CompositeTooDeep);
@@ -1880,98 +2242,131 @@ impl Face {
         out: &mut Outline,
         depth: u8,
     ) -> Result<(), SfntError> {
-        const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
-        const ARGS_ARE_XY_VALUES: u16 = 0x0002;
-        const WE_HAVE_A_SCALE: u16 = 0x0008;
-        const MORE_COMPONENTS: u16 = 0x0020;
-        const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
-        const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
-
-        let mut pos = 0usize;
-        loop {
-            let flags = u16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?;
-            let component = u16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
-                .ok_or(SfntError::MalformedTable("glyf"))?;
-            pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
-
-            let (arg1, arg2) = if flags & ARG_1_AND_2_ARE_WORDS == 0 {
-                let lo = *data.get(pos).ok_or(SfntError::MalformedTable("glyf"))?;
-                let hi = *data
-                    .get(pos.checked_add(1).ok_or(SfntError::TooShort)?)
-                    .ok_or(SfntError::MalformedTable("glyf"))?;
-                pos = pos.checked_add(2).ok_or(SfntError::TooShort)?;
-                // Byte args are *signed* when they are offsets.
-                #[allow(clippy::cast_possible_wrap)]
-                (f32::from(lo as i8), f32::from(hi as i8))
-            } else {
-                let lo = i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?;
-                let hi = i16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
-                    .ok_or(SfntError::MalformedTable("glyf"))?;
-                pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
-                (f32::from(lo), f32::from(hi))
-            };
-
-            // Point-matching placement (args are point indices, not offsets)
-            // is vanishingly rare and needs the parent's point list, which we
-            // have already collapsed into path commands. Treat it as no
-            // translation rather than mis-placing the component.
-            let (tx, ty) = if flags & ARGS_ARE_XY_VALUES == 0 {
-                (0.0, 0.0)
-            } else {
-                (arg1, arg2)
-            };
-
-            let mut xform = Transform {
-                e: tx,
-                f: ty,
-                ..Transform::IDENTITY
-            };
-            if flags & WE_HAVE_A_SCALE != 0 {
-                let scale = f2dot14(i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?);
-                pos = pos.checked_add(2).ok_or(SfntError::TooShort)?;
-                xform.a = scale;
-                xform.d = scale;
-            } else if flags & WE_HAVE_AN_X_AND_Y_SCALE != 0 {
-                xform.a = f2dot14(i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?);
-                xform.d = f2dot14(
-                    i16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
-                        .ok_or(SfntError::MalformedTable("glyf"))?,
-                );
-                pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
-            } else if flags & WE_HAVE_A_TWO_BY_TWO != 0 {
-                let read = |k: usize| -> Result<f32, SfntError> {
-                    let at = pos
-                        .checked_add(k.checked_mul(2).ok_or(SfntError::TooShort)?)
-                        .ok_or(SfntError::TooShort)?;
-                    Ok(f2dot14(
-                        i16_at(data, at).ok_or(SfntError::MalformedTable("glyf"))?,
-                    ))
-                };
-                xform.a = read(0)?;
-                xform.b = read(1)?;
-                xform.c = read(2)?;
-                xform.d = read(3)?;
-                pos = pos.checked_add(8).ok_or(SfntError::TooShort)?;
-            }
-
+        for c in read_components(data)? {
             // Recurse into the component and splice its (transformed) path in.
             // Building the child separately is what makes nested composites
             // work: the child's own component transforms compose naturally
             // because they were already applied when it was built.
             let mut child = Outline::default();
             self.outline_into(
-                component,
+                c.gid,
                 &mut child,
                 depth.checked_add(1).ok_or(SfntError::CompositeTooDeep)?,
             )?;
-            out.extend_transformed(&child, &xform);
-
-            if flags & MORE_COMPONENTS == 0 {
-                break;
-            }
+            out.extend_transformed(&child, &c.xform);
         }
         Ok(())
     }
+}
+
+/// One entry of a composite glyph: which glyph, and where it goes.
+///
+/// Split out of the drawing loop because `gvar` varies a composite by moving
+/// its components: each component contributes exactly one point to the glyph's
+/// variation point array, and that point is this transform's translation. The
+/// default instance and a varied one therefore differ only in `xform.e` and
+/// `xform.f`, and both paths can share the reading.
+#[derive(Clone, Copy)]
+pub(crate) struct Component {
+    pub(crate) gid: u16,
+    pub(crate) xform: Transform,
+    /// Whether the placement came from an (x, y) offset rather than a pair of
+    /// point indices. `gvar` may only move the offset kind — a point-matched
+    /// component is positioned by the *parent's* geometry, which has already
+    /// moved, so adding a delta on top would move it twice.
+    pub(crate) offset_placed: bool,
+}
+
+/// Read a composite glyph's component list.
+fn read_components(data: &[u8]) -> Result<Vec<Component>, SfntError> {
+    const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
+    const ARGS_ARE_XY_VALUES: u16 = 0x0002;
+    const WE_HAVE_A_SCALE: u16 = 0x0008;
+    const MORE_COMPONENTS: u16 = 0x0020;
+    const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
+    const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+
+    // A composite with more components than a face has glyphs is malformed;
+    // the bound stops a corrupt `MORE_COMPONENTS` chain from looping until the
+    // data runs out, which on a large `glyf` is a long time.
+    const MAX_COMPONENTS: usize = 4096;
+
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    loop {
+        let flags = u16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?;
+        let component = u16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
+            .ok_or(SfntError::MalformedTable("glyf"))?;
+        pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
+
+        let (arg1, arg2) = if flags & ARG_1_AND_2_ARE_WORDS == 0 {
+            let lo = *data.get(pos).ok_or(SfntError::MalformedTable("glyf"))?;
+            let hi = *data
+                .get(pos.checked_add(1).ok_or(SfntError::TooShort)?)
+                .ok_or(SfntError::MalformedTable("glyf"))?;
+            pos = pos.checked_add(2).ok_or(SfntError::TooShort)?;
+            // Byte args are *signed* when they are offsets.
+            #[allow(clippy::cast_possible_wrap)]
+            (f32::from(lo as i8), f32::from(hi as i8))
+        } else {
+            let lo = i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?;
+            let hi = i16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
+                .ok_or(SfntError::MalformedTable("glyf"))?;
+            pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
+            (f32::from(lo), f32::from(hi))
+        };
+
+        // Point-matching placement (args are point indices, not offsets)
+        // is vanishingly rare and needs the parent's point list, which we
+        // have already collapsed into path commands. Treat it as no
+        // translation rather than mis-placing the component.
+        let offset_placed = flags & ARGS_ARE_XY_VALUES != 0;
+        let (tx, ty) = if offset_placed { (arg1, arg2) } else { (0.0, 0.0) };
+
+        let mut xform = Transform {
+            e: tx,
+            f: ty,
+            ..Transform::IDENTITY
+        };
+        if flags & WE_HAVE_A_SCALE != 0 {
+            let scale = f2dot14(i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?);
+            pos = pos.checked_add(2).ok_or(SfntError::TooShort)?;
+            xform.a = scale;
+            xform.d = scale;
+        } else if flags & WE_HAVE_AN_X_AND_Y_SCALE != 0 {
+            xform.a = f2dot14(i16_at(data, pos).ok_or(SfntError::MalformedTable("glyf"))?);
+            xform.d = f2dot14(
+                i16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?)
+                    .ok_or(SfntError::MalformedTable("glyf"))?,
+            );
+            pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
+        } else if flags & WE_HAVE_A_TWO_BY_TWO != 0 {
+            let read = |k: usize| -> Result<f32, SfntError> {
+                let at = pos
+                    .checked_add(k.checked_mul(2).ok_or(SfntError::TooShort)?)
+                    .ok_or(SfntError::TooShort)?;
+                Ok(f2dot14(
+                    i16_at(data, at).ok_or(SfntError::MalformedTable("glyf"))?,
+                ))
+            };
+            xform.a = read(0)?;
+            xform.b = read(1)?;
+            xform.c = read(2)?;
+            xform.d = read(3)?;
+            pos = pos.checked_add(8).ok_or(SfntError::TooShort)?;
+        }
+
+        out.push(Component {
+            gid: component,
+            xform,
+            offset_placed,
+        });
+
+        if flags & MORE_COMPONENTS == 0 || out.len() >= MAX_COMPONENTS {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1980,9 +2375,9 @@ impl Face {
 
 /// A decoded `glyf` point, before it becomes a path command.
 #[derive(Clone, Copy)]
-struct GlyphPoint {
-    p: Point,
-    on_curve: bool,
+pub(crate) struct GlyphPoint {
+    pub(crate) p: Point,
+    pub(crate) on_curve: bool,
 }
 
 /// Read one axis of a simple glyph's delta-encoded coordinates.
@@ -2029,7 +2424,57 @@ fn read_coord_deltas(
     Ok(out)
 }
 
+/// One simple glyph as the file stores it: points, and where each contour ends.
+///
+/// This is the shape `gvar` needs and path commands are not. A variation delta
+/// is addressed by *point index*, and the points a tuple does not mention are
+/// filled in by interpolating between the ones it does — both of which require
+/// the point array to still exist, and to still be divided into contours, since
+/// the interpolation wraps within a contour and never across one.
+///
+/// So the outline is built in two steps rather than one: read the points, then
+/// (after any deltas are applied) turn them into path commands. The default
+/// instance goes through both back to back, which is why nothing outside this
+/// module notices.
+pub(crate) struct SimpleGlyph {
+    pub(crate) points: Vec<GlyphPoint>,
+    /// Index one past the last point of each contour, so contour *i* is
+    /// `points[ends[i-1]..ends[i]]`. Kept as the exclusive end rather than the
+    /// file's inclusive last index, because every use here is a slice bound.
+    pub(crate) ends: Vec<usize>,
+}
+
+/// Turn a point array back into path commands, one contour at a time.
+fn emit_glyph(glyph: &SimpleGlyph, out: &mut Outline) {
+    let mut start = 0usize;
+    for &end in &glyph.ends {
+        let Some(contour) = glyph.points.get(start..end) else {
+            // Only reachable if `ends` and `points` disagree, which
+            // `read_simple_glyph` has already ruled out. Stopping is right
+            // regardless: the contours read so far are correct.
+            return;
+        };
+        emit_contour(contour, out);
+        start = end;
+    }
+}
+
 fn parse_simple_glyph(d: &[u8], num_contours: usize, out: &mut Outline) -> Result<(), SfntError> {
+    let Some(glyph) = read_simple_glyph(d, num_contours)? else {
+        return Ok(());
+    };
+    emit_glyph(&glyph, out);
+    Ok(())
+}
+
+/// Read a simple glyph's points without collapsing them into a path.
+///
+/// `Ok(None)` for a glyph with no contours, which is a real and common thing —
+/// the space glyph is one.
+pub(crate) fn read_simple_glyph(
+    d: &[u8],
+    num_contours: usize,
+) -> Result<Option<SimpleGlyph>, SfntError> {
     const ON_CURVE: u8 = 0x01;
     const X_SHORT: u8 = 0x02;
     const Y_SHORT: u8 = 0x04;
@@ -2038,7 +2483,7 @@ fn parse_simple_glyph(d: &[u8], num_contours: usize, out: &mut Outline) -> Resul
     const Y_SAME_OR_POS: u8 = 0x20;
 
     if num_contours == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
     let mut end_pts = Vec::with_capacity(num_contours);
@@ -2105,18 +2550,23 @@ fn parse_simple_glyph(d: &[u8], num_contours: usize, out: &mut Outline) -> Resul
         })
         .collect();
 
+    // Validate every contour bound now, so that `emit_glyph` and the `gvar`
+    // interpolation can both slice by them without re-checking — and so that a
+    // malformed file is an error here rather than a silently-short outline
+    // three call frames away.
+    let mut ends = Vec::with_capacity(num_contours);
     let mut start = 0usize;
     for end in &end_pts {
         let end_idx = usize::from(*end)
             .checked_add(1)
             .ok_or(SfntError::TooShort)?;
-        let contour = points
-            .get(start..end_idx)
-            .ok_or(SfntError::MalformedTable("glyf"))?;
-        emit_contour(contour, out);
+        if end_idx > points.len() || end_idx < start {
+            return Err(SfntError::MalformedTable("glyf"));
+        }
+        ends.push(end_idx);
         start = end_idx;
     }
-    Ok(())
+    Ok(Some(SimpleGlyph { points, ends }))
 }
 
 /// Turn one contour's points into path commands.
@@ -2761,6 +3211,224 @@ pub(crate) mod tests {
         gpos
     }
 
+    /// The fixture plus an `fvar` with one `wght` axis and a `gvar` that moves
+    /// all four glyphs.
+    ///
+    /// This exists because **no font installed on this host can test the
+    /// interesting half of `gvar`**. A sweep of every variable face here
+    /// (`tools/variable_survey.py`, and the phantom probe written alongside
+    /// `installed_variable_fonts_vary_their_outlines`) found that all seven
+    /// carry `HVAR`, express their advance and side-bearing variation *there*,
+    /// and therefore leave every phantom point's delta at zero — in 400 glyphs
+    /// per face, not one moved. Real files likewise rarely exercise IUP in a way
+    /// that a bounding box would notice, and none of them varies a composite's
+    /// component offset. Those three paths are the ones a reader gets wrong, so
+    /// they are built here by hand where the expected answer can be computed on
+    /// paper rather than trusted from a second implementation.
+    ///
+    /// The axis is `wght` 100/400/700, so user weight 700 is normalized +1.0
+    /// (every tuple at full strength) and 550 is exactly +0.5 (every tuple
+    /// halved) — two instances whose arithmetic is exact in `f32` and so can be
+    /// asserted without a tolerance.
+    pub(crate) fn build_variable_test_font() -> Vec<u8> {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        // 'H' is added to the `cmap` on top of the base fixture's 'A'-'C',
+        // mapped onto the square, because `ScaledFont` measures its cap height
+        // from that character's outline. Without it the cap height falls back
+        // to a fraction of the ascender and no longer varies, so the assertion
+        // that outline-derived metrics follow the instance would pass whatever
+        // the code did. The base fixture is left alone rather than given the
+        // same mapping: adding it there would silently change the cap height
+        // every other test in this crate sees.
+        for (tag, data) in &mut tables {
+            if tag == b"cmap" {
+                *data = format4_cmap(&[
+                    (0x0041, 0x0043, 1 - 0x41),
+                    (0x0048, 0x0048, 1 - 0x48),
+                    (0xFFFF, 0xFFFF, 1),
+                ]);
+            }
+        }
+        tables.push((*b"fvar", variable_fvar()));
+        tables.push((*b"gvar", variable_gvar()));
+        tables.sort_by_key(|(tag, _)| *tag);
+        assemble(&tables)
+    }
+
+    /// A `cmap` holding one format-4 subtable with the given
+    /// `(start, end, idDelta)` segments, which must be sorted and must end with
+    /// the mandatory `0xFFFF` one.
+    fn format4_cmap(segments: &[(u16, u16, i16)]) -> Vec<u8> {
+        let n = u16::try_from(segments.len()).expect("a test may not need 65536 segments");
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&4u16.to_be_bytes()); // format
+        sub.extend_from_slice(&0u16.to_be_bytes()); // length, filled in below
+        sub.extend_from_slice(&0u16.to_be_bytes()); // language
+        sub.extend_from_slice(&(n * 2).to_be_bytes());
+        // The three search hints are derived from the segment count and are
+        // ignored by every reader that binary-searches the arrays itself, this
+        // one included. They are written correctly anyway so the fixture stays
+        // a file a stricter reader would also accept.
+        let entry_selector = u16::try_from(n.ilog2()).unwrap();
+        let search_range = 2 * (1u16 << entry_selector);
+        sub.extend_from_slice(&search_range.to_be_bytes());
+        sub.extend_from_slice(&entry_selector.to_be_bytes());
+        sub.extend_from_slice(&(n * 2 - search_range).to_be_bytes());
+        for &(_, end, _) in segments {
+            sub.extend_from_slice(&end.to_be_bytes());
+        }
+        sub.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
+        for &(start, _, _) in segments {
+            sub.extend_from_slice(&start.to_be_bytes());
+        }
+        for &(_, _, delta) in segments {
+            sub.extend_from_slice(&delta.to_be_bytes());
+        }
+        for _ in segments {
+            sub.extend_from_slice(&0u16.to_be_bytes()); // idRangeOffset
+        }
+        let len = u16::try_from(sub.len()).unwrap();
+        sub[2..4].copy_from_slice(&len.to_be_bytes());
+
+        let mut cmap = Vec::new();
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // version
+        cmap.extend_from_slice(&1u16.to_be_bytes()); // numTables
+        cmap.extend_from_slice(&3u16.to_be_bytes()); // platformID
+        cmap.extend_from_slice(&1u16.to_be_bytes()); // encodingID
+        cmap.extend_from_slice(&12u32.to_be_bytes()); // offset to the subtable
+        cmap.extend_from_slice(&sub);
+        cmap
+    }
+
+    /// One `wght` axis, 100 to 700 with the default at 400, and one named
+    /// instance at the top of it.
+    fn variable_fvar() -> Vec<u8> {
+        fn fixed(v: f32) -> [u8; 4] {
+            #[allow(clippy::cast_possible_truncation)]
+            let raw = (v * 65536.0) as i32;
+            raw.to_be_bytes()
+        }
+        let mut fvar = Vec::new();
+        fvar.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+        fvar.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+        fvar.extend_from_slice(&16u16.to_be_bytes()); // axesArrayOffset
+        fvar.extend_from_slice(&2u16.to_be_bytes()); // reserved
+        fvar.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        fvar.extend_from_slice(&20u16.to_be_bytes()); // axisSize
+        fvar.extend_from_slice(&1u16.to_be_bytes()); // instanceCount
+        fvar.extend_from_slice(&8u16.to_be_bytes()); // instanceSize
+        fvar.extend_from_slice(b"wght");
+        fvar.extend_from_slice(&fixed(100.0));
+        fvar.extend_from_slice(&fixed(400.0));
+        fvar.extend_from_slice(&fixed(700.0));
+        fvar.extend_from_slice(&0u16.to_be_bytes()); // flags
+        fvar.extend_from_slice(&256u16.to_be_bytes()); // axisNameID
+        fvar.extend_from_slice(&257u16.to_be_bytes()); // subfamilyNameID
+        fvar.extend_from_slice(&0u16.to_be_bytes()); // flags
+        fvar.extend_from_slice(&fixed(700.0));
+        fvar
+    }
+
+    /// Variation data for glyphs 1, 2 and 3, each chosen to exercise one thing
+    /// the host's own fonts cannot.
+    ///
+    /// * **Glyph 1** names every point, including the phantoms, and gives the
+    ///   left phantom a delta of +5. That is the only way to check that the
+    ///   varied side-bearing correction is subtracted rather than added; with a
+    ///   zero phantom the two signs are indistinguishable.
+    /// * **Glyph 2** carries two tuples, one peaking at each end of the axis,
+    ///   so at every instance one of them scores zero and must still be stepped
+    ///   over byte for byte. The bold one names points 0 and 2 of a three-point
+    ///   contour and leaves point 1 — the off-curve control — to IUP, which
+    ///   must place it at the interpolated x and refuse to move it in y (its
+    ///   two neighbours share a y, so there is no ratio). The light one names
+    ///   point 1 alone, which is the case that translates a contour bodily.
+    /// * **Glyph 3** is the composite, whose single variation point is its
+    ///   component's placement offset.
+    fn variable_gvar() -> Vec<u8> {
+        // Glyph 1: eight points (four contour, four phantom), all named, so the
+        // tuple carries a full delta array and no point list.
+        let mut g1 = Vec::new();
+        g1.extend_from_slice(&1u16.to_be_bytes()); // tupleVariationCount
+        g1.extend_from_slice(&10u16.to_be_bytes()); // dataOffset
+        g1.extend_from_slice(&18u16.to_be_bytes()); // variationDataSize
+        g1.extend_from_slice(&0x8000u16.to_be_bytes()); // EMBEDDED_PEAK_TUPLE
+        g1.extend_from_slice(&16384u16.to_be_bytes()); // peak: wght at +1
+        // A byte run of eight, twice: x then y. Point 4 is the left phantom.
+        g1.extend_from_slice(&[0x07, 10, 20, 30, 40, 5, 0, 0, 0]);
+        g1.extend_from_slice(&[0x07, 1, 2, 3, 4, 0, 0, 0, 0]);
+        assert_eq!(g1.len(), 28, "glyph 1's variation data is 10 + 18 bytes");
+
+        // Glyph 2: seven points and *two* tuples, one peaking at each end of
+        // the axis, so that at either instance exactly one of them scores zero.
+        // The zero-scoring one is not merely inert — its bytes still have to be
+        // stepped over, because the next tuple's data begins where this one's
+        // ends and not where its own header says. The two tuples are given
+        // different point lists and wildly different deltas precisely so that
+        // reading the second at the first's offset produces a wrong glyph
+        // rather than a read error, which a test can tell apart from a
+        // reader that declined to vary at all.
+        let mut g2 = Vec::new();
+        g2.extend_from_slice(&2u16.to_be_bytes()); // tupleVariationCount
+        g2.extend_from_slice(&16u16.to_be_bytes()); // dataOffset: past both headers
+        // EMBEDDED_PEAK_TUPLE | PRIVATE_POINT_NUMBERS, twice.
+        g2.extend_from_slice(&7u16.to_be_bytes()); // variationDataSize
+        g2.extend_from_slice(&0xA000u16.to_be_bytes());
+        g2.extend_from_slice(&0xC000u16.to_be_bytes()); // peak: wght at -1
+        g2.extend_from_slice(&10u16.to_be_bytes()); // variationDataSize
+        g2.extend_from_slice(&0xA000u16.to_be_bytes());
+        g2.extend_from_slice(&0x4000u16.to_be_bytes()); // peak: wght at +1
+        // Tuple 1 (light): names point 1 alone and moves it by (100,100), which
+        // — being the contour's only named point — translates the whole contour.
+        g2.extend_from_slice(&[0x01, 0x00, 0x01]);
+        g2.extend_from_slice(&[0x00, 100]);
+        g2.extend_from_slice(&[0x00, 100]);
+        // Tuple 2 (bold): names points 0 and 2, stored as deltas from the
+        // previous point number: 0, then +2.
+        g2.extend_from_slice(&[0x02, 0x01, 0x00, 0x02]);
+        g2.extend_from_slice(&[0x01, 0, 100]); // x deltas for those two
+        g2.extend_from_slice(&[0x01, 0, 0]); // y deltas
+        assert_eq!(g2.len(), 33, "glyph 2's variation data is 16 + 7 + 10 bytes");
+
+        // Glyph 3: one component plus four phantoms.
+        let mut g3 = Vec::new();
+        g3.extend_from_slice(&1u16.to_be_bytes());
+        g3.extend_from_slice(&10u16.to_be_bytes());
+        g3.extend_from_slice(&12u16.to_be_bytes()); // variationDataSize
+        g3.extend_from_slice(&0x8000u16.to_be_bytes());
+        g3.extend_from_slice(&16384u16.to_be_bytes());
+        g3.extend_from_slice(&[0x04, 25, 0, 0, 0, 0]);
+        #[allow(clippy::cast_sign_loss)]
+        g3.extend_from_slice(&[0x04, -35i8 as u8, 0, 0, 0, 0]);
+        assert_eq!(g3.len(), 22, "glyph 3's variation data is 10 + 12 bytes");
+
+        let mut body = Vec::new();
+        let mut offsets = alloc::vec![0u32]; // glyph 0 does not vary
+        for g in [&g1, &g2, &g3] {
+            offsets.push(u32::try_from(body.len()).unwrap());
+            body.extend_from_slice(g);
+        }
+        offsets.push(u32::try_from(body.len()).unwrap());
+
+        // The offset array is `glyphCount + 1` long and sits immediately after
+        // the twenty-byte header, so the data array starts at 20 + 4 * 5.
+        let data_array = 20 + 4 * u32::try_from(offsets.len()).unwrap();
+        let mut gvar = Vec::new();
+        gvar.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+        gvar.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+        gvar.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        gvar.extend_from_slice(&0u16.to_be_bytes()); // sharedTupleCount
+        gvar.extend_from_slice(&0u32.to_be_bytes()); // sharedTuplesOffset
+        gvar.extend_from_slice(&4u16.to_be_bytes()); // glyphCount
+        gvar.extend_from_slice(&1u16.to_be_bytes()); // flags: long offsets
+        gvar.extend_from_slice(&data_array.to_be_bytes());
+        for off in offsets {
+            gvar.extend_from_slice(&off.to_be_bytes());
+        }
+        gvar.extend_from_slice(&body);
+        gvar
+    }
+
     /// Lay out tables into a valid sfnt container.
     fn assemble(tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
         let n = u16::try_from(tables.len()).unwrap();
@@ -3149,6 +3817,243 @@ pub(crate) mod tests {
         assert_eq!(b.y_min, 200.0);
         assert_eq!(b.x_max, 700.0);
         assert_eq!(b.y_max, 300.0);
+    }
+
+    // --- gvar: the fixture at a non-default instance ---------------------
+    //
+    // Every expected outline below is computed on paper from the tuple bytes
+    // in `variable_gvar`, not taken from a run. The axis is arranged so that
+    // both instances used here have a scalar that is exact in `f32` (1.0 and
+    // 0.5), so these compare without a tolerance.
+
+    fn variable_face() -> Face {
+        Face::parse(build_variable_test_font()).expect("the variable fixture must parse")
+    }
+
+    /// The fixture at user weight `w`.
+    fn at_weight(f: &Face, w: f32) -> var::Coords {
+        f.variation_axes()
+            .expect("the variable fixture has an fvar")
+            .normalize(&[w])
+    }
+
+    #[test]
+    fn the_variable_fixture_offers_one_weight_axis() {
+        let f = variable_face();
+        let v = f.variation_axes().unwrap();
+        assert_eq!(v.axes().len(), 1);
+        assert_eq!(v.axes()[0].tag, *b"wght");
+        assert_eq!(v.axes()[0].default, 400.0);
+        // Normalization has to land on these two exactly for the assertions
+        // below to be exact rather than approximate.
+        assert_eq!(at_weight(&f, 700.0).as_slice(), &[16384]);
+        assert_eq!(at_weight(&f, 550.0).as_slice(), &[8192]);
+    }
+
+    #[test]
+    fn the_default_instance_draws_exactly_what_glyf_holds() {
+        // The default instance is *defined* as the stored outline, so this must
+        // hold command for command — a tolerance here would hide a delta that
+        // was applied when every tuple's scalar is zero.
+        let f = variable_face();
+        for gid in 0..4 {
+            let plain = f.outline(gid).unwrap();
+            let varied = f.outline_at(gid, &f.variation_axes().unwrap().default_coords()).unwrap();
+            assert_eq!(varied.commands, plain.commands, "glyph {gid}");
+        }
+    }
+
+    #[test]
+    fn a_phantom_delta_corrects_the_varied_side_bearing() {
+        // Glyph 1's tuple moves its four corners by (10,1) (20,2) (30,3) (40,4)
+        // and its *left phantom point* by (5,0). The phantom is the left side
+        // bearing point, so the whole outline slides back by 5 to keep that
+        // point on the origin: a corner at 100+10 draws at 105, not 110.
+        let f = variable_face();
+        let o = f.outline_at(1, &at_weight(&f, 700.0)).unwrap();
+        assert_eq!(
+            o.commands,
+            vec![
+                PathCmd::MoveTo(Point::new(105.0, 1.0)),
+                PathCmd::LineTo(Point::new(215.0, 2.0)),
+                PathCmd::LineTo(Point::new(225.0, 103.0)),
+                PathCmd::LineTo(Point::new(135.0, 104.0)),
+                PathCmd::LineTo(Point::new(105.0, 1.0)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_half_strength_tuple_moves_points_half_as_far() {
+        // Weight 550 is exactly half way from the default to the peak, so every
+        // delta — the phantom's included — is halved. This is the assertion
+        // that a scalar is applied at all rather than a tuple being all or
+        // nothing.
+        let f = variable_face();
+        let o = f.outline_at(1, &at_weight(&f, 550.0)).unwrap();
+        assert_eq!(
+            o.commands,
+            vec![
+                PathCmd::MoveTo(Point::new(102.5, 0.5)),
+                PathCmd::LineTo(Point::new(207.5, 1.0)),
+                PathCmd::LineTo(Point::new(212.5, 101.5)),
+                PathCmd::LineTo(Point::new(117.5, 102.0)),
+                PathCmd::LineTo(Point::new(102.5, 0.5)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_point_the_tuple_did_not_name_is_interpolated_not_left_behind() {
+        // Glyph 2 is (0,0) — (50,200) off-curve — (100,0). The tuple names only
+        // the two ends, moving the second by (100,0). Point 1 sits half way
+        // between them in x, so IUP gives it half the movement: 50, putting the
+        // control point at 100. Leaving it at 50 — the bug this test exists
+        // for — would tear the curve away from its own endpoints.
+        //
+        // In y the two named points share a coordinate and a delta, so there is
+        // no ratio to interpolate along and the answer is that shared delta,
+        // which is zero.
+        let f = variable_face();
+        let o = f.outline_at(2, &at_weight(&f, 700.0)).unwrap();
+        assert_eq!(
+            o.commands,
+            vec![
+                PathCmd::MoveTo(Point::new(0.0, 0.0)),
+                PathCmd::QuadTo(Point::new(100.0, 200.0), Point::new(200.0, 0.0)),
+                PathCmd::LineTo(Point::new(0.0, 0.0)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tuple_peaking_on_the_far_side_of_the_default_applies_only_there() {
+        // Glyph 2's other tuple peaks at wght -1 and names point 1 alone. At
+        // weight 100 it is at full strength and the bold tuple is at zero, so
+        // the contour translates bodily by (100,100) — the single-named-point
+        // case, where IUP has no second point to interpolate against and every
+        // unnamed point takes the named one's delta whole.
+        //
+        // This is also the assertion that a zero-scoring tuple still occupies
+        // its bytes. At *either* instance one tuple is skipped, and a reader
+        // that skipped its data as well as its arithmetic would read the
+        // surviving tuple's deltas from the wrong offset and draw neither of
+        // these two shapes.
+        let f = variable_face();
+        let o = f.outline_at(2, &at_weight(&f, 100.0)).unwrap();
+        assert_eq!(
+            o.commands,
+            vec![
+                PathCmd::MoveTo(Point::new(100.0, 100.0)),
+                PathCmd::QuadTo(Point::new(150.0, 300.0), Point::new(200.0, 100.0)),
+                PathCmd::LineTo(Point::new(100.0, 100.0)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_composites_component_offset_varies() {
+        // Glyph 3 places glyph 1 at (500,200); its one variation point is that
+        // offset, moved by (25,-35) to (525,165). The component *also* varies
+        // in its own right, so the corners are glyph 1's varied points — the
+        // unshifted ones, since the parent's bearing correction applies once to
+        // the finished glyph and not again to each part.
+        let f = variable_face();
+        let o = f.outline_at(3, &at_weight(&f, 700.0)).unwrap();
+        assert_eq!(
+            o.commands,
+            vec![
+                PathCmd::MoveTo(Point::new(635.0, 166.0)),
+                PathCmd::LineTo(Point::new(745.0, 167.0)),
+                PathCmd::LineTo(Point::new(755.0, 268.0)),
+                PathCmd::LineTo(Point::new(665.0, 269.0)),
+                PathCmd::LineTo(Point::new(635.0, 166.0)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn an_ink_box_follows_the_instance_rather_than_the_stored_header_box() {
+        // The regression this pins: `glyph_bbox` reads the four words in the
+        // glyph header, and `gvar` never rewrites them, so off the default
+        // instance that box describes a shape the face no longer draws. Mark
+        // positioning stacks accents on this box, so a stale one puts the
+        // accent where the *default* weight's ink used to be — visible as an
+        // accent drifting off its base as the weight is dragged.
+        let f = variable_face();
+        let bold = at_weight(&f, 700.0);
+        let box_at = f.glyph_bbox_at(1, &bold).expect("glyph 1 has an outline");
+
+        // Glyph 1 at weight 700 draws its corners at (105,1) (215,2) (225,103)
+        // (135,104) — see `a_phantom_delta_corrects_the_varied_side_bearing`.
+        // The box is their hull, which is the box a point walk can produce and
+        // the one HarfBuzz produces off the default instance too.
+        assert_eq!(box_at.x_min, 105.0);
+        assert_eq!(box_at.y_min, 1.0);
+        assert_eq!(box_at.x_max, 225.0);
+        assert_eq!(box_at.y_max, 104.0);
+
+        // And it is genuinely a different answer, not the stored box arrived at
+        // by a longer route: without this assertion the test above would pass
+        // just as well on a fixture whose deltas happened to cancel.
+        let stored = f.glyph_bbox(1).expect("glyph 1 states a header box");
+        assert_ne!(box_at, stored);
+    }
+
+    #[test]
+    fn the_default_instance_still_reads_the_box_the_glyph_states() {
+        // The default instance is the one case where the header box is exactly
+        // right, and it is the tight box around the *curves* where a point walk
+        // gives the looser control-point hull. Measuring it anyway would make
+        // every static face disagree with itself about its own ink for no gain,
+        // so the fast path is a correctness requirement, not an optimisation.
+        let f = variable_face();
+        for gid in 1..4 {
+            assert_eq!(
+                f.glyph_bbox_at(gid, &var::Coords::default()),
+                f.glyph_bbox(gid),
+                "glyph {gid} must read its stated box at the default instance"
+            );
+            assert_eq!(
+                f.glyph_bbox_at(gid, &at_weight(&f, 400.0)),
+                f.glyph_bbox(gid),
+                "glyph {gid}: weight 400 *is* the default, by another spelling"
+            );
+        }
+    }
+
+    #[test]
+    fn a_face_without_gvar_measures_the_same_box_at_every_instance() {
+        // The plain fixture cannot vary, so asking it for an instance must give
+        // the stated box rather than falling into the point walk and quietly
+        // loosening every box in a static face.
+        let f = face();
+        for gid in 0..4 {
+            assert_eq!(
+                f.glyph_bbox_at(gid, &var::Coords::default()),
+                f.glyph_bbox(gid)
+            );
+        }
+    }
+
+    #[test]
+    fn a_face_without_gvar_draws_the_same_outline_at_every_instance() {
+        // The plain fixture has neither table. Asking it for an instance must
+        // not fail and must not differ — a caller should be able to route every
+        // glyph through `outline_at` without first asking whether it will help.
+        let f = face();
+        let coords = var::Coords::default();
+        for gid in 0..4 {
+            assert_eq!(
+                f.outline_at(gid, &coords).unwrap().commands,
+                f.outline(gid).unwrap().commands
+            );
+        }
     }
 
     #[test]

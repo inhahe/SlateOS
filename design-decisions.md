@@ -17116,7 +17116,10 @@ drawn.
 (`gui/font/tools/device_survey.py`). The wrong answer is not a slightly wrong
 correction; it is an arbitrary one. Variation indices outnumber real device
 tables 60 to 1 on this machine, so this is the *common* path through the
-reader, not the edge case — see `TD-FONT-DOES-NOT-READ-VARIATION-STORES`.
+reader, not the edge case. That arm no longer declines: §451 gave it the
+instance as well as the size, and `TD-FONT-DOES-NOT-READ-VARIATION-STORES` is
+closed. The ordering rule above is what makes the two cases distinguishable in
+the first place, so it stays exactly as written.
 
 **Pixels are converted to font units by truncation, not rounding.** A delta is
 in pixels and the value it corrects is in font units, so it is multiplied by
@@ -17678,6 +17681,438 @@ it for pinning the reduction.
 
 `randrange/src/lib.rs`, a workspace member (not a default member — same
 rationale as `yamldoc`), `no_std` with no `alloc`.
+
+---
+
+## §448 — A variable font's chosen instance belongs to the scaled font, and the number it is chosen with is HarfBuzz's
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** Some fonts are adjustable — one file can draw at any weight from
+thin to bold, and at any width, rather than shipping one file per weight. The
+file describes the *dials* (weight from 200 to 700, say) and the app turns
+them. Two questions had to be settled before writing any of it: **where the
+turned-dial setting is stored**, and **exactly what number a given dial
+position turns into** — because that number gets used by four other tables, and
+being off by one in the last digit shows up as a glyph that is subtly the wrong
+shape.
+
+Both answers were forced by things already true of this crate, so neither is a
+close call — but both are easy to get wrong later by someone who does not know
+why, which is why they are written down.
+
+### The setting lives on the scaled font, not the parsed face
+
+`Face` is the parsed file. `ScaledFont` is that file at a size, for drawing.
+The instance ("weight 600") goes on `ScaledFont`.
+
+- *What changes:* one loaded file can be drawn at two weights at the same
+  time — a document with bold and regular text loads the font once.
+- **The alternative** — putting it on `Face` — means a bold run and a regular
+  run of the same family are two parsed copies of the same megabyte of data,
+  or one copy mutated between draws, which is a data race waiting to happen in
+  the compositor. Neither is acceptable, and the second is worse than it looks
+  because the mutation is invisible at the call site.
+- **Cost of the choice:** every function that reads a variation-dependent
+  table needs the coordinates passed to it, so signatures downstream get one
+  more argument. That is real but it is the honest shape: those functions
+  genuinely do depend on the instance, and a version that reads it off the
+  face is hiding a dependency rather than removing one.
+
+`Face::variation_axes()` therefore returns the *axis description* — what dials
+exist and their ranges — and never a position along them.
+
+### The dial position is converted with HarfBuzz's arithmetic, bit for bit
+
+Turning "weight 600" into the internal number is two steps: a proportion
+(600 is two-thirds of the way from 400 to 700), then an optional per-font
+correction curve the designer supplies (`avar`, which lets them say "the
+two-thirds point should really be three-fifths"). The curve is stored as fixed
+point — integers over 16384 — and interpolating along it involves a division.
+
+**Decision: land on the number HarfBuzz lands on, whatever rounding that
+takes, rather than on the number the arithmetic looks like it should give.**
+
+- *What changes:* nothing a user can see directly. What is at stake is whether
+  this crate's number can differ from the oracle's by one 16384th.
+- **Why the oracle and not accuracy:** HarfBuzz is this crate's oracle
+  everywhere else — shaping, kerning, mark placement are all checked against
+  it by `gui/font/tools/harfbuzz_sweep.py`. A one-unit divergence here does
+  not stay here: it feeds `gvar`'s outline deltas and `GPOS`'s positioning
+  deltas, where it becomes a sub-pixel disagreement in a *glyph shape*, at
+  which point no sweep can tell "we round better" from "we have a bug".
+- **Which rounding that turns out to be, per operation** — the two are not the
+  same and reading one off the other is exactly the mistake made here:
+  - `avar`'s segment map **rounds to nearest, halves away from zero**.
+    HarfBuzz's `SegmentMaps::map` interpolates in `float` and takes `roundf`.
+    Done here in integers, which reaches the same answer without a float's
+    own rounding.
+  - Reaching fixed point from a user-space float is also half-away-from-zero,
+    for the same `roundf`.
+  - Device-table pixel-to-font-unit conversion, by contrast, **truncates**
+    (§440): `Device::get_delta` does `pixels * (int64_t)scale / ppem` in C
+    integers.
+
+**Correction, 2026-08-17 (commit `777a040ff`).** This entry originally read
+"divide the way HarfBuzz divides, **including truncating toward zero**", and
+`SegmentMap::map` truncated to match. That was wrong: the truncation belongs
+to `Device::get_delta`, a different operation, and was generalized to `avar`
+without checking. The cost was not a rounding curiosity — the normalized
+coordinate is the input to *every* delta the face computes, so Segoe UI
+Variable at weight 550 (`8192 * 8192 / 10923` = 6143.99, truncated to 6143
+where HarfBuzz has 6144) had every `gvar` outline delta and every
+`HVAR`/`MVAR` metric scaled by 0.99995 of what it should be, at that instance
+and no other. The *decision* above did not change; only the belief about what
+it required. The lesson kept here: pinning to an oracle means reading the
+oracle for each operation, not extrapolating a rule from a neighbouring one.
+
+**Consequence for testing.** Because the arithmetic is pinned to another
+implementation, "it matches the spec" is not the property under test —
+"it matches, unit for unit" is. So the host-font test compares all 82 named
+instances of this machine's 7 variable faces against
+`variable_survey.py --normalize`, a second implementation written from the
+specification in a different language, *including* its rounding. A
+disagreement is then a bug rather than a rounding preference. Verified by
+injection: changing the rounding to truncation is caught at one unit
+(9829 against 9830).
+
+**But that host test did not catch the truncation bug** — a second oracle only
+helps if it was written independently, and this one inherited the same wrong
+belief from this entry (it truncated too, until the same day). Even had it
+not, a named instance almost always sits *on* a segment endpoint, where the
+interpolation is exact and every rounding agrees: re-running the survey after
+correcting it produced byte-identical output for all 82 instances. What
+catches it is `avar_rounds_to_the_nearest_coordinate_rather_than_truncating`
+in `var.rs`, an arithmetic unit test at a deliberately fractional point. Two
+implementations of the same misunderstanding are one implementation.
+
+### A malformed variation table costs variability, not drawability
+
+`Variations::parse` returns `Option`, not `Result`, and `Face::parse` drops the
+`None` on the floor.
+
+- *What changes:* a font whose `fvar` is corrupt still opens and still draws,
+  at its default weight, instead of failing to open.
+- The `avar` case is the sharper one: an `avar` that disagrees with `fvar`
+  about how many axes there are is discarded **whole**, not per axis. Pairing
+  correction curve *k* with axis *k* across a count mismatch silently applies
+  the weight correction to the width — a wrong answer that still looks like a
+  font, which is the failure mode this crate spends most of its effort
+  avoiding.
+- An `avar` curve whose points are out of order becomes the identity **for
+  that axis only**, since the identity is exactly what the table's absence
+  would have meant and the other axes' curves are still readable.
+
+---
+
+## §449 — `gvar` hands back a delta per point, spaces glyphs at the default width, and is proved by a font we wrote ourselves
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous)
+
+**In short:** An adjustable font (§448) stores its *shapes* as a base outline
+plus a table of nudges — "at weight 700, move this corner 40 units right." The
+table is `gvar`, and reading it is what makes a variable face actually look
+bolder rather than merely claim to. Three things had to be settled while writing
+it: **what shape the nudges are handed back in** — this runs once per glyph per
+frame, on the compositor's text path, and the table also nudges four invisible
+points that are not part of the drawn shape at all; **whether the same table
+should also decide how far apart to space the glyphs**, since it technically
+knows; and **what counts as proof that any of it is right**, given the
+surprising discovery that not one font installed on this machine exercises a
+third of the code.
+
+### `gvar` returns a delta vector over the *raw points*, and the caller applies it
+
+`Gvar::deltas` takes the glyph's point array plus its contour ends and returns
+one `(dx, dy)` per point **plus four more** — the phantom points. It does not
+mutate the glyph and it does not know what a path is.
+
+- *What changes:* nothing visible. It is the seam that makes the next two
+  callers possible.
+- **Why not have it mutate the glyph**, which is what "apply the deltas" sounds
+  like: the four phantom deltas are not points of the outline. They are the
+  varied side bearings and advances, they belong to no contour, and
+  `Face::outline_at` needs the first of them — the left phantom's `dx` — to
+  correct where the glyph sits (`out.translate_x(glyf_shift(gid) - phantom)`).
+  A mutating signature would have to smuggle that number out some other way,
+  and the obvious way — appending four fake points to the outline — puts
+  invisible geometry into a drawable path.
+- **Why it pays off immediately:** a *composite* glyph varies by moving its
+  components, and its variation point array has one entry per component, not
+  per contour point. Because `deltas` only wants "an array of points and a list
+  of contour ends", the composite path calls the *same function* with a
+  synthesized array of component offsets and an empty `ends`, and gets component
+  movement for free — including the rule that an empty `ends` means no
+  interpolation, so a component the font did not name simply does not move. A
+  glyph-mutating design would have needed a second, near-duplicate
+  implementation for composites, which is where a divergent bug would live.
+- **Why the argument is `&[GlyphPoint]` and not `&[Point]`**, even though
+  `gvar` never reads the on-curve flag: `&[Point]` would force every caller to
+  build a stripped copy of the array first, which is an allocation per glyph per
+  frame on the compositor's text path, paid to hide a field the callee ignores.
+- **Why not a path-to-path transform**, which would be the tidiest signature of
+  all: the conversion to a path is lossy in exactly the direction that matters.
+  `gvar` numbers points by index in the *raw* array — off-curve control points
+  included, phantoms past the end — and a path has already dissolved that
+  numbering into curve commands. Reconstructing it would mean reconstructing
+  the very thing the path threw away.
+
+### An advance that varies comes from `HVAR`, even though `gvar` also knows it
+
+`gvar`'s phantom points encode the varied advance width. We read them — for the
+side-bearing correction, which nothing else provides — and then deliberately do
+**not** use them to space the glyph. Until the `ItemVariationStore` reader
+lands, a varied glyph is drawn at its varied shape and spaced at its *default*
+width.
+
+- *What changes:* at the extremes of a weight axis, letters are very slightly
+  too close together. Near the default, nothing.
+- **Why not just use the phantom**, which is sitting right there and would make
+  the symptom disappear today: it would make two tables the source of truth for
+  one number, at a moment when *neither* had been checked against a real file
+  for that number. Every variable face on this host puts its advance variation
+  in `HVAR` and leaves the `gvar` phantoms at zero — so "use the phantom" would
+  have shipped as "the advance never varies", dressed up as a feature. A
+  visible, documented gap that the next step closes is better than an invisible
+  one that the next step has to *discover* and then contradict.
+- The gap is recorded at the call site in `ScaledFont::rasterize_glyph` and in
+  `known-issues.md` → `TD-FONT-DOES-NOT-READ-VARIATION-STORES`, not left to be
+  inferred.
+
+### The interesting half of `gvar` is tested against a font built in the test file
+
+This host has 556 fonts, 7 of them variable, and across ~2,800 glyphs of those
+7 **not one** moves a phantom point, varies a composite's component offset, or
+has a tuple whose omitted points make interpolation visible. Those three paths —
+roughly a third of the module — are unreachable from any real file here.
+
+**Decision: hand-assemble a small variable font inside `sfnt.rs`'s test module
+and compute its expected outlines on paper.**
+
+- *What changes:* the module's hardest paths are covered by exact equality
+  against arithmetic done by hand, with no tolerance, rather than by a sweep
+  that would have reported success while testing nothing.
+- The fixture's axis is deliberately arranged so the two tested instances have
+  scalars of exactly 1.0 and 0.5 — values a binary float represents exactly —
+  so an expectation like "half of 100 units" is `50`, not `50 ± ε`. A tolerance
+  would have hidden the class of bug most likely to be present.
+- One glyph carries **two** tuples peaking at opposite ends of the axis, which
+  is what tests the rule that a tuple scoring zero still occupies its bytes: a
+  reader that skips the advance along with the parse then reads the *next*
+  tuple from the wrong offset and draws a wrong glyph rather than erroring.
+  A one-tuple-per-glyph fixture cannot express that at all.
+- **Cost of the choice:** ~150 lines of byte-level table construction that must
+  be maintained by hand, and which no external tool validates. Accepted because
+  the alternative is not a cheaper test, it is no test.
+
+**The oracle is split in two for the same reason.**
+`gui/font/tools/gvar_oracle.py` is written from the specification, but its
+`glyf` reader and its point→path conversion cannot be meaningfully independent
+of ours. Those are validated by a *separate* comparison taken at the **default
+instance**, where every tuple's scalar is provably zero — so a failure in the
+varied table means "we applied the deltas wrong" and a failure in the default
+table means "we read the outline wrong", rather than one signal for two
+unrelated bugs.
+
+**And every comparison carries a "did it move" assertion.** Agreement between
+two readers is satisfiable by a reader that ignores `gvar` entirely and an
+oracle that agrees with it about nothing, so
+`installed_variable_fonts_vary_their_outlines` separately demands that
+non-default rows *differ* from the unvaried glyph, and fails if fewer than
+three quarters of them do. The lesson generalises past fonts: a differential
+test needs a liveness assertion, or the null implementation passes it.
+
+---
+
+## §450 — One table owns each varying number: `HVAR` the advance, `MVAR` the line box, and the outline itself the cap-height
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** an adjustable ("variable") font stores several numbers *twice*.
+How wide a letter is at weight 700 can be worked out from the shape table
+(`gvar`, which nudges four invisible points that encode the width) **or** read
+straight out of a table that exists to answer exactly that question (`HVAR`).
+How tall the capital letters are at weight 700 can be measured off the drawn
+shape **or** read out of `MVAR`'s `cpht` entry. In both cases the two answers
+are *supposed* to agree, and in a real font they nearly do — which is worse
+than if they plainly disagreed, because a small mismatch shows up as text that
+is drawn at one width and spaced at another, and nobody can tell which half is
+wrong. So each number gets exactly one owner, chosen per number, and the other
+source is never consulted.
+
+### The advance comes from `HVAR`, never from `gvar`'s phantom points
+
+`Face::advance_at` adds an `HVAR` delta to the `hmtx` advance.
+`Face::outline_at` does read `gvar`'s phantom points — it needs the left
+side-bearing correction to place the outline — but nothing derives a *width*
+from them.
+
+- *What changes:* a bold instance of a proportional face is spaced at its bold
+  widths instead of its regular ones. Before this, a varied glyph was drawn
+  varied and spaced default: visibly wrong at the extremes of a weight axis,
+  invisible near the default.
+- **For `HVAR`:** it is the table whose entire purpose is this number, it is
+  present on all 7 of this host's variable faces, and it is a direct lookup
+  (glyph id → delta) rather than a reconstruction. `gvar`'s phantoms, by
+  contrast, arrive only *after* the full delta/interpolation pipeline has run,
+  so an advance derived from them inherits every bug in outline handling.
+- **Against:** a face could ship `gvar` phantom deltas and no `HVAR`, and would
+  then be spaced at default widths. No such face exists here; all 7 leave every
+  one of ~2,800 glyphs' phantom deltas at zero and put the variation in `HVAR`.
+  If one ever turns up, the fix is to fall back to the phantoms *when `HVAR` is
+  absent* — a fallback, still not a second opinion.
+- **Cost:** four call sites in `scaled.rs` had to move from `advance` to
+  `advance_at`, and missing one would have left a single measurement stale
+  against the rest. That is the real hazard of this decision and is why the
+  change was made everywhere at once rather than at the rasterizer alone.
+
+### Ascender, descender and line-gap come from `MVAR`; cap-height and x-height stay measured
+
+`Face::metrics_at` applies `MVAR`'s `hasc`/`hdsc`/`hlgp`. It does **not** apply
+`xhgt` or `cpht`, even though 4 host faces carry both and the reader could
+trivially fetch them. `ScaledFont::derive_metrics` keeps measuring those two off
+the varied outline.
+
+- *What changes:* nothing a user sees today, because both routes give nearly
+  the same answer. What changes is which one is authoritative when they differ.
+- **Why the split is not arbitrary.** The line box (ascender/descender/gap) is
+  *declared*, not observable: no glyph's outline tells you how far apart the
+  font wants its lines. `MVAR` is the only source, so it is the source.
+  Cap-height and x-height are the opposite — they are a *measurement of a
+  shape*, and the shape is right there, already varied by `gvar`. Reading the
+  tag instead would let a face's declared cap-height drift from where its `H`
+  actually ends, and the underline would then miss the letters it belongs to.
+- **The consistency argument settles it.** The non-variable path already
+  measures cap-height off the outline rather than reading `OS/2`. Reading
+  `MVAR` in the variable path would mean the *same face* answered the same
+  question two different ways depending on whether an axis had been set — a
+  discontinuity at the default instance, which is the one place where nothing
+  should change.
+- **Against:** a font whose `cpht` is deliberately different from its drawn
+  `H` (a designer's override) is ignored. Accepted: an override that contradicts
+  the ink is not information this stack can act on coherently, and the
+  non-variable path has always ignored it.
+
+### The reader is proved against a spec-derived oracle *and* against fixtures for what no font reaches
+
+`gui/font/tools/varstore_oracle.py` is written from the OpenType specification
+rather than transcribed from `varstore.rs`, and the host tests pin its output
+for every named instance of every variable face: 7 faces through `HVAR` (5
+varying), 4 through `MVAR` (all 4 varying), each with a floor on how many must
+*move* so the null implementation cannot pass.
+
+Three branches are unreachable from any installed font and are covered by
+synthetic stores in `varstore.rs`'s own test module instead:
+
+- **A null advance-mapping offset means the implicit map** (outer 0, inner =
+  glyph id), not "no variation". The only two host faces that take that path
+  are the two monospace ones, whose advances do not vary — so misreading it
+  produces a *correct* result on every font here.
+- **`LONG_WORDS` doubles both column widths.** No host font sets it.
+- **A degenerate region scores 1.0**, following HarfBuzz. Measured: 0 of 199
+  region axes on this host are degenerate. The oracle deliberately implements
+  the plain specification reading here and says so in its docstring, so the two
+  can never agree merely by having been copied from each other.
+
+---
+
+## §451 — Size and instance are two arguments, not one: `Ppem` answers device tables, `Corrections` answers both
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** fonts can ship hand-written nudges that say "at *this* size, move
+this letter 1 pixel left" — a *device table*. Adjustable ("variable") fonts can
+instead ship a nudge that says "at *this weight*, move it 5 units left". The two
+live in the same slot in the file and are told apart by one marker word, so the
+code reading that slot has to be handed two different things: a pixel size for
+the first kind, and the reader's chosen weight/width/etc. for the second. The
+decision is to pass those as **two types** — the existing `Ppem` for callers who
+only have a size, and a new `Corrections` for callers who have both — rather
+than widening `Ppem` to carry a weight it usually does not have.
+
+### The problem
+
+`Ppem` is a two-field `Copy` value: pixels-per-em and units-per-em. It is
+constructed everywhere and passed by value down through `gpos`, `kern` and
+`mark`. The `VariationIndex` arm needs two more things that `Ppem` has no
+business owning: a **borrow** of `GDEF`'s `ItemVariationStore` and a **slice**
+of normalized coordinates. Both are borrows, so carrying them turns `Ppem` from
+a plain value into a lifetime-parameterised one at every one of those call
+sites.
+
+### Options
+
+| | *What changes:* |
+|---|---|
+| **Widen `Ppem`** | `Ppem<'a>` everywhere; every existing caller that has only a size must invent an empty instance to satisfy the type. |
+| **Two types (chosen)** | `Ppem` keeps its current shape and meaning; a new `Corrections<'a>` composes it with the instance and is what `gpos`/`kern`/`mark` thread. |
+| **Two separate `delta` calls** | Callers ask `Ppem` first and the store second and add the answers; every call site has to know which arm applied. |
+
+**Two types, because a caller that knows a size but not an instance is not
+making an error.** A non-variable face drawn at 11px is exactly that case, and
+it is the overwhelmingly common one — 549 of this host's 556 faces. Widening
+`Ppem` would make all of them spell out an emptiness that means nothing, and
+would put a lifetime on a value whose whole point is that it is a trivially
+copyable pair of numbers. `Corrections::at(ppem)` is the bridge, `const`, and
+reads as what it is.
+
+The third option was rejected outright: the two arms are *alternatives*, not
+addends — a slot holds one table or the other, never both — so a shape that
+lets a caller add them is a shape that lets a caller be wrong.
+
+### The asymmetry that makes this more than plumbing
+
+**The two corrections are not in the same units, and this is the specification's
+doing, not ours.** A device table's delta is in **pixels**, so `Ppem::delta`
+converts it back through the em and it correctly contributes nothing at
+`Ppem::NONE` (no size means no pixel to correct). A `VariationIndex`'s delta is
+already in **font units**, so it bypasses that conversion — and consequently
+**applies at `Ppem::NONE` too**, where the other kind cannot.
+
+This matches HarfBuzz, where `VariationDevice::get_x_delta` scales the store's
+value by the font scale while `DeviceTable::get_x_delta` scales it by `x_ppem`.
+A reader that routes both arms through one conversion is wrong twice: wrong
+magnitude, and silently zero whenever the caller supplied no ppem. That is the
+single most important fact in this section, and it is why `Corrections` owns the
+dispatch rather than `pixel_delta` growing a branch — `pixel_delta` is the
+pixel-units function, and the other arm is not in pixels.
+
+### `store` is `None` at the default instance, not just for a face without one
+
+At the default instance every delta in the store is zero by construction, so
+there is nothing to compute. Collapsing the two cases means the common path does
+no work *and* cannot be told apart from the case where there is nothing to do —
+which is the right invariant, because a difference between them would be a bug
+either way.
+
+### What this cost to prove, which is the part worth remembering
+
+Nothing about the arm is reachable from a differential test that only ever asks
+at the default instance: there, every `VariationIndex` is zero, every `avar`
+segment is the identity, and every `HVAR` advance is the stored one. The reader
+runs, agrees with HarfBuzz, and proves nothing. Teaching the oracle to ask at an
+instance (`shape_dump`'s third argument, `harfbuzz_sweep.py --axes`) turned up
+**three** real bugs on the first sweep, and **two of them had nothing to do with
+variable fonts** — a `PairPos` format 1 device base measured from the wrong
+parent table, and `avar` interpolating with truncating division. Both had
+survived a 556-face sweep because the default instance never reaches them.
+
+The general lesson, which is not specific to fonts: **a differential test proves
+only the questions it asks.** A dimension the oracle is never varied along is a
+dimension in which both sides can be equally wrong, indefinitely, while the
+sweep reports agreement. When adding a feature that introduces a new input
+dimension, the oracle has to learn that dimension before the feature can be
+called proved.
+
+**Where:** `gui/font/src/device.rs` (`Corrections`, `variation_delta`),
+`gui/font/src/sfnt.rs` (`gdef_store`, `Face::corrections`),
+`gui/font/src/gpos.rs`, `gui/font/src/kern.rs`, `gui/font/src/mark.rs`,
+`gui/font/src/scaled.rs`. See `known-issues.md` →
+`TD-FONT-DOES-NOT-READ-VARIATION-STORES` (now FIXED) for the three bugs.
 
 ---
 

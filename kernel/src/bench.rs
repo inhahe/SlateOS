@@ -5250,6 +5250,9 @@ fn bench_lock_primitives() {
     // `PROCESS_NS` and friends use.
     static RAW: spin::Mutex<u64> = spin::Mutex::new(0);
     static TRACKED: crate::sync::Mutex<u64> = crate::sync::Mutex::new(0);
+    // Second tracked lock, existing only to be acquired *while holding*
+    // TRACKED. See the `lock_tracked_nested` window below.
+    static TRACKED_B: crate::sync::Mutex<u64> = crate::sync::Mutex::new(0);
 
     let raw = run_diagnostic("lock_raw_spin", 2000, || {
         let mut g = RAW.lock();
@@ -5260,6 +5263,41 @@ fn bench_lock_primitives() {
         let mut g = TRACKED.lock();
         *g = core::hint::black_box(*g).wrapping_add(1);
     });
+
+    // The nested acquire: the only window in this suite where lockdep's
+    // dependency machinery actually runs.
+    //
+    // Every other lock benchmark takes a single lock with nothing else held, so
+    // `held.depth == 0` and `lock_acquire`'s `record_edge` loop body never
+    // executes. That is not a gap in coverage of an obscure path — it is the
+    // path that runs on every nested acquire in the kernel, and its absence is
+    // why an O(edges) linear scan there survived for a long time while the
+    // reported lockdep overhead sat flat at ~32-36ns. The overhead figure was
+    // not stable; it was structurally incapable of moving. See
+    // known-issues.md A-LOCKDEP-RECORD-EDGE-WAS-A-LINEAR-SCAN-ON-EVERY-NESTED-ACQUIRE.
+    //
+    // Measures the *steady state* deliberately: after the first iteration the
+    // TRACKED->TRACKED_B edge already exists, so this times the "have I seen
+    // this pair before?" lookup rather than the one-off insert. That lookup is
+    // what every nested acquire pays for the rest of the boot, so it is the
+    // number a regression would show up in.
+    //
+    // The order is always TRACKED then TRACKED_B, so this registers one honest
+    // dependency edge and never trips the deadlock validator.
+    let nested = run("lock_tracked_nested", 2000, || {
+        let mut a = TRACKED.lock();
+        {
+            let mut b = TRACKED_B.lock();
+            *b = core::hint::black_box(*b).wrapping_add(1);
+        }
+        *a = core::hint::black_box(*a).wrapping_add(1);
+    });
+    // No hardware target -- there is no published "nested lock acquire" figure
+    // to grade against -- but it is exactly the kind of number that means
+    // something compared against the previous boot, which is what `track` is
+    // for. Printing it and dropping it is what left the original regression
+    // unrecorded.
+    track("lock_tracked_nested", &nested);
 
     // Toggle lockdep off for the third variant, then restore it. Safe to
     // toggle here only because no tracked lock is held at this point -- see
@@ -5308,13 +5346,34 @@ fn bench_lock_primitives() {
         preempt.min_ns,
         tsc_pair.min_ns
     );
+    // A nested acquire is two acquires plus two releases, which is exactly what
+    // two independent `lock_tracked` iterations cost. Everything above that is
+    // the dependency-tracking work that only a nested acquire reaches, so the
+    // difference prices `record_edge` directly instead of inferring it from
+    // whichever unrelated benchmark happened to take nested locks. Saturating
+    // because on a quiet run the two figures can land within noise of each
+    // other, and a nested acquire is never genuinely cheaper than two flat ones.
+    serial_println!(
+        "[bench]   nested acquire: {}ns for 2 nested vs {}ns for 2 flat = {}ns of lockdep dependency work per nested acquire",
+        nested.min_ns,
+        tracked.min_ns.saturating_mul(2),
+        nested.min_ns.saturating_sub(tracked.min_ns.saturating_mul(2))
+    );
     // Lockdep's per-acquire cost used to be O(registered classes) — a linear
     // scan run twice per lock operation — so this number was the multiplier on
     // it. Printed even now that the lookup is a hash, because it is what would
     // reveal the regression if the index were ever bypassed.
+    //
+    // The edge count is here for the same reason, and its absence is why a real
+    // regression went unread: `record_edge` stayed an O(edges) linear scan long
+    // after the class lookup became a hash, and it runs on every *nested*
+    // acquire. This line reported exactly `128` classes — the old cap — for two
+    // runs before that was noticed, because a class count alone says nothing
+    // about how much work a nested acquire does. Print both, or neither.
     serial_println!(
-        "[bench]   lock context: {} lockdep classes registered",
-        crate::lockdep::class_count()
+        "[bench]   lock context: {} lockdep classes registered, {} dependency edges",
+        crate::lockdep::class_count(),
+        crate::lockdep::edge_count()
     );
 
     // Differences, and then the check that the differences and the direct

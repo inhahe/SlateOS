@@ -32,20 +32,40 @@
 
 use crate::serial_println;
 use crate::smp;
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
 /// Maximum number of distinct lock classes tracked.
-const MAX_CLASSES: usize = 128;
+///
+/// Raised from 128 to 256 because 128 was **not** a comfortable ceiling: once
+/// `lockdep::init()` moved ahead of the ring-3 self-test battery, the bench
+/// harness reported `128 lockdep classes registered` — exactly the cap, where
+/// every previous run had reported 43-44. A table at exactly its limit is a
+/// table that has been silently discarding classes, and a discarded class is a
+/// lock the validator no longer checks at all. See
+/// `report_class_table_full` for the warning that now fires instead of
+/// dropping them quietly, and `known-issues.md`
+/// A-LOCKDEP-RECORD-EDGE-WAS-A-LINEAR-SCAN-ON-EVERY-NESTED-ACQUIRE.
+///
+/// 256 is a guess at headroom, not a measured requirement: the true number of
+/// distinct classes was masked by the old cap. The warning is what will tell us
+/// if 256 is also too low.
+const MAX_CLASSES: usize = 256;
 
 /// Maximum nesting depth per CPU (locks held simultaneously).
 const MAX_DEPTH: usize = 16;
 
-/// Maximum number of dependency edges in the graph.
-const MAX_EDGES: usize = 512;
+/// Number of dependency edges the graph can hold.
+///
+/// Not a configurable budget: the graph is an adjacency bitmap over
+/// [`MAX_CLASSES`] (see [`ADJ`]), so every representable edge fits and this is
+/// simply how many that is. It exists to be reported in the startup banner.
+/// There is deliberately no "edge table full" path any more — the previous
+/// 512-edge list silently stopped detecting new cycles once exhausted.
+const MAX_EDGES: usize = MAX_CLASSES * MAX_CLASSES;
 
 /// Maximum CPUs.
 const MAX_CPUS: usize = 16;
@@ -128,7 +148,8 @@ fn class_is_ready(idx: usize) -> bool {
 // Measured: with lockdep on, an uncontended `sync::Mutex` acquire+release cost
 // 632 ns; with lockdep off, 232 ns.  The 400 ns difference is ~66% of the
 // entire tracked-mutex overhead, and it is spent almost entirely here — two
-// scans of up to `MAX_CLASSES` = 128 entries.  The cost is also *positional*:
+// scans of up to `MAX_CLASSES` entries (128 when this was measured).  The cost
+// is also *positional*:
 // a lock registered early is found in a few iterations, one registered late
 // pays the full scan, so the same lockdep call is cheap or expensive depending
 // on boot order.  That is precisely the "linear scan on a hot path" that
@@ -143,8 +164,10 @@ fn class_is_ready(idx: usize) -> bool {
 // This is the fix that made the "keep lockdep in release builds or not?"
 // question go away: the validator was not inherently expensive, its index was.
 
-/// log2 of the number of hash buckets.
-const CLASS_HASH_SHIFT: u32 = 9;
+/// log2 of the number of hash buckets. Tracks [`MAX_CLASSES`]: raising the
+/// class capacity without raising this would push the load factor up and
+/// lengthen every probe run, which is the cost this index exists to remove.
+const CLASS_HASH_SHIFT: u32 = 10;
 
 /// Bucket count. Power of two so the probe wrap is a mask, and 4x
 /// `MAX_CLASSES` so the table never exceeds a 25% load factor — at which
@@ -255,24 +278,54 @@ fn hash_insert(addr: usize, idx: u16) -> u16 {
 // Dependency graph (edges: "class A was held when class B was acquired")
 // ---------------------------------------------------------------------------
 
-/// A dependency edge: class_a was held while class_b was acquired.
-#[derive(Clone, Copy)]
-struct DepEdge {
-    from: u16, // class index of the lock that was HELD
-    to: u16,   // class index of the lock being ACQUIRED
-}
+/// `u64` words per adjacency row, one bit per possible destination class.
+const ADJ_WORDS: usize = MAX_CLASSES.div_ceil(64);
 
-impl DepEdge {
-    const fn empty() -> Self {
-        Self { from: 0, to: 0 }
-    }
-}
+/// Dependency graph as an adjacency bitmap: row `from`, bit `to`.
+///
+/// # Why a bitmap and not the edge list it replaces
+///
+/// This is on the hot path of *every* nested lock acquire. `lock_acquire` calls
+/// [`record_edge`] once per already-held lock (up to [`MAX_DEPTH`] = 16), and
+/// the old implementation answered "is this edge already known?" with a linear
+/// scan over every edge recorded so far. That made the per-acquire cost
+/// `O(held_depth x edges)` — and `edges` grows monotonically for the whole
+/// uptime of the machine, so the cost of taking a lock grew with how long the
+/// kernel had been running. Measured consequence: when `lockdep::init()` moved
+/// ahead of the ring-3 self-test battery, the class table went from 43-44
+/// entries at benchmark time to a *full* 128, and `page_fault_anonymous` more
+/// than doubled (~2080ns -> 4978ns). See `known-issues.md`
+/// A-LOCKDEP-RECORD-EDGE-WAS-A-LINEAR-SCAN-ON-EVERY-NESTED-ACQUIRE.
+///
+/// A bitmap makes the same question one shifted load and one `fetch_or`:
+/// `O(1)`, independent of how many edges exist. `has_cycle`'s neighbour
+/// enumeration likewise drops from a full-table scan per BFS node to
+/// [`ADJ_WORDS`] (= 4) word loads.
+///
+/// It is also cheap for what it buys — 256 x 256 bits = 8 KiB, against a
+/// 512-entry edge list (2 KiB) that could represent only 512 of the 65536
+/// possible edges — and so it removes the "edge table full" case
+/// entirely: every representable edge now fits, meaning cycle detection no
+/// longer goes silently blind once a long-running kernel exhausts `MAX_EDGES`.
+static ADJ: [[AtomicU64; ADJ_WORDS]; MAX_CLASSES] =
+    [const { [const { AtomicU64::new(0) }; ADJ_WORDS] }; MAX_CLASSES];
 
-/// Global dependency graph (append-only during normal operation).
-static mut EDGES: [DepEdge; MAX_EDGES] = [DepEdge::empty(); MAX_EDGES];
-
-/// Number of recorded edges.
+/// Number of distinct edges recorded. Pure statistic: it no longer bounds any
+/// loop, because [`ADJ`] can hold every representable edge.
 static EDGE_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// Set once the class table has overflowed and the warning has been printed.
+static CLASS_TABLE_FULL_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Split a class index into its `(word, bit-mask)` position in an [`ADJ`] row.
+#[inline]
+fn adj_pos(class: u16) -> Option<(usize, u64)> {
+    let c = class as usize;
+    if c >= MAX_CLASSES {
+        return None;
+    }
+    Some((c / 64, 1u64 << (c % 64)))
+}
 
 // ---------------------------------------------------------------------------
 // Per-CPU held-lock stack
@@ -391,11 +444,16 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8]) {
     // Find or register the lock class.
     let class_idx = find_or_register_class(lock_addr, name);
     let Some(class_idx) = class_idx else {
+        // Table full. Say so exactly once: from here on this lock is invisible
+        // to the validator, so a real deadlock involving it will go unreported
+        // and the absence of a warning stops meaning "no violation". Silently
+        // skipping made lockdep degrade into a no-op that still looked healthy.
+        report_class_table_full();
         // SAFETY: Restoring re-entrancy guard for this CPU.
         unsafe {
             IN_LOCKDEP[cpu] = false;
         }
-        return; // Table full — silently skip.
+        return;
     };
 
     // SAFETY: Only this CPU accesses its held stack (called with lock
@@ -600,14 +658,25 @@ pub fn snapshot() -> LockdepSnapshot {
         });
     }
 
-    let mut edges = alloc::vec::Vec::with_capacity(num_edges.min(MAX_EDGES));
-    for i in 0..num_edges.min(MAX_EDGES) {
-        // SAFETY: Reading from append-only array within bounds.
-        let e = unsafe { EDGES[i] };
-        edges.push(DepEdgeInfo {
-            from: e.from,
-            to: e.to,
-        });
+    // Materialise the edge list from the adjacency bitmap. `num_edges` is only
+    // a capacity hint here: it is read before the walk, so a concurrent
+    // `record_edge` can make the walk yield more (or, after a wider change,
+    // fewer) than it predicted. The Vec grows if so — the count is not used to
+    // bound the loop, which is the bug this whole module just got fixed for.
+    let mut edges = alloc::vec::Vec::with_capacity(num_edges);
+    for (from, row) in ADJ.iter().enumerate() {
+        for (w, cell) in row.iter().enumerate() {
+            let mut bits = cell.load(Ordering::Relaxed);
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                #[allow(clippy::cast_possible_truncation)] // both < MAX_CLASSES, which fits u16
+                edges.push(DepEdgeInfo {
+                    from: from as u16,
+                    to: (w * 64 + b) as u16,
+                });
+            }
+        }
     }
 
     LockdepSnapshot {
@@ -770,7 +839,7 @@ fn find_or_register_class(lock_addr: usize, name: &[u8]) -> Option<u16> {
     // which is why this second publication point exists at all.
     #[allow(clippy::indexing_slicing)] // idx < MAX_CLASSES, enforced by the CAS above
     CLASS_READY[idx].store(true, Ordering::Release);
-    #[allow(clippy::cast_possible_truncation)] // idx < MAX_CLASSES = 128
+    #[allow(clippy::cast_possible_truncation)] // idx < MAX_CLASSES, which fits u16
     Some(hash_insert(lock_addr, idx as u16))
 }
 
@@ -781,28 +850,26 @@ fn find_class(lock_addr: usize) -> Option<u16> {
 
 /// Record a dependency edge (from → to).  Returns true if this is a NEW edge.
 fn record_edge(from: u16, to: u16) -> bool {
-    let count = EDGE_COUNT.load(Ordering::Relaxed) as usize;
+    let Some((word, mask)) = adj_pos(to) else {
+        return false;
+    };
+    let Some(row) = ADJ.get(from as usize) else {
+        return false;
+    };
+    let Some(cell) = row.get(word) else {
+        return false;
+    };
 
-    // Check if edge already exists.
-    for i in 0..count.min(MAX_EDGES) {
-        // SAFETY: Reading from append-only edge array.
-        let e = unsafe { EDGES[i] };
-        if e.from == from && e.to == to {
-            return false; // Already recorded.
-        }
+    // One atomic op replaces the whole scan-then-append sequence. `fetch_or`
+    // also makes the "is it new?" answer race-free, which the old code was not:
+    // two CPUs could both complete the scan before either appended, and both
+    // would append the same edge and both report it as new. Here exactly one
+    // CPU observes the bit as previously clear.
+    let prev = cell.fetch_or(mask, Ordering::Relaxed);
+    if prev & mask != 0 {
+        return false; // Already recorded.
     }
-
-    // Add new edge.
-    let idx = EDGE_COUNT.fetch_add(1, Ordering::Relaxed) as usize;
-    if idx >= MAX_EDGES {
-        EDGE_COUNT.fetch_sub(1, Ordering::Relaxed);
-        return false; // Table full.
-    }
-
-    // SAFETY: We "own" this slot via fetch_add.
-    unsafe {
-        EDGES[idx] = DepEdge { from, to };
-    }
+    EDGE_COUNT.fetch_add(1, Ordering::Relaxed);
     true
 }
 
@@ -814,42 +881,98 @@ fn record_edge(from: u16, to: u16) -> bool {
 /// held_class→class_idx) combined with the existing path
 /// (start→...→target) creates a cycle.
 ///
-/// Simple BFS with bounded depth to avoid stack overflow.
+/// BFS over the whole reachable set. Complete: every class is enqueued at most
+/// once, so the queue cannot need more than [`MAX_CLASSES`] slots and the walk
+/// never truncates.
+///
+/// It used to stop after 32 nodes, which silently made cycle detection
+/// incomplete -- a deadlock whose cycle ran through a 33rd class was simply not
+/// reported, and a validator that misses violations without saying so is worse
+/// than one that is switched off. Raising `MAX_CLASSES` to 256 would have made
+/// that hole wider still. The cost of closing it is bounded and small: a
+/// `[u16; 256]` queue and a 4-word visited bitmap is ~544 bytes of stack, on a
+/// 16 KiB interrupt stack, in a function that only runs when an edge is
+/// genuinely new.
 fn has_cycle(start: u16, target: u16) -> bool {
-    // BFS queue (bounded).
-    let mut queue = [0u16; 32];
+    let mut queue = [0u16; MAX_CLASSES];
     let mut head = 0usize;
     let mut tail = 0usize;
-    let mut visited = [false; MAX_CLASSES];
+    // Bitmap rather than `[bool; MAX_CLASSES]`: 4 words instead of 256 bytes,
+    // which is most of what the larger queue costs back.
+    let mut visited = [0u64; ADJ_WORDS];
 
-    queue[tail] = start;
+    let Some((sw, smask)) = adj_pos(start) else {
+        return false;
+    };
+    #[allow(clippy::indexing_slicing)] // adj_pos bounds `sw` to ADJ_WORDS
+    {
+        visited[sw] |= smask;
+        queue[tail] = start;
+    }
     tail += 1;
-    visited[start as usize] = true;
 
-    let edge_count = EDGE_COUNT.load(Ordering::Relaxed) as usize;
-
-    while head < tail && head < 32 {
+    while head < tail {
+        #[allow(clippy::indexing_slicing)] // head < tail <= MAX_CLASSES = queue.len()
         let current = queue[head];
         head += 1;
 
-        // Find all edges FROM current.
-        for i in 0..edge_count.min(MAX_EDGES) {
-            // SAFETY: i < edge_count ≤ MAX_EDGES, so EDGES[i] is within bounds.
-            let e = unsafe { EDGES[i] };
-            if e.from == current {
-                if e.to == target {
+        // Enumerate the successors of `current` straight out of its adjacency
+        // row: ADJ_WORDS (= 4) loads, iterating only the bits that are set,
+        // instead of scanning the entire edge table once per dequeued node.
+        let Some(row) = ADJ.get(current as usize) else {
+            continue;
+        };
+        for (w, cell) in row.iter().enumerate() {
+            let mut bits = cell.load(Ordering::Relaxed);
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1; // clear the lowest set bit
+                let to_idx = w * 64 + b;
+                if to_idx == target as usize {
                     return true; // Cycle found!
                 }
-                let to_idx = e.to as usize;
-                if to_idx < MAX_CLASSES && !visited[to_idx] && tail < 32 {
-                    visited[to_idx] = true;
-                    queue[tail] = e.to;
+                // `to_idx < MAX_CLASSES` holds because it came out of an
+                // ADJ row, whose width is exactly MAX_CLASSES bits.
+                let vmask = 1u64 << b;
+                #[allow(clippy::indexing_slicing)] // w indexes the row we are iterating
+                if visited[w] & vmask == 0 && tail < MAX_CLASSES {
+                    #[allow(clippy::indexing_slicing)] // tail < MAX_CLASSES = queue.len()
+                    {
+                        visited[w] |= vmask;
+                        #[allow(clippy::cast_possible_truncation)] // < MAX_CLASSES, fits u16
+                        {
+                            queue[tail] = to_idx as u16;
+                        }
+                    }
                     tail += 1;
                 }
             }
         }
     }
     false
+}
+
+/// Warn, once per boot, that the class table is full.
+///
+/// Called with the per-CPU `IN_LOCKDEP` re-entrancy guard already set, so the
+/// `serial_println!` here cannot recurse back into lockdep.
+///
+/// Deliberately unconditional rather than rate-limited-to-N: this is a
+/// capacity fact about the build, not an event stream, so one line is both
+/// necessary and sufficient. The `swap` makes it exactly one even if several
+/// CPUs overflow at once.
+#[cold]
+#[inline(never)]
+fn report_class_table_full() {
+    if CLASS_TABLE_FULL_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    serial_println!(
+        "[lockdep] WARNING: class table full at {} entries — further lock classes \
+         are NOT being tracked, so absence of a violation warning no longer means \
+         there is none. Raise MAX_CLASSES in kernel/src/lockdep.rs.",
+        MAX_CLASSES
+    );
 }
 
 /// Report a lock ordering violation.
@@ -1098,13 +1221,121 @@ pub fn self_test() {
     );
     // An unpublished slot must name itself unknown rather than render its blank
     // bytes as a real lock name.
-    #[allow(clippy::cast_possible_truncation)] // published <= MAX_CLASSES = 128
+    #[allow(clippy::cast_possible_truncation)] // published <= MAX_CLASSES, which fits u16
     let unpublished_name = class_name(published as u16);
     assert!(
         unpublished_name == "?",
         "unpublished class slot reported a name"
     );
     serial_println!("[lockdep]   Slot publication (ready flags vs count): OK");
+
+    // Test 10: the edge bitmap. `record_edge` answers "is this edge new?" on
+    // every nested acquire, so the property that matters is that it says "new"
+    // exactly once per distinct edge — if it ever says "new" for an edge it
+    // already holds, `has_cycle` runs on the hot path instead of only on
+    // genuinely new dependencies, and the O(1) win is given straight back.
+    //
+    // Uses two class indices near the top of the table, which the boot has not
+    // reached, so this neither perturbs real dependency data nor depends on it.
+    let e_from = (MAX_CLASSES - 1) as u16;
+    let e_to = (MAX_CLASSES - 2) as u16;
+    let edges_before = EDGE_COUNT.load(Ordering::Relaxed);
+    assert!(
+        record_edge(e_from, e_to),
+        "first record_edge for a fresh pair must report the edge as new"
+    );
+    assert!(
+        !record_edge(e_from, e_to),
+        "record_edge must report a duplicate edge as already known"
+    );
+    assert_eq!(
+        EDGE_COUNT.load(Ordering::Relaxed),
+        edges_before + 1,
+        "a duplicate edge must not increment the edge count"
+    );
+    // Direction matters: an edge is not symmetric, and a bitmap indexed by the
+    // wrong operand would make it look symmetric.
+    assert!(
+        record_edge(e_to, e_from),
+        "the reverse edge is a distinct edge and must register"
+    );
+    // Out-of-range indices must be refused rather than aliasing onto a real
+    // row, which is what an unchecked shift by `to % 64` would silently do.
+    assert!(
+        !record_edge(MAX_CLASSES as u16, 0),
+        "record_edge must refuse an out-of-range source"
+    );
+    assert!(
+        !record_edge(0, MAX_CLASSES as u16),
+        "record_edge must refuse an out-of-range destination"
+    );
+    // Having just made e_from -> e_to and e_to -> e_from, a cycle between them
+    // must be visible to the BFS that now walks the bitmap.
+    assert!(
+        has_cycle(e_to, e_from),
+        "has_cycle must find the 2-cycle just recorded"
+    );
+    // Undo, so the self-test leaves no synthetic dependencies behind for the
+    // real kernel's graph. This is the only place the graph is ever cleared.
+    for (idx, class) in [(e_from, e_to), (e_to, e_from)] {
+        if let (Some(row), Some((w, mask))) = (ADJ.get(idx as usize), adj_pos(class)) {
+            if let Some(cell) = row.get(w) {
+                cell.fetch_and(!mask, Ordering::Relaxed);
+            }
+        }
+    }
+    EDGE_COUNT.store(edges_before, Ordering::Relaxed);
+    serial_println!("[lockdep]   Edge bitmap (dedup, direction, bounds): OK");
+
+    // Test 11: BFS completeness. Build a chain longer than the 32-node bound
+    // `has_cycle` used to stop at, and require the far end to be reachable.
+    // Under the old bound this returned `false` — a real deadlock whose cycle
+    // ran through a 33rd lock class was never reported, and the silence was
+    // indistinguishable from "no deadlock". Uses the top of the class table,
+    // which the boot has not reached this early.
+    const CHAIN: usize = 40;
+    // The chain occupies `base ..= base + CHAIN`, stopping one slot short of the
+    // top of the table so that the very top class is left unconnected and can
+    // serve as the negative control below. Sizing it to run all the way up
+    // instead would make the "unconnected" class the chain's own tail, and the
+    // negative assertion would contradict the positive one.
+    let base = MAX_CLASSES - CHAIN - 2;
+    let edges_before_chain = EDGE_COUNT.load(Ordering::Relaxed);
+    for i in 0..CHAIN {
+        #[allow(clippy::cast_possible_truncation)] // base + CHAIN < MAX_CLASSES
+        let (a, b) = ((base + i) as u16, (base + i + 1) as u16);
+        assert!(record_edge(a, b), "chain edge {i} should be new");
+    }
+    #[allow(clippy::cast_possible_truncation)] // both < MAX_CLASSES
+    let (head_cls, tail_cls) = (base as u16, (base + CHAIN) as u16);
+    assert!(
+        has_cycle(head_cls, tail_cls),
+        "has_cycle must follow a chain longer than the old 32-node BFS bound"
+    );
+    // The class just past the chain's end must NOT be reachable, so the test
+    // cannot pass by simply returning true for everything. `base` is chosen
+    // above so this slot is genuinely off the chain.
+    #[allow(clippy::cast_possible_truncation)] // < MAX_CLASSES
+    let off_chain = (MAX_CLASSES - 1) as u16;
+    assert!(
+        off_chain != tail_cls,
+        "negative control must not be the chain's own tail"
+    );
+    assert!(
+        !has_cycle(head_cls, off_chain),
+        "has_cycle must not report a path to an unconnected class"
+    );
+    for i in 0..CHAIN {
+        #[allow(clippy::cast_possible_truncation)] // base + CHAIN < MAX_CLASSES
+        let (a, b) = ((base + i) as u16, (base + i + 1) as u16);
+        if let (Some(row), Some((w, mask))) = (ADJ.get(a as usize), adj_pos(b)) {
+            if let Some(cell) = row.get(w) {
+                cell.fetch_and(!mask, Ordering::Relaxed);
+            }
+        }
+    }
+    EDGE_COUNT.store(edges_before_chain, Ordering::Relaxed);
+    serial_println!("[lockdep]   BFS completeness (chain of {CHAIN} > old bound 32): OK");
 
     // Restore state.
     ENABLED.store(prev_enabled, Ordering::Relaxed);

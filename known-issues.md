@@ -29905,6 +29905,315 @@ on it. `cargo clippy -p kernel` exits 0 with **54** warnings naming
 `lockdep.rs`, against a 55 baseline -- one fewer, none new, despite the module
 growing by a static array, a helper and a test.
 
+## A-LOCKDEP-RECORD-EDGE-WAS-A-LINEAR-SCAN-ON-EVERY-NESTED-ACQUIRE (lane A, 2026-08-17) - **fixed**
+
+> **Read the CORRECTION at the end of this entry before believing anything here
+> about `page_fault_anonymous`.** The fix described below is real and was kept;
+> the *cause* it is attributed to was tested afterwards and refuted. The
+> performance claims in this entry stand as a recorded hypothesis, not a finding.
+
+**In short:** the lock-order checker answered the question "have I seen this
+pair of locks nested before?" by scanning its entire list of previously-seen
+pairs, every single time one lock was taken while another was held. The list
+only ever grows, so taking a lock got slower the longer the machine had been
+running. This stayed hidden for a long time because the checker was only
+switched on near the *end* of boot, where little had accumulated; moving it to
+the *start* of boot -- done earlier the same day for unrelated diagnostic
+reasons -- exposed it, and the anonymous page-fault benchmark more than doubled.
+
+**Where:** `kernel/src/lockdep.rs`, `record_edge` and `has_cycle`; the missing
+instrumentation is `kernel/src/bench.rs` `bench_lock_primitives`.
+
+**The cost.** `lock_acquire` loops over every lock the CPU already holds (up to
+`MAX_DEPTH` = 16) and calls `record_edge(held, acquiring)` for each. The old
+`record_edge` opened with:
+
+```rust
+let count = EDGE_COUNT.load(Ordering::Relaxed) as usize;
+for i in 0..count.min(MAX_EDGES) {          // <-- O(edges), every nested acquire
+    let e = unsafe { EDGES[i] };
+    if e.from == from && e.to == to { return false; }
+}
+```
+
+so a nested acquire cost `O(held_depth x edges)`, with `edges` monotonically
+increasing for the whole uptime of the machine. `has_cycle` was worse per call
+-- `O(V x E)`, rescanning the entire edge table once per BFS node -- but it only
+runs when an edge is genuinely new, so it is not the hot cost.
+
+**How it surfaced.** `page_fault_anonymous`, from `bench/history.jsonl`:
+
+| Runs | Commit(s) | ns |
+|---|---|---|
+| 34 consecutive | `fcd066231` .. `d542299e2` | 2057-2801 (median ~2090) |
+| 1 | `7342d57ea` | 3510 |
+| 2 | `78affced4` | 4333, 4978 |
+
+**The first step is not this bug and not any bug.** `d542299e2..7342d57ea`
+touches `bench/boot-history.jsonl` and `bench/history.jsonl` and nothing else --
+zero kernel source -- and that commit's own message records the run as an A/A
+comparison (same commit both sides) that the harness called clean. So
+2158 -> 3510 (+63%) happened with a byte-identical kernel. That is a real
+statement about this benchmark's environmental spread, and it is why the harness
+was right to say "treat with suspicion".
+
+**The second step is.** `78affced4` is the merge that carried the
+`lockdep::init()` move. The bench harness's own context line, which had read
+`43 lockdep classes registered` (or 44) on **ten** previous runs across
+`build/baseline-boot.log`, `bench-capquery.log`, `bisect-86a923fe1.log` and
+seven others, now read:
+
+```
+[bench]   lock context: 128 lockdep classes registered
+```
+
+128 is `MAX_CLASSES` **exactly** -- the table was not merely fuller, it was
+*full*, and had been silently discarding every class past the 128th. With ~3x
+the classes registered before the benchmarks run, the edge table is
+correspondingly larger and every nested acquire pays a proportionally longer
+scan.
+
+**Why the harness could not see it, and this is the part worth keeping.** The
+bench suite *does* measure lockdep overhead -- `lock overhead: total +241ns =
+lockdep 32ns + ...` -- and that number stayed flat across the regression. It
+stayed flat because every lock benchmark
+(`lock_raw_spin`, `lock_tracked`, `lock_no_lockdep`, `lock_tracked_no_stats`)
+takes **one** lock with nothing else held:
+
+```rust
+let tracked = run("lock_tracked", 2000, || {
+    let mut g = TRACKED.lock();          // held.depth == 0 at this point
+    *g = core::hint::black_box(*g).wrapping_add(1);
+});
+```
+
+With `held.depth == 0` the `for i in 0..held.depth` loop in `lock_acquire` has
+no iterations, so `record_edge` is **never called** and the scan being measured
+is not in the measurement. The instrument pointed at lockdep was, by
+construction, blind to the only part of lockdep whose cost was superlinear. An
+overhead figure that cannot vary is not a control.
+
+**Fix.** The edge list is now an adjacency bitmap, `ADJ: [[AtomicU64;
+ADJ_WORDS]; MAX_CLASSES]` -- row `from`, bit `to`:
+
+* `record_edge` is one `fetch_or`. `O(1)`, independent of edge count, and
+  race-free in a way the old code was not: two CPUs could previously both
+  finish the scan before either appended, then both append the same edge and
+  both report it as new. Exactly one CPU now observes the bit as clear.
+* `has_cycle` enumerates a node's successors from its own row -- `ADJ_WORDS`
+  (= 4) word loads, iterating only set bits -- instead of scanning the whole
+  table per BFS node.
+* It is **smaller** than what it replaced (256x256 bits = 8 KiB, against a
+  512-entry edge list that could hold 512 of 65536 possible edges) and it
+  deletes the "edge table full" case outright. That case was a silent one:
+  past 512 edges the old code stopped recording dependencies, so cycle
+  detection went blind on a long-running kernel with no indication.
+* `MAX_CLASSES` raised 128 -> 256, and `CLASS_HASH_SHIFT` 9 -> 10 with it, to
+  hold the hash index at the 25% load factor its comment claims.
+* Overflow is no longer silent: `report_class_table_full` prints once, because
+  a dropped class is a lock the validator stops checking, and the absence of a
+  warning then stops meaning "no violation".
+
+**Tests.** `lockdep::self_test` gains "Test 10: edge bitmap", asserting that
+`record_edge` reports an edge as new exactly once, that the count does not move
+on a duplicate, that `from -> to` and `to -> from` are distinct edges (a bitmap
+indexed by the wrong operand would make them look symmetric), that
+out-of-range indices are refused rather than aliasing onto a real row, and that
+`has_cycle` finds the 2-cycle just built. It removes its own synthetic edges
+afterwards so the real graph is unperturbed.
+
+**Instrumentation.** The bench context line now prints the edge count beside
+the class count. The class count alone said nothing about the cost of a nested
+acquire, which is why `128` -- a number equal to the cap -- was printed twice
+and read as unremarkable.
+
+**Still open, deliberately.** Two things this entry does *not* claim:
+
+1. That the fix restores `page_fault_anonymous` to ~2090ns. The first step in
+   the table above proves this benchmark can move +63% with identical code, so
+   a single post-fix run cannot settle it either way.
+2. That 256 classes is enough. The true number of distinct lock classes in this
+   kernel is still unknown -- it was masked by the old cap for as long as the
+   cap has existed. `report_class_table_full` is what will say.
+
+A follow-up worth doing: add a *nested* lock benchmark
+(`lock_tracked_nested`), so the cost that regressed here is measured directly
+rather than inferred from a page-fault benchmark that happens to take nested
+locks.
+
+### A-LOCKDEP-RECORD-EDGE-WAS-A-LINEAR-SCAN — CORRECTION 2026-08-17 — the fix is right, the attribution above was wrong
+
+**In short:** the fix landed and is worth keeping, but the claim above that this
+bug caused the `page_fault_anonymous` regression is **not supported by the
+measurement that tested it**. The section headed "The second step is" should be
+read as a hypothesis that was then refuted, not as a finding. Recorded rather
+than rewritten, because an attribution that survived a whole implementation
+before failing its test is worth being able to find again.
+
+**What boot #17 (PASS, clean streak 7, `--bench`) actually showed.** The new
+instrumentation answered the question the old line could not:
+
+```
+[bench]   lock context: 138 lockdep classes registered, 132 dependency edges
+[bench] page_fault_anonymous: min=15344 cycles (4138ns) ... [200 iters]
+```
+
+Two things follow, and they point opposite ways.
+
+**1. The class overflow was real — this half is confirmed.** With the cap
+raised to 256 the true count is **138**. The old cap was 128. So 10 lock
+classes were being silently discarded on every boot after `lockdep::init()`
+moved earlier, and every lock in those 10 classes was invisible to the deadlock
+validator. That is a genuine correctness defect and it is fixed.
+
+**2. The performance attribution was wrong.** The edge table held only **132**
+edges — nowhere near the 512-entry cap, and far short of what the entry above
+assumed when it reasoned that "the edge table is correspondingly larger". A
+132-entry scan is not free, but it is not 2900ns of TCG work either. And the
+decisive check: making `record_edge` `O(1)` moved `page_fault_anonymous` from
+4333/4978ns only to **4138ns**, against a pre-shift baseline of ~2090ns. If the
+edge scan had been the cause, removing it entirely would have restored the
+baseline. It did not.
+
+**So what is wrong with `page_fault_anonymous`? Still unknown, and it is
+probably not code.** The strongest single piece of evidence remains the one
+already in this entry: the first +63% step (2158 -> 3510ns) happened across
+`d542299e2..7342d57ea`, which changes `bench/boot-history.jsonl` and
+`bench/history.jsonl` and *nothing else* -- a byte-identical kernel, in a run
+that commit's own message records as a clean A/A comparison. A benchmark that
+moves +63% with identical code can move the rest of the way for the same
+reason, whatever that reason is. Ruled out so far:
+
+| Candidate | Ruled out by |
+|---|---|
+| `record_edge` linear scan | this correction: fixed, benchmark did not recover |
+| `mm/page_table.rs` changes in the fence | diff is `const` values and doc comments only; no function body changed |
+| PAT reprogramming mis-typing kernel memory | no mapping site hard-codes the `PWT` bit; `WRITE_THROUGH` was relocated to slot 7 and `NO_CACHE` left on slot 2, so named-constant users keep their memory type |
+| `lockdep::init()` move enabling lockdep during benchmarks | it was already enabled -- `bench::run_all()` runs at main.rs:5775+, after *both* the old init site (5374) and the new one (1530) |
+
+Not yet ruled out, and the next thing to try: **code layout under TCG**, via
+`python scripts/straddle-check.py --compare <old-elf> <new-elf>`. The merge at
+`78affced4` added ~6365 lines, which re-rolls the layout lottery for every
+function; the harness's own prior for this is
+`A-CRYPTO-BENCHMARKS-STEPPED-58-PERCENT-WITH-BYTE-IDENTICAL-CRYPTO-SOURCE`,
+whose verdict was "code layout under TCG. Not a regression." Note this cannot
+explain the *first* step, where the binary did not change at all.
+
+**`isr_latency` is settled and is noise.** Boot #17 reported it "+66% vs
+suite", but the same benchmark has a **2.34x spread within a single commit**
+(`3f733c39c`: 19065 and 44619ns) and a 1.69x spread within another
+(`d542299e2`: 40756 and 24064ns). A metric whose same-binary spread exceeds the
+movement being flagged cannot support a regression claim. No action.
+
+**The fix stands on its own merits regardless of the attribution**, and would
+be worth keeping even if `page_fault_anonymous` had never moved:
+
+* `record_edge` is `O(1)` instead of `O(edges)` on a path that runs on every
+  nested lock acquire — CLAUDE.md forbids linear scans on hot paths, and this
+  one grew with uptime.
+* It closes a real race: two CPUs could previously both finish the scan before
+  either appended, then both append the same edge and both report it as new.
+* It removes two silent-degradation modes — the 512-edge cap (past which cycle
+  detection stopped recording dependencies with no indication) and the 128-class
+  cap (which was *actually being hit*, at 138).
+* `has_cycle` is now complete. It previously abandoned the search after 32
+  nodes, so a deadlock whose cycle ran through a 33rd lock class was never
+  reported; raising `MAX_CLASSES` to 256 would have widened that hole.
+
+**Lesson worth keeping.** The instrument that should have caught this was
+pointed at the right subsystem and still could not see it: the bench suite
+measures lockdep overhead using a lock taken with nothing else held, so
+`held.depth == 0`, so `record_edge` is never called in the measurement at all.
+The overhead figure stayed flat at ~32-36ns throughout because it was
+structurally incapable of moving. That is why the edge count is now printed
+next to the class count -- and it is why the follow-up below matters more than
+the attribution this entry got wrong.
+
+**Follow-up, now closed (2026-08-17):** `lock_tracked_nested` exists. It takes
+`TRACKED_B` while holding `TRACKED`, so `held.depth > 0` and `record_edge`
+actually runs inside the measurement; it is `track`ed into
+`bench/history.jsonl` and diffed run-over-run. Boot #21 measured **721ns for 2
+nested acquires vs 522ns for 2 flat = 199ns of lockdep dependency work per
+nested acquire**, against a flat-path lockdep cost that now measures **0ns**
+(tracked 261ns vs no-lockdep 263ns). Both numbers together are the point: the
+old suite, pointed squarely at lockdep, would have reported the subsystem as
+free, because the only path it could see was the one lockdep does no work on.
+Note that 199ns is the *steady-state* cost -- the edge is already in the bitmap
+after the first iteration, so this measures the lookup, not the one-off insert.
+
+### A-LOCKDEP-RECORD-EDGE-WAS-A-LINEAR-SCAN — FOLLOW-UP 2026-08-17 — `page_fault_anonymous` recovered on its own; there was no regression
+
+**In short:** the benchmark went back to normal by itself. Boot #18 measured
+`page_fault_anonymous` at **2105ns**, inside the 2057-2158ns band it held for
+eight consecutive runs before the excursion — on a kernel whose page-fault code
+is **identical** to the one that measured 4138ns a run earlier. Nothing was
+fixed in between. The question the CORRECTION above left open ("still unknown,
+and it is probably not code") is now answered as far as it can be: **there was
+no code regression here.**
+
+**The series, in full.** Each row is one recorded run:
+
+| Commit | `page_fault` | Note |
+|---|---|---|
+| `602fc62e0` | 2062, 2084 | |
+| `86a923fe1` | 2076 | |
+| `9ecef3188` | 2057, 2139 | |
+| `d542299e2` | 2097, 2158 | |
+| `7342d57ea` | **3510** | diff vs previous is *two bench JSONL files* |
+| `78affced4` | **4333, 4978** | the +6365-line merge |
+| `e3ae7bae1` | **4138** | `record_edge` made O(1) — barely moved |
+| `71fa87ab7` | **2105** | recovered; **no kernel file changed** |
+| `71fa87ab7` | **2110** | A/A control, byte-identical binary |
+
+**Why the last two rows settle it.** `git diff --stat e3ae7bae1 origin/main --
+kernel/` is *empty*: the merge that preceded the recovery touched `gui/`,
+`apps/` and shared documents, and not one file under `kernel/`. The only
+kernel-side change between 4138ns and 2105ns is inside `lockdep::self_test` —
+a test that runs once at boot and cannot be reached from the page-fault path.
+It is dead code with respect to what was measured. A benchmark that halves
+across a change it cannot observe is not measuring that change.
+
+The A/A control then rules out the other explanation. Re-running the *same*
+tree produced 2110ns against 2105ns — **0.2% apart**. `kernel/build.rs` emits
+no `cargo:rustc-env`, no git hash and no timestamp, so the rebuild is
+reproducible and this really is the same binary twice. Therefore:
+
+| Reading | Predicts | Verdict |
+|---|---|---|
+| Run-to-run noise | same binary lands in either band | **ruled out** — 2105 vs 2110 |
+| Code layout under TCG | the band is a property of the build | consistent with everything |
+
+Layout also matches this harness's own precedent,
+`A-CRYPTO-BENCHMARKS-STEPPED-58-PERCENT-WITH-BYTE-IDENTICAL-CRYPTO-SOURCE`
+("code layout under TCG. Not a regression."). Under TCG a translation block
+ends at a guest page boundary, so a hot loop whose backward branch straddles a
+4 KiB boundary pays a dispatcher round-trip per iteration — ~1.7x on this
+project, against ~2x here.
+
+**The one loose end.** Layout cannot explain the *first* step
+(`d542299e2` 2158 -> `7342d57ea` 3510), whose commit changes only
+`bench/boot-history.jsonl` and `bench/history.jsonl`. If the kernel there was
+byte-identical then its layout did not move either, so that step is something
+else — most likely host interference, which this harness cannot see
+(`B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING`). Worth noting that boot #18 was
+flagged `RUN CONTAMINATED` on wall time (178s vs a 132s median) while producing
+the *fast* number: the contamination flag and the direction of the error are
+not correlated the way one would assume.
+
+**Action: none, and none is warranted.** No page-fault code changed in the
+window and the value is back to baseline. What did come out of the
+investigation is in the entry above and stands on its own: a real class-table
+overflow (138 classes against a 128 cap, so 10 lock classes went untracked), an
+O(1) `record_edge`, a fixed double-report race, and a complete `has_cycle`.
+
+**The reusable lesson.** The harness printed this metric's own range —
+`0-7274ns`, median 2834ns over 8 runs — on every run of the investigation. That
+spread is wider than the "regression" that was chased through an entire
+implementation. The rule that would have saved the effort: **before attributing
+a movement to a change, check whether the metric's own same-binary spread
+already covers it.** It is the same test that correctly dismissed
+`isr_latency`, applied one metric to the left.
+
 ## TD-SPANS-ARE-LAID-OUT-END-TO-END (lane C, 2026-08-17)
 
 **What.** Three more places have the defect `TD-EDITOR-IS-NOT-BIDIRECTIONAL`
@@ -30031,6 +30340,87 @@ deleted — it is a compact tour of the model's API.
 *defect* (nothing is wrong with what exists; it is only unreachable). Not
 urgent for correctness, but it should come before more model features are
 added, so that what is added is shaped by a real caller.
+
+## A-JOB-CONTROL-SELF-STOP-LOST-A-RACING-SIGCONT (lane A, 2026-08-17) - **fixed**
+
+**In short:** when a program stopped itself for job control (what a shell does
+on Ctrl-Z), it told its parent "I have stopped" *before* it actually went to
+sleep. If the parent answered "carry on" in that gap, the wake-up was thrown
+away, because the kernel's resume call quietly does nothing to a thread that is
+not asleep yet. The program then went to sleep with nobody left to wake it, and
+hung forever.
+
+**Where:** `kernel/src/syscall/handlers.rs` `stop_process_for_signal`, and
+`kernel/src/sched/mod.rs` `suspend`/`resume`.
+
+**How it was found.** Boot #19's ring-3 fixture `ctest-jobctl` failed with
+`expected Zombie, got Some(Running)`. The serial log gives the interleaving
+directly:
+
+```
+[signal] Process 164 stopped by signal 20
+[signal] Process 164 continued
+[sched] Suspended task 131
+```
+
+The suspend commits *after* the continue has already come and gone. Note the
+fixture's own failure message had pre-enumerated the three possible causes
+("the parent parked in waitpid() for a stop the child never reported ... the
+child still suspended because SIGCONT never resumed it ..."), which is what
+made the log ordering legible at a glance. Diagnostics that name their own
+candidate causes pay for themselves.
+
+**Why it existed.** The ordering was deliberate and the doc comment said so:
+the parent's `waitpid` must be able to observe the stop *without* waiting for
+the stopping thread to be resumed — that is what `WUNTRACED` means. So the
+announcement genuinely has to precede the park. But `sched::resume` returns
+early unless the target is already `Suspended`, so anything that arrives in the
+window between announcement and park is silently discarded. The losing
+interleaving:
+
+1. the child records the stop and wakes the parent;
+2. the parent wakes, observes the stop, sends `SIGCONT`;
+3. `continue_process` calls `sched::resume` on a thread that is still
+   `Running` — a no-op, and the wakeup is gone;
+4. the child parks, and nothing will ever resume it.
+
+**Frequency.** Intermittent — 4 `SELFTEST_FAIL`s in 50 recorded boots, and the
+immediately preceding boot passed on a byte-identical binary. This is the
+failure mode that is easiest to dismiss as flakiness and most expensive to
+leave in: it is a real hang, it just needs the scheduler to interleave two
+threads a particular way.
+
+**The fix: a two-phase park.** Reordering is not available (see above), so the
+park was split so that the *intent* to sleep is published before the
+announcement:
+
+* `sched::suspend_pending(tid)` commits the task to `Suspended` **without**
+  yielding. The thread keeps running, but its scheduler state now says
+  Suspended, so a concurrent `resume` takes effect instead of being dropped.
+* `sched::park_if_suspended()` yields only if the task is *still* Suspended. If
+  a resume landed in the window, it returns without parking — a `SIGCONT` that
+  overtakes its own `SIGSTOP` correctly leaves the process running.
+
+`sched::suspend` is now these two composed, so the single-call path is
+unchanged for every other caller.
+
+**The subtlety that the fix had to handle.** When a resume wins the race it
+does not merely flip the state — it also *enqueues* the task, on the assumption
+that a Suspended task is parked. But this task never parked; it is executing
+right now. Returning from `park_if_suspended` while it sits in a run queue
+would publish a task that is already on a CPU, and another CPU could pick it up
+and run the same task concurrently. So the cancel path dequeues it and restores
+`Running`. This is the kind of bug the original would have traded for, and it
+is worth stating explicitly because "resume cancels the park" sounds complete
+and is not.
+
+**Test.** `sched::test_two_phase_self_suspend` (self-test 2b) reproduces the
+race deterministically by calling `resume` inside the window on purpose — no
+second CPU and no timing luck needed — then asserts all three properties: the
+resume is observed, the park is declined, and the task is left `Running` and
+**not** queued (checked via `queue_length`, so the dequeue is actually
+verified rather than assumed). Testing it at this level rather than through the
+ring-3 fixture is the point: the fixture found the bug once in fifty boots.
 
 ## TD-BACKGROUND-TASK-LOGS-ARE-UNBOUNDED (lane B, 2026-08-17) — **mitigated once; the cause is unfixed**
 

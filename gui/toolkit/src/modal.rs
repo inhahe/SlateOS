@@ -1133,56 +1133,40 @@ impl InputDialog {
         EventResult::Consumed
     }
 
-    /// Step the caret one place left or right *on the screen*.
+    /// Step the caret one character earlier or later **in the string**.
     ///
-    /// Not `byte ± 1`, and not "the previous character": where the text changes
-    /// direction those are different places, and stepping by the string order
-    /// makes the caret jump across a right-to-left word and back rather than
-    /// walk through it.
+    /// On a line that mixes directions this is not one step left or right on
+    /// the *screen*: the caret jumps across a right-to-left word rather than
+    /// walking through it. That is deliberate. Logical motion is what macOS,
+    /// GTK and Qt do and Windows moves visually; both ship, and choosing
+    /// between them is a user-visible policy the operator has not yet decided
+    /// (`open-questions.md` → C-Q2).
     ///
-    /// A password field is the exception. What is drawn there is a row of
-    /// asterisks, so the drawn order is the string order no matter what was
-    /// typed, and measuring `input_text` would move the caret by the layout of
-    /// text nobody can see — a password containing Hebrew would walk its
-    /// asterisks in a scrambled order. Step logically, matching the mask.
+    /// The visual alternative is built and tested — `text::caret_left` /
+    /// `caret_right`, and this dialog already stores the `TextCursor` they
+    /// need. Answering C-Q2 "visual" means calling those here for the
+    /// non-password case, and nothing else. **A password field would stay on
+    /// this path either way:** what it draws is a row of asterisks, so its
+    /// drawn order is its string order whatever was typed, and moving by the
+    /// layout of the hidden text would scatter the caret among identical marks
+    /// with nothing on screen to explain the jumps.
     fn move_caret(&mut self, right: bool) {
-        if self.password_mode {
-            let at = self.cursor.byte();
-            let stepped = if right {
-                self.input_text
-                    .get(at..)
-                    .and_then(|after| after.chars().next())
-                    .map(|ch| at + ch.len_utf8())
-            } else {
-                self.input_text
-                    .get(..at)
-                    .and_then(|before| before.chars().next_back())
-                    .map(|ch| at - ch.len_utf8())
-            };
-            if let Some(next) = stepped {
-                self.cursor = TextCursor::from(next);
-            }
-            return;
-        }
-        // Measured at the size the field draws at, or motion and drawing would
-        // disagree about where the gaps between glyphs are.
+        let at = self.cursor.byte();
+        // By a whole character's width in bytes, never by one: `String::remove`
+        // and `insert` panic on an offset inside a character.
         let stepped = if right {
-            crate::text::caret_right(
-                &self.input_text,
-                self.cursor,
-                FONT_SIZE,
-                FontWeightHint::Regular,
-            )
+            self.input_text
+                .get(at..)
+                .and_then(|after| after.chars().next())
+                .map(|ch| at + ch.len_utf8())
         } else {
-            crate::text::caret_left(
-                &self.input_text,
-                self.cursor,
-                FONT_SIZE,
-                FontWeightHint::Regular,
-            )
+            self.input_text
+                .get(..at)
+                .and_then(|before| before.chars().next_back())
+                .map(|ch| at - ch.len_utf8())
         };
         if let Some(next) = stepped {
-            self.cursor = next;
+            self.cursor = TextCursor::from(next);
         }
     }
 
@@ -2961,13 +2945,18 @@ mod tests {
         })
     }
 
-    /// The arrows move by what is drawn. `ab` + two Hebrew letters + `cd` is
-    /// laid out `a b <bet> <aleph> c d`, so walking left from the end crosses
-    /// the Hebrew a letter at a time — visiting byte offsets 7, 6, 4, 6, 1, 0,
-    /// which rise in the middle because moving left there moves later in the
-    /// string.
+    /// The arrows move **logically** — one character earlier or later in the
+    /// string — so on `ab` + two Hebrew letters + `cd`, drawn
+    /// `a b <bet> <aleph> c d`, walking left from the end visits the byte
+    /// offsets 7, 6, 4, 2, 1, 0 and the caret jumps sideways across the Hebrew
+    /// rather than stepping through it.
+    ///
+    /// **This pins a policy, not a truth.** Logical is macOS/GTK/Qt; Windows
+    /// moves visually; the choice is `open-questions.md` → C-Q2 and is
+    /// unanswered. If it answers "visual" this expectation becomes
+    /// 7, 6, 4, 6, 1, 0. Do not change it to match without that answer.
     #[test]
-    fn the_arrows_cross_a_right_to_left_word_one_letter_at_a_time() {
+    fn the_arrows_move_by_the_string_pending_c_q2() {
         let text = "ab\u{05D0}\u{05D1}cd";
         let mut dialog = InputDialog::prompt("Test", "Path:", "").with_initial_text(text);
         dialog.show();
@@ -2976,25 +2965,26 @@ mod tests {
             dialog.handle_event(&key(Key::Left));
             seen.push(dialog.cursor.byte());
         }
-        assert_eq!(seen, vec![7, 6, 4, 6, 1, 0]);
+        assert_eq!(seen, vec![7, 6, 4, 2, 1, 0]);
         let mut seen = vec![];
         for _ in 0..6 {
             dialog.handle_event(&key(Key::Right));
             seen.push(dialog.cursor.byte());
         }
-        assert_eq!(seen, vec![1, 2, 4, 2, 7, 8]);
+        assert_eq!(seen, vec![1, 2, 4, 6, 7, 8]);
         // Past the end it stays put rather than wrapping.
         dialog.handle_event(&key(Key::Right));
         assert_eq!(dialog.cursor.byte(), text.len());
     }
 
-    /// A password field draws asterisks, so its drawn order *is* its string
-    /// order whatever was typed. Moving by the layout of the hidden text would
-    /// walk those asterisks in a scrambled order — the caret jumping about a row
-    /// of identical marks, with no way for the user to make sense of it. So the
-    /// mask gets logical motion, and the same text unmasked does not.
+    /// A password field would keep stepping logically **even if C-Q2 answers
+    /// "visual"**, so this is the one place the answer is already known. What
+    /// it draws is a row of asterisks: its drawn order is its string order
+    /// whatever was typed, and moving by the layout of the hidden text would
+    /// scatter the caret among identical marks with nothing on screen to
+    /// explain the jumps — and would leak the shape of the secret besides.
     #[test]
-    fn a_password_field_steps_through_its_mask_not_its_secret() {
+    fn a_password_field_would_step_through_its_mask_not_its_secret() {
         let text = "ab\u{05D0}\u{05D1}cd";
         let mut hidden = InputDialog::prompt("Test", "Password:", "")
             .with_password_mode(true)
@@ -3010,19 +3000,21 @@ mod tests {
             vec![7, 6, 4, 2, 1, 0],
             "asterisks are crossed in string order"
         );
-
-        let mut shown = InputDialog::prompt("Test", "Path:", "").with_initial_text(text);
-        shown.show();
-        let mut seen = vec![];
+        // What the *visual* walk would have done with the same text, for the
+        // contrast: it enters the Hebrew from the other end. This is the
+        // sequence a password field must not adopt.
+        let mut visual = vec![];
+        let mut at = crate::text::TextCursor::from(text.len());
         for _ in 0..6 {
-            shown.handle_event(&key(Key::Left));
-            seen.push(shown.cursor.byte());
+            let Some(next) =
+                crate::text::caret_left(text, at, FONT_SIZE, FontWeightHint::Regular)
+            else {
+                break;
+            };
+            visual.push(next.byte());
+            at = next;
         }
-        assert_eq!(
-            seen,
-            vec![7, 6, 4, 6, 1, 0],
-            "the same text unmasked is crossed in drawn order"
-        );
+        assert_eq!(visual, vec![7, 6, 4, 6, 1, 0]);
     }
 
     #[test]

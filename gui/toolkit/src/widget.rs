@@ -800,11 +800,6 @@ impl Widget {
             return EventResult::Ignored;
         }
 
-        // Read before `self.kind` is borrowed mutably. Motion must be measured
-        // with the size the text is drawn at — the gaps between glyphs are a
-        // property of the shaped run, so measuring at another size would move
-        // the caret to a place this widget never drew.
-        let font_size = self.style.font_size;
         match &mut self.kind {
             WidgetKind::TextInput { value, cursor, .. } => {
                 if let Some(ch) = key.text {
@@ -833,30 +828,44 @@ impl Widget {
                         }
                         EventResult::Consumed
                     }
-                    // The arrows are the opposite: they are about the screen.
-                    // Left means left, whichever way the text under the caret
-                    // runs, so they step through the drawn order and carry the
-                    // affinity that tells the two sides of a direction boundary
-                    // apart.
+                    // The arrows step *logically* — one character later or
+                    // earlier in the string — which on a line mixing
+                    // directions is not the same as one step right or left on
+                    // the screen. That is deliberate and is not an oversight:
+                    // macOS, GTK and Qt move logically, Windows moves visually,
+                    // both ship, and picking between them is a user-visible
+                    // policy the operator has not yet decided. See
+                    // `open-questions.md` → C-Q2.
+                    //
+                    // The visual alternative is fully built and tested —
+                    // `text::caret_left`/`caret_right`, and this widget already
+                    // stores the `TextCursor` they need. Answering C-Q2
+                    // "visual" is two edits and nothing else: bind
+                    // `let font_size = self.style.font_size;` *above* the
+                    // `match &mut self.kind` (it has to be read before `kind`
+                    // is borrowed mutably), then replace each arm's body with
+                    // `if let Some(next) = crate::text::caret_left(value,
+                    // *cursor, font_size, FontWeightHint::Regular) { *cursor =
+                    // next; }`. Measuring at the size the text is *drawn* at is
+                    // not optional — the gaps between glyphs are a property of
+                    // the shaped run, so another size moves the caret to a
+                    // place this widget never drew it. Do not make that switch
+                    // without an answer.
                     crate::event::Key::Left => {
-                        if let Some(next) = crate::text::caret_left(
-                            value,
-                            *cursor,
-                            font_size,
-                            FontWeightHint::Regular,
-                        ) {
-                            *cursor = next;
+                        if let Some(ch) = value
+                            .get(..cursor.byte())
+                            .and_then(|before| before.chars().next_back())
+                        {
+                            *cursor = TextCursor::from(cursor.byte() - ch.len_utf8());
                         }
                         EventResult::Consumed
                     }
                     crate::event::Key::Right => {
-                        if let Some(next) = crate::text::caret_right(
-                            value,
-                            *cursor,
-                            font_size,
-                            FontWeightHint::Regular,
-                        ) {
-                            *cursor = next;
+                        if let Some(ch) = value
+                            .get(cursor.byte()..)
+                            .and_then(|after| after.chars().next())
+                        {
+                            *cursor = TextCursor::from(cursor.byte() + ch.len_utf8());
                         }
                         EventResult::Consumed
                     }
@@ -1035,17 +1044,20 @@ mod tests {
         assert_eq!(state(&empty), ("", 0));
     }
 
-    /// The arrows walk the screen, not the string. `ab` + two Hebrew letters +
-    /// `cd` is drawn `a b <bet> <aleph> c d`, so a caret pressed left from the
-    /// end crosses the Hebrew one letter at a time — visiting the byte offsets
-    /// 7, 6, 4, 6, 1, 0, which go *up* in the middle because moving left there
-    /// moves later in the string.
+    /// The arrows move **logically** — one character earlier or later in the
+    /// string — which on `ab` + two Hebrew letters + `cd` walks the byte
+    /// offsets 7, 6, 4, 2, 1, 0 straight down, even though the line is drawn
+    /// `a b <bet> <aleph> c d` and the caret therefore jumps sideways across
+    /// the Hebrew rather than stepping through it.
     ///
-    /// The widget can only do this because it stores a whole `TextCursor`. Made
-    /// to hold a bare offset again, it would visit 7, 6, 1, 0 and skip the
-    /// Hebrew entirely.
+    /// **This test pins a policy, not a truth.** Logical is what macOS, GTK and
+    /// Qt do; Windows moves visually; the choice is `open-questions.md` → C-Q2
+    /// and the operator has not answered it. The visual behaviour is built and
+    /// tested in `text::caret_left`/`caret_right`, and this test is what will
+    /// change — to 7, 6, 4, 6, 1, 0 — if C-Q2 answers "visual". Do not "fix"
+    /// this test to match the visual sequence without that answer.
     #[test]
-    fn the_arrows_cross_a_right_to_left_word_one_letter_at_a_time() {
+    fn the_arrows_move_by_the_string_pending_c_q2() {
         let text = "ab\u{05D0}\u{05D1}cd";
         let mut input = Widget::text_input(text, "");
         let mut seen = vec![];
@@ -1053,23 +1065,24 @@ mod tests {
             input.handle_key(&pressed(crate::event::Key::Left));
             seen.push(state(&input).1);
         }
-        assert_eq!(seen, vec![7, 6, 4, 6, 1, 0]);
+        assert_eq!(seen, vec![7, 6, 4, 2, 1, 0]);
         // And back out again the other way.
         let mut seen = vec![];
         for _ in 0..6 {
             input.handle_key(&pressed(crate::event::Key::Right));
             seen.push(state(&input).1);
         }
-        assert_eq!(seen, vec![1, 2, 4, 2, 7, 8]);
+        assert_eq!(seen, vec![1, 2, 4, 6, 7, 8]);
         // Pressed past the end it stays put rather than wrapping or panicking.
         input.handle_key(&pressed(crate::event::Key::Right));
         assert_eq!(state(&input), (text, text.len()));
     }
 
-    /// Backspace stays a *logical* edit even though the arrows are visual: it
-    /// removes the character before this one in the string, which is what a
-    /// reader of that script means by "the previous character" regardless of
-    /// which side of the caret it is drawn on.
+    /// Backspace removes the character before this one in the string, and would
+    /// keep doing so even if C-Q2 made the arrows visual: "the previous
+    /// character" is what a reader of that script means regardless of which
+    /// side of the caret it is drawn on. Deleting and moving are allowed to
+    /// disagree.
     #[test]
     fn backspace_deletes_the_previous_character_in_the_string() {
         let mut input = Widget::text_input("ab\u{05D0}\u{05D1}cd", "");

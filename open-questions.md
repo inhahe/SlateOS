@@ -401,12 +401,27 @@ end of the word that is, and about what happens in between.
 | **B. Switch to visual** (Windows edit controls, and what ICU's `ubidi` API is built to support) | The caret always moves one step in the direction of the arrow, and never jumps. Holding Right walks the caret smoothly across the line, but the *text position* it is at can go backwards, so typing after several presses inserts earlier in the sentence than the previous press did. |
 | **C. Both, on a setting** | A preference the user sets, defaulting to one of the above. Costs a setting nobody knows how to answer, and doubles the number of behaviours every future text widget has to be correct in. |
 
-**What is already built either way.** The hard part is done: the shaping engine
-already knows, for every character, where it is drawn and which direction it
-runs, and the caret already carries the extra bit ("which side of a direction
-boundary am I on") that either answer needs. Both options are a small amount of
-code on top of that. This is a question about which behaviour is right, not
-about which is affordable.
+**What is already built either way — updated 2026-08-17: option B is now written
+and tested, and is one line per widget away from being switched on.** The
+shaping engine knows where every character is drawn and which way it runs; on
+top of that there are now `caret_left`/`caret_right` functions that take a caret
+and hand back the next caret position *to the left or right on the screen*, with
+tests covering a mixed-direction line, an Arabic ligature crossed as one unit,
+and the pixel round-trip. Nothing calls them. Answering "B" is a one-line change
+in each of three text widgets; answering "A" deletes nothing, because those
+functions are also what mouse selection and any future screen-order feature
+want. **So this question is now purely about which behaviour is right.**
+
+**One thing measured while building it, which strengthens the case that this had
+to be asked rather than guessed.** The extra bit the caret carries ("which side
+of a direction boundary am I on") turned out not to be a nicety. A text box that
+remembers only the caret's *position in the string* between keypresses, and
+works the rest out fresh each time, does not merely land on the wrong side of a
+boundary — it **skips the entire right-to-left word in a single press**. So a
+half-hearted "B" — switching the arrow keys without also making the widgets
+remember that bit — would be *worse* than today's behaviour, not better. That
+groundwork has been done now regardless of the answer, so the choice is no
+longer between "A" and "a risky B".
 
 **My recommendation: B, visual.** The reason is what the key is called. Users
 press "right arrow" while looking at the screen, and an arrow key that sometimes
@@ -424,11 +439,15 @@ constant in Hebrew or Arabic text. It gets harder to change later only in the
 sense that more text widgets will have been written against whichever answer is
 in force.
 
-**Where it bites:** `gui/font/src/shape.rs` (`ShapedRun::x_of`, `offset_at`,
-and the per-glyph bidi levels a visual walk would use), `gui/toolkit/src/text.rs`
-(`TextCursor`), and the arrow-key handling in `guitk::widget::TextInput`,
-`guitk::modal::InputDialog` and `apps/editor`. Tracked in `known-issues.md` →
-`TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`.
+**Where it bites:** `gui/font/src/shape.rs` (`ShapedRun::caret_left` /
+`caret_right`, built 2026-08-17), `gui/toolkit/src/text.rs` (`TextCursor` and
+its `caret_left`/`caret_right` wrappers), and the arrow-key handling in
+`guitk::widget::TextInput` and `guitk::modal::InputDialog` — each of which
+carries a comment marked `C-Q2` naming the exact line to change. `apps/editor`
+is **not** covered by either answer: it draws its caret and scrolls sideways in
+a way that assumes screen order equals reading order, so it needs its own,
+larger fix first (`known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL`).
+Tracked in `known-issues.md` → `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`.
 
 ## C-Q3 — [C] `CLAUDE.md` tells all three lanes to publish finished work through one shared folder, and two of them collided in it today. Change the instruction? — Status: OPEN
 

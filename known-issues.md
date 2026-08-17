@@ -29879,22 +29879,31 @@ cost of a mismatch is small.
 
 **The proper fix**, in the order the dependencies force:
 
-- **(a) Give `guiremote` an input direction.** Frames already carry a tag byte
-  (`lib.rs:126-127` for the clip tags), so the container generalises without a
-  format break. Encode the compositor's `EventNotification` variants.
-- **(b) Decide what a key looks like on the wire.** The compositor speaks
-  `scancode: u32` + `character: Option<char>`; `guitk::event` speaks a semantic
-  `Key` (`gui/toolkit/src/event.rs:82`) inside a `KeyEvent` (`:69`), alongside
-  `Event` (`:8`), `MouseEventKind` (`:50`) and `EventResult` (`:224`). No
-  scancode→`Key` mapping exists anywhere in the tree — grepped, it appears only
-  inside the compositor. Somebody has to own that translation, and where it
-  lives is a genuine design decision (server-side keeps one keymap for the
-  system; client-side lets an app see raw scancodes for games). This wants a
-  `design-decisions.md` entry in lane C's §400–499 band.
-- **(c) Write the client-side loop once, in `guitk`,** not once per app: connect,
+- **(a) Give `guiremote` an input direction.** — **DONE 2026-08-17.**
+  `gui/remote/src/input.rs`: an `INPT`-magic frame carrying batched
+  `InputEvent`s, each a `guitk::event::Event` plus its addressee window. Its own
+  magic, so a frame sent the wrong way over a duplex transport fails on its
+  first four bytes rather than decoding into plausible nonsense. 23 tests,
+  including an exhaustive sweep of all 88 named keys, all 16 modifier
+  combinations, and every mouse kind × button — and a corruption sweep that
+  flips every byte of a frame in turn to confirm the decoder never panics on
+  input from another process.
+- **(b) Decide what a key looks like on the wire.** — **DECIDED 2026-08-17,
+  `design-decisions.md` §456.** The compositor translates scancode→`Key`
+  centrally, so one system keymap governs every app, *and* forwards the raw
+  scancode so games and remappers can still see physical key positions. The
+  scancode rides on the wire event rather than on `guitk::event::KeyEvent`,
+  which would have obliged all ~539 `KeyEvent` construction sites in the tree to
+  invent one.
+- **(c) Give the compositor the keymap and the modifier state** that (b) assigns
+  it. `handle_key` (`gui/compositor/src/main.rs:3129`) currently passes
+  `pressed` straight through and accumulates nothing, so there is no
+  `Modifiers` to put in a `KeyEvent`; and the scancode→`Key` table it now owns
+  does not exist yet. Then replace the stub drain at `:4305` with a real send.
+- **(d) Write the client-side loop once, in `guitk`,** not once per app: connect,
   block on events, dispatch to a handler, push a `RenderTree` per frame. 138
   hand-written loops is 138 chances to get the seam subtly different.
-- **(d) Wire `apps/editor` to it** as the first real client, calling
+- **(e) Wire `apps/editor` to it** as the first real client, calling
   `ensure_cursor_visible` and `ensure_caret_visible_horizontally` after any
   cursor movement. Its demo `main()` should become an example or a test, not be
   deleted — it is a compact tour of the model's API.

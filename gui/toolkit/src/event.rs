@@ -4,7 +4,12 @@
 //! Widgets consume or propagate events up the tree.
 
 /// Input event from the windowing system.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` but not `Eq`: `Tick`/`ScaleChanged` and the mouse coordinates
+/// carry floats. It is derived so that a codec can assert a round trip returns
+/// what it was given — comparing field by field instead would let an encoder
+/// drop a field and still pass its own test.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// Mouse event (click, move, scroll).
     Mouse(MouseEvent),
@@ -35,7 +40,7 @@ pub enum MouseButton {
 }
 
 /// Mouse event data.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MouseEvent {
     /// Mouse X position relative to widget.
     pub x: f32,
@@ -46,7 +51,7 @@ pub struct MouseEvent {
 }
 
 /// Mouse event kind.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MouseEventKind {
     /// Button pressed down.
     Press(MouseButton),
@@ -65,7 +70,13 @@ pub enum MouseEventKind {
 }
 
 /// Key event data.
-#[derive(Clone, Debug)]
+///
+/// Note what is *not* here: the physical scancode. A widget reacting to a key
+/// wants to know it was `Key::Left`, not which switch on the board closed, and
+/// putting the scancode here would oblige all 500-odd construction sites in the
+/// tree to invent one. It rides on the wire event instead — see
+/// `guiremote::input::InputEvent::scancode`.
+#[derive(Clone, Debug, PartialEq)]
 pub struct KeyEvent {
     /// Key code (virtual key).
     pub key: Key,

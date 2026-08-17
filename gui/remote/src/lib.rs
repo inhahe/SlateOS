@@ -13,6 +13,17 @@
 //! commands versus megabytes of pixels. Latency is determined by the
 //! network round trip, not by an encoder. Text remains pixel-perfect.
 //!
+//! ## The two directions
+//!
+//! * **Out** — draw commands, this module ([`encode_frame`]) for one window and
+//!   [`scene`] for a whole stacked desktop.
+//! * **Back** — input events, [`input`]. A display protocol that only travelled
+//!   outwards could show a window but never let anyone use it.
+//!
+//! Each direction has its own frame magic, so a frame sent the wrong way over a
+//! duplex transport fails on its first four bytes instead of decoding into
+//! plausible nonsense.
+//!
 //! ## Frame format
 //!
 //! Each frame is a self-contained, length-prefixed envelope:
@@ -64,6 +75,12 @@ pub mod scene;
 pub use scene::{
     SceneFrame, SceneSession, SceneWindow, WindowSnapshot, apply_scene_frame, decode_scene_frame,
     encode_scene_frame,
+};
+
+pub mod input;
+pub use input::{
+    INPUT_MAGIC, INPUT_VERSION, InputEvent, decode_input_frame, encode_input_frame,
+    encode_input_frame_into, try_decode_input_frame,
 };
 
 // ============================================================================
@@ -304,6 +321,17 @@ pub enum DecodeError {
     BadUtf8,
     /// A scene frame's window or removed-id count exceeds [`scene::MAX_WINDOWS_PER_FRAME`].
     TooManyWindows(u32),
+    /// An input frame's event count exceeds [`input::MAX_EVENTS_PER_FRAME`].
+    TooManyEvents(u32),
+    /// A [`Key`](guitk::event::Key) code byte is not in this decoder's table.
+    BadKey(u8),
+    /// A [`MouseButton`](guitk::event::MouseButton) code byte was unknown.
+    BadMouseButton(u8),
+    /// A [`MouseEventKind`](guitk::event::MouseEventKind) tag byte was unknown.
+    BadMouseKind(u8),
+    /// A character field held a value that is not a Unicode scalar — a
+    /// surrogate, or past `U+10FFFF`.
+    BadChar(u32),
 }
 
 impl core::fmt::Display for DecodeError {
@@ -334,6 +362,17 @@ impl core::fmt::Display for DecodeError {
                     scene::MAX_WINDOWS_PER_FRAME
                 )
             }
+            Self::TooManyEvents(n) => {
+                write!(
+                    f,
+                    "input event count {n} exceeds limit {}",
+                    input::MAX_EVENTS_PER_FRAME
+                )
+            }
+            Self::BadKey(b) => write!(f, "unknown key code {b:#04x}"),
+            Self::BadMouseButton(b) => write!(f, "unknown mouse button {b:#04x}"),
+            Self::BadMouseKind(b) => write!(f, "unknown mouse event kind {b:#04x}"),
+            Self::BadChar(c) => write!(f, "codepoint {c:#x} is not a Unicode scalar value"),
         }
     }
 }

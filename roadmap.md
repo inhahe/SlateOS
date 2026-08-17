@@ -923,9 +923,22 @@ Roadmap:
   `remove` (`GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES`, fixed in
   `guitk::widget::TextInput`, `guitk::modal::InputDialog` and `apps/editor`,
   which additionally needed `snap_to_boundary` for a column carried between
-  lines). Still open, and wanting its own entry: arrow keys move in *logical*
-  order, so a caret crossing a direction boundary jumps across the screen
-  rather than stepping. Vello itself waits on `[A]`'s GPU driver.
+  lines). **The arrow keys now move by the screen too** (2026-08-17,
+  `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`, §452): `caret_left`/`caret_right`
+  step through the drawn slots, so a caret crossing a direction boundary steps
+  across it instead of teleporting to the far side and back. That work found
+  the affinity to be a prerequisite in a stronger sense than expected — a
+  cursor rebuilt from its byte offset each keypress skips an entire
+  right-to-left run in *one* press, so `TextInput` and `InputDialog`, recorded
+  above as needing no affinity because they never draw one, had to carry a
+  `TextCursor` as soon as they had to move. Deleting stays logical while the
+  arrows go visual, and a password field steps logically because what it draws
+  is a row of asterisks; both asymmetries are tested. Left out on purpose:
+  `apps/editor`, which places its caret at `measure(prefix)` and scrolls
+  horizontally by *slicing the line at a byte offset* — and the visible part of
+  a bidirectional line is not the shaping of a substring of it, so that is a
+  model change rather than a substitution (`TD-EDITOR-IS-NOT-BIDIRECTIONAL`).
+  Vello itself waits on `[A]`'s GPU driver.
   **Variable fonts are done** (§448, §449, §450, §451): all four steps
   `TD-FONT-DOES-NOT-READ-VARIATION-STORES` mandates have
   landed: `gui/font/src/var.rs` reads `fvar`/`avar` and turns "weight 600" into

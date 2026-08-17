@@ -23389,10 +23389,16 @@ affinity. Both did, however, hold a *byte* offset and move it by *one byte* per
 keypress, which is a separate and worse bug; see
 `GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES` below.
 
-Still not done, and still deliberately out of scope: **visual-order arrow-key
-motion** (left arrow moving left on the screen whichever way the text runs).
-The affinity is a prerequisite for it, not a solution to it, and it wants its
-own entry when someone picks it up.
+The arrow-key half — **visual-order motion**, the left arrow moving left on
+the screen whichever way the text runs — was out of scope here and was picked
+up on 2026-08-17 under `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER` below, which
+is now itself fixed for the toolkit widgets. The affinity added here turned out
+to be a prerequisite in a stronger sense than "useful": a caret rebuilt from
+its byte offset each keypress does not merely land on the wrong side of a
+boundary, it steps over an entire right-to-left run in one press. That is why
+`TextInput` and `InputDialog`, called out four paragraphs above as needing no
+affinity *because they never draw one*, in fact needed one as soon as they had
+to **move**.
 
 The original entry follows.
 
@@ -27894,3 +27900,124 @@ this is exactly the class of defect where reading the code proves nothing.
 
 Until then, `sort`'s `show()` is a plain lossy conversion, marked with a comment
 pointing here so the next reader does not mistake it for a considered choice.
+
+## TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER
+
+**Status: FIXED 2026-08-17 for the toolkit widgets.** `apps/editor` is
+excluded and is tracked below as `TD-EDITOR-IS-NOT-BIDIRECTIONAL`.
+
+**What.** Pressing the left arrow moved the caret backwards through the
+*string*, not leftwards across the *screen*. Those are the same step only
+while a line runs in one direction. `ShapedRun::caret_left`/`caret_right`
+(`gui/font/src/shape.rs`) and `text::caret_left`/`caret_right`
+(`gui/toolkit/src/text.rs`) now step through the drawn order instead, and
+`pathbar`, `widget.rs`'s `TextInput` and `modal.rs`'s `InputDialog` call them.
+
+**Symptom it fixed.** Take `ab` followed by a right-to-left `HR` followed by
+`cd`. It is drawn `a b R H c d`. Pressing left from the far right should walk
+the byte offsets 7, 6, 4, 6, 1, 0 — the pair in the middle *rises* because
+moving left across a right-to-left letter moves later in the string. The old
+`offset - 1` walked 7, 6, 4, 2, 1, 0, so the first press past `c` put the
+caret at the far side of the right-to-left word and the second brought it
+back. The caret teleported rather than stepping.
+
+**The model.** n drawn clusters make n+1 caret slots. Moving right from slot k
+lands on the right edge of `clusters[k]` — the cluster just crossed — and
+moving left from slot k lands on the left edge of `clusters[k-1]`. Which of a
+cluster's two byte boundaries *is* its left edge depends on its direction, and
+that swap is the entire fix. Naming a boundary by the character just crossed
+is the standard convention and has one consequence worth knowing: the **pixel**
+position round-trips exactly under a step and its reverse, but the **byte
+offset** may come back as the other of the boundary's two names. That is
+inherent — the two names are one place on the screen — and is why the
+round-trip test asserts on x and not on the offset.
+
+**A trap this uncovered, worth not re-learning.** A widget that stores only the
+byte offset and rebuilds the cursor from it each keypress does not merely
+choose the wrong side of a boundary. It **skips the whole reordered run in a
+single press**: on the string above, an affinity-less rightward walk visits 1,
+2, 7, 8 and never enters the Hebrew at all. `TextInput` and `InputDialog` both
+held a bare `usize` and had to be converted to `TextCursor`. The failure is
+pinned by `text::dropping_the_affinity_between_steps_skips_the_reordered_run`,
+which asserts the *broken* sequence on purpose, so a refactor back to a plain
+offset is caught in this repository rather than by a user typing Hebrew.
+
+**Two deliberate asymmetries.**
+
+* **Deleting stays logical while the arrows go visual.** Backspace removes the
+  character before this one in the *string*, which is what a reader of that
+  script means, even where that character is drawn to the right. The left
+  arrow means left. Both are correct and they disagree; the code says so at
+  each site.
+* **A password field steps logically.** It draws a row of asterisks, so its
+  drawn order is its string order whatever was typed. Moving by the layout of
+  the hidden text would scatter the caret among identical marks with nothing
+  on screen to explain the jumps. `modal.rs`'s `move_caret` branches on
+  `password_mode`, and a test pins the masked walk against the same text
+  unmasked.
+
+**Verified by injection**, the discipline this codebase already applies to
+rounding (see `design-decisions.md` 448): dropping the direction swap in
+`visual_clusters` fails exactly the three bidi motion tests and the round-trip
+and nothing else; dropping the ligature snap in `slot_of_caret` fails exactly
+the ligature test.
+
+**Still not covered:** `Home`/`End` (which are logical, and arguably should be
+— they mean the start and end of the *line*, not of the screen), `Ctrl+arrow`
+word motion, and shift-extended selection across a direction boundary, whose
+anchor-and-head model has the same two-names problem and has not been thought
+through.
+
+## TD-EDITOR-IS-NOT-BIDIRECTIONAL
+
+**Status: OPEN.**
+
+**What.** `apps/editor` was left out of `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`
+above, and not because its arrow keys are fine — they have the same defect. It
+is out because motion is the *smallest* of three problems there, and fixing
+only motion would move the caret to positions the editor does not draw it at,
+which is worse than the present state where at least the two agree with each
+other about being wrong.
+
+**Three problems, which have to be fixed together.**
+
+1. **The caret is placed at the width of the prefix, not at the caret's own
+   position.** `render_editor` (around `main.rs:1637`) computes
+   `text_x() + text::measure(before_cursor, …)`. That is `width_upto` under
+   another name — the quantity `TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL` renamed
+   precisely because it is not a caret position. On any line with a
+   right-to-left run the caret is drawn at the distance *into* the text rather
+   than the position *across* the line. The fix is `text::caret_x`, which
+   needs `cursor_col` to carry an affinity.
+2. **Hit-testing and selection have the same shape.** A click resolves to a
+   byte column by measuring prefixes, and a selection is painted as a span
+   between two measured prefixes — but a logically-contiguous selection that
+   crosses a direction change is two or more *disjoint* rectangles.
+   `text::cursor_at` and `text::selection_boxes` are the replacements, exactly
+   as in `pathbar`.
+3. **Horizontal scrolling slices the line at a byte offset** — `scroll_col` is
+   a byte index, and the renderer draws `line[scroll_col..]`. This one is not a
+   substitution; it is a model problem. *The visible portion of a bidirectional
+   line is not the shaping of a substring of it.* Reordering is decided over
+   the whole paragraph, so shaping a suffix can yield a different visual order
+   than the same characters occupy in the full line. Scrolling has to become
+   pixel-based over the whole shaped line, with clipping, rather than
+   byte-based over a re-shaped tail.
+
+**Why 3 makes this its own task.** It is a real design change with a genuine
+tradeoff — shape-whole-line-and-clip costs work proportional to line length on
+every frame, where the present code shapes only what is visible — and the
+editor's long-line performance is the reason the byte-slicing exists. Anyone
+picking this up should measure that cost on a pathological line before
+choosing, and record the choice in `design-decisions.md`. Caching the shaped
+line per document revision is the obvious mitigation and probably makes the
+question moot, but "probably" is not a measurement.
+
+**Where.** `apps/editor/src/main.rs`: `Document::move_left`/`move_right`
+(~822), `cursor_col`/`scroll_col` (~54, ~67), the caret and text drawing in
+`render_editor` (~1620–1640), and the click handler.
+
+**Severity.** Low in practice today — a code editor's content is
+overwhelmingly one-directional, and on such text every one of these is
+correct. It bites a user editing a document with a quoted Arabic or Hebrew
+phrase in it, which markdown and comment text make entirely plausible.

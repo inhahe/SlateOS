@@ -441,11 +441,17 @@ impl Positioning {
         out: &mut [Adjust],
         depth: usize,
     ) -> Option<usize> {
+        // The per-subtable digests are *not* consulted here. They are correct
+        // for `GPOS` — `subtable_coverage` reads the mark coverage for the
+        // attachment types, which is the one that decides where a lookup
+        // applies — but the measurement that motivated them charges ~0% of
+        // shaping cost to this pass, so filtering here would be complexity
+        // bought with no evidence. See
+        // `C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE`.
         lookup
             .subtables
             .iter()
-            .copied()
-            .find_map(|sub| self.one(data, lookup, sub, run, i, out, depth))
+            .find_map(|sub| self.one(data, lookup, sub.at, run, i, out, depth))
     }
 
     /// Try one subtable at one position, reporting where to resume.

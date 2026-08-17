@@ -28474,11 +28474,12 @@ phrase in it, which markdown and comment text make entirely plausible.
 
 ## C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE (lane C, 2026-08-17)
 
-**Status: OPEN, but 19.6x recovered — root-caused 2026-08-17 and a fix
-landed the same day. Shaping now costs ~2.7 us/character where it cost ~64.
-That is still ~2.7x above this crate's own floor and an order of magnitude off
+**Status: OPEN, but 33.0x recovered — root-caused 2026-08-17 and two fixes
+landed the same day. Shaping now costs ~1.6 us/character where it cost ~64.
+That is still ~1.6x above this crate's own floor and an order of magnitude off
 HarfBuzz, so the entry stays open; what remains is named under "What is left"
-below and is a direct continuation of the fix, not a fresh investigation.**
+below. Both named continuations of the fix are now done, so the next step is a
+fresh measurement rather than a fresh guess.**
 
 **What.** `ScaledFont::shape` cost **~64 microseconds per character** on a
 real outline face, and the cost was *linear* in the string — so it was a huge
@@ -28525,6 +28526,19 @@ cannot match, with coverage digests"), same instrument, same host:
 figure is **19.6x**, not 22.9x; host state moves the absolute numbers by
 ~15% between runs, which is why the guard below is a ratio and not a
 microsecond count.)
+
+**After the per-subtable digests** (commit "font: give every GSUB subtable its
+own coverage digest"), same instrument, same host:
+
+| chars | system face | built-in | ratio | vs. run-digest only |
+|---:|---:|---:|---:|---:|
+| 80 | 129.3 us | 2.4 us | 54x | 1.70x faster |
+| 200 | 372.8 us | 6.5 us | 57x | 1.39x faster |
+| 1,000 | 1,895 us | 29.7 us | 64x | 1.51x faster |
+| 5,000 | 10,293 us | 138.0 us | 75x | 1.43x faster |
+| 20,000 | 41,981 us | 832.1 us | 50x | 1.34x faster |
+
+Cumulative against the 4,272 us same-day baseline at 80 characters: **33.0x**.
 
 **Why this is severe.** A single 200-character line takes **12 ms** to shape.
 A 60 Hz frame is 16.7 ms. So one line of text is 74% of a frame, and a
@@ -28602,36 +28616,58 @@ anyway and a false "no" cannot occur.
   a *slice*, and rebuilding from the slice would describe the syllable rather
   than the run.
 
+**The second fix: per-subtable digests** (HarfBuzz's `hb_applicable_t`, which
+lives inside its `hb_ot_layout_lookup_accelerator_t`). The run digest excludes
+only 52 of the 147 selected lookups; the other 95 genuinely share glyphs with
+the run *somewhere*, and each survivor was still walking all of its subtables
+per admitted glyph at ~5 coverage searches each. So `otl::Lookup::subtables`
+became `Vec<Subtable>` — an offset and its own digest as **one** type, not two
+parallel `Vec`s, because a digest paired with the wrong subtable is not a slow
+filter but a *wrong* one that silently drops substitutions. `gsub`'s six apply
+functions filter through `admitting(subtables, glyph)` before each coverage
+search. A free side effect: one unreadable subtable used to force the whole
+lookup's digest to `full()` and kill all skipping for it, and now widens only
+itself while its readable neighbours keep their narrow digests.
+
+The filter is **GSUB-only**, deliberately, with the reason recorded at each of
+the three call sites that do not use it: `gpos.rs` (the A/B charges ~0% of the
+cost to positioning, so filtering there is complexity bought with no evidence),
+`kern.rs` (kerning asks about a *pair*, and a digest summarises only the left
+glyph) and `would.rs` (`would_apply` runs once per candidate pair, not once per
+glyph per lookup). The digests themselves are correct for `GPOS` —
+`subtable_coverage` reads the mark coverage for the attachment types — so
+turning the filter on there is a one-line change if a measurement ever asks
+for it.
+
 **Guard against regression.** `guitk`'s
 `text::shaping_cost::the_layout_tables_do_not_dominate_shaping` is **not
 `#[ignore]`d** and runs in the normal suite. It asserts the system face costs
 under **500x** the built-in face for 80 characters — a ratio rather than a
 microsecond figure, so it survives a debug build, a loaded machine and slower
-hardware without going so loose it stops catching anything. It measures 80x in
-release and 147x in debug today; the bug sat at 1400-2200x.
+hardware without going so loose it stops catching anything. It measures 54x in
+release and ~150x in debug today; the bug sat at 1400-2200x.
 
 **What is left.** The A/B above puts the floor — everything except `GSUB` — at
-**80.3 us** for 80 characters, and shaping now costs 219.7 us. So `GSUB` is
-still ~2.5x the whole rest of the pipeline and there is ~2.7x left to recover
-before this becomes a different problem. The next step is named and is the same
-technique one level down:
+**80.3 us** for 80 characters, and shaping now costs 129.3 us. `GSUB` is
+therefore down from ~98% of the cost to roughly **38%** of it (~49 us over the
+floor), and the remaining headroom against that floor is ~1.6x. Both of the
+continuations this entry originally named are done, so:
 
-1. **Per-subtable digests** (HarfBuzz's `hb_applicable_t`, inside its
-   `hb_ot_layout_lookup_accelerator_t`). Only **52 of the 147** lookups are
-   excluded by the run digest — the other 95 genuinely share glyphs with the
-   run somewhere — and each survivor still walks all of its subtables per
-   admitted glyph, ~5 coverage searches each. Giving `Lookup` a `Digest` *per
-   subtable*, checked in `apply_single`/`apply_multiple`/`apply_alternate`/
-   `apply_ligature`/`apply_context`/`apply_chain_context` before each coverage
-   search, cuts that. The parse-time machinery already exists —
-   `otl::subtable_coverage` + `otl::coverage_digest` compute exactly this per
-   subtable and then union it away.
-2. **After that, re-measure before doing anything else.** The remaining passes
-   (`byte_levels`, `joining::forms`, `script::runs`, `hangul::preprocess`,
-   `advance_at`) are all linear with no obvious per-character table walk, and
-   the 80.3 us floor is the budget they share. Which of them dominates is not
-   yet known and should not be guessed at — this entry's original `cmap`
-   hypothesis is the cautionary tale.
+1. **Re-measure before doing anything else.** The A/B split that produced the
+   98.1% figure was taken when `GSUB` dwarfed everything; it is stale as a
+   guide to what to attack next, and the two halves are now within 2x of each
+   other. Re-run the environment-gated A/B in `ScaledFont::shape_with`
+   (`gui/font/src/scaled.rs:677`) first.
+2. **Then attribute the floor.** The remaining passes (`byte_levels`,
+   `joining::forms`, `script::runs`, `hangul::preprocess`, `advance_at`) are
+   all linear with no obvious per-character table walk, and the 80.3 us floor
+   is the budget they share. Which of them dominates is not yet known and
+   **should not be guessed at** — this entry's original `cmap` hypothesis is
+   the cautionary tale: it survived a careful reading of the code and was
+   killed only by measurement.
+3. Further `GSUB` work is possible but is no longer the obvious lever. The
+   remaining ~49 us buys at most 1.6x even if it went to zero, where the floor
+   is now the larger of the two shares.
 
 **How this was found.** Scoping `TD-EDITOR-IS-NOT-BIDIRECTIONAL`, whose item 3
 asks whether shape-whole-line-and-clip is affordable. The measurement that was

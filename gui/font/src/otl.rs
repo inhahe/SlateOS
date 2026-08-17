@@ -321,6 +321,28 @@ pub(crate) const MAX_SUBTABLES: usize = 8192;
 /// the rest of the lookup header cannot be read without it.
 const USE_MARK_FILTERING_SET: u16 = 0x0010;
 
+/// One subtable: where it is, and a summary of the glyphs it can act *at*.
+///
+/// The offset and the digest are one type rather than two parallel arrays
+/// because they must not be able to drift apart. A digest that describes a
+/// different subtable than the one it is checked against is not a slow filter,
+/// it is a wrong one — it would exclude glyphs the subtable does match, and
+/// the substitutions would silently stop happening. A parallel `Vec<Digest>`
+/// makes that a length bug waiting to happen; this makes it unrepresentable.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Subtable {
+    /// Absolute byte offset of the subtable in the font.
+    pub(crate) at: usize,
+    /// A conservative summary of this subtable's input coverage: never `false`
+    /// for a glyph the subtable covers, so a glyph it excludes can skip the
+    /// coverage search outright.
+    ///
+    /// [`Digest::full`] where the coverage could not be read, and until
+    /// [`ByScript::parse`] fills it in — see [`Lookup::digest`] for why the
+    /// other constructor leaves it that way.
+    pub(crate) digest: Digest,
+}
+
 /// One lookup: what it does, and where the subtables that do it live.
 ///
 /// Kept as a unit rather than flattened into one list of subtables because a
@@ -347,14 +369,14 @@ pub(crate) struct Lookup {
     /// present only when the flag's `UseMarkFilteringSet` bit is set. Zero
     /// otherwise, which is harmless because nothing reads it unless the bit is.
     pub(crate) filter: u16,
-    /// Absolute byte offsets of this lookup's subtables, in the order the font
-    /// lists them — which is the order they are tried in, first match winning.
-    pub(crate) subtables: Vec<usize>,
+    /// This lookup's subtables, in the order the font lists them — which is
+    /// the order they are tried in, first match winning.
+    pub(crate) subtables: Vec<Subtable>,
     /// A conservative summary of the glyphs this lookup can act *at*: the
-    /// union of its subtables' input coverage. A glyph the digest excludes
-    /// cannot match any of them, so the whole subtable walk can be skipped for
-    /// it — and a run none of whose glyphs the digest admits skips the lookup
-    /// entirely, in O(1).
+    /// union of its subtables' input coverage. A run none of whose glyphs the
+    /// digest admits skips the lookup entirely, in O(1); a glyph it excludes
+    /// skips the subtable walk. Within the walk, each subtable's own digest
+    /// then decides whether *that* subtable is worth a coverage search.
     ///
     /// [`Digest::full`] where it could not be worked out, which is the safe
     /// direction: it excludes nothing and so changes no result. That is what
@@ -394,7 +416,7 @@ pub(crate) fn feature_subtables(
 ) -> Option<Vec<usize>> {
     let mut out = Vec::new();
     for lookup in feature_lookups(data, base, tags, want, extension)? {
-        out.extend_from_slice(&lookup.subtables);
+        out.extend(lookup.subtables.iter().map(|sub| sub.at));
     }
     (!out.is_empty()).then_some(out)
 }
@@ -571,7 +593,7 @@ impl ByScript {
             // belongs at parse time and not at shaping time for exactly the
             // reason the type doc gives: this walk is the expensive one, and it
             // is paid per face rather than per string drawn.
-            lookup.digest = lookup_digest(data, &lookup, extension);
+            fill_digests(data, &mut lookup, extension);
             let Ok(pos) = u16::try_from(lookups.len()) else {
                 break;
             };
@@ -933,7 +955,10 @@ fn read_lookup(
             continue;
         };
         if !extended {
-            subtables.push(sub);
+            subtables.push(Subtable {
+                at: sub,
+                digest: Digest::full(),
+            });
             *budget = budget.saturating_sub(1);
             continue;
         }
@@ -952,7 +977,10 @@ fn read_lookup(
             .and_then(|o| sub.checked_add(o))
         {
             effective = Some(wrapped);
-            subtables.push(target);
+            subtables.push(Subtable {
+                at: target,
+                digest: Digest::full(),
+            });
             *budget = budget.saturating_sub(1);
         }
     }
@@ -1083,24 +1111,29 @@ fn coverage_digest(data: &[u8], table: usize) -> Option<Digest> {
     Some(digest)
 }
 
-/// The union of a lookup's subtables' input coverage, or [`Digest::full`] if
-/// any one of them could not be read.
+/// Summarise every subtable of `lookup`, and the lookup as their union.
 ///
-/// All-or-nothing on purpose: a lookup whose second subtable is unreadable
-/// could still match there, so summarising only the first would be a filter
-/// that excludes glyphs the lookup can act on. The digest's one-sidedness —
-/// never "no" for a member — is the whole basis of it being safe to skip on.
-fn lookup_digest(data: &[u8], lookup: &Lookup, extension: u16) -> Digest {
-    let mut digest = Digest::EMPTY;
-    for &sub in &lookup.subtables {
-        let Some(one) = subtable_coverage(data, lookup.kind, sub, extension)
+/// A subtable whose coverage cannot be read becomes [`Digest::full`] rather
+/// than being dropped or left out of the union: it could still match, so a
+/// summary that excluded it would be a filter that excludes glyphs the lookup
+/// does act on. The digest's one-sidedness — never "no" for a member — is the
+/// whole basis of it being safe to skip on, and it is preserved by widening on
+/// every failure, never by narrowing.
+///
+/// Because the lookup's digest is the union, one unreadable subtable makes it
+/// [`Digest::full`] too, and the lookup is never skipped as a whole. That is
+/// the right answer and costs less than it used to: the *readable* subtables
+/// beside it keep their own digests, so the walk still skips them.
+fn fill_digests(data: &[u8], lookup: &mut Lookup, extension: u16) {
+    let kind = lookup.kind;
+    let mut all = Digest::EMPTY;
+    for sub in &mut lookup.subtables {
+        sub.digest = subtable_coverage(data, kind, sub.at, extension)
             .and_then(|coverage| coverage_digest(data, coverage))
-        else {
-            return Digest::full();
-        };
-        digest.union(one);
+            .unwrap_or_else(Digest::full);
+        all.union(sub.digest);
     }
-    digest
+    lookup.digest = all;
 }
 
 /// Where `glyph` sits in a coverage table, or `None` if it is not covered.

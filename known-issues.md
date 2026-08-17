@@ -29065,6 +29065,97 @@ ratio. Doing both in one boot avoids comparing against a number from a different
 build, and a ratio near 1.0 is then unambiguous evidence that slot 1 is not
 being selected -- the exact silent failure this entry predicted.
 
+### TD-NO-WRITE-COMBINING -- UPDATE 2026-08-17 (second) -- the ratio is measured; it is **not measurable** under QEMU TCG, and the acceptance criterion stated just above is unsound
+
+**In short:** the fill-ratio measurement the previous update called for now
+exists and has run. It reported **0.94x** -- write-combining fractionally
+*slower* than uncached. That is not the bug it looks like: the test platform is
+QEMU's TCG interpreter, which emulates no cache and no store buffer at all, so a
+write-combining mapping and an uncached one run the identical host code and the
+ratio is pinned near 1.0 no matter how correct the kernel is. The paragraph above
+is therefore wrong where it says a ratio near 1.0 is "unambiguous evidence that
+slot 1 is not being selected". It is only evidence of that on a platform that
+models memory types in the first place.
+
+**What was built.** `VramAperture::measure_write_combining`
+(`kernel/src/drm/ati/aperture.rs`) fills the same 1 MiB of the same BAR twice in
+one boot -- once with the PTEs saying `WC`, once saying `UC` -- and
+`drm::ati::report_write_combining` reports the ratio. Two ways to get a
+flattering number are defended against explicitly: each timed region ends with
+`sfence` *inside* the clock, so WC is not credited for stores still sitting in a
+fill buffer; and each half gets identical preparation, so neither pays for work
+the other avoids.
+
+**Measured, boot #12 (PASS, 1244 s):**
+
+```
+[ati]   VRAM aperture mapped: 16 MiB at 0x80000000 (memory type WC, writes may linger: false)
+[ati]   Write-combining measured over 1024 KiB: WC 810133928 cycles vs UC 764480631 cycles = 0.94x
+```
+
+**Why that is a property of the emulator, not of the kernel.** 810133928 cycles
+over 262144 four-byte stores is ~3090 cycles per store -- orders of magnitude
+above any real memory or MMIO write, and squarely in
+trap-to-the-device-model territory. `scripts/boot-test.sh` passes no `-accel`
+flag, so QEMU runs TCG. TCG interprets or JITs every guest store and models no
+store buffer, no cache and no memory types whatsoever; `WC` and `UC` reach the
+same host code. The 6% difference is noise.
+
+The kernel already had this information and did not use it: `[hypervisor]
+Detected: QEMU TCG (signature: "TCGTCGTCGTCG")` is printed at serial line **71**,
+about 1600 lines before the ATI probe warned at line 1677.
+
+**What landed as a result.**
+
+* `Hypervisor::models_memory_types()` (`kernel/src/hypervisor.rs`) -- false only
+  for `QemuTcg`. Every other hypervisor runs guest page tables on the real MMU,
+  so guest `IA32_PAT` governs real caching there and a low ratio *would* be a
+  genuine finding. `Unknown` answers `true` deliberately: the failure that
+  matters is suppressing a real finding, not printing an inconclusive one.
+* The verdict in `report_write_combining` branches on it. Under TCG it reports
+  the number as *not measurable* and says so; elsewhere it still warns.
+* **The warning stopped blaming the wrong thing.** It used to end "check that PAT
+  slot 1 is selected" -- which the line printed immediately above it already
+  disproves, since that line decodes the mapping's live memory type as `WC`. A
+  diagnostic that sends its reader to re-verify the one thing already proven is
+  worse than none. It now names the actual remaining suspect on real hardware: an
+  MTRR covering the aperture that says `UC` overrides PAT, because the effective
+  type is the *combination* of the two and for MTRR=UC the combination is UC
+  regardless of PAT (Intel SDM Vol. 3, Table 11-7). That is how a
+  correctly-programmed WC mapping still ends up uncached on metal.
+
+**A methodology bug found and fixed while doing this.** The first version warmed
+the TLB once, before the WC pass only. But switching the range to `UC` runs
+`invlpg` on every hardware page and one `wbinvd`, so the UC pass then started
+with a cold TLB and cold caches -- it was charged for refills the WC pass had
+been spared. That biases the ratio *upward*: the measurement would have
+flattered write-combining by handicapping its rival, which is exactly the class
+of error the function's own doc comment claims to defend against. Both halves now
+get the same remap-then-warm-up sequence, including a redundant remap-to-WC
+before the WC half.
+
+**Still open -- and now blocked on a platform rather than on work.** Everything
+that can be verified without hardware that models memory types has been: the MSR
+reads back as programmed, the four named `PageFlags` constants decode to
+`WB`/`WC`/`WT`/`UC` through the table actually in force, no live mapping changed
+meaning (`design-decisions.md` §219), and the measurement harness itself is
+sound. What remains is one number from a platform capable of producing it:
+
+* Real hardware with an ATI RV100 -- adjacent to `open-questions.md` Q49.
+* Or QEMU with `-accel whpx` (this is a Windows host) / KVM. **Unverified, and
+  not automatically sufficient:** hardware-accelerated guests honour guest PAT
+  for memory the host maps into the guest, but only if QEMU's `ati-vga` BAR0 is a
+  RAM-backed memory region rather than a trapping device model. The ~3090
+  cycles/store above is weak evidence it may be the latter, in which case
+  acceleration will not help and no QEMU configuration can measure this.
+  Worth one manual QEMU run to find out; do **not** change
+  `scripts/boot-test.sh`'s accelerator to test it, since that would alter the
+  test environment for all three lanes.
+
+Until then this entry stays open, and the guard against silently regressing to
+uncached is the WC-vs-UC line itself: on any platform that models memory types it
+warns, and on TCG it says plainly that it cannot tell.
+
 ### BUG-BOOT-SPINLOCK-STALL-UNNAMED -- an intermittent boot hang reports `lock '?'` and `cpu 0 holds 0 lock(s)`, because lockdep is not yet enabled when the self-test battery runs -- 2026-08-17 -- OPEN (flaky; the diagnostic gap is the actionable part)
 
 **Observed.** Boot #10 of the lane-A tree (2026-08-17, tree at `8fd6813e1`)
@@ -29142,3 +29233,183 @@ usable on its own, without lockdep.
 writing. Before treating a single failure at any one self-test as a regression,
 re-run -- and check whether the freeze point moves, which is what distinguishes
 this from a deterministic deadlock in the test the log happens to stop at.
+
+### BUG-BOOT-SPINLOCK-STALL-UNNAMED -- RESOLUTION 2026-08-17 -- both diagnostic fixes landed; the third is superseded by a better one
+
+**In short:** the two diagnostic defects described above are fixed and verified
+by boot #12. The intermittent hang itself is **not** fixed -- it has not
+reproduced since, so there is nothing to debug against -- but the next
+occurrence will print a lock the reader can actually identify, and a held-lock
+stack that is either true or says it is unavailable. The point of this work was
+never to fix the hang; it was to make sure the *next* one is diagnosable.
+
+**Part 1 -- move `lockdep::init()` ahead of the self-test battery: done.**
+It now runs as "Step 20z" at `kernel/src/main.rs:1530-1531`, immediately before
+`// Step 21: Enable hardware interrupts`, instead of at the old `main.rs:5374`.
+The stated prerequisite was checked against the code rather than taken on trust
+and does not hold: `smp::current_cpu_index` returns `BSP_CPU_INDEX` whenever
+`SMP_INITIALIZED` is clear, which is the correct answer while only the BSP runs.
+
+Verified: `Lock order validator enabled` appears at serial line **1931** of boot
+#12, where in boot #11 it appeared at line **26693** of ~27150 -- it now precedes
+essentially the entire self-test battery instead of trailing it.
+
+The lock-order findings this entry predicted did **not** materialise. Boot #12
+logged 28 `[lockdep]` lines in total, and every warning among them belongs to
+`lockdep::self_test`'s own deliberate `test-A`/`test-B`/`test-C` inversions
+(which the self-test labels as expected). Zero real violations across the
+newly-covered phase. That is a result rather than a non-event: the validator now
+watches the ext4 / spawn / signal / VFS self-tests and finds their lock ordering
+correct, so a violation reported there in future is a genuine signal and not a
+gap in coverage.
+
+**Part 2 -- make `dump_held_locks` say when it is disabled: done.**
+`kernel/src/lockdep.rs` now returns early with `validator DISABLED -- held-lock
+stack is not maintained, so nothing can be concluded from it` when `ENABLED` is
+clear, instead of printing a confident `0 lock(s)` on the strength of not having
+looked.
+
+**Part 3, as this entry proposed it, was the wrong fix, and has been replaced by
+a better one.** The entry suggested naming the mutexes reachable from the
+self-test battery with `Mutex::named`. The scope of that was measured first:
+**627** `Mutex::new` call sites against **28** `Mutex::named` (worst offenders
+`kshell.rs` 17, `net/httpd.rs` 8, `net/firewall.rs` 7, `sched/kmutex.rs` 6,
+`ipc/namespace.rs` 6, `sync.rs` 5). Naming them is 627 edits, 627 chances to
+miss one, does nothing for a lock allocated on the heap or created after the
+edit, and -- decisively -- only helps the locks somebody already suspected.
+
+What landed instead: **both `sync::report_spin_stall` and
+`lockdep::dump_held_locks` now print the lock's address.** The stall report
+reads `lock '?' @ 0xffff...` and the held stack reads `[0] ? @ 0xffff...`.
+
+Why this is the better fix rather than merely the cheaper one:
+
+* It is **one change that covers every lock in the tree**, including the ones
+  nobody has thought about, the heap-allocated ones no symbol covers, and every
+  lock added after today.
+* The address is **already** lockdep's class identity -- `find_or_register_class`
+  keys on `lock_addr`, and `Mutex::addr()` is the address of the inner
+  `spin::Mutex`. So the two reports now share one key and can be
+  cross-referenced directly.
+* It answers the question the dump exists to answer. With most locks named `?`,
+  a held stack rendered by name alone reads `[0] ?` / `[1] ?` -- entries
+  indistinguishable from each other, let alone matchable against the stalled
+  lock. "Am I already holding the lock I am stalled on?" is the entire question a
+  recursive self-deadlock turns on, and it is now a comparison instead of a
+  guess. That is precisely the question boot #10's dump left unanswerable.
+
+`PreemptSpinMutex` gained an `addr()` accessor for this, deliberately returning
+the address of its inner `spin::Mutex` so it agrees with `Mutex::addr()` and
+needs no offset correction when compared against a lockdep class ID.
+
+**Still open:** the hang itself, and it stays open. It is flaky (~1 boot in 8 was
+non-clean when first seen), it has not recurred, and the reproduction advice
+above still stands -- in particular, check whether the freeze point *moves*
+between runs, which is what distinguishes this from a deterministic deadlock in
+whichever self-test the log happens to stop at.
+
+## TD-LOCKDEP-CLASS-TABLE-IS-PUBLISHED-TWICE-AND-ONLY-ONE-PATH-IS-ORDERED (lane A, 2026-08-17) - **open**
+
+**In short:** the lock-order checker keeps a table of the locks it has seen. A
+CPU adding a row to that table reserves the row first and fills it in second.
+Three of the checker's own report-printing functions decide how many rows to
+read from the reservation counter -- so they can read a row that is reserved but
+not yet filled, and print a lock name and address that are still zero or, worse,
+half-written garbage. This is diagnostics-only: it can corrupt a *report* about
+a deadlock, never the deadlock detection itself. It has never been observed,
+because in practice the only caller that hits the dump is the CPU that just
+finished writing the row.
+
+**Where:** `kernel/src/lockdep.rs`.
+
+The writer, `find_or_register_class` (line ~675):
+
+```rust
+// Register new class.
+let idx = CLASS_COUNT.fetch_add(1, Ordering::Relaxed) as usize;   // <-- reserve
+if idx >= MAX_CLASSES {
+    CLASS_COUNT.fetch_sub(1, Ordering::Relaxed);                  // <-- racy undo
+    return None;
+}
+unsafe {
+    CLASSES[idx].id = lock_addr;                                  // <-- fill
+    let copy_len = name.len().min(16);
+    CLASSES[idx].name[..copy_len].copy_from_slice(&name[..copy_len]);
+    CLASSES[idx].name_len = copy_len as u8;
+}
+// Publish only after the entry is fully written -- `hash_insert`'s Release
+// store is what makes it safe for another CPU to follow the index here.
+Some(hash_insert(lock_addr, idx as u16))
+```
+
+The comment is correct as far as it goes, and the ordering it describes is real:
+a reader that arrives through `hash_lookup` cannot see `idx` until the matching
+Release store in `hash_insert`, by which time the slot is complete. **But
+`hash_insert` is not the only way to reach a slot.** Three readers reach
+`CLASSES` by counting instead, bounding their loop with `CLASS_COUNT` -- the very
+counter that is incremented *before* the slot is written:
+
+| Line | Function | What it does with the slot |
+|---|---|---|
+| ~548 | `snapshot()` | pushes `id`/`name`/`name_len` into a heap `Vec` |
+| ~635 | `dump_held_locks()` | prints `name @ id` for each held lock |
+| ~1022 | `verify_class_index()` | asserts the index agrees with a linear scan |
+
+For each of these, the sequence `CPU0: fetch_add -> (interrupt / other CPU runs)
+-> CPU1: load CLASS_COUNT, read CLASSES[idx]` observes a reserved-but-empty
+slot. Both loads are `Relaxed`, so there is not even an acquire fence to pair
+against; on x86-64 the store order happens to be preserved by the hardware, but
+that is an accident of the target, not something the code establishes, and
+`copy_from_slice` into `name` is not a single store in any case.
+
+Two smaller defects in the same six lines:
+
+- **The "undo" on a full table is racy.** If two CPUs both overflow
+  concurrently, each does `fetch_add` then `fetch_sub`; interleaved with a third
+  CPU's successful `fetch_add`, the counter can end up naming a slot nobody
+  owns, or below the true number of live classes -- which would make the readers
+  above *skip* real entries. `MAX_CLASSES` is 128 and the kernel currently
+  registers 5, so this is unreachable today.
+- **`fetch_sub` can transiently expose a count above `MAX_CLASSES`.** All three
+  readers do `.min(MAX_CLASSES)`, so this is contained -- but it is contained by
+  every caller remembering to clamp, rather than by the counter being correct.
+
+**Why it has not bitten:** `dump_held_locks` is called from the violation
+reporter on the CPU that is *itself* mid-`lock_acquire`, so the slot it names was
+written by that same CPU before the call -- the held-lock stack only ever
+contains indices whose slots that CPU has already filled. `snapshot()` is
+`#[allow(dead_code)]`. `verify_class_index` runs at two fixed boot points that
+are effectively single-threaded. So the window is real but currently
+unreachable, which is exactly the kind of bug that surfaces the first time
+someone calls the dump from a different CPU -- e.g. an NMI-time or watchdog-time
+lock dump, which is precisely the feature this table exists to make possible.
+
+**The proper fix** -- publish the slot, not the reservation:
+
+1. Fill `CLASSES[idx]` completely, then make the count the publication point with
+   a Release store: replace the eager `fetch_add` with a reservation counter that
+   is *separate* from the published count, i.e. `NEXT_SLOT.fetch_add(1, Relaxed)`
+   to claim, and after filling, `CLASS_COUNT.fetch_max(idx + 1, Release)` (or a
+   CAS loop) to publish. Readers then use `CLASS_COUNT.load(Acquire)`.
+   `fetch_max` also removes the need to undo anything on overflow: an overflowing
+   claimer simply never publishes, so the racy `fetch_sub` disappears.
+2. Give the three counting readers `Acquire` loads to pair with it.
+3. Note that with `fetch_max` publication, a published count of `N` no longer
+   guarantees every slot below `N` is filled if claims complete out of order.
+   Either keep a per-slot `initialized: AtomicBool` (readers skip un-set slots),
+   or -- simpler and adequate for a 128-entry diagnostic table -- serialise
+   registration behind the lockdep-internal lock that `record_edge` already needs,
+   and keep a single `CLASS_COUNT` written last with Release. Registration is
+   cold by construction (it happens once per distinct lock address, ever), so the
+   lock costs nothing measurable; the O(1) `hash_lookup` fast path at the top of
+   `find_or_register_class` returns before reaching it on every subsequent
+   acquire.
+
+Option 3 is the recommended one: it makes "the count is the publication point"
+true by construction instead of by a per-slot flag every future reader must
+remember to check, and it fixes the overflow race in the same stroke.
+
+**How it was found:** reading `find_or_register_class` while adding the class
+address to `dump_held_locks`' output (the `@ {:#x}` field) -- i.e. while making
+one of the three unordered readers print *more* of the slot it may be reading too
+early.

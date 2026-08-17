@@ -611,6 +611,22 @@ pub fn dump_held_locks(cpu: usize) {
     if cpu >= MAX_CPUS {
         return;
     }
+    // Say so when disabled, instead of reporting an empty stack as a fact.
+    // `lock_acquire`/`lock_release` are no-ops while disabled, so the held stack
+    // is not merely stale but meaningless -- and the difference matters: printed
+    // during a spinlock-stall dump, "cpu 0 holds 0 lock(s)" reads as evidence
+    // that the CPU does *not* hold the wanted lock, which directly contradicts
+    // the "RECURSIVE self-deadlock" line printed immediately above it. A reader
+    // then has to pick which line to believe, and the wrong choice rules out the
+    // correct explanation. This happened; see `known-issues.md`
+    // BUG-BOOT-SPINLOCK-STALL-UNNAMED.
+    if !ENABLED.load(Ordering::Relaxed) {
+        serial_println!(
+            "[lockdep]   cpu {cpu}: validator DISABLED — held-lock stack is not maintained, \
+             so nothing can be concluded from it"
+        );
+        return;
+    }
     // SAFETY: Reading the per-CPU held stack + depth for diagnostics only.
     // See the doc comment: the target CPU is spinning and not mutating its
     // own stack, so this snapshot is stable. Copying by value avoids
@@ -623,19 +639,30 @@ pub fn dump_held_locks(cpu: usize) {
         if class_idx >= count {
             continue;
         }
-        // SAFETY: class_idx < count ≤ number of registered classes; the
-        // CLASSES array is append-only so this slot is fully initialized.
-        let (name, name_len) = unsafe {
-            (
-                CLASSES[class_idx].name,
-                CLASSES[class_idx].name_len as usize,
-            )
-        };
+        // Copy the whole slot in one indexing operation rather than one per
+        // field. `LockClass` is `Copy`, so this is no more work, and it keeps the
+        // number of `indexing_slicing` sites -- each a separate panic path to
+        // justify -- at one, instead of growing with every field the dump learns
+        // to print.
+        // SAFETY: class_idx < count ≤ number of registered classes; the CLASSES
+        // array is append-only, so this slot is fully initialized and is never
+        // mutated after publication.
+        let class = unsafe { CLASSES[class_idx] };
+        let (name, name_len, id) = (class.name, class.name_len as usize, class.id);
         let n = name.get(..name_len.min(16)).unwrap_or(b"");
+        // Print the class address, not just the name. Most locks in the tree take
+        // `Mutex::new`'s default name of "?", so a held stack rendered by name
+        // alone reads "[0] ?" / "[1] ?" -- entries that cannot be told apart from
+        // each other, let alone matched against the lock named in the stall
+        // report printed immediately above. The address is the same value
+        // `sync::report_spin_stall` prints, so "am I already holding the lock I am
+        // stalled on?" -- the entire question a recursive self-deadlock turns
+        // on -- becomes a comparison instead of a guess.
         serial_println!(
-            "[lockdep]     [{}] {}",
+            "[lockdep]     [{}] {} @ {:#x}",
             i,
-            core::str::from_utf8(n).unwrap_or("<non-utf8>")
+            core::str::from_utf8(n).unwrap_or("<non-utf8>"),
+            id
         );
     }
 }

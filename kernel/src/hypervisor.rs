@@ -91,6 +91,30 @@ impl Hypervisor {
         self != Self::None
     }
 
+    /// Whether this platform models x86 cache memory types (PAT / MTRR) at all.
+    ///
+    /// This is the question to ask before *measuring* a memory type, as opposed
+    /// to merely programming one. Hardware-virtualized guests -- KVM, Hyper-V /
+    /// WHPX, VMware, VirtualBox, Xen, bhyve -- run guest page tables on the real
+    /// MMU, so the guest's own `IA32_PAT` governs real caching: a
+    /// write-combining mapping really does combine, and a measurement that finds
+    /// it is not combining has found a genuine bug.
+    ///
+    /// QEMU's TCG does not. It interprets or JITs every guest store and models
+    /// no store buffer, no cache and no memory types whatsoever, so a `WC`
+    /// mapping and a `UC` mapping execute the *identical* host code path. A
+    /// measurement there is not failing, it is **unmeasurable** -- and reporting
+    /// "write-combining is not taking effect" would be a false alarm, on a
+    /// platform incapable of ever producing any other result.
+    ///
+    /// [`Hypervisor::Unknown`] answers `true` deliberately: an unrecognised
+    /// signature is not evidence that memory types are unmodelled, and the
+    /// failure that matters here is suppressing a real finding, not printing an
+    /// inconclusive one.
+    pub fn models_memory_types(self) -> bool {
+        self != Self::QemuTcg
+    }
+
     /// Convert from raw u8 (for atomic loading).
     fn from_u8(v: u8) -> Self {
         match v {

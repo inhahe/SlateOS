@@ -18428,6 +18428,131 @@ believed on this one).
 
 ---
 
+## §455 — Multi-coloured text crosses the wire as byte-ranged spans, not as positioned glyphs
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** the text editor colours its keywords, strings and comments by
+drawing each one as a separate little piece of text, placed left to right at
+the point where the previous piece stopped. That is fine for English, and wrong
+for Hebrew or Arabic, where a quoted phrase's letters end up *interleaved* with
+the punctuation around them rather than sitting in a block of their own — so
+there is no single place on the screen where "the string literal" can be drawn.
+The fix makes colour a property of a *letter* instead of a property of a *piece
+of text to draw*. The question this entry settles is who works out which letter
+gets which colour: the app that knows the keywords, or the compositor that
+actually draws them. The answer is the compositor, and the app tells it "bytes
+0 to 2 are blue, bytes 3 to 9 are green" — ranges of the *text*, not positions
+on the *screen*.
+
+**Context.** `known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL` item 4.
+`apps/editor`'s `draw_tokens` walked the syntax token list emitting one
+`RenderCommand::Text` per token at a running `x`. Cutting a line into pieces
+and laying them end to end is the assumption that screen order equals byte
+order, applied once per token — which is exactly what bidirectional reordering
+violates.
+
+**The options.**
+
+**(1) The app shapes the line and sends positioned, coloured glyphs.** The
+editor calls `text::shape`, walks the resulting glyphs, gives each the colour
+of the token containing its source byte, and sends a list of
+`(glyph_id, x, y, colour)`.
+
+*What changes:* nothing visible if it worked — but it cannot work here. The
+compositor's `draw_text` **re-shapes the string itself** (`let run =
+font.shape(text)`) and resolves the family from its own `font_stack`, which
+`PushFont`/`PopFont` commands manipulate. The app does not know which face will
+be used, so any glyph ids it produces are for the wrong font. It is also the
+largest thing on the wire: a glyph record per character rather than a span
+record per token.
+
+**(2) The command carries the string plus byte-ranged colour spans, and the
+renderer resolves colour per glyph.** `RenderCommand::RichText { text, spans,
+color, … }`, where a span is `{ end: u32, color }`. The renderer is already
+shaping; `ShapedGlyph` already carries `cluster`, the source byte offset. So
+the byte→glyph translation costs a lookup per glyph and nothing else.
+
+*What changes:* the app sends what it actually knows (where its tokens are in
+the text) and the renderer does what only it can do (decide where those bytes
+land on the screen).
+
+**Chosen: (2).** Not on elegance — on the fact that the app *cannot* correctly
+shape, because the family is resolved on the far side of the wire. Option (1)
+would require moving font-stack resolution into the app, which inverts the
+whole point of the `PushFont` command. (2) is additionally the compact
+encoding, and it reuses the `max_width` / `overflow` / clipping machinery the
+`Text` command already has, because it is the same command with one extra
+field.
+
+**Sub-decision: span ends are cumulative, not start/end pairs.** A span is
+`{ end, color }` and begins where the previous one ended (at 0 for the first).
+
+- *Start/end pairs* let a caller emit two spans that disagree about a byte, or
+  leave a byte in no span at all. Both are representable, so both have to be
+  defined — and the definition ("the first span wins", say) is a rule nobody
+  reads, whose violation looks like a colouring bug rather than an error.
+- *Cumulative ends* make gaps and overlaps **unrepresentable**. A gap the
+  caller wants must be written down as a span in the fallback colour, which is
+  a decision made visibly rather than a hole fallen into.
+
+The editor's `draw_tokens` shows the effect: it fills a gap the tokenizer might
+leave with an explicit plain-coloured span, and
+`every_byte_of_a_line_is_covered_by_some_token` asserts the fill never fires.
+Under start/end pairs that gap would have been silently dropped — which is how
+a byte of the user's text disappears off the screen.
+
+**Sub-decision: bytes past the last span take the command's own `color`, and
+`TextSpan::color_at` returns `Option<Color>` rather than a fallback.** The
+fallback is per-command, not per-span, so a caller does not have to describe
+the tail. `color_at` returning `Option` rather than taking a fallback is for
+the compositor, which works in packed ARGB: taking a `Color` fallback would
+force an ARGB→`Color`→ARGB round trip once per glyph purely to hand back
+something it already had.
+
+**Sub-decision: lookup is a binary search, not a forward walk.** Tempting to
+walk the spans alongside the glyphs, since both are in order — but glyphs are
+*drawn* in visual order (`ShapedRun::draw_order()`), and under bidi that order
+does not ascend by cluster. A forward walk would mis-colour exactly the case
+this whole change exists for. `partition_point` costs log(spans) and is order
+independent; `resolution_does_not_depend_on_query_order` in
+`gui/toolkit/src/render.rs` is the test that says so.
+
+**Sub-decision: a new wire tag (0x0D), not a `PROTOCOL_VERSION` bump.** Same
+argument already recorded for `FontFamilyTag`: old frames still decode
+identically because nothing about them changed, and an old decoder meeting the
+new tag fails cleanly with `DecodeError::BadTag` rather than misreading the
+bytes. A version bump would additionally reject every old frame, which buys
+nothing.
+
+**The cost, which turned out to be negative.** The old comment above
+`draw_tokens` accepted losing kerning across token boundaries as a small price.
+Measured against the shaping instrument in `gui/toolkit/src/text.rs`, the
+decomposition was not a price at all but a loss: each shaping carries a fixed
+cost of ~3.6 us on top of ~0.75 us per character, so cutting a line into *n*
+pieces pays the fixed cost *n* times. An 80-character line of 40 tokens — an
+ordinary line of code — cost **2.3x** what shaping it whole costs. So this
+change makes the output correct under bidi *and* the common case faster, and
+the lost kerning comes back for free.
+
+**What it does not fix.** `draw_tokens` still slices the line at `scroll_col`
+and hands the renderer the tail, so the string being shaped is still a
+substring — and the visible portion of a bidirectional line is not the shaping
+of a substring of it. That is item 3 / step (d) of
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL`, deliberately left separate.
+`gui/toolkit/src/textview.rs` has the same end-to-end layout in two widgets and
+is *not* covered by this decision, because its spans carry size and weight as
+well as colour — see `TD-SPANS-ARE-LAID-OUT-END-TO-END`.
+
+**Where.** `gui/toolkit/src/render.rs` (`TextSpan`, `RenderCommand::RichText`,
+`RenderTree::rich_text` / `rich_text_clipped`), `gui/compositor/src/main.rs`
+(`blit_run` / `draw_text` take `spans`), `gui/remote/src/lib.rs`
+(`Tag::RichText`, `MAX_SPANS`, `write_spans` / `read_spans`),
+`apps/editor/src/main.rs` (`draw_tokens`, `rebase`).
+
+---
+
 ## §323 — A calculator's runtime error abandons the top-level statement, and the session lives on
 
 **Date:** 2026-08-16
@@ -18799,3 +18924,283 @@ one untestable target for another.
   foundation a modern port extends rather than work to throw away — the display
   block's structure is inherited, and the pure/MMIO split is what makes the new
   registers testable in turn.
+
+## §218 — GEM backing became an enum, because "a list of physical frames" is a lie about video memory that the buddy allocator would believe
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** A "GEM object" is the kernel's word for a chunk of memory a
+graphics driver hands out to hold an image. Until now every one of them was a
+list of ordinary RAM pages, and freeing one meant giving those pages back to
+the system's memory allocator. The new ATI driver hands out memory that lives
+*on the graphics card* instead — which is not RAM, is not the system
+allocator's, and would poison it if returned there. The decision was to make
+the difference visible in the type, so the compiler asks every piece of code
+which of the two kinds it is prepared to deal with, rather than letting card
+memory quietly flow down a path built for RAM.
+
+### The concrete hazard
+
+`GemObject` carried `phys_frames: Vec<PhysFrame>`, and `free_backing()` walked
+it calling `frame::free_frame`. The obvious way to add VRAM support is to put
+the card's addresses in that same vector — they *are* physical addresses, and
+`PhysFrame::from_addr` accepts them.
+
+The result would compile, run, and pass a functional test. It would also, on
+the first `gem_destroy`, insert a run of PCI BAR addresses into the buddy
+allocator's free lists. The next unrelated `alloc_frame()` anywhere in the
+kernel returns one of them, and a kernel structure gets built in the graphics
+card's framebuffer. The symptom is arbitrary corruption, appearing at an
+arbitrary later time, in a subsystem with no connection to graphics.
+
+That is worse than a leak by a wide margin: a leak is bounded, visible in a
+counter, and diagnosable. This is unbounded, invisible, and the evidence points
+everywhere except at the driver responsible.
+
+### Options considered
+
+| | *What changes:* |
+|---|---|
+| **A. Chosen — `GemBacking` enum** | `phys_frames` becomes `backing: GemBacking`, with `SystemRam(Vec<PhysFrame>)` and `Vram { offset, len }`. Every consumer of the frame list must say what it does about VRAM; `free_backing` returns `NotSupported` rather than freeing. |
+| B. Leave `phys_frames`, add a `is_vram: bool` beside it | Nothing structural. The vector still exists and is still the obvious thing to iterate; the flag is a comment the compiler does not enforce. |
+| C. Leave `phys_frames` empty for VRAM objects, add `vram_offset: Option<u32>` | `free_backing` becomes a no-op on VRAM (correct), but every *reader* silently sees a zero-length buffer instead of an error. A compositor asking for the frames of a VRAM buffer gets "no pixels" rather than "wrong question". |
+
+### Why A over C
+
+C is genuinely safe against the corruption — an empty vector cannot be freed
+wrongly — and it is a much smaller change. It was rejected because it converts
+the hazard from corruption into *silence*, which is the failure mode this
+codebase keeps deciding against elsewhere (see the aperture's refusal to assume
+its `NO_CACHE` request was granted, §217's whole premise, and the mode list's
+refusal to advertise a mode that would then be refused).
+
+Concretely: `DrmDevice::gem_frame_addrs` under C returns `Ok(vec![])` for a
+VRAM object. A caller loops over it, writes nothing, and reports success. The
+screen stays black and there is no error anywhere to find. Under A the same
+call returns `NotSupported`, which names the mistake at the point it is made.
+
+The cost of A is real and was paid: eleven call sites across `driver.rs`,
+`mod.rs` and `gem.rs` had to be examined and told what to do. That is the
+benefit, not the price — each of those was a place where the question "what if
+this is video memory?" had never been asked, and four of them (the Limine and
+virtio page-flip and flush-region loops) turned out to need an explicit refusal
+they did not previously have.
+
+### Why B was never really in the running
+
+A `bool` beside the vector documents the invariant without enforcing it. The
+next person to add a backend reads `phys_frames`, iterates it, and the flag
+does nothing. It is exactly the "quick fix that becomes permanent" the project
+standards rule out.
+
+### What this does not decide
+
+VRAM objects currently cannot be mapped into a user process:
+`gem_phys_addrs` returns `NotSupported` for them. Their bytes *do* have
+physical addresses, but the `mmap` shim would map them with ordinary
+write-back caching, and pixels written into a cache line are pixels the scanout
+engine never sees. Fixing that needs the write-combining page attribute tracked
+as `TD-NO-WRITE-COMBINING` in `known-issues.md`; until it exists, refusing is
+the honest answer.
+
+
+## §219 — The PAT gets Linux's layout, because it is the only rearrangement that leaves every mapping the kernel has already made meaning exactly what it meant before
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** The graphics card's memory was being written to one pixel at a
+time over a slow bus, because the CPU had no way to be told "batch these writes
+up and send them in bulk." x86 does have a mode for that — *write-combining* —
+but it lives in an eight-slot table that, on power-up, does not contain a
+write-combining entry at all. So the mode had to be created before it could be
+used. The catch is that the same eight slots are already being selected by every
+memory mapping in the kernel: rewrite a slot and you silently change what
+existing, working mappings mean. The decision was **which** slot to sacrifice.
+The answer is the one Linux picked, for a reason that can be checked rather than
+taken on faith.
+
+**Background, in plain terms.** Every page of memory has a *caching mode* — how
+freely the CPU is allowed to hold on to writes instead of sending them out
+immediately. Three bits in the page's descriptor (`PAT`, `PCD`, `PWT`) do *not*
+name the mode; together they form a 3-bit number, 0–7, which indexes a table of
+eight entries held in a CPU register (`IA32_PAT`, MSR `0x277`). The page picks a
+slot; the register decides what the slot means. Nothing about that table is
+fixed — which is what makes it both useful and dangerous.
+
+Power-on contents are `WB, WT, UC-, UC, WB, WT, UC-, UC`
+(WB = writeback, the fast default; WT = write-through; UC = uncacheable;
+UC- = uncacheable-but-MTRR-overridable). Note what is missing: **WC
+(write-combining) is not in the table.** There is no bit pattern a page can
+carry that means write-combining until the register is rewritten.
+
+**The decision.** Program the table to Linux's layout,
+`WB, WC, UC-, UC, WB, WP, UC-, WT` (`arch/x86/mm/pat/memtype.c`, `pat_init`).
+
+**Why this layout and not one of our own choosing — the checkable argument.**
+The property that matters is not elegance, it is that *no mapping already made
+changes meaning*. Under this layout:
+
+| Slot | Bits selecting it | Power-on | New | Mappings affected |
+|---|---|---|---|---|
+| 0 | none | WB | WB | unchanged — all ordinary memory |
+| 1 | `PWT` | WT | **WC** | **the one change** |
+| 2 | `PCD` | UC- | UC- | unchanged — all 15 `NO_CACHE` MMIO sites |
+| 3 | `PCD`+`PWT` | UC | UC | unchanged |
+| 4–7 | require `PAT` (bit 7) | — | — | none — nothing sets bit 7 |
+
+Slots 0, 2 and 3 keep their power-on meanings, and those are the only slots any
+live mapping selects. Slots 4–7 require bit 7, which no existing flag set uses.
+So exactly one slot changes, and it can be enumerated: slot 1, `PWT` alone,
+write-through → write-combining.
+
+**The one hazard, and why redefining a constant defuses it.** Write-through's
+whole point is *stronger* ordering; write-combining is *weaker*. A caller that
+asked for write-through and silently got write-combining would be a real bug,
+and nothing would fault — the wrongness would show up as a device seeing writes
+in the wrong order, arbitrarily later. The kernel has exactly one such caller,
+`mm::dma::alloc_for_user`, and it asks by name: `PageFlags::WRITE_THROUGH`. So
+the same commit that rewrites the MSR also moves that constant from `1 << 3`
+(slot 1, now WC) to `(1 << 7) | (1 << 4) | (1 << 3)` (slot 7, still WT), and the
+caller follows automatically. `PageFlags::WRITE_COMBINING` takes over the vacated
+`1 << 3`.
+
+That leaves a trap for whoever writes the *next* such mapping: hard-code `1 << 3`
+believing it to mean write-through and you get write-combining with no
+diagnostic. Two guards, because a comment alone would not survive:
+`WRITE_THROUGH`'s doc comment states the relocation explicitly, and
+`mm::pat::self_test` decodes all four named constants back through the table in
+force and fails the boot if any of them stops meaning what its name says. The
+self-test is the part that matters — it turns "someone split the MSR write from
+the constant change" from a silent miscompile into a boot failure.
+
+**Alternatives considered.**
+
+* **Put WC in a slot that needs bit 7 (4–7) and leave slots 0–3 completely
+  untouched.** Superficially the safest option, and rejected for a specific
+  reason: bit 7 is not free. At the page-table (leaf) level bit 7 *is* `PAT`, but
+  at the directory level the same bit is the page-size bit, and `PAT` moves to
+  bit 12. A flag set carrying bit 7 that reaches a huge-page mapper does not mean
+  "write-combining", it means "already a huge page", and the result is an
+  *uncacheable* huge page created silently. SlateOS's 16 KiB frames are four
+  4 KiB PTEs, so every leaf we map is 4 KiB and bit 7 is safe *there* — but
+  building the common, hot, frequently-copied WC flag on a bit that is only safe
+  by virtue of a frame-size coincidence is the wrong foundation. Slot 1 needs no
+  such reasoning. (Bit 7 is still used, for `WRITE_THROUGH` — but that has one
+  caller in the whole kernel, not the open-ended set WC will accumulate, and
+  `map_huge_2m` now rejects any flag set carrying bit 7 outright so the collision
+  is a returned error rather than a wrong mapping.)
+* **Invent our own layout.** No benefit, and it discards the one genuinely
+  valuable property of matching Linux: every firmware, hypervisor and errata
+  workaround in existence has been exercised against *this* table. QEMU included.
+* **Use MTRRs instead of the PAT.** MTRRs are a fixed, small set of physical
+  ranges, allocated at boot and awkward to change; the PAT is per-page and needs
+  no range bookkeeping. For a framebuffer aperture whose size and location come
+  from a PCI BAR at probe time, per-page is the right granularity.
+
+**Two consequences worth stating, because both are silent if forgotten.**
+
+1. **The PAT is per-logical-processor.** A page descriptor stores only the
+   3-bit index, so a core still on the power-on layout reads a WC page as
+   *write-through*. That disagreement is invisible until a thread migrates, so
+   `mm::pat::init_ap` programs each AP, gated on the BSP having succeeded — an AP
+   never creates the disagreement on its own.
+2. **The decoder must report the table actually in force, not the one we intend
+   — and "in force" is not the same as "architectural default".** The first
+   boot with this code logged the pre-existing table as `0x0000010500070406`,
+   whose slots 4–7 are `WP, WC, UC, UC`. The architectural power-on table says
+   those slots are `WB, WT, UC-, UC`. So the firmware/bootloader had already
+   rewritten half the table before the kernel ran, and a decoder falling back to
+   the architectural default would have reported four slots as memory types they
+   demonstrably were not — with no way for a reader to tell. `init` therefore
+   saves the value it read *before* overwriting it, and `memory_type_of` decodes
+   against that when `init` has not run. A diagnostic that is confidently wrong
+   is worse than one that says "WT", and worse still when the wrongness comes
+   from trusting a specification over an observation.
+
+**What this buys.** The ATI framebuffer aperture
+(`kernel/src/drm/ati/aperture.rs`) maps BAR0 write-combining instead of
+uncached. Uncached stores to a PCI BAR go out individually; write-combining
+gathers them in a fill buffer and burst-writes a full cache line. The cost is
+that the unconditional `sfence` in `Aperture::flush` becomes load-bearing rather
+than belt-and-braces: WC stores sit in that fill buffer with no ordering
+guarantee, so the `CRTC_OFFSET` register write that publishes a frame must not
+be allowed to overtake the pixels it publishes.
+
+## §220 — A diagnostic that cannot work on the platform it is running on reports "not measurable", never "failed"
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel now measures whether write-combining — a CPU feature
+that batches many small writes to the graphics card into a few large ones — is
+actually making writes to the card's memory faster. Under QEMU's software
+emulator, which is how this whole project is tested, the answer is always "no
+faster", because the emulator does not pretend to have a cache or a write buffer
+at all. The choice was between printing a warning anyway (it looks exactly like a
+real fault) and detecting the emulator and saying plainly that the number means
+nothing there. We detect the emulator. The cost accepted is that on the emulator
+this particular test can no longer catch a genuine write-combining bug — but it
+never could; it only looked as though it might.
+
+**The decision.** `drm::ati::report_write_combining` branches its verdict on
+`hypervisor::Hypervisor::models_memory_types()`, which is false for `QemuTcg`
+alone. On TCG a low ratio is reported as *not measurable*, with the reason. On
+anything else it is reported as a `WARNING`, because there a low ratio means
+something.
+
+The underlying asymmetry is not about virtualization but about who owns the page
+tables. A hardware-virtualized guest — KVM, Hyper-V/WHPX, VMware, VirtualBox,
+Xen, bhyve — runs its own page tables on the real MMU, so the guest's `IA32_PAT`
+governs real caching and write-combining genuinely happens or genuinely does not.
+QEMU's TCG interprets or JITs every guest store into host code that models no
+store buffer, no cache and no memory types; a `WC` mapping and a `UC` mapping
+execute the *same* host instructions. Measuring a memory type there is not
+failing, it is unmeasurable.
+
+**Alternatives considered.**
+
+1. **Warn unconditionally.** Rejected. It fires on every single boot of the only
+   platform this project is tested on. A warning that always fires is one its
+   reader learns to skip, which spends the credibility of the line on the one
+   occasion it would have mattered. This is not hypothetical for us: the
+   contradictory-and-therefore-useless stall dump in
+   `known-issues.md` → `BUG-BOOT-SPINLOCK-STALL-UNNAMED` cost real debugging time
+   for exactly this reason.
+2. **Delete the measurement.** Rejected. It is the only check that can catch this
+   failure on real hardware, and the failure is silent by nature: a wrong PAT slot
+   index yields a *different valid memory type* rather than a fault, and `UC` and
+   `WC` are indistinguishable to every decode-side check the driver can make (both
+   mean "writes do not linger"). Speed is the only evidence that exists.
+3. **Gate on `is_virtual()` rather than on TCG specifically.** Rejected, and this
+   is the alternative worth naming: it would have suppressed the warning under
+   KVM and WHPX too, which is where we are most likely to ever catch this bug for
+   real. The gate must be as narrow as the actual limitation.
+4. **Fail the boot on a low ratio.** Rejected. An uncached framebuffer is correct,
+   merely slow; refusing to boot would trade a working slow display for no
+   display.
+
+**Consequences.**
+
+1. On TCG the line is informational and the aperture's correctness rests on
+   `mm::pat::self_test` instead, which verifies the MSR contents and that each
+   named `PageFlags` constant decodes to the intended memory type through the
+   table actually in force. That is a weaker guarantee than the ratio and is
+   documented as such in `known-issues.md` → `TD-NO-WRITE-COMBINING`, which stays
+   open pending a platform that can produce the number.
+2. `Hypervisor::Unknown` answers `true` — an unrecognised signature warns rather
+   than staying silent. The failure mode worth avoiding is suppressing a real
+   finding, not printing an inconclusive one.
+3. The general rule this sets for kernel diagnostics: **prefer an honest "cannot
+   tell" to a false "failed", and equally to a false "passed".** A check should
+   know the conditions under which it is capable of concluding anything, and say
+   when they do not hold. The same principle produced the companion change in
+   `lockdep::dump_held_locks`, which now prints "validator DISABLED" instead of a
+   confident "0 lock(s)" it has not earned.
+4. A corollary applied at the same time: **a diagnostic must not accuse something
+   the log has already cleared.** The old warning ended "check that PAT slot 1 is
+   selected" while the line printed immediately above it decoded the mapping's
+   live memory type as `WC`. It now names the suspect that is actually still
+   open — an MTRR covering the range that says `UC`, which beats PAT because the
+   effective type is the combination of the two (Intel SDM Vol. 3, Table 11-7).

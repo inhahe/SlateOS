@@ -28634,7 +28634,69 @@ filenames. Four things worth carrying forward:
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
-**Status: OPEN.**
+**Status: OPEN — items 3 and 4 (steps (c) and (d)) done 2026-08-17; 1 and 2
+remain.**
+
+**Update 2026-08-17 — item 4 is fixed.** `draw_tokens` no longer emits a
+command per token. The toolkit gained a `RenderCommand::RichText`: one string,
+one shaping, plus a list of byte-ranged colour spans, and the renderer — which
+is the party doing the shaping, and the only party that knows the resolved
+font — gives each glyph the colour of the span containing the byte it came
+from. See `design-decisions.md` §455 for why the spans cross the wire as byte
+ranges rather than as positioned glyphs, and why span ends are cumulative. The
+editor now emits exactly one `rich_text_clipped` per visible line;
+`a_highlighted_line_is_drawn_as_one_shaped_run` is the regression guard, and
+`rich_text_lays_out_exactly_as_plain_text_does` in the compositor asserts the
+pixels are unchanged for ordinary text. The kerning across token boundaries
+that the old comment accepted losing comes back for free, and the 2.3x cost of
+the decomposition goes with it.
+
+**Update 2026-08-17 — item 3 is fixed too.** `Document::scroll_col`, a byte
+offset, is now `Document::scroll_px`, a pixel offset. The line is shaped once,
+whole, and *translated* left by `scroll_px` under a clip rectangle, instead of
+being sliced at a byte and the tail re-shaped. That is the difference between a
+window onto the correctly-ordered line and a separate shaping of part of it:
+the bidi algorithm resolves visual order from the whole paragraph, so a suffix
+can come out ordered differently from the way those same characters sit in the
+complete line — scrolling would have rearranged the text rather than slid it.
+`a_scroll_changes_only_where_the_line_is_drawn_not_what` is the regression
+guard; it asserts the drawn string and every span are *identical* at rest and
+scrolled, and only the `x` differs.
+
+Three things fell out of it:
+
+- **The "scrolled into the middle of a character" bug class is gone, not
+  guarded.** There is no slice left to land inside a character, so `rebase` lost
+  its scroll argument and became `span_end`, and the test that drove
+  `scroll_col` through every byte of `"café au lait"` was replaced by one
+  asserting a multi-byte line is drawn *whole* at every scroll position.
+- **The caret is measured over the whole prefix**, from byte 0, then shifted —
+  not measured from the scroll position. It therefore keeps the kerning that
+  used to be lost at the scroll boundary, and sits in the same coordinate
+  system as the glyphs it is placed among.
+- **`max_width` is measured from the shifted x**, since the renderer stops at
+  `x + max_width`. Getting that wrong is invisible until someone scrolls and
+  then truncates the line early by exactly the scroll distance;
+  `the_drawn_run_is_bounded_by_the_viewport` now asserts the stop lands on the
+  viewport edge at a non-zero scroll.
+
+Also added `EditorState::ensure_caret_visible_horizontally`, the companion to
+the existing `Document::ensure_cursor_visible` and the reason `scroll_px` is
+ever non-zero. **Note that neither is called by anything yet** — `apps/editor`
+has no live input loop; its `main()` is a demo harness, and the editor is a
+model plus a renderer driven by tests. Both are ready for the loop when it
+lands. (`ensure_cursor_visible` having sat uncalled since it was written is
+worth knowing: vertical auto-scroll is equally unwired, so a caret moved below
+the viewport vanishes today for the same reason a horizontal one used to.)
+
+**What that leaves.** Items 1 and 2 — the caret's x and the selection
+rectangles are still prefix-*width* sums, and under a right-to-left run the
+caret between two characters is not at the summed width of the bytes before
+it, nor is a selection one rectangle. Both need the shaped run's cluster
+positions rather than a measured width, which is step (e), and step (b)'s
+per-line shaped cache is what makes asking for those positions cheap. **(b) is
+now the head of the queue**, because (e) wants somewhere to ask for cluster
+positions and (b) is what provides it.
 
 **What.** `apps/editor` was left out of `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`
 above, and not because its arrow keys are fine — they have the same defect. It
@@ -28675,7 +28737,10 @@ widgets do today.
    than the same characters occupy in the full line. Scrolling has to become
    pixel-based over the whole shaped line, with clipping, rather than
    byte-based over a re-shaped tail.
-4. **Syntax highlighting draws one run per token, each positioned at the sum of
+4. **~~Syntax highlighting draws one run per token~~ — FIXED 2026-08-17, see
+   the update at the top of this entry.** Kept below as written, because it is
+   the argument for the shape of the fix and (d) rests on the same reasoning.
+   **Syntax highlighting draws one run per token, each positioned at the sum of
    the previous runs' widths** — `draw_tokens` (`main.rs:1513`), which walks the
    `StyledToken` list emitting a `tree.text(x, …)` per token and advancing
    `x += text::measure(piece, …)`. Found 2026-08-17 while scoping the fix; it is
@@ -28729,9 +28794,11 @@ doing them in the wrong order means writing code twice. Shape-the-whole-line is
 the foundation and 3 and 4 both sit on it, so: (a) ~~measure the shaping cost on
 a pathological line and decide the caching question~~ — **done 2026-08-17; the
 answer is "cache it", and the numbers are in the shaping entry below**;
-(c) convert `draw_tokens` to colour glyphs rather than slice strings (4), which
-is the change that makes the output correct; (d) convert scrolling to
-pixels over the shaped run with clipping (3); (b) build the per-line shaped
+~~(c) convert `draw_tokens` to colour glyphs rather than slice strings (4)~~ —
+**done 2026-08-17, see the update at the top**;
+~~(d) convert scrolling to pixels over the shaped run with clipping (3)~~ —
+**done 2026-08-17, see the second update at the top**; **(b) is now the head of
+the queue:** build the per-line shaped
 cache keyed on document revision; (e) 1 and 2 then fall out as
 one-line substitutions to `text::caret_x` / `cursor_at` / `selection_boxes`,
 because by then the shaped line they need is already in hand. Motion (the arrow
@@ -29187,3 +29254,654 @@ and after, at a fixed resolution; the whole point is the ratio. If it is not a
 clear multiple, the PAT entry is not actually being selected — which is easy to
 get wrong silently, since a wrong index just yields a different valid memory
 type rather than a fault.
+
+
+### TD-NO-WRITE-COMBINING -- UPDATE 2026-08-17 -- implemented as `kernel/src/mm/pat.rs`; the speed *ratio* this entry asks for is not yet measured
+
+`mm::pat` now programs `IA32_PAT` to Linux's layout on the BSP (`init`) and on
+every AP (`init_ap`), `PageFlags::WRITE_COMBINING` selects slot 1, and
+`drm/ati/aperture.rs` maps BAR0 with it. Rationale, the alternatives, and the
+argument for why no *existing* mapping changes meaning: `design-decisions.md`
+§219. Validated by boot #11 (PASS, 493 s).
+
+Two corrections to the plan sketched above, both discovered by doing it:
+
+1. **The bit-7 collision was handled by not relying on bit 7 for WC.** The
+   sketch offered "confine `WC` to 4 KiB leaves or handle the collision
+   explicitly". Slot 1 needs no `PAT` bit at all, so `WRITE_COMBINING` is
+   `PWT` alone and never collides. Bit 7 is now used only by
+   `PageFlags::WRITE_THROUGH`, which moved to slot 7 to vacate slot 1 -- one
+   caller in the whole kernel (`mm::dma::alloc_for_user`), which asks by name.
+   `mm::hugepage::map_huge_2m` additionally rejects any flag set carrying bit 7
+   outright, so a `WRITE_THROUGH` request reaching a huge-page mapper returns
+   `InvalidArgument` instead of silently producing an *uncacheable* huge page.
+2. **"Power-on meanings" is not what the kernel actually inherits.** The first
+   boot logged the pre-existing table as `0x0000010500070406` -- slots 4-7 are
+   `WP, WC, UC, UC`, where the architectural power-on table says
+   `WB, WT, UC-, UC`. The firmware/bootloader had already rewritten half of it.
+   The claim that matters survives (slots 0-3 *were* at their power-on values,
+   and those are the only slots any live mapping selects), but any future
+   reasoning of the form "the other entries are at their power-on values" is
+   unsound on this boot path. `mm::pat::init` now saves the value it read before
+   overwriting it, and `memory_type_of` decodes against *that* when `init` has
+   not run, rather than against a specification the machine contradicts.
+
+**Still open, and the reason this entry is not closed.** The acceptance test
+this entry itself specifies -- "time a full-screen fill through the aperture
+before and after; the whole point is the ratio" -- has not been run. What is
+verified so far is weaker, and the difference is exactly the failure mode the
+entry warned about:
+
+* `mm::pat::self_test` confirms the MSR reads back as programmed, and that the
+  four named `PageFlags` constants still decode to `WB`/`WC`/`WT`/`UC` through
+  the table in force. That proves the *table* is right and the *flags* select
+  the slots we think they do.
+* It does **not** prove the CPU is combining. A wrong index yields a different
+  valid memory type rather than a fault, and `UC` and `WC` are
+  indistinguishable from any decode-side check -- both report "writes do not
+  linger", which is why `Aperture::flush` skips `clflush` for both.
+
+The measurement to add: time a full-screen fill through the WC aperture and
+through an uncached mapping of the *same* BAR in the same boot, and report the
+ratio. Doing both in one boot avoids comparing against a number from a different
+build, and a ratio near 1.0 is then unambiguous evidence that slot 1 is not
+being selected -- the exact silent failure this entry predicted.
+
+### TD-NO-WRITE-COMBINING -- UPDATE 2026-08-17 (second) -- the ratio is measured; it is **not measurable** under QEMU TCG, and the acceptance criterion stated just above is unsound
+
+**In short:** the fill-ratio measurement the previous update called for now
+exists and has run. It reported **0.94x** -- write-combining fractionally
+*slower* than uncached. That is not the bug it looks like: the test platform is
+QEMU's TCG interpreter, which emulates no cache and no store buffer at all, so a
+write-combining mapping and an uncached one run the identical host code and the
+ratio is pinned near 1.0 no matter how correct the kernel is. The paragraph above
+is therefore wrong where it says a ratio near 1.0 is "unambiguous evidence that
+slot 1 is not being selected". It is only evidence of that on a platform that
+models memory types in the first place.
+
+**What was built.** `VramAperture::measure_write_combining`
+(`kernel/src/drm/ati/aperture.rs`) fills the same 1 MiB of the same BAR twice in
+one boot -- once with the PTEs saying `WC`, once saying `UC` -- and
+`drm::ati::report_write_combining` reports the ratio. Two ways to get a
+flattering number are defended against explicitly: each timed region ends with
+`sfence` *inside* the clock, so WC is not credited for stores still sitting in a
+fill buffer; and each half gets identical preparation, so neither pays for work
+the other avoids.
+
+**Measured, boot #12 (PASS, 1244 s):**
+
+```
+[ati]   VRAM aperture mapped: 16 MiB at 0x80000000 (memory type WC, writes may linger: false)
+[ati]   Write-combining measured over 1024 KiB: WC 810133928 cycles vs UC 764480631 cycles = 0.94x
+```
+
+**Why that is a property of the emulator, not of the kernel.** 810133928 cycles
+over 262144 four-byte stores is ~3090 cycles per store -- orders of magnitude
+above any real memory or MMIO write, and squarely in
+trap-to-the-device-model territory. `scripts/boot-test.sh` passes no `-accel`
+flag, so QEMU runs TCG. TCG interprets or JITs every guest store and models no
+store buffer, no cache and no memory types whatsoever; `WC` and `UC` reach the
+same host code. The 6% difference is noise.
+
+The kernel already had this information and did not use it: `[hypervisor]
+Detected: QEMU TCG (signature: "TCGTCGTCGTCG")` is printed at serial line **71**,
+about 1600 lines before the ATI probe warned at line 1677.
+
+**What landed as a result.**
+
+* `Hypervisor::models_memory_types()` (`kernel/src/hypervisor.rs`) -- false only
+  for `QemuTcg`. Every other hypervisor runs guest page tables on the real MMU,
+  so guest `IA32_PAT` governs real caching there and a low ratio *would* be a
+  genuine finding. `Unknown` answers `true` deliberately: the failure that
+  matters is suppressing a real finding, not printing an inconclusive one.
+* The verdict in `report_write_combining` branches on it. Under TCG it reports
+  the number as *not measurable* and says so; elsewhere it still warns.
+* **The warning stopped blaming the wrong thing.** It used to end "check that PAT
+  slot 1 is selected" -- which the line printed immediately above it already
+  disproves, since that line decodes the mapping's live memory type as `WC`. A
+  diagnostic that sends its reader to re-verify the one thing already proven is
+  worse than none. It now names the actual remaining suspect on real hardware: an
+  MTRR covering the aperture that says `UC` overrides PAT, because the effective
+  type is the *combination* of the two and for MTRR=UC the combination is UC
+  regardless of PAT (Intel SDM Vol. 3, Table 11-7). That is how a
+  correctly-programmed WC mapping still ends up uncached on metal.
+
+**A methodology bug found and fixed while doing this.** The first version warmed
+the TLB once, before the WC pass only. But switching the range to `UC` runs
+`invlpg` on every hardware page and one `wbinvd`, so the UC pass then started
+with a cold TLB and cold caches -- it was charged for refills the WC pass had
+been spared. That biases the ratio *upward*: the measurement would have
+flattered write-combining by handicapping its rival, which is exactly the class
+of error the function's own doc comment claims to defend against. Both halves now
+get the same remap-then-warm-up sequence, including a redundant remap-to-WC
+before the WC half.
+
+**Still open -- and now blocked on a platform rather than on work.** Everything
+that can be verified without hardware that models memory types has been: the MSR
+reads back as programmed, the four named `PageFlags` constants decode to
+`WB`/`WC`/`WT`/`UC` through the table actually in force, no live mapping changed
+meaning (`design-decisions.md` §219), and the measurement harness itself is
+sound. What remains is one number from a platform capable of producing it:
+
+* Real hardware with an ATI RV100 -- adjacent to `open-questions.md` Q49.
+* Or QEMU with `-accel whpx` (this is a Windows host) / KVM. **Unverified, and
+  not automatically sufficient:** hardware-accelerated guests honour guest PAT
+  for memory the host maps into the guest, but only if QEMU's `ati-vga` BAR0 is a
+  RAM-backed memory region rather than a trapping device model. The ~3090
+  cycles/store above is weak evidence it may be the latter, in which case
+  acceleration will not help and no QEMU configuration can measure this.
+  Worth one manual QEMU run to find out; do **not** change
+  `scripts/boot-test.sh`'s accelerator to test it, since that would alter the
+  test environment for all three lanes.
+
+Until then this entry stays open, and the guard against silently regressing to
+uncached is the WC-vs-UC line itself: on any platform that models memory types it
+warns, and on TCG it says plainly that it cannot tell.
+
+### BUG-BOOT-SPINLOCK-STALL-UNNAMED -- an intermittent boot hang reports `lock '?'` and `cpu 0 holds 0 lock(s)`, because lockdep is not yet enabled when the self-test battery runs -- 2026-08-17 -- OPEN (flaky; the diagnostic gap is the actionable part)
+
+**Observed.** Boot #10 of the lane-A tree (2026-08-17, tree at `8fd6813e1`)
+never reached `BOOT_OK`; `run-timeout` killed it at 1444 s, past the kernel's
+own 827 s deadline. Serial froze after
+`[spawn] Running link()/linkat no-follow symlink test (kernel, ext4 /mnt)...`
+with:
+
+```
+[sync] *** SPINLOCK STALL *** lock '?' still not acquired after ~30s of spinning
+       (cpu 0, task 0, 46170112 iters).
+[sync]   lock '?' holder: task 0 == spinner -- RECURSIVE self-deadlock
+[lockdep]   cpu 0 holds 0 lock(s):
+[liveness] cpu0: ... preempt_disable_depth=4 last_rip=0xffffffff804ca584
+```
+
+then three `SYSTEM HANG` reports and silence. **Not a regression, and not that
+test:** the immediately following boot (#11, identical kernel source plus the
+`mm::pat` work) passed `link()/linkat no-follow: OK` and went on to reach
+`BOOT_OK` in 493 s. Boot history at the time: 42 boots, 37 clean.
+
+**The actionable finding is the diagnostic, not the deadlock.** Two lines of
+that dump contradict each other, and working out which one lies is the whole
+content of this entry:
+
+* `sync::report_spin_stall` compares the lock's recorded `owner` against the
+  spinning task id. Both were 0, so it printed "RECURSIVE self-deadlock".
+* `lockdep::dump_held_locks(0)` printed **zero** held locks -- which, if lockdep
+  were running, would mean cpu 0 does *not* hold the lock, making the line above
+  false.
+
+lockdep was **not** running. `lockdep::lock_acquire` returns immediately unless
+`ENABLED` is set, and `ENABLED` is set only by `lockdep::init()`, which is called
+at `kernel/src/main.rs:5374` -- whereas the ring-3 self-test battery begins at
+`main.rs:1510` ("Step 21: Enable hardware interrupts -- BEFORE the ring-3
+self-test battery") and runs to roughly 4790. Confirmation from the serial log:
+`lockdep::init()`'s banner (`Lock order validator enabled`) appears **zero**
+times in all 1.29 MB of boot #10's output, and the only `[lockdep]` line in the
+entire log is the misleading "holds 0 lock(s)" from the stall report itself.
+
+So the most deadlock-prone phase of boot -- several thousand lines of self-tests
+exercising ext4, spawn, signals and the VFS -- runs with the lock-order
+validator switched off, and the phase after it, which is mostly idle, runs with
+it on. Worse, `dump_held_locks` prints a confident "0 lock(s)" when disabled
+rather than "lockdep disabled", so the dump actively misleads a reader into
+ruling out the correct explanation.
+
+**What was lost by that.** `lockdep::lock_acquire` already contains a precise
+detector for exactly this failure: it walks the per-CPU held stack and, on
+finding the same lock class already held, reports a re-entrant acquisition of the
+*same instance* immediately -- with the class name, and *before* the 30 s stall
+detector would fire (its own comment says as much). Had it been enabled, boot
+#10 would have produced a named lock and a located report instead of `lock '?'`
+and a 29-frame unsymbolized backtrace.
+
+**Proper fix, in two parts.**
+
+1. **Move `lockdep::init()` ahead of the self-test battery** (before
+   `main.rs:1510`). Its stated prerequisite -- "Must be after SMP init so
+   `current_cpu_index()` works on all CPUs" -- does not hold:
+   `smp::current_cpu_index` returns `BSP_CPU_INDEX` whenever `SMP_INITIALIZED`
+   is clear, which is the correct answer while only the BSP is running. Expect
+   this to surface real lock-order findings from paths that have never been
+   validated; those are the point, not an objection.
+2. **Make `dump_held_locks` say when it is disabled**, so a dump can never again
+   claim "0 lock(s)" on the strength of not having looked.
+
+Also worth doing, and cheaper: the stalled lock printed `'?'` because
+`sync::Mutex::new` defaults its name to `b"?"`. Naming the mutexes reachable from
+the self-test battery (`Mutex::named`) would make the stall detector's output
+usable on its own, without lockdep.
+
+**Reproducing.** Loop `python scripts/run-timeout.py --poll 60 1800
+./scripts/boot-test.sh`; roughly 1 boot in 8 was non-clean at the time of
+writing. Before treating a single failure at any one self-test as a regression,
+re-run -- and check whether the freeze point moves, which is what distinguishes
+this from a deterministic deadlock in the test the log happens to stop at.
+
+### BUG-BOOT-SPINLOCK-STALL-UNNAMED -- RESOLUTION 2026-08-17 -- both diagnostic fixes landed; the third is superseded by a better one
+
+**In short:** the two diagnostic defects described above are fixed and verified
+by boot #12. The intermittent hang itself is **not** fixed -- it has not
+reproduced since, so there is nothing to debug against -- but the next
+occurrence will print a lock the reader can actually identify, and a held-lock
+stack that is either true or says it is unavailable. The point of this work was
+never to fix the hang; it was to make sure the *next* one is diagnosable.
+
+**Part 1 -- move `lockdep::init()` ahead of the self-test battery: done.**
+It now runs as "Step 20z" at `kernel/src/main.rs:1530-1531`, immediately before
+`// Step 21: Enable hardware interrupts`, instead of at the old `main.rs:5374`.
+The stated prerequisite was checked against the code rather than taken on trust
+and does not hold: `smp::current_cpu_index` returns `BSP_CPU_INDEX` whenever
+`SMP_INITIALIZED` is clear, which is the correct answer while only the BSP runs.
+
+Verified: `Lock order validator enabled` appears at serial line **1931** of boot
+#12, where in boot #11 it appeared at line **26693** of ~27150 -- it now precedes
+essentially the entire self-test battery instead of trailing it.
+
+The lock-order findings this entry predicted did **not** materialise. Boot #12
+logged 28 `[lockdep]` lines in total, and every warning among them belongs to
+`lockdep::self_test`'s own deliberate `test-A`/`test-B`/`test-C` inversions
+(which the self-test labels as expected). Zero real violations across the
+newly-covered phase. That is a result rather than a non-event: the validator now
+watches the ext4 / spawn / signal / VFS self-tests and finds their lock ordering
+correct, so a violation reported there in future is a genuine signal and not a
+gap in coverage.
+
+**Part 2 -- make `dump_held_locks` say when it is disabled: done.**
+`kernel/src/lockdep.rs` now returns early with `validator DISABLED -- held-lock
+stack is not maintained, so nothing can be concluded from it` when `ENABLED` is
+clear, instead of printing a confident `0 lock(s)` on the strength of not having
+looked.
+
+**Part 3, as this entry proposed it, was the wrong fix, and has been replaced by
+a better one.** The entry suggested naming the mutexes reachable from the
+self-test battery with `Mutex::named`. The scope of that was measured first:
+**627** `Mutex::new` call sites against **28** `Mutex::named` (worst offenders
+`kshell.rs` 17, `net/httpd.rs` 8, `net/firewall.rs` 7, `sched/kmutex.rs` 6,
+`ipc/namespace.rs` 6, `sync.rs` 5). Naming them is 627 edits, 627 chances to
+miss one, does nothing for a lock allocated on the heap or created after the
+edit, and -- decisively -- only helps the locks somebody already suspected.
+
+What landed instead: **both `sync::report_spin_stall` and
+`lockdep::dump_held_locks` now print the lock's address.** The stall report
+reads `lock '?' @ 0xffff...` and the held stack reads `[0] ? @ 0xffff...`.
+
+Why this is the better fix rather than merely the cheaper one:
+
+* It is **one change that covers every lock in the tree**, including the ones
+  nobody has thought about, the heap-allocated ones no symbol covers, and every
+  lock added after today.
+* The address is **already** lockdep's class identity -- `find_or_register_class`
+  keys on `lock_addr`, and `Mutex::addr()` is the address of the inner
+  `spin::Mutex`. So the two reports now share one key and can be
+  cross-referenced directly.
+* It answers the question the dump exists to answer. With most locks named `?`,
+  a held stack rendered by name alone reads `[0] ?` / `[1] ?` -- entries
+  indistinguishable from each other, let alone matchable against the stalled
+  lock. "Am I already holding the lock I am stalled on?" is the entire question a
+  recursive self-deadlock turns on, and it is now a comparison instead of a
+  guess. That is precisely the question boot #10's dump left unanswerable.
+
+`PreemptSpinMutex` gained an `addr()` accessor for this, deliberately returning
+the address of its inner `spin::Mutex` so it agrees with `Mutex::addr()` and
+needs no offset correction when compared against a lockdep class ID.
+
+**Still open:** the hang itself, and it stays open. It is flaky (~1 boot in 8 was
+non-clean when first seen), it has not recurred, and the reproduction advice
+above still stands -- in particular, check whether the freeze point *moves*
+between runs, which is what distinguishes this from a deterministic deadlock in
+whichever self-test the log happens to stop at.
+
+## TD-LOCKDEP-CLASS-TABLE-IS-PUBLISHED-TWICE-AND-ONLY-ONE-PATH-IS-ORDERED (lane A, 2026-08-17) - **open**
+
+**In short:** the lock-order checker keeps a table of the locks it has seen. A
+CPU adding a row to that table reserves the row first and fills it in second.
+Three of the checker's own report-printing functions decide how many rows to
+read from the reservation counter -- so they can read a row that is reserved but
+not yet filled, and print a lock name and address that are still zero or, worse,
+half-written garbage. This is diagnostics-only: it can corrupt a *report* about
+a deadlock, never the deadlock detection itself. It has never been observed,
+because in practice the only caller that hits the dump is the CPU that just
+finished writing the row.
+
+**Where:** `kernel/src/lockdep.rs`.
+
+The writer, `find_or_register_class` (line ~675):
+
+```rust
+// Register new class.
+let idx = CLASS_COUNT.fetch_add(1, Ordering::Relaxed) as usize;   // <-- reserve
+if idx >= MAX_CLASSES {
+    CLASS_COUNT.fetch_sub(1, Ordering::Relaxed);                  // <-- racy undo
+    return None;
+}
+unsafe {
+    CLASSES[idx].id = lock_addr;                                  // <-- fill
+    let copy_len = name.len().min(16);
+    CLASSES[idx].name[..copy_len].copy_from_slice(&name[..copy_len]);
+    CLASSES[idx].name_len = copy_len as u8;
+}
+// Publish only after the entry is fully written -- `hash_insert`'s Release
+// store is what makes it safe for another CPU to follow the index here.
+Some(hash_insert(lock_addr, idx as u16))
+```
+
+The comment is correct as far as it goes, and the ordering it describes is real:
+a reader that arrives through `hash_lookup` cannot see `idx` until the matching
+Release store in `hash_insert`, by which time the slot is complete. **But
+`hash_insert` is not the only way to reach a slot.** Three readers reach
+`CLASSES` by counting instead, bounding their loop with `CLASS_COUNT` -- the very
+counter that is incremented *before* the slot is written:
+
+| Line | Function | What it does with the slot |
+|---|---|---|
+| ~548 | `snapshot()` | pushes `id`/`name`/`name_len` into a heap `Vec` |
+| ~635 | `dump_held_locks()` | prints `name @ id` for each held lock |
+| ~1022 | `verify_class_index()` | asserts the index agrees with a linear scan |
+
+For each of these, the sequence `CPU0: fetch_add -> (interrupt / other CPU runs)
+-> CPU1: load CLASS_COUNT, read CLASSES[idx]` observes a reserved-but-empty
+slot. Both loads are `Relaxed`, so there is not even an acquire fence to pair
+against; on x86-64 the store order happens to be preserved by the hardware, but
+that is an accident of the target, not something the code establishes, and
+`copy_from_slice` into `name` is not a single store in any case.
+
+Two smaller defects in the same six lines:
+
+- **The "undo" on a full table is racy.** If two CPUs both overflow
+  concurrently, each does `fetch_add` then `fetch_sub`; interleaved with a third
+  CPU's successful `fetch_add`, the counter can end up naming a slot nobody
+  owns, or below the true number of live classes -- which would make the readers
+  above *skip* real entries. `MAX_CLASSES` is 128 and the kernel currently
+  registers 5, so this is unreachable today.
+- **`fetch_sub` can transiently expose a count above `MAX_CLASSES`.** All three
+  readers do `.min(MAX_CLASSES)`, so this is contained -- but it is contained by
+  every caller remembering to clamp, rather than by the counter being correct.
+
+**Why it has not bitten:** `dump_held_locks` is called from the violation
+reporter on the CPU that is *itself* mid-`lock_acquire`, so the slot it names was
+written by that same CPU before the call -- the held-lock stack only ever
+contains indices whose slots that CPU has already filled. `snapshot()` is
+`#[allow(dead_code)]`. `verify_class_index` runs at two fixed boot points that
+are effectively single-threaded. So the window is real but currently
+unreachable, which is exactly the kind of bug that surfaces the first time
+someone calls the dump from a different CPU -- e.g. an NMI-time or watchdog-time
+lock dump, which is precisely the feature this table exists to make possible.
+
+**The proper fix** -- publish the slot, not the reservation:
+
+1. Fill `CLASSES[idx]` completely, then make the count the publication point with
+   a Release store: replace the eager `fetch_add` with a reservation counter that
+   is *separate* from the published count, i.e. `NEXT_SLOT.fetch_add(1, Relaxed)`
+   to claim, and after filling, `CLASS_COUNT.fetch_max(idx + 1, Release)` (or a
+   CAS loop) to publish. Readers then use `CLASS_COUNT.load(Acquire)`.
+   `fetch_max` also removes the need to undo anything on overflow: an overflowing
+   claimer simply never publishes, so the racy `fetch_sub` disappears.
+2. Give the three counting readers `Acquire` loads to pair with it.
+3. Note that with `fetch_max` publication, a published count of `N` no longer
+   guarantees every slot below `N` is filled if claims complete out of order.
+   Either keep a per-slot `initialized: AtomicBool` (readers skip un-set slots),
+   or -- simpler and adequate for a 128-entry diagnostic table -- serialise
+   registration behind the lockdep-internal lock that `record_edge` already needs,
+   and keep a single `CLASS_COUNT` written last with Release. Registration is
+   cold by construction (it happens once per distinct lock address, ever), so the
+   lock costs nothing measurable; the O(1) `hash_lookup` fast path at the top of
+   `find_or_register_class` returns before reaching it on every subsequent
+   acquire.
+
+Option 3 is the recommended one: it makes "the count is the publication point"
+true by construction instead of by a per-slot flag every future reader must
+remember to check, and it fixes the overflow race in the same stroke.
+
+**How it was found:** reading `find_or_register_class` while adding the class
+address to `dump_held_locks`' output (the `@ {:#x}` field) -- i.e. while making
+one of the three unordered readers print *more* of the slot it may be reading too
+early.
+
+### TD-LOCKDEP-CLASS-TABLE-IS-PUBLISHED-TWICE -- RESOLUTION 2026-08-17 -- fixed lock-free; the recommendation above was wrong
+
+**In short:** the defect is fixed, but *not* the way this entry recommended. Its
+"Option 3" -- serialise class registration behind "the lockdep-internal lock that
+`record_edge` already needs" -- cannot be implemented, and would deadlock the
+kernel on the first lock acquisition if it were. There is no such lock, and there
+can never be one. What actually landed is the per-slot flag the entry dismissed
+as the inferior option; it turns out to be the only option.
+
+**Why Option 3 is impossible.** `sync::Mutex::lock` calls
+`lockdep::lock_acquire` (`kernel/src/sync.rs:438`, and again at 534). So a
+`sync::Mutex` *inside* lockdep would re-enter lockdep on every acquire of the
+lockdep lock itself -- infinite recursion on the first lock in the boot, not a
+subtle ordering bug. This is why `lockdep` holds no lock of any kind: a grep of
+the module confirms it contains none, and instead relies on
+`IN_LOCKDEP: [bool; MAX_CPUS]`, a per-CPU re-entrancy guard, precisely because a
+real lock is unavailable to it. The phrase "the lockdep-internal lock that
+`record_edge` already needs" in the recommendation above describes a lock that
+does not exist and was never a candidate; it was written from the assumption that
+a cold path can always afford a mutex, without checking whether *this* module is
+allowed to hold one. Recorded here rather than deleted so the reasoning error is
+visible: the cost of a lock is not always its contention.
+
+For the same reason, the entry's aside that "registration is cold by
+construction, so the lock costs nothing measurable" is beside the point. The
+problem was never the cost.
+
+**What landed instead** -- Option 1 of the entry's step 3, a parallel
+publication-flag array:
+
+```rust
+/// Publication flag per class slot: `true` once `CLASSES[i]` is fully written.
+static CLASS_READY: [AtomicBool; MAX_CLASSES] =
+    [const { AtomicBool::new(false) }; MAX_CLASSES];
+
+#[inline]
+fn class_is_ready(idx: usize) -> bool {
+    CLASS_READY.get(idx).is_some_and(|f| f.load(Ordering::Acquire))
+}
+```
+
+A parallel array rather than an `initialized: AtomicBool` field inside
+`LockClass`, because `LockClass` is `Copy` and several readers depend on that:
+they snapshot a whole slot in one indexing operation (`let c = unsafe {
+CLASSES[i] };`) rather than borrowing it. An atomic field would make the struct
+non-`Copy` and force those readers back to holding a reference into a mutable
+static, which is the very thing the fix removes.
+
+The reservation is now a bounded CAS loop, which deletes the racy `fetch_sub`
+undo the entry describes as its second smaller defect -- an overflowing claimer
+never increments the counter at all, so there is nothing to undo and the count
+can never transiently exceed `MAX_CLASSES`:
+
+```rust
+let idx = loop {
+    let cur = CLASS_COUNT.load(Ordering::Relaxed);
+    if cur as usize >= MAX_CLASSES {
+        return None;
+    }
+    if CLASS_COUNT
+        .compare_exchange_weak(cur, cur + 1, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        break cur as usize;
+    }
+};
+```
+
+and the slot is published with a `Release` store *after* it is filled and
+*before* `hash_insert`, so both publication paths -- the counting one and the
+hash one -- are now ordered:
+
+```rust
+CLASS_READY[idx].store(true, Ordering::Release);
+Some(hash_insert(lock_addr, idx as u16))
+```
+
+All three counting readers named in the table above (`snapshot`,
+`dump_held_locks`, `verify_class_index`) now skip un-published slots.
+`dump_held_locks` says so explicitly rather than silently omitting the row --
+`<class N still being registered>` -- because this entry's sibling
+(`BUG-BOOT-SPINLOCK-STALL-UNNAMED`) exists entirely because a dump printed a
+confident answer it had not earned. `verify_class_index` needed the gate in two
+places, not one: its linear-scan oracle would otherwise "find" an unpublished
+slot whose `id` is still zero and report the *index checker* as broken.
+
+**Two extra sites found while auditing, both now fixed.** A grep for `CLASSES[`
+turned up `class_name` (line ~913) forming `&CLASSES[idx]` -- a shared reference
+to a mutable static, which is UB the moment another CPU appends, and which this
+same file's `class_id` doc comment already warns against. `snapshot()` did the
+same. Both now read by `Copy` or via `&raw const`, and `class_name` returns `"?"`
+for an unpublished index. Confirmed *not* needing a gate: `class_id`'s hot
+callers (`hash_lookup:213`, `hash_insert:244`) arrive through the ordered hash
+path, where the Release/Acquire pair already guarantees the slot is complete.
+
+**Regression test.** A new "Test 9: slot publication" in `lockdep::self_test()`
+asserts that every slot below `CLASS_COUNT` is ready, that the slot *at*
+`CLASS_COUNT` is not, that `class_is_ready(MAX_CLASSES)` is false, and that
+`class_name` of an unpublished index is `"?"`. It deliberately does **not** try
+to reproduce the race -- a two-CPU interleaving inside a six-line window is not
+reproducible on demand -- and instead pins the failure mode that a future edit
+would actually cause: forgetting the `CLASS_READY` store, which would make all
+three counting readers silently skip every real class and turn every lock dump
+into a blank one. A quiet diagnostic is the failure mode worth a boot-time
+assert.
+
+**Verified** by boot #16 (`PASS`, every gate green, consecutive clean streak 6):
+
+```
+1957:[lockdep]   Slot publication (ready flags vs count): OK
+1959:[lockdep] Self-test PASSED
+1958:[lockdep]   Stats: 5 classes, 5 edges, 3 violations
+```
+
+The 3 violations are the intentional ones the self-test provokes (two AB/BA
+warnings and one `*** SELF-DEADLOCK ***`), unchanged from before this fix. The
+new Test 9 line sits between the pre-existing `class hash (early)` check and the
+stats line, i.e. it runs at "Step 20z" ahead of the whole self-test battery,
+where a broken publication would be caught before any of the code that depends
+on it. `cargo clippy -p kernel` exits 0 with **54** warnings naming
+`lockdep.rs`, against a 55 baseline -- one fewer, none new, despite the module
+growing by a static array, a helper and a test.
+
+## TD-SPANS-ARE-LAID-OUT-END-TO-END (lane C, 2026-08-17)
+
+**What.** Three more places have the defect `TD-EDITOR-IS-NOT-BIDIRECTIONAL`
+item 4 just had fixed — two widgets in `gui/toolkit/src/textview.rs` and
+`apps/markdowneditor` — and all three were left alone deliberately: the fix
+that worked for the editor does not fit them, for a reason worth writing down
+before someone tries it.
+
+`RichTextView` draws a wrapped line by walking its `RichSpan`s, emitting a
+`RenderCommand::Text` per span at a running `x` and advancing
+`x += self.span_width(span, heading)` (`textview.rs:1821` for selection boxes,
+`:2541` for the drawing itself; `span_width` at `:1751` is
+`crate::text::measure`). Laying the pieces out end to end **is** the assumption
+that screen order equals byte order — the same assumption, with the same
+consequence: on a line containing a right-to-left run the spans' glyphs belong
+interleaved with each other, so there is no `x` at which a span can be drawn as
+one left-to-right piece.
+
+`SimpleTextView` (the ANSI/terminal view) advances by
+`columns(&span.text) * self.config.char_width` (`:1125`) instead. That is
+narrower than a bug: a terminal *is* a grid of cells and advancing by cells is
+the terminal's own model, not a mis-measurement. It is still wrong under a
+right-to-left run — a terminal has to reorder within the line to display one —
+but fixing it is a terminal-bidi question (BiDi in a cell grid), not the same
+question as `RichTextView`'s.
+
+`apps/markdowneditor` has the same shape as `RichTextView` and one extra fault
+on top. It emits a `RenderCommand::Text` per `HighlightSpan`
+(`markdowneditor/src/main.rs:2881–2898`) positioned by
+`col_x(line, span.start, text_x)` — and `col_x` (`:139`) is
+`text_x + prefix.chars().count() * char_width()`, a *nominal* character width
+multiplied by a character count. That is wrong before bidi ever enters: it
+assumes every glyph is exactly `char_width()` wide, so on a proportional face
+the error compounds along the line and every span after the first lands in the
+wrong place. The same expression positions the caret, so the caret and the text
+drift together and the editor looks self-consistent while both are wrong. Fix
+the nominal width first — that one is a plain bug with a plain fix
+(`text::measure`, exactly as `apps/editor`'s caret comment already argues) —
+and the span layout with the rest of this entry.
+
+**Why `RichText` does not simply apply.** The editor's spans differ only in
+*colour*, which is why a `TextSpan { end, color }` could carry them. These do
+not:
+
+| Carrier | Per-span attributes beyond colour |
+|---|---|
+| `RichSpan` → `RichSpanStyle` (`:1215`) | `weight`, `font_style`, `font_size`, `bg_color`, `underline`, `strikethrough`, `link` |
+| `SimpleTextView` → `AnsiStyle` (`:161`) | `bg`, `bold`, `dim`, `italic`, `underline`, `reverse` |
+| `markdowneditor` → `HighlightSpan` (`:2197`) | `weight` |
+
+A span that changes the *size* or the *weight* changes the shaping, so it is
+not merely a colour attribute painted onto glyphs that were shaped uniformly —
+it is a genuine style run, and shaping a line whose runs differ in face means
+shaping each run and then ordering the results, which is what a real text
+engine (HarfBuzz + a bidi pass + a line breaker) does. `underline`,
+`strikethrough` and `bg_color` are worse still: each needs the *rectangles* the
+span occupies on screen, and under bidi one span occupies several disjoint
+rectangles — exactly the problem `text::selection_boxes` already solves for
+selections, and the same machinery is the answer here.
+
+**The proper fix.** Widen the render primitive from "colour per byte range" to
+"style per byte range" — a `RichTextSpan { end, color, bg, weight, size,
+decorations }` — and have the renderer shape each style run, order the runs by
+the bidi algorithm over the whole line, then emit glyphs and, for each span,
+the set of rectangles its glyphs cover (which the decorations and the
+background are drawn into). That is a larger change than §455's, and it wanted
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL` step (d) done first: (d) establishes
+shape-the-whole-line-and-clip in the editor, which is the same shape this
+needs, and doing them in the other order means designing the multi-run
+machinery against no caller.
+
+**That prerequisite is met as of 2026-08-17** — step (d) landed, and the
+pattern it establishes is worth copying verbatim here: shape the whole line,
+translate it under a clip rectangle rather than slicing it, and measure
+`max_width` from the *shifted* x. `apps/editor`'s `draw_tokens` is the worked
+example.
+
+**Severity.** Low today for the bidi part, same as the editor's:
+uni-directional text lays out correctly under the present code, and
+`RichTextView`'s callers are help text and markdown-ish rendering. It bites on
+a document with a quoted Arabic or Hebrew phrase — which is precisely what a
+markdown view exists to display. **`markdowneditor`'s nominal character width
+is not low severity** and is not really part of this entry's question: it is
+visibly wrong on any proportional face, today, in English.
+
+**Where.** `gui/toolkit/src/textview.rs`: `RichTextView::span_width` (~1751),
+`selection_boxes_of_cols` (~1796–1821), the draw loop (~2470–2545); and
+`SimpleTextView`'s draw loop (~1090–1126) for the terminal-grid variant.
+`apps/markdowneditor/src/main.rs`: `col_x` (~139), the span draw loop
+(~2881–2898), and the caret at (~2902).
+
+## TD-EDITOR-HAS-NO-INPUT-LOOP (lane C, 2026-08-17)
+
+**What.** `apps/editor` is a document model plus a renderer with no way to
+drive it. `fn main()` is a demo harness that mutates a `Document`
+programmatically and prints to stdout; there is no key handler, no event
+dispatch, and no connection to the compositor. Every feature the editor has —
+undo/redo, find, folding, outline, structural selection, external-change
+merging, syntax highlighting — is reachable only from tests.
+
+**How it was found.** Wiring horizontal auto-scroll for
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL` step (d) needed a caller, and there was none.
+`Document::ensure_cursor_visible` turned out to have *zero* callers and to have
+had none since it was written: vertical auto-scroll is written, tested by
+nobody, and never runs. `EditorState::ensure_caret_visible_horizontally`, added
+by step (d), is in exactly the same position — correct, tested, and uncalled.
+
+**Why this matters more than it looks.** Two uncalled scroll functions is the
+visible symptom; the real cost is that *nothing* in the editor is exercised
+end to end. A model-level test can assert that `ensure_cursor_visible` moves
+`scroll_line`, but not that anything ever asks it to — and that is precisely
+the kind of defect that survives a green test suite. The longer the model
+grows without a driver, the more of it is written against an imagined caller.
+
+**The proper fix.** Give the editor a real event loop against
+`gui/remote`: connect, receive input events, translate them to the document
+operations that already exist, call `ensure_cursor_visible` and
+`ensure_caret_visible_horizontally` after any cursor movement, and push a
+`RenderTree` per frame. `apps/markdowneditor` has a working loop of this shape
+to copy from. The demo `main()` should become an example or a test, not be
+deleted — it is a compact tour of the model's API.
+
+**Severity.** High as a *blocker* (the editor cannot be used at all), low as a
+*defect* (nothing is wrong with what exists; it is only unreachable). Not
+urgent for correctness, but it should come before more model features are
+added, so that what is added is shaped by a real caller.

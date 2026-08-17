@@ -509,7 +509,7 @@ impl<T> Mutex<T> {
     #[cold]
     #[inline(never)]
     fn report_stall(&self, iters: u64) {
-        report_spin_stall(self.name, &self.owner, iters);
+        report_spin_stall(self.name, self.addr(), &self.owner, iters);
     }
 
     /// Try to acquire the lock without blocking.
@@ -761,13 +761,26 @@ impl<T> Drop for MutexIrqGuard<'_, T> {
 /// identical stall output. `owner` is the lock's diagnostic holder-id atomic
 /// (see [`Mutex::owner`] / [`PreemptSpinMutex`]); `OWNER_NONE` means unheld.
 ///
+/// `addr` is the lock's own address, and it is printed because the name usually
+/// is not enough to find the lock. [`Mutex::new`] defaults `name` to `"?"` and
+/// the overwhelming majority of locks in the tree take that default (627
+/// `Mutex::new` against 28 `Mutex::named` when this was written), so a stall
+/// report that carried only the name said `lock '?'` and identified nothing —
+/// which is exactly what happened in
+/// `known-issues.md` → `BUG-BOOT-SPINLOCK-STALL-UNNAMED`. The address is
+/// unambiguous for every lock, needs no per-site change to work, works for
+/// heap-allocated locks that no symbol covers, and is the same key lockdep
+/// already uses to identify a lock class — so it cross-references the two
+/// reports directly. Naming all 627 sites would be 627 chances to forget one;
+/// this is correct for locks nobody has thought about yet.
+///
 /// Limitation: this prints via the serial port, so if the *serial* lock itself
 /// is the deadlocked lock (or is held by this same CPU) the report may not
 /// appear. That is an accepted edge case — the target failure modes are the
 /// scheduler / cgroup-table / teardown locks, not serial.
 #[cold]
 #[inline(never)]
-fn report_spin_stall(name: &'static [u8], owner: &AtomicU64, iters: u64) {
+fn report_spin_stall(name: &'static [u8], addr: usize, owner: &AtomicU64, iters: u64) {
     use crate::serial_println;
 
     let n = STALL_REPORTS.fetch_add(1, Ordering::Relaxed);
@@ -780,11 +793,12 @@ fn report_spin_stall(name: &'static [u8], owner: &AtomicU64, iters: u64) {
     let name = core::str::from_utf8(name).unwrap_or("<non-utf8>");
     let owner = owner.load(Ordering::Relaxed);
     serial_println!(
-        "[sync] *** SPINLOCK STALL *** lock '{}' still not acquired after ~{}s of \
+        "[sync] *** SPINLOCK STALL *** lock '{}' @ {:#x} still not acquired after ~{}s of \
          spinning (cpu {}, task {}, {} iters). Likely self-deadlock or lock convoy; \
          the timer-driven liveness watchdog is blind to this if interrupts are \
          disabled.",
         name,
+        addr,
         STALL_SECONDS,
         cpu,
         tid,
@@ -797,24 +811,27 @@ fn report_spin_stall(name: &'static [u8], owner: &AtomicU64, iters: u64) {
     // still fails — a lost-unlock / poisoned-flag desync.
     if owner == OWNER_NONE {
         serial_println!(
-            "[sync]   lock '{}' holder: NONE recorded (owner=unheld) — \
+            "[sync]   lock '{}' @ {:#x} holder: NONE recorded (owner=unheld) — \
              lost-unlock or flag desync; spinner is task {} on cpu {}",
             name,
+            addr,
             tid,
             cpu
         );
     } else if owner == tid {
         serial_println!(
-            "[sync]   lock '{}' holder: task {} == spinner — RECURSIVE \
+            "[sync]   lock '{}' @ {:#x} holder: task {} == spinner — RECURSIVE \
              self-deadlock (same task re-entered the lock)",
             name,
+            addr,
             owner
         );
     } else {
         serial_println!(
-            "[sync]   lock '{}' holder: task {} (spinner is task {}) — guard \
+            "[sync]   lock '{}' @ {:#x} holder: task {} (spinner is task {}) — guard \
              held by another task; check whether it is still alive",
             name,
+            addr,
             owner,
             tid
         );
@@ -835,6 +852,7 @@ fn report_spin_stall(name: &'static [u8], owner: &AtomicU64, iters: u64) {
 #[inline(never)]
 fn spin_with_stall<G>(
     name: &'static [u8],
+    addr: usize,
     owner: &AtomicU64,
     mut try_acquire: impl FnMut() -> Option<G>,
 ) -> G {
@@ -856,7 +874,7 @@ fn spin_with_stall<G>(
             };
             if stalled {
                 warned = true;
-                report_spin_stall(name, owner, iters);
+                report_spin_stall(name, addr, owner, iters);
             }
         }
     }
@@ -926,6 +944,17 @@ impl<T> PreemptSpinMutex<T> {
         }
     }
 
+    /// Address identifying this lock instance in a stall report.
+    ///
+    /// Deliberately the address of the inner `spin::Mutex`, matching
+    /// [`Mutex::addr`], so the two lock types report the same identity for the
+    /// same lock and a `PreemptSpinMutex` address can be compared against a
+    /// lockdep class ID without an offset correction.
+    #[inline]
+    fn addr(&self) -> usize {
+        &self.inner as *const _ as usize
+    }
+
     /// Acquire the lock, returning a guard that releases on drop.
     ///
     /// Disables preemption before spinning (so the holder can't be preempted
@@ -940,7 +969,9 @@ impl<T> PreemptSpinMutex<T> {
         crate::sched::preempt_disable();
         let guard = match self.inner.try_lock() {
             Some(g) => g,
-            None => spin_with_stall(self.name, &self.owner, || self.inner.try_lock()),
+            None => spin_with_stall(self.name, self.addr(), &self.owner, || {
+                self.inner.try_lock()
+            }),
         };
         self.owner
             .store(crate::sched::current_task_id(), Ordering::Relaxed);

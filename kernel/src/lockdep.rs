@@ -78,8 +78,43 @@ impl LockClass {
 /// Global registry of known lock classes.
 static mut CLASSES: [LockClass; MAX_CLASSES] = [LockClass::empty(); MAX_CLASSES];
 
-/// Number of registered classes.
+/// Number of class slots *reserved*. Not the number that are readable.
+///
+/// A registering CPU claims a slot by bumping this counter and only then fills
+/// the slot in, so a reader that bounds a loop by this value alone can reach a
+/// slot that is reserved but still blank. Bound loops by it, but gate each slot
+/// on [`class_is_ready`] before reading it.
 static CLASS_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// Publication flag per class slot: `true` once `CLASSES[i]` is fully written.
+///
+/// [`find_or_register_class`] reaches a slot two different ways, and only one of
+/// them was ordered. A reader arriving through [`hash_lookup`] cannot observe the
+/// slot index until `hash_insert`'s `Release` store, by which point the slot is
+/// complete — that path was always safe. But three readers ([`snapshot`],
+/// [`dump_held_locks`], [`verify_class_index`]) find slots by *counting* instead,
+/// bounded by `CLASS_COUNT`, which is incremented *before* the slot is written.
+/// Those readers could see a blank or half-written slot and print a lock name and
+/// address of zero — in the held-lock dump, the very output someone is reading to
+/// identify a deadlock.
+///
+/// A separate array rather than a field on `LockClass`, deliberately: `LockClass`
+/// is `Copy` so a slot can be snapshotted in one indexing operation, and an
+/// `AtomicBool` field would take that away. Keeping the flag alongside costs one
+/// byte per class and leaves the hot read shape untouched.
+static CLASS_READY: [AtomicBool; MAX_CLASSES] = [const { AtomicBool::new(false) }; MAX_CLASSES];
+
+/// Whether class slot `idx` is fully written and safe to read.
+///
+/// The `Acquire` pairs with the `Release` store in [`find_or_register_class`]: if
+/// this returns `true`, every write to `CLASSES[idx]` made before publication is
+/// visible to this CPU.
+#[inline]
+fn class_is_ready(idx: usize) -> bool {
+    CLASS_READY
+        .get(idx)
+        .is_some_and(|f| f.load(Ordering::Acquire))
+}
 
 // ---------------------------------------------------------------------------
 // Class index — O(1) address → class lookup
@@ -546,8 +581,17 @@ pub fn snapshot() -> LockdepSnapshot {
 
     let mut classes = alloc::vec::Vec::with_capacity(num_classes.min(MAX_CLASSES));
     for i in 0..num_classes.min(MAX_CLASSES) {
-        // SAFETY: Reading from append-only array within bounds.
-        let c = unsafe { &CLASSES[i] };
+        // A reserved-but-unfilled slot is not yet a class; omitting it is right
+        // for a snapshot, whose consumers treat every element as a real entry.
+        if !class_is_ready(i) {
+            continue;
+        }
+        // SAFETY: `i < MAX_CLASSES` and `class_is_ready(i)` established that the
+        // slot is fully written and never mutated again, so this `Copy` read of a
+        // published slot is sound. Copied by value rather than borrowed: a shared
+        // reference to a mutable static is UB the moment another CPU appends (see
+        // `class_id`), which is what `&CLASSES[i]` used to form here.
+        let c = unsafe { CLASSES[i] };
         classes.push(LockClassInfo {
             index: i as u16,
             id: c.id,
@@ -611,6 +655,22 @@ pub fn dump_held_locks(cpu: usize) {
     if cpu >= MAX_CPUS {
         return;
     }
+    // Say so when disabled, instead of reporting an empty stack as a fact.
+    // `lock_acquire`/`lock_release` are no-ops while disabled, so the held stack
+    // is not merely stale but meaningless -- and the difference matters: printed
+    // during a spinlock-stall dump, "cpu 0 holds 0 lock(s)" reads as evidence
+    // that the CPU does *not* hold the wanted lock, which directly contradicts
+    // the "RECURSIVE self-deadlock" line printed immediately above it. A reader
+    // then has to pick which line to believe, and the wrong choice rules out the
+    // correct explanation. This happened; see `known-issues.md`
+    // BUG-BOOT-SPINLOCK-STALL-UNNAMED.
+    if !ENABLED.load(Ordering::Relaxed) {
+        serial_println!(
+            "[lockdep]   cpu {cpu}: validator DISABLED — held-lock stack is not maintained, \
+             so nothing can be concluded from it"
+        );
+        return;
+    }
     // SAFETY: Reading the per-CPU held stack + depth for diagnostics only.
     // See the doc comment: the target CPU is spinning and not mutating its
     // own stack, so this snapshot is stable. Copying by value avoids
@@ -623,19 +683,37 @@ pub fn dump_held_locks(cpu: usize) {
         if class_idx >= count {
             continue;
         }
-        // SAFETY: class_idx < count ≤ number of registered classes; the
-        // CLASSES array is append-only so this slot is fully initialized.
-        let (name, name_len) = unsafe {
-            (
-                CLASSES[class_idx].name,
-                CLASSES[class_idx].name_len as usize,
-            )
-        };
+        // Skip a slot that is reserved but not yet filled. Printing it would
+        // render as `?` @ 0x0 -- indistinguishable from a real lock named by the
+        // default name, in the one report where a wrong identity is worst.
+        if !class_is_ready(class_idx) {
+            serial_println!("[lockdep]     [{i}] <class {class_idx} still being registered>");
+            continue;
+        }
+        // Copy the whole slot in one indexing operation rather than one per
+        // field. `LockClass` is `Copy`, so this is no more work, and it keeps the
+        // number of `indexing_slicing` sites -- each a separate panic path to
+        // justify -- at one, instead of growing with every field the dump learns
+        // to print.
+        // SAFETY: class_idx < count ≤ number of registered classes; the CLASSES
+        // array is append-only, so this slot is fully initialized and is never
+        // mutated after publication.
+        let class = unsafe { CLASSES[class_idx] };
+        let (name, name_len, id) = (class.name, class.name_len as usize, class.id);
         let n = name.get(..name_len.min(16)).unwrap_or(b"");
+        // Print the class address, not just the name. Most locks in the tree take
+        // `Mutex::new`'s default name of "?", so a held stack rendered by name
+        // alone reads "[0] ?" / "[1] ?" -- entries that cannot be told apart from
+        // each other, let alone matched against the lock named in the stall
+        // report printed immediately above. The address is the same value
+        // `sync::report_spin_stall` prints, so "am I already holding the lock I am
+        // stalled on?" -- the entire question a recursive self-deadlock turns
+        // on -- becomes a comparison instead of a guess.
         serial_println!(
-            "[lockdep]     [{}] {}",
+            "[lockdep]     [{}] {} @ {:#x}",
             i,
-            core::str::from_utf8(n).unwrap_or("<non-utf8>")
+            core::str::from_utf8(n).unwrap_or("<non-utf8>"),
+            id
         );
     }
 }
@@ -652,24 +730,46 @@ fn find_or_register_class(lock_addr: usize, name: &[u8]) -> Option<u16> {
         return Some(idx);
     }
 
-    // Register new class.
-    let idx = CLASS_COUNT.fetch_add(1, Ordering::Relaxed) as usize;
-    if idx >= MAX_CLASSES {
-        // Table full.  Undo the increment (best-effort).
-        CLASS_COUNT.fetch_sub(1, Ordering::Relaxed);
-        return None;
-    }
+    // Reserve a slot by CAS rather than an unconditional `fetch_add`.
+    //
+    // The previous form incremented first and "undid" the increment with a
+    // `fetch_sub` when the table turned out to be full, which is not sound under
+    // contention: two CPUs overflowing concurrently, interleaved with a third
+    // succeeding, can leave the counter naming a slot nobody owns or *below* the
+    // number of live classes — which would make the counting readers skip real
+    // entries. Refusing to increment past the bound in the first place needs no
+    // undo, so that whole class of interleaving disappears.
+    let idx = loop {
+        let cur = CLASS_COUNT.load(Ordering::Relaxed);
+        if cur as usize >= MAX_CLASSES {
+            // Table full. The counter is left alone, so it never exceeds
+            // MAX_CLASSES and readers need no clamp to stay in bounds.
+            return None;
+        }
+        if CLASS_COUNT
+            .compare_exchange_weak(cur, cur + 1, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            break cur as usize;
+        }
+    };
 
-    // SAFETY: We "own" slot `idx` because fetch_add gave us a unique index.
-    // No other CPU will write to this slot.
+    // SAFETY: We "own" slot `idx` because the CAS above gave us a unique index,
+    // and no slot is ever reused or mutated after publication. No other CPU will
+    // write to this slot.
     unsafe {
         CLASSES[idx].id = lock_addr;
         let copy_len = name.len().min(16);
         CLASSES[idx].name[..copy_len].copy_from_slice(&name[..copy_len]);
         CLASSES[idx].name_len = copy_len as u8;
     }
-    // Publish only after the entry is fully written — `hash_insert`'s Release
-    // store is what makes it safe for another CPU to follow the index here.
+    // Publish the slot to the *counting* readers. This must come after the writes
+    // above and before `hash_insert`, and it is the store `class_is_ready`'s
+    // `Acquire` pairs with. `hash_insert`'s own `Release` covers only readers that
+    // arrive via `hash_lookup`; it says nothing to a reader walking 0..CLASS_COUNT,
+    // which is why this second publication point exists at all.
+    #[allow(clippy::indexing_slicing)] // idx < MAX_CLASSES, enforced by the CAS above
+    CLASS_READY[idx].store(true, Ordering::Release);
     #[allow(clippy::cast_possible_truncation)] // idx < MAX_CLASSES = 128
     Some(hash_insert(lock_addr, idx as u16))
 }
@@ -804,19 +904,33 @@ fn report_recursive(class_idx: u16, cpu: usize) {
 }
 
 /// Get the name of a lock class for diagnostic output.
+///
+/// Returns `"?"` for an out-of-range index and for a slot that is reserved but
+/// not yet published, rather than reading a half-written name: the callers are
+/// violation and self-deadlock reports, where a plausible-looking wrong name is
+/// worse than an admitted unknown.
 fn class_name(idx: u16) -> &'static str {
     let idx = idx as usize;
-    if idx >= MAX_CLASSES {
+    if idx >= MAX_CLASSES || !class_is_ready(idx) {
         return "?";
     }
-    // SAFETY: Reading from the class array within bounds.
-    let class = unsafe { &CLASSES[idx] };
-    let len = class.name_len as usize;
+    // SAFETY: `idx` is in bounds and the read is a place expression on a `Copy`
+    // field, so no reference to the mutable static is formed.
+    #[allow(clippy::indexing_slicing)]
+    let len = (unsafe { CLASSES[idx].name_len } as usize).min(16);
     if len == 0 {
         return "?";
     }
-    // SAFETY: name bytes were copied from a valid &[u8] in register.
-    core::str::from_utf8(&class.name[..len]).unwrap_or("?")
+    // SAFETY: `class_is_ready` established the slot is fully written, and a
+    // published slot is never mutated again, so these bytes are immutable for the
+    // remaining life of the kernel -- which is what makes the `'static` sound.
+    // `&raw const` reaches the field without forming `&CLASSES[idx]`, a shared
+    // reference to a mutable static that is UB the moment another CPU appends
+    // (the bug this replaced; see `class_id`).
+    #[allow(clippy::indexing_slicing)]
+    let bytes =
+        unsafe { core::slice::from_raw_parts((&raw const CLASSES[idx].name).cast::<u8>(), len) };
+    core::str::from_utf8(bytes).unwrap_or("?")
 }
 
 // ---------------------------------------------------------------------------
@@ -955,6 +1069,43 @@ pub fn self_test() {
     // see the function's own doc comment for why once is not enough.
     verify_class_index("early");
 
+    // Test 9: slot publication. Every slot the counter claims exists must also be
+    // marked ready, and slots past the counter must not be -- the invariant the
+    // three counting readers (`snapshot`, `dump_held_locks`, `verify_class_index`)
+    // now rely on instead of assuming a reserved slot is a filled one.
+    //
+    // This cannot reproduce the race it guards against, which needs a reader to
+    // land inside another CPU's registration window. What it does catch is the
+    // likely regression: a future edit that reserves a slot, or reorders the
+    // publishing store after `hash_insert`, and leaves `CLASS_READY` unset -- at
+    // which point every counting reader silently skips a real class and the dump
+    // goes quiet rather than wrong. A quiet diagnostic is the failure mode worth a
+    // boot-time assert.
+    let published = CLASS_COUNT.load(Ordering::Relaxed) as usize;
+    for i in 0..published {
+        assert!(
+            class_is_ready(i),
+            "class slot below CLASS_COUNT is not published"
+        );
+    }
+    assert!(
+        !class_is_ready(published),
+        "class slot at CLASS_COUNT is published before it was reserved"
+    );
+    assert!(
+        !class_is_ready(MAX_CLASSES),
+        "class_is_ready must refuse an out-of-range index"
+    );
+    // An unpublished slot must name itself unknown rather than render its blank
+    // bytes as a real lock name.
+    #[allow(clippy::cast_possible_truncation)] // published <= MAX_CLASSES = 128
+    let unpublished_name = class_name(published as u16);
+    assert!(
+        unpublished_name == "?",
+        "unpublished class slot reported a name"
+    );
+    serial_println!("[lockdep]   Slot publication (ready flags vs count): OK");
+
     // Restore state.
     ENABLED.store(prev_enabled, Ordering::Relaxed);
 
@@ -997,13 +1148,20 @@ pub fn verify_class_index(when: &str) {
     // Every registered class is found, at the index the scan would report.
     let mut checked = 0usize;
     for i in 0..count {
+        // A reserved-but-unfilled slot has id 0 and is not in the hash yet, so
+        // checking it would report a spurious "registered class the hash cannot
+        // find" -- a self-test failing on a race in itself, not a real defect.
+        if !class_is_ready(i) {
+            continue;
+        }
         let Some(id) = class_id(i) else {
             continue;
         };
-        // Scan oracle: the first slot carrying this id.
+        // Scan oracle: the first slot carrying this id. Unready slots are skipped
+        // here too, so the oracle and the hash are compared over the same set.
         let mut scan = None;
         for j in 0..count {
-            if class_id(j) == Some(id) {
+            if class_is_ready(j) && class_id(j) == Some(id) {
                 scan = Some(j as u16);
                 break;
             }

@@ -15,12 +15,20 @@
 //! byte offsets from the base of VRAM.
 //!
 //! That separation has a sharp edge worth naming, because it is the bug this
-//! module exists to make impossible: a VRAM-resident [`crate::drm::gem::GemObject`]
-//! carries `PhysFrame`s pointing into the BAR0 aperture, and `free_backing`
-//! returns `phys_frames` to the buddy allocator. Freeing such an object through
-//! the ordinary path would hand card memory to the system allocator, which then
-//! satisfies a kernel allocation out of it — silent corruption rather than a
-//! leak. VRAM-backed objects must be released through [`VramAllocator::free`].
+//! module exists to make impossible. Had a VRAM-resident
+//! [`crate::drm::gem::GemObject`] been described the obvious way — as a list of
+//! `PhysFrame`s that happen to point into the BAR0 aperture — then
+//! [`crate::drm::gem::GemObject::free_backing`] would hand those addresses to
+//! the buddy allocator, which would then satisfy a kernel allocation out of the
+//! card's memory. That is silent corruption rather than a leak, and it surfaces
+//! arbitrarily far from the driver that caused it.
+//!
+//! It is not describable that way: [`crate::drm::gem::GemBacking`] is an enum,
+//! and a VRAM object holds a byte offset and a length rather than frames. The
+//! result is that the mistake above does not compile, `free_backing` refuses
+//! with `NotSupported` instead of freeing, and the only way to release such an
+//! object is [`VramAllocator::free`] — which is this module, holding the only
+//! bookkeeping that describes the reservation. See `design-decisions.md` §218.
 //!
 //! ## Why a free list rather than a bump allocator
 //!

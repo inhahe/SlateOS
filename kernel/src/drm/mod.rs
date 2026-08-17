@@ -182,6 +182,12 @@ pub enum DrmBackend {
     Limine(driver::LimineBackend),
     /// virtio-gpu paravirtualized driver (QEMU/KVM).
     VirtioGpu(driver::VirtioGpuBackend),
+    /// Legacy ATI/AMD display block — R100 and Rage 128.
+    ///
+    /// The only variant whose buffers are not in system RAM: its GEM objects
+    /// live in the card's own video memory, so its `gem_destroy` must not go
+    /// anywhere near the buddy allocator. See [`ati::backend::AtiBackend`].
+    Ati(ati::backend::AtiBackend),
 }
 
 impl DrmDevice {
@@ -214,6 +220,7 @@ impl DrmDevice {
         match &self.backend {
             DrmBackend::Limine(b) => b.name(),
             DrmBackend::VirtioGpu(b) => b.name(),
+            DrmBackend::Ati(b) => b.name(),
         }
     }
 
@@ -230,6 +237,7 @@ impl DrmDevice {
         let (connectors, crtcs, planes, encoders) = match &mut self.backend {
             DrmBackend::Limine(b) => b.enumerate(&alloc_fn)?,
             DrmBackend::VirtioGpu(b) => b.enumerate(&alloc_fn)?,
+            DrmBackend::Ati(b) => b.enumerate(&alloc_fn)?,
         };
         // One cursor state per CRTC.
         let cursor_count = crtcs.len();
@@ -288,6 +296,7 @@ impl DrmDevice {
         let gem = match &mut self.backend {
             DrmBackend::Limine(b) => b.gem_create(&alloc_fn, width, height, format)?,
             DrmBackend::VirtioGpu(b) => b.gem_create(&alloc_fn, width, height, format)?,
+            DrmBackend::Ati(b) => b.gem_create(&alloc_fn, width, height, format)?,
         };
         let handle = gem.handle;
         self.gem_objects.push(gem);
@@ -305,6 +314,7 @@ impl DrmDevice {
         match &mut self.backend {
             DrmBackend::Limine(b) => b.gem_destroy(gem)?,
             DrmBackend::VirtioGpu(b) => b.gem_destroy(gem)?,
+            DrmBackend::Ati(b) => b.gem_destroy(gem)?,
         }
         Ok(())
     }
@@ -319,6 +329,7 @@ impl DrmDevice {
         match &self.backend {
             DrmBackend::Limine(b) => b.gem_mmap(gem),
             DrmBackend::VirtioGpu(b) => b.gem_mmap(gem),
+            DrmBackend::Ati(b) => b.gem_mmap(gem),
         }
     }
 
@@ -390,6 +401,7 @@ impl DrmDevice {
         match &mut self.backend {
             DrmBackend::Limine(b) => b.page_flip(crtc_id, fb, gem),
             DrmBackend::VirtioGpu(b) => b.page_flip(crtc_id, fb, gem),
+            DrmBackend::Ati(b) => b.page_flip(crtc_id, fb, gem),
         }
     }
 
@@ -419,6 +431,7 @@ impl DrmDevice {
         match &mut self.backend {
             DrmBackend::Limine(b) => b.flush_region(fb, gem, x, y, w, h),
             DrmBackend::VirtioGpu(b) => b.flush_region(fb, gem, x, y, w, h),
+            DrmBackend::Ati(b) => b.flush_region(fb, gem, x, y, w, h),
         }
     }
 
@@ -437,6 +450,13 @@ impl DrmDevice {
     /// This allows callers to hold the addresses past the DRM lock scope
     /// and perform direct pixel writes without holding any DRM lock.
     /// Addresses remain valid as long as the GEM object is not destroyed.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the handle is unknown; `NotSupported` if the object lives
+    /// in a card's video memory, which the HHDM does not cover — ask
+    /// [`Self::gem_mmap`] instead, which routes to the driver holding the
+    /// aperture.
     pub fn gem_frame_addrs(&self, handle: u32) -> KernelResult<Vec<u64>> {
         use crate::mm::page_table;
 
@@ -446,8 +466,18 @@ impl DrmDevice {
             .find(|g| g.handle == handle)
             .ok_or(KernelError::NotFound)?;
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
-        let addrs: Vec<u64> = gem.phys_frames.iter().map(|pf| pf.addr() + hhdm).collect();
-        Ok(addrs)
+        // A frame address the HHDM cannot reach would be a physical address
+        // above the direct map, which on this kernel means the frame allocator
+        // handed out something outside RAM. Reported rather than wrapped: a
+        // wrapped address is a pointer into low memory that writes will corrupt.
+        gem.ram_frames()?
+            .iter()
+            .map(|pf| {
+                pf.addr()
+                    .checked_add(hhdm)
+                    .ok_or(KernelError::InvalidAddress)
+            })
+            .collect()
     }
 
     /// Get the pitch (bytes per row) of a GEM object.
@@ -469,13 +499,22 @@ impl DrmDevice {
     /// PhysFrame`]s and map the buffer into a user process.  Each address is
     /// 16 KiB-frame-aligned.  Addresses remain valid as long as the GEM object
     /// is not destroyed.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the handle is unknown; `NotSupported` if the object lives
+    /// in video memory. Its bytes do have physical addresses — they are behind
+    /// a PCI BAR — but handing them to the `mmap` shim would map device memory
+    /// into a process with the write-back caching an ordinary page gets, and
+    /// pixels written into a cache line are pixels the scanout engine never
+    /// sees.
     pub fn gem_phys_addrs(&self, handle: u32) -> KernelResult<Vec<u64>> {
         let gem = self
             .gem_objects
             .iter()
             .find(|g| g.handle == handle)
             .ok_or(KernelError::NotFound)?;
-        Ok(gem.phys_frames.iter().map(|pf| pf.addr()).collect())
+        Ok(gem.ram_frames()?.iter().map(|pf| pf.addr()).collect())
     }
 
     /// Get the total byte size of a GEM object's allocation.
@@ -746,13 +785,22 @@ pub fn init() {
         }
     }
 
-    // Probe for a legacy ATI display device and check its register map against
-    // the hardware. No backend is registered yet — this device is not driving
-    // the console, and the probe deliberately does not reprogram a CRTC it does
-    // not own. What it buys is the one thing a self-test cannot: confirmation
-    // from a real (or emulated) device that the offsets in `ati::regs` name the
-    // registers they claim to.
-    ati::probe_hardware();
+    // Probe for a legacy ATI display device, check its register map against the
+    // hardware, exercise the display, and register it as a DRM device.
+    //
+    // It is registered but *not* promoted to primary, even though it is a real
+    // GPU and virtio-gpu is a paravirtual one. Primary means "the device the
+    // console and compositor bind to", and on the machine this actually boots
+    // the ATI card is an unused second head while virtio-gpu drives the screen
+    // the operator is looking at. Promoting it would move the display onto a
+    // driver with no cursor plane, no gamma, and a mode list capped by 16 MiB
+    // of aperture — a downgrade dressed as an upgrade.
+    if let Some(ati) = ati::probe_hardware() {
+        match register_device("ati", DrmBackend::Ati(ati)) {
+            Ok(idx) => serial_println!("[drm] ATI display block registered as device {}", idx),
+            Err(e) => serial_println!("[drm] WARNING: failed to register ATI backend: {:?}", e),
+        }
+    }
 
     // Enable hotplug detection now that all backends are registered.
     hotplug::enable();

@@ -546,6 +546,13 @@ extern "C" fn kernel_main() -> ! {
     // Enable SMEP/SMAP — hardware protection against kernel accidentally
     // accessing or executing user-space memory.  Critical for security.
     smep_smap::init();
+    // Program IA32_PAT so a write-combining memory type exists at all.  Must
+    // run before anything maps memory write-through or write-combining, since
+    // it changes what PAT slot 1 means (write-through -> write-combining) and
+    // relocates write-through to slot 7.  Nothing has mapped either yet at
+    // this point: the frame allocator has not handed out a page and no driver
+    // has mapped a BAR.
+    mm::pat::init();
     // Spectre/Meltdown mitigations — enable IBRS, STIBP, SSBD based on
     // CPU capabilities.  Issues initial IBPB to flush stale predictions.
     spectre::init();
@@ -686,6 +693,17 @@ extern "C" fn kernel_main() -> ! {
     // Verify page table operations work (translate HHDM, map/unmap).
     if let Err(e) = mm::page_table::self_test() {
         serial_println!("FATAL: Page table self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Verify IA32_PAT reads back as programmed and that the PageFlags memory
+    // types decode to what the rest of the kernel assumes.  Fatal: a wrong
+    // PAT silently changes the memory type of every MMIO and framebuffer
+    // mapping, which is not a failure any later test would attribute
+    // correctly.  Runs here because page_table::self_test has just proven the
+    // mapping machinery this depends on.
+    if let Err(e) = mm::pat::self_test() {
+        serial_println!("FATAL: PAT self-test failed: {}", e);
         cpu::halt_loop();
     }
 
@@ -1488,6 +1506,29 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::fat::trim_self_test() {
         serial_println!("WARNING: FAT fstrim self-test failed: {:?}", e);
     }
+
+    // Step 20z: Initialize the lock order validator (lockdep) — BEFORE the
+    // ring-3 self-test battery, which is the part of boot most likely to
+    // deadlock and, until 2026-08-17, the part that ran without it.
+    //
+    // This call used to sit ~3800 lines below, after SMP init, justified by
+    // "must be after SMP init so current_cpu_index() works on all CPUs". That
+    // reasoning does not survive contact with `smp::current_cpu_index`, which
+    // returns `BSP_CPU_INDEX` whenever `SMP_INITIALIZED` is clear — the correct
+    // answer while only the BSP is running, which is the case here.
+    //
+    // What the old placement cost, concretely: an intermittent hang inside the
+    // ext4 `link()/linkat` self-test produced `lock '?'` and `cpu 0 holds 0
+    // lock(s)`, because `lock_acquire` returns immediately while disabled. Yet
+    // `lock_acquire` contains a precise detector for exactly that failure — it
+    // finds a re-entrant acquisition of the same lock *instance* on the per-CPU
+    // held stack and names the class, before the 30 s stall detector fires. It
+    // was switched off during the only phase of boot that has ever needed it.
+    //
+    // Expect this to surface lock-order findings from paths that have never been
+    // validated. Those are the point.
+    lockdep::init();
+    lockdep::self_test();
 
     // Step 21: Enable hardware interrupts — BEFORE the ring-3 self-test battery.
     //
@@ -5350,11 +5391,12 @@ extern "C" fn kernel_main() -> ! {
     // Gracefully skips if frame pointers are missing (e.g., optimized-out in release).
     backtrace::self_test();
 
-    // Step 22f3: Initialize lock order validator (lockdep).
-    // Detects potential deadlocks via dependency graph cycle detection.
-    // Must be after SMP init so current_cpu_index() works on all CPUs.
-    lockdep::init();
-    lockdep::self_test();
+    // Step 22f3: lockdep is initialized far earlier -- see the block just
+    // before Step 21. It used to live here, after SMP init, on the stated
+    // grounds that `current_cpu_index()` needs SMP; it does not, and the cost of
+    // believing it was that the entire ring-3 self-test battery ran with the
+    // validator switched off. See `known-issues.md`
+    // BUG-BOOT-SPINLOCK-STALL-UNNAMED.
 
     console::boot_step_update(console::BootStatus::Ok, "Keyboard & multi-core");
 

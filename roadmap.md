@@ -944,6 +944,34 @@ Roadmap:
   horizontally by *slicing the line at a byte offset* — and the visible part of
   a bidirectional line is not the shaping of a substring of it, so that is a
   model change rather than a substitution (`TD-EDITOR-IS-NOT-BIDIRECTIONAL`).
+  **Two of that entry's four items are now done.** First (§455): syntax
+  highlighting no
+  longer draws a command per token. Cutting a line at each colour change and
+  laying the pieces out end to end *is* the screen-order-is-byte-order
+  assumption, applied once per token; colour is now an attribute of a glyph,
+  carried by a new `RenderCommand::RichText` (a string plus byte-ranged colour
+  spans) that the renderer resolves per glyph while it shapes — it has to be
+  the renderer, since the compositor re-shapes the string itself and resolves
+  the family from its own font stack, so the app cannot know which glyphs it is
+  colouring. It is also 2.3x *faster* on an ordinary 80-character line of 40
+  tokens, since each shaping pays a fixed cost that the decomposition paid once
+  per piece. Second, the byte-offset scroll is gone: `Document::scroll_col`
+  becomes `scroll_px`, and the line is shaped once, whole, and *translated*
+  under a clip rectangle instead of being sliced and its tail re-shaped — a
+  window onto the correctly-ordered line rather than a differently-ordered
+  shaping of part of it. That also deletes the "scrolled into the middle of a
+  character" bug class outright (nothing is sliced, so there is nothing to land
+  inside), and lets the caret keep the kerning it used to lose at the scroll
+  boundary. Still outstanding there: the caret and hit testing, both of which
+  want the per-line shaped cache first so there is somewhere to ask for cluster
+  positions. Wiring any of it to a user needs `TD-EDITOR-HAS-NO-INPUT-LOOP`
+  closed — the editor has no event loop at all, which is how two auto-scroll
+  functions came to be written, tested and never called.
+  The same end-to-end layout was then found
+  in three more places — `RichTextView`, `SimpleTextView` and
+  `apps/markdowneditor` — and cannot take the same fix, because their spans
+  carry weight and size rather than colour alone
+  (`TD-SPANS-ARE-LAID-OUT-END-TO-END`).
   Vello itself waits on `[A]`'s GPU driver.
   **Variable fonts are done** (§448, §449, §450, §451): all four steps
   `TD-FONT-DOES-NOT-READ-VARIATION-STORES` mandates have
@@ -5726,13 +5754,32 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
           Rejects double and overlapping frees rather than corrupting the list.
           Pure, so the self-test checks the list invariants after every
           mutation, not just the return values.
-    - [ ] `DrmBackend::Ati` — a registered backend: BAR0 aperture mapping, GEM
-          objects resident in VRAM, `page_flip` as a `CRTC_OFFSET` write rather
-          than a memcpy. Note that `GemObject::free_backing` returns
-          `phys_frames` to the buddy allocator, so VRAM-backed objects must be
-          released through `vram::VramAllocator::free` — reusing
-          `LimineBackend`'s destroy path would hand card memory to the system
-          allocator, which is silent corruption rather than a leak.
+    - [x] `drm/ati/aperture.rs` — the BAR0 window: up to 16 MiB of the card's
+          video memory mapped `NO_CACHE` so the CPU can put pixels in it.
+          Consults the page tables afterwards rather than assuming the request
+          was honoured, and keeps a `flush` for the case where it was not.
+          Uncacheable rather than write-combining because nothing programs the
+          PAT MSR yet — see `TD-NO-WRITE-COMBINING` in `known-issues.md`, and
+          note that this is why the boot exercise draws at 640x480.
+    - [x] `DrmBackend::Ati` — the card registered as a DRM device. GEM objects
+          live in VRAM, so `page_flip` is a single `CRTC_OFFSET` write with no
+          copy at any resolution, which is the whole reason a real GPU driver
+          beats a framebuffer shim. `enumerate` advertises exactly the DMT modes
+          that fit the mapped aperture, filtered by `ModeSetPlan::new` — the
+          same predicate `page_flip` applies later, so the menu cannot drift
+          from what is actually settable. Registered but deliberately *not*
+          promoted to primary: on the machine this boots, virtio-gpu drives the
+          screen and this card is an unused second head, so the whole path is
+          exercised every boot without being load-bearing for the only display.
+    - [x] `GemObject` backing became an enum (`GemBacking::SystemRam` /
+          `::Vram`) as part of the above, and this is the load-bearing part.
+          `free_backing` returns frames to the buddy allocator; a VRAM object
+          carrying BAR addresses in a `Vec<PhysFrame>` would hand the system
+          allocator memory that was never RAM — silent corruption surfacing
+          arbitrarily far from the driver that caused it, not a leak. The enum
+          makes it a compile error to reach the frame list without saying which
+          case you handle, `free_backing` now returns `NotSupported` for VRAM,
+          and the self-test asserts the refusal rather than trusting it.
 - [ ] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
 - [ ] `[A]` NVIDIA: defer until open-source driver matures, or use Linux compat layer later
 

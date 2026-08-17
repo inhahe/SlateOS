@@ -55,7 +55,9 @@
 )]
 
 use guitk::color::Color;
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::render::{
+    FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow, TextSpan,
+};
 use guitk::style::CornerRadii;
 
 pub mod scene;
@@ -97,6 +99,18 @@ pub const MAX_COMMANDS_PER_FRAME: u32 = 1 << 20;
 /// peak memory.
 pub const MAX_STRING_LEN: u32 = 4 * 1024 * 1024;
 
+/// Maximum number of colour spans on a single
+/// [`RichText`](guitk::render::RenderCommand::RichText) command.
+///
+/// Spans are cumulative byte offsets into a string bounded by
+/// [`MAX_STRING_LEN`], so a list longer than that string cannot describe
+/// anything: it must repeat or go backwards. The limit is stated separately
+/// anyway, because the count is read from the wire and the string it refers to
+/// may be short — a hostile sender should not be able to name four million
+/// spans over a three-byte string and have the decoder find that out one
+/// eight-byte read at a time.
+pub const MAX_SPANS: u32 = MAX_STRING_LEN;
+
 // ============================================================================
 // Command tags
 // ============================================================================
@@ -116,6 +130,12 @@ enum Tag {
     BoxShadow = 0x0A,
     PushFont = 0x0B,
     PopFont = 0x0C,
+    /// Added after `PROTOCOL_VERSION` reached 2, without bumping it — a *new*
+    /// tag byte, so every frame an older encoder produces still decodes
+    /// identically, and an older decoder meeting one fails cleanly with
+    /// [`DecodeError::BadTag`] naming the byte. See [`FontFamilyTag`] for the
+    /// same argument at length.
+    RichText = 0x0D,
 }
 
 impl Tag {
@@ -133,6 +153,7 @@ impl Tag {
             0x0A => Some(Self::BoxShadow),
             0x0B => Some(Self::PushFont),
             0x0C => Some(Self::PopFont),
+            0x0D => Some(Self::RichText),
             _ => None,
         }
     }
@@ -269,6 +290,8 @@ pub enum DecodeError {
     TooManyCommands(u32),
     /// String length exceeds [`MAX_STRING_LEN`].
     StringTooLarge(u32),
+    /// A `RichText` command's span count exceeds [`MAX_SPANS`].
+    TooManySpans(u32),
     /// Encountered a tag byte that does not correspond to a known command.
     BadTag(u8),
     /// A `FontWeightHint` tag byte was unknown.
@@ -295,6 +318,9 @@ impl core::fmt::Display for DecodeError {
             }
             Self::StringTooLarge(n) => {
                 write!(f, "string length {n} exceeds limit {MAX_STRING_LEN}")
+            }
+            Self::TooManySpans(n) => {
+                write!(f, "span count {n} exceeds limit {MAX_SPANS}")
             }
             Self::BadTag(b) => write!(f, "unknown command tag {b:#04x}"),
             Self::BadFontWeight(b) => write!(f, "unknown font-weight tag {b:#04x}"),
@@ -354,6 +380,97 @@ pub fn encode_frame_to_vec(tree: &RenderTree) -> Vec<u8> {
     v
 }
 
+/// The trailing block both text commands share on the wire.
+///
+/// `Text` and `RichText` differ only in the middle — the span list — and end
+/// with the same five fields. Writing and reading that tail in one place is
+/// what keeps them from drifting apart: a field added to one encoder and
+/// forgotten in the other produces a frame that decodes into the wrong
+/// *command*, not a clean error, because everything after the omission is
+/// misaligned.
+struct TextStyle {
+    color: guitk::color::Color,
+    font_size: f32,
+    font_weight: FontWeightHint,
+    max_width: Option<f32>,
+    overflow: TextOverflow,
+}
+
+fn write_text_style(
+    out: &mut Vec<u8>,
+    color: guitk::color::Color,
+    font_size: f32,
+    font_weight: FontWeightHint,
+    max_width: Option<f32>,
+    overflow: TextOverflow,
+) {
+    write_color(out, color);
+    write_f32(out, font_size);
+    out.push(FontWeightTag::from_weight(font_weight) as u8);
+    write_optional_f32(out, max_width);
+    out.push(TextOverflowTag::from_overflow(overflow) as u8);
+}
+
+fn read_text_style(r: &mut Reader<'_>) -> Result<TextStyle, DecodeError> {
+    let color = r.read_color()?;
+    let font_size = r.read_f32()?;
+    let weight_byte = r.read_u8()?;
+    let font_weight = FontWeightTag::from_byte(weight_byte)
+        .ok_or(DecodeError::BadFontWeight(weight_byte))?
+        .to_weight();
+    let max_width = r.read_optional_f32()?;
+    let overflow_byte = r.read_u8()?;
+    let overflow = TextOverflowTag::from_byte(overflow_byte)
+        .ok_or(DecodeError::BadTextOverflow(overflow_byte))?
+        .to_overflow();
+    Ok(TextStyle {
+        color,
+        font_size,
+        font_weight,
+        max_width,
+        overflow,
+    })
+}
+
+/// A `RichText` command's span list: a count, then that many `(end, colour)`.
+fn write_spans(out: &mut Vec<u8>, spans: &[TextSpan]) {
+    // Saturates for the same reason `write_string` does: a list this long
+    // cannot decode anyway (see `MAX_SPANS`), so the choice is between a frame
+    // that is rejected and one that is silently truncated to a wrong colouring.
+    write_u32(out, u32::try_from(spans.len()).unwrap_or(u32::MAX));
+    for span in spans {
+        write_u32(out, span.end);
+        write_color(out, span.color);
+    }
+}
+
+fn read_spans(r: &mut Reader<'_>) -> Result<Vec<TextSpan>, DecodeError> {
+    let n = r.read_u32()?;
+    if n > MAX_SPANS {
+        return Err(DecodeError::TooManySpans(n));
+    }
+    // Reserved in a bounded chunk rather than at the announced count: the count
+    // is attacker-chosen and the bytes backing it may not exist, so a full
+    // reservation lets a 40-byte frame ask for 32 MiB. Growth past this is paid
+    // for by bytes actually present.
+    let mut spans = Vec::with_capacity((n as usize).min(1024));
+    for _ in 0..n {
+        spans.push(TextSpan {
+            end: r.read_u32()?,
+            color: r.read_color()?,
+        });
+    }
+    Ok(spans)
+}
+
+// One arm per command kind: the length is the command enum's length, not a
+// function doing too much. The shared parts are already factored out
+// (`write_text_style`, `write_spans`, `write_radii`); what is left is each
+// command's field order, which is the wire format itself and must be readable
+// beside `decode_command`'s matching arm. Splitting the match in two would put
+// an arbitrary boundary between commands and hide which half a new one belongs
+// in.
+#[allow(clippy::too_many_lines)]
 fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
     match cmd {
         RenderCommand::FillRect { x, y, width, height, color, corner_radii } => {
@@ -380,11 +497,17 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
             write_f32(out, *x);
             write_f32(out, *y);
             write_string(out, text);
-            write_color(out, *color);
-            write_f32(out, *font_size);
-            out.push(FontWeightTag::from_weight(*font_weight) as u8);
-            write_optional_f32(out, *max_width);
-            out.push(TextOverflowTag::from_overflow(*overflow) as u8);
+            write_text_style(out, *color, *font_size, *font_weight, *max_width, *overflow);
+        }
+        RenderCommand::RichText {
+            x, y, text, spans, color, font_size, font_weight, max_width, overflow
+        } => {
+            out.push(Tag::RichText as u8);
+            write_f32(out, *x);
+            write_f32(out, *y);
+            write_string(out, text);
+            write_spans(out, spans);
+            write_text_style(out, *color, *font_size, *font_weight, *max_width, *overflow);
         }
         RenderCommand::Image { x, y, width, height, image_id } => {
             out.push(Tag::Image as u8);
@@ -672,6 +795,8 @@ fn decode_internal(input: &[u8]) -> Result<(RenderTree, usize), DecodeError> {
     Ok((tree, r.pos))
 }
 
+// Long for the same reason `encode_command` is, and must stay its mirror image.
+#[allow(clippy::too_many_lines)]
 fn decode_command(r: &mut Reader<'_>) -> Result<RenderCommand, DecodeError> {
     let tag_byte = r.read_u8()?;
     let tag = Tag::from_byte(tag_byte).ok_or(DecodeError::BadTag(tag_byte))?;
@@ -697,26 +822,34 @@ fn decode_command(r: &mut Reader<'_>) -> Result<RenderCommand, DecodeError> {
             let x = r.read_f32()?;
             let y = r.read_f32()?;
             let text = r.read_string()?;
-            let color = r.read_color()?;
-            let font_size = r.read_f32()?;
-            let weight_byte = r.read_u8()?;
-            let font_weight = FontWeightTag::from_byte(weight_byte)
-                .ok_or(DecodeError::BadFontWeight(weight_byte))?
-                .to_weight();
-            let max_width = r.read_optional_f32()?;
-            let overflow_byte = r.read_u8()?;
-            let overflow = TextOverflowTag::from_byte(overflow_byte)
-                .ok_or(DecodeError::BadTextOverflow(overflow_byte))?
-                .to_overflow();
+            let style = read_text_style(r)?;
             RenderCommand::Text {
                 x,
                 y,
                 text,
-                color,
-                font_size,
-                font_weight,
-                max_width,
-                overflow,
+                color: style.color,
+                font_size: style.font_size,
+                font_weight: style.font_weight,
+                max_width: style.max_width,
+                overflow: style.overflow,
+            }
+        }
+        Tag::RichText => {
+            let x = r.read_f32()?;
+            let y = r.read_f32()?;
+            let text = r.read_string()?;
+            let spans = read_spans(r)?;
+            let style = read_text_style(r)?;
+            RenderCommand::RichText {
+                x,
+                y,
+                text,
+                spans,
+                color: style.color,
+                font_size: style.font_size,
+                font_weight: style.font_weight,
+                max_width: style.max_width,
+                overflow: style.overflow,
             }
         }
         Tag::Image => RenderCommand::Image {
@@ -793,7 +926,7 @@ impl RenderTreeWithCapacity for RenderTree {
 mod tests {
     use super::*;
     use guitk::color::Color;
-    use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+    use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextSpan};
     use guitk::style::CornerRadii;
 
     fn radii(a: f32) -> CornerRadii {
@@ -805,6 +938,11 @@ mod tests {
         }
     }
 
+    // One command of every kind, so `each_command_kind_roundtrips_individually`
+    // covers a newly-added variant the moment it is added here. Its length is
+    // the protocol's length and grows with it; splitting it into "some commands"
+    // and "the rest" would only hide which half a new variant belongs in.
+    #[allow(clippy::too_many_lines)]
     fn sample_tree() -> RenderTree {
         let mut t = RenderTree::new();
         t.commands.push(RenderCommand::FillRect {
@@ -843,6 +981,35 @@ mod tests {
             font_weight: FontWeightHint::Light,
             max_width: None,
             overflow: TextOverflow::Clip,
+        });
+        t.commands.push(RenderCommand::RichText {
+            x: 11.0,
+            y: 21.0,
+            text: "let x = 1;".to_string(),
+            spans: vec![
+                TextSpan { end: 3, color: Color::rgba(200, 100, 50, 255) },
+                TextSpan { end: 5, color: Color::rgba(1, 2, 3, 4) },
+                TextSpan { end: 10, color: Color::rgb(9, 9, 9) },
+            ],
+            color: Color::rgb(255, 255, 255),
+            font_size: 13.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(180.0),
+            overflow: TextOverflow::Clip,
+        });
+        // The empty list separately, because it is the case where a dropped
+        // count field still decodes — into a command that draws in one colour
+        // and looks entirely plausible.
+        t.commands.push(RenderCommand::RichText {
+            x: 12.0,
+            y: 22.0,
+            text: "uncoloured".to_string(),
+            spans: Vec::new(),
+            color: Color::rgb(7, 8, 9),
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Ellipsis,
         });
         t.commands.push(RenderCommand::Image {
             x: 30.0,
@@ -1121,6 +1288,54 @@ mod tests {
         assert!(matches!(
             decode_frame(&bytes),
             Err(DecodeError::TooManyCommands(_))
+        ));
+    }
+
+    /// A span count is attacker-chosen and each span costs eight bytes to
+    /// describe, so a tiny frame can name a huge list. The count is checked
+    /// against the limit before any of it is believed.
+    #[test]
+    fn too_many_spans_is_rejected_before_allocation() {
+        let mut body = vec![Tag::RichText as u8];
+        body.extend_from_slice(&0.0_f32.to_le_bytes()); // x
+        body.extend_from_slice(&0.0_f32.to_le_bytes()); // y
+        body.extend_from_slice(&0_u32.to_le_bytes()); // empty text
+        body.extend_from_slice(&(MAX_SPANS + 1).to_le_bytes());
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.push(PROTOCOL_VERSION);
+        bytes.push(0);
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&body);
+
+        assert!(matches!(
+            decode_frame(&bytes),
+            Err(DecodeError::TooManySpans(_))
+        ));
+    }
+
+    /// A count within the limit but not backed by bytes must end as a clean
+    /// end-of-input, not as a silently short list — a truncated span list
+    /// mis-colours the tail of the string rather than failing.
+    #[test]
+    fn a_span_count_larger_than_the_frame_is_eof() {
+        let mut body = vec![Tag::RichText as u8];
+        body.extend_from_slice(&0.0_f32.to_le_bytes());
+        body.extend_from_slice(&0.0_f32.to_le_bytes());
+        body.extend_from_slice(&0_u32.to_le_bytes());
+        body.extend_from_slice(&4_u32.to_le_bytes()); // four spans, none present
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.push(PROTOCOL_VERSION);
+        bytes.push(0);
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&body);
+
+        assert!(matches!(
+            decode_frame(&bytes),
+            Err(DecodeError::UnexpectedEof)
         ));
     }
 

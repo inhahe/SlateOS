@@ -43,7 +43,9 @@ use std::time::{Duration, Instant};
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::render::{
+    FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow, TextSpan,
+};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use osfont::raster::GlyphMask;
@@ -1636,6 +1638,13 @@ fn family_of(family: FontFamily) -> Family {
 ///
 /// Free rather than a method for the same borrow reason as [`blend_mask`], and
 /// takes the font by `&mut` because the glyph cache rasterises on demand.
+///
+/// `spans` colours the run per glyph, by the byte each glyph came from; empty —
+/// which it is for every plain `Text` command — draws the whole run in `color`.
+/// Resolving colour *here*, inside the one walk that already visits every
+/// glyph, is what lets a multi-coloured string be one shaped run: the
+/// alternative is to cut the string per colour and shape the pieces, which is
+/// the bug this parameter exists to fix. See `RenderCommand::RichText`.
 #[allow(clippy::too_many_arguments)]
 fn blit_run(
     fb: &mut Framebuffer,
@@ -1645,6 +1654,7 @@ fn blit_run(
     baseline: f32,
     limit: Option<f32>,
     color: u32,
+    spans: &[TextSpan],
     opacity: f32,
     clip: Option<&Rect>,
 ) {
@@ -1663,6 +1673,10 @@ fn blit_run(
         {
             break;
         }
+        // Resolved before the mask is fetched: `glyph_mask` borrows the font
+        // mutably for as long as the mask lives, and this needs nothing from it.
+        let ink = TextSpan::color_at(spans, shaped.cluster)
+            .map_or(color, |c| color_to_argb(&c));
         if let Some(mask) = font.glyph_mask(shaped.key) {
             // `offset` is zero except on an attached combining mark, and its
             // `y` points up where the screen's points down.
@@ -1671,7 +1685,7 @@ fn blit_run(
                 mask,
                 *pen + shaped.offset.0,
                 baseline - shaped.offset.1,
-                color,
+                ink,
                 opacity,
                 clip,
             );
@@ -1881,6 +1895,35 @@ impl RenderEngine {
                     py,
                     text,
                     color_to_argb(color),
+                    &[],
+                    opacity,
+                    max_w,
+                    *font_size,
+                    *font_weight,
+                    *overflow,
+                );
+            }
+            RenderCommand::RichText {
+                x,
+                y,
+                text,
+                spans,
+                color,
+                font_size,
+                font_weight,
+                max_width,
+                overflow,
+            } => {
+                let px = (*x + tx) as i32;
+                let py = (*y + ty) as i32;
+                let max_w = max_width.map(|w| w as u32);
+                self.draw_text(
+                    fb,
+                    px,
+                    py,
+                    text,
+                    color_to_argb(color),
+                    spans,
                     opacity,
                     max_w,
                     *font_size,
@@ -2058,6 +2101,7 @@ impl RenderEngine {
         y: i32,
         text: &str,
         color: u32,
+        spans: &[TextSpan],
         opacity: f32,
         max_width: Option<u32>,
         size: f32,
@@ -2123,6 +2167,7 @@ impl RenderEngine {
             baseline,
             limit,
             color,
+            spans,
             opacity,
             clip.as_ref(),
         );
@@ -2130,6 +2175,12 @@ impl RenderEngine {
             // Unbounded on purpose: the room was reserved above, so bounding it
             // again could only round it away and put us back where we started —
             // a cut with nothing to show for it.
+            //
+            // Uncoloured by the spans, too: the mark stands for the text that
+            // was *not* drawn, so it belongs to no byte and no token. Colouring
+            // it as if it were byte zero — which is what passing `spans` here
+            // would do, the mark being its own run with its own clusters — would
+            // paint the "there is more" mark in the colour of the first word.
             blit_run(
                 fb,
                 font,
@@ -2138,6 +2189,7 @@ impl RenderEngine {
                 baseline,
                 None,
                 color,
+                &[],
                 opacity,
                 clip.as_ref(),
             );
@@ -3786,6 +3838,7 @@ impl Compositor {
             text_y,
             title,
             text_color,
+            &[],
             opacity,
             Some(max_text_width),
             DEFAULT_FONT_SIZE,
@@ -5818,6 +5871,7 @@ mod tests {
             4,
             text,
             0xFF_FF_FF_FF,
+            &[],
             1.0,
             max_width,
             size,
@@ -6109,6 +6163,7 @@ mod tests {
                         y,
                         "leak",
                         0xFF_FF_FF_FF,
+                        &[],
                         1.0,
                         max_width,
                         16.0,
@@ -6152,5 +6207,192 @@ mod tests {
         // 200x120 surface. What matters is that asking does not panic.
         let (rows, _) = ink_of("W", 1e30, FontWeightHint::Regular, None);
         assert!(rows.is_empty(), "a 512px glyph should not fit in 120 rows");
+    }
+
+    // ---- rich text (per-glyph colour) --------------------------------------
+
+    /// [`paint`] with a span list, so a test can compare a multi-coloured
+    /// rendering against the plain one of the same string.
+    fn paint_rich(text: &str, size: f32, spans: &[TextSpan]) -> Framebuffer {
+        let mut fb = Framebuffer::new(INK_W, INK_H).unwrap();
+        fb.clear(0xFF_00_00_00);
+        let mut engine = RenderEngine::new();
+        engine.draw_text(
+            &mut fb,
+            INK_X,
+            4,
+            text,
+            0xFF_FF_FF_FF,
+            spans,
+            1.0,
+            None,
+            size,
+            FontWeightHint::Regular,
+            TextOverflow::Clip,
+        );
+        fb
+    }
+
+    /// Every pixel that received ink, as (x, y, rgb).
+    fn lit_pixels(fb: &Framebuffer) -> Vec<(u32, u32, u32)> {
+        let mut out = Vec::new();
+        for y in 0..INK_H {
+            for x in 0..INK_W {
+                if let Some(p) = fb.get_pixel(x, y)
+                    && p & 0x00FF_FFFF != 0
+                {
+                    out.push((x, y, p & 0x00FF_FFFF));
+                }
+            }
+        }
+        out
+    }
+
+    /// **The regression that matters.** Colouring by span must change colours
+    /// and nothing else: the glyphs must land in exactly the positions the plain
+    /// command puts them in. The whole reason this primitive exists is that
+    /// cutting the string per colour *moved* the glyphs; a rich-text path that
+    /// laid out even slightly differently would have reintroduced the bug in a
+    /// place no colour assertion looks.
+    #[test]
+    fn rich_text_lays_out_exactly_as_plain_text_does() {
+        let sample = "let x = fn(1, 2);";
+        let plain = paint(sample, 20.0, FontWeightHint::Regular, None, TextOverflow::Clip);
+        let rich = paint_rich(
+            sample,
+            20.0,
+            &[
+                TextSpan { end: 3, color: Color::rgb(255, 0, 0) },
+                TextSpan { end: 5, color: Color::rgb(0, 255, 0) },
+                TextSpan { end: 17, color: Color::rgb(0, 0, 255) },
+            ],
+        );
+        let plain_at: Vec<(u32, u32)> = lit_pixels(&plain).iter().map(|&(x, y, _)| (x, y)).collect();
+        let rich_at: Vec<(u32, u32)> = lit_pixels(&rich).iter().map(|&(x, y, _)| (x, y)).collect();
+        assert!(!plain_at.is_empty(), "nothing drawn");
+        assert_eq!(
+            plain_at, rich_at,
+            "rich text put ink in different pixels from plain text",
+        );
+    }
+
+    /// A glyph takes the colour of the byte it came from, so the string's two
+    /// halves come out in their two colours — and, since the primitive shapes
+    /// once, the boundary falls between glyphs rather than at a guessed x.
+    #[test]
+    fn each_glyph_takes_the_colour_of_its_span() {
+        // Two characters, two colours, and channels chosen so a pixel can be
+        // attributed to one span or the other however the antialiasing scales
+        // it: red-only ink can only have come from the first span.
+        let fb = paint_rich(
+            "HI",
+            40.0,
+            &[
+                TextSpan { end: 1, color: Color::rgb(255, 0, 0) },
+                TextSpan { end: 2, color: Color::rgb(0, 0, 255) },
+            ],
+        );
+        let lit = lit_pixels(&fb);
+        assert!(!lit.is_empty(), "nothing drawn");
+        let reds: Vec<u32> = lit
+            .iter()
+            .filter(|&&(_, _, c)| c & 0x00_FF_00 == 0 && c & 0x00_00_FF == 0)
+            .map(|&(x, _, _)| x)
+            .collect();
+        let blues: Vec<u32> = lit
+            .iter()
+            .filter(|&&(_, _, c)| c & 0xFF_00_00 == 0 && c & 0x00_FF_00 == 0)
+            .map(|&(x, _, _)| x)
+            .collect();
+        assert!(!reds.is_empty(), "no red ink — the first span was not applied");
+        assert!(!blues.is_empty(), "no blue ink — the second span was not applied");
+        assert!(
+            lit.len() == reds.len() + blues.len(),
+            "{} pixels are neither span's colour",
+            lit.len() - reds.len() - blues.len(),
+        );
+        // In left-to-right text the first byte's glyph is also the leftmost, so
+        // the two colours must not interleave in x.
+        let (red_max, blue_min) = (
+            reds.iter().copied().max().unwrap(),
+            blues.iter().copied().min().unwrap(),
+        );
+        assert!(
+            red_max < blue_min,
+            "colours interleave: red runs to x={red_max}, blue starts at x={blue_min}",
+        );
+    }
+
+    /// An empty span list has to be indistinguishable from a plain `Text`
+    /// command — same glyphs, same colour — because that is the fallback every
+    /// caller with nothing to say lands on.
+    #[test]
+    fn rich_text_with_no_spans_is_plain_text() {
+        let sample = "fallback";
+        let plain = paint(sample, 24.0, FontWeightHint::Regular, None, TextOverflow::Clip);
+        let rich = paint_rich(sample, 24.0, &[]);
+        assert_eq!(lit_pixels(&plain), lit_pixels(&rich));
+    }
+
+    /// Bytes past the last span fall through to the command's own colour rather
+    /// than borrowing the last span's. A tokenizer that stops short of the end
+    /// of a line is the ordinary way to reach this.
+    #[test]
+    fn bytes_past_the_last_span_take_the_base_colour() {
+        // `paint_rich` draws in white, so the tail must be white while the
+        // covered head is red.
+        let fb = paint_rich(
+            "HI",
+            40.0,
+            &[TextSpan { end: 1, color: Color::rgb(255, 0, 0) }],
+        );
+        let lit = lit_pixels(&fb);
+        assert!(!lit.is_empty(), "nothing drawn");
+        // White ink has all three channels lit; red-only ink has one.
+        let white = lit
+            .iter()
+            .filter(|&&(_, _, c)| c & 0x00_FF_00 != 0 && c & 0x00_00_FF != 0)
+            .count();
+        let red = lit
+            .iter()
+            .filter(|&&(_, _, c)| c & 0x00_FF_00 == 0 && c & 0x00_00_FF == 0)
+            .count();
+        assert!(red > 0, "the covered byte was not coloured by its span");
+        assert!(white > 0, "the uncovered byte did not fall back to the base colour");
+    }
+
+    /// The overflow mark stands for text that was *not* drawn, so it belongs to
+    /// no byte and takes the base colour — not the colour of byte zero, which is
+    /// what passing the spans to the mark's own run would give it.
+    #[test]
+    fn the_overflow_mark_is_not_coloured_by_the_spans() {
+        let mut fb = Framebuffer::new(INK_W, INK_H).unwrap();
+        fb.clear(0xFF_00_00_00);
+        let mut engine = RenderEngine::new();
+        let long = "W".repeat(60);
+        engine.draw_text(
+            &mut fb,
+            INK_X,
+            4,
+            &long,
+            0xFF_FF_FF_FF,
+            // One span over the whole string, in a colour with no white in it.
+            &[TextSpan { end: 60, color: Color::rgb(255, 0, 0) }],
+            1.0,
+            Some(120),
+            20.0,
+            FontWeightHint::Regular,
+            TextOverflow::Ellipsis,
+        );
+        let lit = lit_pixels(&fb);
+        assert!(!lit.is_empty(), "nothing drawn");
+        let white = lit
+            .iter()
+            .filter(|&&(_, _, c)| c & 0x00_FF_00 != 0 && c & 0x00_00_FF != 0)
+            .count();
+        assert!(
+            white > 0,
+            "the ellipsis was drawn in the span's colour rather than the base colour",
+        );
     }
 }

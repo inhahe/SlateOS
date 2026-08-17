@@ -28412,7 +28412,28 @@ two code paths runs. `Input` in `cut.rs` is that shape.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
-**Status: OPEN.**
+**Status: OPEN — item 4 (step (c)) done 2026-08-17; 1, 2 and 3 remain.**
+
+**Update 2026-08-17 — item 4 is fixed.** `draw_tokens` no longer emits a
+command per token. The toolkit gained a `RenderCommand::RichText`: one string,
+one shaping, plus a list of byte-ranged colour spans, and the renderer — which
+is the party doing the shaping, and the only party that knows the resolved
+font — gives each glyph the colour of the span containing the byte it came
+from. See `design-decisions.md` §455 for why the spans cross the wire as byte
+ranges rather than as positioned glyphs, and why span ends are cumulative. The
+editor now emits exactly one `rich_text_clipped` per visible line;
+`a_highlighted_line_is_drawn_as_one_shaped_run` is the regression guard, and
+`rich_text_lays_out_exactly_as_plain_text_does` in the compositor asserts the
+pixels are unchanged for ordinary text. The kerning across token boundaries
+that the old comment accepted losing comes back for free, and the 2.3x cost of
+the decomposition goes with it.
+
+**What that leaves.** The output is still not correct under a right-to-left
+run, because item 3 is untouched: `draw_tokens` still slices the line at
+`scroll_col` and hands the renderer the tail, so the *spans* are now right but
+the *string being shaped* is still a substring — and the visible portion of a
+bidirectional line is not the shaping of a substring of it. Step (d) is next
+and is what makes the whole line the unit of shaping.
 
 **What.** `apps/editor` was left out of `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`
 above, and not because its arrow keys are fine — they have the same defect. It
@@ -28453,7 +28474,10 @@ widgets do today.
    than the same characters occupy in the full line. Scrolling has to become
    pixel-based over the whole shaped line, with clipping, rather than
    byte-based over a re-shaped tail.
-4. **Syntax highlighting draws one run per token, each positioned at the sum of
+4. **~~Syntax highlighting draws one run per token~~ — FIXED 2026-08-17, see
+   the update at the top of this entry.** Kept below as written, because it is
+   the argument for the shape of the fix and (d) rests on the same reasoning.
+   **Syntax highlighting draws one run per token, each positioned at the sum of
    the previous runs' widths** — `draw_tokens` (`main.rs:1513`), which walks the
    `StyledToken` list emitting a `tree.text(x, …)` per token and advancing
    `x += text::measure(piece, …)`. Found 2026-08-17 while scoping the fix; it is
@@ -28507,8 +28531,9 @@ doing them in the wrong order means writing code twice. Shape-the-whole-line is
 the foundation and 3 and 4 both sit on it, so: (a) ~~measure the shaping cost on
 a pathological line and decide the caching question~~ — **done 2026-08-17; the
 answer is "cache it", and the numbers are in the shaping entry below**;
-(c) convert `draw_tokens` to colour glyphs rather than slice strings (4), which
-is the change that makes the output correct; (d) convert scrolling to
+~~(c) convert `draw_tokens` to colour glyphs rather than slice strings (4)~~ —
+**done 2026-08-17, see the update at the top**; **(d) is now the head of the
+queue:** convert scrolling to
 pixels over the shaped run with clipping (3); (b) build the per-line shaped
 cache keyed on document revision; (e) 1 and 2 then fall out as
 one-line substitutions to `text::caret_x` / `cursor_at` / `selection_boxes`,
@@ -28965,3 +28990,67 @@ and after, at a fixed resolution; the whole point is the ratio. If it is not a
 clear multiple, the PAT entry is not actually being selected — which is easy to
 get wrong silently, since a wrong index just yields a different valid memory
 type rather than a fault.
+
+## TD-TEXTVIEW-LAYS-SPANS-OUT-END-TO-END (lane C, 2026-08-17)
+
+**What.** `gui/toolkit/src/textview.rs` has the defect
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL` item 4 just had fixed, in two widgets, and it
+was left alone deliberately: the fix that worked for the editor does not fit
+here, for a reason worth writing down before someone tries it.
+
+`RichTextView` draws a wrapped line by walking its `RichSpan`s, emitting a
+`RenderCommand::Text` per span at a running `x` and advancing
+`x += self.span_width(span, heading)` (`textview.rs:1821` for selection boxes,
+`:2541` for the drawing itself; `span_width` at `:1751` is
+`crate::text::measure`). Laying the pieces out end to end **is** the assumption
+that screen order equals byte order — the same assumption, with the same
+consequence: on a line containing a right-to-left run the spans' glyphs belong
+interleaved with each other, so there is no `x` at which a span can be drawn as
+one left-to-right piece.
+
+`SimpleTextView` (the ANSI/terminal view) advances by
+`columns(&span.text) * self.config.char_width` (`:1125`) instead. That is
+narrower than a bug: a terminal *is* a grid of cells and advancing by cells is
+the terminal's own model, not a mis-measurement. It is still wrong under a
+right-to-left run — a terminal has to reorder within the line to display one —
+but fixing it is a terminal-bidi question (BiDi in a cell grid), not the same
+question as `RichTextView`'s.
+
+**Why `RichText` does not simply apply.** The editor's spans differ only in
+*colour*, which is why a `TextSpan { end, color }` could carry them. These do
+not:
+
+| Carrier | Per-span attributes beyond colour |
+|---|---|
+| `RichSpan` → `RichSpanStyle` (`:1215`) | `weight`, `font_style`, `font_size`, `bg_color`, `underline`, `strikethrough`, `link` |
+| `SimpleTextView` → `AnsiStyle` (`:161`) | `bg`, `bold`, `dim`, `italic`, `underline`, `reverse` |
+
+A span that changes the *size* or the *weight* changes the shaping, so it is
+not merely a colour attribute painted onto glyphs that were shaped uniformly —
+it is a genuine style run, and shaping a line whose runs differ in face means
+shaping each run and then ordering the results, which is what a real text
+engine (HarfBuzz + a bidi pass + a line breaker) does. `underline`,
+`strikethrough` and `bg_color` are worse still: each needs the *rectangles* the
+span occupies on screen, and under bidi one span occupies several disjoint
+rectangles — exactly the problem `text::selection_boxes` already solves for
+selections, and the same machinery is the answer here.
+
+**The proper fix.** Widen the render primitive from "colour per byte range" to
+"style per byte range" — a `RichTextSpan { end, color, bg, weight, size,
+decorations }` — and have the renderer shape each style run, order the runs by
+the bidi algorithm over the whole line, then emit glyphs and, for each span,
+the set of rectangles its glyphs cover (which the decorations and the
+background are drawn into). That is a larger change than §455's, and it wants
+`TD-EDITOR-IS-NOT-BIDIRECTIONAL` step (d) done first: (d) establishes
+shape-the-whole-line-and-clip in the editor, which is the same shape this
+needs, and doing them in the other order means designing the multi-run
+machinery against no caller.
+
+**Severity.** Low today, same as the editor's: uni-directional text lays out
+correctly under the present code, and `RichTextView`'s callers are help text
+and markdown-ish rendering. It bites on a document with a quoted Arabic or
+Hebrew phrase — which is precisely what a markdown view exists to display.
+
+**Where.** `gui/toolkit/src/textview.rs`: `RichTextView::span_width` (~1751),
+`selection_boxes_of_cols` (~1796–1821), the draw loop (~2470–2545); and
+`SimpleTextView`'s draw loop (~1090–1126) for the terminal-grid variant.

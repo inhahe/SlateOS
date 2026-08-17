@@ -18,7 +18,7 @@ mod highlight;
 mod syntree;
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderTree};
+use guitk::render::{FontWeightHint, RenderTree, TextSpan};
 use guitk::tabs::Tabs;
 use guitk::text;
 use highlight::{DEFAULT_THEME, HighlightState, StyledToken, Token};
@@ -242,6 +242,18 @@ fn snap_to_boundary(line: &str, col: usize) -> usize {
         col -= 1;
     }
     col
+}
+
+/// A byte offset into a whole line, expressed against a line drawn from `start`.
+///
+/// Saturating in both directions rather than panicking, because this feeds a
+/// [`TextSpan`] and a wrong span mis-colours where a panic takes the editor
+/// down. An offset before `start` clamps to 0 — the span is then empty, which
+/// is what a token entirely left of the scroll position should contribute — and
+/// a line longer than 4 GiB clamps to `u32::MAX`, past every glyph, which
+/// colours the rest of the line in that token's colour rather than losing it.
+fn rebase(offset: usize, start: usize) -> u32 {
+    u32::try_from(offset.saturating_sub(start)).unwrap_or(u32::MAX)
 }
 
 impl Default for Document {
@@ -1497,18 +1509,36 @@ impl EditorState {
         self.gutter_width + 8.0
     }
 
-    /// Draw one line as a row of coloured runs, one per syntax token.
+    /// Draw one line as a single shaped run whose glyphs carry the colours of
+    /// the tokens they came from.
     ///
-    /// `scroll_col` is a byte offset into `line`; tokens entirely left of it are
-    /// skipped and the one straddling it is cut. Drawing stops once the pen has
-    /// passed `right`, so a line thousands of columns wide costs a screenful of
-    /// commands rather than one per token.
+    /// `scroll_col` is a byte offset into `line`; the line is drawn from there,
+    /// and the renderer stops at `right`, so a line thousands of columns wide
+    /// costs a screenful of glyphs rather than one command per token.
     ///
-    /// Each run's x is the previous run's x plus that run's measured width,
-    /// which is how the toolkit's own multi-span text (`guitk::textview`) is
-    /// laid out. It forgoes kerning *across* a token boundary — but drawing the
-    /// runs in separate commands already does, and a token boundary is almost
-    /// always a change of character class, where there is no kern pair to lose.
+    /// **This used to emit one `Text` command per token, each positioned at the
+    /// sum of the previous tokens' widths, and that was wrong in a way no amount
+    /// of care in the loop could fix.** Laying pieces out end to end *is* the
+    /// assumption that screen order is byte order. Under a right-to-left run the
+    /// glyphs of a token belong interleaved with those around them, so there is
+    /// no single `x` at which the token can be drawn — the piece is not
+    /// contiguous on the screen. Colour therefore has to be an attribute of a
+    /// glyph rather than of a substring to draw, which is what
+    /// `guitk::render::RenderCommand::RichText` makes it: the line is shaped
+    /// once as a whole and each glyph takes the colour of the token containing
+    /// the byte it came from.
+    ///
+    /// Two things fall out for free. Kerning across a token boundary is no
+    /// longer lost — the comment that used to sit here accepted losing it as a
+    /// small cost. And it is *faster*: each shaping carries a fixed cost of a
+    /// few microseconds on top of the per-character cost, and cutting a line
+    /// into *n* pieces paid it *n* times. An 80-character line of 40 tokens — an
+    /// ordinary line of code — measured 2.3x the cost of shaping it whole. See
+    /// `known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL`.
+    ///
+    /// Still outstanding: `scroll_col` slices the line at a byte offset, and the
+    /// visible portion of a bidirectional line is not the shaping of a substring
+    /// of it. That is item 3 of the same entry, and a separate change.
     #[allow(clippy::too_many_arguments)]
     fn draw_tokens(
         tree: &mut RenderTree,
@@ -1521,43 +1551,48 @@ impl EditorState {
         font_size: f32,
     ) {
         let start = snap_to_boundary(line, scroll_col);
-        let mut x = left;
-        // Where the last drawn run ended, so a token that begins after it — a
-        // gap the tokenizer left — is still drawn rather than silently dropped.
-        // `every_byte_of_a_line_is_covered_by_some_token` asserts there are no
-        // gaps; this is what keeps a future one from deleting the user's text
-        // off the screen instead of merely mis-colouring it.
+        let Some(text) = line.get(start..) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let plain = DEFAULT_THEME.color_for(Token::Plain);
+
+        // Spans are cumulative — each runs from where the last ended — so a gap
+        // the tokenizer left is not silently dropped but explicitly filled with
+        // the plain colour. `every_byte_of_a_line_is_covered_by_some_token`
+        // asserts there are no gaps; this is what keeps a future one from
+        // mis-colouring rather than deleting the user's text off the screen.
+        let mut spans: Vec<TextSpan> = Vec::with_capacity(tokens.len());
         let mut covered = start;
         for token in tokens {
             if token.end <= covered {
                 continue;
             }
-            if token.start > covered
-                && let Some(gap) = line.get(covered..token.start)
-            {
-                tree.text(x, y, gap, DEFAULT_THEME.color_for(Token::Plain), font_size);
-                x += text::measure(gap, font_size, FontWeightHint::Regular);
+            if token.start > covered {
+                spans.push(TextSpan {
+                    end: rebase(token.start, start),
+                    color: plain,
+                });
             }
-            let from = token.start.max(covered);
-            let Some(piece) = line.get(from..token.end) else {
-                continue;
-            };
-            if !piece.is_empty() {
-                tree.text(x, y, piece, DEFAULT_THEME.color_for(token.kind), font_size);
-                x += text::measure(piece, font_size, FontWeightHint::Regular);
-            }
+            spans.push(TextSpan {
+                end: rebase(token.end, start),
+                color: DEFAULT_THEME.color_for(token.kind),
+            });
             covered = token.end;
-            if x > right {
-                return;
-            }
         }
-        // Anything the tokens did not reach — again, defence rather than an
-        // expected path.
-        if let Some(tail) = line.get(covered..)
-            && !tail.is_empty()
-        {
-            tree.text(x, y, tail, DEFAULT_THEME.color_for(Token::Plain), font_size);
-        }
+        // Bytes past the last span take the fallback colour, so the tail the
+        // tokens did not reach needs no span of its own.
+        tree.rich_text_clipped(
+            left,
+            y,
+            (right - left).max(0.0),
+            text,
+            spans,
+            plain,
+            font_size,
+        );
     }
 
     fn render_editor(&self, tree: &mut RenderTree) {
@@ -2150,17 +2185,41 @@ mod highlight_render_tests {
     use super::*;
     use guitk::render::RenderCommand;
 
-    /// Every `Text` command in a rendered frame, as `(x, text, colour)`.
-    fn drawn(editor: &EditorState) -> Vec<(f32, String, Color)> {
-        editor
-            .render()
-            .commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { x, text, color, .. } => Some((*x, text.clone(), *color)),
-                _ => None,
-            })
-            .collect()
+    /// Every coloured stretch of text in a rendered frame, as `(text, colour)`.
+    ///
+    /// A `RichText` command contributes one entry per span rather than one for
+    /// the whole string, because a span is exactly "this much of the line, in
+    /// this colour" — the thing these tests are about. No `x` accompanies it:
+    /// a span *has* no independent x, which is the entire point of the command
+    /// (a run is positioned once and shaped once; where within it a given byte
+    /// lands is the renderer's answer, not the caller's).
+    fn drawn(editor: &EditorState) -> Vec<(String, Color)> {
+        let mut out = Vec::new();
+        for c in &editor.render().commands {
+            match c {
+                RenderCommand::Text { text, color, .. } => out.push((text.clone(), *color)),
+                RenderCommand::RichText {
+                    text, spans, color, ..
+                } => {
+                    let mut at = 0usize;
+                    for span in spans {
+                        let end = (span.end as usize).min(text.len());
+                        if let Some(s) = text.get(at..end) {
+                            out.push((s.to_string(), span.color));
+                        }
+                        at = end;
+                    }
+                    // Bytes past the last span take the command's own colour.
+                    if let Some(tail) = text.get(at..)
+                        && !tail.is_empty()
+                    {
+                        out.push((tail.to_string(), *color));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     fn editor_showing(src: &str, language: Language) -> EditorState {
@@ -2198,10 +2257,10 @@ mod highlight_render_tests {
         Language::Markdown,
     ];
 
-    /// The renderer draws one run per token and nothing else, so a byte no token
-    /// claims is a byte the user does not see. `draw_tokens` covers a gap
-    /// defensively rather than dropping it — this is the assertion that says the
-    /// defence should never have to fire.
+    /// The renderer colours each byte by the token claiming it, so a byte no
+    /// token claims falls back to the plain colour. `draw_tokens` fills such a
+    /// gap defensively rather than dropping it — this is the assertion that says
+    /// the defence should never have to fire.
     #[test]
     fn every_byte_of_a_line_is_covered_by_some_token() {
         let lines = [
@@ -2249,11 +2308,11 @@ mod highlight_render_tests {
         let keyword = DEFAULT_THEME.color_for(Token::Keyword);
         let function = DEFAULT_THEME.color_for(Token::Function);
         assert!(
-            runs.iter().any(|(_, t, c)| t == "fn" && *c == keyword),
+            runs.iter().any(|(t, c)| t == "fn" && *c == keyword),
             "`fn` was not drawn in the keyword colour; runs were {runs:?}"
         );
         assert!(
-            runs.iter().any(|(_, t, c)| t == "main" && *c == function),
+            runs.iter().any(|(t, c)| t == "main" && *c == function),
             "`main` was not drawn in the function colour; runs were {runs:?}"
         );
     }
@@ -2267,7 +2326,7 @@ mod highlight_render_tests {
         let runs = drawn(&editor);
         assert!(
             runs.iter()
-                .any(|(_, t, c)| t.contains("still a comment") && *c == comment),
+                .any(|(t, c)| t.contains("still a comment") && *c == comment),
             "the second line of a block comment was not drawn as a comment; runs were {runs:?}"
         );
     }
@@ -2287,7 +2346,7 @@ mod highlight_render_tests {
         let runs = drawn(&editor);
         assert!(
             runs.iter()
-                .any(|(_, t, c)| t.contains("body line 149") && *c == comment),
+                .any(|(t, c)| t.contains("body line 149") && *c == comment),
             "a line 150 rows below the `/*` lost the comment colour; runs were {runs:?}"
         );
     }
@@ -2385,6 +2444,207 @@ mod highlight_render_tests {
             doc.line(0), "ab",
             "undo removed the character after the one it inserted"
         );
+    }
+
+    // ---- syntax colouring is per glyph, not per drawn substring ------------
+
+    /// `draw_tokens` output as (text, spans, max_width), or a panic naming what
+    /// it emitted instead.
+    fn tokens_drawn(
+        line: &str,
+        language: Language,
+        scroll_col: usize,
+        right: f32,
+    ) -> (String, Vec<TextSpan>, Option<f32>) {
+        let mut tree = RenderTree::new();
+        let mut state = HighlightState::Normal;
+        let tokens = highlight::highlight_line(line, language, &mut state);
+        EditorState::draw_tokens(&mut tree, line, &tokens, scroll_col, 0.0, 0.0, right, 14.0);
+        match tree.commands.first() {
+            Some(guitk::render::RenderCommand::RichText {
+                text,
+                spans,
+                max_width,
+                ..
+            }) => (text.clone(), spans.clone(), *max_width),
+            other => panic!("expected one RichText command, got {other:?}"),
+        }
+    }
+
+    /// **The regression this exists to prevent.** A highlighted line must be
+    /// *one* command: one command is one shaping, and one shaping is the only
+    /// arrangement under which a right-to-left run can be ordered correctly. A
+    /// command per token is the assumption that screen order is byte order, and
+    /// no amount of care inside the loop repairs it.
+    #[test]
+    fn a_highlighted_line_is_drawn_as_one_shaped_run() {
+        let mut tree = RenderTree::new();
+        let line = "fn main() { let x: u32 = 0x1F; /* hi */ }";
+        let mut state = HighlightState::Normal;
+        let tokens = highlight::highlight_line(line, Language::Rust, &mut state);
+        assert!(tokens.len() > 4, "this line should tokenize into several runs");
+        EditorState::draw_tokens(&mut tree, line, &tokens, 0, 0.0, 0.0, 800.0, 14.0);
+        assert_eq!(
+            tree.len(),
+            1,
+            "a {}-token line produced {} commands; it must produce one",
+            tokens.len(),
+            tree.len(),
+        );
+    }
+
+    /// Every byte of the drawn text must resolve to the colour of the token
+    /// containing it — the property the old per-token loop had by construction
+    /// and this one has to be shown to have.
+    #[test]
+    fn every_byte_resolves_to_its_own_token_colour() {
+        let line = "fn main() { let x: u32 = 0x1F; /* hi */ }";
+        let (text, spans, _) = tokens_drawn(line, Language::Rust, 0, 800.0);
+        assert_eq!(text, line);
+
+        let mut state = HighlightState::Normal;
+        let tokens = highlight::highlight_line(line, Language::Rust, &mut state);
+        for token in &tokens {
+            for byte in token.start..token.end {
+                assert_eq!(
+                    TextSpan::color_at(&spans, byte),
+                    Some(DEFAULT_THEME.color_for(token.kind)),
+                    "byte {byte} of {line:?} is in {token:?} but resolved elsewhere",
+                );
+            }
+        }
+    }
+
+    /// Span offsets are into the *drawn* string, which starts at `scroll_col` —
+    /// not into the whole line. Getting this wrong shifts every colour by the
+    /// scroll position, which looks like working code until someone scrolls.
+    #[test]
+    fn spans_are_offsets_into_the_drawn_text_not_the_whole_line() {
+        let line = "let alpha = \"beta\";";
+        let scroll = 4;
+        let (text, spans, _) = tokens_drawn(line, Language::Rust, scroll, 800.0);
+        assert_eq!(text, line[scroll..]);
+
+        let mut state = HighlightState::Normal;
+        let tokens = highlight::highlight_line(line, Language::Rust, &mut state);
+        for token in &tokens {
+            for byte in token.start.max(scroll)..token.end {
+                assert_eq!(
+                    TextSpan::color_at(&spans, byte - scroll),
+                    Some(DEFAULT_THEME.color_for(token.kind)),
+                    "byte {byte} of {line:?} resolved wrongly at scroll {scroll}",
+                );
+            }
+        }
+    }
+
+    /// The bound is what lets the renderer stop: without it a line thousands of
+    /// columns wide costs a glyph per column every frame, of which a screenful
+    /// is visible.
+    #[test]
+    fn the_drawn_run_is_bounded_by_the_viewport() {
+        let (_, _, max_width) = tokens_drawn("let x = 1;", Language::Rust, 0, 640.0);
+        assert_eq!(max_width, Some(640.0));
+    }
+
+    /// A scroll position past the end of the line draws nothing rather than
+    /// panicking or emitting an empty run. `scroll_col` is clamped elsewhere,
+    /// but this is the cheap guard against the clamp being wrong.
+    #[test]
+    fn scrolling_past_the_end_of_a_line_draws_nothing() {
+        let line = "short";
+        let mut tree = RenderTree::new();
+        let mut state = HighlightState::Normal;
+        let tokens = highlight::highlight_line(line, Language::Rust, &mut state);
+        EditorState::draw_tokens(&mut tree, line, &tokens, 999, 0.0, 0.0, 800.0, 14.0);
+        assert_eq!(tree.len(), 0);
+    }
+
+    /// `scroll_col` may land mid-character — it is a byte offset carried from
+    /// another line — and slicing there panics. It snaps back to a boundary, and
+    /// the spans must be rebased against the *snapped* offset, not the asked-for
+    /// one.
+    #[test]
+    fn a_scroll_offset_inside_a_character_snaps_back() {
+        let line = "日本語 x";
+        for scroll in 1..line.len() {
+            let (text, _, _) = tokens_drawn(line, Language::Rust, scroll, 800.0);
+            assert!(
+                line.ends_with(text.as_str()),
+                "scroll {scroll} drew {text:?}, which is not a suffix of {line:?}",
+            );
+        }
+    }
+
+    /// A gap the tokenizer leaves is filled with the plain colour rather than
+    /// shifting every later span — the cumulative representation makes a gap
+    /// impossible to express, so it has to be filled explicitly.
+    #[test]
+    fn a_gap_between_tokens_is_filled_with_the_plain_colour() {
+        let line = "abcdef";
+        // Hand-built tokens with a hole at bytes 2..4, which the tokenizer is
+        // asserted never to produce but the renderer must survive.
+        let tokens = vec![
+            StyledToken {
+                start: 0,
+                end: 2,
+                kind: Token::Keyword,
+            },
+            StyledToken {
+                start: 4,
+                end: 6,
+                kind: Token::Number,
+            },
+        ];
+        let mut tree = RenderTree::new();
+        EditorState::draw_tokens(&mut tree, line, &tokens, 0, 0.0, 0.0, 800.0, 14.0);
+        let Some(guitk::render::RenderCommand::RichText { spans, .. }) = tree.commands.first()
+        else {
+            panic!("expected RichText");
+        };
+        let plain = DEFAULT_THEME.color_for(Token::Plain);
+        assert_eq!(
+            TextSpan::color_at(spans, 0),
+            Some(DEFAULT_THEME.color_for(Token::Keyword))
+        );
+        assert_eq!(TextSpan::color_at(spans, 2), Some(plain));
+        assert_eq!(TextSpan::color_at(spans, 3), Some(plain));
+        assert_eq!(
+            TextSpan::color_at(spans, 4),
+            Some(DEFAULT_THEME.color_for(Token::Number))
+        );
+    }
+
+    /// Bytes past the last token take the fallback colour, which is the plain
+    /// one — so a tokenizer that stops short mis-colours a tail rather than
+    /// losing it.
+    #[test]
+    fn a_tail_past_the_last_token_needs_no_span() {
+        let line = "abcdef";
+        let tokens = vec![StyledToken {
+            start: 0,
+            end: 2,
+            kind: Token::Keyword,
+        }];
+        let mut tree = RenderTree::new();
+        EditorState::draw_tokens(&mut tree, line, &tokens, 0, 0.0, 0.0, 800.0, 14.0);
+        let Some(guitk::render::RenderCommand::RichText { spans, text, .. }) =
+            tree.commands.first()
+        else {
+            panic!("expected RichText");
+        };
+        assert_eq!(text, line);
+        assert_eq!(TextSpan::color_at(spans, 2), None);
+    }
+
+    /// `rebase` is what keeps a wrong offset a colouring bug rather than a
+    /// crash: it saturates at both ends instead of underflowing or truncating.
+    #[test]
+    fn rebasing_an_offset_before_the_scroll_position_yields_zero() {
+        assert_eq!(rebase(3, 10), 0);
+        assert_eq!(rebase(10, 10), 0);
+        assert_eq!(rebase(14, 10), 4);
+        assert_eq!(rebase(usize::MAX, 0), u32::MAX);
     }
 }
 

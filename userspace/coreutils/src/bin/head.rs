@@ -872,12 +872,9 @@ mod tests {
         parse_args(&args(items)).unwrap_err()
     }
 
-    /// The message without the referral every getopt diagnostic ends with.
+    /// The diagnostic's own sentence, without the referral most of these carry.
     fn body(e: &getopt::Error) -> String {
-        e.message
-            .strip_suffix("\nTry 'head --help' for more information.")
-            .unwrap_or(&e.message)
-            .to_string()
+        e.sentence.clone()
     }
 
     fn run_on(input: &[u8], items: &[&str]) -> Vec<u8> {
@@ -976,7 +973,7 @@ mod tests {
         );
         // `-c2n`: the whole rest of the cluster is `c`'s argument, so the `n`
         // is part of the number and the number is bad.
-        assert_eq!(fail(&["-c2n"]).message, "invalid number of bytes: '2n'");
+        assert_eq!(fail(&["-c2n"]).sentence, "invalid number of bytes: '2n'");
     }
 
     // ---------------------------------------------------- the obsolete form ---
@@ -1045,15 +1042,15 @@ mod tests {
         // and the rest is what gets parsed *and* what gets quoted back.
         assert_eq!(parse(&["-n", "- 5"]).n_units, 5);
         assert_eq!(
-            fail(&["-n", " -5"]).message,
+            fail(&["-n", " -5"]).sentence,
             "invalid number of lines: ' -5'"
         );
         // A lone `-` leaves nothing behind it.
-        assert_eq!(fail(&["-n", "-"]).message, "invalid number of lines: ''");
+        assert_eq!(fail(&["-n", "-"]).sentence, "invalid number of lines: ''");
         // Two dashes leave one, which an unsigned parse refuses — and the
         // message shows the stripped string, not what was typed.
         assert_eq!(
-            fail(&["-n", "--5"]).message,
+            fail(&["-n", "--5"]).sentence,
             "invalid number of lines: '-5'"
         );
     }
@@ -1080,21 +1077,21 @@ mod tests {
         // gnulib knows these; `head`'s list does not include them.
         for bad in ["1w", "1c", "1B", "1g", "1t", "1D"] {
             assert_eq!(
-                fail(&["-n", bad]).message,
+                fail(&["-n", bad]).sentence,
                 format!("invalid number of lines: '{bad}'"),
             );
         }
         // A lone `i` is not `iB`, so it is a trailing byte.
         assert_eq!(
-            fail(&["-n", "1Ki"]).message,
+            fail(&["-n", "1Ki"]).sentence,
             "invalid number of lines: '1Ki'"
         );
         assert_eq!(
-            fail(&["-n", "1KiBB"]).message,
+            fail(&["-n", "1KiBB"]).sentence,
             "invalid number of lines: '1KiBB'"
         );
         assert_eq!(
-            fail(&["-n", "5K5"]).message,
+            fail(&["-n", "5K5"]).sentence,
             "invalid number of lines: '5K5'"
         );
     }
@@ -1105,15 +1102,24 @@ mod tests {
         assert_eq!(parse(&["-n", "+5"]).n_units, 5);
         assert_eq!(parse(&["-n", "0005"]).n_units, 5);
         // Trailing space is a trailing byte.
-        assert_eq!(fail(&["-n", "5 "]).message, "invalid number of lines: '5 '");
+        assert_eq!(
+            fail(&["-n", "5 "]).sentence,
+            "invalid number of lines: '5 '"
+        );
         // The bare-suffix fallback looks at the first byte of the whole string,
         // so a suffix behind whitespace does not qualify.
-        assert_eq!(fail(&["-n", " K"]).message, "invalid number of lines: ' K'");
-        assert_eq!(fail(&["-n", "+K"]).message, "invalid number of lines: '+K'");
-        assert_eq!(fail(&["-n", " "]).message, "invalid number of lines: ' '");
+        assert_eq!(
+            fail(&["-n", " K"]).sentence,
+            "invalid number of lines: ' K'"
+        );
+        assert_eq!(
+            fail(&["-n", "+K"]).sentence,
+            "invalid number of lines: '+K'"
+        );
+        assert_eq!(fail(&["-n", " "]).sentence, "invalid number of lines: ' '");
         // Base 10 only: `0x10` stops at the `x`.
         assert_eq!(
-            fail(&["-n", "0x10"]).message,
+            fail(&["-n", "0x10"]).sentence,
             "invalid number of lines: '0x10'"
         );
     }
@@ -1122,7 +1128,7 @@ mod tests {
     fn overflow_is_a_different_sentence_and_a_bad_suffix_outranks_it() {
         assert_eq!(parse(&["-n", "18446744073709551615"]).n_units, u64::MAX);
         assert_eq!(
-            fail(&["-n", "18446744073709551616"]).message,
+            fail(&["-n", "18446744073709551616"]).sentence,
             "invalid number of lines: '18446744073709551616': \
              Value too large for defined data type"
         );
@@ -1132,7 +1138,7 @@ mod tests {
             18_014_398_509_481_983 * 1024
         );
         assert_eq!(
-            fail(&["-n", "18014398509481984K"]).message,
+            fail(&["-n", "18014398509481984K"]).sentence,
             "invalid number of lines: '18014398509481984K': \
              Value too large for defined data type"
         );
@@ -1141,7 +1147,7 @@ mod tests {
         for big in ["1Z", "1Y", "1R", "1Q"] {
             assert!(
                 fail(&["-n", big])
-                    .message
+                    .sentence
                     .ends_with("Value too large for defined data type"),
                 "{big}"
             );
@@ -1149,13 +1155,13 @@ mod tests {
         // A suffix that is not a suffix wins over the magnitude: this reports
         // an invalid number even though the digits alone would overflow.
         assert_eq!(
-            fail(&["-c", "99999999999999999999X"]).message,
+            fail(&["-c", "99999999999999999999X"]).sentence,
             "invalid number of bytes: '99999999999999999999X'"
         );
         // And the unit changes the noun.
-        assert_eq!(fail(&["-c", "x"]).message, "invalid number of bytes: 'x'");
+        assert_eq!(fail(&["-c", "x"]).sentence, "invalid number of bytes: 'x'");
         // These are the utility's own usage errors, so no referral.
-        assert!(!fail(&["-c", "x"]).message.contains("Try '"));
+        assert_eq!(fail(&["-c", "x"]).referral, None);
     }
 
     // ------------------------------------------------------------ copying ---

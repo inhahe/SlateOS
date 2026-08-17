@@ -729,6 +729,100 @@ plan document keeps asking for something we have decided nothing about. There is
 no time pressure and no drift.
 
 
+## Q50 - [A] The next graphics task is an Intel driver we also cannot run -- and the Intel chip it targets is already inside this PC, switched off. Which way? - Status: OPEN
+
+**In short:** The next planned graphics job is a driver for Intel's built-in
+graphics, which is what most laptops display through. It runs into the same wall
+as the AMD question above -- there is no way to actually run it and see. One
+detail differs though, and it is worth knowing before deciding either question:
+the Intel graphics chip this driver targets is *already inside this PC*, built
+into the CPU, and merely switched off in the firmware settings. So for Intel,
+unlike AMD, no hardware purchase is needed. What is missing instead is that
+SlateOS has never once started up on a real PC -- only ever inside the emulator.
+
+**Some terms.** *BIOS* / *firmware settings* is the setup screen you can enter
+before the OS starts. *Integrated graphics* (or *iGPU*) is a graphics chip built
+into the CPU instead of being a separate plug-in card. *QEMU* is the emulator we
+boot the OS inside for every test. *Passthrough* means handing a real chip
+straight through to the OS running inside the emulator. *Bare metal* means
+running on a real PC directly, with no emulator underneath. *i915* is the
+long-standing name of Linux's Intel graphics driver, and so of the equivalent we
+would write.
+
+**What was measured today, not assumed:**
+
+| Fact | Evidence |
+|---|---|
+| This PC's CPU contains Intel UHD Graphics 630 | CPU is a `Intel(R) Core(TM) i7-8700K`; that model includes UHD 630 (a mainstream, well-documented i915 target) |
+| That chip is switched off, not absent | Windows lists only `NVIDIA GeForce RTX 4090`; **no** Intel display device enumerates on the PCI bus at all -- the usual state when a separate card is fitted. Re-enabling is a firmware toggle, not a purchase |
+| Passthrough is unavailable here regardless | QEMU on this Windows host accelerates via WHPX, which has no device-passthrough at all. The mechanisms that would do it -- VFIO, and Intel's GVT-g graphics partitioning -- are Linux-only |
+| SlateOS has never run on real hardware | No roadmap item exists for it; every boot to date is QEMU. **This, not the chip, is the actual gate** |
+
+**Option A -- treat Intel like Q49 Option A: the generic fallback is the
+supported story, and close the roadmap item saying so.**
+*What changes:* nothing today. On a real laptop the desktop still appears, at
+whatever fixed resolution the firmware chose, with all drawing done by the CPU.
+- *For:* honest, costs nothing, and every line of graphics code we ship stays
+  code we have actually run.
+- *Against:* the plan document asks for this driver, and Intel integrated
+  graphics is the single most common display hardware in desktops and laptops.
+
+**Option B -- write i915 blind, from documentation only.**
+*What changes:* the roadmap item ticks; behaviour on real Intel hardware is
+unknown and stays unknown.
+- *For:* the generation in question (UHD 630) is genuinely the friendly case --
+  it needs no firmware blob loaded into the chip and has a far shorter power-up
+  sequence than a modern AMD card, so noticeably more of it would plausibly be
+  right from the documentation than Q49's option B would be.
+- *Against:* still unverifiable, and it still puts a claim of Intel support in
+  the roadmap that nobody has ever seen work. I give this the same answer as in
+  Q49, just less emphatically.
+
+**Option C -- switch the iGPU on in firmware, get SlateOS booting on bare metal,
+then write i915 against the real chip.**
+*What changes:* the driver becomes testable on real silicon, at no hardware cost.
+- *For:* the only path that ends with a *tested* Intel driver using hardware we
+  already own. Bare-metal boot would also unblock every other real-hardware path
+  we currently cannot reach at all -- storage, USB, ACPI, real monitor EDID.
+- *Against:* bare-metal boot is a large prerequisite and a substantially bigger
+  job than the driver it would enable; the driver is the small half. It also
+  carries the only real risk in this question: a mistake means a black screen on
+  the machine you work at. (Bootable USB, Windows disk untouched, would contain
+  that.)
+
+**Option D -- put Linux on a spare disk or partition and test through KVM with
+GVT-g or VFIO passthrough.**
+*What changes:* the emulator can hand the real Intel chip to SlateOS, so i915
+becomes testable without SlateOS having to boot a real PC first.
+- *For:* far smaller than C, keeps the crash-safety of a virtual machine, and
+  yields a *repeatable automated* test rather than a manual one -- which is what
+  the rest of this project's testing depends on. GVT-g explicitly covers this
+  chip's generation.
+- *Against:* a second OS to install and maintain, and the boot-test scripts
+  currently assume Windows paths, so they would need a Linux path. Intel has also
+  deprecated GVT-g in recent kernels, so this may mean pinning an older kernel;
+  plain VFIO passthrough of an iGPU works too but is fiddly to set up.
+
+**Recommendation: A for now -- same as Q49.** If you do want real graphics
+support at some point, I would pick **D over C**: it costs no money, keeps
+testing automated instead of manual, and it is the same setup that would let us
+test a modern AMD card if you ever fit one -- so it answers Q49 and this question
+with one piece of work. C is worth doing eventually for its own sake (real
+hardware support is a goal in the plan), but as a way to *test a driver* it is a
+lot of prerequisite for the purpose.
+
+**If this is never answered:** nothing breaks and nothing worsens. The emulator
+keeps displaying through virtio-gpu and real machines through the firmware
+framebuffer. The practical consequence is that roadmap §3.1 never closes -- both
+of its two remaining items are these two GPU questions -- and lane A works on
+other things, of which there is no shortage. No time pressure, no drift.
+
+**Why this is filed rather than decided:** it is the same class of call as Q49 --
+spend money, hardware or setup effort, versus narrowing what we claim to support.
+That is the operator's decision, not mine. Related: Q49 (modern AMD),
+`design-decisions.md` §217 (why the old-AMD driver was written first).
+
+
 ---
 
 # Resolved

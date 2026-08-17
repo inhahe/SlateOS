@@ -206,8 +206,7 @@ impl LimineBackend {
 
     /// Free a GEM buffer.
     pub fn gem_destroy(&mut self, mut gem: GemObject) -> KernelResult<()> {
-        gem.free_backing();
-        Ok(())
+        gem.free_backing()
     }
 
     /// Get kernel-virtual pointer to GEM memory.
@@ -227,6 +226,10 @@ impl LimineBackend {
             return Err(KernelError::NotSupported);
         }
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+        // These backends only ever create system-RAM objects, so a VRAM-resident
+        // one arriving here means it came from another driver's device — refused
+        // rather than misread, since its "frames" would be BAR addresses.
+        let frames = gem.ram_frames()?;
 
         let dst = self.fb_addr as *mut u8;
         let copy_h = fb.height.min(self.height) as usize;
@@ -238,7 +241,7 @@ impl LimineBackend {
             let frame_idx = src_byte_offset / FRAME_SIZE;
             let frame_offset = src_byte_offset % FRAME_SIZE;
 
-            if let Some(pf) = gem.phys_frames.get(frame_idx) {
+            if let Some(pf) = frames.get(frame_idx) {
                 let src_virt = pf.addr() + hhdm + (frame_offset as u64);
                 // SAFETY: dst is the Limine framebuffer base (mapped at boot).
                 // row * pitch stays within the framebuffer's linear region.
@@ -258,7 +261,7 @@ impl LimineBackend {
                 // If the row spans a frame boundary, copy the rest from
                 // the next frame.
                 if to_copy < copy_w_bytes {
-                    if let Some(pf2) = gem.phys_frames.get(frame_idx + 1) {
+                    if let Some(pf2) = frames.get(frame_idx + 1) {
                         let src2 = pf2.addr() + hhdm;
                         let remaining = copy_w_bytes - to_copy;
                         // SAFETY: src2 is HHDM-mapped; dst_row + to_copy is within framebuffer.
@@ -291,6 +294,10 @@ impl LimineBackend {
             return Err(KernelError::NotSupported);
         }
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+        // These backends only ever create system-RAM objects, so a VRAM-resident
+        // one arriving here means it came from another driver's device — refused
+        // rather than misread, since its "frames" would be BAR addresses.
+        let frames = gem.ram_frames()?;
 
         let dst_base = self.fb_addr as *mut u8;
         let bpp = fb.format.bpp() as usize;
@@ -304,7 +311,7 @@ impl LimineBackend {
             let frame_idx = src_byte_offset / FRAME_SIZE;
             let frame_offset = src_byte_offset % FRAME_SIZE;
 
-            if let Some(pf) = gem.phys_frames.get(frame_idx) {
+            if let Some(pf) = frames.get(frame_idx) {
                 let src_virt = pf.addr() + hhdm + (frame_offset as u64);
                 // SAFETY: dst_base points to the framebuffer; offset is within pitch × height.
                 let dst_row = unsafe { dst_base.add(row * (self.pitch as usize) + x_start * bpp) };
@@ -447,8 +454,7 @@ impl VirtioGpuBackend {
 
     /// Free a GEM buffer.
     pub fn gem_destroy(&mut self, mut gem: GemObject) -> KernelResult<()> {
-        gem.free_backing();
-        Ok(())
+        gem.free_backing()
     }
 
     /// Get kernel-virtual pointer to GEM memory.
@@ -485,6 +491,10 @@ impl VirtioGpuBackend {
         let dst_base = crate::virtio::gpu::framebuffer_addr().ok_or(KernelError::NotSupported)?;
 
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+        // These backends only ever create system-RAM objects, so a VRAM-resident
+        // one arriving here means it came from another driver's device — refused
+        // rather than misread, since its "frames" would be BAR addresses.
+        let frames = gem.ram_frames()?;
 
         let bpp = fb.format.bpp() as usize;
         let copy_h = fb.height.min(self.height) as usize;
@@ -497,7 +507,7 @@ impl VirtioGpuBackend {
             let frame_idx = src_byte_offset / FRAME_SIZE;
             let frame_offset = src_byte_offset % FRAME_SIZE;
 
-            if let Some(pf) = gem.phys_frames.get(frame_idx) {
+            if let Some(pf) = frames.get(frame_idx) {
                 let src_virt = pf.addr() + hhdm + (frame_offset as u64);
                 // Destination: virtio-gpu driver's framebuffer.
                 let dst_row = dst_base + (row * dst_pitch) as u64;
@@ -518,7 +528,7 @@ impl VirtioGpuBackend {
 
                 // If the row spans a frame boundary, copy the remainder.
                 if to_copy < copy_w_bytes {
-                    if let Some(pf2) = gem.phys_frames.get(frame_idx + 1) {
+                    if let Some(pf2) = frames.get(frame_idx + 1) {
                         let src2 = pf2.addr() + hhdm;
                         let remaining = copy_w_bytes - to_copy;
                         // SAFETY: src2 is HHDM-mapped; dst_row + offset is within the fb.
@@ -555,6 +565,10 @@ impl VirtioGpuBackend {
         let dst_base = crate::virtio::gpu::framebuffer_addr().ok_or(KernelError::NotSupported)?;
 
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+        // These backends only ever create system-RAM objects, so a VRAM-resident
+        // one arriving here means it came from another driver's device — refused
+        // rather than misread, since its "frames" would be BAR addresses.
+        let frames = gem.ram_frames()?;
         let bpp = fb.format.bpp() as usize;
         let dst_pitch = (self.width as usize) * bpp;
 
@@ -567,7 +581,7 @@ impl VirtioGpuBackend {
             let frame_idx = src_byte_offset / FRAME_SIZE;
             let frame_offset = src_byte_offset % FRAME_SIZE;
 
-            if let Some(pf) = gem.phys_frames.get(frame_idx) {
+            if let Some(pf) = frames.get(frame_idx) {
                 let src_virt = pf.addr() + hhdm + (frame_offset as u64);
                 let dst_row = dst_base + (row * dst_pitch + x_start * bpp) as u64;
 

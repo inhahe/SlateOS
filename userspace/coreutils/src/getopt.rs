@@ -88,19 +88,58 @@ pub enum Takes {
 ///
 /// A caller therefore never supplies a status: it states its usage status once
 /// when it builds its [`Program`], and this module applies rule 2 on top.
+///
+/// # The sentence and the referral are two things, not one string
+///
+/// Upstream they are produced by two different pieces of code. `getopt_long`
+/// prints only the sentence — `nl: invalid option -- 'Z'` — and returns `'?'`;
+/// the `Try 'nl --help' for more information.` line comes later, from the
+/// caller's own `usage (EXIT_FAILURE)`. Most utilities call `usage` on the spot,
+/// so the two always appear together and look like one message. `nl` is the
+/// counter-example that makes the distinction visible: its option loop sets an
+/// `ok` flag and keeps going, so `nl -Z -bX` prints *two* sentences and *one*
+/// referral, in encounter order.
+///
+/// So [`sentence`](Error::sentence) holds the diagnostic's own text and
+/// [`referral`](Error::referral) names the program when the referral follows it.
+/// [`Error::message`] joins them, which is what a utility that stops at the
+/// first error prints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
-    pub message: String,
+    /// The diagnostic's own text, with no referral and no `program: ` prefix.
+    ///
+    /// May be several lines — `argmatch`'s carries its list of valid arguments —
+    /// so a caller must not assume it fits one `eprintln!` line's worth of
+    /// framing.
+    pub sentence: String,
+    /// The program name, when this diagnostic is followed by `Try '… --help'`.
+    ///
+    /// Which shape a message takes is measured per message, not chosen: it is
+    /// whether upstream called `error (EXIT_FAILURE, …)` or `error (0, …)` plus
+    /// `usage (EXIT_FAILURE)`.
+    pub referral: Option<&'static str>,
     pub status: i32,
 }
 
-/// The message alone, which is what gets printed; the status is acted on, not
-/// shown. Note the message may be several lines — `argmatch`'s carries its list
-/// of valid arguments — so a caller must not assume it fits one `eprintln!`
-/// line's worth of framing.
+impl Error {
+    /// The full text to print: the sentence, then the referral if there is one.
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self.referral {
+            Some(program) => format!("{}{}", self.sentence, try_help(program)),
+            None => self.sentence.clone(),
+        }
+    }
+}
+
+/// The message as printed; the status is acted on, not shown.
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        f.write_str(&self.sentence)?;
+        match self.referral {
+            Some(program) => f.write_str(&try_help(program)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -113,7 +152,8 @@ fn try_help(program: &str) -> String {
 /// status.
 fn sentence(program: Program, body: &str) -> Error {
     Error {
-        message: format!("{body}{}", try_help(program.name)),
+        sentence: body.to_string(),
+        referral: Some(program.name),
         status: program.usage_status,
     }
 }
@@ -143,7 +183,8 @@ fn named_long(resolved: &str) -> String {
 /// use coreutils::getopt::Program;
 /// const CAT: Program = Program::new("cat", 1);
 /// let e = CAT.invalid_option(b'x');
-/// assert_eq!(e.message, "invalid option -- 'x'\nTry 'cat --help' for more information.");
+/// assert_eq!(e.sentence, "invalid option -- 'x'");
+/// assert_eq!(e.message(), "invalid option -- 'x'\nTry 'cat --help' for more information.");
 /// assert_eq!(e.status, 1);
 /// ```
 #[derive(Clone, Copy, Debug)]
@@ -179,7 +220,8 @@ impl Program {
     #[must_use]
     pub fn usage(self, message: String) -> Error {
         Error {
-            message,
+            sentence: message,
+            referral: None,
             status: self.usage_status,
         }
     }
@@ -388,7 +430,7 @@ fn bad_argument<T: PartialEq>(
         // Always 1, overriding the caller's usage status rather than taking it
         // — measured: `ls --zzz` is 2 but `ls --sort=zzz` is 1. See [`Error`].
         status: 1,
-        message: sentence(
+        ..sentence(
             program,
             &format!(
                 "{what} argument {} for {}\nValid arguments are:\n{}",
@@ -397,7 +439,6 @@ fn bad_argument<T: PartialEq>(
                 lines.join("\n")
             ),
         )
-        .message,
     }
 }
 
@@ -425,10 +466,12 @@ mod tests {
     ];
 
     fn without_referral(err: &Error) -> String {
-        err.message
-            .strip_suffix("\nTry 'sort --help' for more information.")
-            .expect("every diagnostic ends with the referral")
-            .to_string()
+        assert_eq!(
+            err.referral,
+            Some("sort"),
+            "every diagnostic here ends with the referral"
+        );
+        err.sentence.clone()
     }
 
     #[test]
@@ -485,7 +528,7 @@ mod tests {
         // Alphabetically `random-source` would come first. It does not, because
         // the order is GNU's table order, and this is what would catch a table
         // that had been "tidied" into alphabetical order.
-        let m = &err.message;
+        let m = &err.sentence;
         assert!(m.find("'--random-sort'") < m.find("'--random-source'"));
     }
 
@@ -572,7 +615,7 @@ mod tests {
         // because it is derived from the matcher's own table.
         let err = SORT.argmatch(b"bogus", "--check", CHECK_WORDS).unwrap_err();
         assert!(
-            err.message
+            err.sentence
                 .contains("  - 'quiet', 'silent'\n  - 'diagnose-first'"),
             "{err:?}"
         );
@@ -580,7 +623,7 @@ mod tests {
         let distinct: &[(&str, u8)] = &[("month", 0), ("numeric", 1)];
         let err = SORT.argmatch(b"x", "--sort", distinct).unwrap_err();
         assert!(
-            err.message.contains("  - 'month'\n  - 'numeric'"),
+            err.sentence.contains("  - 'month'\n  - 'numeric'"),
             "{err:?}"
         );
     }
@@ -608,7 +651,7 @@ mod tests {
         // A utility's own usage message takes its usage status, and no referral.
         let own = SORT.usage("field number is zero".to_string());
         assert_eq!(own.status, 2);
-        assert!(!own.message.contains("Try '"), "{own:?}");
+        assert_eq!(own.referral, None, "{own:?}");
         // The same three calls for a status-1 utility, which is most of them.
         // `argmatch` stays 1 for both: that is the whole oddity.
         const CAT: Program = Program::new("cat", 1);
@@ -619,10 +662,9 @@ mod tests {
                 .status,
             1
         );
-        assert!(
-            CAT.invalid_option(b'x')
-                .message
-                .ends_with("Try 'cat --help' for more information."),
+        assert_eq!(
+            CAT.invalid_option(b'x').message(),
+            "invalid option -- 'x'\nTry 'cat --help' for more information."
         );
     }
 }

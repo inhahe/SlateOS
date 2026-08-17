@@ -1885,12 +1885,9 @@ mod tests {
         parse_args(&args(items)).unwrap_err()
     }
 
-    /// The message without the referral every getopt diagnostic ends with.
+    /// The diagnostic's own sentence, without the referral most of these carry.
     fn body(e: &getopt::Error) -> String {
-        e.message
-            .strip_suffix("\nTry 'tail --help' for more information.")
-            .unwrap_or(&e.message)
-            .to_string()
+        e.sentence.clone()
     }
 
     /// Run the streaming half of [`emit`] — the paths that take any `Read`, and

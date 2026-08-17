@@ -54257,3 +54257,42 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## stack), and to bound the work by the number of bookmarks already seen rather
 ## than by depth, since that bounds the cyclic case too. Do not "fix" it with a
 ## depth limit alone: a cycle at depth 3 is still infinite.
+
+## ---------------------------------------------------------------------------
+## [A] 2026-08-17 -- DRM MAP_DUMB (commit-7 design above) must reject VRAM GEM
+## ---------------------------------------------------------------------------
+## The "DRM Linux-ABI shim -- commit 7 design (MAP_DUMB + mmap-on-/dev/dri-fd)"
+## block earlier in this file was written when every GEM object was a list of
+## system-RAM PhysFrames. That is no longer true: DrmBackend::Ati creates
+## objects whose backing is GemBacking::Vram { offset, len } -- bytes behind
+## PCI BAR0, not in the frame allocator's map at all (design-decisions.md
+## Sec 218).
+##
+## The commit-7 plan's step 4 ("fetch phys frames; for each frame: ref_inc then
+## page_table::map_frame") is therefore WRONG for such an object, and wrong in
+## the worst way: ref_inc on a BAR address indexes the frame allocator's
+## refcount array with something that was never RAM. What saves us today is
+## that gem_frame_addrs/gem_phys_frames go through GemObject::ram_frames(),
+## which returns NotSupported for VRAM -- so the path errors out instead of
+## corrupting. That is the correct behaviour by accident of ordering, not by
+## design, and the error will reach userspace as a confusing ENOSYS/EIO.
+##
+## WHAT COMMIT 7 MUST DO:
+##   - Match on GemBacking explicitly rather than calling a frames accessor and
+##     propagating whatever error falls out. SystemRam -> the ref_inc/map_frame
+##     path as designed. Vram -> a deliberate outcome, not a fallthrough.
+##   - For Vram the deliberate outcome is initially EOPNOTSUPP, because mapping
+##     it needs two things we do not have: (a) write-combining PTEs, blocked on
+##     TD-NO-WRITE-COMBINING in known-issues.md -- mapping an aperture
+##     uncacheable makes a userspace framebuffer unusably slow, roughly a
+##     byte-at-a-time bus transaction per store; and (b) an ownership story for
+##     what happens when the process exits, since clear_user_address_space
+##     calls free_frame on every present user PTE and those PTEs would name
+##     card memory. (b) is the same class of bug as the one Sec 218 removed
+##     and must not be re-created at the mmap layer.
+##   - The eventual real fix is a VmaKind that marks the range as
+##     device-foreign so teardown unmaps without freeing, plus WC PTEs. Do
+##     that only after TD-NO-WRITE-COMBINING lands.
+##
+## WHEN TO REVISIT: when commit 7 is actually written. This note exists so the
+## author of that commit does not follow the older block's step 4 verbatim.

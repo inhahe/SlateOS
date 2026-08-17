@@ -19,6 +19,8 @@ use super::modeset;
 use super::regs::{self, CrtcTiming, PixWidth};
 use super::timing::{self, DMT_MODES, ModeTiming};
 use super::vram;
+use crate::drm::DrmObjectId;
+use crate::drm::gem::{GemBacking, GemObject};
 use crate::drm::mode::PixelFormat;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -1229,6 +1231,201 @@ fn test_vram(c: &mut Check) {
 }
 
 // ---------------------------------------------------------------------------
+// VRAM-resident GEM objects
+// ---------------------------------------------------------------------------
+
+/// A VRAM buffer is described, not allocated, and cannot be freed as RAM.
+///
+/// The last of those is the one that matters. `GemObject::free_backing`
+/// returns frames to the buddy allocator, so a VRAM object that reached it
+/// would push PCI BAR addresses into the system frame allocator — not a leak
+/// but silent corruption, surfacing arbitrarily far from the driver that
+/// caused it. The whole reason `GemBacking` is an enum is to make that
+/// impossible, and this is the check that the guard is actually in place
+/// rather than merely intended.
+fn test_vram_gem(c: &mut Check) {
+    // A stub ID allocator: these tests never touch a DRM device, so the IDs
+    // only have to be distinct, which a counter in a Cell provides without
+    // borrowing anything the harness owns.
+    let next = core::cell::Cell::new(1u32);
+    let alloc_id = || {
+        let v = next.get();
+        next.set(v.saturating_add(1));
+        DrmObjectId(v)
+    };
+
+    // 640x480 XRGB8888: pitch 2560, size 1_228_800.
+    let gem = c.expect_ok(
+        "describe a 640x480 VRAM buffer",
+        GemObject::from_vram(
+            &alloc_id,
+            0x2_0000,
+            1_228_800,
+            640,
+            480,
+            2560,
+            PixelFormat::Xrgb8888,
+        ),
+    );
+    let Some(mut gem) = gem else {
+        return;
+    };
+    c.eq_u32(
+        "size is pitch times height",
+        u32::try_from(gem.size).unwrap_or(0),
+        1_228_800,
+    );
+    match gem.backing {
+        GemBacking::Vram { offset, len } => {
+            c.eq_u32("records the VRAM offset it was given", offset, 0x2_0000);
+            c.eq_u32("records the reservation length", len, 1_228_800);
+        }
+        GemBacking::SystemRam(_) => {
+            c.fail();
+            serial_println!("[ati]   FAIL: from_vram produced a system-RAM object");
+        }
+    }
+
+    c.is_err(
+        "a VRAM object has no system frames to walk",
+        gem.ram_frames(),
+        KernelError::NotSupported,
+    );
+    c.is_err(
+        "a VRAM object has no HHDM address",
+        gem.virt_addr(),
+        KernelError::NotSupported,
+    );
+    c.is_err(
+        "freeing VRAM through the buddy allocator is refused",
+        gem.free_backing(),
+        KernelError::NotSupported,
+    );
+    // And the refusal did not quietly consume the backing on the way out: an
+    // object that reported an error but dropped its offset would be a leak
+    // the owning driver could no longer clean up.
+    match gem.backing {
+        GemBacking::Vram { offset, len } => {
+            c.eq_u32("offset survives the refused free", offset, 0x2_0000);
+            c.eq_u32("length survives the refused free", len, 1_228_800);
+        }
+        GemBacking::SystemRam(_) => {
+            c.fail();
+            serial_println!("[ati]   FAIL: refused free changed the backing kind");
+        }
+    }
+
+    // A reservation shorter than the pixels is the failure that produces a
+    // CRTC scanning out past the end of a buffer, so it is refused here rather
+    // than discovered at mode-set time.
+    c.is_err(
+        "a reservation shorter than the image is refused",
+        GemObject::from_vram(
+            &alloc_id,
+            0,
+            1_228_799,
+            640,
+            480,
+            2560,
+            PixelFormat::Xrgb8888,
+        ),
+        KernelError::InvalidArgument,
+    );
+    c.is_err(
+        "a zero-length reservation is refused",
+        GemObject::from_vram(&alloc_id, 0, 0, 640, 480, 2560, PixelFormat::Xrgb8888),
+        KernelError::InvalidArgument,
+    );
+    c.is_err(
+        "a zero-height buffer is refused",
+        GemObject::from_vram(&alloc_id, 0, 4096, 640, 0, 2560, PixelFormat::Xrgb8888),
+        KernelError::InvalidArgument,
+    );
+    // An exact fit is not an off-by-one: len == size must be accepted, or
+    // every buffer would need padding nobody asked for.
+    c.expect_ok(
+        "a reservation exactly the size of the image is accepted",
+        GemObject::from_vram(
+            &alloc_id,
+            0,
+            1_228_800,
+            640,
+            480,
+            2560,
+            PixelFormat::Xrgb8888,
+        ),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The mode list the backend advertises
+// ---------------------------------------------------------------------------
+
+/// The connector's mode list is exactly the DMT modes that fit in the mapped
+/// aperture.
+///
+/// `AtiBackend::enumerate` filters `DMT_MODES` by asking `ModeSetPlan::new`
+/// whether each is settable at the card's size, which is the same question
+/// `page_flip` will ask later. Testing the filter *by that predicate* rather
+/// than by hardware is the whole of what enumeration decides, and it is what
+/// stops the advertised list drifting away from the settable one — a
+/// compositor offered a mode that is then refused has no next move.
+fn test_mode_list(c: &mut Check) {
+    let fits = |total: u32| -> usize {
+        DMT_MODES
+            .iter()
+            .filter(|m| {
+                modeset::ModeSetPlan::new(&m.timing, PixelFormat::Xrgb8888, 0, total).is_ok()
+            })
+            .count()
+    };
+
+    // 16 MiB — what QEMU's ati-vga reports, and the aperture cap. 1920x1080 at
+    // 4 bytes per pixel is 8_294_400 B, so every mode in the table fits.
+    c.eq_u32(
+        "a 16 MiB card offers every DMT mode",
+        u32::try_from(fits(16 * 1024 * 1024)).unwrap_or(0),
+        u32::try_from(DMT_MODES.len()).unwrap_or(0),
+    );
+
+    // 6 MiB (6_291_456 B): 1920x1080 needs 8_294_400 B and no longer fits;
+    // 1280x1024 needs 5_242_880 B and does. Four of five. Note 8 MiB would
+    // *not* have made this point — 8_388_608 is larger than 8_294_400, so a
+    // 1080p scanout fits an 8 MiB card with 94 KiB to spare.
+    c.eq_u32(
+        "a 6 MiB card drops only 1920x1080",
+        u32::try_from(fits(6 * 1024 * 1024)).unwrap_or(0),
+        4,
+    );
+    c.eq_u32(
+        "an 8 MiB card still holds a 1080p scanout",
+        u32::try_from(fits(8 * 1024 * 1024)).unwrap_or(0),
+        u32::try_from(DMT_MODES.len()).unwrap_or(0),
+    );
+
+    // 2 MiB: 1024x768 needs 3_145_728 B (out), 800x600 needs 1_920_000 B (in).
+    c.eq_u32(
+        "a 2 MiB card offers 640x480 and 800x600",
+        u32::try_from(fits(2 * 1024 * 1024)).unwrap_or(0),
+        2,
+    );
+
+    // Exactly one 640x480 buffer, to the byte: the smallest card that can
+    // display anything at all. One less byte and the list is empty, which is
+    // the case `enumerate` turns into `NotSupported` rather than an empty menu.
+    c.eq_u32(
+        "a card holding exactly one 640x480 scanout offers it",
+        u32::try_from(fits(1_228_800)).unwrap_or(0),
+        1,
+    );
+    c.eq_u32(
+        "one byte less offers nothing",
+        u32::try_from(fits(1_228_799)).unwrap_or(0),
+        0,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -1253,6 +1450,8 @@ pub fn run() -> KernelResult<()> {
     test_mmio_offsets(&mut c);
     test_modeset_plan(&mut c);
     test_vram(&mut c);
+    test_vram_gem(&mut c);
+    test_mode_list(&mut c);
 
     serial_println!("[ati] Self-test: {} passed, {} failed.", c.passed, c.failed);
     if c.failed > 0 {

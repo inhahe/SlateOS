@@ -5742,13 +5742,32 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
           Rejects double and overlapping frees rather than corrupting the list.
           Pure, so the self-test checks the list invariants after every
           mutation, not just the return values.
-    - [ ] `DrmBackend::Ati` — a registered backend: BAR0 aperture mapping, GEM
-          objects resident in VRAM, `page_flip` as a `CRTC_OFFSET` write rather
-          than a memcpy. Note that `GemObject::free_backing` returns
-          `phys_frames` to the buddy allocator, so VRAM-backed objects must be
-          released through `vram::VramAllocator::free` — reusing
-          `LimineBackend`'s destroy path would hand card memory to the system
-          allocator, which is silent corruption rather than a leak.
+    - [x] `drm/ati/aperture.rs` — the BAR0 window: up to 16 MiB of the card's
+          video memory mapped `NO_CACHE` so the CPU can put pixels in it.
+          Consults the page tables afterwards rather than assuming the request
+          was honoured, and keeps a `flush` for the case where it was not.
+          Uncacheable rather than write-combining because nothing programs the
+          PAT MSR yet — see `TD-NO-WRITE-COMBINING` in `known-issues.md`, and
+          note that this is why the boot exercise draws at 640x480.
+    - [x] `DrmBackend::Ati` — the card registered as a DRM device. GEM objects
+          live in VRAM, so `page_flip` is a single `CRTC_OFFSET` write with no
+          copy at any resolution, which is the whole reason a real GPU driver
+          beats a framebuffer shim. `enumerate` advertises exactly the DMT modes
+          that fit the mapped aperture, filtered by `ModeSetPlan::new` — the
+          same predicate `page_flip` applies later, so the menu cannot drift
+          from what is actually settable. Registered but deliberately *not*
+          promoted to primary: on the machine this boots, virtio-gpu drives the
+          screen and this card is an unused second head, so the whole path is
+          exercised every boot without being load-bearing for the only display.
+    - [x] `GemObject` backing became an enum (`GemBacking::SystemRam` /
+          `::Vram`) as part of the above, and this is the load-bearing part.
+          `free_backing` returns frames to the buddy allocator; a VRAM object
+          carrying BAR addresses in a `Vec<PhysFrame>` would hand the system
+          allocator memory that was never RAM — silent corruption surfacing
+          arbitrarily far from the driver that caused it, not a leak. The enum
+          makes it a compile error to reach the frame list without saying which
+          case you handle, `free_backing` now returns `NotSupported` for VRAM,
+          and the self-test asserts the refusal rather than trusting it.
 - [ ] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
 - [ ] `[A]` NVIDIA: defer until open-source driver matures, or use Linux compat layer later
 

@@ -1070,7 +1070,14 @@ fn ensure_at_random_initialized() {
     // SAFETY: `AT_RANDOM_BYTES` is a live 16-byte static owned by this
     // module, so the pointer is valid for the 16-byte write below.
     let ptr = core::ptr::addr_of_mut!(AT_RANDOM_BYTES).cast::<u8>();
-    if !unsafe { crate::unistd::fill_random(ptr, 16) } {
+    // Flags `0` — the blocking request.  A stack canary is the one value in a
+    // process that must not correlate with any other process's, so waiting for
+    // the kernel to credit its pool is the whole point; `GRND_INSECURE` here
+    // would hand every process booted from one image the same guard.  The wait
+    // is bounded by the kernel and, in practice, already over: the pool is
+    // credited ~330 ms after interrupts are enabled and every userspace process
+    // starts well after that.
+    if unsafe { crate::unistd::fill_random(ptr, 16, 0) }.is_err() {
         // These bytes are the process's stack canary — glibc and musl both
         // seed `__stack_chk_guard` from AT_RANDOM.  Publishing a buffer we
         // could not randomise would hand every process the same canary and

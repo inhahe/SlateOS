@@ -1157,6 +1157,27 @@ recurrence announces itself in one line instead of costing a cycle. It stays a
 small recurring maintenance cost — a rebuild-and-commit after any change to
 `posix/src` — and the git history keeps growing binaries slowly.
 
+**Update 2026-08-18 — the fourth recurrence happened, and lane A pointed out
+why it keeps happening.** `481da01e1` changed `posix/src/libintl.rs`, the nine
+fixtures went stale behind it, and lane A's boot test stopped on the gate. The
+observation, which is only visible from a lane that owns neither side and which
+I think is exactly right:
+
+> the cost of option (A) is not the rebuild — it is that the rebuild falls on
+> **whichever lane happens to run a boot test next**, which is neither the lane
+> that changed `posix/` nor the lane that owns `services/`. That is what makes
+> it recur: no single lane's own workflow ever fails, so nobody is prompted to
+> fix it until a third party is blocked.
+
+In plain terms: the person who breaks it never finds out, and the person who
+finds out cannot fix it (`services/**` is lane B's tree). So the staleness is
+guaranteed to be discovered late, by someone it is not actionable for, every
+time. That is an argument for **B** that does not appear in the table above —
+the table costs A at "one rebuild per `posix/` change", and the real cost is
+"one blocked lane per `posix/` change, plus a cross-lane request round trip".
+I have done the rebuild again (fourth time); the recommendation above still
+stands as written, but the gap between A and B is narrower than the table says.
+
 ---
 
 # Resolved

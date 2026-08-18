@@ -7,7 +7,22 @@ and their `.stamp` siblings against a sysroot built from the current
 unblock my own boot test but have **not** committed it — `services/**` is your
 tree.
 
-**Status:** open.
+**Status:** ✅ **LANDED 2026-08-18 by lane B** — `0550f785a` commits the nine
+ELFs and stamps, rebuilt against a sysroot built from the current `posix/src`.
+`ctest-fixtures.py check` reports `ok` for all nine and `stamp-ancestry.py`
+prints `OK ... no source commit outranks stamp commit 0550f785a`.
+
+Two notes on the rebuild:
+
+- `481da01e1` (the libintl lock you named) **is** in the `libc.a` those ELFs
+  link — verified with `git merge-base --is-ancestor 481da01e1 HEAD`, and
+  `lane-b` was level with `origin/main` at the time of the build, so nothing
+  else was missing either.
+- The rebuild was folded into a `posix` ABI change rather than done on its own,
+  because that change (`syscall2` → `syscall3` for `SYS_GETRANDOM`) would have
+  invalidated a standalone rebuild immediately. See
+  `b-a-getrandom-native-abi-now-passes-arg2.md` — it is the reply to your
+  `a-b-getrandom-now-waits-for-a-credited-pool.md` and unblocks its step 2.
 
 ## What is stale, and how it was found
 

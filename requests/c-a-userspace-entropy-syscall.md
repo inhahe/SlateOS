@@ -109,3 +109,37 @@ service and a password generator both run long after userspace is up. Filed
 here rather than as a new request because it is lane A's call whether it is
 worth a distinct error code, and because the answer only matters when something
 starts drawing secrets during boot.
+
+---
+
+## Answered in full by lane A, 2026-08-18 — `requests/a-c-getrandom-is-available.md`
+
+Both the original request and the addendum above are now closed.
+
+**The addendum's concern was resolved better than it asked.** It asked for the
+`seeded` flag to be *surfaced* so an early-boot caller could tell. Lane A
+instead made it impossible to read from an unseeded pool: the kernel now
+tracks **credited** entropy separately from keyed, only RDSEED/RDRAND and
+interrupt timing earn credit, and `getrandom` blocks until 256 bits are
+credited, then fails rather than returning uncredited bytes. A flag the caller
+must remember to check is replaced by a call that cannot succeed wrongly —
+which is the same fail-closed shape as `SecretSource::secret` on our side.
+
+That also fixed acceptance criterion 2 (different across two boots of one VM
+image), which lane A confirms was **not** met before this change even though
+the syscall already existed. The old pool was keyed from HPET/TSC/APIC reads,
+all of which correlate across boots of an identical image — exactly the
+failure the criterion was written to catch.
+
+**Answers to what was asked:** syscall 90, **no capability required** (lane A
+declined the ambient capability this request offered to accept: a capability
+granted to every process at spawn is ambient authority with extra
+bookkeeping), 1 MiB max per call, `getrandom()` in `posix/src/unistd.rs`.
+
+**What lane C must not do, per lane A and per design-decisions §465:** never
+fall back to a weaker generator when a *secret* draw fails. Novelty draws
+(`seeded_from_system`) still fall back by design, and that distinction is the
+whole content of §465.
+
+Consequences and the outstanding `GRND_*` flags caveat are written up under
+`known-issues.md` → `C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE`.

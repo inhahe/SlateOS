@@ -1242,6 +1242,107 @@ stands as written, but the gap between A and B is narrower than the table says.
 
 ---
 
+## Q51 — [A] The thing that blocked 3D graphics for a month has quietly been available all along; it was one wrong command-line flag. Start the 3D work now, or leave it parked? — Status: OPEN
+
+**In short:** Our OS can draw a desktop but cannot do 3D — no games, no
+hardware-accelerated video, no 3D modelling. A month ago you decided to build
+the plumbing for 3D but *not* the graphics engine itself, because we had no way
+to test 3D: the emulator we develop against appeared not to offer it. That turns
+out to have been wrong. It offers it fine; we were starting the emulator with a
+flag that says "no screen at all", and no screen means no 3D. There is another
+flag that means "no window, but 3D still works". I measured it today and our own
+code now sees the 3D capability being offered. **The reason you deferred the
+work has evaporated.** The question is whether to pick it up now — it is a large
+job, roughly the size of the biggest thing this project has attempted — or leave
+it parked and spend the time elsewhere.
+
+**One honest caveat up front:** I proved the *emulator* offers 3D to us. I did
+not prove any 3D actually renders — nothing in our code yet asks for it. And I
+found that simply switching the flag today would **break the 2D display we
+already have** (details below). So this is "the blocker is gone", not "it works
+now".
+
+**Terms, glossed on first use.** *virgl* — the emulator's 3D feature; it takes
+3D commands from inside our OS and runs them on the real graphics card of this
+PC. *Mesa* — the large open-source library that turns an application's 3D calls
+into those commands; it is the piece we would have to port, and it is external
+code, not ours. *Headless* — running with no visible window, which is how all
+our automated tests run. *Scanout* — the act of pointing the display at a chunk
+of memory so it appears on screen.
+
+### What changed
+
+`design-decisions.md` §59 (your decision, 2026-07-14) says the 3D work waits
+"until a virgl test environment exists", and cites the evidence: the emulator
+offered our driver the feature mask `0x30000002`, which contains no 3D bit.
+
+That number is real, but it came from starting the emulator with `-display none`
+("no screen"). Running the **same kernel image** and changing only the graphics
+device and the screen setting:
+
+| Emulator flags | Feature mask offered to our driver | 3D bit? |
+|---|---|---|
+| `-device virtio-gpu-pci -display none` *(what we use today)* | `0x30000002` | no |
+| `-device virtio-gpu-gl-pci -display egl-headless` | `0x30000013` | **yes** |
+
+`egl-headless` is the "no window, but 3D still works" mode. It has been in our
+emulator the whole time.
+
+**What is *not* proven:** nothing negotiated the 3D feature, created a 3D
+context, or drew a triangle. And with the 3D device our current 2D setup
+regresses — the display fails to attach (`SET_SCANOUT: resp=0x1203`), and the
+graphics subsystem goes from 2 devices to 1 with no primary display. Cause: the
+emulator's 3D device routes everything through its 3D engine, which rejects the
+simple 2D memory buffer we hand it. That is a real, fixable piece of work, and
+it is **lane A's** (kernel-side), separate from the Mesa port.
+
+### The options
+
+**A. Do the kernel-side half now; leave Mesa parked.** Fix the 2D-under-3D
+regression and make our driver negotiate and report the 3D feature honestly, so
+the harness *can* run the 3D device. Stop before Mesa.
+*What changes:* nothing a user sees. Internally, the automated test can run
+against a 3D-capable emulator without losing its display, and the "no test
+environment" excuse is gone for good.
+
+**B. Do A, then start the Mesa port.** The full path to actual 3D.
+*What changes:* eventually, 3D applications run — the first time anything in
+this OS renders a 3D frame. Cost: Mesa is a large external port, and by this
+project's own measured rates that is days-to-weeks of active work, the largest
+single item attempted so far. It is also **lane C's zone** (`gui/**`), so it
+competes with the compositor and desktop work, not with kernel work.
+
+**C. Leave it parked; just correct the record.** Update §59 to say the
+prerequisite exists but we are choosing not to spend the time.
+*What changes:* nothing, except that the entry stops asserting something false.
+The risk this guards against is real and has bitten before (§305's audit
+finding: a decision resting on a missing prerequisite went 25 days unchecked
+after the prerequisite arrived, and ~1,100 commits landed on a dead premise).
+
+**My recommendation: A now, and treat B as a separate decision you make later.**
+A is small, is unambiguously lane A's, removes a regression that would otherwise
+ambush whoever *does* flip the harness, and makes the honest-reporting code in
+`virtgpu_uapi.rs` testable against a device that actually offers the bit. It
+commits you to nothing about Mesa. I am not recommending B without your call —
+it is the largest item on the board and it belongs to a lane with its own queue.
+
+### If this is never answered
+
+**Nothing breaks and nothing gets worse.** 3D stays unsupported, which is what
+the code already reports honestly (`3D_FEATURES = 0`, no capsets — those stay
+correct and are *not* being changed on my own initiative). The only ongoing cost
+is that §59 keeps stating a reason for the deferral that is no longer true, and
+the next person to read it will re-derive today's measurement from scratch. The
+§59 entry has been annotated with the finding, so that cost is already capped
+whatever you decide.
+
+**Where it bites:** `kernel/src/drm/virtgpu_uapi.rs:503` (`param_value`, the
+honest zeros), `kernel/src/virtio/gpu.rs:284` (`negotiate(0)` — requests no
+features), `scripts/boot-test.sh:2262,2276` (`-device virtio-gpu-pci`,
+`-display none`).
+
+---
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

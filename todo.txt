@@ -54008,6 +54008,29 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   C++/slateos toolchain exists" -- the C half has fired, the C++ half has
 ##   NOT; YSH is genuine Oils C++, so this one is still correctly blocked -- but
 ##   re-check it whenever C++ cross-compilation lands).
+##
+##   AUDIT PASS 2026-08-18 (lane A) -- IN PROGRESS, resumable. Findings so far:
+##   * S59 (GPU accel scope, Q18): PREMISE HAS FIRED. It defers the Mesa port
+##     "until a virgl test environment exists"; one exists and always did. The
+##     0x30000002 "no VIRGL" reading was taken under `-display none`, which has
+##     NO OpenGL at all; `-display egl-headless` gives GL without a window, and
+##     with `-device virtio-gpu-gl-pci` our own driver is offered 0x30000013 --
+##     bit 0 = VIRTIO_GPU_F_VIRGL. Measured with the same kernel image, control
+##     row reproduces S59's exact number. RECORDED in S59 (annotated, NOT
+##     flipped -- it is an Operator decision), raised as open-questions.md Q51,
+##     and routed to lane C (requests/a-c-the-virgl-test-environment-...md)
+##     since Mesa is gui/**. CAVEAT carried everywhere: this proves the bit is
+##     OFFERED, not that 3D renders -- nothing negotiates it yet. Also found:
+##     switching the harness to the GL device today REGRESSES the 2D path
+##     (SET_SCANOUT -> 0x1203 ERR_INVALID_RESOURCE_ID; [drm] drops 2 devices ->
+##     1, no primary display) because QEMU's virtio-gpu-gl routes through
+##     virglrenderer even when we accept no page-0 features. That kernel-side
+##     fix is LANE A's and is the gate on any harness flip.
+##   STILL TO CHECK in this pass (spotted, not yet audited):
+##   * design-decisions.md line ~2560 -- "fullscreen game/video remoting stays
+##     unsupported until GPU encode exists". Does GPU encode exist now?
+##   * design-decisions.md line ~6164 -- gated on `#[thread_local]` stabilising.
+##     Check against the current nightly.
 
 ## DONE (2026-08-14, design-decisions.md S306): the shared docs stay per-branch;
 ##   the fix is a fetch/merge CADENCE, now in roadmap.md S5.5 and CLAUDE.md.

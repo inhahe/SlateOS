@@ -35,311 +35,58 @@
 use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
-// SHA-256 constants
+// SHA-256 -- re-exported from the shared `sha2` crate
 // ---------------------------------------------------------------------------
 
-/// SHA-256 initial hash values (first 32 bits of fractional parts of
-/// the square roots of the first 8 primes).
-const H0: [u32; 8] = [
-    0x6a09_e667,
-    0xbb67_ae85,
-    0x3c6e_f372,
-    0xa54f_f53a,
-    0x510e_527f,
-    0x9b05_688c,
-    0x1f83_d9ab,
-    0x5be0_cd19,
-];
-
-/// SHA-256 round constants (first 32 bits of fractional parts of
-/// the cube roots of the first 64 primes).
-const K: [u32; 64] = [
-    0x428a_2f98,
-    0x7137_4491,
-    0xb5c0_fbcf,
-    0xe9b5_dba5,
-    0x3956_c25b,
-    0x59f1_11f1,
-    0x923f_82a4,
-    0xab1c_5ed5,
-    0xd807_aa98,
-    0x1283_5b01,
-    0x2431_85be,
-    0x550c_7dc3,
-    0x72be_5d74,
-    0x80de_b1fe,
-    0x9bdc_06a7,
-    0xc19b_f174,
-    0xe49b_69c1,
-    0xefbe_4786,
-    0x0fc1_9dc6,
-    0x240c_a1cc,
-    0x2de9_2c6f,
-    0x4a74_84aa,
-    0x5cb0_a9dc,
-    0x76f9_88da,
-    0x983e_5152,
-    0xa831_c66d,
-    0xb003_27c8,
-    0xbf59_7fc7,
-    0xc6e0_0bf3,
-    0xd5a7_9147,
-    0x06ca_6351,
-    0x1429_2967,
-    0x27b7_0a85,
-    0x2e1b_2138,
-    0x4d2c_6dfc,
-    0x5338_0d13,
-    0x650a_7354,
-    0x766a_0abb,
-    0x81c2_c92e,
-    0x9272_2c85,
-    0xa2bf_e8a1,
-    0xa81a_664b,
-    0xc24b_8b70,
-    0xc76c_51a3,
-    0xd192_e819,
-    0xd699_0624,
-    0xf40e_3585,
-    0x106a_a070,
-    0x19a4_c116,
-    0x1e37_6c08,
-    0x2748_774c,
-    0x34b0_bcb5,
-    0x391c_0cb3,
-    0x4ed8_aa4a,
-    0x5b9c_ca4f,
-    0x682e_6ff3,
-    0x748f_82ee,
-    0x78a5_636f,
-    0x84c8_7814,
-    0x8cc7_0208,
-    0x90be_fffa,
-    0xa450_6ceb,
-    0xbef9_a3f7,
-    0xc671_78f2,
-];
+// This module used to carry its own FIPS 180-4 SHA-256: the H0/K constant
+// tables, a `Sha256` struct, and a `compress` block function. It was one of 26
+// hand-written copies in this tree (see known-issues.md ->
+// C-SHA-256-IS-IMPLEMENTED-ELEVEN-TIMES-IN-THIS-TREE, whose title undercounts).
+//
+// The kernel's copy was correct, and it was not a deliberate exception -- no
+// constant-time property, no assembly path, nothing the shared crate lacks.
+// What made it worth deleting is the failure mode of the ones that are not
+// checked: SHA-256 with a single wrong round constant still returns 32
+// plausible-looking bytes and only ever disagrees with the rest of the world.
+// Correctness spread over 26 copies is 26 independent pieces of luck.
+//
+// The digest type and the streaming state are unchanged for callers --
+// `sha2::Sha256` exposes the same `new`/`update`/`finalize`, so all 45 call
+// sites across fs/, net/, kshell.rs and bench.rs are untouched by this -- and
+// `sha2` is no_std with no `alloc`, so nothing here allocates that did not
+// before. It adds `Clone`, `Default` and `Debug`, which the local struct had
+// none of.
+//
+// Performance is expected to be a wash, not a win. Lane C measured 22% on
+// `gui/credentials`, but that came from deleting a per-call `Vec` used to hold
+// the padded message; this implementation already padded into a fixed
+// `[u8; 64]` with a `[u32; 8]` state and allocated nothing on the hashing
+// path, so there is no allocation here to remove.
+//
+// One thing that DOES move: `compress` leaves `kernel::crypto` for the `sha2`
+// crate, so its symbol changes from `..6crypto8compress..` to
+// `..4sha28compress..` and the linker places it at a different address. Under
+// QEMU's TCG that alone can shift `crypto_sha256_64B` several-fold with the
+// machine code byte-identical -- see known-issues.md ->
+// A-A-4x-CRYPTO-"REGRESSION"-BISECTS-TO-A-COMMIT-THAT-ONLY-EDITS-audio_mixer.rs
+// and design-decisions.md 228. If the crypto benchmarks move across this
+// commit, read `hot_symbols` in the benchmark record before reading the code,
+// and do not pad or reorder anything to chase it. The `HOT_SYMBOLS` pattern in
+// scripts/bench-history.py is updated in this same commit for exactly that
+// reason: it matches on the module path, and it would otherwise go blind at
+// the moment it is most useful.
+pub use sha2::{Sha256, sha256};
 
 /// SHA-256 output size in bytes.
 pub const SHA256_DIGEST_SIZE: usize = 32;
 
-// ---------------------------------------------------------------------------
-// SHA-256 implementation
-// ---------------------------------------------------------------------------
-
-/// SHA-256 hasher.
-///
-/// Create with [`Sha256::new()`], feed data with [`update()`](Sha256::update),
-/// and finalize with [`finalize()`](Sha256::finalize).
-pub struct Sha256 {
-    /// Current hash state.
-    h: [u32; 8],
-    /// Partial block buffer.
-    buffer: [u8; 64],
-    /// Number of bytes in the buffer.
-    buf_len: usize,
-    /// Total bytes processed.
-    total_len: u64,
-}
-
-impl Sha256 {
-    /// Create a new SHA-256 hasher.
-    pub fn new() -> Self {
-        Self {
-            h: H0,
-            buffer: [0u8; 64],
-            buf_len: 0,
-            total_len: 0,
-        }
-    }
-
-    /// Feed data into the hasher.
-    pub fn update(&mut self, data: &[u8]) {
-        let mut offset = 0usize;
-
-        // If we have a partial block, try to fill it.
-        if self.buf_len > 0 {
-            let needed = 64usize.saturating_sub(self.buf_len);
-            let copy_len = needed.min(data.len());
-            if let (Some(dest), Some(src)) = (
-                self.buffer.get_mut(self.buf_len..self.buf_len + copy_len),
-                data.get(..copy_len),
-            ) {
-                dest.copy_from_slice(src);
-            }
-            self.buf_len += copy_len;
-            offset = copy_len;
-
-            if self.buf_len == 64 {
-                let block = self.buffer;
-                compress(&mut self.h, &block);
-                self.buf_len = 0;
-            }
-        }
-
-        // Process full blocks directly from input.
-        while offset + 64 <= data.len() {
-            if let Some(block_data) = data.get(offset..offset + 64) {
-                let mut block = [0u8; 64];
-                block.copy_from_slice(block_data);
-                compress(&mut self.h, &block);
-            }
-            offset += 64;
-        }
-
-        // Buffer remaining bytes.
-        let remaining = data.len().saturating_sub(offset);
-        if remaining > 0 {
-            if let (Some(dest), Some(src)) = (self.buffer.get_mut(..remaining), data.get(offset..))
-            {
-                dest.copy_from_slice(src);
-            }
-            self.buf_len = remaining;
-        }
-
-        self.total_len = self.total_len.wrapping_add(data.len() as u64);
-    }
-
-    /// Finalize the hash and return the 32-byte digest.
-    pub fn finalize(mut self) -> [u8; SHA256_DIGEST_SIZE] {
-        // Pad the message.
-        let total_bits = self.total_len.wrapping_mul(8);
-
-        // Append 0x80 byte.
-        if let Some(b) = self.buffer.get_mut(self.buf_len) {
-            *b = 0x80;
-        }
-        self.buf_len += 1;
-
-        // If the buffer is too full for the length field, compress and start a new block.
-        if self.buf_len > 56 {
-            // Zero-fill the rest of this block.
-            if let Some(tail) = self.buffer.get_mut(self.buf_len..64) {
-                for b in tail {
-                    *b = 0;
-                }
-            }
-            let block = self.buffer;
-            compress(&mut self.h, &block);
-            self.buffer = [0u8; 64];
-            self.buf_len = 0;
-        }
-
-        // Zero-fill up to the length field.
-        if let Some(tail) = self.buffer.get_mut(self.buf_len..56) {
-            for b in tail {
-                *b = 0;
-            }
-        }
-
-        // Append total length in bits (big-endian, 8 bytes).
-        let len_bytes = total_bits.to_be_bytes();
-        if let Some(dest) = self.buffer.get_mut(56..64) {
-            dest.copy_from_slice(&len_bytes);
-        }
-
-        let block = self.buffer;
-        compress(&mut self.h, &block);
-
-        // Convert hash state to bytes (big-endian).
-        let mut digest = [0u8; 32];
-        for (i, &word) in self.h.iter().enumerate() {
-            let bytes = word.to_be_bytes();
-            let offset = i * 4;
-            if let Some(dest) = digest.get_mut(offset..offset + 4) {
-                dest.copy_from_slice(&bytes);
-            }
-        }
-
-        digest
-    }
-}
-
-/// Convenience function: compute SHA-256 of a byte slice.
-pub fn sha256(data: &[u8]) -> [u8; SHA256_DIGEST_SIZE] {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize()
-}
-
 /// Convenience function: compute SHA-256 and return as a Vec<u8>.
+///
+/// Kept here rather than pushed into `sha2`: the crate is deliberately
+/// `alloc`-free so the kernel can link it, and several callers here want the
+/// `Vec` form. None of them are on a hot path.
 pub fn sha256_vec(data: &[u8]) -> Vec<u8> {
     sha256(data).to_vec()
-}
-
-// ---------------------------------------------------------------------------
-// SHA-256 compression function
-// ---------------------------------------------------------------------------
-
-/// Process a single 64-byte block.
-#[allow(clippy::many_single_char_names)]
-fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
-    // Prepare the message schedule (W).
-    let mut w = [0u32; 64];
-
-    // First 16 words: big-endian decode of the block.
-    for i in 0..16 {
-        let offset = i * 4;
-        w[i] = u32::from_be_bytes([
-            block[offset],
-            block[offset + 1],
-            block[offset + 2],
-            block[offset + 3],
-        ]);
-    }
-
-    // Extend to 64 words.
-    for i in 16..64 {
-        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-        w[i] = w[i - 16]
-            .wrapping_add(s0)
-            .wrapping_add(w[i - 7])
-            .wrapping_add(s1);
-    }
-
-    // Initialize working variables.
-    let mut a = state[0];
-    let mut b = state[1];
-    let mut c = state[2];
-    let mut d = state[3];
-    let mut e = state[4];
-    let mut f = state[5];
-    let mut g = state[6];
-    let mut h = state[7];
-
-    // 64 rounds of compression.
-    for i in 0..64 {
-        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-        let ch = (e & f) ^ ((!e) & g);
-        let temp1 = h
-            .wrapping_add(s1)
-            .wrapping_add(ch)
-            .wrapping_add(K[i])
-            .wrapping_add(w[i]);
-        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-        let maj = (a & b) ^ (a & c) ^ (b & c);
-        let temp2 = s0.wrapping_add(maj);
-
-        h = g;
-        g = f;
-        f = e;
-        e = d.wrapping_add(temp1);
-        d = c;
-        c = b;
-        b = a;
-        a = temp1.wrapping_add(temp2);
-    }
-
-    // Add the compressed chunk's hash to the current state.
-    state[0] = state[0].wrapping_add(a);
-    state[1] = state[1].wrapping_add(b);
-    state[2] = state[2].wrapping_add(c);
-    state[3] = state[3].wrapping_add(d);
-    state[4] = state[4].wrapping_add(e);
-    state[5] = state[5].wrapping_add(f);
-    state[6] = state[6].wrapping_add(g);
-    state[7] = state[7].wrapping_add(h);
 }
 
 // ---------------------------------------------------------------------------

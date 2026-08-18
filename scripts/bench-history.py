@@ -207,11 +207,31 @@ DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "history.jsonl")
 #: benchmark jumps and `compress` moved in the same run, that is the answer.
 #:
 #: Matched as substrings so that one pattern covers both of Rust's mangling
-#: schemes -- legacy `_ZN6kernel6crypto8compress17h…E` and v0
-#: `_RNvNtCs…_6kernel6crypto8compress` share the length-prefixed `6crypto8compress`.
-#: The `6crypto` prefix is what keeps `fs::compress` and `mm::compress` out.
+#: schemes -- legacy `_ZN4sha28compress17h…E` and v0
+#: `_RNvCs…_4sha28compress` share the length-prefixed `4sha28compress`.
+#: The `4sha2` prefix is what keeps `fs::compress` and `mm::compress` out.
+#:
+#: This pattern names a *module path*, so it goes stale whenever the function
+#: moves -- and it just did: `compress` was `kernel::crypto`'s until
+#: `kernel/src/crypto.rs` was moved onto the shared `sha2` crate, at which
+#: point `6crypto8compress` stopped matching anything and `4sha28compress`
+#: started. Updating it is not optional bookkeeping: the migration relocates
+#: the very function whose address this exists to record, so a run that fails
+#: to match here is precisely the run where the reading matters most. It is
+#: updated in the same commit as the migration for that reason. `sha2::compress`
+#: is a crate-root item, so there is no module segment between the crate name
+#: and the function -- hence `4sha2` directly abutting `8compress`.
+#:
+#: The friendly name stays `crypto::compress` even though the function now
+#: lives in `sha2`. It is the key this address is filed under in every
+#: benchmark record, and its job is to let one run's address be compared with
+#: another's. Renaming it would split the series in two at exactly the commit
+#: whose effect on the address is the thing being watched -- the reader would
+#: see a key disappear and a new one appear and have to work out that they are
+#: the same function. Accuracy of the label is worth less here than continuity
+#: of the series; the pattern beside it records where the code actually is.
 HOT_SYMBOLS = {
-    "crypto::compress": "6crypto8compress",
+    "crypto::compress": "4sha28compress",
     "crypto::sha512_compress": "6crypto15sha512_compress",
     "net::tcp::tcp_checksum_ip": "3tcp15tcp_checksum_ip",
 }
@@ -288,11 +308,12 @@ def elf_symbol_addresses(path, wanted=HOT_SYMBOLS):
                     if prev is None or len(name) < prev[0]:
                         best[friendly] = (len(name), value)
         # Every wanted name is present, `null` where the pattern matched
-        # nothing. A pattern goes stale when its function moves module -- and
-        # the obvious next move, `crypto::compress` into the shared `sha2`
-        # crate, would do exactly that, turning `6crypto8compress` into
-        # `4sha28compress`. Dropping the key on a miss would make that failure
-        # silent, and silent in the worst possible way: the diagnostic would
+        # nothing. A pattern goes stale when its function moves module, and that
+        # has now happened once: `crypto::compress` moved into the shared `sha2`
+        # crate, turning `6crypto8compress` into `4sha28compress`. The pattern
+        # was updated in the same commit, so nothing was lost -- but had it not
+        # been, dropping the key on a miss would have made the failure silent,
+        # and silent in the worst possible way: the diagnostic would
         # disappear at the moment it is most needed, because the very change
         # that broke the pattern is the one that relocates the function.
         return {

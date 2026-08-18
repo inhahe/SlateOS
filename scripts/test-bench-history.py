@@ -2244,7 +2244,7 @@ def _synth_elf(path, symbols, *, ident_class=2, ident_data=1, magic=b"\x7fELF"):
 
 def test_hot_symbols_read_legacy_mangling(bh, tmpdir):
     elf = _synth_elf(os.path.join(tmpdir, "legacy.elf"), [
-        ("_ZN6kernel6crypto8compress17h8234a763022d2833E", 0xffffffff80afce00),
+        ("_ZN4sha28compress17h8234a763022d2833E", 0xffffffff80afce00),
         ("_ZN6kernel6crypto15sha512_compress17hff0d9f03de4c6bb2E",
          0xffffffff80af5580),
     ])
@@ -2257,7 +2257,7 @@ def test_hot_symbols_read_legacy_mangling(bh, tmpdir):
 
 def test_hot_symbols_read_v0_mangling(bh, tmpdir):
     elf = _synth_elf(os.path.join(tmpdir, "v0.elf"), [
-        ("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress", 0xffffffff80364980),
+        ("_RNvCsjQArNW8oxTF_4sha28compress", 0xffffffff80364980),
     ])
     got = bh.elf_symbol_addresses(elf)
     check("v0 mangling: the same pattern still matches",
@@ -2292,9 +2292,9 @@ def test_hot_symbols_prefer_the_function_over_a_wrapper(bh, tmpdir):
     unrelated thunk's, which is worse than recording nothing.
     """
     elf = _synth_elf(os.path.join(tmpdir, "wrap.elf"), [
-        ("_RINvNtCsg3_4core3ptr13drop_in_placeNtNtCsjQ_6kernel6crypto8compressEB1j_",
+        ("_RINvNtCsg3_4core3ptr13drop_in_placeNtCsjQ_4sha28compressEB1j_",
          0xdead0000),
-        ("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress", 0xffffffff80364980),
+        ("_RNvCsjQArNW8oxTF_4sha28compress", 0xffffffff80364980),
     ])
     got = bh.elf_symbol_addresses(elf)
     check("the shorter (real) symbol wins over the wrapper",
@@ -2304,7 +2304,7 @@ def test_hot_symbols_prefer_the_function_over_a_wrapper(bh, tmpdir):
 def test_hot_symbols_skip_undefined_symbols(bh, tmpdir):
     """A st_value of 0 is an undefined symbol, not an address of zero."""
     elf = _synth_elf(os.path.join(tmpdir, "undef.elf"), [
-        ("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress", 0),
+        ("_RNvCsjQArNW8oxTF_4sha28compress", 0),
     ])
     got = bh.elf_symbol_addresses(elf)
     check("an undefined symbol contributes no address",
@@ -2333,7 +2333,7 @@ def test_hot_symbols_degrade_quietly_on_bad_input(bh, tmpdir):
     check("truncated ELF yields {}", bh.elf_symbol_addresses(trunc), {})
 
     elf32 = _synth_elf(os.path.join(tmpdir, "elf32.elf"),
-                       [("_ZN6kernel6crypto8compress17hE", 0x1000)],
+                       [("_ZN4sha28compress17hE", 0x1000)],
                        ident_class=1)
     check("32-bit ELF yields {}", bh.elf_symbol_addresses(elf32), {})
 
@@ -2456,7 +2456,7 @@ def test_hot_symbols_absent_and_empty_mean_different_things(bh, tmpdir):
           {k: None for k in bh.HOT_SYMBOLS})
 
     real = _synth_elf(os.path.join(tmpdir, "real.elf"),
-                      [("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress",
+                      [("_RNvCsjQArNW8oxTF_4sha28compress",
                         0xffffffff80afce00)])
     found = run(["--kernel-elf", real], "real.jsonl")
     expected = {k: None for k in bh.HOT_SYMBOLS}
@@ -2468,19 +2468,26 @@ def test_hot_symbols_absent_and_empty_mean_different_things(bh, tmpdir):
 def test_hot_symbols_report_a_stale_pattern_as_null_not_absence(bh, tmpdir):
     """A pattern that stops matching must be visible, not silently dropped.
 
-    `HOT_SYMBOLS` keys on the length-prefixed module path, so moving
-    `crypto::compress` into the shared `sha2` crate turns `6crypto8compress`
-    into `4sha28compress` and the pattern matches nothing. Dropping the key on a
-    miss would hide that -- and hide it at the worst moment, since the very
-    change that breaks the pattern is the one that relocates the function and so
-    is the most likely to swing the benchmark.
+    `HOT_SYMBOLS` keys on the length-prefixed module path, so a function that
+    changes module stops matching. This is not hypothetical: `compress` was
+    `kernel::crypto`'s until `kernel/src/crypto.rs` was moved onto the shared
+    `sha2` crate, at which point `6crypto8compress` matched nothing and the
+    pattern had to become `4sha28compress`.
+
+    The symbol used here is therefore the *pre-migration* one, which is exactly
+    what a stale pattern looks like from the current pattern's point of view.
+    Dropping the key on a miss would hide that -- and hide it at the worst
+    moment, since the change that breaks the pattern is the one that relocates
+    the function and so is the most likely to swing the benchmark.
     """
     moved = _synth_elf(os.path.join(tmpdir, "moved.elf"), [
-        # What the symbol becomes after the sha2 adoption.
-        ("_RNvNtCsjQArNW8oxTF_4sha28compress", 0xffffffff80364980),
+        # Where `compress` lived before the sha2 adoption. The current pattern
+        # must NOT match it -- if this ever starts matching, the pattern has
+        # been widened enough to catch unrelated modules too.
+        ("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress", 0xffffffff80364980),
     ])
     got = bh.elf_symbol_addresses(moved)
-    check("the relocated function no longer matches the old pattern",
+    check("a symbol from the function's old module no longer matches",
           got.get("crypto::compress"), None)
     check("...but the key is still there, so the miss is legible",
           "crypto::compress" in got, True)

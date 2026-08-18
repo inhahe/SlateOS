@@ -5057,6 +5057,7 @@ dependencies = [
  "log",
  "netipc",
  "netring",
+ "sha2",
  "spin",
  "tzrules",
 ]

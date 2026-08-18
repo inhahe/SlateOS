@@ -975,11 +975,15 @@ def find_flat_cases(
     that rebinds it without reading it first.
 
     **Items are not locals.**  A `const`, `static`, `fn` or `use` written inside
-    the body is scoped to its *block*, and a nested `fn` may freely name an item
-    from an enclosing block -- so an item crossing a boundary is not the
-    `E0434` that guards locals, and nothing about the paragraph it sits in looks
-    wrong.  It surfaces as `E0425` somewhere else entirely.  `reserve_tail` and
-    the weld below exist for the two shapes of that, both found in `kernel_main`.
+    the body is scoped to its *block*, wherever in that block it stands, and a
+    nested `fn` may freely name one.  So a case that *reads* an item is fine
+    however far it is from the declaration, above it or below it; what is not
+    fine is casing the paragraph that *declares* it, which would re-scope the
+    item into that case body and cost every other case -- and the tail -- the
+    ability to name it.  That failure is not the `E0434` that guards locals; it
+    surfaces as `E0425` somewhere else entirely, which is how it was found in
+    `kernel_main`.  A declaring paragraph is therefore held back from being a
+    case and left in the outer body, which is the whole of the item rule.
 
     Note what is *not* checked: whether the split is worth doing.  A single
     case is always a no-op -- the peak becomes `outer + case`, which is what it
@@ -996,7 +1000,6 @@ def find_flat_cases(
     uses = {s: _reads(masked[s]) for s in stmts}
     tail = _masked(text, code, starts[stmts[-1][1] + 1], starts[close_idx + 1] - 1)
     tail_uses = _reads(tail)
-    tail_names = set(IDENT.findall(tail))
 
     if reserve_tail and len(groups) > 1:
         # A `-> !` body's last statement stands in tail position and has to
@@ -1009,7 +1012,6 @@ def find_flat_cases(
         # reads join `tail_uses` so the locals it needs still count as live.
         for s in groups.pop():
             tail_uses |= uses[s]
-            tail_names |= set(IDENT.findall(masked[s]))
 
     # A group's reads are what it mentions before its own `let`s introduce it,
     # walking its statements in order so `foo(x); let x = ..;` still counts as
@@ -1024,61 +1026,40 @@ def find_flat_cases(
         g_binds.append(seen)
         g_reads.append(reads)
 
-    # Weld together every paragraph that mentions a block-scoped item.
+    # Which paragraphs *declare* a block-scoped item.
     #
-    # The local walk further down grows a cluster *forward*, which is sound for
-    # locals because a local cannot be read above the `let` that binds it.  An
-    # item can: `fn helper()` declared at the bottom of a body is callable from
-    # the top of it, and `const HELLO_ELF: &[u8] = include_bytes!(..)` in
-    # `kernel_main` is read three paragraphs below its declaration.  So the
-    # item constraint is a two-sided one and is resolved first, by fusing every
-    # paragraph from the first mention of the name to the last into a single
-    # super-paragraph.  After this the forward walk cannot cut one, because any
-    # cluster it starts inside a fused run started at the run's own first group.
+    # An item is not a local and needs no weld: items in a block are scoped to
+    # the whole block regardless of where they stand, and a nested `fn` may name
+    # one freely.  Both halves are checked, not assumed -- this compiles and
+    # prints 123:
     #
-    # Mentions, not reads: a name is looked for anywhere in the paragraph's
-    # text, since an item's whole point is that it is in scope for the block
-    # regardless of where it stands.
+    #     fn outer() -> u32 {
+    #         fn a() -> u32 { BLOB.len() as u32 }   // *above* the declaration
+    #         let t = a();
+    #         const BLOB: &[u8] = b"xyz";
+    #         fn b() -> u32 { BLOB[0] as u32 }
+    #         t + b()
+    #     }
+    #
+    # So the only thing that must not happen is the declaration being *moved
+    # into* a case, which would re-scope it to that case's body and leave every
+    # other case unable to name it.  Refusing to case the declaring paragraph is
+    # therefore the whole constraint: the item stays in the outer body, where it
+    # was already visible to everything, and every other paragraph is free.
+    #
+    # This used to fuse every paragraph from an item's first mention to its last
+    # into one super-paragraph, which is sound but far stronger than Rust
+    # requires -- and expensive, because the fused run then has to clear the
+    # min-length and escape tests as a unit.  One `const` near the top of a body
+    # welded 637 lines of `self_test_seccomp_ptrace_clone3`'s futex case into a
+    # single case, and a single case is arithmetically a no-op: its peak is
+    # `outer + case`, which is what it already was.
     g_items: list[set[str]] = []
-    g_names: list[set[str]] = []
     for g in groups:
         it: set[str] = set()
-        nm: set[str] = set()
         for s in g:
             it |= _item_binds(masked[s])
-            nm |= set(IDENT.findall(masked[s]))
         g_items.append(it)
-        g_names.append(nm)
-
-    reach = list(range(len(groups)))
-    for j, decl in enumerate(g_items):
-        for name in decl:
-            hits = [q for q in range(len(groups)) if name in g_names[q]] or [j]
-            for q in range(min(hits), max(hits) + 1):
-                reach[q] = max(reach[q], max(hits))
-
-    fused: list[list[tuple[int, int]]] = []
-    f_binds: list[set[str]] = []
-    f_reads: list[set[str]] = []
-    f_items: list[set[str]] = []
-    k = 0
-    while k < len(groups):
-        end, j = k, k
-        while j <= end:
-            end = max(end, reach[j])
-            j += 1
-        b, r, i, stmt_list = set(), set(), set(), []
-        for q in range(k, end + 1):
-            r |= g_reads[q] - b
-            b |= g_binds[q]
-            i |= g_items[q]
-            stmt_list += groups[q]
-        fused.append(stmt_list)
-        f_binds.append(b)
-        f_reads.append(r)
-        f_items.append(i)
-        k = end + 1
-    groups, g_binds, g_reads, g_items = fused, f_binds, f_reads, f_items
 
     def last_reader(k: int, name: str) -> int:
         """Index of the last group that can still see group `k`'s `name`.
@@ -1153,13 +1134,18 @@ def find_flat_cases(
         long_enough = end - top + 1 >= min_lines
         # Nothing bound in the cluster can be read after it: the walk above
         # only stops where that is true, except at the tail, which it cannot
-        # extend past.  An *item* has no such walk -- the weld covers only the
-        # paragraphs -- so its escape into the tail is checked directly, and at
-        # any position, since `reserve_tail` may have put a whole paragraph
-        # there.
+        # extend past.
+        #
+        # `c_items` is the separate, unconditional bar: a cluster that *declares*
+        # a block-scoped item cannot become a case at all, because wrapping it
+        # would re-scope the item into the case body and every other case --
+        # and the tail -- would stop being able to name it.  Left in the outer
+        # body it stays visible to all of them.  Unconditional rather than
+        # "escapes into the tail", because a case three paragraphs *above* the
+        # declaration may name it just as legally as one below.
         escapes = (
             any(n in tail_uses for n in c_binds) and cl[-1] == len(groups) - 1
-        ) or any(n in tail_names for n in c_items)
+        ) or bool(c_items)
         if long_enough and not (c_reads & before) and not escapes:
             cases.append((top, end))
         elif long_enough:
@@ -2149,13 +2135,13 @@ _case(
 )
 
 _case(
-    # An item is not a local, and gets no `E0434` to protect it: a nested `fn`
-    # may name a `const` from an enclosing block, so cutting between the
-    # declaration and the use compiles the *declaring* case fine and fails in
-    # the reading one, three paragraphs away.  The three paragraphs are
-    # therefore welded into one case -- note the second, which mentions nothing
-    # at all, is dragged in because it stands between them.
-    "a const used three paragraphs later welds them into one case",
+    # An item is not a local.  It is scoped to its whole block wherever it
+    # stands, so the paragraph three below may name it from inside a case --
+    # what must not happen is the *declaring* paragraph being wrapped, which
+    # would re-scope the item into that one case body.  Only the declaring
+    # paragraph is therefore held back; the other three all become cases,
+    # including the one that reads `BLOB`.
+    "an item's declaring paragraph is held back, its readers are not",
     """fn self_test() {
     const BLOB: &[u8] = b"x";
     step_one();
@@ -2175,17 +2161,23 @@ _case(
 }
 """,
     """fn self_test() {
+    const BLOB: &[u8] = b"x";
+    step_one();
+    step_two();
+
     {
         #[inline(never)]
         fn case() {
-            const BLOB: &[u8] = b"x";
-            step_one();
-            step_two();
-
             step_three();
             step_four();
             step_five();
+        }
+        case();
+    }
 
+    {
+        #[inline(never)]
+        fn case() {
             write(BLOB);
             step_six();
             step_seven();

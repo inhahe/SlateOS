@@ -29459,7 +29459,9 @@ five of which the harness found and the sixth of which it structurally cannot:
 
 `od` is the eighteenth (`scripts/od-diff.sh`: 266 passed, 0 differed, 4 differ
 on purpose — the `--help` referral tail, the `--version` banner, and `-w0` and
-`-w-4`, on which GNU 9.4 `abort()`s; see below).
+`-w-4`, on which GNU 9.4 `abort()`s; see below. 38 differ when pointed at
+MSYS2's `od` with `OURS=/usr/bin/od`, which is the harness proving it still
+discriminates rather than passing everything put in front of it).
 
 The shipped version was a 251-line toy: `-t` accepted a single conversion,
 there was no `-A`, no `-j`, no `-N`, no `-S`, no `-w`, no `--endian`, no `z`

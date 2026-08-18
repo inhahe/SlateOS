@@ -294,6 +294,7 @@ def container(
     starts: list[int],
     open_idx: int,
     text: str,
+    flat: bool = False,
 ) -> int:
     """Where the cases actually live.
 
@@ -305,9 +306,17 @@ def container(
     A lone bare block is genuinely ambiguous -- it is either such a wrapper or a
     single real case -- and the tell is not its size but its contents: a wrapper
     holds sibling cases, a case does not.  So descend only when the block holds
-    at least two bare statement blocks of its own.  (Size was the first rule
-    here; it is an arbitrary constant that misjudges any function short enough
-    for its one case to be most of it.)
+    at least two cases of its own.  (Size was the first rule here; it is an
+    arbitrary constant that misjudges any function short enough for its one case
+    to be most of it.)
+
+    What counts as "cases of its own" depends on which shape is being looked
+    for, which is why `flat` is a parameter rather than a detail of the caller.
+    `self_test_sysv_ipc_mqueue` wraps 1 874 flat lines in one bare block that
+    contains no bare block at all, so the brace test says "a single real case"
+    and refuses to descend -- and `--flat` then sees one statement where there
+    are 96 paragraphs.  Only one level is descended, in either mode: no function
+    here nests two wrappers, and each extra level is another chance to guess.
     """
     body_depth = _depth_inside(lines, depth, code, starts, open_idx)
     close = _matching_close(lines, depth, starts, open_idx, body_depth, text, code)
@@ -321,9 +330,17 @@ def container(
             lines, depth, starts, bare[0], body_depth + 1, text, code
         )
         if _is_statement_block(lines, starts, text, code, bare[0], inner_close):
-            nested, _ = find_cases(
-                lines, depth, code, starts, text, bare[0], inner_close, body_depth + 1
-            )
+            if flat:
+                inner_stmts = statements(
+                    lines, depth, code, starts, text, bare[0], inner_close,
+                    body_depth + 1,
+                )
+                nested = paragraphs(lines, inner_stmts)
+            else:
+                nested, _ = find_cases(
+                    lines, depth, code, starts, text, bare[0], inner_close,
+                    body_depth + 1,
+                )
             if len(nested) >= 2:
                 return bare[0]
     return open_idx
@@ -648,6 +665,29 @@ def statements(
     return out
 
 
+def _let_patterns(masked: str) -> list[tuple[int, int]]:
+    """Offsets of each `let` **pattern** -- what is between `let` and `=`/`:`/`;`.
+
+    Both `_binds` and `_reads` need this same span, and for opposite reasons:
+    the names in it are introduced, and are therefore *not* mentions of an
+    outer name.  Sharing one scan is what keeps the two answers consistent.
+    """
+    spans: list[tuple[int, int]] = []
+    for m in LET.finditer(masked):
+        d, i = 0, m.end()
+        while i < len(masked):
+            ch = masked[i]
+            if ch in "([{":
+                d += 1
+            elif ch in ")]}":
+                d -= 1
+            elif d == 0 and ch in "=;:":
+                break
+            i += 1
+        spans.append((m.end(), i))
+    return spans
+
+
 def _binds(masked: str) -> set[str]:
     """Names a statement's `let`s introduce -- over-approximated on purpose.
 
@@ -663,20 +703,31 @@ def _binds(masked: str) -> set[str]:
     still is.
     """
     out: set[str] = set()
-    for m in LET.finditer(masked):
-        seg, d = [], 0
-        for ch in masked[m.end() :]:
-            if ch in "([{":
-                d += 1
-            elif ch in ")]}":
-                d -= 1
-            elif d == 0 and (ch == "=" or ch == ";" or ch == ":"):
-                break
-            seg.append(ch)
-        for name in IDENT.findall("".join(seg)):
+    for lo, hi in _let_patterns(masked):
+        for name in IDENT.findall(masked[lo:hi]):
             if name not in NOT_A_BINDING and not name[:1].isupper():
                 out.add(name)
     return out
+
+
+def _reads(masked: str) -> set[str]:
+    """Names a statement *mentions*, excluding the ones its own `let`s declare.
+
+    The distinction is the whole ballgame for `--flat`.  `let a = SyscallArgs
+    { .. };` mentions `a`, but as a declaration, not as a use -- and counting
+    it as a use makes every paragraph after the first look like it reads the
+    previous paragraph's `a`.  That is not a hypothetical: it rejected 8 of the
+    9 paragraphs of `self_test_sysv_ipc_mqueue`, whose every case opens with
+    exactly that line.
+
+    Eliding only the pattern (rather than the whole statement) keeps the
+    initialiser honest, so `let a = a + 1;` still reads the outer `a` and the
+    paragraph holding it is still refused.
+    """
+    out = masked
+    for lo, hi in _let_patterns(masked):
+        out = out[:lo] + " " * (hi - lo) + out[hi:]
+    return set(IDENT.findall(out))
 
 
 def _first_code_line(lines: list[str], span: tuple[int, int]) -> int:
@@ -750,6 +801,15 @@ def find_flat_cases(
     a boundary wrong fails the build, it does not miscompile.  The checks here
     exist so the common cases do not have to fail the build first.
 
+    **Shadowing has to be modelled or nothing splits.**  These tests rebind one
+    scratch name per case -- `let a = SyscallArgs { .. };` appears 96 times in
+    `self_test_sysv_ipc_mqueue` -- so a rule that asks only "is the name
+    mentioned later" answers yes every time and skips every paragraph, which is
+    what the first version did (9 skipped, 0 taken).  A paragraph's *reads* are
+    therefore its identifiers minus the ones its own `let`s introduce before
+    that point (see `_reads`), and a binding stops being live at the paragraph
+    that rebinds it without reading it first.
+
     Note what is *not* checked: whether the split is worth doing.  A single
     case is always a no-op -- the peak becomes `outer + case`, which is what it
     already was -- so that judgement lives in `apply`, which refuses to write
@@ -762,36 +822,101 @@ def find_flat_cases(
 
     masked = {s: _masked(text, code, starts[s[0]], starts[s[1] + 1] - 1) for s in stmts}
     binds = {s: _binds(masked[s]) for s in stmts}
-    uses = {s: set(IDENT.findall(masked[s])) for s in stmts}
+    uses = {s: _reads(masked[s]) for s in stmts}
     tail = _masked(text, code, starts[stmts[-1][1] + 1], starts[close_idx + 1] - 1)
-    tail_uses = set(IDENT.findall(tail))
+    tail_uses = _reads(tail)
 
-    g_binds = [set().union(*(binds[s] for s in g)) for g in groups]
-    g_uses = [set().union(*(uses[s] for s in g)) for g in groups]
+    # A group's reads are what it mentions before its own `let`s introduce it,
+    # walking its statements in order so `foo(x); let x = ..;` still counts as
+    # reading the outer `x`.
+    g_binds: list[set[str]] = []
+    g_reads: list[set[str]] = []
+    for g in groups:
+        reads, seen = set(), set()
+        for s in g:
+            reads |= uses[s] - seen
+            seen |= binds[s]
+        g_binds.append(seen)
+        g_reads.append(reads)
 
-    # `live_after[k]` = every name read at or beyond group k, plus the trailing
-    # `Ok(())` and anything else after the last statement.  Names read strictly
-    # after group k are therefore `live_after[k + 1]`.
-    live_after = [tail_uses]
-    for u in reversed(g_uses):
-        live_after.append(live_after[-1] | u)
-    live_after.reverse()
+    def last_reader(k: int, name: str) -> int:
+        """Index of the last group that can still see group `k`'s `name`.
+
+        `k` itself if the binding dies inside `k`; `len(groups) - 1` if it
+        survives to the trailing `Ok(())`, which is a boundary no merge can
+        absorb and is therefore left for the escape test to reject.
+        """
+        out = k
+        for j in range(k + 1, len(groups)):
+            if name in g_reads[j]:
+                out = j
+            if name in g_binds[j]:
+                return out  # rebound, so group k's binding dies here
+        return len(groups) - 1 if name in tail_uses else out
+
+    # Coalesce paragraphs whose locals reach into each other.
+    #
+    # A crossing local does not mean "unsplittable", it means the blank line
+    # was in the wrong place: `self_test_sysv_ipc_mqueue` declares
+    # `let sops_ptr = ..` in one paragraph and dereferences it in the next, so
+    # the two are one case that happens to be written with a gap in it.  Taking
+    # the paragraph as final gave 3 cases of 9; merging along the crossings
+    # gives 6, and the ones that merge are exactly the ones that had to.
+    #
+    # This is the partition-labels walk: extend the cluster to the furthest
+    # group any of its bindings reaches, re-extending as new groups join, and
+    # cut where nothing outstanding is still live.
+    #
+    # The one thing the walk must not do is swallow the whole body.  A local
+    # the author declared at the top and used at the bottom -- `let saved =
+    # total(); .. restore(saved);` -- links the first group to the last, and
+    # the merge would then produce a single case containing everything, whose
+    # peak is `outer + case` and so is not a saving at all.  When that happens
+    # the answer is not to merge but to leave that first paragraph where it is:
+    # it holds a genuine body-scope local, which belongs in the outer frame.
+    def grow(k: int) -> int:
+        end, j = k, k
+        while j <= end:
+            for name in g_binds[j]:
+                end = max(end, last_reader(j, name))
+            j += 1
+        return end
+
+    clusters: list[list[int]] = []
+    leading_skipped = 0
+    k = 0
+    while k < len(groups):
+        end = grow(k)
+        if k == 0 and end == len(groups) - 1 and end > 0:
+            g = groups[0]
+            if g[-1][1] - _first_code_line(lines, g[0]) + 1 >= min_lines:
+                leading_skipped += 1
+            k = 1
+            continue
+        clusters.append(list(range(k, end + 1)))
+        k = end + 1
 
     cases: list[tuple[int, int]] = []
-    skipped = 0
+    skipped = leading_skipped
     before = set(outer) - declared
-    for k, g in enumerate(groups):
-        top, end = _first_code_line(lines, g[0]), g[-1][1]
+    for cl in clusters:
+        c_binds: set[str] = set()
+        c_reads: set[str] = set()
+        for k in cl:
+            c_reads |= g_reads[k] - c_binds
+            c_binds |= g_binds[k]
+        top = _first_code_line(lines, groups[cl[0]][0])
+        end = groups[cl[-1]][-1][1]
         long_enough = end - top + 1 >= min_lines
-        if (
-            long_enough
-            and not (g_uses[k] & before)
-            and not (g_binds[k] & live_after[k + 1])
-        ):
+        # Nothing bound in the cluster can be read after it: the walk above
+        # only stops where that is true, except at the tail, which it cannot
+        # extend past.
+        escapes = any(n in tail_uses for n in c_binds) and cl[-1] == len(groups) - 1
+        if long_enough and not (c_reads & before) and not escapes:
             cases.append((top, end))
         elif long_enough:
             skipped += 1
-        before |= g_binds[k] - declared
+        before |= c_binds - declared
     return cases, skipped
 
 
@@ -929,7 +1054,7 @@ def rewrite(
             f"`fn {fn_name}` does not return KernelResult<()>; this transformer "
             f"only handles that signature (see the module docstring)"
         )
-        open_idx = container(lines, depth, code, starts, b_open, text)
+        open_idx = container(lines, depth, code, starts, b_open, text, bool(flat))
         inner = _depth_inside(lines, depth, code, starts, open_idx)
         close_idx = _matching_close(lines, depth, starts, open_idx, inner, text, code)
         if flat:

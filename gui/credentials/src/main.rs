@@ -8,7 +8,13 @@
 //! Security model:
 //! - The session key is derived by iterating SHA-256 [`DEFAULT_KDF_ROUNDS`]
 //!   times over the password and salt, so that testing one guess costs the
-//!   attacker what one unlock costs the user.
+//!   attacker what one unlock costs the user. That derivation lives in the
+//!   shared `pwkdf` crate, not here: `apps/lockscreen` had independently
+//!   grown its own answer to the same question — a bare unsalted
+//!   `SHA-256(password)` — and two derivations that disagree are not merely
+//!   unequal in strength, they are *incompatible*. What this crate keeps of
+//!   its own is [`VERIFIER_DOMAIN`], the label that stops a vault's verifier
+//!   from being replayable against a lock screen.
 //! - That salt is drawn from the kernel CSPRNG **per vault** ([`KdfParams`])
 //!   and stored beside the verifier, so the cost above is paid once per victim
 //!   rather than once for the world. It used to be a constant compiled into
@@ -40,6 +46,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // algorithm and its FIPS 180-4 vectors now live in `sha2`, once.
 use sha2::{eq_constant_time, sha256};
 
+// The salt-and-stretch derivation used to be written out here too. It is now
+// shared with `apps/lockscreen`, which had independently grown a *different*
+// answer to the same question -- a bare unsalted `SHA-256(password)`. Two
+// derivations that disagree are not merely unequal in strength, they are
+// incompatible, and the cheap way to reconcile them once the two components
+// talk to each other is to weaken this one. See `pwkdf`'s module doc.
+//
+// `KdfParams` is re-exported rather than merely imported because it is part of
+// this crate's public surface (`CredentialStore::kdf_params`,
+// `with_kdf_params`). Its salt used to be a compile-time constant,
+// `"slateos_credential_salt"`, shared by every SlateOS install -- which is
+// precisely backwards: a salt's only job is to be *different for every vault*,
+// so that an attacker who precomputes a table of hashed passwords must redo
+// the work per victim instead of once for the world. A vault must round-trip
+// both the salt and the round count when persisted; one that has lost either
+// can never be opened again, and the symptom is the owner's own password being
+// rejected with nothing to say why.
+pub use pwkdf::{KdfParams, SALT_LEN};
+
 // Likewise the password generator's xorshift, which reduced with `% bound`.
 use randrange::{RandomSource, SecretSource, SystemRandom};
 // Only the tests name a seeded generator: the service itself must never be
@@ -52,41 +77,20 @@ use randrange::SeededRng;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// How many bytes of salt each vault gets.
-///
-/// Sixteen is the usual figure (PBKDF2's RFC 8018 calls for at least eight;
-/// Argon2's reference implementation defaults to sixteen). The requirement is
-/// only that two vaults never collide by chance, which 128 bits settles.
-const SALT_LEN: usize = 16;
-
 /// How many hash iterations turn a master password into a key, for a vault
 /// created today.
 ///
 /// This is *key stretching*, and it is the entire defence a password-derived
-/// key has. A password has perhaps 30–40 bits of real entropy, which is
-/// nothing; what makes it survive is that each guess costs the attacker time.
-/// A single SHA-256 pass — what this used to do — lets commodity GPU hardware
-/// try billions of candidates per second. At 100 000 iterations the same
-/// hardware manages tens of thousands: a factor of 10^5, bought once.
+/// key has: a password has perhaps 30–40 bits of real entropy, so what makes
+/// it survive is that each guess costs the attacker time. The number itself,
+/// and why it is a per-vault *default* rather than a constant of the format,
+/// are documented on [`pwkdf::DEFAULT_ROUNDS`]; a vault's own cost is stored
+/// in its [`KdfParams`] — see [`CredentialStore::kdf_rounds`].
 ///
-/// The number is chosen the standard way — by measurement, so that one
-/// derivation costs enough to hurt an attacker and not enough for a user to
-/// notice. On the development machine one SHA-256 of a ~70-byte input takes
-/// 1.28 µs in a release build, so 100 000 rounds is ~130 ms per unlock.
-///
-/// It is a *default* rather than a constant of the format because the right
-/// number rises with hardware, and a vault written under the old number must
-/// keep opening after the default moves: the cost is a property of the stored
-/// verifier, not of the code that reads it. Every real password-hashing format
-/// records its cost parameters alongside the hash for this reason. See
-/// [`CredentialStore::kdf_rounds`].
-///
-/// This is PBKDF2's *structure*, not PBKDF2 (which iterates HMAC, not a bare
-/// hash), and it is far weaker than a memory-hard function such as Argon2id —
-/// stretching only costs an attacker time, whereas memory-hardness also
-/// denies them the parallelism that makes GPUs worth using. Argon2id is the
-/// end state; see `open-questions.md` → C-Q5.
-const DEFAULT_KDF_ROUNDS: u32 = 100_000;
+/// Named locally rather than used through `pwkdf::` so that this crate keeps a
+/// single place to *diverge* if a vault ever needs to be more expensive than
+/// a lock screen. It is the same number today.
+const DEFAULT_KDF_ROUNDS: u32 = pwkdf::DEFAULT_ROUNDS;
 
 /// Default auto-lock timeout in seconds (5 minutes).
 const DEFAULT_LOCK_TIMEOUT_SECS: u64 = 300;
@@ -156,6 +160,21 @@ impl fmt::Display for CredentialError {
                 f,
                 "the system random number generator is unavailable, so no unpredictable value could be drawn"
             ),
+        }
+    }
+}
+
+/// `pwkdf` has one failure and this crate has one variant for it, so the
+/// conversion is total.
+///
+/// Written as a `From` rather than a `map_err` at the single call site so that
+/// it stays total: if `pwkdf` ever grows a second failure, this match stops
+/// compiling and someone has to decide what the vault does about it, instead
+/// of a closure silently folding it into "no entropy".
+impl From<pwkdf::KdfError> for CredentialError {
+    fn from(err: pwkdf::KdfError) -> Self {
+        match err {
+            pwkdf::KdfError::EntropyUnavailable => Self::EntropyUnavailable,
         }
     }
 }
@@ -282,87 +301,14 @@ impl From<&Credential> for CredentialMetadata {
 /// The size of the nonce prefix that [`encrypt`] writes ahead of a ciphertext.
 const NONCE_LEN: usize = 8;
 
-/// Everything a vault's key derivation is pinned to: its salt and its cost.
+/// The label that separates this crate's verifiers from any other caller's.
 ///
-/// These travel together because they are used together and must be *stored*
-/// together. Every real password-hashing format writes its salt and its cost
-/// parameters beside the hash for the same reason: both are properties of the
-/// stored verifier, not of the code that reads it, and a vault that has lost
-/// either one can never be opened again.
-///
-/// # Why the salt is here at all
-///
-/// It used to be a compile-time constant, `"slateos_credential_salt"`, shared
-/// by every SlateOS install — which is precisely backwards. A salt's only job
-/// is to be *different for every vault*, so that an attacker who precomputes a
-/// table of hashed passwords must redo the work per victim instead of once for
-/// the world. A constant salt means one table opens every vault on every
-/// machine, and the [`DEFAULT_KDF_ROUNDS`] stretching that table cost is paid
-/// once by the attacker rather than once per target.
-///
-/// The comment on that constant said the fix was blocked on a userspace entropy
-/// source. It is not: `randrange::SystemRandom` reaches the kernel CSPRNG, and
-/// this crate already depended on `randrange`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct KdfParams {
-    /// This vault's salt. **A persistence layer must round-trip it.** A vault
-    /// reloaded with a different salt derives a different key from the same
-    /// password, which is indistinguishable from the password being wrong.
-    salt: [u8; SALT_LEN],
-    /// Iteration count this vault's verifier and session key were derived at.
-    /// **A persistence layer must round-trip this too** — see
-    /// [`DEFAULT_KDF_ROUNDS`] for why a vault written under an older, cheaper
-    /// number still has to open.
-    rounds: u32,
-}
-
-impl KdfParams {
-    /// Parameters for a *new* vault: a fresh salt drawn from the kernel.
-    ///
-    /// Fails with [`CredentialError::EntropyUnavailable`] rather than falling
-    /// back to a clock, a counter, or the old constant. A salt is chosen once
-    /// and then lives as long as the vault does, so a predictable one is a
-    /// permanent weakness that nothing later will notice or repair; refusing to
-    /// create the vault is the recoverable outcome.
-    pub fn fresh(rounds: u32) -> Result<Self, CredentialError> {
-        let mut source = SystemRandom::open().map_err(|_| CredentialError::EntropyUnavailable)?;
-        let salt = source
-            .secret(|rng| {
-                let mut salt = [0u8; SALT_LEN];
-                for chunk in salt.chunks_mut(8) {
-                    let word = rng.next_u64().to_le_bytes();
-                    // `chunk` is at most 8 bytes, so the zip stops at its end.
-                    for (slot, byte) in chunk.iter_mut().zip(word) {
-                        *slot = byte;
-                    }
-                }
-                salt
-            })
-            .ok_or(CredentialError::EntropyUnavailable)?;
-        Ok(Self { salt, rounds })
-    }
-
-    /// Parameters for a vault whose salt was chosen earlier — reconstructing a
-    /// stored vault, or a test naming a salt so its assertions are stable.
-    ///
-    /// This is **not** how a new vault gets its salt. Use [`Self::fresh`].
-    #[must_use]
-    pub const fn new(salt: [u8; SALT_LEN], rounds: u32) -> Self {
-        Self { salt, rounds }
-    }
-
-    /// This vault's salt, for a persistence layer to write down.
-    #[must_use]
-    pub const fn salt(&self) -> [u8; SALT_LEN] {
-        self.salt
-    }
-
-    /// The iteration count this vault's key derivation costs.
-    #[must_use]
-    pub const fn rounds(&self) -> u32 {
-        self.rounds
-    }
-}
+/// Domain separation, and the reason a lock-screen verifier cannot be replayed
+/// against a vault even for a user who reuses one password: the two derive
+/// different values from the same key. It is the same byte string this crate
+/// used before the derivation moved into `pwkdf`, so nothing already stored
+/// changes meaning.
+const VERIFIER_DOMAIN: &[u8] = b"slateos-credential-verifier";
 
 /// Derive a 32-byte session key from the master password under `kdf`.
 ///
@@ -371,32 +317,12 @@ impl KdfParams {
 /// vault, and [`DEFAULT_KDF_ROUNDS`] for why the cost must be stored rather
 /// than assumed, and for why the single SHA-256 pass this used to be was not a
 /// key derivation function at all.
-fn derive_session_key(master_password: &str, kdf: &KdfParams) -> [u8; 32] {
-    stretch(master_password.as_bytes(), &kdf.salt, kdf.rounds)
-}
-
-/// Iterated SHA-256 over `password` and `salt` — PBKDF2's shape.
 ///
-/// The password and salt are folded back in on *every* round rather than the
-/// accumulator merely being hashed with itself. That matters: a chain of the
-/// form `h = SHA-256(h)` is the same chain for every password, so an attacker
-/// could walk it once and then test candidates against any point on it. Mixing
-/// the password in each round makes the whole chain password-specific, which
-/// is what forces the attacker to pay the full cost per guess.
-fn stretch(password: &[u8], salt: &[u8], rounds: u32) -> [u8; 32] {
-    let mut buf = Vec::with_capacity(32usize.saturating_add(password.len()).saturating_add(salt.len()));
-    buf.extend_from_slice(password);
-    buf.extend_from_slice(salt);
-    let mut acc = sha256(&buf);
-
-    for _ in 0..rounds {
-        buf.clear();
-        buf.extend_from_slice(&acc);
-        buf.extend_from_slice(password);
-        buf.extend_from_slice(salt);
-        acc = sha256(&buf);
-    }
-    acc
+/// A thin adapter over [`pwkdf::derive_key`], which takes bytes: a master
+/// password arrives here as a `&str` from the IPC surface, and converting once
+/// at the boundary keeps every call site below from repeating `.as_bytes()`.
+fn derive_session_key(master_password: &str, kdf: &KdfParams) -> [u8; 32] {
+    pwkdf::derive_key(master_password.as_bytes(), kdf)
 }
 
 /// The value stored to check a master password against, derived from the
@@ -407,17 +333,13 @@ fn stretch(password: &[u8], salt: &[u8], rounds: u32) -> [u8; 32] {
 /// could test a candidate password for the price of one SHA-256 and never
 /// touch [`derive_session_key`] at all — so stretching the key would have
 /// bought exactly nothing. Deriving the verifier from the key instead puts the
-/// full [`KEY_DERIVATION_ROUNDS`] between the attacker and each guess.
+/// full [`DEFAULT_KDF_ROUNDS`] between the attacker and each guess.
 ///
-/// The extra label keeps this from being a value the key itself could collide
-/// with: the verifier is public (it is stored beside the ciphertext) and must
-/// not be usable as, or derivable into, the key.
+/// [`VERIFIER_DOMAIN`] additionally keeps this from being a value the key
+/// itself could collide with: the verifier is public (it is stored beside the
+/// ciphertext) and must not be usable as, or derivable into, the key.
 fn verifier_for(key: &[u8; 32]) -> [u8; 32] {
-    let label = b"slateos-credential-verifier";
-    let mut buf = Vec::with_capacity(32usize.saturating_add(label.len()));
-    buf.extend_from_slice(key);
-    buf.extend_from_slice(label);
-    sha256(&buf)
+    pwkdf::verifier_for(key, VERIFIER_DOMAIN)
 }
 
 
@@ -1020,7 +942,7 @@ impl CredentialStore {
     /// The iteration count this vault's master password is stretched by.
     #[must_use]
     pub fn kdf_rounds(&self) -> u32 {
-        self.kdf.rounds
+        self.kdf.rounds()
     }
 
     /// This vault's salt and cost, for a persistence layer to write down
@@ -1089,7 +1011,7 @@ impl CredentialStore {
         old_password: Option<&str>,
         new_password: &str,
     ) -> Result<(), CredentialError> {
-        let new_kdf = KdfParams::fresh(self.kdf.rounds)?;
+        let new_kdf = KdfParams::fresh(self.kdf.rounds())?;
         self.set_master_password_with_kdf(old_password, new_password, new_kdf)
     }
 
@@ -2146,6 +2068,34 @@ mod tests {
     }
 
     #[test]
+    fn the_stored_verifier_format_did_not_change_when_the_kdf_moved_to_pwkdf() {
+        // A vault's verifier is `sha256(key || VERIFIER_DOMAIN)`, and it was
+        // that before the derivation was extracted into `pwkdf`. Pinned as a
+        // test because changing the domain is a one-word edit with no local
+        // symptom: everything here would keep passing, and every vault already
+        // on disk would reject its owner's own password forever.
+        let key = test_key("pw");
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&key);
+        expected.extend_from_slice(b"slateos-credential-verifier");
+        assert_eq!(verifier_for(&key), sha256(&expected));
+    }
+
+    #[test]
+    fn a_vault_verifier_cannot_be_replayed_against_a_lock_screen() {
+        // The two now share `pwkdf`, which is the point -- but sharing a
+        // derivation must not mean sharing a *value*. A user who reuses one
+        // password must not have the lock screen's stored verifier open their
+        // vault, or vice versa. The domain label is what keeps them apart.
+        let key = test_key("pw");
+        assert_ne!(
+            verifier_for(&key),
+            pwkdf::verifier_for(&key, b"slateos-lockscreen-verifier"),
+            "one stolen verifier would unlock both"
+        );
+    }
+
+    #[test]
     fn default_kdf_rounds_are_usable() {
         // The rest of the module runs at TEST_KDF_ROUNDS, so this is the one
         // place the shipped cost is exercised end to end. It is also a crude
@@ -3073,8 +3023,8 @@ mod tests {
                 );
             }
             (Err(first), Err(second)) => {
-                assert_eq!(first, CredentialError::EntropyUnavailable);
-                assert_eq!(second, CredentialError::EntropyUnavailable);
+                assert_eq!(first, pwkdf::KdfError::EntropyUnavailable);
+                assert_eq!(second, pwkdf::KdfError::EntropyUnavailable);
             }
             _ => panic!("a salt source that works only sometimes is the worst case of all"),
         }

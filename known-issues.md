@@ -35940,10 +35940,18 @@ obligation, not a duplicate.
 
 ### Still to do
 
-- **`gui/credentials` is not yet on `pwkdf`.** Its `SALT_LEN`,
-  `DEFAULT_KDF_ROUNDS`, `KdfParams`, `stretch`, `derive_session_key` and
-  `verifier_for` are still its own copy. Deleting them in favour of the crate
-  is the other half of "one KDF, not two" and should be the next change.
+- ~~**`gui/credentials` is not yet on `pwkdf`.**~~ **Done the same day.** Its
+  `SALT_LEN`, `KdfParams`, `stretch` and the body of `DEFAULT_KDF_ROUNDS` are
+  gone; `derive_session_key` and `verifier_for` are now three-line adapters
+  over `pwkdf::derive_key` and `pwkdf::verifier_for` (net −150 lines). What
+  it keeps is `VERIFIER_DOMAIN` — the label that stops a vault verifier from
+  being replayable against a lock screen — and a `From<pwkdf::KdfError>`
+  written as an exhaustive match rather than a `map_err`, so that a second
+  `pwkdf` failure mode would stop compiling here instead of being silently
+  folded into "no entropy". Two new tests pin the migration: the stored
+  format is still `sha256(key ‖ "slateos-credential-verifier")`, and a vault
+  verifier differs from a lock-screen one derived from the same key. Both
+  verified by flipping the domain constant. 83 tests, clippy clean.
 - **`pwkdf::stretch` is PBKDF2's *shape*, not PBKDF2**, and the module doc
   says so. Whether to keep a hand-written construction or port a vetted one
   is open question **C-Q5**, which is the operator's call; the crate is

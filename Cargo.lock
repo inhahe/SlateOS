@@ -1941,6 +1941,7 @@ version = "0.1.0"
 name = "credentials"
 version = "0.1.0"
 dependencies = [
+ "pwkdf",
  "randrange",
  "sha2",
 ]

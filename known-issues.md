@@ -32555,3 +32555,137 @@ do not overlap in time.
 debug --top 40`, and `--diff BEFORE_ELF AFTER_ELF` to check a change.
 Note the profile: these numbers are debug, which is what `boot-test.sh`
 builds and therefore what any canary halt will come from.
+
+---
+
+## A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT (lane A, 2026-08-18) - **not a bug; methodology, recorded so it stops being rediscovered**
+
+**In short:** the benchmark suite flags "regressions" that are not real, on
+roughly half of all runs.  This is not a fault in the suite or in the
+contamination canary - both are working.  It is that the machine running the
+benchmarks is somebody's desktop, with Unreal Editor, Chrome, Creative Cloud,
+the Epic Games launcher and assorted node processes resident, and it is never
+going to be quiet.  The only thing that separates a code regression from
+ambient noise on this host is **replication**, and this entry records the
+measurement that proves it, so the next session does not spend an hour
+re-deriving it.
+
+### The measurement
+
+Two `--bench` runs of the **byte-identical kernel binary**, back to back, with
+nothing started by the agent during either QEMU window:
+
+| | run 1 (2026-08-18T00:49) | run 2 (replication) |
+|---|---|---|
+| benchmarks flagged `REGRESSED, UNREPLICATED` | 9 | 12 |
+| whole-suite vs 8-run median | x1.216 | x1.291 |
+| canary verdict | contaminated (spread 76%) | contaminated (spread 164%) |
+
+**Overlap between the two sets: 1 benchmark out of 20. Jaccard 0.05.**
+
+Run 1 flagged `net_arp_lookup`, `vfs_stat_deep`, `crypto_ed25519_sign`,
+`crypto_x25519`, `service_connect`, `page_alloc_zeroed_free`,
+`cp_try_wait_empty`, `crypto_sha256_64B`, `ipc_channel_sync`.
+Run 2 flagged `http_gzip_1KiB`, `http_build_response_1KiB`,
+`vfs_stat_breakdown_prologue`, `vfs_write_256`, `dashboard_api_status`,
+`ipc_channel_roundtrip_64k`, `vfs_stat_3comp`, `crypto_sha256_1KiB`,
+`page_alloc_zeroed_free`, `ipc_channel`, `vfs_stat_breakdown_ns`, `ipc_pipe`.
+
+Same code.  Nineteen of the twenty are noise.
+
+### Three wrong hypotheses, recorded because each was plausible
+
+Getting to that answer took three attempts, and the two failures are worth
+keeping because both are the sort of thing that sounds right:
+
+1. **"A single unlucky sample condemns the run."**  Wrong.  `ab_interleaved`
+   already takes the **minimum over 500 interleaved rounds** per arm, which is
+   a sound estimator against an interrupt landing in one measurement.  The
+   sampling was never the weak part.
+2. **"The canary is reading the suite's own TLB residue, not the host."**
+   This one had real evidence behind it - run 1's `CANARY-TRACE` showed the
+   elevation confined to two *adjacent* positions (48:10.6, 56:9.4) with
+   everything else flat at 6.0-6.6, which is not what ambient load looks like,
+   and the two endpoints agreed to 2% (`start=6, end=6, pct=102`), ruling out
+   drift.  It predicted the bump would recur at the same positions on an
+   identical binary.  It did not: run 2's bump was at 40 (11.6) and 64 (16.5).
+   Refuted by its own prediction, which is the good outcome.
+3. **"The host is busy."**  Correct.  Cumulative CPU on the box is dominated by
+   `UnrealEditor`, `explorer`, `Creative Cloud`, `EpicGamesLauncher`, `chrome`
+   and `node`.  Every instrument was reporting this accurately the whole time.
+
+The general lesson is the one this project keeps relearning from the other end:
+*before concluding an instrument is lying, check whether the thing it is
+measuring is actually true.*  Two sessions have now gone looking for a defect
+in this canary that was not there.
+
+### What to actually do
+
+- **Never accept or reject a benchmark movement from one run.**  The harness
+  already says this (`REGRESSED, UNREPLICATED` -> "re-run WITHOUT rebuilding to
+  confirm").  Follow it literally: `git stash` any uncommitted source changes
+  first, so `cargo` has nothing to rebuild and the second run is provably the
+  same binary.
+- **A `RUN CONTAMINATED` verdict does not invalidate the boot test.**  Both runs
+  above passed every correctness gate.  Contamination taints the *numbers*, not
+  the *pass*.
+- **Do not chase a whole-suite outlier.**  `!! OUTLIER RUN: everything measured
+  slower than usual by N%` means the comparison denominator is bad; drift
+  correction removes the uniform part but cannot remove a non-uniform one.
+- The one thing that *would* be worth building: a mode that runs the suite
+  **twice in one boot** and reports only benchmarks that moved in both halves.
+  That gets replication without paying a second 17-minute release build, and it
+  is the only change here that would improve the signal rather than just
+  documenting the noise.  Not built yet.
+
+---
+
+## A-BENCH-PAGE-ALLOC-ZEROED-FREE-HAS-LEFT-ITS-HISTORICAL-RANGE (lane A, 2026-08-18) - **open, unattributed**
+
+**In short:** one benchmark, `page_alloc_zeroed_free`, is now measuring about
+80% slower than it used to and is well outside the range it has held for the
+last eight runs.  It is the *only* benchmark that was flagged in both of the
+back-to-back identical-binary runs described in the entry above, so unlike the
+other nineteen it is not obviously noise.  It is also not yet attributable to
+any code change, and the evidence for that is specific rather than a shrug.
+
+### The numbers
+
+| run | value | own recent range | median over 8 runs |
+|---|---:|---|---:|
+| baseline (commit `61a4998c1`) | 3 680 ns | 2 909-4 717 ns | 3 645 ns |
+| run 1 (`e2f2a2726`) | 5 125 ns | " | " |
+| run 2 (**identical binary** to run 1) | 6 652 ns | " | " |
+
+Flagged `+35%` then `+27%` against the suite, i.e. after drift correction, and
+run-over-run drift itself was small both times (+2.8%, +2.1%).
+
+### Why it is *not* being attributed to the FpuState / KernelFdTable boxing
+
+The tempting story is that boxing `FpuState` (4 KiB) and `KernelFdTable`
+(8 KiB) added two heap allocations per task creation, changing kernel-heap
+layout and therefore page-allocator free-list state.  That is mechanically
+plausible.  It is also not what the data shows:
+
+- **The second step happened with an unchanged binary.**  Run 2 is the same
+  bytes as run 1 and still rose 27%.  Whatever caused that step is not code.
+- **A code change produces a step, not a ramp.**  3 680 -> 5 125 -> 6 652 is a
+  ramp across three runs, two of which share a binary.
+- **This benchmark is a known high-variance one.**  Run 1's dispersion report
+  lists it explicitly: `page_alloc_zeroed_free: mean is 26x its min`.  A
+  benchmark whose mean is 26x its minimum will be flagged often, by
+  construction.
+
+So the honest reading is: at least the second step is environmental, which
+removes the grounds for reading the first step as code.  What remains true and
+worth tracking is that the current value sits 41% above the top of its own
+eight-run range.
+
+### What would settle it
+
+Run the suite on the commit *before* the boxing changes (`61a4998c1`) and on
+`HEAD`, alternating, three runs each, and compare medians rather than single
+runs.  Alternating matters: consecutive runs share whatever the host was doing,
+which is exactly the confound above.  Until that is done this stays open and
+unattributed - and specifically must **not** be quoted as evidence that the
+boxing changes cost anything, because it is not.

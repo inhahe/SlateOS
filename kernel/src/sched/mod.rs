@@ -1255,12 +1255,19 @@ pub fn init() {
     let num_cpus = 1;
     PER_CPU_SCHED.init(num_cpus);
 
-    let mut state = SCHED.lock();
-
     // Create the idle task.  It represents the current execution
     // context (kmain), using the bootloader-provided stack.
-    let idle = Task::new_idle();
-    state.tasks.insert(0, Box::new(idle));
+    //
+    // Built and boxed *before* SCHED is taken.  `Box::new` calls the global
+    // allocator, which takes the heap lock; doing that under SCHED would
+    // establish a SCHED -> HEAP lock order that every HEAP -> SCHED path in
+    // the kernel would then have to avoid forever.  Hoisting the allocation
+    // means the order simply does not exist.  (Q24 allocation-under-spinlock
+    // sweep.)
+    let idle = Box::new(Task::new_idle());
+
+    let mut state = SCHED.lock();
+    state.tasks.insert(0, idle);
     set_current_task(0, 0); // BSP (CPU 0) starts with idle task 0.
 
     state.initialized = true;
@@ -1297,11 +1304,13 @@ pub fn init() {
 /// when the AP's only real task blocks, `schedule_inner` switches to the
 /// idle task, which safely does `yield_now(); hlt();` in a loop.
 pub fn register_ap_idle(cpu_index: usize) -> TaskId {
-    let idle = Task::new_ap_idle(cpu_index);
+    // Boxed before SCHED is taken: `Box::new` takes the heap lock, and doing
+    // that under SCHED would create a SCHED -> HEAP lock order.  See `init`.
+    let idle = Box::new(Task::new_ap_idle(cpu_index));
     let id = idle.id;
 
     let mut state = SCHED.lock();
-    state.tasks.insert(id, Box::new(idle));
+    state.tasks.insert(id, idle);
     set_current_task(cpu_index, id);
 
     serial_println!(
@@ -1550,11 +1559,19 @@ fn spawn_inner(
         let target_cpu = choose_cpu_for_task(&new_task);
         new_task.last_cpu = target_cpu;
 
+        // Boxed before SCHED is taken, not at the `insert` below: `Box::new`
+        // takes the heap lock, and taking it under SCHED would establish a
+        // SCHED -> HEAP lock order.  See `init`.  Drop semantics are unchanged
+        // — on the `NotSupported` path the box is dropped exactly where the
+        // bare `new_task` used to be, running the same `Task` destructor and
+        // freeing the same kernel stack.
+        let new_task = Box::new(new_task);
+
         let mut state = SCHED.lock();
         if !state.initialized {
             return Err(KernelError::NotSupported);
         }
-        state.tasks.insert(id, Box::new(new_task));
+        state.tasks.insert(id, new_task);
         // Only enqueue when admitting immediately.  A suspended task is left
         // out of every run queue; admit() (via wake()) enqueues it later.
         if admit {

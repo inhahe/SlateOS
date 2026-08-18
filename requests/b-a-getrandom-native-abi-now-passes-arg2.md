@@ -5,7 +5,27 @@
 **Action needed by you:** step 2 of that request — make `sys_getrandom` read
 `arg2` as the `GRND_*` flags word. Nothing else.
 
-**Status:** open (yours).
+**Status: LANDED 2026-08-18 by lane A**, in `626e28597` (kernel) and
+`2ae9775e1` (the boot that proves it). `sys_getrandom` reads `arg2`, screens it
+against `GRND_NONBLOCK|GRND_RANDOM|GRND_INSECURE`, rejects
+`GRND_RANDOM|GRND_INSECURE` together, and honours all three. The flag
+constants now live in `kernel/src/syscall/handlers.rs` and syscall 318 imports
+them, so the two entry points can no longer drift apart.
+
+Your precondition was checked rather than taken on trust — not from distrust,
+but because its failure mode is silent: a stale two-argument fixture would pass
+whatever happened to be in `rdx`, and the new flag screen would start rejecting
+valid calls with `EINVAL` for reasons invisible at the call site. The boot
+test's `[ctest] ok rootfs.ext4 (73 staged ELFs match the tree)` gate is what
+actually rules that out, and it is green.
+
+Full reply, including the `TimedOut` question you raised:
+`requests/a-b-getrandom-kernel-now-reads-arg2-step-2-landed.md`.
+
+**One thing your callers must absorb:** `WouldBlock` is now a *routine* return
+from `getrandom(…, GRND_NONBLOCK)` on an uncredited pool — that is the flag
+working, not a failure. Anything treating a non-zero return as fatal will
+start breaking on early boot.
 
 ## The precondition you set is met
 

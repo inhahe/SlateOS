@@ -35,6 +35,8 @@ use std::env;
 use std::fs;
 use std::io::{self, Write as IoWrite};
 
+use userdb::{Auth, Record, UserDb};
+
 // ============================================================================
 // Authorization result
 // ============================================================================
@@ -178,221 +180,170 @@ fn action_pattern_matches(pattern: &str, action_id: &str) -> bool {
 // User information (lightweight, shared with su/useradm)
 // ============================================================================
 
-/// Minimal user record for authorization decisions.
-#[derive(Debug, Clone)]
-struct UserInfo {
-    uid: u32,
-    username: String,
-    groups: Vec<String>,
-    admin: bool,
-    password_hash: String,
-    salt: String,
-}
-
-const USER_DB_PATH: &str = "/etc/users.yaml";
-
-/// Read all users from `/etc/users.yaml`.
-fn read_users() -> Vec<UserInfo> {
-    let content = match fs::read_to_string(USER_DB_PATH) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut users = Vec::new();
-    let mut current: Option<UserInfo> = None;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("- uid:") || trimmed.starts_with("-  uid:") {
-            if let Some(user) = current.take() {
-                users.push(user);
+/// Read the user database, treating an absent or unreadable file as empty.
+///
+/// Empty is the safe answer *here* because every caller of this function uses
+/// the result to grant something: an unreadable database authorises nobody.
+/// The same shape of fallback in `sudo` was an authentication bypass, because
+/// there the empty case meant "no policy stands in the way" rather than "no
+/// user qualifies" — which is why this comment exists rather than the idiom
+/// being copied around.
+fn read_users() -> UserDb {
+    match UserDb::load(userdb::DEFAULT_PATH) {
+        Ok(db) => db,
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!("polkit: cannot read {}: {e}", userdb::DEFAULT_PATH);
             }
-            let uid: u32 = trimmed
-                .split(':')
-                .nth(1)
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(0);
-            current = Some(UserInfo {
-                uid,
-                username: String::new(),
-                groups: Vec::new(),
-                admin: false,
-                password_hash: String::new(),
-                salt: String::new(),
-            });
-        } else if let Some(ref mut user) = current {
-            if let Some(val) = trimmed.strip_prefix("username:") {
-                user.username = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("password_hash:") {
-                user.password_hash = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("salt:") {
-                user.salt = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("groups:") {
-                let val = val.trim().trim_matches(|c: char| c == '[' || c == ']');
-                user.groups = val
-                    .split(',')
-                    .map(|g| g.trim().trim_matches('"').to_string())
-                    .filter(|g| !g.is_empty())
-                    .collect();
-            } else if let Some(val) = trimmed.strip_prefix("admin:") {
-                user.admin = val.trim() == "true";
-            }
+            UserDb::new()
         }
     }
-
-    if let Some(user) = current {
-        users.push(user);
-    }
-
-    users
 }
 
-/// Look up a user by username.
-fn find_user<'a>(users: &'a [UserInfo], name: &str) -> Option<&'a UserInfo> {
-    users.iter().find(|u| u.username == name)
+/// The record's login name, or the empty string if it has none.
+///
+/// A record with no `username` can match no rule and be authenticated as
+/// nobody; the empty string makes it fall out of the ordinary comparisons
+/// without a special case at each one.
+fn name_of(record: &Record) -> String {
+    record.username().unwrap_or_default()
 }
 
-/// Look up a user by UID.
-fn find_user_by_uid(users: &[UserInfo], uid: u32) -> Option<&UserInfo> {
-    users.iter().find(|u| u.uid == uid)
+/// The record's uid, or `u32::MAX` if it has none.
+///
+/// `u32::MAX` is the same value `get_caller_uid` reports for an unidentifiable
+/// caller, and no account is ever created with it, so a record missing its uid
+/// matches no lookup rather than colliding with root at 0.
+fn uid_of(record: &Record) -> u32 {
+    record.uid().unwrap_or(u32::MAX)
 }
 
-/// Get the current user's UID from `/proc/self/status` or the USER env var.
-fn get_caller_uid(users: &[UserInfo]) -> u32 {
+/// Get the current user's UID from `/proc/self/status` or the `USER` env var.
+fn get_caller_uid(users: &UserDb) -> u32 {
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
             if let Some(rest) = line.strip_prefix("Uid:")
                 && let Some(uid_str) = rest.split_whitespace().next()
-                    && let Ok(uid) = uid_str.parse::<u32>() {
-                        return uid;
-                    }
+                && let Ok(uid) = uid_str.parse::<u32>()
+            {
+                return uid;
+            }
         }
     }
 
     if let Ok(name) = env::var("USER")
-        && let Some(user) = find_user(users, &name) {
-            return user.uid;
-        }
+        && let Some(user) = users.find(&name)
+    {
+        return uid_of(user);
+    }
 
     u32::MAX
 }
 
 // ============================================================================
-// SHA-256 (for admin authentication -- matches su/useradm)
+// Authentication
 // ============================================================================
+//
+// There is deliberately no hash function in this crate. It used to carry a
+// SHA-256 and a `hash_password(password, salt) = sha256(salt + password)`,
+// tested against three known-answer SHA-256 vectors — which proved the SHA-256
+// was SHA-256, and proved nothing whatever about whether the *composition*
+// matched what `useradm` writes. It did not. Every password check here failed
+// against every real database. `Record::check_password` recomputes the stored
+// crypt(3) setting instead, which cannot disagree with the writer because the
+// writer uses the same call.
 
-/// SHA-256 hash returning a lowercase hex string.
-fn sha256_hex(data: &[u8]) -> String {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-    ];
-
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    ];
-
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut padded = data.to_vec();
-    padded.push(0x80);
-    while (padded.len() % 64) != 56 {
-        padded.push(0);
-    }
-    padded.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in padded.chunks(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7)
-                ^ w[i - 15].rotate_right(18)
-                ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17)
-                ^ w[i - 2].rotate_right(19)
-                ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let s0_val = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0_val.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    h.iter().map(|v| format!("{v:08x}")).collect()
-}
-
-/// Hash a password with the given salt.
-fn hash_password(password: &str, salt: &str) -> String {
-    let input = format!("{salt}{password}");
-    sha256_hex(input.as_bytes())
-}
-
-/// Verify a password against a stored hash and salt (constant-time).
-fn verify_password(password: &str, stored_hash: &str, salt: &str) -> bool {
-    let computed = hash_password(password, salt);
-    if computed.len() != stored_hash.len() {
+/// Prompt an admin user to authenticate, returning whether they did.
+///
+/// The database's list of administrators is shown before the prompt, which is
+/// how the real polkit agent behaves: the caller has to know *which* accounts
+/// can approve the action in order to go and find someone holding one.
+fn authenticate_admin(users: &UserDb) -> bool {
+    let admins: Vec<&Record> = users.records().iter().filter(|u| u.is_admin()).collect();
+    if admins.is_empty() {
+        eprintln!("polkit: no admin users configured");
         return false;
     }
-    let mut diff: u8 = 0;
-    for (a, b) in computed.bytes().zip(stored_hash.bytes()) {
-        diff |= a ^ b;
+
+    let _ = writeln!(
+        io::stderr(),
+        "Authentication required. Admin users: {}",
+        admins
+            .iter()
+            .map(|u| name_of(u))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    eprint!("Username: ");
+    let _ = io::stderr().flush();
+    let mut username = String::new();
+    if io::stdin().read_line(&mut username).is_err() {
+        eprintln!("polkit: failed to read username");
+        return false;
     }
-    diff == 0
+    let username = username.trim();
+
+    let Some(admin) = admins.iter().find(|u| name_of(u) == username) else {
+        eprintln!("polkit: user '{username}' is not an admin");
+        return false;
+    };
+
+    prompt_and_check(admin)
+}
+
+/// Prompt the calling user to authenticate themselves.
+fn authenticate_self(user: &Record) -> bool {
+    let _ = writeln!(
+        io::stderr(),
+        "Authentication required for user '{}'.",
+        name_of(user)
+    );
+
+    prompt_and_check(user)
+}
+
+/// Read a password from stdin and check it against `record`.
+///
+/// The five outcomes are spelled out rather than collapsed to a bool because
+/// three of them are administrator errors, not wrong passwords, and a user who
+/// is told "authentication failure" when the real answer is "that account was
+/// never given a password" has no way to act on it.
+fn prompt_and_check(record: &Record) -> bool {
+    if record.is_locked() {
+        eprintln!("polkit: account '{}' is locked", name_of(record));
+        return false;
+    }
+    if record.has_legacy_password() {
+        eprintln!(
+            "polkit: account '{}' has a password stored in a format that predates \
+             this system's hashing; run `useradm passwd {}` to reset it",
+            name_of(record),
+            name_of(record)
+        );
+        return false;
+    }
+
+    eprint!("Password: ");
+    let _ = io::stderr().flush();
+    let mut password = String::new();
+    if io::stdin().read_line(&mut password).is_err() {
+        eprintln!("polkit: failed to read password");
+        return false;
+    }
+    let password = password.trim();
+
+    match record.check_password(password) {
+        Auth::Accepted => true,
+        Auth::NoPassword => {
+            eprintln!(
+                "polkit: account '{}' has no password set and cannot authenticate",
+                name_of(record)
+            );
+            false
+        }
+        Auth::Rejected | Auth::Locked | Auth::Unusable => false,
+    }
 }
 
 // ============================================================================
@@ -493,9 +444,10 @@ fn parse_policy_xml(content: &str) -> Vec<Action> {
                         action.defaults_inactive = r;
                     }
                 } else if let Some(val) = extract_xml_text(trimmed, "allow_active")
-                    && let Some(r) = AuthResult::from_str(&val) {
-                        action.defaults_active = r;
-                    }
+                    && let Some(r) = AuthResult::from_str(&val)
+                {
+                    action.defaults_active = r;
+                }
             }
         } else if let Some(ref mut action) = current_action {
             if let Some(val) = extract_xml_text(trimmed, "description") {
@@ -523,9 +475,10 @@ fn extract_xml_text(line: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
     if let Some(rest) = line.strip_prefix(&open)
-        && let Some(text) = rest.strip_suffix(&close) {
-            return Some(text.to_string());
-        }
+        && let Some(text) = rest.strip_suffix(&close)
+    {
+        return Some(text.to_string());
+    }
     None
 }
 
@@ -533,9 +486,10 @@ fn extract_xml_text(line: &str, tag: &str) -> Option<String> {
 fn extract_action_id(line: &str) -> Option<String> {
     let prefix = "<action id=\"";
     if let Some(rest) = line.strip_prefix(prefix)
-        && let Some(end_quote) = rest.find('"') {
-            return Some(rest[..end_quote].to_string());
-        }
+        && let Some(end_quote) = rest.find('"')
+    {
+        return Some(rest[..end_quote].to_string());
+    }
     None
 }
 
@@ -543,16 +497,18 @@ fn extract_action_id(line: &str) -> Option<String> {
 fn extract_annotate(line: &str) -> Option<(String, String)> {
     let prefix = "<annotate key=\"";
     if let Some(rest) = line.strip_prefix(prefix)
-        && let Some(end_quote) = rest.find('"') {
-            let key = rest[..end_quote].to_string();
-            let after_key = &rest[end_quote + 1..];
-            // Skip the `>`
-            if let Some(after_gt) = after_key.strip_prefix('>')
-                && let Some(val_end) = after_gt.find("</annotate>") {
-                    let val = after_gt[..val_end].to_string();
-                    return Some((key, val));
-                }
+        && let Some(end_quote) = rest.find('"')
+    {
+        let key = rest[..end_quote].to_string();
+        let after_key = &rest[end_quote + 1..];
+        // Skip the `>`
+        if let Some(after_gt) = after_key.strip_prefix('>')
+            && let Some(val_end) = after_gt.find("</annotate>")
+        {
+            let val = after_gt[..val_end].to_string();
+            return Some((key, val));
         }
+    }
     None
 }
 
@@ -561,10 +517,7 @@ fn extract_annotate(line: &str) -> Option<(String, String)> {
 // ============================================================================
 
 /// Directories containing authorization rules.
-const RULES_DIRS: &[&str] = &[
-    "/etc/polkit-1/rules.d",
-    "/usr/share/polkit-1/rules.d",
-];
+const RULES_DIRS: &[&str] = &["/etc/polkit-1/rules.d", "/usr/share/polkit-1/rules.d"];
 
 /// Parse a rules file.
 ///
@@ -617,9 +570,10 @@ fn parse_rules_file(content: &str) -> Vec<Rule> {
                     rule.result = r;
                 }
             } else if let Some(val) = trimmed.strip_prefix("priority:")
-                && let Ok(p) = val.trim().parse::<i32>() {
-                    rule.priority = p;
-                }
+                && let Ok(p) = val.trim().parse::<i32>()
+            {
+                rule.priority = p;
+            }
         }
     }
 
@@ -658,9 +612,10 @@ impl PolicyStore {
                 let Ok(entry) = entry else { continue };
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("policy")
-                    && let Ok(content) = fs::read_to_string(&path) {
-                        actions.extend(parse_policy_xml(&content));
-                    }
+                    && let Ok(content) = fs::read_to_string(&path)
+                {
+                    actions.extend(parse_policy_xml(&content));
+                }
             }
         }
         actions
@@ -705,9 +660,20 @@ impl PolicyStore {
     fn check_authorization(
         &self,
         action_id: &str,
-        user: &UserInfo,
+        user: &Record,
         is_active_session: bool,
     ) -> AuthResult {
+        let username = name_of(user);
+        // An administrator is a member of `wheel` for the purpose of matching a
+        // group rule. The database records administrator-ness as a flag rather
+        // than as group membership, so a rule written `group: wheel` — the
+        // spelling every polkit example uses — would otherwise match nobody on
+        // a machine whose admins were made by `useradm`.
+        let mut groups = user.groups();
+        if user.is_admin() && !groups.iter().any(|g| g == "wheel") {
+            groups.push("wheel".to_string());
+        }
+
         // 1. Explicit rules.
         for rule in &self.rules {
             if !rule.matches_action(action_id) {
@@ -716,15 +682,17 @@ impl PolicyStore {
 
             // Check user constraint.
             if let Some(ref rule_user) = rule.user
-                && *rule_user != user.username {
-                    continue;
-                }
+                && *rule_user != username
+            {
+                continue;
+            }
 
             // Check group constraint.
             if let Some(ref rule_group) = rule.group
-                && !user.groups.iter().any(|g| g == rule_group) {
-                    continue;
-                }
+                && !groups.iter().any(|g| g == rule_group)
+            {
+                continue;
+            }
 
             return rule.result;
         }
@@ -741,80 +709,6 @@ impl PolicyStore {
         // 3. Unknown action: deny.
         AuthResult::No
     }
-}
-
-// ============================================================================
-// Admin authentication
-// ============================================================================
-
-/// Prompt an admin user to authenticate.
-///
-/// Tries to find any admin user in the database. In a real system this
-/// would pop up an authentication agent; here we read from stdin.
-fn authenticate_admin(users: &[UserInfo]) -> bool {
-    let admins: Vec<&UserInfo> = users.iter().filter(|u| u.admin).collect();
-    if admins.is_empty() {
-        eprintln!("polkit: no admin users configured");
-        return false;
-    }
-
-    let _ = writeln!(
-        io::stderr(),
-        "Authentication required. Admin users: {}",
-        admins
-            .iter()
-            .map(|u| u.username.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    eprint!("Username: ");
-    let _ = io::stderr().flush();
-    let mut username = String::new();
-    if io::stdin().read_line(&mut username).is_err() {
-        eprintln!("polkit: failed to read username");
-        return false;
-    }
-    let username = username.trim();
-
-    let admin = match admins.iter().find(|u| u.username == username) {
-        Some(a) => a,
-        None => {
-            eprintln!("polkit: user '{username}' is not an admin");
-            return false;
-        }
-    };
-
-    eprint!("Password: ");
-    let _ = io::stderr().flush();
-    let mut password = String::new();
-    if io::stdin().read_line(&mut password).is_err() {
-        eprintln!("polkit: failed to read password");
-        return false;
-    }
-    let password = password.trim();
-
-    verify_password(password, &admin.password_hash, &admin.salt)
-}
-
-/// Prompt the calling user to authenticate themselves.
-fn authenticate_self(user: &UserInfo) -> bool {
-    let _ = writeln!(
-        io::stderr(),
-        "Authentication required for user '{}'.",
-        user.username
-    );
-
-    eprint!("Password: ");
-    let _ = io::stderr().flush();
-    let mut password = String::new();
-    if io::stdin().read_line(&mut password).is_err() {
-        eprintln!("polkit: failed to read password");
-        return false;
-    }
-    let password = password.trim();
-
-    verify_password(password, &user.password_hash, &user.salt)
 }
 
 // ============================================================================
@@ -924,7 +818,7 @@ fn run_polkitd(args: &[String]) -> i32 {
                         continue;
                     }
                 };
-                let user = match find_user_by_uid(&users, uid) {
+                let user = match users.find_uid(uid) {
                     Some(u) => u,
                     None => {
                         println!("ERR: unknown uid {uid}");
@@ -981,9 +875,21 @@ fn print_polkitd_usage() {
 
 /// Allowlist of environment variables that pkexec preserves.
 const SAFE_ENV_VARS: &[&str] = &[
-    "TERM", "COLORTERM", "DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY",
-    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
-    "HOME", "USER", "LOGNAME", "SHELL", "PATH",
+    "TERM",
+    "COLORTERM",
+    "DISPLAY",
+    "XAUTHORITY",
+    "WAYLAND_DISPLAY",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "PATH",
 ];
 
 /// Run the pkexec personality: execute a command as another user.
@@ -1054,7 +960,7 @@ fn run_pkexec(args: &[String]) -> i32 {
 
     let users = read_users();
     let caller_uid = get_caller_uid(&users);
-    let caller = find_user_by_uid(&users, caller_uid).cloned();
+    let caller = users.find_uid(caller_uid).cloned();
 
     // Root can do anything without authentication.
     if caller_uid == 0 {
@@ -1078,9 +984,7 @@ fn run_pkexec(args: &[String]) -> i32 {
     let result = store.check_authorization(&action_id, &caller, true);
 
     match result {
-        AuthResult::Yes => {
-            exec_command(&command_args, &target_user, &users)
-        }
+        AuthResult::Yes => exec_command(&command_args, &target_user, &users),
         AuthResult::No => {
             eprintln!(
                 "pkexec: not authorized to execute '{}' as '{target_user}'",
@@ -1115,16 +1019,17 @@ fn determine_pkexec_action(command_path: &str) -> String {
     let store = PolicyStore::load();
     for action in &store.actions {
         if let Some(path) = action.annotations.get("org.slateos.policykit.exec.path")
-            && path == command_path {
-                return action.id.clone();
-            }
+            && path == command_path
+        {
+            return action.id.clone();
+        }
     }
     "org.slateos.policykit.exec".to_string()
 }
 
 /// Execute a command as the target user with a sanitized environment.
-fn exec_command(command_args: &[String], target_user: &str, users: &[UserInfo]) -> i32 {
-    let target = find_user(users, target_user);
+fn exec_command(command_args: &[String], target_user: &str, users: &UserDb) -> i32 {
+    let target = users.find(target_user);
 
     // Sanitize environment: only keep safe variables.
     let saved: Vec<(String, String)> = SAFE_ENV_VARS
@@ -1152,9 +1057,14 @@ fn exec_command(command_args: &[String], target_user: &str, users: &[UserInfo]) 
 
     // Override identity variables for the target user.
     if let Some(t) = target {
-        cmd.env("USER", &t.username);
-        cmd.env("LOGNAME", &t.username);
-        cmd.env("HOME", format!("/home/{}", t.username));
+        let name = name_of(t);
+        cmd.env("USER", &name);
+        cmd.env("LOGNAME", &name);
+        // The database's own `home_dir` rather than `/home/<name>`: an account
+        // whose home was moved — root's `/root` above all — would otherwise be
+        // handed a directory that does not exist, and every program the command
+        // runs that writes a dotfile would fail in a different place.
+        cmd.env("HOME", t.home().unwrap_or_else(|| format!("/home/{name}")));
     } else {
         cmd.env("USER", target_user);
         cmd.env("LOGNAME", target_user);
@@ -1175,9 +1085,10 @@ fn caller_uid_string() -> String {
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
             if let Some(rest) = line.strip_prefix("Uid:")
-                && let Some(uid_str) = rest.split_whitespace().next() {
-                    return uid_str.to_string();
-                }
+                && let Some(uid_str) = rest.split_whitespace().next()
+            {
+                return uid_str.to_string();
+            }
         }
     }
     env::var("UID").unwrap_or_else(|_| "0".to_string())
@@ -1413,7 +1324,7 @@ fn run_pkcheck(args: &[String]) -> i32 {
         get_caller_uid(&users)
     };
 
-    let subject = match find_user_by_uid(&users, subject_uid) {
+    let subject = match users.find_uid(subject_uid) {
         Some(u) => u.clone(),
         None => {
             eprintln!("pkcheck: unknown subject (uid {subject_uid})");
@@ -1470,9 +1381,10 @@ fn get_process_uid(pid: u32) -> Option<u32> {
     let content = fs::read_to_string(&path).ok()?;
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("Uid:")
-            && let Some(uid_str) = rest.split_whitespace().next() {
-                return uid_str.parse().ok();
-            }
+            && let Some(uid_str) = rest.split_whitespace().next()
+        {
+            return uid_str.parse().ok();
+        }
     }
     None
 }
@@ -1551,8 +1463,7 @@ fn run_main() -> i32 {
         && matches!(
             args[1].as_str(),
             "daemon" | "polkitd" | "exec" | "pkexec" | "action" | "pkaction" | "check" | "pkcheck"
-        )
-    {
+        ) {
         args[2..].to_vec()
     } else if args.len() > 1 {
         args[1..].to_vec()
@@ -1582,9 +1493,35 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 // Tests
 // ============================================================================
 
+// The workspace's defensive lints are for production code; a test that indexes
+// a fixture it just built is asserting, and an assertion that fails by
+// panicking is a test doing its job.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A user record for authorization tests.
+    ///
+    /// Built through the same setters `useradm` uses rather than from a struct
+    /// literal, so a test cannot describe a record the writer could not
+    /// produce — which is how this crate came to check `admin:` for years
+    /// while every real database spelled it `is_admin:`.
+    fn test_user(uid: u32, username: &str, groups: &[&str], admin: bool) -> Record {
+        let mut r = Record::new();
+        r.set_uid(uid);
+        r.set(userdb::field::USERNAME, username);
+        let owned: Vec<String> = groups.iter().map(|g| (*g).to_string()).collect();
+        r.set_groups(&owned);
+        r.set_admin(admin);
+        r
+    }
 
     // --- AuthResult ---
 
@@ -1620,12 +1557,18 @@ mod tests {
 
     #[test]
     fn test_auth_result_from_str_admin() {
-        assert_eq!(AuthResult::from_str("auth_admin"), Some(AuthResult::AuthAdmin));
+        assert_eq!(
+            AuthResult::from_str("auth_admin"),
+            Some(AuthResult::AuthAdmin)
+        );
     }
 
     #[test]
     fn test_auth_result_from_str_self() {
-        assert_eq!(AuthResult::from_str("auth_self"), Some(AuthResult::AuthSelf));
+        assert_eq!(
+            AuthResult::from_str("auth_self"),
+            Some(AuthResult::AuthSelf)
+        );
     }
 
     #[test]
@@ -1652,7 +1595,10 @@ mod tests {
 
     #[test]
     fn test_pattern_exact_no_match() {
-        assert!(!action_pattern_matches("org.slateos.foo", "org.slateos.bar"));
+        assert!(!action_pattern_matches(
+            "org.slateos.foo",
+            "org.slateos.bar"
+        ));
     }
 
     #[test]
@@ -1667,7 +1613,10 @@ mod tests {
 
     #[test]
     fn test_pattern_wildcard_dot_star_nested() {
-        assert!(action_pattern_matches("org.slateos.*", "org.slateos.foo.bar"));
+        assert!(action_pattern_matches(
+            "org.slateos.*",
+            "org.slateos.foo.bar"
+        ));
     }
 
     #[test]
@@ -1752,7 +1701,10 @@ mod tests {
     fn test_extract_annotate_simple() {
         assert_eq!(
             extract_annotate("<annotate key=\"org.slateos.exec.path\">/usr/bin/foo</annotate>"),
-            Some(("org.slateos.exec.path".to_string(), "/usr/bin/foo".to_string()))
+            Some((
+                "org.slateos.exec.path".to_string(),
+                "/usr/bin/foo".to_string()
+            ))
         );
     }
 
@@ -1802,7 +1754,9 @@ mod tests {
         assert_eq!(actions[0].defaults_inactive, AuthResult::AuthAdmin);
         assert_eq!(actions[0].defaults_active, AuthResult::Yes);
         assert_eq!(
-            actions[0].annotations.get("org.slateos.policykit.exec.path"),
+            actions[0]
+                .annotations
+                .get("org.slateos.policykit.exec.path"),
             Some(&"/usr/bin/test1".to_string())
         );
 
@@ -1959,14 +1913,7 @@ mod tests {
             }],
         };
 
-        let user = UserInfo {
-            uid: 1000,
-            username: "alice".to_string(),
-            groups: vec!["users".to_string()],
-            admin: false,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let user = test_user(1000, "alice", &["users"], false);
 
         assert_eq!(
             store.check_authorization("org.slateos.test", &user, true),
@@ -1987,14 +1934,7 @@ mod tests {
             }],
         };
 
-        let user = UserInfo {
-            uid: 1001,
-            username: "bob".to_string(),
-            groups: vec!["users".to_string()],
-            admin: false,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let user = test_user(1001, "bob", &["users"], false);
 
         // No matching rule, no matching action -> No.
         assert_eq!(
@@ -2016,14 +1956,7 @@ mod tests {
             }],
         };
 
-        let user = UserInfo {
-            uid: 1000,
-            username: "alice".to_string(),
-            groups: vec!["users".to_string(), "storage".to_string()],
-            admin: false,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let user = test_user(1000, "alice", &["users", "storage"], false);
 
         assert_eq!(
             store.check_authorization("org.slateos.mount.disk", &user, true),
@@ -2044,14 +1977,7 @@ mod tests {
             }],
         };
 
-        let user = UserInfo {
-            uid: 1000,
-            username: "alice".to_string(),
-            groups: vec!["users".to_string()],
-            admin: false,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let user = test_user(1000, "alice", &["users"], false);
 
         assert_eq!(
             store.check_authorization("org.slateos.mount.disk", &user, true),
@@ -2077,14 +2003,7 @@ mod tests {
             rules: vec![],
         };
 
-        let user = UserInfo {
-            uid: 1000,
-            username: "bob".to_string(),
-            groups: vec![],
-            admin: false,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let user = test_user(1000, "bob", &[], false);
 
         assert_eq!(
             store.check_authorization("org.slateos.test", &user, true),
@@ -2110,14 +2029,7 @@ mod tests {
             rules: vec![],
         };
 
-        let user = UserInfo {
-            uid: 1000,
-            username: "bob".to_string(),
-            groups: vec![],
-            admin: false,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let user = test_user(1000, "bob", &[], false);
 
         assert_eq!(
             store.check_authorization("org.slateos.test", &user, false),
@@ -2132,14 +2044,7 @@ mod tests {
             rules: vec![],
         };
 
-        let user = UserInfo {
-            uid: 1000,
-            username: "bob".to_string(),
-            groups: vec![],
-            admin: false,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let user = test_user(1000, "bob", &[], false);
 
         assert_eq!(
             store.check_authorization("org.slateos.nonexistent", &user, true),
@@ -2178,14 +2083,7 @@ mod tests {
             rules: sorted_rules,
         };
 
-        let user = UserInfo {
-            uid: 1000,
-            username: "alice".to_string(),
-            groups: vec![],
-            admin: false,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let user = test_user(1000, "alice", &[], false);
 
         assert_eq!(
             store.check_authorization("org.slateos.test", &user, true),
@@ -2206,14 +2104,7 @@ mod tests {
             }],
         };
 
-        let root = UserInfo {
-            uid: 0,
-            username: "root".to_string(),
-            groups: vec!["root".to_string()],
-            admin: true,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let root = test_user(0, "root", &["root"], true);
 
         assert_eq!(
             store.check_authorization("anything.at.all", &root, true),
@@ -2221,54 +2112,105 @@ mod tests {
         );
     }
 
-    // --- SHA-256 ---
+    // --- Passwords ---
+    //
+    // The six tests that were here checked SHA-256 against three published
+    // vectors and then checked that `hash_password` was the SHA-256 of the
+    // salt concatenated with the password. Every one of them passed. What none
+    // of them asked was whether the *writer* of `/etc/users.yaml` produced that
+    // composition — it never has — so the crate authenticated nobody while its
+    // password tests were entirely green. The replacements below go through the
+    // file, which is the only place the two sides can disagree.
 
-    #[test]
-    fn test_sha256_empty() {
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    /// A database as `useradm` writes one, including the field spellings this
+    /// crate used to get wrong.
+    fn auth_fixture() -> UserDb {
+        let mut db = UserDb::parse(
+            "users:\n  \
+             - uid: 1000\n    \
+             username: \"alice\"\n    \
+             is_admin: true\n    \
+             home_dir: \"/home/alice\"\n  \
+             - uid: 1001\n    \
+             username: \"bob\"\n    \
+             is_admin: false\n",
         );
+        let alice = db.find_mut("alice").expect("fixture has alice");
+        alice
+            .set_password_with_salt("hunter2", "0123456789abcdef")
+            .expect("the salt is one crypt can store");
+        db
     }
 
     #[test]
-    fn test_sha256_hello() {
+    fn a_password_written_by_useradm_is_accepted() {
+        let db = auth_fixture();
+        let alice = db.find("alice").expect("fixture has alice");
+        assert_eq!(alice.check_password("hunter2"), Auth::Accepted);
+        assert_eq!(alice.check_password("hunter3"), Auth::Rejected);
+    }
+
+    #[test]
+    fn a_password_survives_the_round_trip_through_the_file() {
+        // The defect this crate carried was a disagreement between writer and
+        // reader, so the test that would have caught it has to serialise.
+        let text = auth_fixture().to_text();
+        let db = UserDb::parse(&text);
+        let alice = db.find("alice").expect("re-parsed database has alice");
+        assert_eq!(alice.check_password("hunter2"), Auth::Accepted);
+    }
+
+    #[test]
+    fn the_admin_flag_is_read_from_the_spelling_useradm_writes() {
+        // `is_admin:`, which the old parser ignored in favour of `admin:` — so
+        // it saw a database with no administrators and refused every
+        // `auth_admin` action before reaching a password prompt.
+        let db = auth_fixture();
+        assert!(db.find("alice").expect("has alice").is_admin());
+        assert!(!db.find("bob").expect("has bob").is_admin());
+    }
+
+    #[test]
+    fn an_account_with_no_password_cannot_authenticate() {
+        let db = auth_fixture();
+        let bob = db.find("bob").expect("fixture has bob");
+        assert_eq!(bob.check_password(""), Auth::NoPassword);
+        assert_eq!(bob.check_password("anything"), Auth::NoPassword);
+    }
+
+    #[test]
+    fn a_locked_account_refuses_its_own_password() {
+        let mut db = auth_fixture();
+        db.find_mut("alice").expect("has alice").set_locked(true);
+        let alice = db.find("alice").expect("has alice");
+        assert_eq!(alice.check_password("hunter2"), Auth::Locked);
+    }
+
+    #[test]
+    fn an_admin_matches_a_wheel_group_rule() {
+        // The database records administrator-ness as a flag, but every polkit
+        // rule in the wild is written against the group.
+        let store = PolicyStore {
+            actions: vec![],
+            rules: vec![Rule {
+                action_pattern: "org.slateos.test".to_string(),
+                user: None,
+                group: Some("wheel".to_string()),
+                result: AuthResult::Yes,
+                priority: 0,
+            }],
+        };
+        let admin = test_user(1000, "alice", &["users"], true);
+        let plain = test_user(1001, "bob", &["users"], false);
+
         assert_eq!(
-            sha256_hex(b"hello"),
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            store.check_authorization("org.slateos.test", &admin, true),
+            AuthResult::Yes
         );
-    }
-
-    #[test]
-    fn test_sha256_abc() {
         assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            store.check_authorization("org.slateos.test", &plain, true),
+            AuthResult::No
         );
-    }
-
-    #[test]
-    fn test_hash_password() {
-        let hash = hash_password("secret", "salt123");
-        assert_eq!(hash, sha256_hex(b"salt123secret"));
-    }
-
-    #[test]
-    fn test_verify_password_correct() {
-        let hash = hash_password("secret", "salt123");
-        assert!(verify_password("secret", &hash, "salt123"));
-    }
-
-    #[test]
-    fn test_verify_password_wrong() {
-        let hash = hash_password("secret", "salt123");
-        assert!(!verify_password("wrong", &hash, "salt123"));
-    }
-
-    #[test]
-    fn test_verify_password_wrong_salt() {
-        let hash = hash_password("secret", "salt123");
-        assert!(!verify_password("secret", &hash, "other_salt"));
     }
 
     // --- Personality detection ---
@@ -2409,9 +2351,18 @@ mod tests {
         let actions = parse_policy_xml(xml);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].annotations.len(), 3);
-        assert_eq!(actions[0].annotations.get("key1"), Some(&"value1".to_string()));
-        assert_eq!(actions[0].annotations.get("key2"), Some(&"value2".to_string()));
-        assert_eq!(actions[0].annotations.get("key3"), Some(&"value3".to_string()));
+        assert_eq!(
+            actions[0].annotations.get("key1"),
+            Some(&"value1".to_string())
+        );
+        assert_eq!(
+            actions[0].annotations.get("key2"),
+            Some(&"value2".to_string())
+        );
+        assert_eq!(
+            actions[0].annotations.get("key3"),
+            Some(&"value3".to_string())
+        );
     }
 
     #[test]
@@ -2452,32 +2403,11 @@ mod tests {
             }],
         };
 
-        let alice_admin = UserInfo {
-            uid: 1000,
-            username: "alice".to_string(),
-            groups: vec!["admin".to_string()],
-            admin: true,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let alice_admin = test_user(1000, "alice", &["admin"], true);
 
-        let alice_no_admin = UserInfo {
-            uid: 1000,
-            username: "alice".to_string(),
-            groups: vec!["users".to_string()],
-            admin: false,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let alice_no_admin = test_user(1000, "alice", &["users"], false);
 
-        let bob_admin = UserInfo {
-            uid: 1001,
-            username: "bob".to_string(),
-            groups: vec!["admin".to_string()],
-            admin: true,
-            password_hash: String::new(),
-            salt: String::new(),
-        };
+        let bob_admin = test_user(1001, "bob", &["admin"], true);
 
         assert_eq!(
             store.check_authorization("org.slateos.test", &alice_admin, true),
@@ -2498,14 +2428,14 @@ mod tests {
     #[test]
     fn test_find_action_found() {
         let store = PolicyStore {
-            actions: vec![
-                Action::new("org.slateos.a"),
-                Action::new("org.slateos.b"),
-            ],
+            actions: vec![Action::new("org.slateos.a"), Action::new("org.slateos.b")],
             rules: vec![],
         };
         assert!(store.find_action("org.slateos.a").is_some());
-        assert_eq!(store.find_action("org.slateos.a").unwrap().id, "org.slateos.a");
+        assert_eq!(
+            store.find_action("org.slateos.a").unwrap().id,
+            "org.slateos.a"
+        );
     }
 
     #[test]

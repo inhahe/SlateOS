@@ -3,4 +3,11 @@ name = "polkit"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS polkit - authorization framework (polkitd/pkexec/pkaction/pkcheck)"
+
+# `userdb` for `/etc/users.yaml`. This crate's own parser read `admin:` — a
+# spelling no writer of the file has ever produced — so every real database
+# looked to it like one with no administrators at all, and its own
+# `sha256(salt + password)` matched nothing any writer stored. See
+# `design-decisions.md` §330.
 [dependencies]
+userdb = { path = "../userdb" }

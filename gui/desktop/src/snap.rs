@@ -1012,6 +1012,17 @@ impl SnapManager {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // --- zone label centring ---
@@ -1106,7 +1117,7 @@ mod tests {
             y: 200.0,
             width: 400.0,
             height: 300.0,
-            label: "".into(),
+            label: String::new(),
         };
         let (cx, cy) = z.center();
         assert!((cx - 300.0).abs() < f32::EPSILON);
@@ -1216,7 +1227,7 @@ mod tests {
     fn six_grid_zones_have_unique_ids() {
         let layout = SnapLayoutPreset::SixGrid.build(1920.0, 1080.0);
         let mut ids: Vec<ZoneId> = layout.zones.iter().map(|z| z.id).collect();
-        ids.sort();
+        ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), 6);
     }

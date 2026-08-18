@@ -533,7 +533,7 @@ impl UpdateSettingsUI {
             1 => self.render_schedule_tab(&mut cmds, x + pad, cy, inner),
             2 => self.render_history_tab(&mut cmds, x + pad, cy, inner),
             _ => {}
-        };
+        }
 
         cmds
     }
@@ -904,6 +904,17 @@ impl UpdateSettingsUI {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     #[test]
@@ -1189,7 +1200,7 @@ mod tests {
 
     #[test]
     fn format_size_units() {
-        assert!(format_size(500).contains("B"));
+        assert!(format_size(500).contains('B'));
         assert!(format_size(5_000_000).contains("MB"));
     }
 

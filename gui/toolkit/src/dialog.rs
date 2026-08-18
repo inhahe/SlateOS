@@ -22,6 +22,7 @@
 //! ```
 
 use crate::color::Color;
+use crate::date::Date;
 use crate::event::{Key, KeyEvent};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
@@ -1147,35 +1148,6 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Seconds in a day. No leap seconds — Unix time does not have them either.
-const SECS_PER_DAY: i64 = 86_400;
-
-/// The Gregorian date `days` after 1970-01-01, as `(year, month, day)` with
-/// `month` and `day` 1-based.
-///
-/// Assembled from `tzrules`' era arithmetic rather than repeating it. That
-/// crate already owns the day-to-date conversion the libc's `localtime`, the
-/// shell's `%(…)T` and the taskbar clock all render through; a file dialog
-/// that computed its own would be a fourth answer, and the one sitting next
-/// to `ls -l` on screen.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let year = tzrules::year_of_day(days);
-    // Days elapsed since 1 January of that year.
-    let mut day_of_year = days.saturating_sub(tzrules::days_from_civil(year, 1, 1));
-    for month in 1..=12u32 {
-        let month_len = i64::from(tzrules::days_in_month(month, year));
-        if day_of_year < month_len {
-            // Now an offset within the month, and months are 1-based.
-            let day = u32::try_from(day_of_year).unwrap_or(0).saturating_add(1);
-            return (year, month, day);
-        }
-        day_of_year = day_of_year.saturating_sub(month_len);
-    }
-    // Unreachable: `year_of_day` returns the year containing `days`, so the
-    // remainder is always inside one of its months.
-    (year, 12, 31)
-}
-
 /// Format a Unix timestamp as a `YYYY-MM-DD` date in `zone`, or `--` if unset.
 ///
 /// The old implementation divided the epoch day count by 365 and then by 30,
@@ -1195,8 +1167,10 @@ fn format_timestamp(epoch_secs: u64, zone: &Tz) -> String {
     // offset in force *at that instant*, so a file written in summer keeps its
     // summer date when read in winter.
     let local = utc.saturating_add(i64::from(zone.lookup(utc).gmtoff));
-    let (year, month, day) = civil_from_days(local.div_euclid(SECS_PER_DAY));
-    format!("{year:04}-{month:02}-{day:02}")
+    // `Date`'s `Display` is ISO 8601, which is what this column has always
+    // shown; the day-from-instant conversion now happens in one place for the
+    // whole toolkit rather than here.
+    Date::from_unix_utc(local).to_string()
 }
 
 /// Check whether a filename matches any of the given glob patterns.
@@ -1616,21 +1590,31 @@ mod tests {
     }
 
     #[test]
-    fn every_day_for_a_century_round_trips_through_the_calendar() {
-        // `civil_from_days` is supposed to be the exact inverse of the
-        // `days_from_civil` the libc and the shell use. "Supposed to be" is
-        // testable: walk every day from 1970 to 2079 and require the round
-        // trip. A drift of even one day anywhere in that range — a leap year
-        // missed, a month length wrong — shows up immediately, which is what
-        // the previous implementation would have failed on its 59th day.
+    fn the_modified_column_agrees_with_the_libc_for_a_century_of_days() {
+        // The column must name the same day the shell and `ls -l` would. Both
+        // render through `tzrules::days_from_civil`, so walking every day from
+        // 1970 to 2079 and requiring the dialog's rendering to invert back to
+        // the same day number is the check that they cannot drift apart. A
+        // leap year missed or a month length wrong anywhere in that range
+        // shows up immediately — the implementation before `Date` would have
+        // failed on its 59th day.
         for days in 0..40_000i64 {
-            let (year, month, day) = civil_from_days(days);
+            // Midday, not midnight: timestamp 0 is the column's "unset"
+            // sentinel, and a mid-day instant also shows the time of day is
+            // discarded rather than rounded.
+            let rendered = format_timestamp(
+                u64::try_from(days * 86_400 + 43_200).expect("non-negative"),
+                &Tz::UTC,
+            );
+            let date = Date::from_days_since_epoch(i32::try_from(days).expect("in range"));
+            assert_eq!(rendered, date.to_string(), "day {days}");
+            let (year, month, day) = date.ymd();
             assert!((1..=12).contains(&month), "month {month} at day {days}");
             assert!((1..=31).contains(&day), "day {day} at day {days}");
             assert_eq!(
-                tzrules::days_from_civil(year, month, day),
+                tzrules::days_from_civil(i64::from(year), month, day),
                 days,
-                "{year:04}-{month:02}-{day:02} did not round-trip"
+                "{rendered} did not round-trip"
             );
         }
     }

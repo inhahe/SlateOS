@@ -373,7 +373,7 @@ impl StartupSettings {
             StartupSort::Name => entries.sort_by_key(|a| a.name.to_lowercase()),
             StartupSort::Impact => entries.sort_by_key(|e| std::cmp::Reverse(e.impact)),
             StartupSort::StartupType => {
-                entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label()))
+                entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label()));
             }
             StartupSort::Status => entries.sort_by_key(|e| std::cmp::Reverse(e.enabled)),
         }
@@ -498,7 +498,7 @@ impl StartupSettingsUI {
             StartupSort::Name => entries.sort_by_key(|a| a.name.to_lowercase()),
             StartupSort::Impact => entries.sort_by_key(|e| std::cmp::Reverse(e.impact)),
             StartupSort::StartupType => {
-                entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label()))
+                entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label()));
             }
             StartupSort::Status => entries.sort_by_key(|e| std::cmp::Reverse(e.enabled)),
         }
@@ -1009,6 +1009,17 @@ impl StartupSettingsUI {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ---- StartupImpact ----

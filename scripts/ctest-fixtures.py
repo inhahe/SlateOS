@@ -100,6 +100,26 @@ against the tree. It is content-based for the same reason the fixture stamp
 is: mtime cannot survive a checkout, and — worse here — the image is written
 by QEMU on every boot, so its own mtime says only when it was last *run*.
 
+The sysroot is the fourth, and it is the one that voids all the others
+----------------------------------------------------------------------
+The three guards above all compare things to `libc.a`. None of them asks
+whether `libc.a` itself is current — and it is a gitignored artifact, so git
+will not either. A merge that changes `posix/src` therefore leaves the whole
+shelf linking a libc that is not in the tree, *silently*, and the more
+diligent you are the quieter it gets: rebuild the fixtures against the stale
+libc and every stamp agrees with every ELF again, because they now agree
+about a stale input. Three separate requests record this happening
+(`a-b-nine-ctest-fixtures-on-main-...`, `a-c-fixture-rebuild-was-correct-on-
+lane-c-and-wrong-on-main`, `a-b-ctest-fixture-elfs-and-stamps-are-stale-
+against-the-current-libc`), the third of them naming exactly this trap.
+
+So `check` now runs `sysroot_staleness()` first and fails on it, before any
+per-fixture verdict — the per-fixture `ok` lines would otherwise read as a
+clean bill of health for a set nobody can vouch for. This is the one guard
+here that uses mtime rather than a content hash, because the question is an
+ordering ("was this built after that was edited"), which a hash of a file the
+stamps do not track cannot answer.
+
 Usage
 -----
     python scripts/ctest-fixtures.py check          # verify, exit 1 on drift
@@ -327,6 +347,71 @@ def _self_cmd() -> str:
     return f"{sys.executable} scripts/ctest-fixtures.py"
 
 
+def sysroot_staleness() -> list[str]:
+    """Repo-relative sources that are newer than `libc.a`, newest question first.
+
+    Every fixture stamp records `libc.a`'s hash, so `check` can prove a fixture
+    matches the libc *on disk* — and that is the narrower question than the one
+    a reader believes it is asking. `libc.a` is a gitignored build artifact, so
+    a merge or a checkout that changes `posix/src` leaves it behind without
+    saying anything. From that moment the whole shelf links a libc that is not
+    in the tree, and every stamp agrees with every ELF, because they agree about
+    a stale input. That is a green check over a fixture set nobody can vouch
+    for, which is the one outcome this script exists to prevent.
+
+    It has now happened three times (`requests/a-b-nine-ctest-fixtures-on-main-...`,
+    `requests/a-c-fixture-rebuild-was-correct-on-lane-c-and-wrong-on-main.md`,
+    `requests/a-b-ctest-fixture-elfs-and-stamps-are-stale-against-the-current-libc.md`),
+    and on each the fixtures' own checks stayed quiet precisely because they
+    were freshly rebuilt. mtime, not a hash, because the question is "was this
+    built after that was edited" — an ordering, which a content hash of a file
+    the stamps do not track cannot answer.
+
+    Mirrors the `SYSROOT_STALE` block in `scripts/create-ext4-rootfs.sh`; keep
+    the two input lists in step.
+    """
+    if not LIBC.is_file():
+        return []
+    libc_mtime = LIBC.stat().st_mtime
+    roots = [
+        REPO / "posix" / "src",
+        REPO / "posix" / "Cargo.toml",
+        REPO / "toolchain" / "stubs",
+        REPO / "toolchain" / "build-sysroot.ps1",
+    ]
+    newer: list[str] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        candidates = [root] if root.is_file() else sorted(root.rglob("*"))
+        for path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_mtime > libc_mtime:
+                    newer.append(path.relative_to(REPO).as_posix())
+            except OSError:
+                # A file that vanished mid-scan is not evidence either way.
+                continue
+    return newer
+
+
+def _report_sysroot_staleness(newer: list[str]) -> None:
+    """Print the diagnosis for a stale `libc.a`. Caller decides the exit code."""
+    print(f"[ctest] ERROR: {LIBC.relative_to(REPO).as_posix()} is OLDER than {len(newer)} tracked source(s).")
+    for name in newer[:8]:
+        print(f"[ctest]          newer: {name}")
+    if len(newer) > 8:
+        print(f"[ctest]          ... and {len(newer) - 8} more")
+    print("[ctest]        libc.a is a gitignored build artifact, so git cannot tell you it is behind.")
+    print("[ctest]        Every fixture below links it, so a per-fixture 'ok' only means the ELF")
+    print("[ctest]        matches a libc that is not the one in the tree. Rebuild in this order:")
+    print("[ctest]          powershell -File toolchain/build-sysroot.ps1")
+    print(f"[ctest]          {_self_cmd()} build")
+    print("[ctest]          wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh   # if present")
+    print("[ctest]          wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh")
+
+
 def cmd_stamp(only: str | None) -> int:
     rc = 0
     for fixture in fixtures():
@@ -349,6 +434,14 @@ def cmd_check(only: str | None) -> int:
         print(f"[ctest] ERROR: no ctest fixtures found under {SERVICES}")
         return 1
     rc = 0
+    # Before any per-fixture verdict, because a stale libc.a invalidates all of
+    # them at once and the per-fixture lines would otherwise read as a clean
+    # bill of health. Fatal, on the same grounds as a missing stamp above:
+    # "cannot vouch for this" must not exit 0.
+    stale = sysroot_staleness()
+    if stale:
+        _report_sysroot_staleness(stale)
+        rc = 1
     for fixture in found:
         if only and only not in fixture.name:
             continue
@@ -398,6 +491,15 @@ def cmd_build(only: str | None) -> int:
     if not LIBC.is_file():
         print(f"[ctest] ERROR: missing {LIBC}; run toolchain/build-sysroot.ps1 first")
         return 1
+    # Warning, not fatal, unlike `check`. Building against a stale libc.a is a
+    # real defect, but refusing to build would leave no way to rebuild the
+    # fixtures at all on a tree whose sysroot is behind - and the rebuild is
+    # step two of the very repair this message asks for. So say it loudly and
+    # proceed; `check` is where it stops the line.
+    stale = sysroot_staleness()
+    if stale:
+        _report_sysroot_staleness(stale)
+        print("[ctest] WARNING: building anyway - the ELFs below will link the stale libc.a.")
     rc = 0
     for fixture in fixtures():
         if only and only not in fixture.name:

@@ -143,11 +143,13 @@ CANARY_RE = re.compile(
     r"(?:\s+(\d+)(?:\s+(\d+)\s+(\d+))?)?)?\s*$"
 )
 
-# `[bench] CANARY-TRACE <pos>:<cycles> ... end:<cycles> ...`
+# `[bench] CANARY-TRACE start:<cycles> <pos>:<cycles> ... end:<cycles>`
 #
 # The per-sample trace behind the `min`/`max`/`spread` summary above. `<pos>`
-# is the scored-benchmark index the sample followed; `end` marks a suite
-# endpoint, which brackets the suite rather than sitting at a position.
+# is the scored-benchmark index the sample followed; `start` and `end` mark the
+# two suite endpoints, which bracket the suite rather than sitting at a
+# position. Older logs label *both* endpoints `end:` -- see `parse_canary_trace`
+# for why that is reported verbatim rather than repaired by ordinal.
 #
 # Why parse it at all, when `spread` already summarises it: extremes say *how
 # much* the reference cost moved and can never say *where*, and the two causes
@@ -471,21 +473,40 @@ def _trace_centi(whole, frac):
     return int(whole) * 100 + int(digits)
 
 
+TRACE_EDGES = ("start", "end")
+
+
 def parse_canary_trace(text):
     """Parse the sample list off a CANARY-TRACE line into a list of dicts.
 
     Each element is `{"pos": <int> or None, "centi": <int>}`, in the order the
-    samples were taken. `pos` is None for a suite endpoint (`end:`), which is
-    not at a suite position -- None rather than a sentinel integer so that no
-    arithmetic can silently treat it as position zero, and so it survives a
-    JSON round-trip as `null`.
+    samples were taken. `pos` is None for a suite endpoint, which is not at a
+    suite position -- None rather than a sentinel integer so that no arithmetic
+    can silently treat it as position zero, and so it survives a JSON round-trip
+    as `null`.
+
+    Endpoint samples additionally carry `"edge": "start"` or `"edge": "end"`,
+    naming which side of the suite they bracket. The key is **absent** on a
+    positioned sample rather than null, matching the convention every other
+    optional field here follows.
+
+    Both endpoints were labelled `end:` before the kernel distinguished them, so
+    a trace parsed out of an old raw log can contain two samples claiming to be
+    the tail. That is why `edge` is reported verbatim and not repaired by
+    position in the list: with a failed calibration only one endpoint is
+    recorded, and it is the *end* sitting where the start would have been, so
+    ordinal cannot identify it either. Consumers must detect the duplicate and
+    decline to use it -- see `trace_edge`.
     """
     samples = []
     for pos, whole, frac in CANARY_TRACE_SAMPLE_RE.findall(text):
-        samples.append({
-            "pos": None if pos == "end" else int(pos),
+        sample = {
+            "pos": None if pos in TRACE_EDGES else int(pos),
             "centi": _trace_centi(whole, frac),
-        })
+        }
+        if pos in TRACE_EDGES:
+            sample["edge"] = pos
+        samples.append(sample)
     return samples
 
 
@@ -1213,6 +1234,239 @@ def global_drift(previous_entries, current):
     if len(ratios) < MIN_SAMPLES_FOR_DRIFT:
         return None
     return statistics.median(ratios)
+
+
+#: Fewest positioned canary samples a positional model may be built on.
+#:
+#: Three, not two. Two samples define a straight line through both, so the
+#: "correction" they yield is a ramp fitted to exactly its own two data points
+#: with no residual and no way to be wrong -- which is not a measurement of
+#: anything. Three is the smallest number at which the trace can disagree with a
+#: line, and therefore the smallest at which an excursion is distinguishable
+#: from the trend. A normal 64-benchmark suite yields eight.
+MIN_TRACE_SAMPLES = 3
+
+#: How far above its own run's baseline a stretch of the suite must sit before
+#: it is worth naming the benchmarks that ran there.
+#:
+#: Deliberately far below `CANARY_TOLERANCE_PCT`: that gate asks "is this whole
+#: run untrustworthy", which is a question about the suite. This asks "which
+#: benchmarks sat in the dear stretch", which is only ever asked about a run
+#: already under suspicion, and answering it too narrowly reproduces the
+#: original defect -- a burst confined to two benchmarks moves the *spread* a
+#: long way and moves the median hardly at all.
+POSITIONAL_NOTE_PCT = 10.0
+
+#: How many flagged benchmarks to name before summarising the rest. A whole-run
+#: disturbance can flag every benchmark in the suite, and sixty lines of
+#: near-identical factors bury the two that matter at the top.
+POSITIONAL_NOTE_LIMIT = 8
+
+#: Benchmarks between canary samples. Must match `CANARY_SAMPLE_EVERY` in
+#: `kernel/src/bench.rs` -- it is the resolution limit of every positional
+#: statement this tool makes, so it is quoted to the reader rather than left
+#: implicit.
+CANARY_SAMPLE_EVERY = 8
+
+
+def trace_edge(trace, which):
+    """Centicycles at the `which` ("start"/"end") endpoint, or None.
+
+    None when the endpoint is missing, and equally when the trace carries **two
+    or more** samples claiming that label -- because both endpoints printed
+    `end:` before the kernel gave them separate sentinels, so a duplicate means
+    the labels in this particular log cannot be trusted rather than that there
+    were two ends. Refusing is the only safe reading: picking either one would
+    anchor the suite's tail correction to a measurement possibly taken before
+    the suite began.
+    """
+    hits = [s.get("centi") for s in trace or () if s.get("edge") == which]
+    if len(hits) != 1 or not isinstance(hits[0], int) or hits[0] <= 0:
+        return None
+    return hits[0]
+
+
+def positioned_samples(trace):
+    """`[(pos, centi)]` for the mid-suite samples only, sorted by position.
+
+    Endpoints are excluded: they are not at a suite position, so they cannot
+    take part in an interpolation over positions. They are also *outside* the
+    span the model claims to describe -- the start sample measures the host
+    before a single benchmark has run.
+    """
+    return sorted(
+        (s["pos"], s["centi"])
+        for s in trace or ()
+        if isinstance(s.get("pos"), int) and isinstance(s.get("centi"), int)
+        and s["centi"] > 0
+    )
+
+
+def trace_reference(trace):
+    """The reading this run's positional model treats as "undisturbed", or None.
+
+    The **median** of the positioned samples, and the choice of estimator is
+    what makes this model complementary to `global_drift` rather than a rival to
+    it. If the host was uniformly twice as busy for the whole run, every sample
+    reads 2x, the median reads 2x, and every positional factor comes out 1.0 --
+    so this correction removes nothing and leaves the uniform factor to
+    `global_drift`, which is the estimator built for it. Only a *local*
+    excursion moves a sample away from its own run's median, and only that is
+    what gets corrected here.
+
+    A mean would defeat exactly that: the burst this instrument exists to catch
+    would drag the baseline toward itself and shrink the correction in
+    proportion to how badly it was needed.
+    """
+    samples = positioned_samples(trace)
+    if len(samples) < MIN_TRACE_SAMPLES:
+        return None
+    return statistics.median(centi for _, centi in samples)
+
+
+def interpolate_trace(trace, pos, last_pos=None):
+    """Reference cost at suite position `pos`, linearly interpolated, or None.
+
+    The canary samples once per `CANARY_SAMPLE_EVERY` benchmarks, so most
+    benchmarks have no sample of their own and must be read off the line between
+    the two that bracket them. A sample at position *p* is taken immediately
+    after benchmark *p* returns, so a benchmark that sits exactly on a sample
+    position gets that sample's own value and nothing is interpolated.
+
+    Outside the sampled span the value is **held flat** rather than
+    extrapolated, on both sides. Extrapolating a noisy reference past its last
+    support point invents data, and the invented values grow without bound
+    exactly where there is least evidence -- the tail of the suite.
+
+    `last_pos` is the highest occupied suite position, and supplying it lets the
+    tail do better than flat: the `end` endpoint sample brackets the benchmarks
+    that run after the final mid-suite sample, which on a 64-benchmark suite is
+    the last seven of them. Used only when `trace_edge` can identify it
+    unambiguously.
+
+    # The resolution limit, which is not a bug and must not be papered over
+
+    A line between two samples is the *least* this can assume, not an estimate
+    of the burst's real shape. The model cannot localise anything finer than the
+    sampling interval, so a one-benchmark spike and an eight-benchmark plateau
+    with the same peak are indistinguishable to it, and it renders both as a
+    triangle spanning the interval. Run against the real contaminated trace in
+    `build/ab-old-2.log`, whose only dear sample is position 32 at 3.2x, this
+    reports factors above 1.1 for positions 25-41 -- sixteen benchmarks, of
+    which perhaps one was actually disturbed.
+
+    That is the correct behaviour for an instrument sampling once per eight
+    benchmarks: the alternative -- attributing the excursion to position 32
+    alone -- would claim a precision the sampling rate does not support. It does
+    mean a corrected value is evidence that a benchmark *may* have been
+    disturbed, never that it was.
+    """
+    samples = positioned_samples(trace)
+    if len(samples) < MIN_TRACE_SAMPLES:
+        return None
+    end_centi = trace_edge(trace, "end")
+    if end_centi is not None and isinstance(last_pos, int) and last_pos > samples[-1][0]:
+        samples.append((last_pos, end_centi))
+    if pos <= samples[0][0]:
+        return float(samples[0][1])
+    if pos >= samples[-1][0]:
+        return float(samples[-1][1])
+    for (lo_pos, lo_centi), (hi_pos, hi_centi) in zip(samples, samples[1:]):
+        if lo_pos <= pos <= hi_pos:
+            span = hi_pos - lo_pos
+            if span <= 0:
+                return float(lo_centi)
+            return lo_centi + (hi_centi - lo_centi) * (pos - lo_pos) / span
+    # Unreachable while `samples` is sorted and `pos` lies inside its range,
+    # both of which are established above. Returning None rather than falling
+    # off the end keeps the "no answer" contract intact if that ever changes.
+    return None
+
+
+def positional_factors(canary, positions):
+    """`{name: factor}` -- how much dearer the host was where each benchmark ran.
+
+    A factor of 1.0 means the reference cost at that benchmark's position
+    matched this run's own baseline; 2.0 means the host was reading twice as
+    dear there, and dividing the benchmark's measured value by the factor is the
+    first-order correction for it.
+
+    Returns `{}` -- not a map of 1.0s -- when the model cannot be built: too few
+    samples, no baseline, or no position map. Those are all "this run cannot be
+    corrected", which a caller must be able to tell from "this run needed no
+    correction". A dict of ones would assert the second while meaning the first.
+
+    # What this assumes, and where it stops being true
+
+    That a benchmark's cost scales with the reference access cost measured
+    beside it. That is the same assumption `global_drift` already makes, applied
+    over position instead of over the whole run, and it is a *first-order*
+    correction: a benchmark that is memory-bound tracks the reference closely
+    and one that is branch-bound barely tracks it at all, so the factor is an
+    upper bound on the correction for the second kind. It is not a licence to
+    trust a corrected outlier -- it is a way to stop reporting an uncorrected
+    one as a regression.
+    """
+    trace = (canary or {}).get("trace")
+    reference = trace_reference(trace)
+    if not reference or not positions:
+        return {}
+    last_pos = max(positions.values())
+    factors = {}
+    for name, pos in positions.items():
+        at = interpolate_trace(trace, pos, last_pos)
+        if at is None:
+            continue
+        factors[name] = at / reference
+    return factors
+
+
+def report_positional_attribution(canary, positions):
+    """Name the benchmarks that ran while the reference cost was elevated.
+
+    This is the line the contamination verdict has never been able to print.
+    `CONTAMINATED: reference access cost spread 117%` states that the host moved
+    and leaves every one of the sixty-odd benchmarks equally under suspicion, so
+    the only safe response has been to discard the whole run. The trace knows
+    *where* the movement was; this says which benchmarks were there.
+
+    Prints nothing at all when the model cannot be built. That is deliberate:
+    silence here means "no positional evidence", and a reader who has just been
+    told the run is contaminated must not be handed a reassuring-looking empty
+    list of affected benchmarks as though the trace had been consulted and had
+    exonerated everyone.
+    """
+    factors = positional_factors(canary, positions)
+    if not factors:
+        return {}
+    reference = trace_reference((canary or {}).get("trace"))
+    flagged = {
+        name: factor
+        for name, factor in factors.items()
+        if (factor - 1.0) * 100 >= POSITIONAL_NOTE_PCT
+    }
+    if not flagged:
+        print(f"  Positional attribution: no stretch of the suite ran more than "
+              f"{POSITIONAL_NOTE_PCT:.0f}% above this run's own reference "
+              f"baseline ({reference / 100:.2f} cycles).")
+        return flagged
+
+    worst = sorted(flagged.items(), key=lambda kv: -kv[1])
+    print(f"  Positional attribution: {len(flagged)} benchmark(s) ran where the "
+          f"reference cost was >={POSITIONAL_NOTE_PCT:.0f}% above this run's "
+          f"baseline of {reference / 100:.2f} cycles.")
+    for name, factor in worst[:POSITIONAL_NOTE_LIMIT]:
+        print(f"    {factor:.2f}x  {name}  (suite position {positions[name]})")
+    if len(worst) > POSITIONAL_NOTE_LIMIT:
+        print(f"    ... and {len(worst) - POSITIONAL_NOTE_LIMIT} more.")
+    # Stated every time, because the number above is the most misreadable thing
+    # this tool prints: it looks like a per-benchmark measurement and is not one.
+    print("  These are the benchmarks the disturbance *could* have reached, not "
+          "ones shown to be affected: the canary samples once per "
+          f"{CANARY_SAMPLE_EVERY} benchmarks, so a spike on one of them is "
+          "attributed to its whole sampling interval. Treat a flagged "
+          "regression as unproven, not as corrected.")
+    return flagged
 
 
 #: How many recent same-host/same-profile records form the median that a single
@@ -2906,6 +3160,13 @@ def main(argv=None):
     # second `canary_verdict(canary)` call is a place where they could silently
     # stop agreeing.
     verdict = print_canary_summary(canary)
+    # Immediately under the verdict it qualifies. When the line above says
+    # CONTAMINATED it has just told the reader the run moved and left every
+    # benchmark equally suspect; this is the only thing in the tool that can
+    # narrow that down. Run on a clean verdict too -- a quiet spread with one
+    # dear stretch is exactly the case `spread` averages away.
+    report_positional_attribution(
+        canary, {n: v[6] for n, v in current_entries.items() if len(v) > 6})
 
     report_dispersion(current_entries)
 

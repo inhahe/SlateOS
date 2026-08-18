@@ -36705,3 +36705,57 @@ Three things worth keeping in mind:
 **The workaround recorded above is no longer needed** and should not be
 repeated: `touch`ing an input to defeat the check now defeats nothing, because
 the check no longer looks at timestamps when a stamp exists.
+
+---
+
+### [A] PREDICTION P21 — the positional model has never been shown to predict anything
+
+**Registered 2026-08-18, before the discriminating run exists.**
+
+`scripts/bench-history.py` now converts the canary's positional trace into a
+per-benchmark factor and prints it beside the benchmarks that ran in a disturbed
+stretch (design-decisions.md §229). Every property asserted for that model so far
+is a property of its *arithmetic*, proved by unit tests against synthetic traces.
+Not one is a property of the machine. By this file's own maxim — a detector that
+has never been shown to fire on a known stimulus is not yet a detector — the
+model is at the same stage the canary itself was at before P20 graded.
+
+The stimulus exists and is already scripted. `scripts/canary-load-test.sh N`
+starts N CPU spinners once `Booting QEMU` appears, so load lands on the
+measurement window. What it has never done is start them *late* — the load has
+always covered the whole suite, which is precisely the uniform case this model is
+designed to contribute nothing to.
+
+- **P21(a)** — load applied only to the second half of the suite will produce
+  canary factors above 1.0 confined to the second half. *Falsified if the flagged
+  positions are spread across the whole suite*, which would mean the factor
+  tracks something other than where the load was.
+- **P21(b)** — the benchmarks the model flags will be inflated relative to their
+  own historical medians, and the ones it does not flag will not. This is the
+  claim a *correction* would rest on, and it is the one most likely to fail:
+  the canary times a memory access, so a branch-bound benchmark may sit inside a
+  flagged stretch and be barely affected. *Falsified if flagged and unflagged
+  benchmarks are inflated by indistinguishable amounts.*
+- **P21(c)** — the ratio between a benchmark's inflation and its canary factor
+  will vary systematically with what the benchmark does, memory-bound ones
+  tracking closest. *Falsified if the ratio is flat across benchmark kinds*,
+  which would remove the second of the two objections in §229 to correcting
+  automatically.
+
+**What each outcome licenses.** P21(a) alone establishes attribution — the model
+can say *where*, which is all the printed line currently claims. P21(a)+(b)
+together are what would justify applying the factor to the recorded value;
+without (b) a correction is arithmetic on an unvalidated coupling. (c) decides
+whether one factor per position is enough or whether the correction would need a
+per-benchmark sensitivity, which nothing currently measures.
+
+**To run it:** `scripts/canary-load-test.sh` needs a delay argument so the
+spinners start partway through the suite rather than at `Booting QEMU`. That is
+the only missing piece; everything else — the trace, the position map, the
+factors — is in place as of this commit.
+
+**Until P21 grades**, treat the attribution line as a *hypothesis about which
+benchmarks to re-run*, not as evidence about any of them, and do not build a
+correction on it. The line's own printed caveat says the same thing, which is
+deliberate: the caveat has to survive being read by someone who never opens this
+file.

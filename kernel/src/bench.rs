@@ -1560,8 +1560,27 @@ static CANARY_SCORED: core::sync::atomic::AtomicU32 = core::sync::atomic::Atomic
 /// still counted and still folded into the extremes, so no verdict depends on
 /// the trace being complete.
 const CANARY_TRACE_MAX: usize = 24;
-/// Trace position meaning "a suite endpoint", not a mid-suite sample.
-const CANARY_POS_ENDPOINT: u32 = u32::MAX;
+/// Trace position meaning "the sample taken *after* the last benchmark".
+///
+/// The two endpoints get distinct sentinels rather than sharing one, because a
+/// reader cannot recover which is which from their order. `report_canary` folds
+/// them in as `[start, end]`, so *when both measured* the first endpoint sample
+/// is the pre-suite one -- but a failed calibration records no start, leaving a
+/// single endpoint sample that is the *end*, sitting in the slot a reader would
+/// have read as the start. Position, not ordinal, is what disambiguates them.
+///
+/// This matters beyond labelling: the end sample is the only right-hand bracket
+/// the trailing benchmarks have. Mid-suite sampling stops at the last multiple
+/// of [`CANARY_SAMPLE_EVERY`], so on a 64-benchmark suite positions 57-63 lie
+/// past every positioned sample, and a positional correction can only either
+/// hold the last sample flat across them or bracket them with the end sample.
+/// It cannot do the latter while "end" might mean "start".
+const CANARY_POS_END: u32 = u32::MAX;
+/// Trace position meaning "the sample taken *before* the first benchmark".
+///
+/// This is the calibration measurement that sets the run's budgets, reused as a
+/// canary sample. See [`CANARY_POS_END`] for why the two are not one sentinel.
+const CANARY_POS_START: u32 = u32::MAX - 1;
 static CANARY_TRACE_POS: [core::sync::atomic::AtomicU32; CANARY_TRACE_MAX] =
     [const { core::sync::atomic::AtomicU32::new(0) }; CANARY_TRACE_MAX];
 static CANARY_TRACE_VAL: [AtomicU64; CANARY_TRACE_MAX] =
@@ -2065,12 +2084,15 @@ fn report_canary(start: Option<u64>) {
     let (end, end_nop, end_store) = measure_access_cost();
     // The endpoints are samples too, so fold them in before reading extremes —
     // but only the ones that measured something.
-    for endpoint in [start, end] {
+    // Paired with their sentinels rather than relying on iteration order: a
+    // failed calibration records no start, so the *ordinal* of an endpoint
+    // sample in the trace does not identify it. See `CANARY_POS_END`.
+    for (endpoint, pos) in [(start, CANARY_POS_START), (end, CANARY_POS_END)] {
         match endpoint {
             // Endpoints are not at a suite position; they bracket the suite.
-            // They are already reported individually as `start`/`end`, so the
-            // sentinel only needs to keep them out of the positional analysis.
-            Some(measured) => canary_record(measured, CANARY_POS_ENDPOINT),
+            // The sentinels keep them out of the *interpolation* domain while
+            // still naming which side of the suite each one measures.
+            Some(measured) => canary_record(measured, pos),
             None => {
                 CANARY_INVALID.fetch_add(1, Ordering::Relaxed);
             }
@@ -2171,10 +2193,14 @@ fn report_canary(start: Option<u64>) {
             // greps it for a human to read. Before the first parser exists is
             // the one moment this change costs nothing.
             let centi = v.load(Ordering::Relaxed);
-            if pos == CANARY_POS_ENDPOINT {
-                serial_print!(" end:{}.{:02}", centi / CENTI, centi % CENTI);
-            } else {
-                serial_print!(" {}:{}.{:02}", pos, centi / CENTI, centi % CENTI);
+            match pos {
+                CANARY_POS_START => {
+                    serial_print!(" start:{}.{:02}", centi / CENTI, centi % CENTI);
+                }
+                CANARY_POS_END => {
+                    serial_print!(" end:{}.{:02}", centi / CENTI, centi % CENTI);
+                }
+                _ => serial_print!(" {}:{}.{:02}", pos, centi / CENTI, centi % CENTI),
             }
         }
         serial_println!("");

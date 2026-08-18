@@ -27,8 +27,10 @@ from a check that passes".
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import inspect
+import io
 import math
 import os
 import sys
@@ -94,6 +96,20 @@ def write(tmpdir, name, text):
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
     return path
+
+
+def capture(func, *args, **kwargs):
+    """Run `func`, returning `(stdout_text, return_value)`.
+
+    Reporting functions here are asserted on for *what they say*, not only for
+    what they return -- several of this file's regression tests exist because a
+    diagnostic returned the right verdict and printed the wrong explanation
+    beside it.
+    """
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        result = func(*args, **kwargs)
+    return buf.getvalue(), result
 
 
 def test_parse_formats(bh, tmpdir):
@@ -365,9 +381,14 @@ def test_canary_trace_parses_and_keeps_its_units(bh, tmpdir):
 
     # `end:` is not at a suite position -- it brackets the suite. None rather
     # than a sentinel integer so no arithmetic can mistake it for position 0,
-    # and so it survives a JSON round-trip as null.
-    check("an endpoint sample has no position",
-          (got or {})["trace"][-1], {"pos": None, "centi": 515})
+    # and so it survives a JSON round-trip as null. It additionally names
+    # *which* side it brackets, which the tail correction needs and which the
+    # sample's ordinal cannot supply.
+    check("an endpoint sample has no position, and says which end it is",
+          (got or {})["trace"][-1],
+          {"pos": None, "centi": 515, "edge": "end"})
+    check("a positioned sample carries no edge key at all",
+          "edge" in (got or {})["trace"][0], False)
 
     # Tenths and hundredths must be the same quantity. Padding right is what
     # makes that true; padding left (or int(frac)) silently divides by ten.
@@ -431,6 +452,161 @@ def test_canary_trace_absence_is_not_an_error(bh, tmpdir):
     check("a trace with no canary at all yields no canary",
           bh.parse_canary(write(tmpdir, "canary-orphan-trace.txt",
                                 "[bench] CANARY-TRACE 0:5.15\n")), None)
+
+
+def _trace(*pairs):
+    """Build a trace list from `(pos_or_edge, centi)` pairs."""
+    out = []
+    for pos, centi in pairs:
+        if isinstance(pos, str):
+            out.append({"pos": None, "centi": centi, "edge": pos})
+        else:
+            out.append({"pos": pos, "centi": centi})
+    return out
+
+
+def test_positional_model_separates_local_from_uniform(bh, tmpdir):
+    """The positional factor must be blind to a uniform slowdown and only that.
+
+    This is the property that makes the model complementary to `global_drift`
+    rather than a second, disagreeing estimate of the same thing. If the host
+    was uniformly dearer, `global_drift` is the right correction and this one
+    must contribute nothing; if a burst hit one stretch of the suite,
+    `global_drift` is the *wrong* correction -- it subtracts a median that the
+    burst barely moved -- and this one has to carry it.
+    """
+    flat = _trace((0, 500), (8, 500), (16, 500), (24, 500))
+    doubled = _trace((0, 1000), (8, 1000), (16, 1000), (24, 1000))
+    positions = {"a": 0, "b": 8, "c": 16, "d": 24}
+
+    check("a flat trace corrects nothing",
+          bh.positional_factors({"trace": flat}, positions),
+          {"a": 1.0, "b": 1.0, "c": 1.0, "d": 1.0})
+    check("a uniformly dear run also corrects nothing -- that is global_drift's",
+          bh.positional_factors({"trace": doubled}, positions),
+          {"a": 1.0, "b": 1.0, "c": 1.0, "d": 1.0})
+
+    # One sample 3x dear. The median is unmoved, so the burst shows up whole.
+    burst = _trace((0, 500), (8, 500), (16, 1500), (24, 500))
+    factors = bh.positional_factors({"trace": burst}, positions)
+    check("a burst is attributed to the position it landed on",
+          round(factors["c"], 3), 3.0)
+    check("and the benchmarks either side of it are untouched",
+          [factors["b"], factors["d"]], [1.0, 1.0])
+
+
+def test_positional_interpolation_and_its_refusals(bh, tmpdir):
+    """Between samples the model interpolates; outside them it declines to guess."""
+    trace = _trace((0, 400), (10, 400), (20, 800))
+
+    check("a benchmark sitting on a sample gets that sample's own value",
+          bh.interpolate_trace(trace, 10), 400.0)
+    check("one halfway between two samples gets the midpoint",
+          bh.interpolate_trace(trace, 15), 600.0)
+    check("and a quarter of the way gets a quarter of the rise",
+          bh.interpolate_trace(trace, 12), 480.0)
+
+    # Held flat outside the sampled span, not extrapolated. Extrapolation would
+    # invent its largest values exactly where there is least evidence.
+    check("before the first sample the model holds flat",
+          bh.interpolate_trace(trace, 0), 400.0)
+    check("after the last sample it holds flat too, rather than extrapolating",
+          bh.interpolate_trace(trace, 60), 800.0)
+
+    # Two samples define a line through both of themselves and can express no
+    # excursion at all, so the model refuses to be built on them.
+    check("two samples are not enough to build a positional model",
+          bh.interpolate_trace(_trace((0, 400), (10, 800)), 5), None)
+    check("...and yield no factors rather than a map of ones",
+          bh.positional_factors({"trace": _trace((0, 400), (10, 800))},
+                                {"a": 0, "b": 10}), {})
+    check("no trace at all yields no factors",
+          bh.positional_factors({}, {"a": 0}), {})
+    check("no position map yields no factors",
+          bh.positional_factors({"trace": trace}, {}), {})
+
+
+def test_positional_tail_uses_the_end_sample_only_when_it_is_identifiable(bh, tmpdir):
+    """The tail bracket is the end sample -- unless the labels cannot be trusted.
+
+    Mid-suite sampling stops at the last multiple of `CANARY_SAMPLE_EVERY`, so
+    the final few benchmarks of every suite lie past all positioned samples.
+    The `end` endpoint is their only right-hand bracket.
+
+    Both endpoints printed `end:` before the kernel gave them separate
+    sentinels, and with a failed calibration only one endpoint is recorded --
+    and it is the *end*, sitting in the slot a reader would take for the start.
+    So neither label nor ordinal identifies an endpoint in such a log, and the
+    model must fall back to holding flat rather than anchor the suite's tail to
+    a measurement that may predate the suite.
+    """
+    body = ((0, 500), (8, 500), (16, 500))
+    positions = {"a": 0, "b": 8, "c": 16, "d": 20, "e": 24}
+
+    labelled = _trace(*body, ("start", 500), ("end", 900))
+    check("the tail is bracketed by the end sample when it is named",
+          bh.interpolate_trace(labelled, 20, last_pos=24), 700.0)
+    check("and the benchmark at the very end reads the end sample itself",
+          bh.interpolate_trace(labelled, 24, last_pos=24), 900.0)
+    check("so the tail benchmarks carry a factor above 1",
+          [round(bh.positional_factors({"trace": labelled}, positions)[n], 2)
+           for n in ("c", "d", "e")], [1.0, 1.4, 1.8])
+
+    # The pre-change shape: two samples both claiming to be the end.
+    ambiguous = _trace(*body, ("end", 500), ("end", 900))
+    check("two samples claiming 'end' means the labels are untrustworthy",
+          bh.trace_edge(ambiguous, "end"), None)
+    check("...so the tail holds flat instead of guessing",
+          bh.interpolate_trace(ambiguous, 24, last_pos=24), 500.0)
+
+    # A start with no end must not be pressed into service as the tail.
+    check("a start sample is never used as the tail bracket",
+          bh.interpolate_trace(_trace(*body, ("start", 900)), 24, last_pos=24),
+          500.0)
+    check("the start sample is readable in its own right",
+          bh.trace_edge(_trace(*body, ("start", 900)), "start"), 900)
+
+    # Endpoints must stay out of the baseline: the start measures the host
+    # before a single benchmark has run, so it describes a moment the model
+    # makes no claim about.
+    check("endpoints do not enter the baseline median",
+          bh.trace_reference(_trace((0, 500), (8, 500), (16, 500),
+                                    ("start", 9000), ("end", 9000))), 500)
+
+
+def test_positional_attribution_is_silent_rather_than_reassuring(bh, tmpdir):
+    """With no model, the report says nothing -- it never prints an empty finding.
+
+    The distinction has teeth because of when this line is read. It sits
+    directly under a CONTAMINATED verdict, and a reader who has just been told
+    the run is untrustworthy is looking for something to narrow it down. An
+    empty "affected benchmarks:" list would answer that question with
+    "apparently none", which is the same class of error as the canary that
+    certified nine runs clean while measuring nothing.
+    """
+    positions = {"a": 0, "b": 8, "c": 16, "d": 24}
+    quiet = _trace((0, 500), (8, 500), (16, 500), (24, 500))
+    burst = _trace((0, 500), (8, 500), (16, 1500), (24, 500))
+
+    out, _ = capture(bh.report_positional_attribution, {"trace": burst},
+                     positions)
+    check("a burst names the benchmarks in its interval", "c" in out, True)
+    check("...with the factor that reached them", "3.00x" in out, True)
+    check("...and the resolution caveat, every time",
+          "not ones shown to be affected" in out, True)
+
+    out, _ = capture(bh.report_positional_attribution, {"trace": quiet},
+                     positions)
+    check("a quiet trace says so explicitly", "no stretch of the suite" in out,
+          True)
+
+    # No trace, no model, no output. Not "0 benchmarks affected".
+    out, ret = capture(bh.report_positional_attribution, {}, positions)
+    check("no trace prints nothing at all", out.strip(), "")
+    check("...and returns no flagged set", ret, {})
+    out, _ = capture(bh.report_positional_attribution,
+                     {"trace": _trace((0, 500), (8, 900))}, {"a": 0, "b": 8})
+    check("too few samples prints nothing either", out.strip(), "")
 
 
 def test_canary_broken_is_not_contamination(bh, tmpdir):

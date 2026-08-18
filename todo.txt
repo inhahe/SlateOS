@@ -54353,3 +54353,31 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##
 ## WHEN TO REVISIT: when commit 7 is actually written. This note exists so the
 ## author of that commit does not follow the older block's step 4 verbatim.
+
+## Bench positional drift — 2026-08-18 (lane A)
+
+DONE: the canary's positional trace is now parsed, stored, and turned into a
+per-benchmark factor.
+  - kernel/src/bench.rs: trace emits two decimals (was tenths, which could not
+    express variation the same CANARY line reported); the two endpoint samples
+    print `start:`/`end:` instead of both printing `end:`.
+  - scripts/bench-history.py: CANARY_TRACE_RE / parse_canary_trace;
+    `positions` sibling map on the record; trace_edge / positioned_samples /
+    trace_reference / interpolate_trace / positional_factors;
+    report_positional_attribution printed under the canary verdict.
+  - design-decisions.md §229 records why the factor is *printed* and not
+    *applied*.
+
+NOT DONE, and deliberately — do not treat as an oversight:
+  - No correction is applied to any recorded value. Blocked on PREDICTION P21
+    (known-issues.md), which is the experiment that would establish the factor
+    predicts a benchmark's inflation. Correcting before P21 grades would be
+    asserting its result.
+  - No positional analysis is possible on any *historical* record. All 71 carry
+    neither a trace nor a position map, and the position map cannot be
+    reconstructed: records are written with `sort_keys=True`, so `entries` was
+    alphabetised on the way to disk and the suite order is gone. The first
+    record with both is whichever `--bench` boot runs after this commit.
+  - scripts/canary-load-test.sh cannot yet start its spinners partway through
+    the suite; it starts them at `Booting QEMU`. P21(a) needs the delayed form.
+    This is the single missing piece for grading P21.

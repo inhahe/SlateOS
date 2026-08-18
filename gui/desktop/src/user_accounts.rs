@@ -108,8 +108,20 @@ impl Default for Avatar {
     }
 }
 
+/// How many colors the avatar palette holds.
+///
+/// Named separately from the array so the wrap-around in
+/// [`Avatar::palette_color`] divides by a compile-time constant; the array's
+/// type below is written in terms of it, so the two cannot disagree.
+const AVATAR_COLOR_COUNT: usize = 7;
+
+/// The same count as a `u32`, for reducing a uid. Derived from
+/// [`AVATAR_COLOR_COUNT`] rather than written out again so the two cannot
+/// disagree.
+const AVATAR_COLOR_COUNT_U32: u32 = AVATAR_COLOR_COUNT as u32;
+
 /// Predefined avatar colors.
-const AVATAR_COLORS: &[Color] = &[
+const AVATAR_COLORS: [Color; AVATAR_COLOR_COUNT] = [
     MOCHA_BLUE,
     MOCHA_GREEN,
     MOCHA_PEACH,
@@ -120,13 +132,32 @@ const AVATAR_COLORS: &[Color] = &[
 ];
 
 impl Avatar {
+    /// The palette color an initials avatar with this index shows.
+    ///
+    /// Wrapping is what lets [`Avatar::Initials`] carry an unconstrained `u8`
+    /// that no caller has to range-check — including one read straight off
+    /// disk. The wrap used to be written twice, once here in `usize` and once
+    /// in [`UserAccount::new`] in `u32`; two spellings of one rule is one too
+    /// many.
+    pub fn palette_color(color_index: u8) -> Color {
+        let slot = usize::from(color_index) % AVATAR_COLOR_COUNT;
+        // Unreachable: `slot` is a remainder modulo the array's own length.
+        // The fallback keeps the function total instead of panicking.
+        AVATAR_COLORS.get(slot).copied().unwrap_or(MOCHA_SURFACE1)
+    }
+
+    /// The palette slot a brand-new account with this uid starts on, spread
+    /// across the palette so consecutive uids do not all look alike.
+    pub fn palette_index_for_uid(uid: u32) -> u8 {
+        let slot = uid % AVATAR_COLOR_COUNT_U32;
+        // Unreachable for the same reason: a remainder modulo 7 fits in a u8.
+        u8::try_from(slot).unwrap_or(0)
+    }
+
     /// Get the background color for this avatar.
     pub fn background_color(&self) -> Color {
         match self {
-            Self::Initials { color_index } => {
-                let idx = (*color_index as usize) % AVATAR_COLORS.len();
-                AVATAR_COLORS[idx]
-            }
+            Self::Initials { color_index } => Self::palette_color(*color_index),
             Self::SystemIcon(_) => MOCHA_SURFACE1,
             Self::ImagePath(_) => MOCHA_SURFACE0,
         }
@@ -227,7 +258,7 @@ impl UserAccount {
             display_name: display_name.to_string(),
             account_type,
             avatar: Avatar::Initials {
-                color_index: (uid % AVATAR_COLORS.len() as u32) as u8,
+                color_index: Avatar::palette_index_for_uid(uid),
             },
             login_options: LoginOptions::default(),
             home_dir: format!("/home/{}", username),
@@ -331,7 +362,10 @@ impl ActivityLog {
 
     pub fn recent(&self, count: usize) -> &[ActivityLogEntry] {
         let start = self.entries.len().saturating_sub(count);
-        &self.entries[start..]
+        // `start` is clamped to the length, so the split always succeeds; the
+        // fallback is the whole log, which is what a caller asking for more
+        // than there is wants anyway.
+        self.entries.get(start..).unwrap_or(&self.entries)
     }
 
     pub fn clear(&mut self) {
@@ -342,6 +376,146 @@ impl ActivityLog {
 // ============================================================================
 // Account manager
 // ============================================================================
+
+/// Escapes one field of a `USER|` record.
+///
+/// A display name, home directory or shell path may legitimately contain a
+/// `|` or a newline. Unescaped, such a value splits its own line into more
+/// fields than the record has — and because the reader takes fields by
+/// position, every field after the offending one is then read from the wrong
+/// place. An account named `Bo|Peep` used to come back named `Bo` with a
+/// garbage shell. Backslash escapes `\`, `|`, newline and carriage return;
+/// [`unescape_split`] is its exact inverse.
+fn escape_field(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '|' => out.push_str("\\|"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Splits a record body on unescaped `|`, undoing [`escape_field`].
+///
+/// A backslash before anything else keeps that character literally, and a
+/// trailing lone backslash is kept as itself, so this is total: every input
+/// splits into some list of fields rather than failing.
+fn unescape_split(body: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut after_backslash = false;
+    for ch in body.chars() {
+        if after_backslash {
+            match ch {
+                'n' => current.push('\n'),
+                'r' => current.push('\r'),
+                other => current.push(other),
+            }
+            after_backslash = false;
+        } else {
+            match ch {
+                '\\' => after_backslash = true,
+                '|' => fields.push(core::mem::take(&mut current)),
+                other => current.push(other),
+            }
+        }
+    }
+    if after_backslash {
+        current.push('\\');
+    }
+    fields.push(current);
+    fields
+}
+
+/// The seven fields of a `USER|` line, named instead of positional.
+///
+/// This type is where the on-disk record format lives. Before it, the field
+/// order was stated twice — once by `to_config_text`'s format string and once
+/// by `from_config_text`'s `parts[0]`..`parts[6]` — with nothing tying the two
+/// together, and the reader's `parts.len() >= 7` guard sat several lines away
+/// from the seven indexes it was supposed to justify.
+struct UserRecord {
+    uid: String,
+    username: String,
+    display_name: String,
+    account_type: String,
+    avatar: String,
+    home: String,
+    shell: String,
+}
+
+impl UserRecord {
+    /// The record body for `account`: the seven fields, escaped, joined by
+    /// `|`. The array literal here and the destructuring in [`Self::parse`]
+    /// are the only two statements of the field order, and they sit together
+    /// so they cannot drift apart.
+    fn render(account: &UserAccount) -> String {
+        let fields: [String; 7] = [
+            account.uid.to_string(),
+            account.username.clone(),
+            account.display_name.clone(),
+            account.account_type.id().to_string(),
+            account.avatar.to_string_repr(),
+            account.home_dir.clone(),
+            account.shell.clone(),
+        ];
+        fields
+            .iter()
+            .map(|field| escape_field(field))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    /// Parses a record body, or `None` unless it has exactly seven fields.
+    ///
+    /// The conversion into a fixed-size array is both the length check and the
+    /// extraction, so there is no way to check one count and then index by
+    /// another. Exactly seven rather than at least seven: now that fields are
+    /// escaped, a longer line can only mean a corrupted file, and silently
+    /// keeping the first seven of it is how corruption becomes permanent.
+    fn parse(body: &str) -> Option<Self> {
+        let fields: [String; 7] = unescape_split(body).try_into().ok()?;
+        let [
+            uid,
+            username,
+            display_name,
+            account_type,
+            avatar,
+            home,
+            shell,
+        ] = fields;
+        Some(Self {
+            uid,
+            username,
+            display_name,
+            account_type,
+            avatar,
+            home,
+            shell,
+        })
+    }
+
+    /// Rebuilds an account. A field that does not parse falls back the way it
+    /// always has: uid 0, the default account type, the default avatar.
+    fn into_account(self) -> UserAccount {
+        let uid = self.uid.parse::<u32>().unwrap_or(0);
+        let mut account = UserAccount::new(
+            uid,
+            &self.username,
+            &self.display_name,
+            AccountType::from_id(&self.account_type),
+        );
+        account.avatar = Avatar::from_string_repr(&self.avatar);
+        account.home_dir = self.home;
+        account.shell = self.shell;
+        account
+    }
+}
 
 /// Manages all user accounts.
 #[derive(Clone, Debug)]
@@ -441,18 +615,23 @@ impl AccountManager {
 
     /// Delete an account by UID. Cannot delete the current user.
     pub fn delete_account(&mut self, uid: u32) -> Result<(), &'static str> {
-        let idx = self
+        // Carry the account out of the search rather than its position and
+        // three later lookups: `position` answers "which one" and then throws
+        // away the only thing that made the answer safe to index with.
+        let (idx, account) = self
             .accounts
             .iter()
-            .position(|a| a.uid == uid)
+            .enumerate()
+            .find(|(_, a)| a.uid == uid)
             .ok_or("Account not found")?;
+        let is_current = account.is_current;
+        let is_admin = account.account_type == AccountType::Administrator;
 
-        if self.accounts[idx].is_current {
+        if is_current {
             return Err("Cannot delete the current user");
         }
 
         // Must have at least one admin remaining
-        let is_admin = self.accounts[idx].account_type == AccountType::Administrator;
         if is_admin {
             let admin_count = self
                 .accounts
@@ -551,16 +730,9 @@ impl AccountManager {
         out.push_str("# User accounts\n");
 
         for acct in &self.accounts {
-            out.push_str(&format!(
-                "USER|{}|{}|{}|{}|{}|{}|{}\n",
-                acct.uid,
-                acct.username,
-                acct.display_name,
-                acct.account_type.id(),
-                acct.avatar.to_string_repr(),
-                acct.home_dir,
-                acct.shell,
-            ));
+            out.push_str("USER|");
+            out.push_str(&UserRecord::render(acct));
+            out.push('\n');
         }
 
         out
@@ -579,28 +751,14 @@ impl AccountManager {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            if let Some(rest) = line.strip_prefix("USER|") {
-                let parts: Vec<&str> = rest.split('|').collect();
-                if parts.len() >= 7 {
-                    let uid = parts[0].parse::<u32>().unwrap_or(0);
-                    let username = parts[1];
-                    let display_name = parts[2];
-                    let account_type = AccountType::from_id(parts[3]);
-                    let avatar = Avatar::from_string_repr(parts[4]);
-                    let home = parts[5];
-                    let shell = parts[6];
-
-                    let mut acct = UserAccount::new(uid, username, display_name, account_type);
-                    acct.avatar = avatar;
-                    acct.home_dir = home.to_string();
-                    acct.shell = shell.to_string();
-
-                    if uid >= mgr.next_uid {
-                        mgr.next_uid = uid.checked_add(1).unwrap_or(uid);
-                    }
-
-                    mgr.accounts.push(acct);
+            if let Some(body) = line.strip_prefix("USER|")
+                && let Some(record) = UserRecord::parse(body)
+            {
+                let acct = record.into_account();
+                if acct.uid >= mgr.next_uid {
+                    mgr.next_uid = acct.uid.checked_add(1).unwrap_or(acct.uid);
                 }
+                mgr.accounts.push(acct);
             }
         }
 
@@ -1551,6 +1709,138 @@ mod tests {
         let mgr2 = AccountManager::from_config_text(&text);
         assert_eq!(mgr2.accounts().len(), 2);
         assert!(mgr2.accounts().iter().any(|a| a.username == "alice"));
+    }
+
+    #[test]
+    fn a_field_containing_the_separator_survives_a_config_roundtrip() {
+        // The old format split on every `|`, so a display name with one in it
+        // shifted every later field along by one: the account came back with a
+        // truncated name, a defaulted type, and a garbage home and shell.
+        let mut mgr = AccountManager::new();
+        let uid = mgr
+            .create_account("bo", "Bo|Peep", AccountType::Standard, 1000)
+            .expect("a valid username is accepted");
+        if let Some(acct) = mgr.get_mut(uid) {
+            acct.home_dir = "/home/bo|peep".to_string();
+            acct.shell = "/bin/sh|sh".to_string();
+        }
+
+        let restored = AccountManager::from_config_text(&mgr.to_config_text());
+        let bo = restored
+            .get(uid)
+            .expect("the account is still there after a roundtrip");
+        assert_eq!(bo.display_name, "Bo|Peep");
+        assert_eq!(bo.home_dir, "/home/bo|peep");
+        assert_eq!(bo.shell, "/bin/sh|sh");
+        assert_eq!(bo.account_type, AccountType::Standard);
+    }
+
+    #[test]
+    fn awkward_field_values_survive_a_config_roundtrip() {
+        let mut mgr = AccountManager::new();
+        let uid = mgr
+            .create_account("odd", "placeholder", AccountType::Standard, 1000)
+            .expect("a valid username is accepted");
+        for value in [
+            "a\\b",
+            "trailing\\",
+            "\\|",
+            "line\none",
+            "carriage\rreturn",
+            "||||",
+            "",
+            "\\n literally",
+        ] {
+            if let Some(acct) = mgr.get_mut(uid) {
+                acct.display_name = value.to_string();
+                acct.home_dir = value.to_string();
+            }
+            let restored = AccountManager::from_config_text(&mgr.to_config_text());
+            let odd = restored.get(uid).expect("account survives");
+            assert_eq!(odd.display_name, value, "display name {value:?}");
+            assert_eq!(odd.home_dir, value, "home dir {value:?}");
+        }
+    }
+
+    #[test]
+    fn escaping_and_splitting_are_inverses() {
+        for value in [
+            "", "plain", "|", "\\", "\\|", "|\\", "a|b|c", "\n", "\r\n", "\\\\|\\|",
+        ] {
+            assert_eq!(
+                unescape_split(&escape_field(value)),
+                vec![value.to_string()],
+                "{value:?} must escape to a single field"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_with_the_wrong_number_of_fields_is_rejected() {
+        assert!(UserRecord::parse("1|a|b|c|d|e").is_none(), "six fields");
+        assert!(
+            UserRecord::parse("1|a|b|c|d|e|f|g").is_none(),
+            "eight fields"
+        );
+        assert!(UserRecord::parse("1|a|b|c|d|e|f").is_some(), "seven fields");
+        // The eighth field above is not silently dropped, so a corrupted line
+        // is skipped rather than half-read.
+        let mgr = AccountManager::from_config_text("USER|1|a|b|c|d|e|f|g\n");
+        assert_eq!(mgr.accounts().len(), 0);
+    }
+
+    #[test]
+    fn every_avatar_index_names_a_palette_color() {
+        // The index is an unconstrained `u8` that can come straight off disk,
+        // so all 256 of them have to land somewhere.
+        let palette: Vec<Color> = (0..AVATAR_COLOR_COUNT)
+            .map(|i| {
+                Avatar::palette_color(u8::try_from(i).expect("the palette is far shorter than 256"))
+            })
+            .collect();
+        for index in 0..=255u8 {
+            let color = Avatar::Initials { color_index: index }.background_color();
+            assert!(
+                palette.contains(&color),
+                "index {index} produced a color outside the palette"
+            );
+            assert_eq!(
+                color,
+                Avatar::palette_color(index),
+                "the avatar and the bare index disagree at {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_palette_wraps_rather_than_clamping() {
+        for index in 0..=255u8 {
+            let wrapped = index.wrapping_add(u8::try_from(AVATAR_COLOR_COUNT).expect("fits"));
+            // Only compare where adding the palette length did not itself wrap
+            // past 255, which would land on a different slot.
+            if wrapped > index {
+                assert_eq!(
+                    Avatar::palette_color(index),
+                    Avatar::palette_color(wrapped),
+                    "{index} and {wrapped} are the same slot"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recent_never_asks_for_more_log_than_there_is() {
+        let mut log = ActivityLog::new(100);
+        for i in 0..5u32 {
+            log.record(i, ActivityEvent::Login, u64::from(i));
+        }
+        assert_eq!(log.recent(0).len(), 0);
+        assert_eq!(log.recent(3).len(), 3);
+        assert_eq!(log.recent(5).len(), 5);
+        assert_eq!(log.recent(500).len(), 5);
+        assert_eq!(log.recent(usize::MAX).len(), 5);
+        // The newest entries, not the oldest.
+        assert_eq!(log.recent(2).first().map(|e| e.uid), Some(3));
     }
 
     // ---- LoginOptions tests ----

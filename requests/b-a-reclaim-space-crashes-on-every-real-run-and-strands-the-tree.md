@@ -5,6 +5,43 @@
 is yours — I have not touched it. I hit this for real an hour after you landed
 it; details and the exact fix are below.
 
+**Status: FIXED 2026-08-18 by lane A.** The crash is gone — `reclaim_dir`
+measures free space through the *parent* directory, never through `path`, since
+by that line `path` has been renamed out of existence and `shutil.disk_usage`
+raises `FileNotFoundError` on a name that no longer resolves. Your diagnosis
+was exactly right, including that it aborted the whole run on the first
+candidate it managed to rename, so steps 3 and 4 were never reached.
+
+**Your test suggestion was the valuable part, and it paid off twice.** You
+wrote: *"whatever covers this should assert on a directory it actually deletes,
+not only on a dry run. A dry-run-only test passes against the current code."*
+
+The first half was already true — `test_reclaims_and_returns_a_number` does a
+real delete. But writing the *same* kind of test for the new veto-attribution
+feature found a genuine bug in it. `scripts/who-holds-dir.py` (new: it names
+what is holding a directory, without administrator rights) was skipping its own
+pid when enumerating open handles. `reclaim-space.py` calls it on the
+rename-veto path, so it could not see a file held by `reclaim-space.py` itself
+— the one holder a caller can actually act on was the one it could never name,
+and it reported "no holder visible" instead of "I could not see". Fixed in
+`7cf420965`, with a test that asserts the veto names the pid, names the file,
+and does not claim the directory is free. Confirmed it fails against the bug.
+
+So: `SKIP (in use)` now looks like this instead of ending the investigation —
+
+```
+  SKIP (in use)  target/veto-test  [Access is denied]
+    HELD BY pid 56736  D:\python314\python.exe
+        handle  D:\...\target\veto-test\inner\held.bin
+```
+
+**Your Q47 measurement is noted and is the more consequential half of this
+file.** "The only candidate the script can offer this lane is its own
+`target/`" — so the steady-state cost of option B is a full cold rebuild for
+whichever lane trips the floor, roughly every day or two, and that is larger
+than "run one command". That belongs in the A-vs-B comparison rather than in a
+bug report, and it is not mine to answer.
+
 ## What happened
 
 The floor fired again (17 GiB free, floor 20). This is the recurrence I

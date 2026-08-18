@@ -34265,3 +34265,74 @@ carries a test affordance.
   `chpasswd` and `login`'s hand-rolled copies are deleted, and
   `userspace/backup`, `pkg`, `rsync`, `ssh` and `useradm` still carry
   unvectored ones.
+
+---
+
+## [B] `/etc/users.yaml` has two writers with incompatible schemas, so a password set by `useradm` is rejected by the login screen (2026-08-17)
+
+**In short:** SlateOS keeps its own user database at `/etc/users.yaml`, separate
+from the POSIX `/etc/shadow`. Seven programs read it and two of them write it —
+`init/login` (the graphical login manager) and `userspace/useradm` (the account
+management CLI) — and the two disagree about what the file looks like. Setting
+a password with `useradm passwd` produces an entry the login screen cannot
+authenticate against, and each tool silently deletes the fields the other owns
+when it rewrites the file. **This is the same bug lane C reported for
+`/etc/shadow` (fixed, `design-decisions.md` §329), one level up: same file,
+different tools, no agreement, and no test that compares them.**
+
+### The disagreements, measured against the code
+
+| | `useradm` | `init/login` |
+|---|---|---|
+| Salt field | `salt:` | `password_salt:` |
+| What is hashed | `sha256(hex_text_of_salt ‖ password)` | `sha256(raw_salt_bytes ‖ password)` |
+| Avatar | `avatar:` | `avatar_path:` |
+| Home | `home:` | `home_dir:` |
+| Admin flag | `admin:` | `is_admin:` |
+| Only in `useradm` | `groups:`, `locked:` | — |
+| Only in `init/login` | — | `auto_login:`, `last_login_timestamp:`, `login_count:` |
+
+Two independent reasons a `useradm`-set password fails at the login screen:
+`init/login` looks for `password_salt:` and finds only `salt:`, so it hashes
+with an *empty* salt; and even given the salt it would hash the decoded bytes
+where `useradm` hashed the hex text. Either alone is fatal.
+
+The field-set difference is a data-loss bug in both directions. Each writer
+emits exactly its own fields, so `useradm mod` on a database the login manager
+wrote drops `auto_login`, `last_login_timestamp` and `login_count`, and the
+login manager writing back drops `groups` and `locked` — including the group
+memberships that `sudo` and `polkit` make authorisation decisions from.
+
+`init/login/src/main.rs`: `hash_password` ~379, `authenticate` ~982,
+`serialize_users_yaml` ~514, `parse_users_yaml` ~541.
+`userspace/useradm/src/main.rs`: `hash_password` ~177, `read_users` ~86,
+`write_users` ~144.
+
+### The other five readers
+
+`su`, `sudo`, `polkit`, `chown` and `chroot` each carry their own parser of the
+same file — seven hand-written parsers of one format, which is how the two
+schemas were able to drift apart without anything failing to compile. They are
+read-only, so they cannot corrupt the file, but each silently gets `None` for
+any field named the way the *other* writer names it.
+
+### The password hash itself
+
+Both constructions are `sha256(salt ‖ password)` in one pass: no work factor,
+so an attacker with the file tries passwords as fast as they can hash, which is
+billions per second. `/etc/shadow` no longer has this problem — §329 moved it to
+SHA-512-crypt with 5000 rounds via `posix::crypt`. The native database should
+use the same implementation; there is no reason for this OS to contain two
+password-hash constructions, let alone three.
+
+### Proper fix
+
+One shared implementation of the format — record type, parser, serialiser that
+round-trips *every* field including ones the caller does not know about, and
+authentication via `posix::crypt` — used by both writers and, in time, the five
+readers. This is the §329 fix applied to the second password store.
+
+**Not blocked on the open architectural question** (`open-questions.md`, whether
+`/etc/users.yaml` or `/etc/shadow` is the system's one account database):
+whichever wins, the tools that write a file today must agree about it today, and
+one parser is easier to delete later than seven.

@@ -33710,6 +33710,98 @@ Verified: `cargo build` clean with zero warnings, `split-frames.py --check`
 23/23 (two new cases - a `const` read three paragraphs later, and a diverging
 tail), and a full boot test.
 
+### Progress - 2026-08-18: the floor is now the standard library
+
+Eight more `kshell` dispatchers, seven more self-tests, and one function that
+was never an `opt-level = 0` artifact at all.  The census below is the whole
+point of this section: **the kernel has essentially stopped being the tallest
+thing on its own stack.**
+
+| Function | before | after (peak) | how |
+|---|---:|---:|---|
+| `audio_mixer::mix_output` | 13 168 | off the top-22 | moved to a static |
+| `self_test_remap_ioprio_futex2` | 13 712 | **6 000** | `--flat`, 9 cases |
+| `sched::backend::self_test` | 13 680 | **6 160** | `--flat`, 8 cases |
+| `mm::alloc_trace::self_test` | 13 520 | **~4 550** | `--flat`, 8 cases |
+| `mm::tlb_gather::self_test` | 13 168 | **4 416** | block, 5 cases |
+| `fs::fat::self_test` | 11 952 | **3 168** | `--flat`, 24 cases |
+| `fs::progmgr::self_test` | 11 264 | **6 608** | `--flat`, 5 cases |
+| `kshell::cmd_progmgr` | 11 280 | **2 240** | `--arms`, 23 cases |
+| `kshell::cmd_netsettings` | 11 240 | **2 944** | `--arms`, 21 cases |
+| `kshell::cmd_schedtune` | 11 088 | **4 224** | `--arms`, 17 cases |
+| `kshell::cmd_capsettings` | 10 976 | off the top-25 | `--arms`, 22 cases |
+| `kshell::cmd_filepicker` | 10 672 | off the top-25 | `--arms`, 19 cases |
+| `kshell::cmd_tasksched` | 10 656 | **2 224** | `--arms`, 19 cases |
+| `kshell::cmd_fsearch` | 10 656 | **2 864** | `--arms`, 7 cases |
+| `kshell::cmd_useracct` | 10 432 | **2 496** | `--arms`, 23 cases |
+
+Prologues claiming >= 4 KiB: 470 -> 459.
+
+**Stop when you reach 13 088.**  The raw ranking now reads:
+
+| bytes | symbol |
+|---:|---|
+| 13 344 | `kshell::cmd_oci::case` (the `"run" \| "create"` arm) |
+| **13 088** | **`alloc::collections::btree::node::Handle::insert_recursing`** |
+| 12 448 | `net::ssh::init` |
+| 12 432 | `fs::vfs::self_test` |
+| 12 416 | `fs::xz::lzma2_decode` |
+| 12 288 | `fs::handle::self_test` |
+| 11 920 | `self_test_eventfd_futex_pkey` |
+| **11 648** | **`alloc::...::BalancingContext::bulk_steal_left`** |
+| **11 616** | **`alloc::...::BalancingContext::bulk_steal_right`** |
+
+Three of the top nine frames are `alloc`'s B-tree monomorphisations.  They are
+not ours to split, they are on the stack whenever any `BTreeMap` insert
+rebalances, and no amount of work on kernel functions moves them.  **This is a
+floor.**  Driving a kernel function from 12 KiB to 4 KiB below it buys headroom
+on that function's own path - which is worth having, see the reversal below -
+but it no longer moves the kernel's peak.  Only `cmd_oci::case` still does.
+
+**A prediction that was wrong, recorded because the reasoning was reasonable.**
+All eight dispatchers in the table above already sat *below* the 13 088 floor,
+so by the peak argument alone the split could not help and was pure churn - the
+same reasoning that correctly reverted four earlier splits.  I expected to
+revert the batch.  The measurement said 4-5x, not the 1-6% those reverts were
+made of.  The lesson is not "always split": it is that *below the floor* and
+*not worth doing* are different claims, and only the first follows from the
+floor.  Measure, then decide.
+
+**`audio_mixer::mix_output` was a different animal entirely** and is worth
+separating from everything else here.  Its 13 168 bytes were not `opt-level=0`
+slop - they were `[i32; 2048]` plus `[u8; 4096]`, two real buffers that do not
+shrink under `-O`.  Splitting could never have touched it.  It is now a
+lock-guarded static, which also supplied the mutual exclusion the function had
+always assumed and never had (two CPUs would each have summed a private
+accumulator and then both written the same output slice).  **When a frame
+resists splitting, check whether it is actually data before assuming the tool
+is at fault** - `audio_notify.rs:133`'s `[0u8; 8192]`, still open, is the same
+shape.
+
+**Two transformer defects fixed**, both of the same kind as the earlier three -
+the tool silently emitting code that could not compile:
+
+- `--arms` never checked that a fixture the arms read was actually threaded in.
+  Every dispatcher binds `parts` in its preamble and reads it in nearly every
+  arm, so omitting `--param` did not fail here and there; it made the file
+  uncompilable.  Eight dispatchers split in one batch surfaced as 320 errors
+  258 seconds later, with the real cause - a missing argument to the script -
+  nowhere in the output.  It now refuses up front and names the local.
+- The leading *fixture* paragraph, skipped by `--flat` and correctly left in
+  the outer frame, was not added to the set of outer locals, so every cluster
+  below it was judged as though it had never existed.  36 `E0434`s.
+
+`split-frames.py --check` is now 26/26.
+
+**What is left.**  `cmd_oci::case` (13 344) is the only frame above the floor
+that is ours.  It is 1 178 lines of sequential container-configuration build-up
+with ~126 genuinely-live locals, so it is a restructuring job, not a splitting
+one.  Below it, `fs::vfs::self_test` (12 432) and `fs::handle::self_test`
+(12 288) are refused by the transformer for a good reason - each contains a
+bare `return` that `case()?` would silently change the meaning of - and need
+hand splitting.  `net::ssh::init` (12 448) and `fs::procfs::generate` (11 072)
+have no case structure at all.
+
 ---
 
 ## A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT (lane A, 2026-08-18) - **not a bug; methodology, recorded so it stops being rediscovered**

@@ -33394,6 +33394,188 @@ container configuration, where the locals genuinely do all stay live - so it is
 in the same class as `eventlog::self_test`, and shrinking it means restructuring
 what it computes, not moving braces.
 
+### Progress - 2026-08-18: the flat bodies, via `--flat`, and one comment that lied
+
+The note above called the flat shape "*inventing* the case boundaries, which is
+a decision about what the test's units are".  That was wrong for the same
+reason the `--arms` note was wrong: the boundaries are already there.  The
+author of `eventlog::self_test` separated the cases with a blank line and a
+`// Test 7: ...` header - they simply are not separated with *braces*, which is
+all the brace-walker could see.  `--flat` reads the blank lines, so it recovers
+the author's own units rather than imposing any.
+
+| Function | before | after (peak) | outer | cases |
+|---|---:|---:|---:|---:|
+| `proc::linux_fd::self_test` | 28 224 | **18 928** | 8 256 | 2 |
+| `eventlog::self_test` | 26 720 | **17 872** | 4 848 | 11 |
+| `net::httpd::self_test` | 11 152 | **8 352** | 128 | 16 |
+| `self_test_sysv_ipc_mqueue` | (top-40) | **7 232** | 64 | 6 |
+| `self_test_bpf_perf_keyring` | (top-40) | **6 000** | 224 | 24 |
+
+(The httpd row read **3 248** when this section was first written, and that was
+wrong - see the `--peak` defect in the next section. Its cases were themselves
+split, and `--peak` was pairing only one level of nesting. Corrected here to
+the figure the fixed tool reports; the "before" column was never affected,
+because none of these functions had nested cases before being split.)
+
+`linux_fd::self_test` is the one the earlier note recorded as a *regression*
+(28 224 -> 28 240 by `--peak`, from a one-case split).  It is now 18 928, and
+the tool refuses a one-case split outright rather than reporting the flattering
+per-symbol number: with a single case the peak stays `outer + case`, which is
+what it already was, so two cases is the arithmetic minimum at which `max` can
+beat `sum`.
+
+Three analysis defects had to be fixed before any of this worked, each hiding
+the next, and all three are the same mistake - **judging a name without judging
+its position**:
+
+- `container()` refused to descend into a lone bare block unless it held two
+  brace-*cases*.  `self_test_sysv_ipc_mqueue` wraps its whole 1 874-line body
+  in one such block containing no block at all, so `--flat` saw one statement
+  where there are nine paragraphs.
+- Every paragraph after the first appeared to read the previous one's `a`,
+  because `let a = SyscallArgs { .. };` *mentions* `a` and the use-test could
+  not tell a declaration from a use.  That line opens all 96 cases of that
+  function.
+- `if let Some(ev) = q.first() { ev.namespace_str() }` mentions `ev` twice, and
+  the second is the binding the first made.  This welded nine independent
+  paragraphs of `eventlog::self_test` into two clusters.
+
+The rule that resolves all three: a mention is a read of an outer name when it
+stands *before* the point a `let` in that statement brings the name into scope
+- which is the end of the **initialiser**, not the end of the pattern.  That is
+the same rule that makes the right-hand `a` of `let a = a + 1;` the outer one,
+and it falls out for free.
+
+Paragraphs whose locals genuinely cross into each other are **coalesced**
+rather than skipped: a crossing local does not mean unsplittable, it means the
+blank line is in the wrong place (`let sops_ptr = ..` declared in one
+paragraph, dereferenced in the next).  The merge is bounded so it cannot
+swallow the whole body - a local declared at the top and used at the bottom
+links the first group to the last, and merging there would produce one case
+whose peak is `outer + case`, i.e. the no-op again.  Such a paragraph is left
+in the outer frame, which is where a body-scope local belongs.
+
+**And one that was not a self-test at all.**  `scfilter::init` - 21 872 bytes,
+the largest frame in the kernel once the tests were split - was twenty lines
+long and carried a comment explaining that it used no stack:
+
+> `EMPTY` is a `const`, so the all-empty table lives in read-only static
+> memory; `Box::new` copies it straight to the heap without first constructing
+> a ~19 KiB temporary on the kernel stack.
+
+Being a `const` is what *guarantees* that temporary.  A `const` has no address
+and is inlined at each use site; `Box::new` takes its argument by value; so at
+`opt-level = 0` the ~19 KiB `FilterTable` is built in `init`'s frame and then
+memcpy'd to the heap.  `EMPTY` is now a `static` - one fixed address - and the
+table is copied from it straight into an uninitialised box.  `init` is now
+under 480 bytes, and no longer ranks in the top five frames of its own module.
+
+This is worth generalising: **a comment asserting a performance property is not
+evidence of it.**  This one was specific, plausible, and exactly backwards, and
+it survived because nobody measured the function it described.  The same shape
+was found in `scfilter::check`'s doc comment earlier (see the "History" section
+there, where a `~5 ns` estimate was typeset as a measurement).
+
+**Where this leaves the census.**  The kernel's largest single frame is now
+`kernel_main` at 19 776, where before today's work it was
+`proc::linux_fd::self_test` at 28 224 - and before this whole thread,
+`self_test_prctl_dispatch` at 32 160.  The remaining top entries are
+`test_per_cpu_work_stealing` (19 504), `PerCpuScheduler::new_const` (18 752)
+and `cmd_oci`'s run arm (18 304), none of which the tool can take:
+
+- `cmd_oci`'s run arm was re-examined with `--flat` after the tool was taught
+  to handle unit-returning functions (`--at LINE` picks it out of the 78
+  functions now named `case` in `kshell.rs`).  It has **two** paragraphs and
+  both cross: it is 126 locals of option parsing in one `while` loop, and the
+  locals really are all live.  This is a restructuring job, not a splitting
+  one, exactly as the previous note concluded.
+- `test_per_cpu_work_stealing` has one paragraph; a one-case split is a no-op.
+- `PerCpuScheduler::new_const` is a `const fn` building a large fixed array,
+  with no case structure of any kind.
+
+Verified end to end: `cargo build` clean, `cargo clippy --message-format short`
+exit 0, `split-frames.py --check` 21/21, and two full boot tests - one for the
+five self-test splits, one for `scfilter::init` - both PASSED with every gate
+green.
+
+### Progress - 2026-08-18: `kernel_main`, 19 776 -> 10 976
+
+`kernel_main` was the largest frame left, and it is the one frame that is
+certainly live under every init routine and every self-test it calls - so
+whatever it claims is subtracted from the headroom of everything below it, for
+the whole of boot. It is 5 600 lines and 477 paragraphs, none of them nested,
+which is precisely the shape `--flat` exists for.
+
+Pointing the tool at it turned up **four more defects**, three of them the same
+mistake as the three before: judging a name without judging where it stands.
+
+- **A path qualifier is not a local read.** The body opens with
+  `if let Some(ref fb) = boot_info.framebuffer`, binding an `fb` that dies two
+  lines later - and then calls `fb::init()` and, 5 000 lines further down,
+  `fb::self_test()`. Counting those as reads of the local kept its binding
+  live across 395 of the 477 paragraphs and coalesced them into a single
+  17 KiB case: 6 cases, peak 19 776 -> 18 720, a 5% "split". Three shapes are
+  spelled exactly like a local and can never be one - `x.name` (a field),
+  `name::init` (a qualifier), `core::name` (a segment) - and excluding them is
+  not a heuristic trading safety for yield, which matters because
+  *under*-approximating reads is the one direction that can produce a wrong
+  boundary rather than a missed one. With the rule in place: 36 cases, peak
+  **10 976** (outer 7 264 + deepest case 3 712). The field half of this rule
+  already existed, in a different function, used for a different purpose.
+- **An item is not a local.** A `const`, `static`, `fn` or `use` written in a
+  body is scoped to its *block*, and a nested `fn` may freely name one from an
+  enclosing block. So moving an item into a case is not the `E0434` that
+  guards locals - nothing about the paragraph looks wrong at all - it is an
+  `E0425` in some *other* case entirely. `kernel_main` declares
+  `static INIT_ELF: &[u8] = include_bytes!(..)` in one paragraph and writes it
+  to the filesystem five paragraphs later; the first attempt produced six such
+  errors across three cases. Items are also two-sided, unlike locals: a `fn`
+  is callable above its own declaration, so the forward-growing walk cannot
+  express the constraint and items are welded first.
+- **A diverging body's last paragraph is in tail position.** In a `-> !`
+  function the final statement must itself diverge, and
+  `{ fn case() {..} case(); }` evaluates to `()`. That is
+  `error[E0308]: expected !, found ()`, and it costs exactly one case to avoid:
+  the paragraph is folded into the tail, whose reads keep alive the locals it
+  needs.
+
+The fourth was in the *measuring* tool, and is the worst of them:
+
+- **`--peak` paired one level of `fn case` and stopped.** A case big enough to
+  be worth splitting again nests, and `net::httpd::self_test` is exactly that.
+  The report said its peak was 3 248 - outer 128 plus a 3 120 case - when that
+  case calls a nested case claiming a further 5 104. Its true peak is 8 352,
+  and the table above has been corrected. A shallow peak is worse than no peak,
+  because it is the number a split is *judged* by: it flatters every split that
+  needed a second pass, which is every split that mattered. `--peak` also never
+  listed `kernel_main` at all, because an `#[unsafe(no_mangle)]` parent sits in
+  the symbol table under its plain name while its cases stay under the mangled
+  path, so the prefix match found no parent. The one function the report was
+  built to watch was the one function it silently omitted.
+
+That last one belongs beside the `scfilter` comment above, as the same failure
+in a different register: **a tool that answers a question you did not ask is
+indistinguishable from one that answers the one you did.** The `scfilter`
+comment claimed a property nobody measured; `--peak` measured a property nobody
+checked the definition of. Both read as evidence.
+
+**Where this leaves the census.** The kernel's largest frame is now
+`test_per_cpu_work_stealing` at 19 504, with `PerCpuScheduler::new_const`
+(18 752), `cmd_oci`'s run arm (18 512 by peak) and `proc::linux_fd::self_test`
+(18 928 by peak) behind it. Before this whole thread it was
+`self_test_prctl_dispatch` at 32 160. The three the tool cannot take are
+unchanged and are all restructuring jobs rather than splitting ones:
+
+- `cmd_oci`'s run arm: two paragraphs, both crossing - 126 locals of option
+  parsing in one `while` loop, all genuinely live.
+- `test_per_cpu_work_stealing`: one paragraph; a one-case split is a no-op.
+- `PerCpuScheduler::new_const`: a `const fn` building a large fixed array.
+
+Verified: `cargo build` clean with zero warnings, `split-frames.py --check`
+23/23 (two new cases - a `const` read three paragraphs later, and a diverging
+tail), and a full boot test.
+
 ---
 
 ## A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT (lane A, 2026-08-18) - **not a bug; methodology, recorded so it stops being rediscovered**

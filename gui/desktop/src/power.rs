@@ -1578,6 +1578,11 @@ mod tests {
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects
     )]
+    // Two screen savers built from the same seed run the same arithmetic in the
+    // same order, so their star fields agree bit for bit. Exactness is the
+    // assertion here, not an accident of it — an approximate comparison would
+    // pass even if the generator had gone non-deterministic.
+    #![allow(clippy::float_cmp)]
 
     use super::*;
 

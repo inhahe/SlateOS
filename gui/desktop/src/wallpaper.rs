@@ -23,6 +23,7 @@
 
 use guitk::color::Color;
 use guitk::render::RenderCommand;
+use guitk::rng::{RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 
 use std::fmt;
@@ -396,30 +397,16 @@ impl SlideshowState {
 
     /// Generate a deterministic shuffle order from a seed value.
     ///
-    /// Uses a simple Fisher-Yates style permutation with a linear
-    /// congruential generator for reproducibility without pulling in
-    /// a full RNG crate.
+    /// Seeded rather than random so that the same slideshow replays the same
+    /// way — a wallpaper rotation the user liked is one they can get back by
+    /// noting the seed. The permutation is Fisher-Yates from
+    /// [`guitk::rng`], which replaced the linear congruential generator that
+    /// used to be written out here; that one reduced its draw into a range
+    /// with a remainder, so the early positions of a long list came up
+    /// slightly more often than the late ones.
     pub fn shuffle_with_seed(&mut self, seed: u64) {
-        let n = self.paths.len();
-        self.order = (0..n).collect();
-
-        if n <= 1 {
-            return;
-        }
-
-        // Simple LCG: state = (a * state + c) mod m.
-        let mut rng_state = seed.wrapping_add(1);
-        for i in (1..n).rev() {
-            rng_state = rng_state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            // `i + 1` is at most `n`, but the checked form makes the divisor's
-            // non-zeroness a fact of this line rather than of the loop bound.
-            let j = ((rng_state >> 33) as usize)
-                .checked_rem(i.saturating_add(1))
-                .unwrap_or(0);
-            self.order.swap(i, j);
-        }
+        self.order = (0..self.paths.len()).collect();
+        SeededRng::new(seed).shuffle(&mut self.order);
 
         // The permutation is the same length, so the position stays in range;
         // re-establish it anyway rather than reasoning about it.
@@ -1490,6 +1477,67 @@ mod tests {
                 .collect();
             seen.sort_unstable();
             assert_eq!(seen, (0..paths.len()).collect::<Vec<_>>(), "seed {seed}");
+        }
+    }
+
+    /// Walk a shuffled slideshow once and report the order it showed.
+    fn shown_order(paths: &[String], seed: u64) -> Vec<usize> {
+        let mut state = SlideshowState::new(paths.to_vec());
+        state.shuffle_with_seed(seed);
+        (0..paths.len())
+            .map(|_| {
+                let idx = state.effective_index().expect("order is non-empty");
+                state.advance();
+                idx
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_same_seed_replays_the_same_show() {
+        // This is the whole point of seeding rather than drawing from the
+        // system generator: a rotation the user liked is one they can get
+        // back. If the shuffle ever picked up ambient state — a clock, an
+        // address, a global counter — this is the test that would notice.
+        let paths: Vec<String> = (0..20).map(|i| format!("{i}.png")).collect();
+        for seed in [0, 1, 42, u64::MAX] {
+            assert_eq!(
+                shown_order(&paths, seed),
+                shown_order(&paths, seed),
+                "seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_image_is_stuck_at_the_front_of_the_shuffle() {
+        // The generator this shuffle used to carry reduced its draw into
+        // range with a plain remainder, which favours the low indices: over
+        // many seeds the early images came up first noticeably more often
+        // than the late ones. A fair shuffle of ten images puts each one
+        // first about a tenth of the time; the bounds below are wide enough
+        // that only a real skew trips them, and the seeds are fixed so the
+        // test cannot flake.
+        const IMAGES: usize = 10;
+        const SEEDS: u64 = 2000;
+        let paths: Vec<String> = (0..IMAGES).map(|i| format!("{i}.png")).collect();
+
+        let mut firsts = [0u32; IMAGES];
+        for seed in 0..SEEDS {
+            let mut state = SlideshowState::new(paths.clone());
+            state.shuffle_with_seed(seed);
+            let first = state.effective_index().expect("order is non-empty");
+            firsts[first] += 1;
+        }
+
+        let expected = SEEDS as f64 / IMAGES as f64;
+        for (image, &count) in firsts.iter().enumerate() {
+            let ratio = f64::from(count) / expected;
+            assert!(
+                (0.75..1.25).contains(&ratio),
+                "image {image} led {count} of {SEEDS} shows (expected about {expected}); \
+                 the shuffle is skewed"
+            );
         }
     }
 

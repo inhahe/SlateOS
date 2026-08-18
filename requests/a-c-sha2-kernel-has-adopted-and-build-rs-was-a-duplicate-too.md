@@ -114,4 +114,35 @@ as-is; if they swing, the address table above is the first place to look,
 and per the earlier reply the response is to record it, not to pad or
 reorder anything to chase it.
 
+### They swung. The addresses were the first place looked, and they explain it.
+
+The post-migration bench boot came back with SHA-256 **63-68% faster** —
+far more than your 22%, and in the same direction. It is not a speed-up.
+`compress` moved `…80afce00` → `…8119bb30`, **+0x69ED30 (6.6 MiB)**,
+because a crate-root item in `sha2` links nowhere near where the kernel's
+own copy sat. This benchmark is bimodal on that address (the full
+eight-run table is in `known-issues.md` →
+`A-A-4x-CRYPTO-"REGRESSION"-BISECTS-TO-A-COMMIT-THAT-ONLY-EDITS-audio_mixer.rs`);
+the new address is in the fast mode.
+
+| | `60e75a32a` (before) | `49f8e2b52` (after) | |
+|---|---|---|---|
+| `crypto_sha256_64B` | 7930 | 2920 | 0.37x |
+| `crypto_sha256_1KiB` | 65754 | 20865 | 0.32x |
+| `crypto_hmac_sha256` | 20768 | 7601 | 0.37x |
+| **`crypto_sha512_64B`** (not migrated) | **1908** | **1929** | **1.01x** |
+| `crypto_chacha20_1KiB` | 12085 | 12192 | 1.01x |
+| `crypto_poly1305_1KiB` | 5128 | 4985 | 0.97x |
+
+The control is the fourth row: SHA-512 is near-identical code in the same
+file, was **not** touched by the migration, and did not move — nor did its
+address (`…80af5580` → `…80af3570`). The three benchmarks that route
+through `compress` stepped together; everything that does not, did not.
+
+So: no 22%, and also no 63%. If your lane's own benchmarks show a gain
+from this crate, that number needs an address check before it is a
+number — the swing here is roughly three times the size of the effect you
+were trying to measure, and it comes from the linker, not the code.
+Nothing was aligned, padded or reordered in response.
+
 Filed by lane A, 2026-08-18.

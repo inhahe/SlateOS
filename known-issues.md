@@ -36192,6 +36192,70 @@ bisect because the history recorded *what* the numbers were and nothing about
 vs. softmmu TLB) is unknown and needs QEMU source we do not have checked out.
 It is recorded as unknown rather than guessed because the guess would be
 untestable here — and knowing the answer would not change either action above.
+
+### The apparatus was used in anger, and it worked (2026-08-18, `49f8e2b52`)
+
+**In short:** the very next commit to touch `crypto.rs` moved SHA-256 63-68%
+*faster*, and `hot_symbols` — added above for exactly this — answered why in one
+line instead of a bisect. It is placement again, not a speed-up.
+
+`ec93008ad`/`49f8e2b52` replaced the kernel's private SHA-256 with the shared
+`sha2` crate (a re-export, so the machine code is the same implementation).
+Lane C's request predicted a 22% gain from that crate's compression function;
+the reply to it (`requests/a-c-sha2-kernel-will-adopt-but-your-22pct-does-not-carry.md`)
+predicted **no gain**, and committed to checking the addresses before the code if
+the numbers moved. They moved. Here is the check.
+
+`compress` is a **crate-root** item in `sha2`, so adopting it moved the function
+from the middle of the kernel's own `.text` to a completely different part of the
+image — `…80afce00` → `…8119bb30`, **+0x69ED30 (6.6 MiB)**. That is the largest
+displacement this benchmark has ever seen, and the SHA-256 family landed back in
+its fast band:
+
+| commit | exp | sha256_64B | sha256_1KiB | **sha512_64B** | hmac_sha256 | chacha20_1KiB | poly1305_1KiB |
+|---|---|---|---|---|---|---|---|
+| `5666d38cb` | — | 2043 | 21170 | 3246 | 5542 | 12452 | 5280 |
+| `b2180939e` | tb-size control | 8087 | 67350 | 2664 | 20781 | 12068 | 5094 |
+| `b2180939e` | tb-size control (repeat) | 8083 | 67219 | 1908 | 20730 | 12056 | 5104 |
+| `780ab7be2` | tb-size=512 test arm | 8053 | 67084 | 1903 | 20695 | 12128 | 5079 |
+| `20b45a860` | `rustc_align(4096)` (confounded) | 1935 | 14971 | 1952 | 5367 | 12216 | 5209 |
+| `20b45a860` | mangling control | 1937 | 14995 | 1953 | 5406 | 12124 | 5162 |
+| `60e75a32a` | — | 7930 | 65754 | 1908 | 20768 | 12085 | 5128 |
+| **`49f8e2b52`** | **— (sha2 adopted)** | **2920** | **20865** | **1929** | **7601** | 12192 | 4985 |
+
+(`entries` — the per-iteration cycle counts, the quantity the bisect above used.)
+
+**SHA-256 is bimodal; the controls are not.** Across those eight runs
+`crypto_sha256_64B` is either ~1935-2920 or ~7930-8087, with nothing between,
+and `_1KiB` and `hmac_sha256` step in lockstep with it — all three route through
+`compress`. Meanwhile **`crypto_sha512_64B`, which was *not* migrated, sits at
+1903-1953 across every one of the same boundaries** (the 3246/2664 in the first
+two rows are the contaminated runs), and `chacha20`/`poly1305` are flat to ±3%.
+The `sha512_compress` address barely moved either (`…80af5580` → `…80af3570`).
+An unmigrated near-identical function in the same file, unmoved and unchanged, is
+as clean a control as this bench can offer.
+
+**So there is no 22%.** The crate's `compress` is not measurably faster than the
+one it replaced; the function merely landed on a better address. Had
+`hot_symbols` not been in the record, a −63% on three crypto benchmarks the same
+day a crypto crate was adopted is exactly the coincidence someone would have
+written up as a win.
+
+**One number is not claimed.** 2920 sits above the previous fast band's
+1935-2043, so it is tempting to read a residual cost. It is not read that way
+here: `crypto_sha256_64B` was flagged in this run's dispersion, and a single
+sample inside a bimodal, placement-sensitive benchmark cannot support a 1.4x
+claim in either direction. Likewise, a first pass that split all 70 records at a
+flat `<4500` cycles produced a headline "60.38x between the bands" — that figure
+is an artifact (SHA-512's own contaminated runs exceed 4500 and fall in the
+"slow" side), and it is recorded here only so nobody re-derives it and believes
+it. The defensible evidence is the eight-run table and the SHA-512 control,
+nothing wider.
+
+**Nothing was done to the kernel in response, per the rules above** — no
+alignment, no padding, no reordering. The numbers are in the history as measured,
+with the addresses beside them, which is the whole point.
+
 ## [B] FIXED — `csplit` wrote the wrong bytes into the wrong files, in four independent ways (2026-08-18)
 
 **In short:** `csplit` splits a file into pieces at places you name — a line

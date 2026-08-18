@@ -1279,6 +1279,56 @@ def _mentions(masked: str, name: str) -> bool:
     return any(m.group(0) == name for m in _value_idents(masked))
 
 
+def _unthreaded_arm_locals(
+    text: str,
+    code: bytearray,
+    starts: list[int],
+    b_open: int,
+    m_open: int,
+    cases: list[tuple[int, int]],
+    params: list[tuple[str, str, str]],
+) -> tuple[list[str], int]:
+    """Outer locals an arm body reads that no `--param` threads in.
+
+    The block and `--flat` chunkers *derive* their fixtures: they know which
+    locals cross a boundary and either refuse the split or leave the paragraph
+    alone.  `--arms` cannot, because an arm always sits below the preamble that
+    binds `parts` and always reads it -- deriving the same rule would refuse
+    every dispatcher in the kernel.  So the fixture list is supplied by hand,
+    with `--param`, and until this check existed there was nothing that noticed
+    when the hand forgot.
+
+    What that cost, concretely: eight kshell dispatchers were split in one batch
+    with the `--param` left off, and the mistake surfaced 258 seconds later as
+    320 compiler errors in a 100 000-line file, with the *real* diagnosis --
+    "you omitted an argument to this script" -- nowhere in the output.  A tool
+    that can emit uncompilable code should say so itself, immediately, and name
+    the local it is missing.
+
+    Textual, like `_used_params`, and for the same reason: it does not need to
+    be sound, because rustc is.  Its job is to turn the common, cheap mistake
+    into a one-line message instead of a build.
+
+    Returns `(names, line)` -- the missing locals and the 1-based line of the
+    first arm that reads one, so the message can point at something.
+    """
+    declared = {p[0] for p in params}
+    # The preamble is everything between the body's `{` and the `match`: exactly
+    # the region whose `let`s are in scope at every arm and inside none of them.
+    outer = _binds(_masked(text, code, starts[b_open + 1], starts[m_open])) - declared
+    if not outer:
+        return [], 0
+    missing: set[str] = set()
+    first = 0
+    for o, c in cases:
+        body = _masked(text, code, starts[o + 1], starts[c])
+        hit = {n for n in outer if _mentions(body, n)}
+        if hit and not first:
+            first = o + 1
+        missing |= hit
+    return sorted(missing), first
+
+
 def rewrite(
     text: str,
     fn_name: str,
@@ -1319,6 +1369,20 @@ def rewrite(
         )
         cases, skipped = find_arm_cases(
             lines, depth, code, starts, text, m_open, m_close, inner + 1
+        )
+        missing, where = _unthreaded_arm_locals(
+            text, code, starts, b_open, m_open, cases, params
+        )
+        assert not missing, (
+            f"`fn {fn_name}`: arm bodies read the outer local(s) "
+            + ", ".join(f"`{n}`" for n in missing)
+            + f", which no --param threads in (first at line {where}). A nested "
+            f"`fn` cannot capture its environment, so writing this out would "
+            f"produce code that fails to compile with E0434. Re-run with a "
+            f"--param for each, e.g. --param '"
+            + f"{missing[0]}:&str' -- or, when the call expression differs from "
+            f"the name (a `Vec` local handed to a `&[T]` parameter), "
+            f"--param '{missing[0]}=&{missing[0]}:&[&str]'"
         )
         noun = "arm whose body is not a block on its own lines"
     else:
@@ -1892,6 +1956,74 @@ _case(
 }
 """,
     AssertionError,
+    arms=True,
+)
+
+_case(
+    # The mistake that costs the most: `--arms` with the `--param` left off.
+    # Every kshell dispatcher binds `parts` in its preamble and reads it in
+    # nearly every arm, so omitting the fixture does not fail here and there --
+    # it makes the whole file uncompilable, four minutes later, with the actual
+    # cause ("you forgot an argument to this script") absent from the output.
+    "--arms refuses an arm that reads an outer local with no --param",
+    """fn self_test(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "a" => {
+            println!("{}", parts.get(1).copied().unwrap_or(""));
+        }
+        _ => {
+            println!("b");
+        }
+    }
+}
+""",
+    AssertionError,
+    arms=True,
+)
+
+_case(
+    # ... and accepts the same function once the fixture is declared, threading
+    # it only into the arm that names it.  `sub` is bound in the same preamble
+    # but read by neither arm -- it is the match scrutinee, which stays outside
+    # -- so it must not be demanded.
+    "--arms accepts it once the outer local is threaded",
+    """fn self_test(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "a" => {
+            println!("{}", parts.get(1).copied().unwrap_or(""));
+        }
+        _ => {
+            println!("b");
+        }
+    }
+}
+""",
+    """fn self_test(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "a" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                println!("{}", parts.get(1).copied().unwrap_or(""));
+            }
+            case(&parts);
+        }
+        _ => {
+            #[inline(never)]
+            fn case() {
+                println!("b");
+            }
+            case();
+        }
+    }
+}
+""",
+    [("parts", "&[&str]", "&parts")],
     arms=True,
 )
 

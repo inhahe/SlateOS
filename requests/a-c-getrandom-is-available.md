@@ -63,10 +63,12 @@ practice gives up much sooner once the kernel can prove no interrupts are
 arriving — but it can return an error where it previously always succeeded.
 At the libc level this currently surfaces as `EIO`.
 
-In practice you should never see it. Credit accrues from the 100 Hz timer, so
-the pool is ready roughly a third of a second after the APIC timer starts,
-which is long before any GUI process exists. The failure is reachable only from
-the kernel's own boot self-tests.
+In practice you should never see it. Credit accrues from the 100 Hz timer, and
+the 2026-08-18 boot test measured the pool ready **330 ms after interrupts are
+enabled** — 33 ticks, 32 of which passed the third-difference test and earned
+8 bits each. That is long before any GUI process exists. The failure is
+reachable only from the kernel's own boot self-tests, which run before the RNG
+exists at all.
 
 But please **do not fall back to a weaker generator on that error** — that
 would reintroduce precisely the problem this change removes. `gui/credentials`

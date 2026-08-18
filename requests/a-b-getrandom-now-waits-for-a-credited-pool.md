@@ -53,9 +53,18 @@ for "the pool is not ready and you asked to wait" does not really exist —
 Linux simply blocks forever. `EIO` on a timeout is fine by me; the request here
 is only that you don't silently substitute something weaker.
 
-Under QEMU (no RDRAND, no RDSEED) the pool is credited from timer interrupts,
-which at 100 Hz takes roughly a third of a second after the APIC timer starts.
-Any `getrandom` from a real userspace process runs long after that, so in
+Under QEMU (no RDRAND, no RDSEED) the pool is credited from timer interrupts.
+Measured on the 2026-08-18 boot test: **330 ms after interrupts are enabled**,
+which is 33 ticks at 100 Hz, of which 32 passed the third-difference test and
+earned the 8 bits each that reach 256.
+
+Note *which* event that 330 ms is measured from. It is `cpu::sti()`
+(`kernel/src/main.rs:1595`, the serial line `[boot] Interrupts enabled`), not
+`apic::init` — those are ~7.9 s apart on this boot, because the whole
+pre-preemption half of boot runs between them. In absolute terms the pool
+became ready 8188 ms into boot, and the gap is boot work, not slow entropy.
+
+Everything that could reasonably be called userspace starts after `sti`, so in
 practice you should never see the timeout. It is reachable only from the kernel
 boot self-tests, which run before the RNG exists at all.
 

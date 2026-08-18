@@ -11947,6 +11947,17 @@ bits; we cap at 8, which needs ~32 qualifying ticks — about 0.32 s at 100 Hz.
 conservative about how much any single observation is worth, and 0.32 s is
 invisible next to the rest of boot.
 
+That paragraph was a prediction when it was written. The 2026-08-18 boot test
+confirmed it almost exactly: `32 of the first 33 interrupts qualified`, i.e.
+32 × 8 = 256 bits, with the third-difference test rejecting exactly one tick —
+330 ms of ticking. Worth stating precisely what that interval is measured
+*from*, because the absolute number looks alarming and is not: the pool became
+ready **8188 ms into boot**, but 7.86 s of that is the stretch between
+`hpet::init` (`main.rs:1079`) and `cpu::sti` (`main.rs:1595`), during which no
+interrupts arrive at all because none can. Entropy accrual accounts for the
+last 330 ms of it. Anything that could be called userspace starts after `sti`,
+so the gate is invisible to it.
+
 ### The bug this decision had, for about an hour: a guarantee with two doors
 
 Gating the native `SYS_GETRANDOM` (90) guaranteed nothing on its own, because

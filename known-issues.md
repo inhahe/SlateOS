@@ -35702,7 +35702,10 @@ syscall ABI change and both halves must land together.
    since 5.6).
 
 **How much it bites today:** very little. Credit accrues from the 100 Hz timer,
-so the pool is ready roughly 0.32 s after the APIC timer starts — long before
-any userspace process runs. The wait is only reachable from the kernel's own
-boot self-tests, which take the early-out and never sleep. The entry exists
+and the 2026-08-18 boot test measured the pool ready 330 ms after `cpu::sti()`
+(33 ticks, 32 of them credited) — long before any userspace process runs. Note
+the measurement is from `sti`, not from `apic::init`: those are ~7.9 s apart on
+this boot, and the gap is the pre-preemption half of boot, not slow entropy.
+The wait is only reachable from the kernel's own boot self-tests, which take
+the early-out and never sleep. The entry exists
 because the *contract* is wrong, not because anything currently hangs on it.

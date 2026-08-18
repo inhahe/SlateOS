@@ -184,6 +184,118 @@ impl ExtF80 {
         round(false, u128::from(v), 0, false)
     }
 
+    /// An `f64`, exactly. Every `double` is an `ExtF80`, so nothing is lost and
+    /// nothing is rounded.
+    #[must_use]
+    pub fn from_f64(v: f64) -> Self {
+        let bits = v.to_bits();
+        let neg = bits >> 63 != 0;
+        let biased = (bits >> 52) & 0x7ff;
+        let frac = bits & 0x000f_ffff_ffff_ffff;
+        if biased == 0x7ff {
+            // The sign is carried on a NaN as well as an infinity: widening to
+            // `long double` is an x87 `FLD`, which copies the sign bit through,
+            // and `printf` prints it. `od -t fD` on the last eight bytes of a
+            // 0..255 file says `-nan`, not `nan`.
+            return if frac == 0 {
+                ExtF80 {
+                    neg,
+                    ..ExtF80::INFINITY
+                }
+            } else {
+                ExtF80 {
+                    neg,
+                    ..ExtF80::NAN
+                }
+            };
+        }
+        if biased == 0 {
+            if frac == 0 {
+                return ExtF80 {
+                    neg,
+                    ..ExtF80::ZERO
+                };
+            }
+            // Subnormal doubles are `frac * 2^-1074`; they are all normal here,
+            // whose exponent range is far wider.
+            return round(neg, u128::from(frac), -1074, false);
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let exp2 = biased as i32 - 1075;
+        round(neg, u128::from(frac | (1 << 52)), exp2, false)
+    }
+
+    /// An `f32`, exactly.
+    #[must_use]
+    pub fn from_f32(v: f32) -> Self {
+        let bits = v.to_bits();
+        let neg = bits >> 31 != 0;
+        let biased = (bits >> 23) & 0xff;
+        let frac = bits & 0x007f_ffff;
+        if biased == 0xff {
+            // Sign-preserving for the same reason as `from_f64`.
+            return if frac == 0 {
+                ExtF80 {
+                    neg,
+                    ..ExtF80::INFINITY
+                }
+            } else {
+                ExtF80 {
+                    neg,
+                    ..ExtF80::NAN
+                }
+            };
+        }
+        if biased == 0 {
+            if frac == 0 {
+                return ExtF80 {
+                    neg,
+                    ..ExtF80::ZERO
+                };
+            }
+            return round(neg, u128::from(frac), -149, false);
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        let exp2 = biased as i32 - 150;
+        round(neg, u128::from(frac | (1 << 23)), exp2, false)
+    }
+
+    /// The `long double` held in ten bytes of x86 memory, little endian: the
+    /// 64-bit significand first — integer bit and all — then the sign and the
+    /// 15-bit biased exponent.
+    ///
+    /// # The patterns no CPU produces still have to print something
+    ///
+    /// Three of the 2^80 bit patterns are not values: an *unnormal* (a nonzero
+    /// exponent with the integer bit clear), a *pseudo-infinity* (the all-ones
+    /// exponent with a zero significand) and the *pseudo-NaNs* beside it. x87
+    /// raises `#IA` the moment one is loaded and hands back the QNaN
+    /// indefinite, so every C program that reads one through a `long double`
+    /// prints `nan` — measured against GNU `od 9.4`, which prints `nan` for the
+    /// unnormal `0x4000000000000000p+1` and for a pseudo-infinity alike.
+    ///
+    /// That is reproduced here rather than decoded "as written", because a
+    /// dumper that invents a value for an unnormal is a dumper that disagrees
+    /// with every other tool on the same bytes. The one pattern that *is*
+    /// well-defined and looks equally strange — a *pseudo-denormal*, exponent
+    /// zero with the integer bit set — is a plain number, `sig * 2^-16445`,
+    /// and falls out of the ordinary subnormal decode with no special case.
+    #[must_use]
+    pub fn from_x87_bytes(bytes: [u8; 10]) -> Self {
+        let mut sig_bytes = [0u8; 8];
+        sig_bytes.copy_from_slice(&bytes[..8]);
+        let sig = u64::from_le_bytes(sig_bytes);
+        let word = u16::from_le_bytes([bytes[8], bytes[9]]);
+        let neg = word & 0x8000 != 0;
+        let exp = word & 0x7fff;
+        if exp != 0 && sig >> 63 == 0 {
+            // Unnormal, and — when `exp` is `0x7fff` and `sig` is zero — a
+            // pseudo-infinity. Both are `#IA`.
+            return ExtF80::NAN;
+        }
+        ExtF80 { neg, exp, sig }
+    }
+
     /// The value as `m * 2^e` with `m` a 64-bit integer. Meaningless for
     /// infinities and NaNs, which callers exclude first.
     fn decompose(self) -> (u64, i32) {
@@ -1779,6 +1891,26 @@ mod tests {
         assert!((inf * p("2")).is_infinite());
         assert!((ExtF80::NAN + ExtF80::ONE).is_nan());
         assert_eq!(ExtF80::NAN.partial_cmp(ExtF80::ONE), None);
+    }
+
+    #[test]
+    fn widening_carries_the_sign_of_a_nan() {
+        // Widening to `long double` is an x87 FLD, which copies the sign bit
+        // through, and `printf` prints it. `od -t fF` on the bytes fc fd fe ff
+        // says `-nan`; dropping the sign here made it say `nan`.
+        for (bits, text) in [(0xffff_ffff_u32, "-nan"), (0x7fff_ffff, "nan")] {
+            let v = ExtF80::from_f32(f32::from_bits(bits));
+            assert!(v.is_nan());
+            assert_eq!(f("%Lg", v), text);
+        }
+        for (bits, text) in [(u64::MAX, "-nan"), (0x7fff_ffff_ffff_ffff, "nan")] {
+            let v = ExtF80::from_f64(f64::from_bits(bits));
+            assert!(v.is_nan());
+            assert_eq!(f("%Lg", v), text);
+        }
+        // Infinities were already sign-preserving; keep them that way.
+        assert_eq!(f("%Lg", ExtF80::from_f32(f32::NEG_INFINITY)), "-inf");
+        assert_eq!(f("%Lg", ExtF80::from_f64(f64::NEG_INFINITY)), "-inf");
     }
 
     #[test]

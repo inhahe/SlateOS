@@ -21545,6 +21545,210 @@ there. It is recorded in `awk`'s module docs and pinned by an `xfail_case` in
 
 ---
 
+## §334 — When the kernel answers "no" to `getrandom`, that is the answer; the hardware RNG is only for when there is no kernel
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** Our C library can get random bytes from two places: the kernel,
+or a CPU instruction (`RDRAND`) that generates them directly. Until now, if the
+kernel refused for any reason, we quietly tried the CPU instead. The kernel has
+just learned to refuse in a *meaningful* way — "I don't have enough real
+randomness yet, and you told me not to wait" — and quietly overriding that
+refusal would throw the message away. From now on the CPU is used only when
+there is no kernel at all to ask (which in practice means our test builds on
+Windows). If a kernel is present and says no, we report its answer to the
+caller unchanged.
+
+### What forced the choice
+
+Lane A's kernel now blocks `SYS_GETRANDOM` until its random pool has been
+*credited* with genuinely unpredictable input, and it honours the `GRND_*`
+flags — in particular `GRND_NONBLOCK`, which means "fail rather than make me
+wait" and which must report `EAGAIN` (the standard "try again later" error).
+Our side threw that away twice over:
+
+1. `posix/src/random.rs` reached the kernel through `syscall2`, which declares
+   only two argument registers, so the flags word never arrived. That half is
+   not a decision — it is just a fix (`syscall3`).
+2. `kernel_fill` returned a **`bool`**. Every refusal, whatever it meant,
+   became `false`, and `false` became `EIO`. `EIO` is not a value any caller
+   retries on, so `GRND_NONBLOCK` could not have worked even with the flags
+   plumbed through.
+
+Fixing (2) means carrying the kernel's errno out. Once it is carried out, the
+question below becomes unavoidable — the old code answered it by accident.
+
+### The decision
+
+`kernel_fill` now returns three states rather than two: `Filled`, `Absent`
+(there is no kernel — the host build's `-ENOSYS`), and `Refused(errno)`. Only
+`Absent` falls through to `RDRAND`/`RDSEED`.
+
+| | Old | New |
+|---|---|---|
+| Kernel filled the buffer | success | success |
+| No kernel to ask | try `RDRAND` | try `RDRAND` |
+| Kernel present, declined | **try `RDRAND`** | **report its errno** |
+
+*What changes observably:* on a machine with `RDRAND`, a `getrandom(...,
+GRND_NONBLOCK)` issued before the kernel pool is credited used to return good
+bytes; it now returns `-1`/`EAGAIN`.
+
+### Why, and the case against
+
+The case *for* the old behaviour is real and should be stated plainly:
+`RDRAND` is a genuine hardware CSPRNG, not a weak source. Substituting it
+yields bytes that are perfectly good as key material. Refusing where we could
+have succeeded is, in isolation, a worse outcome for the caller.
+
+Three things outweigh it:
+
+1. **A silent override makes the refusal unobservable, and inconsistently so.**
+   The same program with the same flags would take different branches on two
+   machines for a reason it cannot inspect — `EAGAIN` where there is no
+   `RDRAND`, success where there is. A caller using `GRND_NONBLOCK` is by
+   definition one that has a fallback plan; denying it the signal it asked for
+   is worse than either answer given consistently.
+2. **The case is nearly unreachable, so the cost is close to zero.** The kernel
+   credits its pool from `RDSEED`/`RDRAND` at init. A machine that could serve
+   the fallback is therefore a machine whose pool was credited before userspace
+   started, so "kernel declined for want of entropy" and "hardware RNG
+   available" are very nearly mutually exclusive. Under QEMU (no `RDRAND`) the
+   fallback could not have helped anyway.
+3. **It makes "the kernel is broken" visible.** A kernel that does not
+   implement syscall 90 now surfaces as an error instead of being papered over
+   by a userspace substitute — the same reasoning as §462 below, and as this
+   module's standing refusal to invent bytes from a clock.
+
+The narrow scope is what keeps this safe: `Absent` is keyed on `-ENOSYS`, which
+every `syscallN` returns on the host build, and `-38` lies in none of the bands
+`errno::native` assigns (`-1..=-9`, `-100`, `-200`, `-300`, `-400`, `-500`,
+`-600`), so no real kernel code can collide with it. A test pins that
+(`test_host_sentinel_cannot_collide_with_a_kernel_code`): if a future band ever
+grows to reach `-38`, it fires before the entropy path starts reading a live
+refusal as an absent kernel.
+
+### Three smaller calls inside this one
+
+- **`getentropy` pins its errno to `EIO`** rather than passing the kernel's
+  through. `getentropy(3)` specifies exactly two failures, `EIO` and `EFAULT`,
+  and a caller written to that spec would not recognise a third. `getrandom`,
+  which has no such constraint, passes the kernel's value through.
+- **The readiness timeout reports `EIO`, not `ETIMEDOUT`.** The kernel's
+  `TimedOut` maps to `ETIMEDOUT` in the shared table, which is honest but which
+  no portable caller tests for; `getentropy`'s specified "could not fill the
+  buffer" value is `EIO`, and both calls share this path. Every other code
+  passes through untouched, which is exactly what keeps `WOULD_BLOCK` →
+  `EAGAIN` intact. Lane A explicitly blessed `EIO` here.
+- **Both internal callers ask with flags `0`** — the blocking request. The
+  `arc4random` pool seed and the `AT_RANDOM` stack canary have no error channel
+  and no way to mark bytes provisional, so they must *wait* for a credited pool
+  rather than accept whatever is available. A canary drawn from an uncredited
+  pool would be identical in every process booted from one image, which is the
+  exact failure the kernel's readiness gate exists to prevent.
+
+---
+
+## §335 — `csplit` is rewritten around two cursors and an execution-time repeat, and reads its input whole
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** `csplit` cuts a file into pieces at places you name. Ours was
+wrong in four independent ways at once — the worst of them produced **10,003
+files** where GNU produces 8 — so it was rewritten rather than patched. Three
+design choices in the rewrite had a real alternative: how a repeated pattern is
+expanded, how the two positions in the input are tracked, and whether the input
+is streamed or read whole. This records those three.
+
+### 1. `{*}` and `{N}` are expanded when the pattern runs, not when it is parsed
+
+The old code cloned the pattern *10000 times* at parse time. That is wrong for
+two separate reasons and only one of them is the file count: a cloned line
+number is re-applied **absolutely** on each copy, so `csplit f 3 '{*}'` split at
+line 3, then at line 3 again, forever — the cursor never advanced, and every
+one of the 10,003 files after the first two was empty.
+
+The alternative was to keep the clone-at-parse shape and make the clones carry
+an incrementing multiplier. It works, but it stores 10000 `Control`s to
+represent "repeat until the input runs out", and it makes the repeat count a
+property of the pattern list rather than of the loop that walks it — which is
+exactly the confusion that produced the bug. The rewrite carries
+`Repeat::{Times(n), Forever}` on one `Control` and expands it in the executor,
+where the repetition index is in hand and `lines_required * (repetition + 1)`
+is one line of arithmetic.
+
+*Cost:* the executor is now a nested loop rather than a flat walk, and the
+`{*}` termination condition differs by pattern kind — a regex that stops
+matching ends the run with status 0, a line number that runs past the end is a
+fatal `line number out of range on repetition N`. Those two really are
+different in GNU (`process_regexp` has a `repeat_forever` branch,
+`process_line_count` has none), so the asymmetry is not ours to remove.
+
+### 2. Two cursors, `emit` and `search`, rather than one position
+
+The obvious model is a single "where are we" index. GNU does not have one, and
+the difference is observable:
+
+```
+$ csplit f 2 '/2/'          # 20 lines
+2
+csplit: '/2/': match not found
+```
+
+The `2` split consumed nothing past line 1, and yet `/2/` does not find line 2.
+The reason is that a regex match leaves the search position at **`m + 1`**
+(GNU's `find_line (++current_line)`), while a line number leaves it at the new
+section's start. `csplit f '%MARK%' '/MARK/'` shows the same thing from the
+other side: it finds the *second* `MARK`, because the first is behind the search
+cursor even though it is the first line of the current section.
+
+A single cursor can be made to reproduce this only by special-casing the
+lookahead at each use site. Two named cursors state the rule once, at the two
+places that assign them, and every case in the harness that distinguishes them
+passes without further conditionals.
+
+*Cost:* one more piece of state to keep consistent, and a reader has to learn
+which cursor a given operation moves. The names carry it: `emit` is the first
+line not yet written, `search` is the first line the next regex examines.
+
+### 3. The input is read whole, not streamed
+
+GNU streams through a line buffer. We read the file into memory and take
+`&[u8]` slices of it, each keeping its own terminator.
+
+*For:* the two cursors are then plain indices into one slice, backwards offsets
+(`/RE/-1`) are free, and the byte count of a piece is a subtraction rather than
+a running total. Streaming would need a rewindable window sized to the largest
+negative offset seen anywhere in the pattern list, and the old implementation's
+"re-terminate every line with `
+`" corruption is a direct consequence of
+having consumed the terminator on the way past.
+
+*Against:* an input larger than memory cannot be split, and one behaviour
+diverges — reading a **directory** as input. GNU creates `xx00` and prints its
+count of `0` before the read fails, because the failure happens mid-stream; we
+report the same `read error: Is a directory` with no count and no file. That is
+the *only* case out of 76 in `scripts/csplit-diff.sh` where the two differ
+behaviourally, and it is a case with no legitimate use.
+
+*Revisit if:* `csplit` is ever asked to split something too large to hold. The
+change that fixes the size limit fixes the directory case in the same motion,
+and the harness case for it is already written.
+
+### Why a rewrite rather than four fixes
+
+Three of the four faults were **silent**: the byte counts on stdout were
+self-consistently wrong, so only a comparison of the *files* revealed them.
+`scripts/csplit-diff.sh` is the first harness in this tree to compare a manifest
+of what was left on disk rather than stdout alone, and it was written before the
+fixes. Patching four faults individually would have left the shape that produced
+them — a parse-time repeat, a single cursor, and `str::contains` standing in for
+a regular expression — intact.
+
+---
+
 ## §462 — A generator that cannot reach the kernel CSPRNG refuses to generate
 
 **Date:** 2026-08-18

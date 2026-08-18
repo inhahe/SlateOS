@@ -71,7 +71,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::syscall::{SYS_GETRANDOM, syscall2};
+use crate::syscall::{SYS_GETRANDOM, syscall3};
 
 /// Bytes of keystream produced per refill (four ChaCha20 blocks).
 const REFILL: usize = 256;
@@ -161,21 +161,73 @@ fn chacha20_block(key: &[u32; 8], counter: u32, out: &mut [u8; 64]) {
 // Entropy sources
 // ---------------------------------------------------------------------------
 
-/// Fill `out` from the kernel CSPRNG.  Returns `true` iff `out` was filled
-/// completely.
+/// The outcome of asking the kernel for bytes.
 ///
-/// The kernel caps a single call at 1 MiB, so a larger request loops.  Any
-/// non-positive return (`-ENOSYS` on the host build, where the raw `SYSCALL`
-/// instruction is gated off) ends the attempt.
-fn kernel_fill(out: &mut [u8]) -> bool {
+/// This is three-valued rather than a `bool` because "no kernel answered" and
+/// "the kernel answered, and the answer was no" call for opposite responses,
+/// and collapsing them is what made [`GRND_NONBLOCK`](crate::unistd::GRND_NONBLOCK)
+/// unimplementable: a `-EAGAIN` that becomes `false` becomes `EIO`, and `EIO`
+/// is not a value any caller retries on.
+pub(crate) enum KernelFill {
+    /// `out` is fully populated.
+    Filled,
+    /// There is no kernel to ask.  Try the hardware sources.
+    ///
+    /// Constructed only by the host build: [`classify_refusal`] keys this on
+    /// `-ENOSYS`, which every `syscallN` returns when built for the host, and
+    /// that check is `cfg`'d away on the OS target.  On the target there is
+    /// always a kernel, so `dead_code` correctly observes that nothing
+    /// constructs this — the `allow` records that as the intended invariant
+    /// rather than an oversight.
+    ///
+    /// It is deliberately *not* `cfg`'d out of the enum. Removing the variant
+    /// would make both matches on it exhaustive after two arms that always
+    /// return, which turns the hardware fallback following each match into
+    /// `unreachable_code` — trading one warning for two and scattering `cfg`
+    /// through three functions to silence them.  Nor is the fix to let the
+    /// target construct it: a target kernel that does not implement 90 is a
+    /// *broken* kernel, and quietly serving `RDRAND` in its place is precisely
+    /// what design-decisions.md §334 decided against.
+    #[cfg_attr(target_os = "none", allow(dead_code))]
+    Absent,
+    /// The kernel is present and declined, reporting this errno.  Its answer
+    /// is final — see [`secure_bytes`] for why we do not then try hardware.
+    Refused(i32),
+}
+
+/// Fill `out` from the kernel CSPRNG, passing `flags` through as `GRND_*`.
+///
+/// The kernel caps a single call at 1 MiB, so a larger request loops.
+///
+/// # Why the third argument matters
+///
+/// This used to be `syscall2`, which declares only `rdi`/`rsi`; `rdx` — where
+/// the kernel reads `arg2` — held whatever the compiler last left there.  The
+/// kernel therefore could not begin honouring `GRND_*` on the native ABI
+/// without every already-built binary starting to pass garbage flags, which is
+/// why the switch to `syscall3` had to land here first and be rebuilt into the
+/// `services/ctest-*` fixtures before the kernel side could follow.  See
+/// `requests/a-b-getrandom-now-waits-for-a-credited-pool.md`.
+fn kernel_fill(out: &mut [u8], flags: u32) -> KernelFill {
     let mut done: usize = 0;
     while done < out.len() {
         let Some(rest) = out.get_mut(done..) else {
-            return false;
+            return KernelFill::Refused(crate::errno::EIO);
         };
-        let ret = syscall2(SYS_GETRANDOM, rest.as_mut_ptr() as u64, rest.len() as u64);
-        if ret <= 0 {
-            return false;
+        let ret = syscall3(
+            SYS_GETRANDOM,
+            rest.as_mut_ptr() as u64,
+            rest.len() as u64,
+            u64::from(flags),
+        );
+        if ret < 0 {
+            return classify_refusal(ret);
+        }
+        if ret == 0 {
+            // A zero-length request is already excluded by the loop condition,
+            // so a zero return means the kernel made no progress on a non-empty
+            // buffer.  Looping again would spin forever.
+            return KernelFill::Refused(crate::errno::EIO);
         }
         // Clamp: a kernel that claimed to have written more than we asked for
         // would otherwise walk `done` past `out.len()` and, worse, make us
@@ -184,7 +236,42 @@ fn kernel_fill(out: &mut [u8]) -> bool {
         let n = (ret as usize).min(rest.len());
         done = done.saturating_add(n);
     }
-    true
+    KernelFill::Filled
+}
+
+/// Turn a negative `SYS_GETRANDOM` return into [`KernelFill`].
+///
+/// On the host build every `syscallN` returns `-ENOSYS`, which is the one
+/// value meaning "there is no kernel here".  It is safe to key on: `-38` sits
+/// in none of the bands `errno::native` assigns (`-1..=-9`, `-100`, `-200`,
+/// `-300`, `-400`, `-500`, `-600`), so no real kernel answer can collide with
+/// it.  On the OS target there is always a kernel, so a refusal is always a
+/// genuine refusal — a kernel that does not implement 90 is a broken kernel,
+/// and quietly substituting `RDRAND` for it would hide that.
+fn classify_refusal(ret: i64) -> KernelFill {
+    #[cfg(not(target_os = "none"))]
+    if ret == -i64::from(crate::errno::ENOSYS) {
+        return KernelFill::Absent;
+    }
+
+    // Reuse `errno::translate` rather than restating the table: it is the one
+    // place the kernel's native codes are mapped, and a second copy here would
+    // be a copy that drifts.  It sets errno as its side effect, so read it
+    // back rather than duplicating the match.
+    let _ = crate::errno::translate(ret);
+    let err = crate::errno::get_errno();
+
+    // One deliberate override.  `KernelError::TimedOut` — the pool was never
+    // credited within the kernel's bounded wait — translates to `ETIMEDOUT`,
+    // which is honest but which no portable caller tests for.  `getentropy(3)`
+    // is *specified* to report `EIO` when it cannot fill the buffer, and
+    // `getrandom` shares this path, so both report the value the standard
+    // names.  Every other code passes through untouched, which is what keeps
+    // `WOULD_BLOCK` → `EAGAIN` intact for `GRND_NONBLOCK`.
+    if err == crate::errno::ETIMEDOUT {
+        return KernelFill::Refused(crate::errno::EIO);
+    }
+    KernelFill::Refused(err)
 }
 
 /// Whether this CPU has `RDSEED` / `RDRAND`, resolved once via `CPUID`.
@@ -292,9 +379,20 @@ fn hw_word() -> Option<u64> {
 /// Kernel first; hardware second.  Returns `false` if neither answered, in
 /// which case `key` is untouched and the caller must fail rather than run on
 /// a guessable key.
+///
+/// Flags are `0`: this key seeds the `arc4random` pool, which has no error
+/// channel and no way to tell a caller "these bytes are provisional", so it
+/// must **wait** for a credited pool rather than take whatever is available.
+/// Before the kernel gained its readiness gate that distinction did not exist;
+/// now, asking with `GRND_INSECURE` here would key every process's pool from
+/// material that correlates across boots of the same image.
 fn seed_material(key: &mut [u8; KEY_BYTES]) -> bool {
-    if kernel_fill(key) {
-        return true;
+    match kernel_fill(key, 0) {
+        KernelFill::Filled => return true,
+        // The kernel is there and said no.  Its answer is final for the same
+        // reason as in `secure_bytes`.
+        KernelFill::Refused(_) => return false,
+        KernelFill::Absent => {}
     }
     let mut scratch = [0u8; KEY_BYTES];
     for chunk in scratch.chunks_mut(8) {
@@ -448,20 +546,41 @@ pub(crate) fn reseed_after_fork() {
 
 /// Fill `out` with cryptographically-secure bytes.
 ///
-/// Returns `false` if neither the kernel CSPRNG nor a hardware RNG could be
-/// reached, in which case `out` holds unspecified contents (the kernel may
-/// have filled part of it before failing) and must not be used.  Callers must
-/// surface that as an error; there is deliberately no "best effort" path.
+/// `flags` are the caller's `GRND_*` bits, passed to the kernel unchanged.
+///
+/// Returns `Err(errno)` if no bytes could be obtained, in which case `out`
+/// holds unspecified contents (the kernel may have filled part of it before
+/// failing) and must not be used.  Callers must surface that as an error;
+/// there is deliberately no "best effort" path.
 ///
 /// This goes to the kernel directly rather than through the `arc4random`
 /// pool, matching Linux's `getrandom(2)`: a caller asking for key material
 /// by name gets it from the kernel's pool, not from a userspace copy that
 /// outlives the call in this process's memory.
-pub(crate) fn secure_bytes(out: &mut [u8]) -> bool {
-    if kernel_fill(out) {
-        return true;
+///
+/// # Why a refusal is not retried against hardware
+///
+/// The hardware path exists for one situation: there is no kernel to ask.
+/// When the kernel *is* present and declines, falling through to `RDRAND`
+/// would make the decline unobservable — `GRND_NONBLOCK` would report
+/// `EAGAIN` on a machine without `RDRAND` and quietly succeed on one with it,
+/// so the same program would take different branches on two machines for a
+/// reason it cannot see.  That is worse than either outcome consistently.
+/// The case barely arises in any event: the kernel credits its pool from
+/// `RDSEED`/`RDRAND` at init, so a machine that could serve the fallback is
+/// a machine whose pool was credited before userspace started.
+pub(crate) fn secure_bytes(out: &mut [u8], flags: u32) -> Result<(), i32> {
+    match kernel_fill(out, flags) {
+        KernelFill::Filled => Ok(()),
+        KernelFill::Refused(err) => Err(err),
+        KernelFill::Absent => {
+            if pool_fill(out) {
+                Ok(())
+            } else {
+                Err(crate::errno::EIO)
+            }
+        }
     }
-    pool_fill(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -626,7 +745,7 @@ mod tests {
         // The host build has no kernel syscall, so this exercises the
         // RDRAND-seeded pool path end to end.
         let mut buf = [0u8; 64];
-        assert!(secure_bytes(&mut buf));
+        assert!(secure_bytes(&mut buf, 0).is_ok());
         assert_ne!(buf, [0u8; 64]);
     }
 
@@ -634,8 +753,8 @@ mod tests {
     fn test_successive_fills_differ() {
         let mut a = [0u8; 32];
         let mut b = [0u8; 32];
-        assert!(secure_bytes(&mut a));
-        assert!(secure_bytes(&mut b));
+        assert!(secure_bytes(&mut a, 0).is_ok());
+        assert!(secure_bytes(&mut b, 0).is_ok());
         assert_ne!(a, b);
     }
 
@@ -645,7 +764,7 @@ mod tests {
         // seam must not repeat: a bug that failed to advance the key would
         // make byte i and byte i + POOL_BYTES identical.
         let mut buf = [0u8; POOL_BYTES * 3 + 17];
-        assert!(secure_bytes(&mut buf));
+        assert!(secure_bytes(&mut buf, 0).is_ok());
         let (first, rest) = buf.split_at(POOL_BYTES);
         assert_ne!(first, &rest[..POOL_BYTES]);
     }
@@ -653,7 +772,7 @@ mod tests {
     #[test]
     fn test_zero_length_fill_is_ok() {
         let mut buf: [u8; 0] = [];
-        assert!(secure_bytes(&mut buf));
+        assert!(secure_bytes(&mut buf, 0).is_ok());
     }
 
     #[test]
@@ -662,7 +781,7 @@ mod tests {
         // a stuck source would not be; cheap sanity check that we are not
         // returning a constant.
         let mut buf = [0u8; 256];
-        assert!(secure_bytes(&mut buf));
+        assert!(secure_bytes(&mut buf, 0).is_ok());
         let first = buf[0];
         assert!(buf.iter().any(|&b| b != first));
     }
@@ -777,13 +896,39 @@ mod tests {
     }
 
     #[test]
-    fn test_kernel_fill_fails_on_host() {
+    fn test_kernel_fill_reports_absent_on_host() {
         // The raw SYSCALL instruction is gated off on host builds, so this
         // must report failure rather than silently "succeed" with a buffer
         // the kernel never touched.
+        //
+        // It must report it as `Absent` specifically, not as a refusal: that
+        // is the discriminator the hardware fallback hangs off, so a
+        // misclassification here would either strand the host build with no
+        // entropy source at all (`Refused` → no fallback) or, on the target,
+        // silently paper over a kernel that declined.
         let mut buf = [0u8; 8];
-        assert!(!kernel_fill(&mut buf));
+        assert!(matches!(kernel_fill(&mut buf, 0), KernelFill::Absent));
         assert_eq!(buf, [0u8; 8]);
+    }
+
+    #[test]
+    fn test_host_sentinel_cannot_collide_with_a_kernel_code() {
+        // `classify_refusal` keys "there is no kernel" on `-ENOSYS`, which is
+        // only sound while no native error code shares that number. The bands
+        // in `errno::native` are -1..=-9, -100..=-103, -200..=-203, -300..=-304,
+        // -400..=-401, -500..=-511 and -600..=-602; -38 is in none of them.
+        // If a future band ever reaches it, this fires before the entropy path
+        // starts silently taking the fallback on a live kernel refusal.
+        let sentinel = -i64::from(crate::errno::ENOSYS);
+        assert_eq!(sentinel, -38);
+        let mut occupied = (-9..=-1)
+            .chain(-103..=-100)
+            .chain(-203..=-200)
+            .chain(-304..=-300)
+            .chain(-401..=-400)
+            .chain(-511..=-500)
+            .chain(-602..=-600);
+        assert!(!occupied.any(|c| c == sentinel));
     }
 
     #[test]

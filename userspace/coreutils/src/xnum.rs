@@ -136,40 +136,89 @@ fn skip_space(text: &[u8]) -> usize {
     at
 }
 
-/// C's `strtoumax` with base 10, minus the sign handling its callers here never
-/// reach.
+/// The value of one digit in `base`, or `None` if it is not one.
+///
+/// Letters count from 10 in either case, as C's `strtoumax` reads them, and are
+/// rejected by the `< base` test rather than by the character class — so `f` is
+/// a digit in base 16 and a terminator in base 10.
+fn digit_value(c: u8, base: u32) -> Option<u32> {
+    let value = match c {
+        b'0'..=b'9' => u32::from(c - b'0'),
+        b'a'..=b'z' => u32::from(c - b'a') + 10,
+        b'A'..=b'Z' => u32::from(c - b'A') + 10,
+        _ => return None,
+    };
+    (value < base).then_some(value)
+}
+
+/// C's `strtoumax`, minus the sign handling its callers here never reach.
 ///
 /// A negative sign is rejected by [`xstrtoumax`] *before* this runs — gnulib
 /// does the same, because C would otherwise negate `-1` into `UINTMAX_MAX`
 /// silently. So only `+` is accepted here.
 ///
-/// Base 10 is the only base implemented because it is the only one the
-/// utilities converted so far ask for. `od` and `printf` want C's full
-/// base-prefix grammar; when one of them is converted, that belongs here as a
-/// `base` parameter rather than as a fourth private copy.
-fn strtoumax(text: &[u8]) -> Scan {
+/// # The base prefix is C's, and it is looser than it looks
+///
+/// Base 0 means "read the prefix": `0x`/`0X` is hexadecimal, a leading `0` is
+/// octal, anything else decimal. Base 16 *also* accepts the `0x` prefix, and
+/// no other base accepts any prefix. This matters to `od`, whose old-style
+/// offset operand is octal by default and hexadecimal after `0x`, so that
+/// `od f +010` skips eight bytes where `od -j 010 f` — same digits, same
+/// base-0 grammar — also skips eight, and `od f +10.` skips none at all
+/// because the `.` upstream's own `--help` documents is not in the suffix list.
+///
+/// The subtle part is a `0x` with nothing usable after it. C consumes the `0`
+/// alone and leaves the pointer on the `x`, so `0xz` is the number zero with a
+/// trailing `xz`, not a failed parse. A caller passing a suffix list therefore
+/// sees an invalid suffix, which is a different diagnostic from an invalid
+/// number, and that difference is observable.
+fn strtoumax_base(text: &[u8], base: u32) -> Scan {
     let mut at = skip_space(text);
     if matches!(text.get(at), Some(b'+')) {
         at = at.saturating_add(1);
     }
+    // The prefix, if this base takes one. `end_of_zero` remembers where a bare
+    // `0` ended, for the `0x`-with-no-digits case below.
+    let mut base = base;
+    let mut end_of_zero = None;
+    if (base == 0 || base == 16)
+        && text.get(at) == Some(&b'0')
+        && matches!(text.get(at.saturating_add(1)), Some(b'x' | b'X'))
+    {
+        end_of_zero = Some(at.saturating_add(1));
+        at = at.saturating_add(2);
+        base = 16;
+    } else if base == 0 {
+        base = if text.get(at) == Some(&b'0') { 8 } else { 10 };
+    }
+
     let first_digit = at;
     let mut value = 0u64;
     let mut overflow = false;
-    while let Some(&c) = text.get(at) {
-        if !c.is_ascii_digit() {
-            break;
-        }
+    while let Some(digit) = text.get(at).and_then(|&c| digit_value(c, base)) {
         // C keeps consuming digits after ERANGE — it does not stop at the
         // first one that overflows — so the end pointer lands past the whole
         // run and a trailing character after a huge number is still seen.
-        let digit = u64::from(c.saturating_sub(b'0'));
-        match value.checked_mul(10).and_then(|v| v.checked_add(digit)) {
+        match value
+            .checked_mul(u64::from(base))
+            .and_then(|v| v.checked_add(u64::from(digit)))
+        {
             Some(v) => value = v,
             None => overflow = true,
         }
         at = at.saturating_add(1);
     }
     if at == first_digit {
+        // `0x` with no hexadecimal digit after it: the `0` converted, the `x`
+        // did not.
+        if let Some(end) = end_of_zero {
+            return Scan {
+                value: 0,
+                end,
+                overflow: false,
+                converted: true,
+            };
+        }
         return Scan {
             value: 0,
             end: 0,
@@ -228,6 +277,15 @@ const SCALABLE: &[u8] = b"EGgkKMmPQRTtYZ";
 /// [`Status::Invalid`], where it is zero.
 #[must_use]
 pub fn xstrtoumax(text: &[u8], valid_suffixes: Option<&[u8]>) -> (u64, Status) {
+    xstrtoumax_base(text, 10, valid_suffixes)
+}
+
+/// [`xstrtoumax`] in a base other than ten — gnulib's third argument, which
+/// most callers pass as `10` and `od` passes as `0`, `8` or `16`.
+///
+/// A base of zero reads C's prefix: see [`strtoumax_base`].
+#[must_use]
+pub fn xstrtoumax_base(text: &[u8], base: u32, valid_suffixes: Option<&[u8]>) -> (u64, Status) {
     // gnulib refuses a leading `-` itself rather than letting C's strtoumax
     // wrap it around into a huge positive. This is why `fold -w -3` says
     // "invalid number of columns" and not "out of range".
@@ -235,7 +293,7 @@ pub fn xstrtoumax(text: &[u8], valid_suffixes: Option<&[u8]>) -> (u64, Status) {
         return (0, Status::Invalid);
     }
 
-    let scan = strtoumax(text);
+    let scan = strtoumax_base(text, base);
     let mut value = scan.value;
     let mut overflow = scan.overflow;
     let mut at = scan.end;
@@ -429,6 +487,67 @@ pub fn xstrtoimax(text: &[u8], valid_suffixes: Option<&[u8]>) -> (i64, Status) {
         .map(i64::saturating_neg)
         .unwrap_or(i64::MIN);
     (signed, status)
+}
+
+/// gnulib's `xstrtol_fatal`: the diagnostic an option-taking caller prints when
+/// [`xstrtoumax`] refused its argument.
+///
+/// This is a *different* sentence shape from [`xdectoumax`]'s. That one names
+/// the quantity (`invalid number of columns: '0'`); this one names the **option
+/// that carried it**, which is why upstream threads `long_options` and the short
+/// option character all the way down into it:
+///
+/// ```text
+/// invalid -N argument 'abc'
+/// invalid suffix in --read-bytes argument '4q'
+/// -w argument '99999999999999999999' too large
+/// ```
+///
+/// `option` is that name already rendered with its hyphens — `"-N"` or
+/// `"--read-bytes"` — rather than upstream's `(opt_idx, c, long_options)` triple,
+/// which exists only because C cannot return two strings from a `switch`. Which
+/// spelling appears is observable: it is whichever form the user actually typed,
+/// so a caller that resolved a long option must pass the long name.
+///
+/// Returns `None` for [`Status::Ok`], where upstream calls `abort` — there is no
+/// message for a number that converted, and a caller reaching here with one has
+/// a bug rather than a diagnostic to print.
+#[must_use]
+pub fn strtol_fatal(status: Status, option: &str, arg: &[u8]) -> Option<String> {
+    // No `strerror` tail on any of the three: upstream passes 0 for errno.
+    match status {
+        Status::Ok => None,
+        Status::Invalid => Some(format!("invalid {option} argument {}", quote(arg))),
+        Status::InvalidSuffix | Status::InvalidSuffixWithOverflow => Some(format!(
+            "invalid suffix in {option} argument {}",
+            quote(arg)
+        )),
+        Status::Overflow => Some(format!("{option} argument {} too large", quote(arg))),
+    }
+}
+
+/// [`xstrtoumax_base`] and [`strtol_fatal`] as the one step every caller of the
+/// pair actually wants.
+///
+/// Upstream writes it out longhand at each site — `xstrtoumax (…); if (s_err !=
+/// LONGINT_OK) xstrtol_fatal (…)` — five times in `od` alone. Folding it here
+/// keeps the base and the suffix list next to the option they belong to and
+/// leaves no site free to forget the check.
+///
+/// # Errors
+///
+/// The diagnostic body, ready to print after the program name.
+pub fn xstrtoumax_option(
+    text: &[u8],
+    base: u32,
+    valid_suffixes: Option<&[u8]>,
+    option: &str,
+) -> Result<u64, String> {
+    let (value, status) = xstrtoumax_base(text, base, valid_suffixes);
+    match strtol_fatal(status, option, text) {
+        Some(message) => Err(message),
+        None => Ok(value),
+    }
 }
 
 /// Fold an overflow that only the signed range noticed into an existing status.

@@ -2084,16 +2084,18 @@ pub extern "C" fn getrandom(buf: *mut u8, buflen: usize, flags: u32) -> isize {
     }
 
     // 5. No entropy source → fail, rather than return predictable bytes a
-    //    caller would use as key material.  Linux cannot reach this state
-    //    (its pool is always seedable), so there is no ABI precedent to
-    //    match; `EIO` is what `getentropy` is specified to report for the
-    //    same condition, so both calls agree.  `GRND_INSECURE` does not
-    //    override it: that flag means "don't block waiting for the pool to
-    //    initialise", not "make something up".
+    //    caller would use as key material.  The flags reach the kernel from
+    //    here, so the errno is now whatever the kernel reported rather than a
+    //    flat `EIO`: `GRND_NONBLOCK` against an uncredited pool arrives as
+    //    `EAGAIN`, exactly as on Linux, and only a genuine "could not fill it"
+    //    is `EIO`.  `GRND_INSECURE` is likewise the kernel's to interpret —
+    //    it means "don't block waiting for the pool to initialise", never
+    //    "make something up", and there is no userspace path that fabricates
+    //    bytes for it to reach.
     // SAFETY: `buf` is non-null (checked at step 3) and the caller's
     // contract is that it is writable for `buflen` bytes.
-    if !unsafe { fill_random(buf, buflen) } {
-        errno::set_errno(errno::EIO);
+    if let Err(err) = unsafe { fill_random(buf, buflen, flags) } {
+        errno::set_errno(err);
         return -1;
     }
     buflen as isize
@@ -2134,10 +2136,20 @@ pub extern "C" fn getentropy(buf: *mut u8, buflen: usize) -> i32 {
     }
 
     // No entropy source → `EIO`, which is exactly what `getentropy` is
-    // specified to report when it "could not fill the buffer".
+    // specified to report when it "could not fill the buffer".  `getentropy`
+    // has no flags word, so it asks with `0`: the blocking, fully-validated
+    // request, which is the only one matching its contract of either
+    // returning `buflen` good bytes or failing.
+    //
+    // The errno is pinned to `EIO` here rather than passed through, because
+    // `getentropy(3)` specifies exactly two failure values — `EIO` and
+    // `EFAULT` — and a caller written to that spec would not recognise
+    // anything else.  With `flags == 0` the only reachable kernel refusal is
+    // the readiness timeout, which `secure_bytes` already reports as `EIO`,
+    // so this is belt-and-braces rather than a live substitution.
     // SAFETY: `buf` is non-null (checked above) and the caller's contract is
     // that it is writable for `buflen` bytes.
-    if !unsafe { fill_random(buf, buflen) } {
+    if unsafe { fill_random(buf, buflen, 0) }.is_err() {
         errno::set_errno(errno::EIO);
         return -1;
     }
@@ -2146,28 +2158,39 @@ pub extern "C" fn getentropy(buf: *mut u8, buflen: usize) -> i32 {
 
 /// Fill a buffer with cryptographically-secure random bytes.
 ///
-/// Returns `false` when no entropy source could be reached, in which case the
-/// buffer's contents are unspecified and must not be used.  See
+/// Returns `Err(errno)` when no entropy source could be reached, in which case
+/// the buffer's contents are unspecified and must not be used.  See
 /// [`crate::random::secure_bytes`] for where the bytes come from and
 /// why there is no "best effort" fallback: this used to expand a single
 /// 64-bit `RDRAND` draw (or the monotonic clock, if `RDRAND` failed) with an
 /// LCG, giving `getrandom`/`getentropy` callers at most 64 bits of entropy
 /// from a generator whose whole state is recoverable from its output.
 ///
+/// `flags` are the caller's `GRND_*` bits and reach the kernel unchanged.
+/// Callers with no flags to express — [`getentropy`], and the `AT_RANDOM`
+/// stack canary in `crt.rs` — pass `0`, the blocking, fully-validated request.
+///
+/// # Why this is not a `bool`
+///
+/// It was, and that is what made `GRND_NONBLOCK` unimplementable: every kernel
+/// refusal collapsed to `false` and every `false` became `EIO`, which is not a
+/// value any caller retries on.  The errno has to survive the trip for the
+/// flag to mean anything.  See design-decisions.md §334.
+///
 /// # Safety
 ///
 /// `buf` must be valid for writes of `len` bytes, or `len` must be 0.
-pub(crate) unsafe fn fill_random(buf: *mut u8, len: usize) -> bool {
+pub(crate) unsafe fn fill_random(buf: *mut u8, len: usize, flags: u32) -> Result<(), i32> {
     if len == 0 {
-        return true;
+        return Ok(());
     }
     if buf.is_null() {
-        return false;
+        return Err(errno::EFAULT);
     }
     // SAFETY: the caller guarantees `buf` is writable for `len` bytes, and it
     // is non-null with `len` nonzero by the checks above.
     let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
-    crate::random::secure_bytes(out)
+    crate::random::secure_bytes(out, flags)
 }
 
 // ---------------------------------------------------------------------------

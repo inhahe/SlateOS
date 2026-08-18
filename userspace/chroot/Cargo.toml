@@ -3,4 +3,8 @@ name = "chroot"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS chroot utility"
+
+# `userdb` for `/etc/users.yaml`. This crate carried the fifth hand-rolled
+# parser of that file. See `design-decisions.md` §330.
 [dependencies]
+userdb = { path = "../userdb" }

@@ -1746,99 +1746,105 @@ pub fn bench_etag(body: &[u8]) -> String {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[httpd] Running self-test...");
 
-    // Test 1: Path normalization.
-    let norm = |s: &str| normalize_path(s.as_bytes());
-    assert_eq!(norm("/"), PathBuf::from("/"));
-    assert_eq!(norm("/foo/bar"), PathBuf::from("/foo/bar"));
-    assert_eq!(norm("/foo/../bar"), PathBuf::from("/bar"));
-    assert_eq!(norm("/foo/./bar"), PathBuf::from("/foo/bar"));
-    assert_eq!(norm("/../../../etc/passwd"), PathBuf::from("/etc/passwd"));
-    assert_eq!(norm("/a//b///c"), PathBuf::from("/a/b/c"));
-    assert_eq!(norm(""), PathBuf::from("/"));
-    // A byte that is not valid UTF-8 must survive normalization intact.
-    assert_eq!(
-        normalize_path(b"/a/re\xffport.txt"),
-        PathBuf::from(b"/a/re\xffport.txt".as_slice())
-    );
-    serial_println!("[httpd]   Path normalization: OK");
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 1: Path normalization.
+            let norm = |s: &str| normalize_path(s.as_bytes());
+            assert_eq!(norm("/"), PathBuf::from("/"));
+            assert_eq!(norm("/foo/bar"), PathBuf::from("/foo/bar"));
+            assert_eq!(norm("/foo/../bar"), PathBuf::from("/bar"));
+            assert_eq!(norm("/foo/./bar"), PathBuf::from("/foo/bar"));
+            assert_eq!(norm("/../../../etc/passwd"), PathBuf::from("/etc/passwd"));
+            assert_eq!(norm("/a//b///c"), PathBuf::from("/a/b/c"));
+            assert_eq!(norm(""), PathBuf::from("/"));
+            // A byte that is not valid UTF-8 must survive normalization intact.
+            assert_eq!(
+                normalize_path(b"/a/re\xffport.txt"),
+                PathBuf::from(b"/a/re\xffport.txt".as_slice())
+            );
+            serial_println!("[httpd]   Path normalization: OK");
 
-    // Test 2: Percent decoding.
-    assert_eq!(percent_decode("/foo%20bar"), b"/foo bar");
-    assert_eq!(percent_decode("/hello%2Fworld"), b"/hello/world");
-    assert_eq!(percent_decode("/plain"), b"/plain");
-    assert_eq!(percent_decode("%41%42%43"), b"ABC");
-    // `%FF` is a legal escape naming a legal filename byte. Decoding it used
-    // to yield the empty string, which normalized to `/` — so the server
-    // answered a request for this file with the document-root listing.
-    assert_eq!(percent_decode("/re%FFport.txt"), b"/re\xffport.txt");
-    serial_println!("[httpd]   Percent decode: OK");
+            // Test 2: Percent decoding.
+            assert_eq!(percent_decode("/foo%20bar"), b"/foo bar");
+            assert_eq!(percent_decode("/hello%2Fworld"), b"/hello/world");
+            assert_eq!(percent_decode("/plain"), b"/plain");
+            assert_eq!(percent_decode("%41%42%43"), b"ABC");
+            // `%FF` is a legal escape naming a legal filename byte. Decoding it used
+            // to yield the empty string, which normalized to `/` — so the server
+            // answered a request for this file with the document-root listing.
+            assert_eq!(percent_decode("/re%FFport.txt"), b"/re\xffport.txt");
+            serial_println!("[httpd]   Percent decode: OK");
 
-    // Test 3: MIME type detection.
-    let mime = |s: &str| mime_for_path(Path::new(s));
-    assert_eq!(mime("/index.html"), "text/html; charset=utf-8");
-    assert_eq!(mime("/style.css"), "text/css; charset=utf-8");
-    assert_eq!(mime("/app.js"), "application/javascript; charset=utf-8");
-    assert_eq!(mime("/data.json"), "application/json; charset=utf-8");
-    assert_eq!(mime("/image.png"), "image/png");
-    assert_eq!(mime("/unknown"), "application/octet-stream");
-    // A dotfile has no extension, and a directory component's dot must not be
-    // mistaken for one.
-    assert_eq!(mime("/.htaccess"), "application/octet-stream");
-    assert_eq!(mime("/a.b/plain"), "application/octet-stream");
-    assert_eq!(
-        mime_for_path(Path::new(b"/x.h\xfftml".as_slice())),
-        "application/octet-stream"
-    );
-    serial_println!("[httpd]   MIME type detection: OK");
+            // Test 3: MIME type detection.
+            let mime = |s: &str| mime_for_path(Path::new(s));
+            assert_eq!(mime("/index.html"), "text/html; charset=utf-8");
+            assert_eq!(mime("/style.css"), "text/css; charset=utf-8");
+            assert_eq!(mime("/app.js"), "application/javascript; charset=utf-8");
+            assert_eq!(mime("/data.json"), "application/json; charset=utf-8");
+            assert_eq!(mime("/image.png"), "image/png");
+            assert_eq!(mime("/unknown"), "application/octet-stream");
+            // A dotfile has no extension, and a directory component's dot must not be
+            // mistaken for one.
+            assert_eq!(mime("/.htaccess"), "application/octet-stream");
+            assert_eq!(mime("/a.b/plain"), "application/octet-stream");
+            assert_eq!(
+                mime_for_path(Path::new(b"/x.h\xfftml".as_slice())),
+                "application/octet-stream"
+            );
+            serial_println!("[httpd]   MIME type detection: OK");
 
-    // Test 4: Request parsing.
-    let req = parse_request(b"GET /index.html HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(req.is_some());
-    let r = req.unwrap();
-    assert_eq!(r.method, "GET");
-    assert_eq!(r.path, PathBuf::from("/index.html"));
-    serial_println!("[httpd]   Request parsing: OK");
+            // Test 4: Request parsing.
+            let req = parse_request(b"GET /index.html HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            assert!(req.is_some());
+            let r = req.unwrap();
+            assert_eq!(r.method, "GET");
+            assert_eq!(r.path, PathBuf::from("/index.html"));
+            serial_println!("[httpd]   Request parsing: OK");
 
-    // Test 5: Request with query string.
-    let req2 = parse_request(b"GET /search?q=hello&lang=en HTTP/1.1\r\n\r\n");
-    assert!(req2.is_some());
-    assert_eq!(req2.unwrap().path, PathBuf::from("/search"));
-    // The undecodable path must reach the VFS as its exact bytes, not be
-    // silently rerouted to the document root.
-    let req3 = parse_request(b"GET /re%FFport.txt HTTP/1.1\r\n\r\n");
-    assert_eq!(
-        req3.map(|r| r.path),
-        Some(PathBuf::from(b"/re\xffport.txt".as_slice()))
-    );
-    serial_println!("[httpd]   Query string stripping: OK");
+            // Test 5: Request with query string.
+            let req2 = parse_request(b"GET /search?q=hello&lang=en HTTP/1.1\r\n\r\n");
+            assert!(req2.is_some());
+            assert_eq!(req2.unwrap().path, PathBuf::from("/search"));
+            // The undecodable path must reach the VFS as its exact bytes, not be
+            // silently rerouted to the document root.
+            let req3 = parse_request(b"GET /re%FFport.txt HTTP/1.1\r\n\r\n");
+            assert_eq!(
+                req3.map(|r| r.path),
+                Some(PathBuf::from(b"/re\xffport.txt".as_slice()))
+            );
+            serial_println!("[httpd]   Query string stripping: OK");
 
-    // Test 6: Response building.
-    let resp = build_response(200, "OK", "text/plain", b"Hello");
-    let resp_str = core::str::from_utf8(&resp).unwrap_or("");
-    assert!(resp_str.starts_with("HTTP/1.1 200 OK\r\n"));
-    assert!(resp_str.contains("Content-Length: 5\r\n"));
-    assert!(resp_str.contains("Content-Type: text/plain\r\n"));
-    assert!(resp_str.ends_with("Hello"));
-    serial_println!("[httpd]   Response building: OK");
+            // Test 6: Response building.
+            let resp = build_response(200, "OK", "text/plain", b"Hello");
+            let resp_str = core::str::from_utf8(&resp).unwrap_or("");
+            assert!(resp_str.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(resp_str.contains("Content-Length: 5\r\n"));
+            assert!(resp_str.contains("Content-Type: text/plain\r\n"));
+            assert!(resp_str.ends_with("Hello"));
+            serial_println!("[httpd]   Response building: OK");
 
-    // Test 7: Error response.
-    let err = error_response(404, "Not Found");
-    let err_str = core::str::from_utf8(&err).unwrap_or("");
-    assert!(err_str.starts_with("HTTP/1.1 404 Not Found\r\n"));
-    assert!(err_str.contains("404 Not Found"));
-    serial_println!("[httpd]   Error response: OK");
+            // Test 7: Error response.
+            let err = error_response(404, "Not Found");
+            let err_str = core::str::from_utf8(&err).unwrap_or("");
+            assert!(err_str.starts_with("HTTP/1.1 404 Not Found\r\n"));
+            assert!(err_str.contains("404 Not Found"));
+            serial_println!("[httpd]   Error response: OK");
 
-    // Test 8: Path traversal prevention.
-    assert_eq!(norm("/../../etc/shadow"), PathBuf::from("/etc/shadow"));
-    assert_eq!(norm("/foo/../../bar"), PathBuf::from("/bar"));
-    // Path can never escape root.
-    assert_eq!(norm("/../../../../"), PathBuf::from("/"));
-    // ...including when the `..` arrives percent-encoded.
-    assert_eq!(
-        normalize_path(&percent_decode("/%2e%2e/%2e%2e/etc/shadow")),
-        PathBuf::from("/etc/shadow")
-    );
-    serial_println!("[httpd]   Path traversal prevention: OK");
+            // Test 8: Path traversal prevention.
+            assert_eq!(norm("/../../etc/shadow"), PathBuf::from("/etc/shadow"));
+            assert_eq!(norm("/foo/../../bar"), PathBuf::from("/bar"));
+            // Path can never escape root.
+            assert_eq!(norm("/../../../../"), PathBuf::from("/"));
+            // ...including when the `..` arrives percent-encoded.
+            assert_eq!(
+                normalize_path(&percent_decode("/%2e%2e/%2e%2e/etc/shadow")),
+                PathBuf::from("/etc/shadow")
+            );
+            serial_println!("[httpd]   Path traversal prevention: OK");
+        }
+        case();
+    }
 
     // Test 9: contains_header_end detection.
     assert!(contains_header_end(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
@@ -1847,16 +1853,22 @@ pub fn self_test() -> KernelResult<()> {
     assert!(!contains_header_end(b"\r\n\r"));
     serial_println!("[httpd]   Header end detection: OK");
 
-    // Test 10: process_http_request for valid GET.
-    let resp = process_http_request(b"GET /proc/version HTTP/1.1\r\nHost: x\r\n\r\n");
-    let resp_str = core::str::from_utf8(&resp).unwrap_or("");
-    // /proc/version should exist and return 200.
-    assert!(
-        resp_str.starts_with("HTTP/1.1 200 OK\r\n")
-            || resp_str.starts_with("HTTP/1.1 404 Not Found\r\n"),
-        "Expected 200 or 404 for /proc/version"
-    );
-    serial_println!("[httpd]   process_http_request: OK");
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 10: process_http_request for valid GET.
+            let resp = process_http_request(b"GET /proc/version HTTP/1.1\r\nHost: x\r\n\r\n");
+            let resp_str = core::str::from_utf8(&resp).unwrap_or("");
+            // /proc/version should exist and return 200.
+            assert!(
+                resp_str.starts_with("HTTP/1.1 200 OK\r\n")
+                    || resp_str.starts_with("HTTP/1.1 404 Not Found\r\n"),
+                "Expected 200 or 404 for /proc/version"
+            );
+            serial_println!("[httpd]   process_http_request: OK");
+        }
+        case();
+    }
 
     // Test 11: process_http_request rejects POST.
     let resp2 = process_http_request(b"POST /index.html HTTP/1.1\r\nHost: x\r\n\r\n");
@@ -1870,370 +1882,412 @@ pub fn self_test() -> KernelResult<()> {
     assert!(resp3_str.starts_with("HTTP/1.1 400 Bad Request\r\n"));
     serial_println!("[httpd]   Malformed request handling: OK");
 
-    // Test 13: FNV-1a hash determinism and uniqueness.
-    let h1 = fnv1a_64(b"hello");
-    let h2 = fnv1a_64(b"hello");
-    let h3 = fnv1a_64(b"world");
-    assert_eq!(h1, h2, "FNV hash must be deterministic");
-    assert_ne!(h1, h3, "Different inputs should produce different hashes");
-    assert_ne!(fnv1a_64(b""), fnv1a_64(b"\0"), "Empty vs null must differ");
-    serial_println!("[httpd]   FNV-1a hash: OK");
-
-    // Test 14: ETag generation.
-    let body = b"Hello, World!";
-    let etag1 = etag_for_body(body);
-    let etag2 = etag_for_body(body);
-    let etag3 = etag_for_body(b"Different content");
-    assert_eq!(etag1, etag2, "Same content must produce same ETag");
-    assert_ne!(
-        etag1, etag3,
-        "Different content must produce different ETag"
-    );
-    assert!(etag1.starts_with('"'), "ETag must be quoted");
-    assert!(etag1.ends_with('"'), "ETag must be quoted");
-    assert!(
-        etag1.contains("fnv1a-"),
-        "ETag must contain algorithm prefix"
-    );
-    serial_println!("[httpd]   ETag generation: OK");
-
-    // Test 15: ETag conditional matching.
-    let body = b"Test content for ETag";
-    let etag = etag_for_body(body);
-    let inm = Some(etag.clone());
-    assert!(etag_matches(&inm, body), "Matching ETag should return true");
-    assert!(
-        !etag_matches(&inm, b"Changed content"),
-        "Changed content should not match"
-    );
-    assert!(
-        !etag_matches(&None, body),
-        "No If-None-Match should not match"
-    );
-    // Comma-separated list (multiple ETags).
-    let multi_inm = Some(format!("\"other\", {}, \"another\"", etag));
-    assert!(
-        etag_matches(&multi_inm, body),
-        "ETag in comma list should match"
-    );
-    serial_println!("[httpd]   ETag conditional matching: OK");
-
-    // Test 16: Response includes ETag header.
-    let resp = build_response(200, "OK", "text/plain", b"ETag test body");
-    let resp_str = core::str::from_utf8(&resp).unwrap_or("");
-    assert!(
-        resp_str.contains("ETag: \"fnv1a-"),
-        "Response must include ETag header"
-    );
-    assert!(
-        resp_str.contains("Cache-Control: no-cache"),
-        "Response must include Cache-Control"
-    );
-    serial_println!("[httpd]   ETag in response: OK");
-
-    // Test 17: 304 Not Modified response format.
-    let etag = etag_for_body(b"some content");
-    let resp304 = not_modified_response(&etag);
-    let resp304_str = core::str::from_utf8(&resp304).unwrap_or("");
-    assert!(resp304_str.starts_with("HTTP/1.1 304 Not Modified\r\n"));
-    assert!(resp304_str.contains(&format!("ETag: {}", etag)));
-    assert!(
-        !resp304_str.contains("Content-Length:"),
-        "304 should not have Content-Length"
-    );
-    serial_println!("[httpd]   304 Not Modified response: OK");
-
-    // Test 18: Request header parsing (If-None-Match).
-    let req = parse_request(
-        b"GET /index.html HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"fnv1a-abc123\"\r\n\r\n",
-    );
-    assert!(req.is_some());
-    let r = req.unwrap();
-    assert_eq!(r.if_none_match.as_deref(), Some("\"fnv1a-abc123\""));
-    serial_println!("[httpd]   If-None-Match header parsing: OK");
-
-    // Test 19: Request statistics tracking.
-    let before = request_count();
-    let _ = process_http_request(b"GET / HTTP/1.1\r\n\r\n");
-    assert!(request_count() > before, "Request counter should increment");
-    serial_println!("[httpd]   Request statistics: OK");
-
-    // Test 20: Range header parsing.
-    // Standard range: bytes=0-99
-    assert_eq!(parse_range("bytes=0-99", 1000), Some((0, 99)));
-    // Open-ended range: bytes=500-
-    assert_eq!(parse_range("bytes=500-", 1000), Some((500, 999)));
-    // Suffix range: bytes=-200 (last 200 bytes)
-    assert_eq!(parse_range("bytes=-200", 1000), Some((800, 999)));
-    // Start beyond file size: invalid.
-    assert_eq!(parse_range("bytes=1000-1500", 1000), None);
-    // End clamped to file size.
-    assert_eq!(parse_range("bytes=900-2000", 1000), Some((900, 999)));
-    // Single byte range.
-    assert_eq!(parse_range("bytes=0-0", 100), Some((0, 0)));
-    // Invalid: no "bytes=" prefix.
-    assert_eq!(parse_range("chars=0-100", 1000), None);
-    // Invalid: multi-range (unsupported).
-    assert_eq!(parse_range("bytes=0-100,200-300", 1000), None);
-    // Invalid: start > end.
-    assert_eq!(parse_range("bytes=500-100", 1000), None);
-    // Empty file with suffix range.
-    assert_eq!(parse_range("bytes=-100", 0), None);
-    serial_println!("[httpd]   Range header parsing: OK");
-
-    // Test 21: 206 Partial Content response.
-    let data = b"Hello, World! This is test content for range requests.";
-    let resp = partial_content_response("text/plain", data, 7, 11, "\"test-etag\"");
-    let resp_str = core::str::from_utf8(&resp).unwrap_or("");
-    assert!(resp_str.starts_with("HTTP/1.1 206 Partial Content\r\n"));
-    assert!(resp_str.contains("Content-Range: bytes 7-11/54\r\n"));
-    assert!(resp_str.contains("Content-Length: 5\r\n"));
-    assert!(resp_str.contains("Accept-Ranges: bytes\r\n"));
-    assert!(resp_str.ends_with("World"));
-    serial_println!("[httpd]   Partial content response: OK");
-
-    // Test 22: 416 Range Not Satisfiable response.
-    let resp416 = range_not_satisfiable(1000);
-    let resp416_str = core::str::from_utf8(&resp416).unwrap_or("");
-    assert!(resp416_str.starts_with("HTTP/1.1 416 Range Not Satisfiable\r\n"));
-    assert!(resp416_str.contains("Content-Range: bytes */1000\r\n"));
-    serial_println!("[httpd]   416 Range Not Satisfiable: OK");
-
-    // Test 23: Range header in request parsing.
-    let req = parse_request(b"GET /bigfile.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=0-1023\r\n\r\n");
-    assert!(req.is_some());
-    let r = req.unwrap();
-    assert_eq!(r.range.as_deref(), Some("bytes=0-1023"));
-    serial_println!("[httpd]   Range header in request: OK");
-
-    // Test 24: extract_status from a 200 response.
-    let resp200 = build_response(200, "OK", "text/plain", b"hi");
-    assert_eq!(extract_status(&resp200), 200);
-    serial_println!("[httpd]   extract_status 200: OK");
-
-    // Test 25: extract_status from a 404 response.
-    let resp404 = error_response(404, "Not Found");
-    assert_eq!(extract_status(&resp404), 404);
-    serial_println!("[httpd]   extract_status 404: OK");
-
-    // Test 26: extract_status from 304 response.
-    let resp304 = not_modified_response("\"abc\"");
-    assert_eq!(extract_status(&resp304), 304);
-    serial_println!("[httpd]   extract_status 304: OK");
-
-    // Test 27: extract_status with empty/malformed input.
-    assert_eq!(extract_status(b""), 0);
-    assert_eq!(extract_status(b"short"), 0);
-    serial_println!("[httpd]   extract_status malformed: OK");
-
-    // Test 28: Access log ring buffer push and recent.
     {
         #[inline(never)]
         fn case() {
-            let mut log = AccessLog::new();
-            log.push(AccessLogEntry {
-                method: String::from("GET"),
-                path: String::from("/a"),
-                status: 200,
-                body_size: 100,
-                duration_us: 0,
-            });
-            log.push(AccessLogEntry {
-                method: String::from("HEAD"),
-                path: String::from("/b"),
-                status: 304,
-                body_size: 0,
-                duration_us: 0,
-            });
-            let recent = log.recent(10);
-            assert_eq!(recent.len(), 2);
-            assert_eq!(recent[0].path, "/a");
-            assert_eq!(recent[1].path, "/b");
-
-            // Request only last 1 entry.
-            let last = log.recent(1);
-            assert_eq!(last.len(), 1);
-            assert_eq!(last[0].path, "/b");
-        }
-        case();
-    }
-    serial_println!("[httpd]   Access log ring buffer: OK");
-
-    // Test 29: Access log ring buffer wraps correctly.
-    {
-        #[inline(never)]
-        fn case() {
-            let mut log = AccessLog::new();
-            // Fill past capacity to verify wrapping.
-            for i in 0..ACCESS_LOG_SIZE + 5 {
-                log.push(AccessLogEntry {
-                    method: String::from("GET"),
-                    path: format!("/{}", i),
-                    status: 200,
-                    body_size: i,
-                    duration_us: 0,
-                });
-            }
-            let recent = log.recent(ACCESS_LOG_SIZE);
-            assert_eq!(recent.len(), ACCESS_LOG_SIZE);
-            // Oldest entry should be #5 (indices 0-4 were overwritten).
-            assert_eq!(recent[0].path, "/5");
-            // Newest should be ACCESS_LOG_SIZE + 4.
-            let expected_last = format!("/{}", ACCESS_LOG_SIZE + 4);
-            assert_eq!(recent[ACCESS_LOG_SIZE - 1].path, expected_last);
-        }
-        case();
-    }
-    serial_println!("[httpd]   Access log wrap: OK");
-
-    // Test 30: Accept-Ranges header in normal responses.
-    let resp_ar = build_response(200, "OK", "text/plain", b"test");
-    let resp_ar_str = core::str::from_utf8(&resp_ar).unwrap_or("");
-    assert!(resp_ar_str.contains("Accept-Ranges: bytes\r\n"));
-    serial_println!("[httpd]   Accept-Ranges header: OK");
-
-    // Test 31: Rate limiting — first requests should pass.
-    {
-        #[inline(never)]
-        fn case() {
-            // Temporarily enable rate limiting for the test.
-            let was_enabled = RATE_LIMIT_ENABLED.load(Ordering::Relaxed);
-            RATE_LIMIT_ENABLED.store(true, Ordering::Relaxed);
-
-            let test_ip = [192, 168, 99, 99];
-            // First request should always succeed (new IP gets full bucket).
-            assert!(check_rate_limit(test_ip));
-            serial_println!("[httpd]   Rate limit initial allow: OK");
-
-            // Restore previous state.
-            RATE_LIMIT_ENABLED.store(was_enabled, Ordering::Relaxed);
+            // Test 13: FNV-1a hash determinism and uniqueness.
+            let h1 = fnv1a_64(b"hello");
+            let h2 = fnv1a_64(b"hello");
+            let h3 = fnv1a_64(b"world");
+            assert_eq!(h1, h2, "FNV hash must be deterministic");
+            assert_ne!(h1, h3, "Different inputs should produce different hashes");
+            assert_ne!(fnv1a_64(b""), fnv1a_64(b"\0"), "Empty vs null must differ");
+            serial_println!("[httpd]   FNV-1a hash: OK");
         }
         case();
     }
 
-    // Test 32: Rate limiting — disabled returns true.
     {
         #[inline(never)]
         fn case() {
-            RATE_LIMIT_ENABLED.store(false, Ordering::Relaxed);
-            assert!(check_rate_limit([10, 0, 0, 1]));
-            RATE_LIMIT_ENABLED.store(true, Ordering::Relaxed);
-            serial_println!("[httpd]   Rate limit disabled bypass: OK");
-        }
-        case();
-    }
-
-    // Test 33: 429 response format.
-    {
-        #[inline(never)]
-        fn case() {
-            let resp = too_many_requests_response();
-            let resp_str = core::str::from_utf8(&resp).unwrap_or("");
-            assert!(resp_str.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
-            assert!(resp_str.contains("Retry-After: 1\r\n"));
-            serial_println!("[httpd]   429 response format: OK");
-        }
-        case();
-    }
-
-    // Test 34: accepts_gzip helper.
-    {
-        #[inline(never)]
-        fn case() {
-            assert!(accepts_gzip(&Some(String::from("gzip, deflate, br"))));
-            assert!(accepts_gzip(&Some(String::from("gzip"))));
-            assert!(!accepts_gzip(&Some(String::from("deflate, br"))));
-            assert!(!accepts_gzip(&None));
-            serial_println!("[httpd]   accepts_gzip: OK");
-        }
-        case();
-    }
-
-    // Test 35: is_compressible helper.
-    {
-        #[inline(never)]
-        fn case() {
-            assert!(is_compressible("text/html; charset=utf-8"));
-            assert!(is_compressible("text/css"));
-            assert!(is_compressible("application/json"));
-            assert!(is_compressible("application/javascript"));
-            assert!(is_compressible("image/svg+xml"));
-            assert!(!is_compressible("image/png"));
-            assert!(!is_compressible("application/octet-stream"));
-            serial_println!("[httpd]   is_compressible: OK");
-        }
-        case();
-    }
-
-    // Test 36: gzip compression helpers and response building.
-    {
-        #[inline(never)]
-        fn case() {
-            // Use a highly compressible body (1024 bytes of repeated pattern).
-            // This guarantees compression ratio > 2:1, overcoming gzip's 18-byte
-            // header/trailer overhead.
-            let mut body = Vec::with_capacity(1024);
-            for _ in 0..64 {
-                body.extend_from_slice(b"ABCDEFGHIJKLMNOP");
-            }
-
-            let compressed = crate::fs::compress::gzip(&body);
-            let ratio_pct = body
-                .len()
-                .saturating_mul(100)
-                .checked_div(compressed.len().max(1))
-                .unwrap_or(0);
-            serial_println!(
-                "[httpd]   gzip: {}B → {}B ({}% ratio)",
-                body.len(),
-                compressed.len(),
-                ratio_pct
+            // Test 14: ETag generation.
+            let body = b"Hello, World!";
+            let etag1 = etag_for_body(body);
+            let etag2 = etag_for_body(body);
+            let etag3 = etag_for_body(b"Different content");
+            assert_eq!(etag1, etag2, "Same content must produce same ETag");
+            assert_ne!(
+                etag1, etag3,
+                "Different content must produce different ETag"
             );
+            assert!(etag1.starts_with('"'), "ETag must be quoted");
+            assert!(etag1.ends_with('"'), "ETag must be quoted");
+            assert!(
+                etag1.contains("fnv1a-"),
+                "ETag must contain algorithm prefix"
+            );
+            serial_println!("[httpd]   ETag generation: OK");
+        }
+        case();
+    }
 
-            if compressed.len() < body.len() {
-                // Compression worked — verify the response builder uses it.
-                let resp = build_response_gzip(200, "OK", "text/html", &body);
-                // Headers are ASCII, but the gzip body is binary.  Find the
-                // end-of-headers marker and check only the header portion.
-                let header_end = resp
-                    .windows(4)
-                    .position(|w| w == b"\r\n\r\n")
-                    .map(|p| p.saturating_add(4))
-                    .unwrap_or(resp.len());
-                let header_str = core::str::from_utf8(&resp[..header_end]).unwrap_or("");
-                assert!(
-                    header_str.contains("Content-Encoding: gzip\r\n"),
-                    "gzip response should contain Content-Encoding header"
-                );
-                assert!(
-                    header_str.contains("Vary: Accept-Encoding\r\n"),
-                    "gzip response should contain Vary header"
-                );
-                // Verify the compressed response is smaller than uncompressed.
-                let uncompressed = build_response(200, "OK", "text/html", &body);
-                assert!(
-                    resp.len() < uncompressed.len(),
-                    "gzip ({}) should be smaller than plain ({})",
-                    resp.len(),
-                    uncompressed.len()
-                );
-                serial_println!(
-                    "[httpd]   gzip response: OK ({}B vs {}B uncompressed)",
-                    resp.len(),
-                    uncompressed.len()
-                );
-            } else {
-                // Compression didn't help — verify the fallback works.
-                let resp = build_response_gzip(200, "OK", "text/html", &body);
-                assert!(
-                    resp.starts_with(b"HTTP/1.1 200 OK\r\n"),
-                    "fallback response should be valid HTTP"
-                );
-                serial_println!(
-                    "[httpd]   gzip response: OK (fallback, {}B ≥ {}B)",
-                    compressed.len(),
-                    body.len()
-                );
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 15: ETag conditional matching.
+            let body = b"Test content for ETag";
+            let etag = etag_for_body(body);
+            let inm = Some(etag.clone());
+            assert!(etag_matches(&inm, body), "Matching ETag should return true");
+            assert!(
+                !etag_matches(&inm, b"Changed content"),
+                "Changed content should not match"
+            );
+            assert!(
+                !etag_matches(&None, body),
+                "No If-None-Match should not match"
+            );
+            // Comma-separated list (multiple ETags).
+            let multi_inm = Some(format!("\"other\", {}, \"another\"", etag));
+            assert!(
+                etag_matches(&multi_inm, body),
+                "ETag in comma list should match"
+            );
+            serial_println!("[httpd]   ETag conditional matching: OK");
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 16: Response includes ETag header.
+            let resp = build_response(200, "OK", "text/plain", b"ETag test body");
+            let resp_str = core::str::from_utf8(&resp).unwrap_or("");
+            assert!(
+                resp_str.contains("ETag: \"fnv1a-"),
+                "Response must include ETag header"
+            );
+            assert!(
+                resp_str.contains("Cache-Control: no-cache"),
+                "Response must include Cache-Control"
+            );
+            serial_println!("[httpd]   ETag in response: OK");
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 17: 304 Not Modified response format.
+            let etag = etag_for_body(b"some content");
+            let resp304 = not_modified_response(&etag);
+            let resp304_str = core::str::from_utf8(&resp304).unwrap_or("");
+            assert!(resp304_str.starts_with("HTTP/1.1 304 Not Modified\r\n"));
+            assert!(resp304_str.contains(&format!("ETag: {}", etag)));
+            assert!(
+                !resp304_str.contains("Content-Length:"),
+                "304 should not have Content-Length"
+            );
+            serial_println!("[httpd]   304 Not Modified response: OK");
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 18: Request header parsing (If-None-Match).
+            let req = parse_request(
+                b"GET /index.html HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"fnv1a-abc123\"\r\n\r\n",
+            );
+            assert!(req.is_some());
+            let r = req.unwrap();
+            assert_eq!(r.if_none_match.as_deref(), Some("\"fnv1a-abc123\""));
+            serial_println!("[httpd]   If-None-Match header parsing: OK");
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 19: Request statistics tracking.
+            let before = request_count();
+            let _ = process_http_request(b"GET / HTTP/1.1\r\n\r\n");
+            assert!(request_count() > before, "Request counter should increment");
+            serial_println!("[httpd]   Request statistics: OK");
+
+            // Test 20: Range header parsing.
+            // Standard range: bytes=0-99
+            assert_eq!(parse_range("bytes=0-99", 1000), Some((0, 99)));
+            // Open-ended range: bytes=500-
+            assert_eq!(parse_range("bytes=500-", 1000), Some((500, 999)));
+            // Suffix range: bytes=-200 (last 200 bytes)
+            assert_eq!(parse_range("bytes=-200", 1000), Some((800, 999)));
+            // Start beyond file size: invalid.
+            assert_eq!(parse_range("bytes=1000-1500", 1000), None);
+            // End clamped to file size.
+            assert_eq!(parse_range("bytes=900-2000", 1000), Some((900, 999)));
+            // Single byte range.
+            assert_eq!(parse_range("bytes=0-0", 100), Some((0, 0)));
+            // Invalid: no "bytes=" prefix.
+            assert_eq!(parse_range("chars=0-100", 1000), None);
+            // Invalid: multi-range (unsupported).
+            assert_eq!(parse_range("bytes=0-100,200-300", 1000), None);
+            // Invalid: start > end.
+            assert_eq!(parse_range("bytes=500-100", 1000), None);
+            // Empty file with suffix range.
+            assert_eq!(parse_range("bytes=-100", 0), None);
+            serial_println!("[httpd]   Range header parsing: OK");
+
+            // Test 21: 206 Partial Content response.
+            let data = b"Hello, World! This is test content for range requests.";
+            let resp = partial_content_response("text/plain", data, 7, 11, "\"test-etag\"");
+            let resp_str = core::str::from_utf8(&resp).unwrap_or("");
+            assert!(resp_str.starts_with("HTTP/1.1 206 Partial Content\r\n"));
+            assert!(resp_str.contains("Content-Range: bytes 7-11/54\r\n"));
+            assert!(resp_str.contains("Content-Length: 5\r\n"));
+            assert!(resp_str.contains("Accept-Ranges: bytes\r\n"));
+            assert!(resp_str.ends_with("World"));
+            serial_println!("[httpd]   Partial content response: OK");
+
+            // Test 22: 416 Range Not Satisfiable response.
+            let resp416 = range_not_satisfiable(1000);
+            let resp416_str = core::str::from_utf8(&resp416).unwrap_or("");
+            assert!(resp416_str.starts_with("HTTP/1.1 416 Range Not Satisfiable\r\n"));
+            assert!(resp416_str.contains("Content-Range: bytes */1000\r\n"));
+            serial_println!("[httpd]   416 Range Not Satisfiable: OK");
+
+            // Test 23: Range header in request parsing.
+            let req = parse_request(b"GET /bigfile.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=0-1023\r\n\r\n");
+            assert!(req.is_some());
+            let r = req.unwrap();
+            assert_eq!(r.range.as_deref(), Some("bytes=0-1023"));
+            serial_println!("[httpd]   Range header in request: OK");
+
+            // Test 24: extract_status from a 200 response.
+            let resp200 = build_response(200, "OK", "text/plain", b"hi");
+            assert_eq!(extract_status(&resp200), 200);
+            serial_println!("[httpd]   extract_status 200: OK");
+
+            // Test 25: extract_status from a 404 response.
+            let resp404 = error_response(404, "Not Found");
+            assert_eq!(extract_status(&resp404), 404);
+            serial_println!("[httpd]   extract_status 404: OK");
+
+            // Test 26: extract_status from 304 response.
+            let resp304 = not_modified_response("\"abc\"");
+            assert_eq!(extract_status(&resp304), 304);
+            serial_println!("[httpd]   extract_status 304: OK");
+
+            // Test 27: extract_status with empty/malformed input.
+            assert_eq!(extract_status(b""), 0);
+            assert_eq!(extract_status(b"short"), 0);
+            serial_println!("[httpd]   extract_status malformed: OK");
+
+            // Test 28: Access log ring buffer push and recent.
+            {
+                #[inline(never)]
+                fn case() {
+                    let mut log = AccessLog::new();
+                    log.push(AccessLogEntry {
+                        method: String::from("GET"),
+                        path: String::from("/a"),
+                        status: 200,
+                        body_size: 100,
+                        duration_us: 0,
+                    });
+                    log.push(AccessLogEntry {
+                        method: String::from("HEAD"),
+                        path: String::from("/b"),
+                        status: 304,
+                        body_size: 0,
+                        duration_us: 0,
+                    });
+                    let recent = log.recent(10);
+                    assert_eq!(recent.len(), 2);
+                    assert_eq!(recent[0].path, "/a");
+                    assert_eq!(recent[1].path, "/b");
+
+                    // Request only last 1 entry.
+                    let last = log.recent(1);
+                    assert_eq!(last.len(), 1);
+                    assert_eq!(last[0].path, "/b");
+                }
+                case();
+            }
+            serial_println!("[httpd]   Access log ring buffer: OK");
+
+            // Test 29: Access log ring buffer wraps correctly.
+            {
+                #[inline(never)]
+                fn case() {
+                    let mut log = AccessLog::new();
+                    // Fill past capacity to verify wrapping.
+                    for i in 0..ACCESS_LOG_SIZE + 5 {
+                        log.push(AccessLogEntry {
+                            method: String::from("GET"),
+                            path: format!("/{}", i),
+                            status: 200,
+                            body_size: i,
+                            duration_us: 0,
+                        });
+                    }
+                    let recent = log.recent(ACCESS_LOG_SIZE);
+                    assert_eq!(recent.len(), ACCESS_LOG_SIZE);
+                    // Oldest entry should be #5 (indices 0-4 were overwritten).
+                    assert_eq!(recent[0].path, "/5");
+                    // Newest should be ACCESS_LOG_SIZE + 4.
+                    let expected_last = format!("/{}", ACCESS_LOG_SIZE + 4);
+                    assert_eq!(recent[ACCESS_LOG_SIZE - 1].path, expected_last);
+                }
+                case();
+            }
+            serial_println!("[httpd]   Access log wrap: OK");
+
+            // Test 30: Accept-Ranges header in normal responses.
+            let resp_ar = build_response(200, "OK", "text/plain", b"test");
+            let resp_ar_str = core::str::from_utf8(&resp_ar).unwrap_or("");
+            assert!(resp_ar_str.contains("Accept-Ranges: bytes\r\n"));
+            serial_println!("[httpd]   Accept-Ranges header: OK");
+
+            // Test 31: Rate limiting — first requests should pass.
+            {
+                #[inline(never)]
+                fn case() {
+                    // Temporarily enable rate limiting for the test.
+                    let was_enabled = RATE_LIMIT_ENABLED.load(Ordering::Relaxed);
+                    RATE_LIMIT_ENABLED.store(true, Ordering::Relaxed);
+
+                    let test_ip = [192, 168, 99, 99];
+                    // First request should always succeed (new IP gets full bucket).
+                    assert!(check_rate_limit(test_ip));
+                    serial_println!("[httpd]   Rate limit initial allow: OK");
+
+                    // Restore previous state.
+                    RATE_LIMIT_ENABLED.store(was_enabled, Ordering::Relaxed);
+                }
+                case();
+            }
+
+            // Test 32: Rate limiting — disabled returns true.
+            {
+                #[inline(never)]
+                fn case() {
+                    RATE_LIMIT_ENABLED.store(false, Ordering::Relaxed);
+                    assert!(check_rate_limit([10, 0, 0, 1]));
+                    RATE_LIMIT_ENABLED.store(true, Ordering::Relaxed);
+                    serial_println!("[httpd]   Rate limit disabled bypass: OK");
+                }
+                case();
+            }
+
+            // Test 33: 429 response format.
+            {
+                #[inline(never)]
+                fn case() {
+                    let resp = too_many_requests_response();
+                    let resp_str = core::str::from_utf8(&resp).unwrap_or("");
+                    assert!(resp_str.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
+                    assert!(resp_str.contains("Retry-After: 1\r\n"));
+                    serial_println!("[httpd]   429 response format: OK");
+                }
+                case();
+            }
+
+            // Test 34: accepts_gzip helper.
+            {
+                #[inline(never)]
+                fn case() {
+                    assert!(accepts_gzip(&Some(String::from("gzip, deflate, br"))));
+                    assert!(accepts_gzip(&Some(String::from("gzip"))));
+                    assert!(!accepts_gzip(&Some(String::from("deflate, br"))));
+                    assert!(!accepts_gzip(&None));
+                    serial_println!("[httpd]   accepts_gzip: OK");
+                }
+                case();
+            }
+
+            // Test 35: is_compressible helper.
+            {
+                #[inline(never)]
+                fn case() {
+                    assert!(is_compressible("text/html; charset=utf-8"));
+                    assert!(is_compressible("text/css"));
+                    assert!(is_compressible("application/json"));
+                    assert!(is_compressible("application/javascript"));
+                    assert!(is_compressible("image/svg+xml"));
+                    assert!(!is_compressible("image/png"));
+                    assert!(!is_compressible("application/octet-stream"));
+                    serial_println!("[httpd]   is_compressible: OK");
+                }
+                case();
+            }
+
+            // Test 36: gzip compression helpers and response building.
+            {
+                #[inline(never)]
+                fn case() {
+                    // Use a highly compressible body (1024 bytes of repeated pattern).
+                    // This guarantees compression ratio > 2:1, overcoming gzip's 18-byte
+                    // header/trailer overhead.
+                    let mut body = Vec::with_capacity(1024);
+                    for _ in 0..64 {
+                        body.extend_from_slice(b"ABCDEFGHIJKLMNOP");
+                    }
+
+                    let compressed = crate::fs::compress::gzip(&body);
+                    let ratio_pct = body
+                        .len()
+                        .saturating_mul(100)
+                        .checked_div(compressed.len().max(1))
+                        .unwrap_or(0);
+                    serial_println!(
+                        "[httpd]   gzip: {}B → {}B ({}% ratio)",
+                        body.len(),
+                        compressed.len(),
+                        ratio_pct
+                    );
+
+                    if compressed.len() < body.len() {
+                        // Compression worked — verify the response builder uses it.
+                        let resp = build_response_gzip(200, "OK", "text/html", &body);
+                        // Headers are ASCII, but the gzip body is binary.  Find the
+                        // end-of-headers marker and check only the header portion.
+                        let header_end = resp
+                            .windows(4)
+                            .position(|w| w == b"\r\n\r\n")
+                            .map(|p| p.saturating_add(4))
+                            .unwrap_or(resp.len());
+                        let header_str = core::str::from_utf8(&resp[..header_end]).unwrap_or("");
+                        assert!(
+                            header_str.contains("Content-Encoding: gzip\r\n"),
+                            "gzip response should contain Content-Encoding header"
+                        );
+                        assert!(
+                            header_str.contains("Vary: Accept-Encoding\r\n"),
+                            "gzip response should contain Vary header"
+                        );
+                        // Verify the compressed response is smaller than uncompressed.
+                        let uncompressed = build_response(200, "OK", "text/html", &body);
+                        assert!(
+                            resp.len() < uncompressed.len(),
+                            "gzip ({}) should be smaller than plain ({})",
+                            resp.len(),
+                            uncompressed.len()
+                        );
+                        serial_println!(
+                            "[httpd]   gzip response: OK ({}B vs {}B uncompressed)",
+                            resp.len(),
+                            uncompressed.len()
+                        );
+                    } else {
+                        // Compression didn't help — verify the fallback works.
+                        let resp = build_response_gzip(200, "OK", "text/html", &body);
+                        assert!(
+                            resp.starts_with(b"HTTP/1.1 200 OK\r\n"),
+                            "fallback response should be valid HTTP"
+                        );
+                        serial_println!(
+                            "[httpd]   gzip response: OK (fallback, {}B ≥ {}B)",
+                            compressed.len(),
+                            body.len()
+                        );
+                    }
+                }
+                case();
             }
         }
         case();

@@ -2559,6 +2559,14 @@ def main(argv=None):
                              "whoever ran it, not a measurement. 'loaded' "
                              "marks a deliberately-poisoned control run, which "
                              "is then excluded from every baseline.")
+    parser.add_argument("--commit", default="",
+                        help="commit the measured kernel was built from. Pass "
+                             "the value read BEFORE the build: this tool runs "
+                             "after a run long enough for HEAD to have moved "
+                             "(default: ask git now).")
+    parser.add_argument("--dirty", action="store_true",
+                        help="the tree had uncommitted changes at build time, "
+                             "so --commit names an ancestor of what ran.")
     args = parser.parse_args(argv)
 
     if args.list:
@@ -2594,7 +2602,14 @@ def main(argv=None):
     # *next* run can find this one. Two `git_commit()` calls could disagree if
     # HEAD moved mid-run, and a record filed under a different commit than the
     # one it was judged as would corrupt every later replication verdict.
-    commit = git_commit()
+    #
+    # Reading it once is necessary but not sufficient: this runs at the *end* of
+    # a boot that took ten to twenty minutes, so a single reading here can still
+    # name a commit made while QEMU was running rather than the one that was
+    # built. `--commit` is boot-test.sh's answer -- it reads HEAD before the
+    # build and hands that value down -- and it wins whenever it is given. The
+    # git fallback keeps a standalone invocation working.
+    commit = args.commit or git_commit()
     regressed = report(previous, current_entries, args.threshold,
                        records=records, host=host, profile=args.profile,
                        commit=commit)
@@ -2638,6 +2653,11 @@ def main(argv=None):
             # record_profile() reads as "debug". See LEGACY_PROFILE.
             "profile": args.profile,
             "commit": commit,
+            # True when the tree carried uncommitted changes at build time, so
+            # `commit` names the nearest ancestor rather than what was measured.
+            # Stored so a later comparison can qualify itself instead of
+            # treating the hash as if it identified the code.
+            "dirty": bool(args.dirty),
             # The target is static and already lives in baselines.toml, so
             # only the measured number goes here.
             "entries": {n: v[0] for n, v in current_entries.items()},

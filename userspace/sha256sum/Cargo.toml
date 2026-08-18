@@ -3,4 +3,9 @@ name = "sha256sum"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS cryptographic checksum utilities"
+# `sha2` for SHA-256. This crate carried its own, which is the least defensible
+# place for a private copy: the whole purpose of a checksum utility is to
+# produce a digest that some other program, on some other machine, compares
+# against its own. SHA-1 and SHA-512 stay local -- `sha2` provides only SHA-256.
 [dependencies]
+sha2 = { path = "../../sha2" }

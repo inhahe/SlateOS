@@ -3409,6 +3409,557 @@ fn build_one_stage(
     res
 }
 
+/// The state one build stage accumulates as its instructions execute.
+///
+/// # Why the instructions are methods rather than `match` arms
+///
+/// All seventeen Dockerfile instructions used to be arms of a single `match`
+/// inside [`build_one_stage_inner`].  At `opt-level = 0` LLVM gives every
+/// temporary its own stack slot and reuses none of them, so that one frame
+/// charged for *every* arm's locals simultaneously even though exactly one arm
+/// runs per instruction -- 15 000 bytes, against a 32 KiB kernel task stack,
+/// and the second-largest frame in the kernel.  `COPY`/`ADD` alone accounts for
+/// a third of it and a `Dockerfile` without a `COPY` paid for it anyway.
+///
+/// As `#[inline(never)]` methods each instruction gets a frame that is released
+/// before the next instruction begins, so a stage costs the largest single
+/// instruction instead of the sum of all of them.  The attribute is load-bearing
+/// rather than decorative: without it a future `-O` build could inline them all
+/// back into the loop and silently restore the original frame.
+///
+/// The borrowed fields are the build inputs the instructions read; they point
+/// into the caller's arguments, hence the lifetime.
+struct StageBuild<'a> {
+    /// The image under construction: config, layers, history.
+    spec: ImageSpec,
+    /// Build-time variables: global ARGs seed each stage, then ARG/ENV extend.
+    vars: Vec<(String, String)>,
+    /// Base-image layer blobs carried forward verbatim (FROM <dir>/<stage>).
+    base_layer_descs: Vec<Descriptor>,
+    /// The base image's uncompressed layer digests, 1:1 with `base_layer_descs`.
+    base_diff_ids: Vec<String>,
+    /// Directory the base image was loaded from, if this stage has one.
+    base_dir: Option<String>,
+    /// Whether a `FROM` has been seen; every other instruction requires it.
+    from_seen: bool,
+    /// Memoised (image_dir -> extracted rootfs dir) for `COPY --from`.
+    rootfs_cache: Vec<(String, String)>,
+    /// Monotone index for `RUN` scratch dirs (`{dest}.run{N}.{lower,upper,merge}`).
+    run_no: usize,
+    /// The build context directory that `COPY`/`ADD` read from.
+    context_dir: &'a str,
+    /// `.dockerignore` rules, applied to context copies only.
+    ignore: &'a [(bool, String)],
+    /// Stages already built, for `FROM <stage>` and `COPY --from=<stage>`.
+    prior: &'a [StageBuilt],
+    /// The OCI layout directory this stage writes its blobs into.
+    dest: &'a str,
+}
+
+impl<'a> StageBuild<'a> {
+    /// Begin a stage whose variables are seeded with the Dockerfile's global
+    /// (pre-`FROM`) `ARG`s.
+    fn new(
+        context_dir: &'a str,
+        ignore: &'a [(bool, String)],
+        global_args: &[(String, String)],
+        prior: &'a [StageBuilt],
+        dest: &'a str,
+    ) -> Self {
+        Self {
+            spec: ImageSpec::new(),
+            vars: global_args.to_vec(),
+            base_layer_descs: Vec::new(),
+            base_diff_ids: Vec::new(),
+            base_dir: None,
+            from_seen: false,
+            rootfs_cache: Vec::new(),
+            run_no: 0,
+            context_dir,
+            ignore,
+            prior,
+            dest,
+        }
+    }
+
+    /// `FROM <ref>` — adopt a base image's config, layers and history, or start
+    /// empty for the reserved reference `scratch`.
+    #[inline(never)]
+    fn instr_from(&mut self, line: usize, rest_raw: &str) -> Result<(), BuildError> {
+        let expanded = expand_vars(rest_raw, &self.vars);
+        let base_ref = expanded.split_whitespace().next().unwrap_or("");
+        if base_ref.is_empty() {
+            return Err(BuildError::Parse {
+                line,
+                msg: String::from("FROM requires an image reference"),
+            });
+        }
+        if base_ref != "scratch" {
+            // A prior-stage reference resolves to that stage's built image dir;
+            // otherwise resolve as either an on-disk OCI layout directory or a
+            // named-store reference (`name:tag`).
+            let (base_path, base) = match resolve_stage_dir(base_ref, self.prior) {
+                Some(d) => (String::from(d), load_image(d).map_err(BuildError::Kernel)?),
+                None => resolve_image_source(base_ref).map_err(BuildError::Kernel)?,
+            };
+            self.spec.architecture = base.config.architecture.clone();
+            self.spec.os = base.config.os.clone();
+            self.spec.env = base.config.env.clone();
+            self.spec.cmd = base.config.cmd.clone();
+            self.spec.entrypoint = base.config.entrypoint.clone();
+            self.spec.working_dir = base.config.working_dir.clone();
+            self.spec.user = base.config.user.clone();
+            self.spec.exposed_ports = base.config.exposed_ports.clone();
+            self.spec.labels = base.config.labels.clone();
+            // Volumes/StopSignal/Shell are inherited config; ONBUILD triggers
+            // are NOT (Docker fires + clears them on build).
+            self.spec.volumes = base.config.volumes.clone();
+            self.spec.stop_signal = base.config.stop_signal.clone();
+            self.spec.shell = base.config.shell.clone();
+            // Healthcheck is inherited config (a child may override it with its
+            // own HEALTHCHECK or disable via HEALTHCHECK NONE).
+            self.spec.healthcheck = base.config.healthcheck.clone();
+            // Seed vars with the inherited ENV so `${VAR}` sees them.
+            for e in &base.config.env {
+                if let Some((k, v)) = e.split_once('=') {
+                    self.vars.push((String::from(k), String::from(v)));
+                }
+            }
+            self.base_layer_descs = base.manifest.layers.clone();
+            self.base_diff_ids = base.config.diff_ids.clone();
+            // Carry the base image's build history forward so the non-empty
+            // entries stay 1:1 with the inherited layers.
+            self.spec.history = base.config.history.clone();
+            if self.base_layer_descs.len() != self.base_diff_ids.len() {
+                return Err(BuildError::Parse {
+                    line,
+                    msg: String::from("base image layer/diff_id count mismatch"),
+                });
+            }
+            self.base_dir = Some(base_path);
+        }
+        self.from_seen = true;
+        Ok(())
+    }
+
+    /// `RUN <cmd>` — execute inside the in-progress image and commit the
+    /// filesystem changes as a new layer (§58/Q17).
+    #[inline(never)]
+    fn instr_run(&mut self, line: usize, rest_raw: &str) -> Result<(), BuildError> {
+        let expanded = expand_vars(rest_raw, &self.vars);
+        let argv = parse_cmd_form(&expanded, &self.spec.shell);
+        if argv.is_empty() {
+            return Err(BuildError::Parse {
+                line,
+                msg: String::from("RUN requires a command"),
+            });
+        }
+        let layer = exec_build_run(
+            self.run_no,
+            line,
+            self.dest,
+            &argv,
+            &self.spec.env,
+            &self.spec.working_dir,
+            self.base_dir.as_deref(),
+            &self.base_layer_descs,
+            &self.spec.layers,
+        )?;
+        self.run_no = self.run_no.saturating_add(1);
+        // A `RUN` always produces a layer (even an empty one), matching Docker
+        // — this keeps the `history[]` empty_layer flags in step.
+        self.spec.layers.push(layer);
+        Ok(())
+    }
+
+    /// `CMD` — the default arguments, in JSON exec or shell form.
+    #[inline(never)]
+    fn instr_cmd(&mut self, rest_raw: &str) {
+        self.spec.cmd = parse_cmd_form(rest_raw, &self.spec.shell);
+    }
+
+    /// `ENTRYPOINT` — the executable `CMD` supplies arguments to.
+    #[inline(never)]
+    fn instr_entrypoint(&mut self, rest_raw: &str) {
+        self.spec.entrypoint = parse_cmd_form(rest_raw, &self.spec.shell);
+    }
+
+    /// `ENV` — in either `KEY=VALUE ...` or `KEY the rest of the line` form.
+    /// Sets the image environment *and* the build-time variable set.
+    #[inline(never)]
+    fn instr_env(&mut self, line: usize, rest_raw: &str) -> Result<(), BuildError> {
+        let expanded = expand_vars(rest_raw, &self.vars);
+        let toks = tokenize(&expanded);
+        if toks.first().is_some_and(|t| t.contains('=')) {
+            // key=value [key2=value2 ...]
+            for tok in &toks {
+                if let Some((k, v)) = tok.split_once('=') {
+                    set_env(&mut self.spec.env, k, v);
+                    self.vars.push((String::from(k), String::from(v)));
+                }
+            }
+        } else if let Some(key) = toks.first() {
+            // ENV KEY the rest of the line
+            let value = rest_after_first_token(&expanded);
+            set_env(&mut self.spec.env, key, &value);
+            self.vars.push((key.clone(), value));
+        } else {
+            return Err(BuildError::Parse {
+                line,
+                msg: String::from("ENV requires at least a key"),
+            });
+        }
+        Ok(())
+    }
+
+    /// `LABEL key=value ...` — image metadata.
+    #[inline(never)]
+    fn instr_label(&mut self, line: usize, rest_raw: &str) -> Result<(), BuildError> {
+        let expanded = expand_vars(rest_raw, &self.vars);
+        let toks = tokenize(&expanded);
+        if toks.is_empty() {
+            return Err(BuildError::Parse {
+                line,
+                msg: String::from("LABEL requires at least one key=value"),
+            });
+        }
+        for tok in &toks {
+            if let Some((k, v)) = tok.split_once('=') {
+                set_label(&mut self.spec.labels, k, v);
+            } else {
+                return Err(BuildError::Parse {
+                    line,
+                    msg: format!("LABEL entry is not key=value: {tok}"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// `WORKDIR <path>` — absolute, or relative to the current working
+    /// directory, and materialised in the image as Docker does.
+    #[inline(never)]
+    fn instr_workdir(&mut self, rest_raw: &str) {
+        let expanded = expand_vars(rest_raw, &self.vars);
+        let w = expanded.trim();
+        if w.starts_with('/') {
+            self.spec.working_dir = String::from(w);
+        } else if self.spec.working_dir.is_empty() {
+            self.spec.working_dir = format!("/{w}");
+        } else {
+            self.spec.working_dir =
+                format!("{}/{}", self.spec.working_dir.trim_end_matches('/'), w);
+        }
+        // Docker creates the working directory in the image filesystem (mode
+        // 0o755, root-owned) if it does not already exist.  Emit a layer that
+        // materialises it; overlay semantics make this a no-op when the
+        // directory already exists in a lower layer.
+        let dir_rel = archive_norm(&self.spec.working_dir);
+        if !dir_rel.is_empty() {
+            self.spec.layers.push(BuildLayer {
+                dirs: alloc::vec![LayerDir {
+                    path: dir_rel,
+                    mode: 0o755,
+                }],
+                files: Vec::new(),
+            });
+        }
+    }
+
+    /// `USER <name|uid>` — the identity subsequent `RUN`s and the container run as.
+    #[inline(never)]
+    fn instr_user(&mut self, rest_raw: &str) {
+        let expanded = expand_vars(rest_raw, &self.vars);
+        self.spec.user = String::from(expanded.trim());
+    }
+
+    /// `EXPOSE <port>[/proto] ...` — documented listening ports, `tcp` by default.
+    #[inline(never)]
+    fn instr_expose(&mut self, rest_raw: &str) {
+        let expanded = expand_vars(rest_raw, &self.vars);
+        for tok in expanded.split_whitespace() {
+            let port = if tok.contains('/') {
+                String::from(tok)
+            } else {
+                format!("{tok}/tcp")
+            };
+            if !self.spec.exposed_ports.contains(&port) {
+                self.spec.exposed_ports.push(port);
+            }
+        }
+    }
+
+    /// `COPY`/`ADD` — the one instruction that reads the build context, and the
+    /// largest of the seventeen: flag parsing, glob expansion, `--from` rootfs
+    /// resolution and (for `ADD`) tar auto-extraction.
+    #[inline(never)]
+    fn instr_copy(
+        &mut self,
+        line: usize,
+        rest_raw: &str,
+        is_add: bool,
+        scratch: &mut Vec<String>,
+    ) -> Result<(), BuildError> {
+        use crate::fs::Vfs;
+
+        let expanded = expand_vars(rest_raw, &self.vars);
+        let mut toks = tokenize(&expanded);
+        // Detect `--from=<ref>` *before* dropping flag tokens: it switches the
+        // copy source from the build context to a prior stage's (or an external
+        // image's) assembled rootfs.
+        let from_ref: Option<String> = toks
+            .iter()
+            .find_map(|t| t.strip_prefix("--from=").map(String::from));
+        // `--chmod=<octal>` overrides the copied files' permission bits.
+        let chmod: Option<u32> = match toks.iter().find_map(|t| t.strip_prefix("--chmod=")) {
+            Some(m) => match u32::from_str_radix(m.trim_start_matches("0o"), 8) {
+                Ok(v) => Some(v),
+                Err(_) => {
+                    return Err(BuildError::Parse {
+                        line,
+                        msg: format!("COPY/ADD --chmod is not a valid octal mode: {m}"),
+                    });
+                }
+            },
+            None => None,
+        };
+        // `--chown=<uid>[:<gid>]` sets the owner (numeric only — name resolution
+        // needs the stage's /etc/passwd, unsupported).  A bare uid uses that
+        // value for the gid too, matching Docker.
+        let chown: Option<(u32, u32)> = match toks.iter().find_map(|t| t.strip_prefix("--chown=")) {
+            Some(owner) => {
+                let (us, gs) = match owner.split_once(':') {
+                    Some((u, g)) => (u, g),
+                    None => (owner, owner),
+                };
+                match (us.parse::<u32>(), gs.parse::<u32>()) {
+                    (Ok(u), Ok(g)) => Some((u, g)),
+                    _ => {
+                        return Err(BuildError::Parse {
+                            line,
+                            msg: format!(
+                                "COPY/ADD --chown must be numeric uid[:gid] (name resolution unsupported): {owner}"
+                            ),
+                        });
+                    }
+                }
+            }
+            None => None,
+        };
+        // Drop leading flag tokens (e.g. --chown=, --chmod=, --from=).
+        toks.retain(|t| !t.starts_with("--"));
+        if toks.len() < 2 {
+            return Err(BuildError::Parse {
+                line,
+                msg: String::from("COPY/ADD needs at least one source and a destination"),
+            });
+        }
+        // A destination that does not start with `/` is interpreted relative to
+        // the current WORKDIR (Docker semantics); an unset WORKDIR defaults to
+        // root.  The trailing slash (dir marker) is preserved by the join.
+        let dest_raw = toks.last().cloned().unwrap_or_default();
+        let dest_path = if dest_raw.starts_with('/') {
+            dest_raw
+        } else {
+            let wd = if self.spec.working_dir.is_empty() {
+                "/"
+            } else {
+                self.spec.working_dir.as_str()
+            };
+            format!("{}/{}", wd.trim_end_matches('/'), dest_raw)
+        };
+        let src_count = toks.len().saturating_sub(1);
+        let mut files: Vec<LayerFile> = Vec::new();
+        // For `--from`, copy from the referenced rootfs with no `.dockerignore`
+        // filtering (that only applies to the context).
+        let empty_ignore: [(bool, String); 0] = [];
+        let (src_dir, eff_ignore): (String, &[(bool, String)]) = match &from_ref {
+            Some(r) => (
+                resolve_from_rootfs(r, self.prior, &mut self.rootfs_cache, scratch, self.dest)?,
+                &empty_ignore,
+            ),
+            None => (String::from(self.context_dir), self.ignore),
+        };
+        // Expand any wildcard sources against the source tree (Docker
+        // `filepath.Match`); a literal source passes through unchanged.  A
+        // wildcard that matches nothing is an error (missing source).
+        let mut effective_srcs: Vec<PathBuf> = Vec::new();
+        let src_root = Path::new(src_dir.as_str());
+        for src in toks.iter().take(src_count) {
+            if has_glob_meta(src) {
+                let matches = expand_glob(src_root, Path::new(src.as_str()));
+                if matches.is_empty() {
+                    return Err(BuildError::CopySourceMissing { src: src.clone() });
+                }
+                effective_srcs.extend(matches);
+            } else {
+                effective_srcs.push(PathBuf::from(src.as_str()));
+            }
+        }
+        // `single` (rename-to-dest semantics) is keyed off the *expanded* source
+        // count: a wildcard matching several files forces the dest to be treated
+        // as a directory.
+        let single = effective_srcs.len() == 1;
+        // ADD (but not COPY) auto-extracts a local tar archive (plain or gzip)
+        // into the destination directory — a `--from` reference disables this
+        // (Docker treats it as a plain copy).
+        let add_extract = is_add && from_ref.is_none();
+        let dest_target = Path::new(dest_path.as_str());
+        for src in &effective_srcs {
+            if add_extract {
+                let full = normalize_path_join(src_root, src);
+                if let Ok(bytes) = Vfs::read_file(&full) {
+                    if let Some(tar) = as_tar_bytes(&bytes) {
+                        add_tar_into(&tar, dest_target, chmod, chown, &mut files, line)?;
+                        continue;
+                    }
+                }
+            }
+            collect_copy_src(
+                src_root,
+                src,
+                dest_target,
+                single,
+                eff_ignore,
+                chmod,
+                chown,
+                &mut files,
+                line,
+            )?;
+        }
+        self.spec.layers.push(BuildLayer {
+            dirs: Vec::new(),
+            files,
+        });
+        Ok(())
+    }
+
+    /// `VOLUME` — mount points the runtime should back with anonymous volumes.
+    #[inline(never)]
+    fn instr_volume(&mut self, line: usize, rest_raw: &str) -> Result<(), BuildError> {
+        let expanded = expand_vars(rest_raw, &self.vars);
+        // Accept both the JSON exec form `["/a","/b"]` and the
+        // whitespace-separated shell form `VOLUME /a /b`.
+        let paths = parse_json_str_array(&expanded).unwrap_or_else(|| tokenize(&expanded));
+        if paths.is_empty() {
+            return Err(BuildError::Parse {
+                line,
+                msg: String::from("VOLUME requires at least one path"),
+            });
+        }
+        for p in paths {
+            if !self.spec.volumes.contains(&p) {
+                self.spec.volumes.push(p);
+            }
+        }
+        Ok(())
+    }
+
+    /// `STOPSIGNAL` — the signal `docker stop` sends before the kill timeout.
+    #[inline(never)]
+    fn instr_stopsignal(&mut self, line: usize, rest_raw: &str) -> Result<(), BuildError> {
+        let expanded = expand_vars(rest_raw, &self.vars);
+        let sig = expanded.trim();
+        if sig.is_empty() {
+            return Err(BuildError::Parse {
+                line,
+                msg: String::from("STOPSIGNAL requires a signal"),
+            });
+        }
+        self.spec.stop_signal = String::from(sig);
+        Ok(())
+    }
+
+    /// `SHELL` — the argv prefix shell-form `RUN`/`CMD`/`ENTRYPOINT` expand to.
+    #[inline(never)]
+    fn instr_shell(&mut self, line: usize, rest_raw: &str) -> Result<(), BuildError> {
+        // Docker requires SHELL in JSON exec form.
+        let expanded = expand_vars(rest_raw, &self.vars);
+        match parse_json_str_array(&expanded) {
+            Some(sh) if !sh.is_empty() => self.spec.shell = sh,
+            _ => {
+                return Err(BuildError::Parse {
+                    line,
+                    msg: String::from("SHELL requires a JSON array, e.g. [\"/bin/sh\",\"-c\"]"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// `ONBUILD` — an instruction stored verbatim, to be executed by a later
+    /// build that uses this image as a base rather than now.
+    #[inline(never)]
+    fn instr_onbuild(&mut self, line: usize, rest_raw: &str) -> Result<(), BuildError> {
+        let trigger = rest_raw.trim();
+        if trigger.is_empty() {
+            return Err(BuildError::Parse {
+                line,
+                msg: String::from("ONBUILD requires an instruction"),
+            });
+        }
+        self.spec.onbuild.push(String::from(trigger));
+        Ok(())
+    }
+
+    /// `HEALTHCHECK` — the container liveness probe.  Stored in the image config
+    /// so the runtime health monitor (`container::start_health_monitor` /
+    /// `health_tick`) picks it up when the image is run.
+    #[inline(never)]
+    fn instr_healthcheck(&mut self, line: usize, rest_raw: &str) -> Result<(), BuildError> {
+        let expanded = expand_vars(rest_raw, &self.vars);
+        let hc = parse_healthcheck(&expanded).map_err(|msg| BuildError::Parse { line, msg })?;
+        self.spec.healthcheck = Some(hc);
+        Ok(())
+    }
+
+    /// `MAINTAINER` — deprecated; recorded as the conventional label.
+    #[inline(never)]
+    fn instr_maintainer(&mut self, rest_raw: &str) {
+        let expanded = expand_vars(rest_raw, &self.vars);
+        set_label(&mut self.spec.labels, "maintainer", expanded.trim());
+    }
+
+    /// Execute one instruction, dispatching on its (upper-cased) keyword.
+    ///
+    /// Kept separate from the loop in [`build_one_stage_inner`] so that the
+    /// dispatch reads as a table: every arm is one call, and everything an
+    /// instruction needs is either in `self` or passed here.
+    fn exec_instr(
+        &mut self,
+        instr_up: &str,
+        line: usize,
+        rest_raw: &str,
+        scratch: &mut Vec<String>,
+    ) -> Result<(), BuildError> {
+        match instr_up {
+            "FROM" => self.instr_from(line, rest_raw)?,
+            "RUN" => self.instr_run(line, rest_raw)?,
+            "CMD" => self.instr_cmd(rest_raw),
+            "ENTRYPOINT" => self.instr_entrypoint(rest_raw),
+            "ENV" => self.instr_env(line, rest_raw)?,
+            "LABEL" => self.instr_label(line, rest_raw)?,
+            "WORKDIR" => self.instr_workdir(rest_raw),
+            "USER" => self.instr_user(rest_raw),
+            "EXPOSE" => self.instr_expose(rest_raw),
+            "COPY" | "ADD" => self.instr_copy(line, rest_raw, instr_up == "ADD", scratch)?,
+            "VOLUME" => self.instr_volume(line, rest_raw)?,
+            "STOPSIGNAL" => self.instr_stopsignal(line, rest_raw)?,
+            "SHELL" => self.instr_shell(line, rest_raw)?,
+            "ONBUILD" => self.instr_onbuild(line, rest_raw)?,
+            "HEALTHCHECK" => self.instr_healthcheck(line, rest_raw)?,
+            "MAINTAINER" => self.instr_maintainer(rest_raw),
+            other => {
+                return Err(BuildError::Parse {
+                    line,
+                    msg: format!("unsupported instruction: {other}"),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_one_stage_inner(
     stage: &StageSpec,
@@ -3422,18 +3973,7 @@ fn build_one_stage_inner(
 ) -> Result<Descriptor, BuildError> {
     use crate::fs::Vfs;
 
-    let mut spec = ImageSpec::new();
-    // Build-time variables: global ARGs seed each stage, then ARG/ENV extend.
-    let mut vars: Vec<(String, String)> = global_args.to_vec();
-    // Base-image layer blobs carried forward verbatim (FROM <dir>/<stage>).
-    let mut base_layer_descs: Vec<Descriptor> = Vec::new();
-    let mut base_diff_ids: Vec<String> = Vec::new();
-    let mut base_dir: Option<String> = None;
-    let mut from_seen = false;
-    // Memoised (image_dir -> extracted rootfs dir) for `COPY --from`.
-    let mut rootfs_cache: Vec<(String, String)> = Vec::new();
-    // Monotone index for `RUN` scratch dirs (`{dest}.run{N}.{lower,upper,merge}`).
-    let mut run_no: usize = 0;
+    let mut sb = StageBuild::new(context_dir, ignore, global_args, prior, dest);
 
     for (line, logical) in stage.instrs {
         let line = *line;
@@ -3445,11 +3985,11 @@ fn build_one_stage_inner(
 
         // ARG may legally precede FROM (a "global" build arg).
         if instr_up == "ARG" {
-            apply_arg(rest_raw, &mut vars, build_args);
+            apply_arg(rest_raw, &mut sb.vars, build_args);
             continue;
         }
 
-        if !from_seen && instr_up != "FROM" {
+        if !sb.from_seen && instr_up != "FROM" {
             return Err(BuildError::MissingFrom);
         }
 
@@ -3457,416 +3997,30 @@ fn build_one_stage_inner(
         // layer" iff it grew this count (COPY/ADD always do; WORKDIR does
         // unless it resolves to `/`).  This keeps the OCI `history[]`
         // `empty_layer` flags exactly in step with the real layer count.
-        let layers_before = spec.layers.len();
+        let layers_before = sb.spec.layers.len();
 
-        match instr_up.as_str() {
-            "FROM" => {
-                let expanded = expand_vars(rest_raw, &vars);
-                let base_ref = expanded.split_whitespace().next().unwrap_or("");
-                if base_ref.is_empty() {
-                    return Err(BuildError::Parse {
-                        line,
-                        msg: String::from("FROM requires an image reference"),
-                    });
-                }
-                if base_ref != "scratch" {
-                    // A prior-stage reference resolves to that stage's built
-                    // image dir; otherwise resolve as either an on-disk OCI
-                    // layout directory or a named-store reference (`name:tag`).
-                    let (base_path, base) = match resolve_stage_dir(base_ref, prior) {
-                        Some(d) => (String::from(d), load_image(d).map_err(BuildError::Kernel)?),
-                        None => resolve_image_source(base_ref).map_err(BuildError::Kernel)?,
-                    };
-                    spec.architecture = base.config.architecture.clone();
-                    spec.os = base.config.os.clone();
-                    spec.env = base.config.env.clone();
-                    spec.cmd = base.config.cmd.clone();
-                    spec.entrypoint = base.config.entrypoint.clone();
-                    spec.working_dir = base.config.working_dir.clone();
-                    spec.user = base.config.user.clone();
-                    spec.exposed_ports = base.config.exposed_ports.clone();
-                    spec.labels = base.config.labels.clone();
-                    // Volumes/StopSignal/Shell are inherited config; ONBUILD
-                    // triggers are NOT (Docker fires + clears them on build).
-                    spec.volumes = base.config.volumes.clone();
-                    spec.stop_signal = base.config.stop_signal.clone();
-                    spec.shell = base.config.shell.clone();
-                    // Healthcheck is inherited config (a child may override it
-                    // with its own HEALTHCHECK or disable via HEALTHCHECK NONE).
-                    spec.healthcheck = base.config.healthcheck.clone();
-                    // Seed vars with the inherited ENV so `${VAR}` sees them.
-                    for e in &base.config.env {
-                        if let Some((k, v)) = e.split_once('=') {
-                            vars.push((String::from(k), String::from(v)));
-                        }
-                    }
-                    base_layer_descs = base.manifest.layers.clone();
-                    base_diff_ids = base.config.diff_ids.clone();
-                    // Carry the base image's build history forward so the
-                    // non-empty entries stay 1:1 with the inherited layers.
-                    spec.history = base.config.history.clone();
-                    if base_layer_descs.len() != base_diff_ids.len() {
-                        return Err(BuildError::Parse {
-                            line,
-                            msg: String::from("base image layer/diff_id count mismatch"),
-                        });
-                    }
-                    base_dir = Some(base_path);
-                }
-                from_seen = true;
-            }
-            "RUN" => {
-                // Docker `RUN` runs a command inside the in-progress image and
-                // commits its filesystem changes as a new layer (§58/Q17).
-                let expanded = expand_vars(rest_raw, &vars);
-                let argv = parse_cmd_form(&expanded, &spec.shell);
-                if argv.is_empty() {
-                    return Err(BuildError::Parse {
-                        line,
-                        msg: String::from("RUN requires a command"),
-                    });
-                }
-                let layer = exec_build_run(
-                    run_no,
-                    line,
-                    dest,
-                    &argv,
-                    &spec.env,
-                    &spec.working_dir,
-                    base_dir.as_deref(),
-                    &base_layer_descs,
-                    &spec.layers,
-                )?;
-                run_no = run_no.saturating_add(1);
-                // A `RUN` always produces a layer (even an empty one), matching
-                // Docker — this keeps the `history[]` empty_layer flags in step.
-                spec.layers.push(layer);
-            }
-            "CMD" => {
-                spec.cmd = parse_cmd_form(rest_raw, &spec.shell);
-            }
-            "ENTRYPOINT" => {
-                spec.entrypoint = parse_cmd_form(rest_raw, &spec.shell);
-            }
-            "ENV" => {
-                let expanded = expand_vars(rest_raw, &vars);
-                let toks = tokenize(&expanded);
-                if toks.first().is_some_and(|t| t.contains('=')) {
-                    // key=value [key2=value2 ...]
-                    for tok in &toks {
-                        if let Some((k, v)) = tok.split_once('=') {
-                            set_env(&mut spec.env, k, v);
-                            vars.push((String::from(k), String::from(v)));
-                        }
-                    }
-                } else if let Some(key) = toks.first() {
-                    // ENV KEY the rest of the line
-                    let value = rest_after_first_token(&expanded);
-                    set_env(&mut spec.env, key, &value);
-                    vars.push((key.clone(), value));
-                } else {
-                    return Err(BuildError::Parse {
-                        line,
-                        msg: String::from("ENV requires at least a key"),
-                    });
-                }
-            }
-            "LABEL" => {
-                let expanded = expand_vars(rest_raw, &vars);
-                let toks = tokenize(&expanded);
-                if toks.is_empty() {
-                    return Err(BuildError::Parse {
-                        line,
-                        msg: String::from("LABEL requires at least one key=value"),
-                    });
-                }
-                for tok in &toks {
-                    if let Some((k, v)) = tok.split_once('=') {
-                        set_label(&mut spec.labels, k, v);
-                    } else {
-                        return Err(BuildError::Parse {
-                            line,
-                            msg: format!("LABEL entry is not key=value: {tok}"),
-                        });
-                    }
-                }
-            }
-            "WORKDIR" => {
-                let expanded = expand_vars(rest_raw, &vars);
-                let w = expanded.trim();
-                if w.starts_with('/') {
-                    spec.working_dir = String::from(w);
-                } else if spec.working_dir.is_empty() {
-                    spec.working_dir = format!("/{w}");
-                } else {
-                    spec.working_dir = format!("{}/{}", spec.working_dir.trim_end_matches('/'), w);
-                }
-                // Docker creates the working directory in the image filesystem
-                // (mode 0o755, root-owned) if it does not already exist.  Emit a
-                // layer that materialises it; overlay semantics make this a
-                // no-op when the directory already exists in a lower layer.
-                let dir_rel = archive_norm(&spec.working_dir);
-                if !dir_rel.is_empty() {
-                    spec.layers.push(BuildLayer {
-                        dirs: alloc::vec![LayerDir {
-                            path: dir_rel,
-                            mode: 0o755,
-                        }],
-                        files: Vec::new(),
-                    });
-                }
-            }
-            "USER" => {
-                let expanded = expand_vars(rest_raw, &vars);
-                spec.user = String::from(expanded.trim());
-            }
-            "EXPOSE" => {
-                let expanded = expand_vars(rest_raw, &vars);
-                for tok in expanded.split_whitespace() {
-                    let port = if tok.contains('/') {
-                        String::from(tok)
-                    } else {
-                        format!("{tok}/tcp")
-                    };
-                    if !spec.exposed_ports.contains(&port) {
-                        spec.exposed_ports.push(port);
-                    }
-                }
-            }
-            "COPY" | "ADD" => {
-                let expanded = expand_vars(rest_raw, &vars);
-                let mut toks = tokenize(&expanded);
-                // Detect `--from=<ref>` *before* dropping flag tokens: it
-                // switches the copy source from the build context to a prior
-                // stage's (or an external image's) assembled rootfs.
-                let from_ref: Option<String> = toks
-                    .iter()
-                    .find_map(|t| t.strip_prefix("--from=").map(String::from));
-                // `--chmod=<octal>` overrides the copied files' permission bits.
-                let chmod: Option<u32> = match toks.iter().find_map(|t| t.strip_prefix("--chmod="))
-                {
-                    Some(m) => match u32::from_str_radix(m.trim_start_matches("0o"), 8) {
-                        Ok(v) => Some(v),
-                        Err(_) => {
-                            return Err(BuildError::Parse {
-                                line,
-                                msg: format!("COPY/ADD --chmod is not a valid octal mode: {m}"),
-                            });
-                        }
-                    },
-                    None => None,
-                };
-                // `--chown=<uid>[:<gid>]` sets the owner (numeric only — name
-                // resolution needs the stage's /etc/passwd, unsupported).  A
-                // bare uid uses that value for the gid too, matching Docker.
-                let chown: Option<(u32, u32)> = match toks
-                    .iter()
-                    .find_map(|t| t.strip_prefix("--chown="))
-                {
-                    Some(spec) => {
-                        let (us, gs) = match spec.split_once(':') {
-                            Some((u, g)) => (u, g),
-                            None => (spec, spec),
-                        };
-                        match (us.parse::<u32>(), gs.parse::<u32>()) {
-                            (Ok(u), Ok(g)) => Some((u, g)),
-                            _ => {
-                                return Err(BuildError::Parse {
-                                    line,
-                                    msg: format!(
-                                        "COPY/ADD --chown must be numeric uid[:gid] (name resolution unsupported): {spec}"
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                    None => None,
-                };
-                // Drop leading flag tokens (e.g. --chown=, --chmod=, --from=).
-                toks.retain(|t| !t.starts_with("--"));
-                if toks.len() < 2 {
-                    return Err(BuildError::Parse {
-                        line,
-                        msg: String::from("COPY/ADD needs at least one source and a destination"),
-                    });
-                }
-                // A destination that does not start with `/` is interpreted
-                // relative to the current WORKDIR (Docker semantics); an unset
-                // WORKDIR defaults to root.  The trailing slash (dir marker) is
-                // preserved by the join.
-                let dest_raw = toks.last().cloned().unwrap_or_default();
-                let dest_path = if dest_raw.starts_with('/') {
-                    dest_raw
-                } else {
-                    let wd = if spec.working_dir.is_empty() {
-                        "/"
-                    } else {
-                        spec.working_dir.as_str()
-                    };
-                    format!("{}/{}", wd.trim_end_matches('/'), dest_raw)
-                };
-                let src_count = toks.len().saturating_sub(1);
-                let mut files: Vec<LayerFile> = Vec::new();
-                // For `--from`, copy from the referenced rootfs with no
-                // `.dockerignore` filtering (that only applies to the context).
-                let empty_ignore: [(bool, String); 0] = [];
-                let (src_dir, eff_ignore): (String, &[(bool, String)]) = match &from_ref {
-                    Some(r) => (
-                        resolve_from_rootfs(r, prior, &mut rootfs_cache, scratch, dest)?,
-                        &empty_ignore,
-                    ),
-                    None => (String::from(context_dir), ignore),
-                };
-                // Expand any wildcard sources against the source tree (Docker
-                // `filepath.Match`); a literal source passes through unchanged.
-                // A wildcard that matches nothing is an error (missing source).
-                let mut effective_srcs: Vec<PathBuf> = Vec::new();
-                let src_root = Path::new(src_dir.as_str());
-                for src in toks.iter().take(src_count) {
-                    if has_glob_meta(src) {
-                        let matches = expand_glob(src_root, Path::new(src.as_str()));
-                        if matches.is_empty() {
-                            return Err(BuildError::CopySourceMissing { src: src.clone() });
-                        }
-                        effective_srcs.extend(matches);
-                    } else {
-                        effective_srcs.push(PathBuf::from(src.as_str()));
-                    }
-                }
-                // `single` (rename-to-dest semantics) is keyed off the *expanded*
-                // source count: a wildcard matching several files forces the
-                // dest to be treated as a directory.
-                let single = effective_srcs.len() == 1;
-                // ADD (but not COPY) auto-extracts a local tar archive (plain or
-                // gzip) into the destination directory — a `--from` reference
-                // disables this (Docker treats it as a plain copy).
-                let add_extract = instr_up == "ADD" && from_ref.is_none();
-                let dest_target = Path::new(dest_path.as_str());
-                for src in &effective_srcs {
-                    if add_extract {
-                        let full = normalize_path_join(src_root, src);
-                        if let Ok(bytes) = Vfs::read_file(&full) {
-                            if let Some(tar) = as_tar_bytes(&bytes) {
-                                add_tar_into(&tar, dest_target, chmod, chown, &mut files, line)?;
-                                continue;
-                            }
-                        }
-                    }
-                    collect_copy_src(
-                        src_root,
-                        src,
-                        dest_target,
-                        single,
-                        eff_ignore,
-                        chmod,
-                        chown,
-                        &mut files,
-                        line,
-                    )?;
-                }
-                spec.layers.push(BuildLayer {
-                    dirs: Vec::new(),
-                    files,
-                });
-            }
-            "VOLUME" => {
-                let expanded = expand_vars(rest_raw, &vars);
-                // Accept both the JSON exec form `["/a","/b"]` and the
-                // whitespace-separated shell form `VOLUME /a /b`.
-                let paths = parse_json_str_array(&expanded).unwrap_or_else(|| tokenize(&expanded));
-                if paths.is_empty() {
-                    return Err(BuildError::Parse {
-                        line,
-                        msg: String::from("VOLUME requires at least one path"),
-                    });
-                }
-                for p in paths {
-                    if !spec.volumes.contains(&p) {
-                        spec.volumes.push(p);
-                    }
-                }
-            }
-            "STOPSIGNAL" => {
-                let expanded = expand_vars(rest_raw, &vars);
-                let sig = expanded.trim();
-                if sig.is_empty() {
-                    return Err(BuildError::Parse {
-                        line,
-                        msg: String::from("STOPSIGNAL requires a signal"),
-                    });
-                }
-                spec.stop_signal = String::from(sig);
-            }
-            "SHELL" => {
-                // Docker requires SHELL in JSON exec form.
-                let expanded = expand_vars(rest_raw, &vars);
-                match parse_json_str_array(&expanded) {
-                    Some(sh) if !sh.is_empty() => spec.shell = sh,
-                    _ => {
-                        return Err(BuildError::Parse {
-                            line,
-                            msg: String::from(
-                                "SHELL requires a JSON array, e.g. [\"/bin/sh\",\"-c\"]",
-                            ),
-                        });
-                    }
-                }
-            }
-            "ONBUILD" => {
-                // Store the trigger instruction verbatim (executed by a later
-                // build that uses this image as a base — not run now).
-                let trigger = rest_raw.trim();
-                if trigger.is_empty() {
-                    return Err(BuildError::Parse {
-                        line,
-                        msg: String::from("ONBUILD requires an instruction"),
-                    });
-                }
-                spec.onbuild.push(String::from(trigger));
-            }
-            "HEALTHCHECK" => {
-                // Container liveness probe (Docker `HEALTHCHECK`). Stored in the
-                // image config so the runtime health monitor (container::
-                // start_health_monitor / health_tick) picks it up when the image
-                // is run. Var-expanded like the other config instructions.
-                let expanded = expand_vars(rest_raw, &vars);
-                let hc =
-                    parse_healthcheck(&expanded).map_err(|msg| BuildError::Parse { line, msg })?;
-                spec.healthcheck = Some(hc);
-            }
-            "MAINTAINER" => {
-                // Deprecated; record as the conventional label.
-                let expanded = expand_vars(rest_raw, &vars);
-                set_label(&mut spec.labels, "maintainer", expanded.trim());
-            }
-            other => {
-                return Err(BuildError::Parse {
-                    line,
-                    msg: format!("unsupported instruction: {other}"),
-                });
-            }
-        }
+        sb.exec_instr(&instr_up, line, rest_raw, scratch)?;
 
         // Record the build step. FROM contributes no entry of its own (it
         // carries the base image's history); COPY/ADD produce a filesystem
         // layer (non-empty), everything else is a metadata-only empty layer.
         if instr_up != "FROM" {
-            spec.history.push(HistoryEntry {
+            sb.spec.history.push(HistoryEntry {
                 created_by: logical.clone(),
-                empty_layer: spec.layers.len() == layers_before,
+                empty_layer: sb.spec.layers.len() == layers_before,
             });
         }
     }
 
-    if !from_seen {
+    if !sb.from_seen {
         return Err(BuildError::MissingFrom);
     }
 
     // Assemble: base layers (carried verbatim) + new COPY/ADD layers.
     create_layout_skeleton(dest);
-    let mut layer_descs = base_layer_descs;
-    let mut diff_ids = base_diff_ids;
-    if let Some(bdir) = &base_dir {
+    let mut layer_descs = sb.base_layer_descs;
+    let mut diff_ids = sb.base_diff_ids;
+    if let Some(bdir) = &sb.base_dir {
         for d in &layer_descs {
             let bp = d
                 .blob_path()
@@ -3875,7 +4029,7 @@ fn build_one_stage_inner(
             Vfs::write_file(format!("{dest}/{bp}"), &data)?;
         }
     }
-    for layer in &spec.layers {
+    for layer in &sb.spec.layers {
         let tar = build_layer_tar(layer);
         diff_ids.push(sha256_digest(&tar));
         let gz = crate::fs::compress::gzip(&tar);
@@ -3884,7 +4038,7 @@ fn build_one_stage_inner(
     if layer_descs.len() > MAX_LAYERS {
         return Err(BuildError::Kernel(KernelError::InvalidArgument));
     }
-    finish_image(dest, &spec, &layer_descs, &diff_ids).map_err(BuildError::Kernel)
+    finish_image(dest, &sb.spec, &layer_descs, &diff_ids).map_err(BuildError::Kernel)
 }
 
 /// Set or replace an `ENV` key in `env` (Docker keeps at most one entry per key).

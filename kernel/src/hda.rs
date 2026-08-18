@@ -33,7 +33,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::{self, PhysFrame};
+use crate::mm::dma::{DmaBuffer, DmaConstraint};
+use crate::mm::frame::PhysFrame;
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::pci::{self, PciDevice};
 use crate::serial_println;
@@ -89,6 +90,26 @@ const REG_INTCTL: usize = 0x20;
 /// Interrupt Status (32-bit).
 #[allow(dead_code)]
 const REG_INTSTS: usize = 0x24;
+
+// ---------------------------------------------------------------------------
+// DMA buffer sizes
+// ---------------------------------------------------------------------------
+//
+// `mm::dma::alloc` rounds each of these up to a buddy block, so the numbers
+// here are the sizes the *hardware* is told about, not the memory consumed.
+// They are named rather than inlined because each one is written twice — once
+// to size the allocation and once to program a controller register — and the
+// two silently disagreeing is how a DMA engine ends up ringing past the end of
+// its own buffer.
+
+/// CORB: 256 command entries × 4 bytes (`CORBSIZE = 0x02` selects 256).
+const CORB_BYTES: usize = 256 * 4;
+/// RIRB: 256 response entries × 8 bytes (`RIRBSIZE = 0x02` selects 256).
+const RIRB_BYTES: usize = 256 * 8;
+/// BDL: 256 buffer-descriptor entries × 16 bytes, the spec's maximum.
+const BDL_BYTES: usize = 256 * 16;
+/// PCM output ring: ~340 ms of 48 kHz / 16-bit / stereo.
+const PCM_BYTES: usize = 64 * 1024;
 
 // CORB registers
 const REG_CORBLBASE: usize = 0x40;
@@ -366,8 +387,13 @@ struct HdaDevice {
     dac_nid: u8,
     /// Output pin node ID.
     pin_nid: u8,
-    /// Physical frames allocated (for cleanup).
-    _frames: Vec<PhysFrame>,
+    /// DMA buffers backing CORB/RIRB/BDL/PCM, held so they are never freed.
+    ///
+    /// `HdaDevice` lives in the static [`DEVICE`] for the lifetime of the
+    /// kernel and the controller DMAs into these buffers continuously, so
+    /// there is deliberately no free path: dropping one while `CORBCTL.RUN`
+    /// is set would hand the allocator memory a device is still writing to.
+    _dma: Vec<DmaBuffer>,
 }
 
 // ---------------------------------------------------------------------------
@@ -545,43 +571,74 @@ pub fn init(hhdm_offset: u64) {
         return;
     }
 
-    // Allocate DMA buffers for CORB and RIRB.
-    let mut frames = Vec::new();
-
-    // CORB: 256 entries × 4 bytes = 1024 bytes (fits in one 16 KiB frame).
-    let corb_frame = match frame::alloc_frame() {
-        Ok(f) => f,
-        Err(e) => {
-            serial_println!("[hda] Failed to allocate CORB frame: {:?}", e);
-            return;
-        }
+    // Every DMA buffer below comes from `mm::dma`, which allocates through the
+    // buddy allocator and is therefore *physically contiguous and naturally
+    // aligned* — the two properties this controller's descriptors require and
+    // that a sequence of independent `alloc_frame()` calls does not provide.
+    //
+    // The PCM buffer used to be four separate `alloc_frame()`s zeroed as one
+    // 64 KiB block "hoping the allocator gives us sequential frames".  It does
+    // not: on boot 91 the run reached the end of a 248 KiB usable region at
+    // 0x7fef4000 and the zeroing walked straight off the HHDM into an
+    // unmapped page, halting the kernel with an unrecoverable page fault.
+    // Had the memory happened to be mapped, the outcome would have been worse
+    // and silent — the controller would have streamed audio over 48 KiB of
+    // memory belonging to somebody else.
+    //
+    // GCAP bit 0 (`64OK`) says whether the controller can address more than
+    // 4 GiB.  When it is clear the *UBASE registers are reserved, so a buffer
+    // above 4 GiB would be truncated to its low 32 bits and the device would
+    // DMA into unrelated memory.  This machine has RAM at 0x1_0000_0000, so
+    // that is reachable, not theoretical; constrain the allocation instead of
+    // relying on where the allocator happens to land.
+    let dma_constraint = if gcap & 0x1 != 0 {
+        DmaConstraint::None
+    } else {
+        DmaConstraint::Below4G
     };
-    let corb_phys = corb_frame.addr();
-    let corb_virt = corb_phys + hhdm_offset;
-    frames.push(corb_frame);
+    let mut dma_bufs: Vec<DmaBuffer> = Vec::new();
 
-    // Zero the CORB buffer.
-    // SAFETY: We just allocated this frame and have exclusive access.
-    unsafe {
-        core::ptr::write_bytes(corb_virt as *mut u8, 0, 4096);
+    /// Allocate one zeroed, contiguous DMA buffer and keep it alive.
+    ///
+    /// Returns `(phys, virt)`.  `mm::dma::alloc` zeroes the whole block, so no
+    /// caller needs its own `write_bytes`.
+    fn dma_alloc(
+        bufs: &mut Vec<DmaBuffer>,
+        size: usize,
+        constraint: DmaConstraint,
+        what: &str,
+    ) -> Option<(u64, u64)> {
+        match crate::mm::dma::alloc(size, constraint) {
+            Ok(buf) => {
+                let Some(virt) = buf.virt_addr() else {
+                    serial_println!("[hda] No HHDM mapping for {} DMA buffer", what);
+                    return None;
+                };
+                let pair = (buf.phys_addr(), virt as u64);
+                bufs.push(buf);
+                Some(pair)
+            }
+            Err(e) => {
+                serial_println!("[hda] Failed to allocate {} DMA buffer: {:?}", what, e);
+                None
+            }
+        }
     }
 
-    // RIRB: 256 entries × 8 bytes = 2048 bytes (fits in same-size frame).
-    let rirb_frame = match frame::alloc_frame() {
-        Ok(f) => f,
-        Err(e) => {
-            serial_println!("[hda] Failed to allocate RIRB frame: {:?}", e);
-            return;
-        }
+    // CORB: 256 entries × 4 bytes = 1024 bytes.  The spec requires 128-byte
+    // alignment; a buddy block is frame-aligned, which is stronger.
+    let Some((corb_phys, corb_virt)) =
+        dma_alloc(&mut dma_bufs, CORB_BYTES, dma_constraint, "CORB")
+    else {
+        return;
     };
-    let rirb_phys = rirb_frame.addr();
-    let rirb_virt = rirb_phys + hhdm_offset;
-    frames.push(rirb_frame);
 
-    // SAFETY: Exclusive access to freshly-allocated frame.
-    unsafe {
-        core::ptr::write_bytes(rirb_virt as *mut u8, 0, 4096);
-    }
+    // RIRB: 256 entries × 8 bytes = 2048 bytes.
+    let Some((rirb_phys, rirb_virt)) =
+        dma_alloc(&mut dma_bufs, RIRB_BYTES, dma_constraint, "RIRB")
+    else {
+        return;
+    };
 
     // Set up CORB.
     setup_corb(mmio_base, corb_phys);
@@ -611,57 +668,21 @@ pub fn init(hhdm_offset: u64) {
 
     CODEC_COUNT.store(codec_count, Ordering::Release);
 
-    // Allocate BDL buffer (one frame for BDL entries).
-    let bdl_frame = match frame::alloc_frame() {
-        Ok(f) => f,
-        Err(e) => {
-            serial_println!("[hda] Failed to allocate BDL frame: {:?}", e);
-            return;
-        }
+    // BDL: 256 entries × 16 bytes = 4096 bytes.  The spec requires 128-byte
+    // alignment.
+    let Some((bdl_phys, bdl_virt)) = dma_alloc(&mut dma_bufs, BDL_BYTES, dma_constraint, "BDL")
+    else {
+        return;
     };
-    let bdl_phys = bdl_frame.addr();
-    let bdl_virt = bdl_phys + hhdm_offset;
-    frames.push(bdl_frame);
 
-    // SAFETY: Exclusive access.
-    unsafe {
-        core::ptr::write_bytes(bdl_virt as *mut u8, 0, 4096);
-    }
-
-    // Allocate PCM output buffer (4 frames = 64 KiB for ~340ms of 48kHz/16-bit/stereo).
-    let pcm_frames_needed = 4;
-    let pcm_size: u32 = pcm_frames_needed * 16384; // 4 × 16 KiB = 64 KiB
-
-    // Allocate contiguous frames for PCM buffer.
-    // Note: for simplicity we use the first frame's address and hope the
-    // allocator gives us sequential frames.  In production we'd use a
-    // proper contiguous DMA allocator.
-    let first_pcm_frame = match frame::alloc_frame() {
-        Ok(f) => f,
-        Err(e) => {
-            serial_println!("[hda] Failed to allocate PCM frame: {:?}", e);
-            return;
-        }
+    // PCM output ring: 64 KiB, ~340 ms of 48 kHz / 16-bit / stereo.  One
+    // buddy block, so the single BDL entry programmed below really does
+    // describe `PCM_BYTES` of memory this driver owns.
+    let Some((pcm_phys, pcm_virt)) = dma_alloc(&mut dma_bufs, PCM_BYTES, dma_constraint, "PCM")
+    else {
+        return;
     };
-    let pcm_phys = first_pcm_frame.addr();
-    let pcm_virt = pcm_phys + hhdm_offset;
-    frames.push(first_pcm_frame);
-
-    for _ in 1..pcm_frames_needed {
-        match frame::alloc_frame() {
-            Ok(f) => frames.push(f),
-            Err(e) => {
-                serial_println!("[hda] Failed to allocate PCM frame: {:?}", e);
-                return;
-            }
-        }
-    }
-
-    // Zero the PCM buffer.
-    // SAFETY: We allocated these frames and own them exclusively.
-    unsafe {
-        core::ptr::write_bytes(pcm_virt as *mut u8, 0, pcm_size as usize);
-    }
+    let pcm_size = PCM_BYTES as u32;
 
     // Store device state.
     let mut dev = HdaDevice {
@@ -685,7 +706,7 @@ pub fn init(hhdm_offset: u64) {
         vendor_id: 0,
         dac_nid: 0,
         pin_nid: 0,
-        _frames: frames,
+        _dma: dma_bufs,
     };
 
     // If we have codecs, probe codec 0.

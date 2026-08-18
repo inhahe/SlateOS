@@ -3,4 +3,9 @@ name = "ssh"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS SSH-2 client"
+
+# `sha2` for the key exchange, HMAC and host-key fingerprints. This crate
+# carried its own SHA-256; in a protocol client that is a private protocol,
+# since every one of those digests has to agree with the far end.
 [dependencies]
+sha2 = { path = "../../sha2" }

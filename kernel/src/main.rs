@@ -389,69 +389,75 @@ enum KasanEarlyStatus {
 #[cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 #[unsafe(no_mangle)]
 extern "C" fn kernel_main() -> ! {
-    // Step 0: Install the KASAN zero shadow, before literally anything else.
-    //
-    // In the compiler-instrumented build every load and store first reads a
-    // shadow byte, so until the shadow exists *no* instrumented memory access
-    // may happen — and with no IDT installed yet the failure mode is a triple
-    // fault and a silent reboot, not a diagnosable panic. That rules out doing
-    // even serial init first: `serial::init` takes a spinlock, and a spinlock
-    // acquisition calls `core::sync::atomic::atomic_compare_exchange_weak`,
-    // which — being generic — is monomorphised into *this* crate and therefore
-    // instrumented no matter which module called it. (This is precisely how the
-    // first instrumented boot died.) So `hhdm_offset_early` reads the Limine
-    // response with raw loads and this runs as statement zero.
-    //
-    // Pointing all 16 TiB of shadow at one shared read-only zero page makes
-    // every check pass until something poisons a byte for real. It is done in
-    // the ordinary build too, so the path is exercised by every boot test
-    // instead of first running in the build where something is already going
-    // wrong. Costs 20 KiB of .bss and 32 PML4 entries.
-    //
-    // Nothing can be reported yet, so the outcome is stashed and logged as soon
-    // as the serial port is up.
-    //
-    // SAFETY: we are at kernel entry, so Limine has populated its request
-    // statics; `early_init` is called once, on the BSP, with interrupts off and
-    // no other CPU running.
-    let kasan_early = unsafe {
-        match boot::hhdm_offset_early() {
-            Some(hhdm) => {
-                if mm::kasan::early_init(hhdm) {
-                    KasanEarlyStatus::Installed
-                } else {
-                    KasanEarlyStatus::TranslationFailed
+    {
+        #[inline(never)]
+        fn case() {
+            // Step 0: Install the KASAN zero shadow, before literally anything else.
+            //
+            // In the compiler-instrumented build every load and store first reads a
+            // shadow byte, so until the shadow exists *no* instrumented memory access
+            // may happen — and with no IDT installed yet the failure mode is a triple
+            // fault and a silent reboot, not a diagnosable panic. That rules out doing
+            // even serial init first: `serial::init` takes a spinlock, and a spinlock
+            // acquisition calls `core::sync::atomic::atomic_compare_exchange_weak`,
+            // which — being generic — is monomorphised into *this* crate and therefore
+            // instrumented no matter which module called it. (This is precisely how the
+            // first instrumented boot died.) So `hhdm_offset_early` reads the Limine
+            // response with raw loads and this runs as statement zero.
+            //
+            // Pointing all 16 TiB of shadow at one shared read-only zero page makes
+            // every check pass until something poisons a byte for real. It is done in
+            // the ordinary build too, so the path is exercised by every boot test
+            // instead of first running in the build where something is already going
+            // wrong. Costs 20 KiB of .bss and 32 PML4 entries.
+            //
+            // Nothing can be reported yet, so the outcome is stashed and logged as soon
+            // as the serial port is up.
+            //
+            // SAFETY: we are at kernel entry, so Limine has populated its request
+            // statics; `early_init` is called once, on the BSP, with interrupts off and
+            // no other CPU running.
+            let kasan_early = unsafe {
+                match boot::hhdm_offset_early() {
+                    Some(hhdm) => {
+                        if mm::kasan::early_init(hhdm) {
+                            KasanEarlyStatus::Installed
+                        } else {
+                            KasanEarlyStatus::TranslationFailed
+                        }
+                    }
+                    None => KasanEarlyStatus::NoHhdmResponse,
+                }
+            };
+
+            // Step 1: Initialize serial console for debug output.
+            // This must be first *after* the shadow so we can log everything that
+            // follows.
+            //
+            // SAFETY: COM1 is standard PC hardware, always present in QEMU.
+            // Called exactly once.
+            unsafe {
+                serial::init();
+            }
+
+            match kasan_early {
+                KasanEarlyStatus::Installed => {
+                    serial_println!("[boot] KASAN zero shadow installed");
+                }
+                // Both failures mean the kernel cannot reach physical memory through
+                // the direct map, so nothing after this point can be trusted — and an
+                // instrumented build would triple-fault within a few instructions.
+                KasanEarlyStatus::NoHhdmResponse => {
+                    serial_println!("FATAL: Limine did not answer the HHDM request");
+                    cpu::halt_loop();
+                }
+                KasanEarlyStatus::TranslationFailed => {
+                    serial_println!("FATAL: KASAN zero shadow install failed (bad HHDM offset?)");
+                    cpu::halt_loop();
                 }
             }
-            None => KasanEarlyStatus::NoHhdmResponse,
         }
-    };
-
-    // Step 1: Initialize serial console for debug output.
-    // This must be first *after* the shadow so we can log everything that
-    // follows.
-    //
-    // SAFETY: COM1 is standard PC hardware, always present in QEMU.
-    // Called exactly once.
-    unsafe {
-        serial::init();
-    }
-
-    match kasan_early {
-        KasanEarlyStatus::Installed => {
-            serial_println!("[boot] KASAN zero shadow installed");
-        }
-        // Both failures mean the kernel cannot reach physical memory through
-        // the direct map, so nothing after this point can be trusted — and an
-        // instrumented build would triple-fault within a few instructions.
-        KasanEarlyStatus::NoHhdmResponse => {
-            serial_println!("FATAL: Limine did not answer the HHDM request");
-            cpu::halt_loop();
-        }
-        KasanEarlyStatus::TranslationFailed => {
-            serial_println!("FATAL: KASAN zero shadow install failed (bad HHDM offset?)");
-            cpu::halt_loop();
-        }
+        case();
     }
 
     serial_println!("=== Kernel booting ===");
@@ -469,1105 +475,1129 @@ extern "C" fn kernel_main() -> ! {
         init_boot_stack_canary();
     }
 
-    // Step 2: Parse boot information from Limine.
-    let Some(boot_info) = boot::parse_boot_info() else {
-        serial_println!("FATAL: Failed to parse boot info from Limine");
-        cpu::halt_loop();
-    };
-
-    serial_println!("[boot] Boot info parsed successfully");
-    serial_println!("[boot] HHDM offset: {:#x}", boot_info.hhdm_offset);
-
-    // Step 2b: Initialize framebuffer console (if available).
-    // The framebuffer is already mapped by Limine, so we can start
-    // writing pixels immediately — no page tables or heap needed.
-    // This gives us on-screen text output for the rest of boot.
-    //
-    // SAFETY: Limine guarantees the framebuffer address is a valid,
-    // mapped virtual address covering at least height*pitch bytes.
-    // Called exactly once.
-    if let Some(ref fb) = boot_info.framebuffer {
-        unsafe {
-            console::init(fb.address, fb.width, fb.height, fb.pitch, fb.bpp);
-        }
-        console_println!("=== Framebuffer console active ===");
-        console_println!(); // blank line before boot steps
-    }
-
-    // Initialize framebuffer 2D graphics primitives (after console::init
-    // makes the framebuffer parameters available).
-    fb::init();
-
-    // Step 3: Set up our own GDT (replacing the one Limine set up).
-    //
-    // SAFETY: We are in ring 0, interrupts are disabled, and this is
-    // the only CPU running.
-    console::boot_step(console::BootStatus::Running, "CPU tables (GDT/IDT)");
-    unsafe {
-        gdt::init();
-    }
-    serial_println!("[gdt] GDT and TSS initialized");
-    boot_timing::mark(boot_timing::Milestone::GdtIdt);
-
-    // Step 4: Set up the IDT with exception handlers.
-    //
-    // SAFETY: GDT is loaded (the IDT references kernel CS).  We are
-    // single-threaded during boot.
-    unsafe {
-        idt::init();
-    }
-    serial_println!("[idt] IDT initialized");
-
-    // Step 4a: Detect CPU features via CPUID and cache them globally.
-    // Must be done before FPU init so subsystems can query feature flags.
-    cpu::detect_features();
-    cpu::log_features();
-    // Detect virtualization environment via CPUID.  This must happen
-    // early because hypervisor type affects TSC behavior and driver
-    // selection (e.g., prefer virtio under KVM/QEMU).
-    hypervisor::detect();
-    // Detect Intel CET (Control-flow Enforcement Technology) support.
-    // On hardware with CET, this enables shadow stacks and IBT for kernel protection.
-    cet::detect();
-    // Apply CPUID-gated code patches before anything depends on them.
-    //
-    // Ordering is load-bearing in two directions: *after* cpu::detect_features()
-    // (the patcher reads CPUID), and *before* smp::init() (patching .text while
-    // another CPU might execute it is cross-modifying code).  apply() asserts
-    // the CPU-count precondition rather than trusting this call site.
-    //
-    // It does NOT need to precede mm::protect::harden_kernel_sections(): .text
-    // is read-only from the moment Limine maps it, so the patcher writes
-    // through the image's read-write HHDM alias regardless.
-    //
-    // Concretely this turns the 3-byte NOP at the top of every ISR stub into
-    // `clac`, so smep_smap can enable SMAP without ring-3's AC flag disabling it.
-    alternatives::apply();
-    // Enable SMEP/SMAP — hardware protection against kernel accidentally
-    // accessing or executing user-space memory.  Critical for security.
-    smep_smap::init();
-    // Program IA32_PAT so a write-combining memory type exists at all.  Must
-    // run before anything maps memory write-through or write-combining, since
-    // it changes what PAT slot 1 means (write-through -> write-combining) and
-    // relocates write-through to slot 7.  Nothing has mapped either yet at
-    // this point: the frame allocator has not handed out a page and no driver
-    // has mapped a BAR.
-    mm::pat::init();
-    // Spectre/Meltdown mitigations — enable IBRS, STIBP, SSBD based on
-    // CPU capabilities.  Issues initial IBPB to flush stale predictions.
-    spectre::init();
-    // Cache topology detection uses only CPUID (no heap needed), but
-    // logging uses alloc::format, so we detect now and log later.
-    cpu::detect_cache_topology();
-
-    // Step 4b: Initialize FPU/SSE hardware on the BSP.
-    //
-    // Ensures CR0 and CR4 are configured for SSE operation (clear EM/TS,
-    // set OSFXSR/OSXMMEXCPT).  While Limine typically sets these, we
-    // configure them explicitly so the state is deterministic.  Must be
-    // done before any code that might use XMM registers (e.g., the heap
-    // allocator's memcpy, auto-vectorized loops).
-    sched::fpu::init_bsp();
-    console::boot_step_update(console::BootStatus::Ok, "CPU tables (GDT/IDT)");
-
-    // Step 5: Initialize the physical frame allocator.
-    //
-    // SAFETY: Boot info contains a valid memory map and HHDM offset from
-    // Limine.  This is the first and only call to frame::init.  We are
-    // single-threaded with interrupts disabled.
-    console::boot_step(console::BootStatus::Running, "Memory manager");
-    if let Err(e) = unsafe { mm::frame::init(boot_info.hhdm_offset, boot_info.memory_map) } {
-        serial_println!("FATAL: Frame allocator init failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Verify basic allocator functionality before proceeding.
-    if let Err(e) = mm::frame::self_test() {
-        serial_println!("FATAL: Frame allocator self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    boot_timing::mark(boot_timing::Milestone::FrameAlloc);
-
-    // Step 6: Initialize the kernel heap.
-    // The slab allocator uses the frame allocator for backing memory.
-    mm::heap::init(boot_info.hhdm_offset);
-
-    // Enable slab poisoning immediately, before the first heap allocation.
-    //
-    // Poisoning fills every freed slot with a poison pattern (UAF/double-free
-    // detection) and every freshly-allocated slot with ALLOC_POISON, so the
-    // red-zone overflow check can rely on "every byte past the requested size
-    // is 0xCD".  That invariant ONLY holds if a slot was alloc-poisoned at the
-    // time it was handed out.  If poisoning were enabled later in boot, every
-    // allocation made in the pre-enable window would be unpoisoned; freeing
-    // such a slot after poisoning came online made check_redzone scan stale
-    // (or zeroed) bytes and report spurious "BUFFER OVERFLOW" false positives
-    // (see known-issues B-HEAP1).  Enabling here — before any allocation —
-    // closes that window entirely.  Poison is only ever toggled OFF for the
-    // duration of the heap benchmarks (deferred_bench_task), which free their
-    // own allocations within that window, then back ON afterwards.
-    mm::heap::enable_poison();
-
-    // Now that the heap is available, tell the console it can allocate
-    // its screen text buffer and scrollback ring.
-    console::notify_heap_available();
-
-    // Verify heap allocations work.
-    if let Err(e) = mm::heap::self_test() {
-        serial_println!("FATAL: Heap allocator self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-    boot_timing::mark(boot_timing::Milestone::Heap);
-    console::boot_step_update(console::BootStatus::Ok, "Memory manager");
-
-    // Install the REAL physical memory map into the memlayout diagnostic table
-    // straight from the Limine memmap response (needs the heap, just brought
-    // up). This is the single source of truth for /proc/memlayout, total_ram()
-    // and the `memlayout` kshell command — without it those would report a
-    // fabricated layout. Done here, right after the heap, so the table reflects
-    // the machine's actual RAM as early as possible.
-    fs::memlayout::populate_from_memmap(boot_info.memory_map);
-
-    // Load kernel symbol table from ELF .symtab for backtrace resolution.
-    // Needs heap (Vec allocation).  Best done early so symbols are available
-    // for any crash during the rest of boot.
-    ksyms::init();
-
-    // Log cache topology (deferred from early boot — needs heap for formatting).
-    cpu::log_cache_topology();
-
-    // Step 6b: Calibrate TSC frequency using PIT for benchmark timing.
-    // Must be after serial (for output) and before subsystem benchmarks.
-    // PIT channel 2 is always available on x86_64 hardware.
-    bench::calibrate_tsc();
-    // Rescale the syscall-latency histogram thresholds into TSC cycles now
-    // that the frequency is known.  Must follow `calibrate_tsc` and should be
-    // as early as possible: syscalls dispatched before this point cannot be
-    // bucketed and are counted separately as unmeasurable rather than being
-    // silently reported as "<1us".
-    sclatency::calibrate();
-    sclatency::self_test();
-
-    // Bring up the Ada/SPARK components and check the FFI boundary.
-    //
-    // Placed here rather than next to the virtio drivers that use it because
-    // what is being checked is the *linkage*, not the driver: that the Ada
-    // objects resolved, that the calling convention agrees, and that this
-    // side's status enum still matches the Ada constants. Those are properties
-    // of the image, so a mismatch should stop the boot at a point where the
-    // serial log is short and the cause is unambiguous — not several hundred
-    // lines later as a confusing virtio failure.
-    //
-    // It needs nothing but the serial console: the Ada side allocates nothing
-    // and its state is statically allocated .bss, which is why it can run this
-    // early.
-    ada::init();
-    if let Err(e) = ada::selftest() {
-        serial_println!("FATAL: Ada/SPARK FFI self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-    // Say so on success too. Every other self-test in this tree ends `: OK`, and
-    // a silent one is indistinguishable from one that was never called — an
-    // `ada::selftest()` accidentally dropped from this sequence would look
-    // exactly like a passing boot. Printing the two bounds makes the line carry
-    // information rather than just presence: they are read back out of the Ada
-    // object, so the numbers are evidence the linkage resolved.
-    serial_println!(
-        "[ada]   FFI boundary self-test (linkage, calling convention, status enum, \
-         Max_Descriptors={}, Max_Queues={}): OK",
-        ada::MAX_DESCRIPTORS,
-        ada::MAX_QUEUES
-    );
-
-    cputime::init();
-    timekeeping::init();
-
-    console::boot_step(console::BootStatus::Running, "Virtual memory");
-
-    // Step 7: Initialize the page table subsystem.
-    // This provides map/unmap/translate operations for managing virtual
-    // address spaces.  Uses the HHDM to read/write page table entries.
-    mm::page_table::init(boot_info.hhdm_offset);
-
-    // Verify page table operations work (translate HHDM, map/unmap).
-    if let Err(e) = mm::page_table::self_test() {
-        serial_println!("FATAL: Page table self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Verify IA32_PAT reads back as programmed and that the PageFlags memory
-    // types decode to what the rest of the kernel assumes.  Fatal: a wrong
-    // PAT silently changes the memory type of every MMIO and framebuffer
-    // mapping, which is not a failure any later test would attribute
-    // correctly.  Runs here because page_table::self_test has just proven the
-    // mapping machinery this depends on.
-    if let Err(e) = mm::pat::self_test() {
-        serial_println!("FATAL: PAT self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Initialize KASAN shadow memory (heap-corruption detector). Records the
-    // HHDM offset so shadow addresses can be computed; shadow pages are lazily
-    // mapped and checking is disabled by default (see mm::kasan). Requires the
-    // page-table subsystem (for lazy shadow mapping) to be up first.
-    mm::kasan::init(boot_info.hhdm_offset);
-
-    // Step 8: Initialize the page fault / demand paging subsystem.
-    // This registers the kernel address space and enables the page
-    // fault handler to resolve faults for demand-paged regions.
-    mm::fault::init();
-
-    // Verify demand paging works (register VMA, trigger fault, verify).
-    if let Err(e) = mm::fault::self_test() {
-        serial_println!("FATAL: Demand paging self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 8b: Verify userspace pointer validation logic.
-    // Validates that kernel rejects null, kernel-space, wrapping, and
-    // unmapped user-space pointers before any syscall handler uses them.
-    if let Err(e) = mm::user::self_test() {
-        serial_println!("FATAL: User memory validation self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 8c: Initialize kernel stack allocator with hardware guard pages.
-    // Must be after fault::init() since it registers Guard VMAs.
-    mm::kstack::init();
-    if let Err(e) = mm::kstack::self_test() {
-        serial_println!("FATAL: Kernel stack guard page self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    boot_timing::mark(boot_timing::Milestone::PageTable);
-    console::boot_step_update(console::BootStatus::Ok, "Virtual memory");
-
-    // Step 9: Initialize the scheduler.
-    // Creates the idle task (the current execution context) and sets up
-    // the priority round-robin scheduler.  Timer-based preemption will
-    // be added when the APIC timer is wired up (§2.2).
-    console::boot_step(console::BootStatus::Running, "Scheduler");
-    sched::init();
-
-    // Verify cooperative scheduling works (spawn tasks, yield, verify).
-    if let Err(e) = sched::self_test() {
-        serial_println!("FATAL: Scheduler self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Process accounting (after self-test, which fills/empties the hook table).
-    pacct::init();
-
-    // Verify FPU/SSE state save/restore works correctly.
-    // This tests the fxsave64/fxrstor64 path that the context switch uses.
-    sched::fpu::self_test();
-
-    // Multi-task stress test: verify XMM state isolation across context switches.
-    // Spawns 4 tasks writing unique patterns to XMM1, yields 50 times each,
-    // verifies no cross-task XMM leakage.
-    sched::fpu::stress_test();
-
-    // Step 9b: Initialize sysctl parameter registry.
-    // Registers tunable kernel parameters for memory management,
-    // scheduling, and other subsystems.
-    sysctl::init();
-    sysctl::self_test();
-
-    // Step 9b′: Populate the kernel-parameter store from the Limine command
-    // line. This MUST run during boot (previously it was only invoked lazily
-    // from the `kernparam` shell command), because boot-time consumers —
-    // notably the `net.userspace` cutover switch that decides whether the
-    // userspace netstack daemon owns the NIC — call `kernparam::is_set()`
-    // long before any shell exists. Without this, the param store stays
-    // `None` at boot and every `is_set()` returns false regardless of what
-    // the bootloader actually passed, making the switch unusable at runtime.
-    // Idempotent: a no-op if the store was already populated.
-    fs::kernparam::init_defaults();
-
-    // Step 9c: Initialize swap subsystem (zram initially).
-    // The in-memory compressed (zram) backend is always available.
-    // We'll try to upgrade to disk-backed swap after virtio-blk
-    // and blkdev init (Step 20e).
-    mm::swap::init(256);
-    mm::swap::self_test();
-    mm::compress::self_test();
-
-    boot_timing::mark(boot_timing::Milestone::Scheduler);
-    console::boot_step_update(console::BootStatus::Ok, "Scheduler");
-
-    // Step 10: Initialize IPC subsystem.
-    // Channels are the primary IPC mechanism — structured message
-    // passing between tasks/processes.  No explicit init needed (the
-    // global channel table is lazily populated).  Run self-tests to
-    // verify send, recv, blocking, close detection, and backpressure.
-    console::boot_step(console::BootStatus::Running, "IPC subsystem");
-    if let Err(e) = ipc::channel::self_test() {
-        serial_println!("FATAL: IPC channel self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 11: Initialize syscall dispatch.
-    // The versioned dispatch table maps syscall numbers to handlers.
-    // No explicit init needed (table is a const static), but we run
-    // self-tests to verify dispatch, yield, task_id, and IPC roundtrip
-    // all work through the syscall interface.
-    if let Err(e) = syscall::self_test() {
-        serial_println!("FATAL: Syscall dispatch self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-    if let Err(e) = syscall::linux::self_test() {
-        serial_println!("FATAL: Linux ABI translation self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-    // The translation self-test is the deepest single frame that runs on the
-    // boot stack (a monolithic function whose unoptimized frame is ~480 KiB
-    // and grows with each ABI batch).  Verify it did not breach the redzone;
-    // a clobbered canary means the boot stack overflowed and adjacent `.bss`
-    // may be corrupt, so halt with a clear diagnostic rather than limp on.
-    check_boot_stack_canary();
-
-    // Step 12: Initialize futex subsystem.
-    // Futexes enable fast userspace synchronization: the uncontended
-    // path is pure atomic CAS (no syscall), the contended path uses
-    // the kernel to block/wake tasks.
-    if let Err(e) = ipc::futex::self_test() {
-        serial_println!("FATAL: Futex self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 13: Initialize pipe subsystem.
-    // Pipes provide one-way kernel-buffered byte streams — the classic
-    // Unix pipe model but strictly unidirectional.
-    if let Err(e) = ipc::pipe::self_test() {
-        serial_println!("FATAL: Pipe self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 13b: Initialize stream socket subsystem.
-    // Stream sockets are bidirectional kernel-buffered byte streams — the
-    // primitive backing POSIX socketpair(AF_UNIX, SOCK_STREAM, ...).
-    //
-    // This self-test was previously disabled because its heap-allocation
-    // churn appeared to trigger a "later" boot hang during ring-3 process
-    // spawns.  That hang was in fact the boot-stack-vs-PML4 collision (the
-    // kernel ran on Limine's small reclaimable-memory stack, which grew down
-    // into the active page tables); the churn only shifted allocation/timing
-    // enough to expose it.  With the kernel now switched to a dedicated
-    // 512 KiB boot stack (see `KERNEL_BOOT_STACK`), the underlying bug is
-    // fixed and the self-test runs normally at boot.
-    if let Err(e) = ipc::stream_socket::self_test() {
-        serial_println!("FATAL: Stream socket self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 14: Initialize shared memory subsystem.
-    // Shared memory regions let tasks (and future processes) map the
-    // same physical pages into their address spaces for zero-copy IPC.
-    if let Err(e) = ipc::shm::self_test() {
-        serial_println!("FATAL: Shared memory self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 15: Initialize eventfd subsystem.
-    // Eventfds are lightweight 64-bit counters for wake-up notifications.
-    // Lighter than channels — ideal for "did something happen?" signaling.
-    if let Err(e) = ipc::eventfd::self_test() {
-        serial_println!("FATAL: Eventfd self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 15a: Epoll subsystem.
-    // Epoll instances hold an interest set (fd -> events + user data) and
-    // serve epoll_wait via the shared poll-readiness engine.  This self-test
-    // exercises create/dup/close refcounting and ctl add/mod/del semantics.
-    if let Err(e) = ipc::epoll::self_test() {
-        serial_println!("FATAL: Epoll self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 15a (cont.): Signalfd subsystem.
-    // A signalfd object holds an acceptance mask; reads drain masked pending
-    // signals from the owning process.  This self-test exercises create with
-    // SIGKILL/SIGSTOP mask sanitization, mask get/set, and dup/close
-    // refcounting with a shared mask.
-    if let Err(e) = ipc::signalfd::self_test() {
-        serial_println!("FATAL: Signalfd self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 15a (cont.): Timerfd subsystem.
-    // A timerfd object holds an armed-timer state (clock id, next expiry,
-    // interval); reads return the lazily-computed expiration count.  This
-    // self-test exercises the pure expiry math (one-shot/periodic/overdue),
-    // arm/disarm/query, dup/close refcounting with shared armed state, and
-    // stale-handle safety.
-    if let Err(e) = ipc::timerfd::self_test() {
-        serial_println!("FATAL: Timerfd self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 15a (cont.): Inotify subsystem.
-    // An inotify instance multiplexes a set of path watches over the
-    // native fs::notify subsystem, translating Linux IN_* masks and
-    // serializing native FsEvents into inotify_event records.  This
-    // self-test exercises mask translation, record sizing, add_watch +
-    // event emission/read, move-pair cookie pairing, buffer-too-small
-    // EINVAL, rm_watch IN_IGNORED, and dup/close refcounting.
-    if let Err(e) = ipc::inotify::self_test() {
-        serial_println!("FATAL: Inotify self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 15b: Memfd subsystem.
-    // Anonymous in-memory regular file backing memfd_create(2).  Exercises
-    // create/close/dup refcounting, read/write/seek, pread/pwrite,
-    // truncate grow/shrink, F_SEAL_* enforcement, and poll readiness.
-    if let Err(e) = ipc::memfd::self_test() {
-        serial_println!("FATAL: Memfd self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 16: Initialize completion port subsystem.
-    // Completion ports provide unified wait on heterogeneous kernel
-    // objects (channels, pipes, eventfds, future timers/process exit).
-    // This is the IOCP-like multiplexer from the design spec.
-    if let Err(e) = ipc::completion::self_test() {
-        serial_println!("FATAL: Completion port self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 16b: Timer subsystem self-test.
-    if let Err(e) = ipc::timer::self_test() {
-        serial_println!("FATAL: Timer self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 16b½: IPC semaphore self-test.
-    if let Err(e) = ipc::semaphore::self_test() {
-        serial_println!("FATAL: IPC semaphore self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 16c: io_ring (io_uring-style batch I/O) self-test.
-    if let Err(e) = ipc::io_ring::self_test() {
-        serial_println!("FATAL: io_ring self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    boot_timing::mark(boot_timing::Milestone::Ipc);
-    console::boot_step_update(console::BootStatus::Ok, "IPC subsystem");
-
-    // Step 17: Initialize capability system.
-    // Capability tables store unforgeable handles to kernel objects.
-    // Every resource access goes through capability checks — no
-    // ambient authority.
-    console::boot_step(console::BootStatus::Running, "Capabilities & logging");
-    if let Err(e) = cap::self_test() {
-        serial_println!("FATAL: Capability system self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 17a¼: Initialize named capability groups.
-    // Built-in groups (admin, network, filesystem, driver, process, ipc)
-    // are created with root (gid=0) as default member.
-    cap::groups::init();
-
-    // Step 17a½: Capability audit log self-test.
-    cap::audit::self_test();
-
-    // Step 17a¾: Capability groups self-test.
-    if let Err(e) = cap::groups::self_test() {
-        serial_println!("[WARN] Capability groups self-test failed: {:?}", e);
-    }
-
-    // Step 17a⅞: File capability tags self-test.
-    if let Err(e) = cap::file_tags::self_test() {
-        serial_println!("[WARN] File capability tags self-test failed: {:?}", e);
-    }
-
-    // Step 17a⅞+: Capability request broker self-test.
-    if let Err(e) = cap::request::self_test() {
-        serial_println!("[WARN] Capability request broker self-test failed: {:?}", e);
-    }
-
-    // Step 17b: Initialize structured logging subsystem.
-    // JSON-lines log entries go to serial and a kernel ring buffer.
-    // Must be after APIC init (uses tick_count for timestamps).
-    if let Err(e) = klog::self_test() {
-        serial_println!("FATAL: Structured logging self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    console::boot_step_update(console::BootStatus::Ok, "Capabilities & logging");
-
-    // Step 18: Set up SYSCALL/SYSRET MSRs.
-    // IA32_STAR (segment selectors) was already configured in gdt::init().
-    // This sets up IA32_LSTAR (entry point RIP), IA32_FMASK (RFLAGS mask),
-    // and IA32_KERNEL_GS_BASE (per-CPU data pointer for SWAPGS).
-    //
-    // Must be done before proc::self_test() because the spawn tests
-    // transition to ring 3, and userspace code uses SYSCALL to exit.
-    //
-    // SAFETY: GDT is loaded (IA32_STAR is set), IDT is initialized.
-    // Called exactly once.
-    console::boot_step(console::BootStatus::Running, "Process management");
-    unsafe {
-        syscall::entry::init();
-    }
-
-    // Step 19: Initialize process management subsystem.
-    // Process control blocks track per-process state: address space,
-    // capability table, thread list, parent relationship.
-    // Spawn tests exercise the full ring 3 path: IRETQ → userspace →
-    // SYSCALL(SYS_EXIT) → kernel, so SYSCALL MSRs must be ready.
-    if let Err(e) = proc::self_test() {
-        serial_println!("FATAL: Process management self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    console::boot_step_update(console::BootStatus::Ok, "Process management");
-
-    // Step 19b: Parse ACPI tables for hardware discovery.
-    // Locates the MADT to discover I/O APIC addresses, processor Local
-    // APICs, and interrupt source overrides.  Must run after heap init
-    // (allocates Vecs) and before APIC/IOAPIC init (which uses the data).
-    console::boot_step(console::BootStatus::Running, "Hardware tables (ACPI/HPET)");
-    if let Some(rsdp) = boot_info.rsdp_address {
-        // SAFETY: rsdp is a valid RSDP address from Limine, HHDM maps
-        // all physical memory.  Heap is initialized for Vec allocation.
-        // Memory map is passed for fallback RSDP scanning.
-        unsafe {
-            acpi::init(rsdp, boot_info.hhdm_offset, boot_info.memory_map);
-        }
-
-        if let Err(e) = acpi::self_test() {
-            serial_println!("WARNING: ACPI self-test failed: {} — using defaults", e);
-        }
-    } else {
-        // No RSDP from Limine — try scanning memory directly.
-        serial_println!("[acpi] No RSDP from bootloader — scanning memory...");
-        // SAFETY: rsdp=0 triggers memory scanning; HHDM maps all physical
-        // memory.  Heap is initialized for Vec allocation.
-        unsafe {
-            acpi::init(0, boot_info.hhdm_offset, boot_info.memory_map);
-        }
-
-        if let Err(e) = acpi::self_test() {
-            serial_println!("WARNING: ACPI self-test failed: {} — using defaults", e);
-        }
-    }
-
-    // Step 19c: Initialize HPET (High Precision Event Timer).
-    // Provides a high-resolution monotonic counter (~10-25 MHz) for
-    // precise time measurement.  The ACPI table gives us the MMIO base
-    // address.  Must run after ACPI parsing and page table init (needs
-    // HHDM and MMIO mapping).
-    //
-    // SAFETY: ACPI tables parsed, page tables initialized, single-threaded
-    // early boot with interrupts disabled.
-    unsafe {
-        hpet::init();
-    }
-    if let Err(e) = hpet::self_test() {
-        serial_println!("[hpet] WARNING: Self-test failed: {:?}", e);
-    }
-
-    // Capture the real boot timestamp now that HPET is running, so the
-    // `sysuptime` command reports uptime since actual boot rather than since
-    // the first time someone runs the command.  init_defaults() records
-    // hpet::elapsed_ns() as the boot instant; doing it here (early, right after
-    // the HPET clock starts) is the closest honest approximation of boot time
-    // available to a kernel that does not yet persist a wall-clock boot record.
-    // It is idempotent, so the lazy init in the kshell handler is a harmless
-    // no-op afterwards.
-    fs::sysuptime::init_defaults();
-
-    // Step 19c¼: Detect IOMMU hardware (Intel VT-d / AMD-Vi).
-    // Probes for DMAR/IVRS ACPI tables.  Detection only — actual DMA
-    // remapping page tables are set up below.
-    // Must be after ACPI init (uses acpi::find_table).
-    iommu::init();
-
-    // Step 19c¼: Initialize IOMMU DMA remapping page tables.
-    // Programs root/context tables and enables translation on each
-    // detected IOMMU unit.  After this, all PCI DMA is sandboxed.
-    // Must be after iommu::init() (detection) and frame allocator.
-    if let Err(e) = iommu_remap::init() {
-        serial_println!("[boot] WARNING: IOMMU remap init failed: {:?}", e);
-    }
-
-    // Step 19c½: Initialize high-resolution timer subsystem.
-    // Uses HPET as the clock source for nanosecond-precision timers.
-    // Must be after HPET init.
-    hrtimer::init();
-
-    // Step 19d: Initialize kernel CSPRNG.
-    // Seeds ChaCha20 from RDRAND/RDSEED (if available), HPET counter,
-    // and TSC jitter.  Must be after HPET init for timer-based entropy.
-    rng::init();
-    // Randomize the stack canary using the now-initialized CSPRNG.
-    // Must be after rng::init() and before any task creation.
-    sched::task::init_canary();
-
-    console::boot_step_update(console::BootStatus::Ok, "Hardware tables (ACPI/HPET)");
-
-    // Step 20: Initialize Local APIC and start the timer.
-    // The APIC timer provides periodic interrupts for preemptive
-    // scheduling.  Before this point, scheduling is purely cooperative.
-    //
-    // SAFETY: GDT, IDT, and heap are initialized.  We are single-threaded
-    // with interrupts disabled.  Called exactly once.
-    console::boot_step(console::BootStatus::Running, "Interrupt controllers (APIC)");
-    if let Err(e) = unsafe { apic::init() } {
-        serial_println!("FATAL: APIC init failed: {:?}", e);
-        cpu::halt_loop();
-    }
-
-    // Step 20b: Initialize I/O APIC for external device interrupts.
-    // Disables the legacy 8259 PIC, maps the IOAPIC MMIO registers,
-    // and programs all 24 redirection entries (masked).  Drivers unmask
-    // their IRQ lines individually when ready.  Uses I/O APIC address
-    // from ACPI MADT if available, otherwise falls back to the standard
-    // default (0xFEC0_0000).
-    //
-    // SAFETY: LAPIC is initialized (required for EOI routing).
-    // Interrupts are disabled.  Called exactly once.
-    if let Err(e) = unsafe { ioapic::init() } {
-        serial_println!("FATAL: IOAPIC init failed: {:?}", e);
-        cpu::halt_loop();
-    }
-
-    // Verify IOAPIC configuration.
-    if let Err(e) = ioapic::self_test() {
-        serial_println!("FATAL: IOAPIC self-test failed: {}", e);
-        cpu::halt_loop();
-    }
-
-    boot_timing::mark(boot_timing::Milestone::ApicTimer);
-    console::boot_step_update(console::BootStatus::Ok, "Interrupt controllers (APIC)");
-
-    // Step 20c: Scan PCI bus for device discovery.
-    // This finds virtio, USB, NVMe, and other PCI devices.
-    console::boot_step(console::BootStatus::Running, "PCI & device drivers");
-    if let Err(e) = pci::self_test() {
-        serial_println!("WARNING: PCI scan failed: {}", e);
-    }
-
-    // Step 20d: virtio-net probe is done first (it doesn't need the
-    // blkdev registry).  virtio-blk devices are discovered in the
-    // multi-device init below (step 20e).
-
-    // Step 20d-2: Probe for virtio-net network device.
-    // Uses legacy PCI transport (I/O port BAR0) with polling.
-    // Non-fatal if no NIC is present.
-    virtio::net::init(boot_info.hhdm_offset);
-
-    // Step 20d-2b: Initialize Intel e1000 NIC (if present).
-    // Provides native NIC support for QEMU/VirtualBox without virtio.
-    // Falls back gracefully if no Intel NIC is found.
-    e1000::init(boot_info.hhdm_offset);
-
-    // Step 20d-2c: Initialize Realtek RTL8139 NIC (if present).
-    // Common on older hardware and available as a QEMU option.
-    rtl8139::init(boot_info.hhdm_offset);
-
-    // Step 20d-2d: Program the i6300esb hard-lockup watchdog if the boot
-    // harness supplied one (opt-in `--hard-lockup-watchdog`). Absent on a
-    // normal boot, in which case this is a no-op. Left disarmed here; armed
-    // only around the ring-3 container self-tests. See kernel/src/hardlockup.rs.
-    hardlockup::init(boot_info.hhdm_offset);
-
-    // Step 20d-2d: Initialize Intel HD Audio controller (if present).
-    // Discovers codecs, sets up CORB/RIRB command buffers, probes audio
-    // topology for output path (DAC → Pin).  QEMU: `-device intel-hda
-    // -device hda-duplex`.
-    hda::init(boot_info.hhdm_offset);
-
-    // Virtio-sound driver: modern VM audio via virtio.
-    // QEMU: `-device virtio-sound-pci,audiodev=a0 -audiodev sdl,id=a0`
-    if let Err(e) = virtio::sound::init(boot_info.hhdm_offset) {
-        serial_println!("[virtio-snd] Init: {:?} (non-fatal)", e);
-    }
-
-    // AC97 audio controller: legacy audio for older hardware/VMs.
-    // QEMU: `-device AC97,audiodev=a0 -audiodev sdl,id=a0`
-    if let Err(e) = ac97::init(boot_info.hhdm_offset) {
-        serial_println!("[ac97] Init: {:?} (non-fatal)", e);
-    }
-
-    // Virtio-GPU driver: 2D framebuffer for VMs.
-    // QEMU: `-device virtio-gpu-pci`
-    if let Err(e) = virtio::gpu::init(boot_info.hhdm_offset) {
-        serial_println!("[virtio-gpu] Init: {:?} (non-fatal)", e);
-    }
-
-    // DRM/KMS subsystem: abstracts display hardware for the compositor.
-    // Must come after both fb::init() and virtio-gpu init so that both
-    // backends are available.
-    drm::init();
-
-    console::boot_step_update(console::BootStatus::Ok, "PCI & device drivers");
-
-    // Step 20d-3: Initialize networking stack.
-    // Sets up the network interface from the active NIC (virtio-net or e1000)
-    // and attempts DHCP to obtain an IP address.
-    console::boot_step(console::BootStatus::Running, "Network stack");
-    net::init();
-
-    // Step 20d-4: Attempt DHCP to obtain an IP address.
-    // Non-fatal — the system works without network connectivity.
-    if net::interface::is_up() {
-        match net::dhcp::discover() {
-            Ok(ip) => {
-                serial_println!("[net] DHCP assigned IP: {}", ip);
+    {
+        #[inline(never)]
+        fn case() {
+            // Step 2: Parse boot information from Limine.
+            let Some(boot_info) = boot::parse_boot_info() else {
+                serial_println!("FATAL: Failed to parse boot info from Limine");
+                cpu::halt_loop();
+            };
+
+            serial_println!("[boot] Boot info parsed successfully");
+            serial_println!("[boot] HHDM offset: {:#x}", boot_info.hhdm_offset);
+
+            // Step 2b: Initialize framebuffer console (if available).
+            // The framebuffer is already mapped by Limine, so we can start
+            // writing pixels immediately — no page tables or heap needed.
+            // This gives us on-screen text output for the rest of boot.
+            //
+            // SAFETY: Limine guarantees the framebuffer address is a valid,
+            // mapped virtual address covering at least height*pitch bytes.
+            // Called exactly once.
+            if let Some(ref fb) = boot_info.framebuffer {
+                unsafe {
+                    console::init(fb.address, fb.width, fb.height, fb.pitch, fb.bpp);
+                }
+                console_println!("=== Framebuffer console active ===");
+                console_println!(); // blank line before boot steps
             }
-            Err(e) => {
-                serial_println!("[net] DHCP failed: {:?} (non-fatal)", e);
+
+            // Initialize framebuffer 2D graphics primitives (after console::init
+            // makes the framebuffer parameters available).
+            fb::init();
+
+            // Step 3: Set up our own GDT (replacing the one Limine set up).
+            //
+            // SAFETY: We are in ring 0, interrupts are disabled, and this is
+            // the only CPU running.
+            console::boot_step(console::BootStatus::Running, "CPU tables (GDT/IDT)");
+            unsafe {
+                gdt::init();
             }
-        }
-    }
+            serial_println!("[gdt] GDT and TSS initialized");
+            boot_timing::mark(boot_timing::Milestone::GdtIdt);
 
-    console::boot_step_update(console::BootStatus::Ok, "Network stack");
-
-    // Step 20e: Initialize block device abstraction layer.
-    // Discovers ALL virtio-blk devices on the PCI bus and registers
-    // them as vda, vdb, vdc, etc.  QEMU can present multiple devices
-    // (disk.img, ext4_test.img, swap.img).
-    console::boot_step(console::BootStatus::Running, "Storage & filesystems");
-    blkdev::init_multi(boot_info.hhdm_offset);
-
-    // AHCI/SATA driver: detect and initialize SATA disks on real hardware.
-    // Registers devices as sda, sdb, etc.  No-op in QEMU without SATA.
-    ahci::init(boot_info.hhdm_offset);
-
-    // NVMe driver: detect and initialize NVMe SSDs.
-    // Registers devices as nvme0n1, nvme1n1, etc.  No-op without NVMe hardware.
-    nvme::init(boot_info.hhdm_offset);
-
-    // xHCI USB host controller: detect and enumerate USB devices.
-    // No-op without xHCI hardware (common in QEMU unless -device qemu-xhci).
-    xhci::init(boot_info.hhdm_offset);
-
-    // Step 20e-2: Add disk-backed swap alongside zram.
-    // Multi-device swap: zram (priority 100) handles most evictions with
-    // zero I/O latency; disk (priority 0) catches overflow when zram is full.
-    // In QEMU, a second virtio-blk disk is available as "vda" (or "vdb"
-    // if the boot disk is also virtio).  Try known swap device names.
-    //
-    // Each slot = 16 KiB = 32 sectors.  512 slots = 16 MiB.
-    for swap_dev in &["vdb", "vda"] {
-        // Never claim a device that holds a filesystem: `init_disk` writes a
-        // raw swap area over whatever is there, so probing first is the
-        // difference between "use the spare disk" and "destroy the rootfs".
-        // The Path-Z glibc rootfs (rootfs.ext4) is attached as a virtio-blk
-        // device (typically vdb) and must survive untouched for the /mnt mount
-        // below — skip any device that already contains an ext4 superblock.
-        // A raw swap image (swap.img, all zeros) has no ext4 magic and is still
-        // selected here.
-        if fs::ext4::probe(swap_dev) {
-            serial_println!(
-                "[boot] Skipping {} for swap: holds an ext4 filesystem (reserved for rootfs)",
-                swap_dev
-            );
-            continue;
-        }
-        if mm::swap::init_disk(swap_dev, 0, 512).is_ok() {
-            serial_println!(
-                "[boot] Disk swap added on {} (zram + disk tiered)",
-                swap_dev
-            );
-            // Run the disk-specific self-test now that a disk backend
-            // is active.
-            mm::swap::self_test_disk();
-            break;
-        }
-    }
-
-    // Step 20f: Mount root filesystem.
-    // Try to mount a FAT filesystem from the first block device.
-    // Auto-detects FAT16 or FAT32.  Non-fatal if no filesystem is present.
-    // Prefer a real FAT filesystem on vda (auto-detects FAT16/FAT32).  If no
-    // on-disk filesystem is present, fall back to a volatile in-memory root so
-    // the system *always* has a usable "/" — the virtual filesystems
-    // (/proc, /dev, /sys, /tmp) mount underneath it and userspace sees a
-    // working namespace even on a diskless boot.  (This also means the
-    // boot-test, whose vda is a raw swap disk with no FAT, still exercises the
-    // virtual-filesystem layer instead of silently skipping it.)
-    let fat_ok = match fs::fat::init("vda") {
-        Ok(()) => true,
-        Err(e) => {
-            serial_println!(
-                "[fs] No FAT filesystem on vda: {:?} — using in-memory root (non-fatal)",
-                e
-            );
-            if let Err(me) = fs::memfs::mount("/") {
-                serial_println!(
-                    "[boot] WARNING: failed to mount fallback in-memory root: {:?}",
-                    me
-                );
+            // Step 4: Set up the IDT with exception handlers.
+            //
+            // SAFETY: GDT is loaded (the IDT references kernel CS).  We are
+            // single-threaded during boot.
+            unsafe {
+                idt::init();
             }
-            false
-        }
-    };
+            serial_println!("[idt] IDT initialized");
 
-    // --- Virtual filesystem mounts (independent of which root we have) ---
+            // Step 4a: Detect CPU features via CPUID and cache them globally.
+            // Must be done before FPU init so subsystems can query feature flags.
+            cpu::detect_features();
+            cpu::log_features();
+            // Detect virtualization environment via CPUID.  This must happen
+            // early because hypervisor type affects TSC behavior and driver
+            // selection (e.g., prefer virtio under KVM/QEMU).
+            hypervisor::detect();
+            // Detect Intel CET (Control-flow Enforcement Technology) support.
+            // On hardware with CET, this enables shadow stacks and IBT for kernel protection.
+            cet::detect();
+            // Apply CPUID-gated code patches before anything depends on them.
+            //
+            // Ordering is load-bearing in two directions: *after* cpu::detect_features()
+            // (the patcher reads CPUID), and *before* smp::init() (patching .text while
+            // another CPU might execute it is cross-modifying code).  apply() asserts
+            // the CPU-count precondition rather than trusting this call site.
+            //
+            // It does NOT need to precede mm::protect::harden_kernel_sections(): .text
+            // is read-only from the moment Limine maps it, so the patcher writes
+            // through the image's read-write HHDM alias regardless.
+            //
+            // Concretely this turns the 3-byte NOP at the top of every ISR stub into
+            // `clac`, so smep_smap can enable SMAP without ring-3's AC flag disabling it.
+            alternatives::apply();
+            // Enable SMEP/SMAP — hardware protection against kernel accidentally
+            // accessing or executing user-space memory.  Critical for security.
+            smep_smap::init();
+            // Program IA32_PAT so a write-combining memory type exists at all.  Must
+            // run before anything maps memory write-through or write-combining, since
+            // it changes what PAT slot 1 means (write-through -> write-combining) and
+            // relocates write-through to slot 7.  Nothing has mapped either yet at
+            // this point: the frame allocator has not handed out a page and no driver
+            // has mapped a BAR.
+            mm::pat::init();
+            // Spectre/Meltdown mitigations — enable IBRS, STIBP, SSBD based on
+            // CPU capabilities.  Issues initial IBPB to flush stale predictions.
+            spectre::init();
+            // Cache topology detection uses only CPUID (no heap needed), but
+            // logging uses alloc::format, so we detect now and log later.
+            cpu::detect_cache_topology();
 
-    // Mount an in-memory filesystem at /tmp for temporary files.
-    // This is volatile (lost on reboot) and heap-backed.
-    if let Err(e) = fs::memfs::mount("/tmp") {
-        serial_println!("[boot] WARNING: failed to mount memfs at /tmp: {:?}", e);
-    }
-    // Mount procfs at /proc for system information.
-    // Read-only virtual filesystem — content generated on the fly.
-    if let Err(e) = fs::procfs::mount("/proc") {
-        serial_println!("[boot] WARNING: failed to mount procfs at /proc: {:?}", e);
-    }
-    // Mount devfs at /dev for standard device files.
-    // Provides /dev/null, /dev/zero, /dev/random, /dev/console.
-    if let Err(e) = fs::devfs::mount("/dev") {
-        serial_println!("[boot] WARNING: failed to mount devfs at /dev: {:?}", e);
-    }
-    // Mount sysfs at /sys for kernel configuration and hardware info.
-    // Writable for tunables (hostname, sysctl params), read-only for
-    // system info (kernel version, PCI devices, cache stats).
-    if let Err(e) = fs::sysfs::mount("/sys") {
-        serial_println!("[boot] WARNING: failed to mount sysfs at /sys: {:?}", e);
-    }
+            // Step 4b: Initialize FPU/SSE hardware on the BSP.
+            //
+            // Ensures CR0 and CR4 are configured for SSE operation (clear EM/TS,
+            // set OSFXSR/OSXMMEXCPT).  While Limine typically sets these, we
+            // configure them explicitly so the state is deterministic.  Must be
+            // done before any code that might use XMM registers (e.g., the heap
+            // allocator's memcpy, auto-vectorized loops).
+            sched::fpu::init_bsp();
+            console::boot_step_update(console::BootStatus::Ok, "CPU tables (GDT/IDT)");
 
-    // Probe secondary block devices for ext4 filesystems.
-    // Try common virtio-blk device names.  The first ext4 partition
-    // found is mounted at /mnt.  Non-fatal if none found.
-    for ext4_dev in &["vdb", "vdc"] {
-        if fs::ext4::probe(ext4_dev) {
-            match fs::ext4::mount(ext4_dev, "/mnt") {
-                Ok(()) => break,
+            // Step 5: Initialize the physical frame allocator.
+            //
+            // SAFETY: Boot info contains a valid memory map and HHDM offset from
+            // Limine.  This is the first and only call to frame::init.  We are
+            // single-threaded with interrupts disabled.
+            console::boot_step(console::BootStatus::Running, "Memory manager");
+            if let Err(e) = unsafe { mm::frame::init(boot_info.hhdm_offset, boot_info.memory_map) } {
+                serial_println!("FATAL: Frame allocator init failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Verify basic allocator functionality before proceeding.
+            if let Err(e) = mm::frame::self_test() {
+                serial_println!("FATAL: Frame allocator self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            boot_timing::mark(boot_timing::Milestone::FrameAlloc);
+
+            // Step 6: Initialize the kernel heap.
+            // The slab allocator uses the frame allocator for backing memory.
+            mm::heap::init(boot_info.hhdm_offset);
+
+            // Enable slab poisoning immediately, before the first heap allocation.
+            //
+            // Poisoning fills every freed slot with a poison pattern (UAF/double-free
+            // detection) and every freshly-allocated slot with ALLOC_POISON, so the
+            // red-zone overflow check can rely on "every byte past the requested size
+            // is 0xCD".  That invariant ONLY holds if a slot was alloc-poisoned at the
+            // time it was handed out.  If poisoning were enabled later in boot, every
+            // allocation made in the pre-enable window would be unpoisoned; freeing
+            // such a slot after poisoning came online made check_redzone scan stale
+            // (or zeroed) bytes and report spurious "BUFFER OVERFLOW" false positives
+            // (see known-issues B-HEAP1).  Enabling here — before any allocation —
+            // closes that window entirely.  Poison is only ever toggled OFF for the
+            // duration of the heap benchmarks (deferred_bench_task), which free their
+            // own allocations within that window, then back ON afterwards.
+            mm::heap::enable_poison();
+
+            // Now that the heap is available, tell the console it can allocate
+            // its screen text buffer and scrollback ring.
+            console::notify_heap_available();
+
+            // Verify heap allocations work.
+            if let Err(e) = mm::heap::self_test() {
+                serial_println!("FATAL: Heap allocator self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+            boot_timing::mark(boot_timing::Milestone::Heap);
+            console::boot_step_update(console::BootStatus::Ok, "Memory manager");
+
+            // Install the REAL physical memory map into the memlayout diagnostic table
+            // straight from the Limine memmap response (needs the heap, just brought
+            // up). This is the single source of truth for /proc/memlayout, total_ram()
+            // and the `memlayout` kshell command — without it those would report a
+            // fabricated layout. Done here, right after the heap, so the table reflects
+            // the machine's actual RAM as early as possible.
+            fs::memlayout::populate_from_memmap(boot_info.memory_map);
+
+            // Load kernel symbol table from ELF .symtab for backtrace resolution.
+            // Needs heap (Vec allocation).  Best done early so symbols are available
+            // for any crash during the rest of boot.
+            ksyms::init();
+
+            // Log cache topology (deferred from early boot — needs heap for formatting).
+            cpu::log_cache_topology();
+
+            // Step 6b: Calibrate TSC frequency using PIT for benchmark timing.
+            // Must be after serial (for output) and before subsystem benchmarks.
+            // PIT channel 2 is always available on x86_64 hardware.
+            bench::calibrate_tsc();
+            // Rescale the syscall-latency histogram thresholds into TSC cycles now
+            // that the frequency is known.  Must follow `calibrate_tsc` and should be
+            // as early as possible: syscalls dispatched before this point cannot be
+            // bucketed and are counted separately as unmeasurable rather than being
+            // silently reported as "<1us".
+            sclatency::calibrate();
+            sclatency::self_test();
+
+            // Bring up the Ada/SPARK components and check the FFI boundary.
+            //
+            // Placed here rather than next to the virtio drivers that use it because
+            // what is being checked is the *linkage*, not the driver: that the Ada
+            // objects resolved, that the calling convention agrees, and that this
+            // side's status enum still matches the Ada constants. Those are properties
+            // of the image, so a mismatch should stop the boot at a point where the
+            // serial log is short and the cause is unambiguous — not several hundred
+            // lines later as a confusing virtio failure.
+            //
+            // It needs nothing but the serial console: the Ada side allocates nothing
+            // and its state is statically allocated .bss, which is why it can run this
+            // early.
+            ada::init();
+            if let Err(e) = ada::selftest() {
+                serial_println!("FATAL: Ada/SPARK FFI self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+            // Say so on success too. Every other self-test in this tree ends `: OK`, and
+            // a silent one is indistinguishable from one that was never called — an
+            // `ada::selftest()` accidentally dropped from this sequence would look
+            // exactly like a passing boot. Printing the two bounds makes the line carry
+            // information rather than just presence: they are read back out of the Ada
+            // object, so the numbers are evidence the linkage resolved.
+            serial_println!(
+                "[ada]   FFI boundary self-test (linkage, calling convention, status enum, \
+                 Max_Descriptors={}, Max_Queues={}): OK",
+                ada::MAX_DESCRIPTORS,
+                ada::MAX_QUEUES
+            );
+
+            cputime::init();
+            timekeeping::init();
+
+            console::boot_step(console::BootStatus::Running, "Virtual memory");
+
+            // Step 7: Initialize the page table subsystem.
+            // This provides map/unmap/translate operations for managing virtual
+            // address spaces.  Uses the HHDM to read/write page table entries.
+            mm::page_table::init(boot_info.hhdm_offset);
+
+            // Verify page table operations work (translate HHDM, map/unmap).
+            if let Err(e) = mm::page_table::self_test() {
+                serial_println!("FATAL: Page table self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Verify IA32_PAT reads back as programmed and that the PageFlags memory
+            // types decode to what the rest of the kernel assumes.  Fatal: a wrong
+            // PAT silently changes the memory type of every MMIO and framebuffer
+            // mapping, which is not a failure any later test would attribute
+            // correctly.  Runs here because page_table::self_test has just proven the
+            // mapping machinery this depends on.
+            if let Err(e) = mm::pat::self_test() {
+                serial_println!("FATAL: PAT self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Initialize KASAN shadow memory (heap-corruption detector). Records the
+            // HHDM offset so shadow addresses can be computed; shadow pages are lazily
+            // mapped and checking is disabled by default (see mm::kasan). Requires the
+            // page-table subsystem (for lazy shadow mapping) to be up first.
+            mm::kasan::init(boot_info.hhdm_offset);
+
+            // Step 8: Initialize the page fault / demand paging subsystem.
+            // This registers the kernel address space and enables the page
+            // fault handler to resolve faults for demand-paged regions.
+            mm::fault::init();
+
+            // Verify demand paging works (register VMA, trigger fault, verify).
+            if let Err(e) = mm::fault::self_test() {
+                serial_println!("FATAL: Demand paging self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 8b: Verify userspace pointer validation logic.
+            // Validates that kernel rejects null, kernel-space, wrapping, and
+            // unmapped user-space pointers before any syscall handler uses them.
+            if let Err(e) = mm::user::self_test() {
+                serial_println!("FATAL: User memory validation self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 8c: Initialize kernel stack allocator with hardware guard pages.
+            // Must be after fault::init() since it registers Guard VMAs.
+            mm::kstack::init();
+            if let Err(e) = mm::kstack::self_test() {
+                serial_println!("FATAL: Kernel stack guard page self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            boot_timing::mark(boot_timing::Milestone::PageTable);
+            console::boot_step_update(console::BootStatus::Ok, "Virtual memory");
+
+            // Step 9: Initialize the scheduler.
+            // Creates the idle task (the current execution context) and sets up
+            // the priority round-robin scheduler.  Timer-based preemption will
+            // be added when the APIC timer is wired up (§2.2).
+            console::boot_step(console::BootStatus::Running, "Scheduler");
+            sched::init();
+
+            // Verify cooperative scheduling works (spawn tasks, yield, verify).
+            if let Err(e) = sched::self_test() {
+                serial_println!("FATAL: Scheduler self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Process accounting (after self-test, which fills/empties the hook table).
+            pacct::init();
+
+            // Verify FPU/SSE state save/restore works correctly.
+            // This tests the fxsave64/fxrstor64 path that the context switch uses.
+            sched::fpu::self_test();
+
+            // Multi-task stress test: verify XMM state isolation across context switches.
+            // Spawns 4 tasks writing unique patterns to XMM1, yields 50 times each,
+            // verifies no cross-task XMM leakage.
+            sched::fpu::stress_test();
+
+            // Step 9b: Initialize sysctl parameter registry.
+            // Registers tunable kernel parameters for memory management,
+            // scheduling, and other subsystems.
+            sysctl::init();
+            sysctl::self_test();
+
+            // Step 9b′: Populate the kernel-parameter store from the Limine command
+            // line. This MUST run during boot (previously it was only invoked lazily
+            // from the `kernparam` shell command), because boot-time consumers —
+            // notably the `net.userspace` cutover switch that decides whether the
+            // userspace netstack daemon owns the NIC — call `kernparam::is_set()`
+            // long before any shell exists. Without this, the param store stays
+            // `None` at boot and every `is_set()` returns false regardless of what
+            // the bootloader actually passed, making the switch unusable at runtime.
+            // Idempotent: a no-op if the store was already populated.
+            fs::kernparam::init_defaults();
+
+            // Step 9c: Initialize swap subsystem (zram initially).
+            // The in-memory compressed (zram) backend is always available.
+            // We'll try to upgrade to disk-backed swap after virtio-blk
+            // and blkdev init (Step 20e).
+            mm::swap::init(256);
+            mm::swap::self_test();
+            mm::compress::self_test();
+
+            boot_timing::mark(boot_timing::Milestone::Scheduler);
+            console::boot_step_update(console::BootStatus::Ok, "Scheduler");
+
+            // Step 10: Initialize IPC subsystem.
+            // Channels are the primary IPC mechanism — structured message
+            // passing between tasks/processes.  No explicit init needed (the
+            // global channel table is lazily populated).  Run self-tests to
+            // verify send, recv, blocking, close detection, and backpressure.
+            console::boot_step(console::BootStatus::Running, "IPC subsystem");
+            if let Err(e) = ipc::channel::self_test() {
+                serial_println!("FATAL: IPC channel self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 11: Initialize syscall dispatch.
+            // The versioned dispatch table maps syscall numbers to handlers.
+            // No explicit init needed (table is a const static), but we run
+            // self-tests to verify dispatch, yield, task_id, and IPC roundtrip
+            // all work through the syscall interface.
+            if let Err(e) = syscall::self_test() {
+                serial_println!("FATAL: Syscall dispatch self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+            if let Err(e) = syscall::linux::self_test() {
+                serial_println!("FATAL: Linux ABI translation self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+            // The translation self-test is the deepest single frame that runs on the
+            // boot stack (a monolithic function whose unoptimized frame is ~480 KiB
+            // and grows with each ABI batch).  Verify it did not breach the redzone;
+            // a clobbered canary means the boot stack overflowed and adjacent `.bss`
+            // may be corrupt, so halt with a clear diagnostic rather than limp on.
+            check_boot_stack_canary();
+
+            // Step 12: Initialize futex subsystem.
+            // Futexes enable fast userspace synchronization: the uncontended
+            // path is pure atomic CAS (no syscall), the contended path uses
+            // the kernel to block/wake tasks.
+            if let Err(e) = ipc::futex::self_test() {
+                serial_println!("FATAL: Futex self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 13: Initialize pipe subsystem.
+            // Pipes provide one-way kernel-buffered byte streams — the classic
+            // Unix pipe model but strictly unidirectional.
+            if let Err(e) = ipc::pipe::self_test() {
+                serial_println!("FATAL: Pipe self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 13b: Initialize stream socket subsystem.
+            // Stream sockets are bidirectional kernel-buffered byte streams — the
+            // primitive backing POSIX socketpair(AF_UNIX, SOCK_STREAM, ...).
+            //
+            // This self-test was previously disabled because its heap-allocation
+            // churn appeared to trigger a "later" boot hang during ring-3 process
+            // spawns.  That hang was in fact the boot-stack-vs-PML4 collision (the
+            // kernel ran on Limine's small reclaimable-memory stack, which grew down
+            // into the active page tables); the churn only shifted allocation/timing
+            // enough to expose it.  With the kernel now switched to a dedicated
+            // 512 KiB boot stack (see `KERNEL_BOOT_STACK`), the underlying bug is
+            // fixed and the self-test runs normally at boot.
+            if let Err(e) = ipc::stream_socket::self_test() {
+                serial_println!("FATAL: Stream socket self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 14: Initialize shared memory subsystem.
+            // Shared memory regions let tasks (and future processes) map the
+            // same physical pages into their address spaces for zero-copy IPC.
+            if let Err(e) = ipc::shm::self_test() {
+                serial_println!("FATAL: Shared memory self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 15: Initialize eventfd subsystem.
+            // Eventfds are lightweight 64-bit counters for wake-up notifications.
+            // Lighter than channels — ideal for "did something happen?" signaling.
+            if let Err(e) = ipc::eventfd::self_test() {
+                serial_println!("FATAL: Eventfd self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 15a: Epoll subsystem.
+            // Epoll instances hold an interest set (fd -> events + user data) and
+            // serve epoll_wait via the shared poll-readiness engine.  This self-test
+            // exercises create/dup/close refcounting and ctl add/mod/del semantics.
+            if let Err(e) = ipc::epoll::self_test() {
+                serial_println!("FATAL: Epoll self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 15a (cont.): Signalfd subsystem.
+            // A signalfd object holds an acceptance mask; reads drain masked pending
+            // signals from the owning process.  This self-test exercises create with
+            // SIGKILL/SIGSTOP mask sanitization, mask get/set, and dup/close
+            // refcounting with a shared mask.
+            if let Err(e) = ipc::signalfd::self_test() {
+                serial_println!("FATAL: Signalfd self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 15a (cont.): Timerfd subsystem.
+            // A timerfd object holds an armed-timer state (clock id, next expiry,
+            // interval); reads return the lazily-computed expiration count.  This
+            // self-test exercises the pure expiry math (one-shot/periodic/overdue),
+            // arm/disarm/query, dup/close refcounting with shared armed state, and
+            // stale-handle safety.
+            if let Err(e) = ipc::timerfd::self_test() {
+                serial_println!("FATAL: Timerfd self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 15a (cont.): Inotify subsystem.
+            // An inotify instance multiplexes a set of path watches over the
+            // native fs::notify subsystem, translating Linux IN_* masks and
+            // serializing native FsEvents into inotify_event records.  This
+            // self-test exercises mask translation, record sizing, add_watch +
+            // event emission/read, move-pair cookie pairing, buffer-too-small
+            // EINVAL, rm_watch IN_IGNORED, and dup/close refcounting.
+            if let Err(e) = ipc::inotify::self_test() {
+                serial_println!("FATAL: Inotify self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 15b: Memfd subsystem.
+            // Anonymous in-memory regular file backing memfd_create(2).  Exercises
+            // create/close/dup refcounting, read/write/seek, pread/pwrite,
+            // truncate grow/shrink, F_SEAL_* enforcement, and poll readiness.
+            if let Err(e) = ipc::memfd::self_test() {
+                serial_println!("FATAL: Memfd self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 16: Initialize completion port subsystem.
+            // Completion ports provide unified wait on heterogeneous kernel
+            // objects (channels, pipes, eventfds, future timers/process exit).
+            // This is the IOCP-like multiplexer from the design spec.
+            if let Err(e) = ipc::completion::self_test() {
+                serial_println!("FATAL: Completion port self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 16b: Timer subsystem self-test.
+            if let Err(e) = ipc::timer::self_test() {
+                serial_println!("FATAL: Timer self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 16b½: IPC semaphore self-test.
+            if let Err(e) = ipc::semaphore::self_test() {
+                serial_println!("FATAL: IPC semaphore self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 16c: io_ring (io_uring-style batch I/O) self-test.
+            if let Err(e) = ipc::io_ring::self_test() {
+                serial_println!("FATAL: io_ring self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            boot_timing::mark(boot_timing::Milestone::Ipc);
+            console::boot_step_update(console::BootStatus::Ok, "IPC subsystem");
+
+            // Step 17: Initialize capability system.
+            // Capability tables store unforgeable handles to kernel objects.
+            // Every resource access goes through capability checks — no
+            // ambient authority.
+            console::boot_step(console::BootStatus::Running, "Capabilities & logging");
+            if let Err(e) = cap::self_test() {
+                serial_println!("FATAL: Capability system self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 17a¼: Initialize named capability groups.
+            // Built-in groups (admin, network, filesystem, driver, process, ipc)
+            // are created with root (gid=0) as default member.
+            cap::groups::init();
+
+            // Step 17a½: Capability audit log self-test.
+            cap::audit::self_test();
+
+            // Step 17a¾: Capability groups self-test.
+            if let Err(e) = cap::groups::self_test() {
+                serial_println!("[WARN] Capability groups self-test failed: {:?}", e);
+            }
+
+            // Step 17a⅞: File capability tags self-test.
+            if let Err(e) = cap::file_tags::self_test() {
+                serial_println!("[WARN] File capability tags self-test failed: {:?}", e);
+            }
+
+            // Step 17a⅞+: Capability request broker self-test.
+            if let Err(e) = cap::request::self_test() {
+                serial_println!("[WARN] Capability request broker self-test failed: {:?}", e);
+            }
+
+            // Step 17b: Initialize structured logging subsystem.
+            // JSON-lines log entries go to serial and a kernel ring buffer.
+            // Must be after APIC init (uses tick_count for timestamps).
+            if let Err(e) = klog::self_test() {
+                serial_println!("FATAL: Structured logging self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            console::boot_step_update(console::BootStatus::Ok, "Capabilities & logging");
+
+            // Step 18: Set up SYSCALL/SYSRET MSRs.
+            // IA32_STAR (segment selectors) was already configured in gdt::init().
+            // This sets up IA32_LSTAR (entry point RIP), IA32_FMASK (RFLAGS mask),
+            // and IA32_KERNEL_GS_BASE (per-CPU data pointer for SWAPGS).
+            //
+            // Must be done before proc::self_test() because the spawn tests
+            // transition to ring 3, and userspace code uses SYSCALL to exit.
+            //
+            // SAFETY: GDT is loaded (IA32_STAR is set), IDT is initialized.
+            // Called exactly once.
+            console::boot_step(console::BootStatus::Running, "Process management");
+            unsafe {
+                syscall::entry::init();
+            }
+
+            // Step 19: Initialize process management subsystem.
+            // Process control blocks track per-process state: address space,
+            // capability table, thread list, parent relationship.
+            // Spawn tests exercise the full ring 3 path: IRETQ → userspace →
+            // SYSCALL(SYS_EXIT) → kernel, so SYSCALL MSRs must be ready.
+            if let Err(e) = proc::self_test() {
+                serial_println!("FATAL: Process management self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            console::boot_step_update(console::BootStatus::Ok, "Process management");
+
+            // Step 19b: Parse ACPI tables for hardware discovery.
+            // Locates the MADT to discover I/O APIC addresses, processor Local
+            // APICs, and interrupt source overrides.  Must run after heap init
+            // (allocates Vecs) and before APIC/IOAPIC init (which uses the data).
+            console::boot_step(console::BootStatus::Running, "Hardware tables (ACPI/HPET)");
+            if let Some(rsdp) = boot_info.rsdp_address {
+                // SAFETY: rsdp is a valid RSDP address from Limine, HHDM maps
+                // all physical memory.  Heap is initialized for Vec allocation.
+                // Memory map is passed for fallback RSDP scanning.
+                unsafe {
+                    acpi::init(rsdp, boot_info.hhdm_offset, boot_info.memory_map);
+                }
+
+                if let Err(e) = acpi::self_test() {
+                    serial_println!("WARNING: ACPI self-test failed: {} — using defaults", e);
+                }
+            } else {
+                // No RSDP from Limine — try scanning memory directly.
+                serial_println!("[acpi] No RSDP from bootloader — scanning memory...");
+                // SAFETY: rsdp=0 triggers memory scanning; HHDM maps all physical
+                // memory.  Heap is initialized for Vec allocation.
+                unsafe {
+                    acpi::init(0, boot_info.hhdm_offset, boot_info.memory_map);
+                }
+
+                if let Err(e) = acpi::self_test() {
+                    serial_println!("WARNING: ACPI self-test failed: {} — using defaults", e);
+                }
+            }
+
+            // Step 19c: Initialize HPET (High Precision Event Timer).
+            // Provides a high-resolution monotonic counter (~10-25 MHz) for
+            // precise time measurement.  The ACPI table gives us the MMIO base
+            // address.  Must run after ACPI parsing and page table init (needs
+            // HHDM and MMIO mapping).
+            //
+            // SAFETY: ACPI tables parsed, page tables initialized, single-threaded
+            // early boot with interrupts disabled.
+            unsafe {
+                hpet::init();
+            }
+            if let Err(e) = hpet::self_test() {
+                serial_println!("[hpet] WARNING: Self-test failed: {:?}", e);
+            }
+
+            // Capture the real boot timestamp now that HPET is running, so the
+            // `sysuptime` command reports uptime since actual boot rather than since
+            // the first time someone runs the command.  init_defaults() records
+            // hpet::elapsed_ns() as the boot instant; doing it here (early, right after
+            // the HPET clock starts) is the closest honest approximation of boot time
+            // available to a kernel that does not yet persist a wall-clock boot record.
+            // It is idempotent, so the lazy init in the kshell handler is a harmless
+            // no-op afterwards.
+            fs::sysuptime::init_defaults();
+
+            // Step 19c¼: Detect IOMMU hardware (Intel VT-d / AMD-Vi).
+            // Probes for DMAR/IVRS ACPI tables.  Detection only — actual DMA
+            // remapping page tables are set up below.
+            // Must be after ACPI init (uses acpi::find_table).
+            iommu::init();
+
+            // Step 19c¼: Initialize IOMMU DMA remapping page tables.
+            // Programs root/context tables and enables translation on each
+            // detected IOMMU unit.  After this, all PCI DMA is sandboxed.
+            // Must be after iommu::init() (detection) and frame allocator.
+            if let Err(e) = iommu_remap::init() {
+                serial_println!("[boot] WARNING: IOMMU remap init failed: {:?}", e);
+            }
+
+            // Step 19c½: Initialize high-resolution timer subsystem.
+            // Uses HPET as the clock source for nanosecond-precision timers.
+            // Must be after HPET init.
+            hrtimer::init();
+
+            // Step 19d: Initialize kernel CSPRNG.
+            // Seeds ChaCha20 from RDRAND/RDSEED (if available), HPET counter,
+            // and TSC jitter.  Must be after HPET init for timer-based entropy.
+            rng::init();
+            // Randomize the stack canary using the now-initialized CSPRNG.
+            // Must be after rng::init() and before any task creation.
+            sched::task::init_canary();
+
+            console::boot_step_update(console::BootStatus::Ok, "Hardware tables (ACPI/HPET)");
+
+            // Step 20: Initialize Local APIC and start the timer.
+            // The APIC timer provides periodic interrupts for preemptive
+            // scheduling.  Before this point, scheduling is purely cooperative.
+            //
+            // SAFETY: GDT, IDT, and heap are initialized.  We are single-threaded
+            // with interrupts disabled.  Called exactly once.
+            console::boot_step(console::BootStatus::Running, "Interrupt controllers (APIC)");
+            if let Err(e) = unsafe { apic::init() } {
+                serial_println!("FATAL: APIC init failed: {:?}", e);
+                cpu::halt_loop();
+            }
+
+            // Step 20b: Initialize I/O APIC for external device interrupts.
+            // Disables the legacy 8259 PIC, maps the IOAPIC MMIO registers,
+            // and programs all 24 redirection entries (masked).  Drivers unmask
+            // their IRQ lines individually when ready.  Uses I/O APIC address
+            // from ACPI MADT if available, otherwise falls back to the standard
+            // default (0xFEC0_0000).
+            //
+            // SAFETY: LAPIC is initialized (required for EOI routing).
+            // Interrupts are disabled.  Called exactly once.
+            if let Err(e) = unsafe { ioapic::init() } {
+                serial_println!("FATAL: IOAPIC init failed: {:?}", e);
+                cpu::halt_loop();
+            }
+
+            // Verify IOAPIC configuration.
+            if let Err(e) = ioapic::self_test() {
+                serial_println!("FATAL: IOAPIC self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+
+            boot_timing::mark(boot_timing::Milestone::ApicTimer);
+            console::boot_step_update(console::BootStatus::Ok, "Interrupt controllers (APIC)");
+
+            // Step 20c: Scan PCI bus for device discovery.
+            // This finds virtio, USB, NVMe, and other PCI devices.
+            console::boot_step(console::BootStatus::Running, "PCI & device drivers");
+            if let Err(e) = pci::self_test() {
+                serial_println!("WARNING: PCI scan failed: {}", e);
+            }
+
+            // Step 20d: virtio-net probe is done first (it doesn't need the
+            // blkdev registry).  virtio-blk devices are discovered in the
+            // multi-device init below (step 20e).
+
+            // Step 20d-2: Probe for virtio-net network device.
+            // Uses legacy PCI transport (I/O port BAR0) with polling.
+            // Non-fatal if no NIC is present.
+            virtio::net::init(boot_info.hhdm_offset);
+
+            // Step 20d-2b: Initialize Intel e1000 NIC (if present).
+            // Provides native NIC support for QEMU/VirtualBox without virtio.
+            // Falls back gracefully if no Intel NIC is found.
+            e1000::init(boot_info.hhdm_offset);
+
+            // Step 20d-2c: Initialize Realtek RTL8139 NIC (if present).
+            // Common on older hardware and available as a QEMU option.
+            rtl8139::init(boot_info.hhdm_offset);
+
+            // Step 20d-2d: Program the i6300esb hard-lockup watchdog if the boot
+            // harness supplied one (opt-in `--hard-lockup-watchdog`). Absent on a
+            // normal boot, in which case this is a no-op. Left disarmed here; armed
+            // only around the ring-3 container self-tests. See kernel/src/hardlockup.rs.
+            hardlockup::init(boot_info.hhdm_offset);
+
+            // Step 20d-2d: Initialize Intel HD Audio controller (if present).
+            // Discovers codecs, sets up CORB/RIRB command buffers, probes audio
+            // topology for output path (DAC → Pin).  QEMU: `-device intel-hda
+            // -device hda-duplex`.
+            hda::init(boot_info.hhdm_offset);
+
+            // Virtio-sound driver: modern VM audio via virtio.
+            // QEMU: `-device virtio-sound-pci,audiodev=a0 -audiodev sdl,id=a0`
+            if let Err(e) = virtio::sound::init(boot_info.hhdm_offset) {
+                serial_println!("[virtio-snd] Init: {:?} (non-fatal)", e);
+            }
+
+            // AC97 audio controller: legacy audio for older hardware/VMs.
+            // QEMU: `-device AC97,audiodev=a0 -audiodev sdl,id=a0`
+            if let Err(e) = ac97::init(boot_info.hhdm_offset) {
+                serial_println!("[ac97] Init: {:?} (non-fatal)", e);
+            }
+
+            // Virtio-GPU driver: 2D framebuffer for VMs.
+            // QEMU: `-device virtio-gpu-pci`
+            if let Err(e) = virtio::gpu::init(boot_info.hhdm_offset) {
+                serial_println!("[virtio-gpu] Init: {:?} (non-fatal)", e);
+            }
+
+            // DRM/KMS subsystem: abstracts display hardware for the compositor.
+            // Must come after both fb::init() and virtio-gpu init so that both
+            // backends are available.
+            drm::init();
+
+            console::boot_step_update(console::BootStatus::Ok, "PCI & device drivers");
+
+            // Step 20d-3: Initialize networking stack.
+            // Sets up the network interface from the active NIC (virtio-net or e1000)
+            // and attempts DHCP to obtain an IP address.
+            console::boot_step(console::BootStatus::Running, "Network stack");
+            net::init();
+
+            // Step 20d-4: Attempt DHCP to obtain an IP address.
+            // Non-fatal — the system works without network connectivity.
+            if net::interface::is_up() {
+                match net::dhcp::discover() {
+                    Ok(ip) => {
+                        serial_println!("[net] DHCP assigned IP: {}", ip);
+                    }
+                    Err(e) => {
+                        serial_println!("[net] DHCP failed: {:?} (non-fatal)", e);
+                    }
+                }
+            }
+
+            console::boot_step_update(console::BootStatus::Ok, "Network stack");
+
+            // Step 20e: Initialize block device abstraction layer.
+            // Discovers ALL virtio-blk devices on the PCI bus and registers
+            // them as vda, vdb, vdc, etc.  QEMU can present multiple devices
+            // (disk.img, ext4_test.img, swap.img).
+            console::boot_step(console::BootStatus::Running, "Storage & filesystems");
+            blkdev::init_multi(boot_info.hhdm_offset);
+
+            // AHCI/SATA driver: detect and initialize SATA disks on real hardware.
+            // Registers devices as sda, sdb, etc.  No-op in QEMU without SATA.
+            ahci::init(boot_info.hhdm_offset);
+
+            // NVMe driver: detect and initialize NVMe SSDs.
+            // Registers devices as nvme0n1, nvme1n1, etc.  No-op without NVMe hardware.
+            nvme::init(boot_info.hhdm_offset);
+
+            // xHCI USB host controller: detect and enumerate USB devices.
+            // No-op without xHCI hardware (common in QEMU unless -device qemu-xhci).
+            xhci::init(boot_info.hhdm_offset);
+
+            // Step 20e-2: Add disk-backed swap alongside zram.
+            // Multi-device swap: zram (priority 100) handles most evictions with
+            // zero I/O latency; disk (priority 0) catches overflow when zram is full.
+            // In QEMU, a second virtio-blk disk is available as "vda" (or "vdb"
+            // if the boot disk is also virtio).  Try known swap device names.
+            //
+            // Each slot = 16 KiB = 32 sectors.  512 slots = 16 MiB.
+            for swap_dev in &["vdb", "vda"] {
+                // Never claim a device that holds a filesystem: `init_disk` writes a
+                // raw swap area over whatever is there, so probing first is the
+                // difference between "use the spare disk" and "destroy the rootfs".
+                // The Path-Z glibc rootfs (rootfs.ext4) is attached as a virtio-blk
+                // device (typically vdb) and must survive untouched for the /mnt mount
+                // below — skip any device that already contains an ext4 superblock.
+                // A raw swap image (swap.img, all zeros) has no ext4 magic and is still
+                // selected here.
+                if fs::ext4::probe(swap_dev) {
+                    serial_println!(
+                        "[boot] Skipping {} for swap: holds an ext4 filesystem (reserved for rootfs)",
+                        swap_dev
+                    );
+                    continue;
+                }
+                if mm::swap::init_disk(swap_dev, 0, 512).is_ok() {
+                    serial_println!(
+                        "[boot] Disk swap added on {} (zram + disk tiered)",
+                        swap_dev
+                    );
+                    // Run the disk-specific self-test now that a disk backend
+                    // is active.
+                    mm::swap::self_test_disk();
+                    break;
+                }
+            }
+
+            // Step 20f: Mount root filesystem.
+            // Try to mount a FAT filesystem from the first block device.
+            // Auto-detects FAT16 or FAT32.  Non-fatal if no filesystem is present.
+            // Prefer a real FAT filesystem on vda (auto-detects FAT16/FAT32).  If no
+            // on-disk filesystem is present, fall back to a volatile in-memory root so
+            // the system *always* has a usable "/" — the virtual filesystems
+            // (/proc, /dev, /sys, /tmp) mount underneath it and userspace sees a
+            // working namespace even on a diskless boot.  (This also means the
+            // boot-test, whose vda is a raw swap disk with no FAT, still exercises the
+            // virtual-filesystem layer instead of silently skipping it.)
+            let fat_ok = match fs::fat::init("vda") {
+                Ok(()) => true,
                 Err(e) => {
                     serial_println!(
-                        "[boot] WARNING: ext4 detected on {} but mount failed: {:?}",
-                        ext4_dev,
+                        "[fs] No FAT filesystem on vda: {:?} — using in-memory root (non-fatal)",
                         e
                     );
+                    if let Err(me) = fs::memfs::mount("/") {
+                        serial_println!(
+                            "[boot] WARNING: failed to mount fallback in-memory root: {:?}",
+                            me
+                        );
+                    }
+                    false
+                }
+            };
+
+            // --- Virtual filesystem mounts (independent of which root we have) ---
+
+            // Mount an in-memory filesystem at /tmp for temporary files.
+            // This is volatile (lost on reboot) and heap-backed.
+            if let Err(e) = fs::memfs::mount("/tmp") {
+                serial_println!("[boot] WARNING: failed to mount memfs at /tmp: {:?}", e);
+            }
+            // Mount procfs at /proc for system information.
+            // Read-only virtual filesystem — content generated on the fly.
+            if let Err(e) = fs::procfs::mount("/proc") {
+                serial_println!("[boot] WARNING: failed to mount procfs at /proc: {:?}", e);
+            }
+            // Mount devfs at /dev for standard device files.
+            // Provides /dev/null, /dev/zero, /dev/random, /dev/console.
+            if let Err(e) = fs::devfs::mount("/dev") {
+                serial_println!("[boot] WARNING: failed to mount devfs at /dev: {:?}", e);
+            }
+            // Mount sysfs at /sys for kernel configuration and hardware info.
+            // Writable for tunables (hostname, sysctl params), read-only for
+            // system info (kernel version, PCI devices, cache stats).
+            if let Err(e) = fs::sysfs::mount("/sys") {
+                serial_println!("[boot] WARNING: failed to mount sysfs at /sys: {:?}", e);
+            }
+
+            // Probe secondary block devices for ext4 filesystems.
+            // Try common virtio-blk device names.  The first ext4 partition
+            // found is mounted at /mnt.  Non-fatal if none found.
+            for ext4_dev in &["vdb", "vdc"] {
+                if fs::ext4::probe(ext4_dev) {
+                    match fs::ext4::mount(ext4_dev, "/mnt") {
+                        Ok(()) => break,
+                        Err(e) => {
+                            serial_println!(
+                                "[boot] WARNING: ext4 detected on {} but mount failed: {:?}",
+                                ext4_dev,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Probe for ISO 9660 filesystems (CD-ROM images).
+            // In QEMU, an ISO image can be attached as a virtio-blk device.
+            for iso_dev in &["vdb", "vdc", "vdd"] {
+                if fs::iso9660::probe(iso_dev) {
+                    match fs::iso9660::mount(iso_dev, "/cdrom") {
+                        Ok(()) => break,
+                        Err(e) => {
+                            serial_println!(
+                                "[boot] WARNING: ISO 9660 detected on {} but mount failed: {:?}",
+                                iso_dev,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Initialize the change journal (persistent change tracking).
+            // Must happen before self-tests so all VFS operations are captured.
+            fs::journal::init();
+
+            // --- Disk-backed filesystem self-tests ---
+            // These exercise the on-disk FAT root (and its buffer-cache / journal /
+            // recycle-bin layers), so they only run when a real FAT filesystem
+            // mounted.  On a diskless (in-memory root) boot they are skipped; the
+            // virtual-filesystem self-tests below still run unconditionally.
+            if fat_ok {
+                if let Err(e) = fs::fat::self_test() {
+                    serial_println!("WARNING: FAT self-test failed: {:?}", e);
+                }
+                // io_ring file handle test (requires mounted /tmp).
+                if let Err(e) = ipc::io_ring::self_test_fh() {
+                    serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
+                }
+                // Buffer cache self-test (validates caching, write-back, LRU).
+                if let Err(e) = fs::cache::self_test() {
+                    serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
+                }
+                // Recycle bin self-test (trash, list, restore, empty).
+                if let Err(e) = fs::trash::self_test() {
+                    serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
+                }
+                // Change notification self-test (watch, emit, read, close).
+                if let Err(e) = fs::notify::self_test() {
+                    serial_println!("WARNING: Change notification self-test failed: {:?}", e);
+                }
+                // Change journal self-test (persistent change tracking).
+                if let Err(e) = fs::journal::self_test() {
+                    serial_println!("WARNING: Change journal self-test failed: {:?}", e);
+                }
+                // ext4 self-test (reads directory listing and files if mounted).
+                if let Err(e) = fs::ext4::self_test() {
+                    serial_println!("WARNING: ext4 self-test failed: {:?}", e);
+                }
+                // VFS-level self-test (symlinks, cross-mount resolution) — relies on
+                // the FAT root for cross-mount cases.
+                if let Err(e) = fs::vfs::self_test() {
+                    serial_println!("WARNING: VFS self-test failed: {:?}", e);
+                }
+                // Flush buffer cache to disk so data survives power loss / QEMU kill.
+                if let Err(e) = fs::cache::flush_all() {
+                    serial_println!("WARNING: Buffer cache flush failed: {:?}", e);
                 }
             }
         }
+        case();
     }
 
-    // Probe for ISO 9660 filesystems (CD-ROM images).
-    // In QEMU, an ISO image can be attached as a virtio-blk device.
-    for iso_dev in &["vdb", "vdc", "vdd"] {
-        if fs::iso9660::probe(iso_dev) {
-            match fs::iso9660::mount(iso_dev, "/cdrom") {
-                Ok(()) => break,
-                Err(e) => {
-                    serial_println!(
-                        "[boot] WARNING: ISO 9660 detected on {} but mount failed: {:?}",
-                        iso_dev,
-                        e
-                    );
-                }
+    {
+        #[inline(never)]
+        fn case() {
+            // --- Virtual filesystem self-tests (run on any root) ---
+            // These construct their own filesystem instances and do not depend on a
+            // real on-disk FAT root, so they run regardless of how "/" was mounted.
+            // Pure ext4 extent-placement regression guard (BUG-EXT4-SPARSE-READ) — no
+            // disk needed, so unlike ext4::self_test() it runs on the diskless / non-FAT
+            // Path-Z boot too, where the sparse fastpy ELFs on /mnt/tests are loaded.
+            if let Err(e) = fs::ext4::self_test_pure() {
+                serial_println!("WARNING: ext4 pure self-test failed: {:?}", e);
+            }
+            // File handle self-test — exercises open/read/write/seek/dup/dir-handle and
+            // O_EXCL exclusive-create semantics against the VFS root.  It self-guards
+            // (skips if "/" is not writable), so it runs on a diskless memfs boot too;
+            // gating it on a FAT root would leave the whole handle layer — and O_EXCL —
+            // untested on the common in-memory boot path (e.g. the CI boot test).
+            if let Err(e) = fs::handle::self_test() {
+                serial_println!("WARNING: File handle self-test failed: {:?}", e);
+            }
+            // In-memory filesystem self-test (standalone, doesn't touch VFS mount).
+            if let Err(e) = fs::memfs::self_test() {
+                serial_println!("WARNING: MemFs self-test failed: {:?}", e);
+            }
+            // NTFS read self-test.  Unlike the ext4/ISO 9660 tests this needs no
+            // attached device: it builds a synthetic NTFS volume in RAM and drives the
+            // whole parser over it, so the hard parts (fixups, runlists, the $I30
+            // B+ tree, $ATTRIBUTE_LIST) are covered on every boot rather than only on
+            // the rare boot where someone happens to attach an NTFS disk.
+            if let Err(e) = fs::ntfs::self_test() {
+                serial_println!("WARNING: NTFS self-test failed: {:?}", e);
+            }
+            // Btrfs read self-test, in RAM for the same reason as the NTFS one. It
+            // matters more here: the awkward part of Btrfs is the mount bootstrap
+            // (superblock -> sys_chunk_array -> chunk tree -> root tree -> FS tree),
+            // and the synthetic volume deliberately places logical and physical
+            // addresses a fixed distance apart so that a broken chunk map cannot
+            // accidentally produce correct reads.
+            if let Err(e) = fs::btrfs::self_test() {
+                serial_println!("WARNING: Btrfs self-test failed: {:?}", e);
+            }
+            // F2FS read self-test, also in RAM. The hard parts here are the ones no
+            // amount of parsing care can substitute for reading correctly: which of
+            // the two checkpoint packs is current, which of the two NAT copies the
+            // checkpoint's bitmap selects, and whether the checkpoint's own NAT
+            // journal overrides both. The synthetic volume attaches a decoy to each
+            // of the three, so a driver that gets one wrong fails a check instead of
+            // returning plausible bytes from the wrong block.
+            if let Err(e) = fs::f2fs::self_test() {
+                serial_println!("WARNING: F2FS self-test failed: {:?}", e);
+            }
+            // devfs self-test (validates device file operations).
+            if let Err(e) = fs::devfs::self_test() {
+                serial_println!("WARNING: DevFs self-test failed: {:?}", e);
+            }
+            // sysfs self-test (validates kernel tunables, hostname, PCI).
+            if let Err(e) = fs::sysfs::self_test() {
+                serial_println!("WARNING: SysFs self-test failed: {:?}", e);
+            }
+            // Mount/unmount self-test (exercises the SYS_FS_MOUNT/SYS_FS_UMOUNT
+            // backend dispatch on a scratch tmpfs mount — runs on any root).
+            if let Err(e) = fs::vfs::mount_self_test() {
+                serial_println!("WARNING: VFS mount/unmount self-test failed: {:?}", e);
+            }
+            // Stable file-identity self-test (the page-cache key precursor — §23/§36).
+            if let Err(e) = fs::vfs::file_identity_self_test() {
+                serial_println!("WARNING: VFS file-identity self-test failed: {:?}", e);
+            }
+            // Read-only shared page-cache self-test (C-lite storage core — §23/§36).
+            if let Err(e) = mm::page_cache::self_test() {
+                serial_println!("WARNING: page-cache self-test failed: {:?}", e);
+            }
+            // Register the page-cache shrinker so idle cached pages are reclaimed under
+            // memory pressure instead of pinning frames resident without bound (§36).
+            mm::page_cache::init();
+            // mkfs/format self-test (exercises the SYS_FS_FORMAT backend on a RAM disk).
+            if let Err(e) = fs::fat::format_self_test() {
+                serial_println!("WARNING: FAT mkfs/format self-test failed: {:?}", e);
+            }
+            // fsck self-test (exercises the SYS_FS_CHECK backend on a RAM disk).
+            if let Err(e) = fs::fat::fsck_self_test() {
+                serial_println!("WARNING: FAT fsck self-test failed: {:?}", e);
+            }
+            // Block-layer discard (TRIM) primitive self-test on a scratch RAM disk.
+            if let Err(e) = blkdev::self_test_discard() {
+                serial_println!("WARNING: blkdev discard self-test failed: {:?}", e);
+            }
+            // FAT fstrim (free-space discard) self-test on a scratch RAM disk.
+            if let Err(e) = fs::fat::trim_self_test() {
+                serial_println!("WARNING: FAT fstrim self-test failed: {:?}", e);
             }
         }
+        case();
     }
 
-    // Initialize the change journal (persistent change tracking).
-    // Must happen before self-tests so all VFS operations are captured.
-    fs::journal::init();
-
-    // --- Disk-backed filesystem self-tests ---
-    // These exercise the on-disk FAT root (and its buffer-cache / journal /
-    // recycle-bin layers), so they only run when a real FAT filesystem
-    // mounted.  On a diskless (in-memory root) boot they are skipped; the
-    // virtual-filesystem self-tests below still run unconditionally.
-    if fat_ok {
-        if let Err(e) = fs::fat::self_test() {
-            serial_println!("WARNING: FAT self-test failed: {:?}", e);
+    {
+        #[inline(never)]
+        fn case() {
+            // Step 20z: Initialize the lock order validator (lockdep) — BEFORE the
+            // ring-3 self-test battery, which is the part of boot most likely to
+            // deadlock and, until 2026-08-17, the part that ran without it.
+            //
+            // This call used to sit ~3800 lines below, after SMP init, justified by
+            // "must be after SMP init so current_cpu_index() works on all CPUs". That
+            // reasoning does not survive contact with `smp::current_cpu_index`, which
+            // returns `BSP_CPU_INDEX` whenever `SMP_INITIALIZED` is clear — the correct
+            // answer while only the BSP is running, which is the case here.
+            //
+            // What the old placement cost, concretely: an intermittent hang inside the
+            // ext4 `link()/linkat` self-test produced `lock '?'` and `cpu 0 holds 0
+            // lock(s)`, because `lock_acquire` returns immediately while disabled. Yet
+            // `lock_acquire` contains a precise detector for exactly that failure — it
+            // finds a re-entrant acquisition of the same lock *instance* on the per-CPU
+            // held stack and names the class, before the 30 s stall detector fires. It
+            // was switched off during the only phase of boot that has ever needed it.
+            //
+            // Expect this to surface lock-order findings from paths that have never been
+            // validated. Those are the point.
+            lockdep::init();
+            lockdep::self_test();
         }
-        // io_ring file handle test (requires mounted /tmp).
-        if let Err(e) = ipc::io_ring::self_test_fh() {
-            serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
-        }
-        // Buffer cache self-test (validates caching, write-back, LRU).
-        if let Err(e) = fs::cache::self_test() {
-            serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
-        }
-        // Recycle bin self-test (trash, list, restore, empty).
-        if let Err(e) = fs::trash::self_test() {
-            serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
-        }
-        // Change notification self-test (watch, emit, read, close).
-        if let Err(e) = fs::notify::self_test() {
-            serial_println!("WARNING: Change notification self-test failed: {:?}", e);
-        }
-        // Change journal self-test (persistent change tracking).
-        if let Err(e) = fs::journal::self_test() {
-            serial_println!("WARNING: Change journal self-test failed: {:?}", e);
-        }
-        // ext4 self-test (reads directory listing and files if mounted).
-        if let Err(e) = fs::ext4::self_test() {
-            serial_println!("WARNING: ext4 self-test failed: {:?}", e);
-        }
-        // VFS-level self-test (symlinks, cross-mount resolution) — relies on
-        // the FAT root for cross-mount cases.
-        if let Err(e) = fs::vfs::self_test() {
-            serial_println!("WARNING: VFS self-test failed: {:?}", e);
-        }
-        // Flush buffer cache to disk so data survives power loss / QEMU kill.
-        if let Err(e) = fs::cache::flush_all() {
-            serial_println!("WARNING: Buffer cache flush failed: {:?}", e);
-        }
+        case();
     }
 
-    // --- Virtual filesystem self-tests (run on any root) ---
-    // These construct their own filesystem instances and do not depend on a
-    // real on-disk FAT root, so they run regardless of how "/" was mounted.
-    // Pure ext4 extent-placement regression guard (BUG-EXT4-SPARSE-READ) — no
-    // disk needed, so unlike ext4::self_test() it runs on the diskless / non-FAT
-    // Path-Z boot too, where the sparse fastpy ELFs on /mnt/tests are loaded.
-    if let Err(e) = fs::ext4::self_test_pure() {
-        serial_println!("WARNING: ext4 pure self-test failed: {:?}", e);
+    {
+        #[inline(never)]
+        fn case() {
+            // Step 21: Enable hardware interrupts — BEFORE the ring-3 self-test battery.
+            //
+            // Everything above this point is deterministic kernel/subsystem init and
+            // in-kernel self-tests that neither spawn ring-3 processes nor perform
+            // multi-second, data-proportional work.  Everything BELOW is the ring-3
+            // integration battery: dozens of real Linux-ABI processes that fork,
+            // CoW-clone, exec, demand-page file-backed mappings, run glibc/dash, and
+            // even compile C with gcc/make.  In a debug build (with heap poisoning)
+            // those operations are seconds-long and O(n)-over-large-data.
+            //
+            // Historically `sti()` was deferred until *after* the whole battery, so the
+            // battery ran with IF=0.  That is the "long operation under IRQs-disabled"
+            // anti-pattern (CLAUDE.md): with IF=0 the BSP takes no timer ticks, so the
+            // scheduler cannot preempt, the timer-driven liveness / hung-task watchdogs
+            // are blind, and the BSP-only hard-lockup watchdog kick
+            // (`sched::timer_tick` → `hardlockup::kick`) is starved — so a slow-but-live
+            // boot occasionally crossed the ~9.8 s watchdog / harness-timeout threshold
+            // and presented as the intermittent "BSP-dead total-silence hang"
+            // (known-issues.md B-PTHREAD-YIELDBUDGET).  Fixing each seconds-long IF=0
+            // operation one at a time (SHA-256 auto-versioning, page-fault file reads,
+            // heap poisoning …) was band-aid accumulation; the structural fix is to run
+            // the battery the way userspace actually runs — with interrupts enabled and
+            // preemption live.  This also makes the timer-driven watchdogs able to
+            // catch a *genuine* clone/CoW/reap deadlock during the battery instead of
+            // going silent.
+            //
+            // SAFETY: The IDT is fully populated (exceptions, timer vector 32, spurious
+            // vector 255), the Local APIC + I/O APIC are initialized and the timer is
+            // running (Step 20), and the scheduler is ready (Step 9).  The per-CPU IRQ
+            // stack is installed first so hardware IRQs never push their frame onto a
+            // near-full kernel task stack (B-DF1 / open-questions Q7, option A).
+            console::boot_step(console::BootStatus::Running, "Preemptive scheduling");
+            idt::init_irq_stack(0);
+            // SAFETY: see the paragraph above — all interrupt infrastructure is ready.
+            unsafe {
+                cpu::sti();
+            }
+            serial_println!("[boot] Interrupts enabled — preemptive scheduling active");
+        }
+        case();
     }
-    // File handle self-test — exercises open/read/write/seek/dup/dir-handle and
-    // O_EXCL exclusive-create semantics against the VFS root.  It self-guards
-    // (skips if "/" is not writable), so it runs on a diskless memfs boot too;
-    // gating it on a FAT root would leave the whole handle layer — and O_EXCL —
-    // untested on the common in-memory boot path (e.g. the CI boot test).
-    if let Err(e) = fs::handle::self_test() {
-        serial_println!("WARNING: File handle self-test failed: {:?}", e);
-    }
-    // In-memory filesystem self-test (standalone, doesn't touch VFS mount).
-    if let Err(e) = fs::memfs::self_test() {
-        serial_println!("WARNING: MemFs self-test failed: {:?}", e);
-    }
-    // NTFS read self-test.  Unlike the ext4/ISO 9660 tests this needs no
-    // attached device: it builds a synthetic NTFS volume in RAM and drives the
-    // whole parser over it, so the hard parts (fixups, runlists, the $I30
-    // B+ tree, $ATTRIBUTE_LIST) are covered on every boot rather than only on
-    // the rare boot where someone happens to attach an NTFS disk.
-    if let Err(e) = fs::ntfs::self_test() {
-        serial_println!("WARNING: NTFS self-test failed: {:?}", e);
-    }
-    // Btrfs read self-test, in RAM for the same reason as the NTFS one. It
-    // matters more here: the awkward part of Btrfs is the mount bootstrap
-    // (superblock -> sys_chunk_array -> chunk tree -> root tree -> FS tree),
-    // and the synthetic volume deliberately places logical and physical
-    // addresses a fixed distance apart so that a broken chunk map cannot
-    // accidentally produce correct reads.
-    if let Err(e) = fs::btrfs::self_test() {
-        serial_println!("WARNING: Btrfs self-test failed: {:?}", e);
-    }
-    // F2FS read self-test, also in RAM. The hard parts here are the ones no
-    // amount of parsing care can substitute for reading correctly: which of
-    // the two checkpoint packs is current, which of the two NAT copies the
-    // checkpoint's bitmap selects, and whether the checkpoint's own NAT
-    // journal overrides both. The synthetic volume attaches a decoy to each
-    // of the three, so a driver that gets one wrong fails a check instead of
-    // returning plausible bytes from the wrong block.
-    if let Err(e) = fs::f2fs::self_test() {
-        serial_println!("WARNING: F2FS self-test failed: {:?}", e);
-    }
-    // devfs self-test (validates device file operations).
-    if let Err(e) = fs::devfs::self_test() {
-        serial_println!("WARNING: DevFs self-test failed: {:?}", e);
-    }
-    // sysfs self-test (validates kernel tunables, hostname, PCI).
-    if let Err(e) = fs::sysfs::self_test() {
-        serial_println!("WARNING: SysFs self-test failed: {:?}", e);
-    }
-    // Mount/unmount self-test (exercises the SYS_FS_MOUNT/SYS_FS_UMOUNT
-    // backend dispatch on a scratch tmpfs mount — runs on any root).
-    if let Err(e) = fs::vfs::mount_self_test() {
-        serial_println!("WARNING: VFS mount/unmount self-test failed: {:?}", e);
-    }
-    // Stable file-identity self-test (the page-cache key precursor — §23/§36).
-    if let Err(e) = fs::vfs::file_identity_self_test() {
-        serial_println!("WARNING: VFS file-identity self-test failed: {:?}", e);
-    }
-    // Read-only shared page-cache self-test (C-lite storage core — §23/§36).
-    if let Err(e) = mm::page_cache::self_test() {
-        serial_println!("WARNING: page-cache self-test failed: {:?}", e);
-    }
-    // Register the page-cache shrinker so idle cached pages are reclaimed under
-    // memory pressure instead of pinning frames resident without bound (§36).
-    mm::page_cache::init();
-    // mkfs/format self-test (exercises the SYS_FS_FORMAT backend on a RAM disk).
-    if let Err(e) = fs::fat::format_self_test() {
-        serial_println!("WARNING: FAT mkfs/format self-test failed: {:?}", e);
-    }
-    // fsck self-test (exercises the SYS_FS_CHECK backend on a RAM disk).
-    if let Err(e) = fs::fat::fsck_self_test() {
-        serial_println!("WARNING: FAT fsck self-test failed: {:?}", e);
-    }
-    // Block-layer discard (TRIM) primitive self-test on a scratch RAM disk.
-    if let Err(e) = blkdev::self_test_discard() {
-        serial_println!("WARNING: blkdev discard self-test failed: {:?}", e);
-    }
-    // FAT fstrim (free-space discard) self-test on a scratch RAM disk.
-    if let Err(e) = fs::fat::trim_self_test() {
-        serial_println!("WARNING: FAT fstrim self-test failed: {:?}", e);
-    }
-
-    // Step 20z: Initialize the lock order validator (lockdep) — BEFORE the
-    // ring-3 self-test battery, which is the part of boot most likely to
-    // deadlock and, until 2026-08-17, the part that ran without it.
-    //
-    // This call used to sit ~3800 lines below, after SMP init, justified by
-    // "must be after SMP init so current_cpu_index() works on all CPUs". That
-    // reasoning does not survive contact with `smp::current_cpu_index`, which
-    // returns `BSP_CPU_INDEX` whenever `SMP_INITIALIZED` is clear — the correct
-    // answer while only the BSP is running, which is the case here.
-    //
-    // What the old placement cost, concretely: an intermittent hang inside the
-    // ext4 `link()/linkat` self-test produced `lock '?'` and `cpu 0 holds 0
-    // lock(s)`, because `lock_acquire` returns immediately while disabled. Yet
-    // `lock_acquire` contains a precise detector for exactly that failure — it
-    // finds a re-entrant acquisition of the same lock *instance* on the per-CPU
-    // held stack and names the class, before the 30 s stall detector fires. It
-    // was switched off during the only phase of boot that has ever needed it.
-    //
-    // Expect this to surface lock-order findings from paths that have never been
-    // validated. Those are the point.
-    lockdep::init();
-    lockdep::self_test();
-
-    // Step 21: Enable hardware interrupts — BEFORE the ring-3 self-test battery.
-    //
-    // Everything above this point is deterministic kernel/subsystem init and
-    // in-kernel self-tests that neither spawn ring-3 processes nor perform
-    // multi-second, data-proportional work.  Everything BELOW is the ring-3
-    // integration battery: dozens of real Linux-ABI processes that fork,
-    // CoW-clone, exec, demand-page file-backed mappings, run glibc/dash, and
-    // even compile C with gcc/make.  In a debug build (with heap poisoning)
-    // those operations are seconds-long and O(n)-over-large-data.
-    //
-    // Historically `sti()` was deferred until *after* the whole battery, so the
-    // battery ran with IF=0.  That is the "long operation under IRQs-disabled"
-    // anti-pattern (CLAUDE.md): with IF=0 the BSP takes no timer ticks, so the
-    // scheduler cannot preempt, the timer-driven liveness / hung-task watchdogs
-    // are blind, and the BSP-only hard-lockup watchdog kick
-    // (`sched::timer_tick` → `hardlockup::kick`) is starved — so a slow-but-live
-    // boot occasionally crossed the ~9.8 s watchdog / harness-timeout threshold
-    // and presented as the intermittent "BSP-dead total-silence hang"
-    // (known-issues.md B-PTHREAD-YIELDBUDGET).  Fixing each seconds-long IF=0
-    // operation one at a time (SHA-256 auto-versioning, page-fault file reads,
-    // heap poisoning …) was band-aid accumulation; the structural fix is to run
-    // the battery the way userspace actually runs — with interrupts enabled and
-    // preemption live.  This also makes the timer-driven watchdogs able to
-    // catch a *genuine* clone/CoW/reap deadlock during the battery instead of
-    // going silent.
-    //
-    // SAFETY: The IDT is fully populated (exceptions, timer vector 32, spurious
-    // vector 255), the Local APIC + I/O APIC are initialized and the timer is
-    // running (Step 20), and the scheduler is ready (Step 9).  The per-CPU IRQ
-    // stack is installed first so hardware IRQs never push their frame onto a
-    // near-full kernel task stack (B-DF1 / open-questions Q7, option A).
-    console::boot_step(console::BootStatus::Running, "Preemptive scheduling");
-    idt::init_irq_stack(0);
-    // SAFETY: see the paragraph above — all interrupt infrastructure is ready.
-    unsafe {
-        cpu::sti();
-    }
-    serial_println!("[boot] Interrupts enabled — preemptive scheduling active");
 
     // Verify the APIC timer is actually firing before the battery relies on it
     // for preemption and watchdog kicks.  (Runs here, immediately after enable,
@@ -1578,18 +1608,24 @@ extern "C" fn kernel_main() -> ! {
     }
     console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
 
-    // Timerfd *blocking* path: parked readers are released by `settime` and by
-    // their own expiry `hrtimer`.  This cannot run in `ipc::timerfd::self_test()`
-    // (Step ~10) because hrtimer callbacks are dispatched from the APIC timer
-    // ISR, which only exists once the timer is initialized and IF=1 — i.e. from
-    // right here.  It is also the regression test for the timerfd half of
-    // BUG-PIPE-SINGLE-WAITER-SLOT (several readers parked on one timerfd).
-    if let Err(e) = ipc::timerfd::self_test_blocking_multi_waiter() {
-        serial_println!(
-            "FATAL: Timerfd blocking multi-waiter self-test failed: {}",
-            e
-        );
-        cpu::halt_loop();
+    {
+        #[inline(never)]
+        fn case() {
+            // Timerfd *blocking* path: parked readers are released by `settime` and by
+            // their own expiry `hrtimer`.  This cannot run in `ipc::timerfd::self_test()`
+            // (Step ~10) because hrtimer callbacks are dispatched from the APIC timer
+            // ISR, which only exists once the timer is initialized and IF=1 — i.e. from
+            // right here.  It is also the regression test for the timerfd half of
+            // BUG-PIPE-SINGLE-WAITER-SLOT (several readers parked on one timerfd).
+            if let Err(e) = ipc::timerfd::self_test_blocking_multi_waiter() {
+                serial_println!(
+                    "FATAL: Timerfd blocking multi-waiter self-test failed: {}",
+                    e
+                );
+                cpu::halt_loop();
+            }
+        }
+        case();
     }
 
     // End-to-end dynamically-linked Linux launch test (needs a writable VFS,
@@ -1694,44 +1730,50 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // Net→userspace migration (Path B, §63/§66). The `net.userspace` boot switch
-    // selects NIC ownership at boot (§64):
-    //
-    //   * switch OFF (default): the in-kernel resident stack owns the NIC. Run the
-    //     bounded daemon self-tests here — each briefly claims the NIC, proves a
-    //     path, then releases it back so the kernel stack's RX resumes.
-    //   * switch ON (Phase-5 cutover): the PERSISTENT userspace daemon owns the
-    //     NIC for the system's lifetime and serves all AF_INET socket traffic
-    //     (increment 5.5/5.6). Its spawn is DEFERRED to just before BOOT_OK
-    //     (alongside the container health monitor) — a lifetime service that
-    //     runs continuously would perturb the timing-sensitive timeout
-    //     self-tests below (channel/futex/eventfd recv-with-timeout) and the
-    //     hrtimer self-test's pending-count assertions. Kernel POST must run in
-    //     a quiet system; services start only once self-verification is done.
-    //     The bounded self-tests are also skipped under the switch — they would
-    //     contend for the exclusive raw-NIC claim the daemon will hold (§64).
-    if !crate::net::netstack_client::userspace_enabled() {
-        // Phase 2: spawn the real `services/netstack` daemon (ring 3), which
-        // claims the NIC via the capability-gated SYS_NET_RAW_* syscalls and
-        // proves the raw-frame TX/RX path end-to-end with an ARP round-trip.
-        // Skips gracefully when there's no network.
-        if let Err(e) = proc::spawn::self_test_userspace_netstack() {
-            serial_println!(
-                "WARNING: userspace netstack daemon (ring 3) self-test failed: {:?}",
-                e
-            );
-        }
+    {
+        #[inline(never)]
+        fn case() {
+            // Net→userspace migration (Path B, §63/§66). The `net.userspace` boot switch
+            // selects NIC ownership at boot (§64):
+            //
+            //   * switch OFF (default): the in-kernel resident stack owns the NIC. Run the
+            //     bounded daemon self-tests here — each briefly claims the NIC, proves a
+            //     path, then releases it back so the kernel stack's RX resumes.
+            //   * switch ON (Phase-5 cutover): the PERSISTENT userspace daemon owns the
+            //     NIC for the system's lifetime and serves all AF_INET socket traffic
+            //     (increment 5.5/5.6). Its spawn is DEFERRED to just before BOOT_OK
+            //     (alongside the container health monitor) — a lifetime service that
+            //     runs continuously would perturb the timing-sensitive timeout
+            //     self-tests below (channel/futex/eventfd recv-with-timeout) and the
+            //     hrtimer self-test's pending-count assertions. Kernel POST must run in
+            //     a quiet system; services start only once self-verification is done.
+            //     The bounded self-tests are also skipped under the switch — they would
+            //     contend for the exclusive raw-NIC claim the daemon will hold (§64).
+            if !crate::net::netstack_client::userspace_enabled() {
+                // Phase 2: spawn the real `services/netstack` daemon (ring 3), which
+                // claims the NIC via the capability-gated SYS_NET_RAW_* syscalls and
+                // proves the raw-frame TX/RX path end-to-end with an ARP round-trip.
+                // Skips gracefully when there's no network.
+                if let Err(e) = proc::spawn::self_test_userspace_netstack() {
+                    serial_println!(
+                        "WARNING: userspace netstack daemon (ring 3) self-test failed: {:?}",
+                        e
+                    );
+                }
 
-        // Phase 4: forward a DNS resolve from the kernel to the userspace
-        // `netstack` daemon over the Service Registry (`net.stack`), proving the
-        // socket-syscall → IPC path end-to-end. Bounded self-test (the daemon
-        // owns the NIC only briefly); skips gracefully with no network.
-        if let Err(e) = proc::spawn::self_test_netstack_dns_ipc() {
-            serial_println!(
-                "WARNING: netstack DNS-over-IPC (ring 3) self-test failed: {:?}",
-                e
-            );
+                // Phase 4: forward a DNS resolve from the kernel to the userspace
+                // `netstack` daemon over the Service Registry (`net.stack`), proving the
+                // socket-syscall → IPC path end-to-end. Bounded self-test (the daemon
+                // owns the NIC only briefly); skips gracefully with no network.
+                if let Err(e) = proc::spawn::self_test_netstack_dns_ipc() {
+                    serial_println!(
+                        "WARNING: netstack DNS-over-IPC (ring 3) self-test failed: {:?}",
+                        e
+                    );
+                }
+            }
         }
+        case();
     }
 
     // Ring-3 end-to-end test of the Linux brk(2) heap: a real Linux-ABI
@@ -1746,31 +1788,43 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // Ring-3 end-to-end test of the SA_RESTART transparent-restart path — the
-    // capstone for the slow-object signal-interruptibility work.  A real
-    // Linux-ABI process blocks in read() on its own empty pipe with an
-    // SA_RESTART SIGUSR1 handler installed; the kernel posts SIGUSR1, the
-    // interrupted read returns ERESTARTSYS, the handler writes a byte into the
-    // pipe, and the read is transparently restarted to return it.  Proves the
-    // park is interruptible AND that SA_RESTART resumes the syscall.
-    if let Err(e) = proc::spawn::self_test_linux_sa_restart() {
-        serial_println!(
-            "WARNING: Linux SA_RESTART (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 end-to-end test of the SA_RESTART transparent-restart path — the
+            // capstone for the slow-object signal-interruptibility work.  A real
+            // Linux-ABI process blocks in read() on its own empty pipe with an
+            // SA_RESTART SIGUSR1 handler installed; the kernel posts SIGUSR1, the
+            // interrupted read returns ERESTARTSYS, the handler writes a byte into the
+            // pipe, and the read is transparently restarted to return it.  Proves the
+            // park is interruptible AND that SA_RESTART resumes the syscall.
+            if let Err(e) = proc::spawn::self_test_linux_sa_restart() {
+                serial_println!(
+                    "WARNING: Linux SA_RESTART (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
-    // Ring-3 test that a blocking signalfd read is interrupted by a signal NOT
-    // in the fd's acceptance mask (the signalfd analogue of the slow-object
-    // interruptibility fixes): a Linux-ABI process blocks in read() on a
-    // signalfd watching only SIGUSR2 with a non-SA_RESTART SIGUSR1 handler
-    // installed; the kernel posts SIGUSR1, the read wakes and returns -EINTR.
-    // Before the fix the read parked forever for the out-of-mask signal.
-    if let Err(e) = proc::spawn::self_test_linux_signalfd_interrupt() {
-        serial_println!(
-            "WARNING: Linux signalfd-read interruptibility (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 test that a blocking signalfd read is interrupted by a signal NOT
+            // in the fd's acceptance mask (the signalfd analogue of the slow-object
+            // interruptibility fixes): a Linux-ABI process blocks in read() on a
+            // signalfd watching only SIGUSR2 with a non-SA_RESTART SIGUSR1 handler
+            // installed; the kernel posts SIGUSR1, the read wakes and returns -EINTR.
+            // Before the fix the read parked forever for the out-of-mask signal.
+            if let Err(e) = proc::spawn::self_test_linux_signalfd_interrupt() {
+                serial_println!(
+                    "WARNING: Linux signalfd-read interruptibility (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
     // Ring-3 eventfd-read signal-interruptibility test: a child blocks in
@@ -1785,30 +1839,42 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // Ring-3 timerfd-read signal-interruptibility test: a child blocks in
-    // read() on a disarmed timerfd (blocks indefinitely), with a non-SA_RESTART
-    // SIGUSR1 handler installed; the kernel posts SIGUSR1, the read wakes and
-    // returns -EINTR.  Before the fix the read parked forever (single-slot
-    // reader waiter only wakeable by settime/the expiry hrtimer), the same
-    // hang-bug class as pipe/signalfd/eventfd.
-    if let Err(e) = proc::spawn::self_test_linux_timerfd_interrupt() {
-        serial_println!(
-            "WARNING: Linux timerfd-read interruptibility (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 timerfd-read signal-interruptibility test: a child blocks in
+            // read() on a disarmed timerfd (blocks indefinitely), with a non-SA_RESTART
+            // SIGUSR1 handler installed; the kernel posts SIGUSR1, the read wakes and
+            // returns -EINTR.  Before the fix the read parked forever (single-slot
+            // reader waiter only wakeable by settime/the expiry hrtimer), the same
+            // hang-bug class as pipe/signalfd/eventfd.
+            if let Err(e) = proc::spawn::self_test_linux_timerfd_interrupt() {
+                serial_println!(
+                    "WARNING: Linux timerfd-read interruptibility (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
-    // Ring-3 inotify-read signal-interruptibility test: a child blocks in
-    // read() on an inotify fd with no events queued (blocks indefinitely), with
-    // a non-SA_RESTART SIGUSR1 handler installed; the kernel posts SIGUSR1, the
-    // read wakes and returns -EINTR.  Before the fix the read registered only a
-    // notify-waiter and parked uninterruptibly, the same hang-bug class as
-    // pipe/signalfd/eventfd/timerfd.
-    if let Err(e) = proc::spawn::self_test_linux_inotify_interrupt() {
-        serial_println!(
-            "WARNING: Linux inotify-read interruptibility (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 inotify-read signal-interruptibility test: a child blocks in
+            // read() on an inotify fd with no events queued (blocks indefinitely), with
+            // a non-SA_RESTART SIGUSR1 handler installed; the kernel posts SIGUSR1, the
+            // read wakes and returns -EINTR.  Before the fix the read registered only a
+            // notify-waiter and parked uninterruptibly, the same hang-bug class as
+            // pipe/signalfd/eventfd/timerfd.
+            if let Err(e) = proc::spawn::self_test_linux_inotify_interrupt() {
+                serial_println!(
+                    "WARNING: Linux inotify-read interruptibility (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
     // Ring-3 test that a blocking poll() is signal-interruptible and surfaces
@@ -1855,30 +1921,42 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // Ring-3 end-to-end test of a native fastpy-compiled binary (initiative
-    // F's "first real component" milestone).  Spawns a real fastpy AOT
-    // executable linked against our posix libc and runs it to exit(0),
-    // proving the crt sets up main-thread ELF TLS (SYS_SET_FS_BASE) so the
-    // fastpy runtime's `__thread` accesses don't fault.  Bounded yield loop,
-    // so it can never hang the boot.
-    if let Err(e) = proc::spawn::self_test_fastpy_slateos_tls() {
-        serial_println!(
-            "WARNING: fastpy-on-SlateOS TLS (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 end-to-end test of a native fastpy-compiled binary (initiative
+            // F's "first real component" milestone).  Spawns a real fastpy AOT
+            // executable linked against our posix libc and runs it to exit(0),
+            // proving the crt sets up main-thread ELF TLS (SYS_SET_FS_BASE) so the
+            // fastpy runtime's `__thread` accesses don't fault.  Bounded yield loop,
+            // so it can never hang the boot.
+            if let Err(e) = proc::spawn::self_test_fastpy_slateos_tls() {
+                serial_println!(
+                    "WARNING: fastpy-on-SlateOS TLS (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
-    // The other half of the TLS story: a native C binary whose *child*
-    // threads (pthread_create) each need their own variant-II TLS block and
-    // %fs base.  Compiled with -fstack-protector-all so a child with no
-    // thread pointer faults on the very first canary load from %fs:0x28; the
-    // fixture also verifies the block's contents and isolation from the
-    // parent's.  Bounded yield loop, so it can never hang the boot.
-    if let Err(e) = proc::spawn::self_test_ctls_thread() {
-        serial_println!(
-            "WARNING: child-thread ELF TLS (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // The other half of the TLS story: a native C binary whose *child*
+            // threads (pthread_create) each need their own variant-II TLS block and
+            // %fs base.  Compiled with -fstack-protector-all so a child with no
+            // thread pointer faults on the very first canary load from %fs:0x28; the
+            // fixture also verifies the block's contents and isolation from the
+            // parent's.  Bounded yield loop, so it can never hang the boot.
+            if let Err(e) = proc::spawn::self_test_ctls_thread() {
+                serial_println!(
+                    "WARNING: child-thread ELF TLS (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
     // The sysroot is compiled for x86_64-unknown-none (soft-float) but linked
@@ -1939,46 +2017,64 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: process groups (ring 3) self-test failed: {:?}", e);
     }
 
-    // Job-control stop/continue through our own libc — the other half of what
-    // a shell needs, and the same kind of seam. A child raises SIGTSTP and
-    // suspends itself through SYS_SIGNAL_STOP_SELF; its parent, parked in a
-    // *blocking* waitpid(WUNTRACED), is woken with WIFSTOPPED/WSTOPSIG=SIGTSTP
-    // and resumes it with kill(child, SIGCONT). Neither other layer can see
-    // this: the host suite gets ENOSYS for every stop (the syscall arm is
-    // target-only), and the dispatch self-test can only ever pass WNOHANG,
-    // because a real stop from the boot thread would park the one task left to
-    // resume it. Bounded yield loop; can never hang the boot.
-    if let Err(e) = proc::spawn::self_test_jobctl() {
-        serial_println!("WARNING: job control (ring 3) self-test failed: {:?}", e);
+    {
+        #[inline(never)]
+        fn case() {
+            // Job-control stop/continue through our own libc — the other half of what
+            // a shell needs, and the same kind of seam. A child raises SIGTSTP and
+            // suspends itself through SYS_SIGNAL_STOP_SELF; its parent, parked in a
+            // *blocking* waitpid(WUNTRACED), is woken with WIFSTOPPED/WSTOPSIG=SIGTSTP
+            // and resumes it with kill(child, SIGCONT). Neither other layer can see
+            // this: the host suite gets ENOSYS for every stop (the syscall arm is
+            // target-only), and the dispatch self-test can only ever pass WNOHANG,
+            // because a real stop from the boot thread would park the one task left to
+            // resume it. Bounded yield loop; can never hang the boot.
+            if let Err(e) = proc::spawn::self_test_jobctl() {
+                serial_println!("WARNING: job control (ring 3) self-test failed: {:?}", e);
+            }
+        }
+        case();
     }
 
-    // The controlling terminal and the foreground process group — the third
-    // piece a job-control shell needs, and the one that used to exist in
-    // three unrelated copies (a posix per-process static, tty.rs's
-    // FOREGROUND_PGID atomic, and nothing at all for the native ABI). The
-    // fixture forks, hands the terminal to the child's group with
-    // tcsetpgrp(), and the *child* reads the handoff back with tcgetpgrp():
-    // two processes agreeing about which group owns the terminal is exactly
-    // what a userspace static can never do. Bounded yield loop; can never
-    // hang the boot.
-    if let Err(e) = proc::spawn::self_test_cctty() {
-        serial_println!(
-            "WARNING: controlling terminal (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // The controlling terminal and the foreground process group — the third
+            // piece a job-control shell needs, and the one that used to exist in
+            // three unrelated copies (a posix per-process static, tty.rs's
+            // FOREGROUND_PGID atomic, and nothing at all for the native ABI). The
+            // fixture forks, hands the terminal to the child's group with
+            // tcsetpgrp(), and the *child* reads the handoff back with tcgetpgrp():
+            // two processes agreeing about which group owns the terminal is exactly
+            // what a userspace static can never do. Bounded yield loop; can never
+            // hang the boot.
+            if let Err(e) = proc::spawn::self_test_cctty() {
+                serial_println!(
+                    "WARNING: controlling terminal (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
-    // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
-    // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
-    // memfs and exits with the byte count read back, proving the full path
-    // fastpy open/write/read/close -> C stdio -> SYS_FS_* -> kernel VFS. The
-    // process is granted a File capability so sys_fs_open's cap check passes.
-    // Bounded yield loop; can never hang the boot.
-    if let Err(e) = proc::spawn::self_test_fastpy_slateos_fileio() {
-        serial_println!(
-            "WARNING: fastpy-on-SlateOS pure-mode file I/O (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
+            // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
+            // memfs and exits with the byte count read back, proving the full path
+            // fastpy open/write/read/close -> C stdio -> SYS_FS_* -> kernel VFS. The
+            // process is granted a File capability so sys_fs_open's cap check passes.
+            // Bounded yield loop; can never hang the boot.
+            if let Err(e) = proc::spawn::self_test_fastpy_slateos_fileio() {
+                serial_println!(
+                    "WARNING: fastpy-on-SlateOS pure-mode file I/O (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
     // Ring-3 test of the RICHER pure-mode file-object surface: `with open()`,
@@ -2039,18 +2135,24 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // Ring-3 test of the `fastpy-pipeline` utility: a genuine two-stage
-    // `cmd1 | cmd2` pipeline. One os.pipe + two os.fork'd children — the
-    // producer dup2's stdout->pipe and execs `/bin/cat`, the consumer dup2's
-    // pipe->stdin and execs the `fastpy-countin` fixture; the parent waitpid's
-    // both and cross-checks their byte counts. Proves the consumer-side
-    // dup2(pipe->stdin) redirect survives execve (the direction the capture
-    // test never exercised).
-    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pipeline() {
-        serial_println!(
-            "WARNING: fastpy-on-SlateOS `pipeline` (two-stage cmd1 | cmd2) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 test of the `fastpy-pipeline` utility: a genuine two-stage
+            // `cmd1 | cmd2` pipeline. One os.pipe + two os.fork'd children — the
+            // producer dup2's stdout->pipe and execs `/bin/cat`, the consumer dup2's
+            // pipe->stdin and execs the `fastpy-countin` fixture; the parent waitpid's
+            // both and cross-checks their byte counts. Proves the consumer-side
+            // dup2(pipe->stdin) redirect survives execve (the direction the capture
+            // test never exercised).
+            if let Err(e) = proc::spawn::self_test_fastpy_slateos_pipeline() {
+                serial_println!(
+                    "WARNING: fastpy-on-SlateOS `pipeline` (two-stage cmd1 | cmd2) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
     // Ring-3 test of the `fastpy-redirect` utility: the `cmd > file` output
@@ -2461,44 +2563,62 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // Ring-3 test of `fastpy-getppid`: os.getppid() → getppid() →
-    // SYS_PROCESS_PARENT_ID — a sibling of getpid exercising the *process-
-    // parentage* syscall (a distinct kernel path from self-identity). A
-    // kernel-spawned (parent=0) process reparents to init, so the tool must
-    // report parent PID 1 — distinct from its own PID, proving it reached the
-    // parent syscall and not SYS_PROCESS_ID.
-    if let Err(e) = proc::spawn::self_test_fastpy_slateos_getppid() {
-        serial_println!(
-            "WARNING: fastpy-on-SlateOS `getppid` utility (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 test of `fastpy-getppid`: os.getppid() → getppid() →
+            // SYS_PROCESS_PARENT_ID — a sibling of getpid exercising the *process-
+            // parentage* syscall (a distinct kernel path from self-identity). A
+            // kernel-spawned (parent=0) process reparents to init, so the tool must
+            // report parent PID 1 — distinct from its own PID, proving it reached the
+            // parent syscall and not SYS_PROCESS_ID.
+            if let Err(e) = proc::spawn::self_test_fastpy_slateos_getppid() {
+                serial_println!(
+                    "WARNING: fastpy-on-SlateOS `getppid` utility (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
-    // Ring-3 test of `fastpy-gettid`: os.gettid() → gettid() → SYS_TASK_ID — a
-    // sibling of getpid/getppid exercising the *scheduler's task table* (a
-    // distinct kernel path from the process table). The harness knows the exact
-    // main-thread task ID it assigned at spawn and asserts the tool reports it
-    // back exactly — a value from a different ID space than the PID, proving it
-    // reached SYS_TASK_ID and not SYS_PROCESS_ID.
-    if let Err(e) = proc::spawn::self_test_fastpy_slateos_gettid() {
-        serial_println!(
-            "WARNING: fastpy-on-SlateOS `gettid` utility (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 test of `fastpy-gettid`: os.gettid() → gettid() → SYS_TASK_ID — a
+            // sibling of getpid/getppid exercising the *scheduler's task table* (a
+            // distinct kernel path from the process table). The harness knows the exact
+            // main-thread task ID it assigned at spawn and asserts the tool reports it
+            // back exactly — a value from a different ID space than the PID, proving it
+            // reached SYS_TASK_ID and not SYS_PROCESS_ID.
+            if let Err(e) = proc::spawn::self_test_fastpy_slateos_gettid() {
+                serial_println!(
+                    "WARNING: fastpy-on-SlateOS `gettid` utility (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
-    // Ring-3 test of `fastpy-pipe`: os.pipe() → SYS_PIPE_CREATE plus raw-fd
-    // os.write/os.read → SYS_PIPE_WRITE/READ — the first fastpy tool to touch
-    // the kernel pipe subsystem *and* raw integer fds. The harness knows the
-    // exact constant ("PIPE_OK") the tool round-trips through a kernel pipe and
-    // asserts the file it wrote back holds exactly that. Since the write and
-    // read ends are separate fds joined only by the kernel pipe buffer, a
-    // correct round-trip can't be faked by any userspace echo path.
-    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pipe() {
-        serial_println!(
-            "WARNING: fastpy-on-SlateOS `pipe` utility (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 test of `fastpy-pipe`: os.pipe() → SYS_PIPE_CREATE plus raw-fd
+            // os.write/os.read → SYS_PIPE_WRITE/READ — the first fastpy tool to touch
+            // the kernel pipe subsystem *and* raw integer fds. The harness knows the
+            // exact constant ("PIPE_OK") the tool round-trips through a kernel pipe and
+            // asserts the file it wrote back holds exactly that. Since the write and
+            // read ends are separate fds joined only by the kernel pipe buffer, a
+            // correct round-trip can't be faked by any userspace echo path.
+            if let Err(e) = proc::spawn::self_test_fastpy_slateos_pipe() {
+                serial_println!(
+                    "WARNING: fastpy-on-SlateOS `pipe` utility (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
     // Ring-3 test of the `fastpy-dup` utility: exercises the kernel
@@ -2513,17 +2633,23 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // Ring-3 test of the `fastpy-dup2` utility: exercises the fd-redirection
-    // path (os.dup2 → posix dup2()), which installs a handle at a caller-chosen
-    // fd number. The tool dup2()s a pipe write end onto fd 9, writes "DUP2_OK"
-    // through fd 9, and reads it from the original read end; the harness asserts
-    // the round-tripped file holds "DUP2_OK", so fd 9 can only carry the data if
-    // dup2 aliased the pipe handle there.
-    if let Err(e) = proc::spawn::self_test_fastpy_slateos_dup2() {
-        serial_println!(
-            "WARNING: fastpy-on-SlateOS `dup2` utility (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 test of the `fastpy-dup2` utility: exercises the fd-redirection
+            // path (os.dup2 → posix dup2()), which installs a handle at a caller-chosen
+            // fd number. The tool dup2()s a pipe write end onto fd 9, writes "DUP2_OK"
+            // through fd 9, and reads it from the original read end; the harness asserts
+            // the round-tripped file holds "DUP2_OK", so fd 9 can only carry the data if
+            // dup2 aliased the pipe handle there.
+            if let Err(e) = proc::spawn::self_test_fastpy_slateos_dup2() {
+                serial_println!(
+                    "WARNING: fastpy-on-SlateOS `dup2` utility (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
     // Ring-3 test of the `fastpy-lseek` utility: exercises the raw-fd file open
@@ -2538,30 +2664,42 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // Ring-3 test of the `fastpy-ftruncate` utility: exercises the fd-based
-    // file truncate path (os.ftruncate → SYS_FS_FTRUNCATE, distinct from the
-    // path-based os.truncate/SYS_FS_TRUNCATE). The tool writes 8 bytes,
-    // truncates to 3, and confirms only "ABC" survives; the harness asserts
-    // the round-tripped file holds "ABC", so the file can only be that short
-    // if ftruncate truly shrank it in the kernel.
-    if let Err(e) = proc::spawn::self_test_fastpy_slateos_ftruncate() {
-        serial_println!(
-            "WARNING: fastpy-on-SlateOS `ftruncate` utility (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 test of the `fastpy-ftruncate` utility: exercises the fd-based
+            // file truncate path (os.ftruncate → SYS_FS_FTRUNCATE, distinct from the
+            // path-based os.truncate/SYS_FS_TRUNCATE). The tool writes 8 bytes,
+            // truncates to 3, and confirms only "ABC" survives; the harness asserts
+            // the round-tripped file holds "ABC", so the file can only be that short
+            // if ftruncate truly shrank it in the kernel.
+            if let Err(e) = proc::spawn::self_test_fastpy_slateos_ftruncate() {
+                serial_println!(
+                    "WARNING: fastpy-on-SlateOS `ftruncate` utility (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
-    // Ring-3 test of the `fastpy-pos` utility: exercises positioned file I/O
-    // (os.pwrite/os.pread → posix pwrite()/pread()) — read/write at an explicit
-    // offset without moving the fd offset. The tool pwrites "XY" at offset 2,
-    // confirms SEEK_CUR is still 8, then preads "BXYE" at offset 1; the harness
-    // asserts the round-tripped file holds "BXYE", proving both offset
-    // preservation and correct positioning.
-    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pos() {
-        serial_println!(
-            "WARNING: fastpy-on-SlateOS `pos` utility (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 test of the `fastpy-pos` utility: exercises positioned file I/O
+            // (os.pwrite/os.pread → posix pwrite()/pread()) — read/write at an explicit
+            // offset without moving the fd offset. The tool pwrites "XY" at offset 2,
+            // confirms SEEK_CUR is still 8, then preads "BXYE" at offset 1; the harness
+            // asserts the round-tripped file holds "BXYE", proving both offset
+            // preservation and correct positioning.
+            if let Err(e) = proc::spawn::self_test_fastpy_slateos_pos() {
+                serial_println!(
+                    "WARNING: fastpy-on-SlateOS `pos` utility (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
@@ -2620,17 +2758,23 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // Ring-3 test of the fastpy package manager's `gc` subcommand: seed a
-    // registry referencing one blob, stage a referenced blob + an orphan,
-    // run `pkg gc`, and assert (via the VFS) the referenced blob survives and
-    // the orphan is reclaimed — os.listdir + os.remove combined into the
-    // content-addressed store's garbage collector (unblocked by native
-    // os.remove).
-    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pkg_gc() {
-        serial_println!(
-            "WARNING: fastpy-on-SlateOS `pkg` store gc (ring 3) self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 test of the fastpy package manager's `gc` subcommand: seed a
+            // registry referencing one blob, stage a referenced blob + an orphan,
+            // run `pkg gc`, and assert (via the VFS) the referenced blob survives and
+            // the orphan is reclaimed — os.listdir + os.remove combined into the
+            // content-addressed store's garbage collector (unblocked by native
+            // os.remove).
+            if let Err(e) = proc::spawn::self_test_fastpy_slateos_pkg_gc() {
+                serial_println!(
+                    "WARNING: fastpy-on-SlateOS `pkg` store gc (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
     // Ring-3 test of the fastpy package manager's `search` subcommand: seed a
@@ -2783,17 +2927,23 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
-    // saved/restored per task across context switches.  Two concurrent Linux
-    // procs install distinct FS bases and assert they survive cooperative
-    // yields; without per-task FS-base save/restore they'd clobber each
-    // other's TLS (fatal for any multi-process glibc workload, e.g. a real
-    // toolchain).  Same bounded, hang-safe harness.
-    if let Err(e) = proc::spawn::self_test_linux_fs_tls_switch() {
-        serial_println!(
-            "WARNING: Linux %fs/TLS-base context-switch self-test failed: {:?}",
-            e
-        );
+    {
+        #[inline(never)]
+        fn case() {
+            // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
+            // saved/restored per task across context switches.  Two concurrent Linux
+            // procs install distinct FS bases and assert they survive cooperative
+            // yields; without per-task FS-base save/restore they'd clobber each
+            // other's TLS (fatal for any multi-process glibc workload, e.g. a real
+            // toolchain).  Same bounded, hang-safe harness.
+            if let Err(e) = proc::spawn::self_test_linux_fs_tls_switch() {
+                serial_println!(
+                    "WARNING: Linux %fs/TLS-base context-switch self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
     }
 
     // Sibling regression test for the userspace %gs base (the active
@@ -2819,725 +2969,731 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // B-KNULLJUMP corruption hunt (opt-in via `mm.corruption_hunt` cmdline
-    // flag; default off so normal boots stay fast and keep their unperturbed
-    // repro conditions). When armed, the KASAN shadow + slab free-quarantine
-    // are enabled *around* the Path-Z process spawn/teardown block below — the
-    // region where B-KNULLJUMP reproduces (~1-in-120). Quarantine parks freed
-    // slab slots poisoned so a stale-pointer/UAF write into a reused scheduler
-    // BTree node lands on poison (caught at eviction / the scan_all() checkpoint
-    // after the block) instead of silently corrupting a live node. Intended to
-    // run under the soak harness (many reboots) with the flag set. See
-    // known-issues.md B-KNULLJUMP and open-questions.md Q34.
-    let corruption_hunt = fs::kernparam::is_set("mm.corruption_hunt");
-    if corruption_hunt {
-        mm::kasan::enable();
-        mm::quarantine::enable();
-        serial_println!(
-            "[hunt] B-KNULLJUMP corruption hunt ARMED (KASAN shadow + slab \
-             free-quarantine) around the Path-Z spawn/teardown block"
-        );
-    }
+    {
+        #[inline(never)]
+        fn case() {
+            // B-KNULLJUMP corruption hunt (opt-in via `mm.corruption_hunt` cmdline
+            // flag; default off so normal boots stay fast and keep their unperturbed
+            // repro conditions). When armed, the KASAN shadow + slab free-quarantine
+            // are enabled *around* the Path-Z process spawn/teardown block below — the
+            // region where B-KNULLJUMP reproduces (~1-in-120). Quarantine parks freed
+            // slab slots poisoned so a stale-pointer/UAF write into a reused scheduler
+            // BTree node lands on poison (caught at eviction / the scan_all() checkpoint
+            // after the block) instead of silently corrupting a live node. Intended to
+            // run under the soak harness (many reboots) with the flag set. See
+            // known-issues.md B-KNULLJUMP and open-questions.md Q34.
+            let corruption_hunt = fs::kernparam::is_set("mm.corruption_hunt");
+            if corruption_hunt {
+                mm::kasan::enable();
+                mm::quarantine::enable();
+                serial_println!(
+                    "[hunt] B-KNULLJUMP corruption hunt ARMED (KASAN shadow + slab \
+                     free-quarantine) around the Path-Z spawn/teardown block"
+                );
+            }
 
-    // Path Z: run a REAL, prebuilt, dynamically-linked glibc binary
-    // (/bin/hello, PT_INTERP=ld-linux-x86-64.so.2) end-to-end.  Self-stages the
-    // glibc tree from the read-only ext4 rootfs at /mnt into the active root and
-    // asserts the child exits 42 through the full ld.so + libc startup.  No-ops
-    // when rootfs.ext4 is absent (the image is git-ignored).  Must run after the
-    // /mnt ext4 probe above.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc() {
-        serial_println!(
-            "WARNING: Path-Z real glibc dynamic-execution self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: run a REAL, prebuilt, dynamically-linked glibc binary
+            // (/bin/hello, PT_INTERP=ld-linux-x86-64.so.2) end-to-end.  Self-stages the
+            // glibc tree from the read-only ext4 rootfs at /mnt into the active root and
+            // asserts the child exits 42 through the full ld.so + libc startup.  No-ops
+            // when rootfs.ext4 is absent (the image is git-ignored).  Must run after the
+            // /mnt ext4 probe above.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc() {
+                serial_println!(
+                    "WARNING: Path-Z real glibc dynamic-execution self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z, part 2: run a REAL glibc binary that produces output
-    // (/bin/stdio → printf), redirecting its fd 1 to a capture file and
-    // asserting the exact bytes glibc's full-buffered stdio flushes via
-    // write(2).  Proves the real-glibc output path, not just exit().  No-ops
-    // when rootfs.ext4 is absent.  Must run after self_test_linux_real_glibc
-    // (which stages the glibc tree) and the /mnt ext4 probe.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_stdio() {
-        serial_println!(
-            "WARNING: Path-Z real glibc stdio-output self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z, part 2: run a REAL glibc binary that produces output
+            // (/bin/stdio → printf), redirecting its fd 1 to a capture file and
+            // asserting the exact bytes glibc's full-buffered stdio flushes via
+            // write(2).  Proves the real-glibc output path, not just exit().  No-ops
+            // when rootfs.ext4 is absent.  Must run after self_test_linux_real_glibc
+            // (which stages the glibc tree) and the /mnt ext4 probe.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_stdio() {
+                serial_println!(
+                    "WARNING: Path-Z real glibc stdio-output self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z, part 3: run a REAL glibc binary (/bin/full) that exercises argv,
-    // getenv, a stdin fgets(), and 64 rounds of mixed brk/mmap malloc-free.
-    // fd 0 is redirected from a pre-populated input file and fd 1 to a capture
-    // file; we assert the exact deterministic output line and exit code (11).
-    // Proves the real-glibc argv/env/input/heap paths.  No-ops when
-    // rootfs.ext4 is absent.  Must run after the glibc tree is staged.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_full() {
-        serial_println!(
-            "WARNING: Path-Z real glibc argv/env/stdin/heap self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z, part 3: run a REAL glibc binary (/bin/full) that exercises argv,
+            // getenv, a stdin fgets(), and 64 rounds of mixed brk/mmap malloc-free.
+            // fd 0 is redirected from a pre-populated input file and fd 1 to a capture
+            // file; we assert the exact deterministic output line and exit code (11).
+            // Proves the real-glibc argv/env/input/heap paths.  No-ops when
+            // rootfs.ext4 is absent.  Must run after the glibc tree is staged.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_full() {
+                serial_println!(
+                    "WARNING: Path-Z real glibc argv/env/stdin/heap self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z, part 4: run a REAL glibc binary (/bin/pthread) that creates 4
-    // worker threads via pthread_create, hammers a shared mutex 40000 times,
-    // and pthread_joins them — exercising clone(CLONE_VM|CLONE_THREAD|SETTLS),
-    // per-thread TLS, the futex wait/wake path, and join's child-tid futex.
-    // fd 1 is captured and the exact deterministic output + exit code (13) are
-    // asserted.  This is the multithreading integration coverage thread_clone.rs
-    // cannot self-test.  No-ops when rootfs.ext4 is absent.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_pthread() {
-        serial_println!(
-            "WARNING: Path-Z real glibc pthread self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z, part 4: run a REAL glibc binary (/bin/pthread) that creates 4
+            // worker threads via pthread_create, hammers a shared mutex 40000 times,
+            // and pthread_joins them — exercising clone(CLONE_VM|CLONE_THREAD|SETTLS),
+            // per-thread TLS, the futex wait/wake path, and join's child-tid futex.
+            // fd 1 is captured and the exact deterministic output + exit code (13) are
+            // asserted.  This is the multithreading integration coverage thread_clone.rs
+            // cannot self-test.  No-ops when rootfs.ext4 is absent.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_pthread() {
+                serial_println!(
+                    "WARNING: Path-Z real glibc pthread self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z, part 5: run a REAL glibc binary (/bin/signal) that installs an
-    // SA_SIGINFO handler for SIGUSR1, raise()s it, and (in the handler) reads
-    // the siginfo before returning via glibc's __restore_rt -> rt_sigreturn.
-    // Exercises the kernel's byte-exact Linux rt_sigframe delivery
-    // (build_linux_rt_frame) and the rt_sigreturn restore path.  fd 1 is
-    // captured; the exact deterministic output + exit code (17) are asserted.
-    // This is the real-glibc signal integration coverage the in-kernel
-    // signal-shim self-tests cannot provide.  No-ops when rootfs.ext4 is absent.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_signal() {
-        serial_println!(
-            "WARNING: Path-Z real glibc signal self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z, part 5: run a REAL glibc binary (/bin/signal) that installs an
+            // SA_SIGINFO handler for SIGUSR1, raise()s it, and (in the handler) reads
+            // the siginfo before returning via glibc's __restore_rt -> rt_sigreturn.
+            // Exercises the kernel's byte-exact Linux rt_sigframe delivery
+            // (build_linux_rt_frame) and the rt_sigreturn restore path.  fd 1 is
+            // captured; the exact deterministic output + exit code (17) are asserted.
+            // This is the real-glibc signal integration coverage the in-kernel
+            // signal-shim self-tests cannot provide.  No-ops when rootfs.ext4 is absent.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_signal() {
+                serial_println!(
+                    "WARNING: Path-Z real glibc signal self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: synchronous-fault signal delivery. Proves an AbiMode::Linux
-    // process that installs a SIGSEGV handler, dereferences a bad pointer
-    // (#PF), reads a faithful siginfo (si_addr = bad address, si_code =
-    // SEGV_MAPERR) and recovers via siglongjmp — the kernel delivers a
-    // byte-exact rt_sigframe straight from the page-fault ISR. No-op when
-    // rootfs.ext4 is absent.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_fault() {
-        serial_println!(
-            "WARNING: Path-Z real glibc fault-signal self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: synchronous-fault signal delivery. Proves an AbiMode::Linux
+            // process that installs a SIGSEGV handler, dereferences a bad pointer
+            // (#PF), reads a faithful siginfo (si_addr = bad address, si_code =
+            // SEGV_MAPERR) and recovers via siglongjmp — the kernel delivers a
+            // byte-exact rt_sigframe straight from the page-fault ISR. No-op when
+            // rootfs.ext4 is absent.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_fault() {
+                serial_println!(
+                    "WARNING: Path-Z real glibc fault-signal self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: SI_QUEUE payload delivery. Proves an AbiMode::Linux process that
-    // sigqueue()s itself with a sival_int receives si_code = SI_QUEUE, the
-    // user-supplied si_value (stamped at the correct ABI offset), and a
-    // faithful si_pid (the real caller). No-op when rootfs.ext4 is absent.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_sigqueue() {
-        serial_println!(
-            "WARNING: Path-Z real glibc SI_QUEUE-payload self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: SI_QUEUE payload delivery. Proves an AbiMode::Linux process that
+            // sigqueue()s itself with a sival_int receives si_code = SI_QUEUE, the
+            // user-supplied si_value (stamped at the correct ABI offset), and a
+            // faithful si_pid (the real caller). No-op when rootfs.ext4 is absent.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_sigqueue() {
+                serial_println!(
+                    "WARNING: Path-Z real glibc SI_QUEUE-payload self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real glibc program fork()s, execl()s the silent /bin/hello
-    // child, and waitpid()s it — proving glibc's fork (CoW)/exec (child
-    // re-runs ld.so)/wait wrappers work end-to-end, the foundation for a
-    // shell. No-op when rootfs.ext4 is absent.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_forkexec() {
-        serial_println!(
-            "WARNING: Path-Z real glibc fork/exec/wait self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: a real glibc program fork()s, execl()s the silent /bin/hello
+            // child, and waitpid()s it — proving glibc's fork (CoW)/exec (child
+            // re-runs ld.so)/wait wrappers work end-to-end, the foundation for a
+            // shell. No-op when rootfs.ext4 is absent.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_forkexec() {
+                serial_println!(
+                    "WARNING: Path-Z real glibc fork/exec/wait self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real glibc program builds a `cmd1 | cmd2` pipeline —
-    // pipe() + fork() + the child dup2()s the write end onto fd 1 and
-    // execl()s /bin/emit, the parent read()s the pipe to EOF and
-    // waitpid()s. Proves pipe-fd inheritance across fork, dup2, and an
-    // open fd surviving execve. No-op when rootfs.ext4 is absent.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_pipe() {
-        serial_println!("WARNING: Path-Z real glibc pipe self-test failed: {:?}", e);
-    }
+            // Path Z: a real glibc program builds a `cmd1 | cmd2` pipeline —
+            // pipe() + fork() + the child dup2()s the write end onto fd 1 and
+            // execl()s /bin/emit, the parent read()s the pipe to EOF and
+            // waitpid()s. Proves pipe-fd inheritance across fork, dup2, and an
+            // open fd surviving execve. No-op when rootfs.ext4 is absent.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_pipe() {
+                serial_println!("WARNING: Path-Z real glibc pipe self-test failed: {:?}", e);
+            }
 
-    // Path Z: a real glibc program performs its OWN `cmd > file` output
-    // redirection — open(O_WRONLY|O_CREAT|O_TRUNC) + dup2(fd, 1) + printf.
-    // Proves dup2 of a self-open()ed File handle onto stdout (vs Part 7's
-    // dup2 onto a pipe) and the displaced-console close. No-op without
-    // rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_redir() {
-        serial_println!("WARNING: Path-Z real glibc redir self-test failed: {:?}", e);
-    }
+            // Path Z: a real glibc program performs its OWN `cmd > file` output
+            // redirection — open(O_WRONLY|O_CREAT|O_TRUNC) + dup2(fd, 1) + printf.
+            // Proves dup2 of a self-open()ed File handle onto stdout (vs Part 7's
+            // dup2 onto a pipe) and the displaced-console close. No-op without
+            // rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_redir() {
+                serial_println!("WARNING: Path-Z real glibc redir self-test failed: {:?}", e);
+            }
 
-    // Path Z: the mirror image — a real glibc program performs its OWN
-    // `cmd < file` input redirection: open(O_RDONLY) + dup2(fd, 0) + fgets.
-    // Proves dup2 of a self-open()ed read-only File handle onto stdin and
-    // glibc's buffered input path reading from a real file. No-op without
-    // rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_redirin() {
-        serial_println!(
-            "WARNING: Path-Z real glibc redirin self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: the mirror image — a real glibc program performs its OWN
+            // `cmd < file` input redirection: open(O_RDONLY) + dup2(fd, 0) + fgets.
+            // Proves dup2 of a self-open()ed read-only File handle onto stdin and
+            // glibc's buffered input path reading from a real file. No-op without
+            // rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_redirin() {
+                serial_println!(
+                    "WARNING: Path-Z real glibc redirin self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: the culmination — a real prebuilt POSIX shell (dash) runs and
-    // performs its OWN `echo > file` redirection. Proves ld.so loads dash,
-    // dash parses the command + `>` redirection, and drives open()/dup2()
-    // itself. No-op without rootfs.ext4 / /bin/dash.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_redir() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell redir self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: the culmination — a real prebuilt POSIX shell (dash) runs and
+            // performs its OWN `echo > file` redirection. Proves ld.so loads dash,
+            // dash parses the command + `>` redirection, and drives open()/dup2()
+            // itself. No-op without rootfs.ext4 / /bin/dash.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_redir() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell redir self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // GNU bash 5.2 compiled for this OS and linked against OUR libc.a (not
-    // glibc): a ~5.3 MiB static C program whose every library call lands in
-    // posix/src. The dash tests around it prove our loader/syscalls against
-    // glibc; this one proves our libc itself. No-op without rootfs.ext4 /
-    // /bin/bash (built by scripts/bash-spike/). See open-questions.md Q41.
-    if let Err(e) = proc::spawn::self_test_bash_on_slateos_libc() {
-        serial_println!(
-            "WARNING: GNU bash on SlateOS libc self-test failed: {:?}",
-            e
-        );
-    }
+            // GNU bash 5.2 compiled for this OS and linked against OUR libc.a (not
+            // glibc): a ~5.3 MiB static C program whose every library call lands in
+            // posix/src. The dash tests around it prove our loader/syscalls against
+            // glibc; this one proves our libc itself. No-op without rootfs.ext4 /
+            // /bin/bash (built by scripts/bash-spike/). See open-questions.md Q41.
+            if let Err(e) = proc::spawn::self_test_bash_on_slateos_libc() {
+                serial_println!(
+                    "WARNING: GNU bash on SlateOS libc self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // pkgconf 2.3.0, the second real-world C program linked against OUR libc.a.
-    // bash covers fork/exec/wait, signals and its own `>` redirection; this
-    // covers the file-and-string side — getopt_long, a PKG_CONFIG_LIBDIR search,
-    // .pc parsing with nested ${} expansion, satisfiable AND unsatisfiable
-    // version constraints, and buffered stdout on an inherited file-backed fd 1.
-    // No-op without rootfs.ext4 / /bin/pkgconf (built by
-    // scripts/pkgconf-spike/run.sh). See requests/b-a-pkgconf-self-test-rung.md.
-    if let Err(e) = proc::spawn::self_test_pkgconf_on_slateos_libc() {
-        serial_println!("WARNING: pkgconf on SlateOS libc self-test failed: {:?}", e);
-    }
+            // pkgconf 2.3.0, the second real-world C program linked against OUR libc.a.
+            // bash covers fork/exec/wait, signals and its own `>` redirection; this
+            // covers the file-and-string side — getopt_long, a PKG_CONFIG_LIBDIR search,
+            // .pc parsing with nested ${} expansion, satisfiable AND unsatisfiable
+            // version constraints, and buffered stdout on an inherited file-backed fd 1.
+            // No-op without rootfs.ext4 / /bin/pkgconf (built by
+            // scripts/pkgconf-spike/run.sh). See requests/b-a-pkgconf-self-test-rung.md.
+            if let Err(e) = proc::spawn::self_test_pkgconf_on_slateos_libc() {
+                serial_println!("WARNING: pkgconf on SlateOS libc self-test failed: {:?}", e);
+            }
 
-    // Path Z: the full shell-orchestration proof — dash forks + exec's an
-    // EXTERNAL real-glibc binary (/bin/emit) with output redirection. Proves
-    // dash parses `cmd > file`, fork()s, the child redirects fd 1 + execve()s
-    // the external binary, and the parent wait4()s. No-op without rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_exec() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell fork+exec self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: the full shell-orchestration proof — dash forks + exec's an
+            // EXTERNAL real-glibc binary (/bin/emit) with output redirection. Proves
+            // dash parses `cmd > file`, fork()s, the child redirects fd 1 + execve()s
+            // the external binary, and the parent wait4()s. No-op without rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_exec() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell fork+exec self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real dash shell builds a full PIPELINE — `cmd1 | cmd2 > file`.
-    // Proves dash pipe()s, double-forks, dup2s both pipe ends, exec's two
-    // external glibc binaries, and wait4s both; the downstream counts the
-    // piped bytes. No-op without rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_pipe() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell pipeline self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: a real dash shell builds a full PIPELINE — `cmd1 | cmd2 > file`.
+            // Proves dash pipe()s, double-forks, dup2s both pipe ends, exec's two
+            // external glibc binaries, and wait4s both; the downstream counts the
+            // piped bytes. No-op without rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_pipe() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell pipeline self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real dash shell runs a `for` LOOP that fork+exec's an external
-    // glibc binary every iteration (`for i in a b c; do /bin/emit; done > file`).
-    // Three back-to-back CoW fork→exec→reap cycles in one parent — the exact
-    // path that surfaced the F18 CoW double-free, so this is both a control-flow
-    // capability proof and a regression guard. No-op without rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_loop() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell loop self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: a real dash shell runs a `for` LOOP that fork+exec's an external
+            // glibc binary every iteration (`for i in a b c; do /bin/emit; done > file`).
+            // Three back-to-back CoW fork→exec→reap cycles in one parent — the exact
+            // path that surfaced the F18 CoW double-free, so this is both a control-flow
+            // capability proof and a regression guard. No-op without rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_loop() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell loop self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real dash shell reads a multi-command SCRIPT from stdin (no -c,
-    // fd 0 redirected from a file), driving its main read-eval loop — two
-    // sequential external execs + a builtin, EOF→exit 0. No-op without
-    // rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_script_stdin() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell script-from-stdin self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: a real dash shell reads a multi-command SCRIPT from stdin (no -c,
+            // fd 0 redirected from a file), driving its main read-eval loop — two
+            // sequential external execs + a builtin, EOF→exit 0. No-op without
+            // rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_script_stdin() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell script-from-stdin self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real dash shell performs pathname expansion (globbing) —
-    // `echo /globdir/* > file` — driving its own opendir/getdents64 directory
-    // read, the first end-to-end exercise of glibc readdir. No-op without
-    // rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_glob() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell glob self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: a real dash shell performs pathname expansion (globbing) —
+            // `echo /globdir/* > file` — driving its own opendir/getdents64 directory
+            // read, the first end-to-end exercise of glibc readdir. No-op without
+            // rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_glob() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell glob self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real dash shell performs command substitution —
-    // `echo [$(/bin/emit)] > file` — where dash itself reads the substituted
-    // command's stdout from a pipe and splices it into the command line. No-op
-    // without rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_cmdsub() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell cmdsub self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: a real dash shell performs command substitution —
+            // `echo [$(/bin/emit)] > file` — where dash itself reads the substituted
+            // command's stdout from a pipe and splices it into the command line. No-op
+            // without rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_cmdsub() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell cmdsub self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real dash shell evaluates a conditional compound command —
-    // `x=hello; if [ "$x" = hello ]; then echo EQ; else echo NE; fi > file`
-    // — exercising variable assignment, parameter expansion, the `[`/`test`
-    // builtin, and if/then/else/fi control flow. No-op without rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_cond() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell conditional self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: a real dash shell evaluates a conditional compound command —
+            // `x=hello; if [ "$x" = hello ]; then echo EQ; else echo NE; fi > file`
+            // — exercising variable assignment, parameter expansion, the `[`/`test`
+            // builtin, and if/then/else/fi control flow. No-op without rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_cond() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell conditional self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real dash shell evaluates an arithmetic expansion —
-    // `x=3; y=4; echo $((x * y + 2)) > file` — exercising dash's arithmetic
-    // evaluator (variable lookup in the arithmetic context, `*` before `+`).
-    // No-op without rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_arith() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell arithmetic self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: a real dash shell evaluates an arithmetic expansion —
+            // `x=3; y=4; echo $((x * y + 2)) > file` — exercising dash's arithmetic
+            // evaluator (variable lookup in the arithmetic context, `*` before `+`).
+            // No-op without rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_arith() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell arithmetic self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real dash shell processes a here-document — `read a <<EOF /
-    // HELLO / EOF / echo "$a" > file` — feeding the heredoc body onto fd 0
-    // via the kernel's pipe machinery, then the `read` builtin consumes it.
-    // No-op without rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_heredoc() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell heredoc self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: a real dash shell processes a here-document — `read a <<EOF /
+            // HELLO / EOF / echo "$a" > file` — feeding the heredoc body onto fd 0
+            // via the kernel's pipe machinery, then the `read` builtin consumes it.
+            // No-op without rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_heredoc() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell heredoc self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real dash shell runs a background job and reaps it —
-    // `/bin/emit > file & wait` — exercising the async-child + waitpid path
-    // (the `wait` builtin) driven from the shell. No-op without rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_bgjob() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell background-job self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: a real dash shell runs a background job and reaps it —
+            // `/bin/emit > file & wait` — exercising the async-child + waitpid path
+            // (the `wait` builtin) driven from the shell. No-op without rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_bgjob() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell background-job self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z: a real dash shell runs a two-stage pipeline connecting an
-    // external program to a shell-internal reader — `/bin/emit | while read
-    // l; do echo "<$l>"; done > file` — exercising concurrent pipeline
-    // stages joined by a kernel pipe. No-op without rootfs.ext4.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_pipeline() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell pipeline self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z: a real dash shell runs a two-stage pipeline connecting an
+            // external program to a shell-internal reader — `/bin/emit | while read
+            // l; do echo "<$l>"; done > file` — exercising concurrent pipeline
+            // stages joined by a kernel pipe. No-op without rootfs.ext4.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_pipeline() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell pipeline self-test failed: {:?}",
+                    e
+                );
+            }
 
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_cwd() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell cwd self-test failed: {:?}",
-            e
-        );
-    }
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_cwd() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell cwd self-test failed: {:?}",
+                    e
+                );
+            }
 
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_relpath() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell relpath self-test failed: {:?}",
-            e
-        );
-    }
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_relpath() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell relpath self-test failed: {:?}",
+                    e
+                );
+            }
 
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_statpath() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell statpath self-test failed: {:?}",
-            e
-        );
-    }
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_statpath() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell statpath self-test failed: {:?}",
+                    e
+                );
+            }
 
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_dirstat() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell dirstat self-test failed: {:?}",
-            e
-        );
-    }
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_dirstat() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell dirstat self-test failed: {:?}",
+                    e
+                );
+            }
 
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_append() {
-        serial_println!(
-            "WARNING: Path-Z real dash shell append self-test failed: {:?}",
-            e
-        );
-    }
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_append() {
+                serial_println!(
+                    "WARNING: Path-Z real dash shell append self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 34: run an unmodified prebuilt GNU make that parses a
-    // Makefile and dispatches a recipe via /bin/sh (which fork/execs the
-    // external /bin/emit) — the first rung of the GCC/Make toolchain.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_make() {
-        serial_println!("WARNING: Path-Z real GNU make self-test failed: {:?}", e);
-    }
+            // Path Z Part 34: run an unmodified prebuilt GNU make that parses a
+            // Makefile and dispatches a recipe via /bin/sh (which fork/execs the
+            // external /bin/emit) — the first rung of the GCC/Make toolchain.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_make() {
+                serial_println!("WARNING: Path-Z real GNU make self-test failed: {:?}", e);
+            }
 
-    // Path Z Part 35: run an unmodified prebuilt C compiler (TinyCC) that
-    // compiles a C source into a native ELF, then run that freshly-compiled
-    // program — both in ring 3.  The next rung after make: the OS hosts a
-    // real toolchain, not merely runs prebuilt binaries.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc() {
-        serial_println!(
-            "WARNING: Path-Z real C compiler (tcc) self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 35: run an unmodified prebuilt C compiler (TinyCC) that
+            // compiles a C source into a native ELF, then run that freshly-compiled
+            // program — both in ring 3.  The next rung after make: the OS hosts a
+            // real toolchain, not merely runs prebuilt binaries.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc() {
+                serial_println!(
+                    "WARNING: Path-Z real C compiler (tcc) self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 36: the *hosted* compile rung — tcc links a C program against
-    // real glibc (crt startup -> __libc_start_main -> main, calling puts), then
-    // that freshly-built *dynamic* binary runs through ld.so in ring 3.  This is
-    // the realistic compile mode (vs Part 35's freestanding -nostdlib -static).
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_hosted() {
-        serial_println!(
-            "WARNING: Path-Z hosted C compiler (tcc) self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 36: the *hosted* compile rung — tcc links a C program against
+            // real glibc (crt startup -> __libc_start_main -> main, calling puts), then
+            // that freshly-built *dynamic* binary runs through ld.so in ring 3.  This is
+            // the realistic compile mode (vs Part 35's freestanding -nostdlib -static).
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_hosted() {
+                serial_println!(
+                    "WARNING: Path-Z hosted C compiler (tcc) self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 37: the hosted compile rung exercising more of the glibc ABI
-    // through a freshly-tcc-built dynamic binary — a malloc/free heap round-trip
-    // plus printf's variadic format machinery (%s pointer arg, %d int format).
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_hosted_stdio() {
-        serial_println!(
-            "WARNING: Path-Z hosted C compiler (tcc, printf/malloc) self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 37: the hosted compile rung exercising more of the glibc ABI
+            // through a freshly-tcc-built dynamic binary — a malloc/free heap round-trip
+            // plus printf's variadic format machinery (%s pointer arg, %d int format).
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_hosted_stdio() {
+                serial_println!(
+                    "WARNING: Path-Z hosted C compiler (tcc, printf/malloc) self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 38: separate compilation — `tcc -c` emits two relocatable ELF
-    // objects (a defines slate_add, b's main calls it across the TU boundary),
-    // then `tcc -o prog a.o b.o` links both + crt + glibc into one dynamic exe,
-    // resolving the cross-TU reference at link time, and the binary runs in ring
-    // 3. Exercises object emission + tcc-as-linker over multiple inputs.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_separate() {
-        serial_println!(
-            "WARNING: Path-Z separate-compilation C compiler (tcc) self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 38: separate compilation — `tcc -c` emits two relocatable ELF
+            // objects (a defines slate_add, b's main calls it across the TU boundary),
+            // then `tcc -o prog a.o b.o` links both + crt + glibc into one dynamic exe,
+            // resolving the cross-TU reference at link time, and the binary runs in ring
+            // 3. Exercises object emission + tcc-as-linker over multiple inputs.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_separate() {
+                serial_println!(
+                    "WARNING: Path-Z separate-compilation C compiler (tcc) self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 39: the §4.4 toolchain capstone — real GNU make drives tcc to
-    // build a multi-file C program. make parses a 3-target Makefile, fork/exec's
-    // tcc to compile two TUs to objects and link them into a dynamic ELF, which
-    // then runs in ring 3. Composes Part 34 (make) with Part 38 (separate
-    // compilation) into the realistic "build a C project" flow.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_make_cc() {
-        serial_println!(
-            "WARNING: Path-Z make-drives-tcc build self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 39: the §4.4 toolchain capstone — real GNU make drives tcc to
+            // build a multi-file C program. make parses a 3-target Makefile, fork/exec's
+            // tcc to compile two TUs to objects and link them into a dynamic ELF, which
+            // then runs in ring 3. Composes Part 34 (make) with Part 38 (separate
+            // compilation) into the realistic "build a C project" flow.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_make_cc() {
+                serial_println!(
+                    "WARNING: Path-Z make-drives-tcc build self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 40: a multi-TU C project that #includes its own project header
-    // via `#include "..."` (the project-relative quote form, distinct from the
-    // still-blocked <system_header.h> glibc-tree form). tcc's preprocessor must
-    // resolve the quote-include to a sibling header from two TUs, expand a macro
-    // it defines, and honor a prototype it declares across the TU boundary; the
-    // linked dynamic binary then runs in ring 3 and prints SLATE-HDR-42. Fills
-    // the header-include gap left by Parts 36-39 (which used bare `extern`s).
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_project_header() {
-        serial_println!(
-            "WARNING: Path-Z project-header C build self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 40: a multi-TU C project that #includes its own project header
+            // via `#include "..."` (the project-relative quote form, distinct from the
+            // still-blocked <system_header.h> glibc-tree form). tcc's preprocessor must
+            // resolve the quote-include to a sibling header from two TUs, expand a macro
+            // it defines, and honor a prototype it declares across the TU boundary; the
+            // linked dynamic binary then runs in ring 3 and prints SLATE-HDR-42. Fills
+            // the header-include gap left by Parts 36-39 (which used bare `extern`s).
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_project_header() {
+                serial_println!(
+                    "WARNING: Path-Z project-header C build self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 41: the first rung to exercise the C runtime's constructor/
-    // destructor machinery. tcc compiles a program with __attribute__((constructor))
-    // and __attribute__((destructor)) into .init_array/.fini_array; glibc's csu
-    // init runs the ctor before main, and _dl_fini runs the dtor at exit. The
-    // three markers use raw write(2) (unbuffered) so the captured file's byte
-    // order is the exact temporal order: CTOR then MAIN then DTOR.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_ctor_dtor() {
-        serial_println!(
-            "WARNING: Path-Z ctor/dtor C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 41: the first rung to exercise the C runtime's constructor/
+            // destructor machinery. tcc compiles a program with __attribute__((constructor))
+            // and __attribute__((destructor)) into .init_array/.fini_array; glibc's csu
+            // init runs the ctor before main, and _dl_fini runs the dtor at exit. The
+            // three markers use raw write(2) (unbuffered) so the captured file's byte
+            // order is the exact temporal order: CTOR then MAIN then DTOR.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_ctor_dtor() {
+                serial_println!(
+                    "WARNING: Path-Z ctor/dtor C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 42: ELF thread-local storage (__thread) in a tcc-built dynamic
-    // glibc binary. tcc emits a .tdata/PT_TLS segment + local-exec TLS relocs;
-    // glibc's __libc_setup_tls copies the init image into the main thread's TLS
-    // block and %fs-relative access reads/writes it. First compiled-program TLS
-    // test; also end-to-end coverage of the per-task %fs-base save/restore (F13/F14).
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_tls() {
-        serial_println!(
-            "WARNING: Path-Z TLS (__thread) C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 42: ELF thread-local storage (__thread) in a tcc-built dynamic
+            // glibc binary. tcc emits a .tdata/PT_TLS segment + local-exec TLS relocs;
+            // glibc's __libc_setup_tls copies the init image into the main thread's TLS
+            // block and %fs-relative access reads/writes it. First compiled-program TLS
+            // test; also end-to-end coverage of the per-task %fs-base save/restore (F13/F14).
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_tls() {
+                serial_println!(
+                    "WARNING: Path-Z TLS (__thread) C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 43: POSIX signal delivery in a tcc-built dynamic glibc binary.
-    // The program installs a SIGUSR1 (10) handler via signal(), raise(10)s to
-    // itself, and the kernel delivers the signal synchronously on the syscall
-    // return path (tgkill self-signal) so the handler runs between the "A" and
-    // "B" markers. Exercises glibc's sigaction wrapper, the kernel's asynchronous
-    // signal-frame setup, and rt_sigreturn — end-to-end from compiled source.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_signal() {
-        serial_println!("WARNING: Path-Z signal C runtime self-test failed: {:?}", e);
-    }
+            // Path Z Part 43: POSIX signal delivery in a tcc-built dynamic glibc binary.
+            // The program installs a SIGUSR1 (10) handler via signal(), raise(10)s to
+            // itself, and the kernel delivers the signal synchronously on the syscall
+            // return path (tgkill self-signal) so the handler runs between the "A" and
+            // "B" markers. Exercises glibc's sigaction wrapper, the kernel's asynchronous
+            // signal-frame setup, and rt_sigreturn — end-to-end from compiled source.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_signal() {
+                serial_println!("WARNING: Path-Z signal C runtime self-test failed: {:?}", e);
+            }
 
-    // Path Z Part 44: non-local control flow (setjmp/longjmp) in a tcc-built
-    // dynamic glibc binary. setjmp snapshots the callee-saved registers + rsp/
-    // rip into a jmp_buf; a longjmp from a deeper frame restores it so control
-    // resumes at the setjmp site (setjmp "returns" a second time with the
-    // longjmp value). Uses glibc's exported _setjmp/_longjmp symbols. Proves
-    // tcc's call sequence + glibc's register save/restore work in ring 3.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_setjmp() {
-        serial_println!(
-            "WARNING: Path-Z setjmp/longjmp C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 44: non-local control flow (setjmp/longjmp) in a tcc-built
+            // dynamic glibc binary. setjmp snapshots the callee-saved registers + rsp/
+            // rip into a jmp_buf; a longjmp from a deeper frame restores it so control
+            // resumes at the setjmp site (setjmp "returns" a second time with the
+            // longjmp value). Uses glibc's exported _setjmp/_longjmp symbols. Proves
+            // tcc's call sequence + glibc's register save/restore work in ring 3.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_setjmp() {
+                serial_println!(
+                    "WARNING: Path-Z setjmp/longjmp C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 45: user-defined variadic function (SysV varargs ABI codegen)
-    // in a tcc-built dynamic glibc binary. Exercises tcc's own lowering of the
-    // x86_64 variadic ABI (register save area, %al vector count, va_start/
-    // va_arg/va_end) for a user-authored isum(int, ...) — a path glibc's printf
-    // never covers (its va_arg walk lives inside libc). Purely userspace/codegen.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_vararg() {
-        serial_println!(
-            "WARNING: Path-Z variadic-function C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 45: user-defined variadic function (SysV varargs ABI codegen)
+            // in a tcc-built dynamic glibc binary. Exercises tcc's own lowering of the
+            // x86_64 variadic ABI (register save area, %al vector count, va_start/
+            // va_arg/va_end) for a user-authored isum(int, ...) — a path glibc's printf
+            // never covers (its va_arg walk lives inside libc). Purely userspace/codegen.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_vararg() {
+                serial_println!(
+                    "WARNING: Path-Z variadic-function C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 46: floating-point / SSE codegen + the x86_64 SysV FP ABI in a
-    // tcc-built dynamic glibc binary. No prior rung touched an XMM register, so
-    // tcc's double codegen (mulsd/addsd), the FP calling convention (args/return
-    // in %xmm0/%xmm1), and the truncating double->int cast (cvttsd2si) were
-    // untested from compiled code. A volatile input defeats constant folding so
-    // real SSE + the FP-ABI call sequence run. Purely userspace/codegen.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_float() {
-        serial_println!(
-            "WARNING: Path-Z floating-point C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 46: floating-point / SSE codegen + the x86_64 SysV FP ABI in a
+            // tcc-built dynamic glibc binary. No prior rung touched an XMM register, so
+            // tcc's double codegen (mulsd/addsd), the FP calling convention (args/return
+            // in %xmm0/%xmm1), and the truncating double->int cast (cvttsd2si) were
+            // untested from compiled code. A volatile input defeats constant folding so
+            // real SSE + the FP-ABI call sequence run. Purely userspace/codegen.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_float() {
+                serial_println!(
+                    "WARNING: Path-Z floating-point C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 47: struct-by-value argument passing + return (the x86_64 SysV
-    // aggregate ABI) in a tcc-built dynamic glibc binary. Prior rungs passed only
-    // scalars, so the compiler's aggregate calling convention (eightbyte class-
-    // ification, small-struct register-pair packing, ≤16B all-INTEGER return in
-    // RAX:RDX) was untested from compiled code. A 16-byte struct passes in GP
-    // register pairs and returns in RAX:RDX; a volatile seed defeats constant
-    // folding so the real by-value pack/call/return sequence runs. Userspace-only.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_struct() {
-        serial_println!(
-            "WARNING: Path-Z struct-by-value C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 47: struct-by-value argument passing + return (the x86_64 SysV
+            // aggregate ABI) in a tcc-built dynamic glibc binary. Prior rungs passed only
+            // scalars, so the compiler's aggregate calling convention (eightbyte class-
+            // ification, small-struct register-pair packing, ≤16B all-INTEGER return in
+            // RAX:RDX) was untested from compiled code. A 16-byte struct passes in GP
+            // register pairs and returns in RAX:RDX; a volatile seed defeats constant
+            // folding so the real by-value pack/call/return sequence runs. Userspace-only.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_struct() {
+                serial_println!(
+                    "WARNING: Path-Z struct-by-value C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 48: long double / x87 80-bit extended-precision FP in a tcc-
-    // built dynamic glibc binary. Distinct from Part 46's SSE double: long double
-    // uses the x87 register stack (st0..st7, not XMM) and a separate ABI (args
-    // passed in memory, result in st0), so tcc must emit fldt/fstpt + x87 fmul/
-    // fadd + fisttp truncation — an untested codegen path. A volatile input
-    // defeats constant folding so real x87 + the memory-passing call sequence
-    // run. Only undefined symbol is write (no memset → avoids B-TCC-LIBTCC1-MAIN).
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_longdouble() {
-        serial_println!(
-            "WARNING: Path-Z long-double (x87) C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 48: long double / x87 80-bit extended-precision FP in a tcc-
+            // built dynamic glibc binary. Distinct from Part 46's SSE double: long double
+            // uses the x87 register stack (st0..st7, not XMM) and a separate ABI (args
+            // passed in memory, result in st0), so tcc must emit fldt/fstpt + x87 fmul/
+            // fadd + fisttp truncation — an untested codegen path. A volatile input
+            // defeats constant folding so real x87 + the memory-passing call sequence
+            // run. Only undefined symbol is write (no memset → avoids B-TCC-LIBTCC1-MAIN).
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_longdouble() {
+                serial_println!(
+                    "WARNING: Path-Z long-double (x87) C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 49: bitfield layout + extract/insert codegen in a tcc-built
-    // dynamic glibc binary. No prior rung used bitfields: packing three members
-    // into one 32-bit unit exercises tcc's shift+mask extract and load/mask/
-    // shift/store RMW insert (leaving neighbours intact) — a distinct codegen
-    // path from Part 47's plain struct fields. A volatile seed defeats folding.
-    // Only undefined symbol is write (no memset → avoids B-TCC-LIBTCC1-MAIN).
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_bitfield() {
-        serial_println!(
-            "WARNING: Path-Z bitfield C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 49: bitfield layout + extract/insert codegen in a tcc-built
+            // dynamic glibc binary. No prior rung used bitfields: packing three members
+            // into one 32-bit unit exercises tcc's shift+mask extract and load/mask/
+            // shift/store RMW insert (leaving neighbours intact) — a distinct codegen
+            // path from Part 47's plain struct fields. A volatile seed defeats folding.
+            // Only undefined symbol is write (no memset → avoids B-TCC-LIBTCC1-MAIN).
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_bitfield() {
+                serial_println!(
+                    "WARNING: Path-Z bitfield C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 50: indirect call through a function-pointer dispatch table in
-    // a tcc-built dynamic glibc binary. Prior rungs called by name (direct call);
-    // this calls through a runtime-selected function pointer, exercising tcc's
-    // indirect-call codegen (call *reg) plus per-slot function-address
-    // relocations in a static const table that ld.so fixes up at load. A
-    // volatile selector forces the real indirect call. Only undefined sym: write.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_funcptr() {
-        serial_println!(
-            "WARNING: Path-Z function-pointer C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 50: indirect call through a function-pointer dispatch table in
+            // a tcc-built dynamic glibc binary. Prior rungs called by name (direct call);
+            // this calls through a runtime-selected function pointer, exercising tcc's
+            // indirect-call codegen (call *reg) plus per-slot function-address
+            // relocations in a static const table that ld.so fixes up at load. A
+            // volatile selector forces the real indirect call. Only undefined sym: write.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_funcptr() {
+                serial_println!(
+                    "WARNING: Path-Z function-pointer C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 51: computed goto (GNU labels-as-values, &&label + goto *p) in
-    // a tcc-built dynamic glibc binary. Sibling to Part 50's indirect call: this
-    // is the indirect *jump* path (jmp *reg, no call/return), the mechanism real
-    // interpreters use for threaded bytecode dispatch. A static const table of
-    // label addresses (rodata + per-slot relocation) is indexed by a volatile
-    // selector. Only undefined sym: write (no memset → avoids B-TCC-LIBTCC1-MAIN).
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_computed_goto() {
-        serial_println!(
-            "WARNING: Path-Z computed-goto C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 51: computed goto (GNU labels-as-values, &&label + goto *p) in
+            // a tcc-built dynamic glibc binary. Sibling to Part 50's indirect call: this
+            // is the indirect *jump* path (jmp *reg, no call/return), the mechanism real
+            // interpreters use for threaded bytecode dispatch. A static const table of
+            // label addresses (rodata + per-slot relocation) is indexed by a volatile
+            // selector. Only undefined sym: write (no memset → avoids B-TCC-LIBTCC1-MAIN).
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_computed_goto() {
+                serial_println!(
+                    "WARNING: Path-Z computed-goto C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 52: union type-punning (overlapping-member storage aliasing) in
-    // a tcc-built dynamic glibc binary. No prior rung used a union: writing one
-    // member and reading an overlapping member forces the compiler to lay them
-    // at the same offset and round-trip through memory (no register caching
-    // across the aliasing read) — the standard byte-reinterpretation idiom,
-    // distinct from Part 47's disjoint struct fields. Only undefined sym: write.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_union() {
-        serial_println!(
-            "WARNING: Path-Z union type-punning C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 52: union type-punning (overlapping-member storage aliasing) in
+            // a tcc-built dynamic glibc binary. No prior rung used a union: writing one
+            // member and reading an overlapping member forces the compiler to lay them
+            // at the same offset and round-trip through memory (no register caching
+            // across the aliasing read) — the standard byte-reinterpretation idiom,
+            // distinct from Part 47's disjoint struct fields. Only undefined sym: write.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_union() {
+                serial_println!(
+                    "WARNING: Path-Z union type-punning C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 53: function-local static variable (persistent, once-init
-    // mutable state) in a tcc-built dynamic glibc binary. Prior rungs used only
-    // stack automatics + static const tables; a mutable function-local static
-    // must live in .data (function scope, static storage), be initialised once
-    // at load, and persist across calls. bump() returns ++counter (40->41->42);
-    // a volatile rep count forces two real calls. Only undefined sym: write.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_func_static() {
-        serial_println!(
-            "WARNING: Path-Z function-local-static C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 53: function-local static variable (persistent, once-init
+            // mutable state) in a tcc-built dynamic glibc binary. Prior rungs used only
+            // stack automatics + static const tables; a mutable function-local static
+            // must live in .data (function scope, static storage), be initialised once
+            // at load, and persist across calls. bump() returns ++counter (40->41->42);
+            // a volatile rep count forces two real calls. Only undefined sym: write.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_func_static() {
+                serial_println!(
+                    "WARNING: Path-Z function-local-static C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 54: variable-length array (C99 VLA -> runtime-sized stack
-    // frame) in a tcc-built dynamic glibc binary. Prior automatic arrays had
-    // compile-time-constant sizes (fixed sub rsp,imm); a VLA computes its size at
-    // runtime, carves it off rsp (the alloca mechanism), and unwinds on return --
-    // a distinct, easily-mis-lowered codegen path. A volatile size defeats
-    // constant folding; sum(1..=8)=36 +6 = 42. Only undefined sym: write.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_vla() {
-        serial_println!(
-            "WARNING: Path-Z VLA (dynamic-stack) C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 54: variable-length array (C99 VLA -> runtime-sized stack
+            // frame) in a tcc-built dynamic glibc binary. Prior automatic arrays had
+            // compile-time-constant sizes (fixed sub rsp,imm); a VLA computes its size at
+            // runtime, carves it off rsp (the alloca mechanism), and unwinds on return --
+            // a distinct, easily-mis-lowered codegen path. A volatile size defeats
+            // constant folding; sum(1..=8)=36 +6 = 42. Only undefined sym: write.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_vla() {
+                serial_println!(
+                    "WARNING: Path-Z VLA (dynamic-stack) C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 55: GCC-style inline assembly with operand constraints in a
-    // tcc-built dynamic glibc binary. Exercises tcc's inline-assembler (a
-    // separate subsystem from C codegen): parsing the constraint list, allocating
-    // registers for =r/r/tied-0 operands, and substituting them into the %0/%2
-    // template -- the mechanism real libc/drivers use for syscall/cpuid/atomics/
-    // MMIO. asm_add(20,22)=42 via a single addl. Only undefined sym: write.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_inline_asm() {
-        serial_println!(
-            "WARNING: Path-Z inline-asm C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 55: GCC-style inline assembly with operand constraints in a
+            // tcc-built dynamic glibc binary. Exercises tcc's inline-assembler (a
+            // separate subsystem from C codegen): parsing the constraint list, allocating
+            // registers for =r/r/tied-0 operands, and substituting them into the %0/%2
+            // template -- the mechanism real libc/drivers use for syscall/cpuid/atomics/
+            // MMIO. asm_add(20,22)=42 via a single addl. Only undefined sym: write.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_inline_asm() {
+                serial_println!(
+                    "WARNING: Path-Z inline-asm C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 56: aggregate brace-initializer (runtime value → tcc-
-    // synthesised memset) compiled + glibc-linked + run in ring 3. Regression
-    // guard for B-TCC-LIBTCC1-MAIN (the once-observed "unresolved reference to
-    // 'main'" link failure that on-target instrumentation could not reproduce).
-    // seed(40)+1+1+0 = 42.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_brace_memset() {
-        serial_println!(
-            "WARNING: Path-Z brace-init/memset C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 56: aggregate brace-initializer (runtime value → tcc-
+            // synthesised memset) compiled + glibc-linked + run in ring 3. Regression
+            // guard for B-TCC-LIBTCC1-MAIN (the once-observed "unresolved reference to
+            // 'main'" link failure that on-target instrumentation could not reproduce).
+            // seed(40)+1+1+0 = 42.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_brace_memset() {
+                serial_println!(
+                    "WARNING: Path-Z brace-init/memset C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 57: C11 `_Atomic` + `__atomic_fetch_add` builtin compiled +
-    // glibc-linked + run in ring 3. Proves atomic codegen AND that the sized
-    // atomic helper `__atomic_fetch_add_4` links out of tcc's libtcc1.a (glibc
-    // does not provide it). 21 iterations of += 2 = 42.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_atomic() {
-        serial_println!(
-            "WARNING: Path-Z C11 atomic C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 57: C11 `_Atomic` + `__atomic_fetch_add` builtin compiled +
+            // glibc-linked + run in ring 3. Proves atomic codegen AND that the sized
+            // atomic helper `__atomic_fetch_add_4` links out of tcc's libtcc1.a (glibc
+            // does not provide it). 21 iterations of += 2 = 42.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_atomic() {
+                serial_println!(
+                    "WARNING: Path-Z C11 atomic C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 58: GNU statement expressions (`({ ... })`) + `__typeof__`
-    // compiled + glibc-linked + run in ring 3. Proves the on-target tcc lowers
-    // the once-eval type-generic macro idiom (min/max, container_of) that glibc
-    // and Linux headers depend on. MAX(42, MAX(17, 37)) = 42.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_stmt_expr() {
-        serial_println!(
-            "WARNING: Path-Z statement-expression C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 58: GNU statement expressions (`({ ... })`) + `__typeof__`
+            // compiled + glibc-linked + run in ring 3. Proves the on-target tcc lowers
+            // the once-eval type-generic macro idiom (min/max, container_of) that glibc
+            // and Linux headers depend on. MAX(42, MAX(17, 37)) = 42.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_stmt_expr() {
+                serial_println!(
+                    "WARNING: Path-Z statement-expression C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 59: C11 `_Generic` type-generic selection compiled + glibc-
-    // linked + run in ring 3. Proves the on-target tcc resolves the tgmath.h /
-    // type-generic-macro selection primitive at translation time. int+long+
-    // double+char weights 10+20+5+7 = 42.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_generic() {
-        serial_println!(
-            "WARNING: Path-Z C11 _Generic C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 59: C11 `_Generic` type-generic selection compiled + glibc-
+            // linked + run in ring 3. Proves the on-target tcc resolves the tgmath.h /
+            // type-generic-macro selection primitive at translation time. int+long+
+            // double+char weights 10+20+5+7 = 42.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_generic() {
+                serial_println!(
+                    "WARNING: Path-Z C11 _Generic C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path Z Part 60: a dense `switch` (lowered to an indexed jump table)
-    // compiled + glibc-linked + run in ring 3. Proves the on-target tcc builds
-    // and executes a switch jump table — the canonical option/argument-parser
-    // codegen shape — de-risking real coreutils/bash parser code. Sum = 42.
-    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_switch() {
-        serial_println!(
-            "WARNING: Path-Z dense-switch C runtime self-test failed: {:?}",
-            e
-        );
-    }
+            // Path Z Part 60: a dense `switch` (lowered to an indexed jump table)
+            // compiled + glibc-linked + run in ring 3. Proves the on-target tcc builds
+            // and executes a switch jump table — the canonical option/argument-parser
+            // codegen shape — de-risking real coreutils/bash parser code. Sum = 42.
+            if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_switch() {
+                serial_println!(
+                    "WARNING: Path-Z dense-switch C runtime self-test failed: {:?}",
+                    e
+                );
+            }
 
-    // Path-Z coverage verdict.  Every rung above self-skips when `rootfs.ext4`
-    // lacks a binary it drives, which is correct (the image is optional) but
-    // used to be *invisible*: a rung that never ran looked exactly like a rung
-    // that passed.  All 26 tcc rungs no-op'd unnoticed that way once /bin/tcc
-    // fell out of the image (known-issues.md →
-    // B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT).  This prints the count so a boot
-    // that lost coverage cannot be read as a clean one.
-    proc::spawn::pathz_report_skips();
+            // Path-Z coverage verdict.  Every rung above self-skips when `rootfs.ext4`
+            // lacks a binary it drives, which is correct (the image is optional) but
+            // used to be *invisible*: a rung that never ran looked exactly like a rung
+            // that passed.  All 26 tcc rungs no-op'd unnoticed that way once /bin/tcc
+            // fell out of the image (known-issues.md →
+            // B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT).  This prints the count so a boot
+            // that lost coverage cannot be read as a clean one.
+            proc::spawn::pathz_report_skips();
 
-    // B-KNULLJUMP corruption hunt: end-of-block checkpoint. Sweep every
-    // still-parked slot for a stomped poison pattern (a stale-pointer/UAF write
-    // that landed while the slot was quarantined), report the verdict + stats,
-    // then disarm and drain the ring back to the slab. Under the soak harness a
-    // corruption here pins the fault to this Path-Z window with a precise
-    // address/class instead of the vague downstream crash.
-    if corruption_hunt {
-        let corrupted = mm::quarantine::scan_all();
-        let qs = mm::quarantine::stats();
-        let ks = mm::kasan::stats();
-        // `giveups` is reported here specifically because this line is the one a
-        // soak reads to decide whether a boot was clean. `corruptions=0` means
-        // "no corruption was found", not "no corruption happened", and every
-        // give-up is an allocation whose shadow was never written — so a nonzero
-        // value here is the difference between evidence of absence and absence
-        // of evidence. See known-issues.md →
-        // TD-KASAN-IRQ-CONTEXT-ALLOCATIONS-LOSE-SHADOW-COVERAGE.
-        serial_println!(
-            "[hunt] Path-Z checkpoint: quarantine parked={} total_parked={} \
-             evicted={} corruptions={} (scan found {}); kasan violations={} \
-             shadow_frames={} giveups={}",
-            qs.parked_now,
-            qs.total_parked,
-            qs.total_evicted,
-            qs.corruptions,
-            corrupted,
-            ks.violations,
-            ks.shadow_frames_mapped,
-            ks.map_lock_giveups
-        );
-        mm::quarantine::disable();
-        mm::kasan::disable();
-        // Reclaim parked slots (verifying each on the way out).
-        mm::quarantine::drain(|ptr, _class_idx| {
-            // SAFETY: `ptr` is a slab slot that was live when parked; returning
-            // it to the global allocator via the standard dealloc path. The
-            // layout size is reconstructed from the class by the allocator's
-            // size-class lookup, so a byte-accurate Layout isn't required here —
-            // we free through the raw slab return used for quarantine eviction.
-            mm::heap::quarantine_return_slot(ptr, _class_idx);
-        });
-        serial_println!("[hunt] disarmed; quarantine drained back to the slab");
+            // B-KNULLJUMP corruption hunt: end-of-block checkpoint. Sweep every
+            // still-parked slot for a stomped poison pattern (a stale-pointer/UAF write
+            // that landed while the slot was quarantined), report the verdict + stats,
+            // then disarm and drain the ring back to the slab. Under the soak harness a
+            // corruption here pins the fault to this Path-Z window with a precise
+            // address/class instead of the vague downstream crash.
+            if corruption_hunt {
+                let corrupted = mm::quarantine::scan_all();
+                let qs = mm::quarantine::stats();
+                let ks = mm::kasan::stats();
+                // `giveups` is reported here specifically because this line is the one a
+                // soak reads to decide whether a boot was clean. `corruptions=0` means
+                // "no corruption was found", not "no corruption happened", and every
+                // give-up is an allocation whose shadow was never written — so a nonzero
+                // value here is the difference between evidence of absence and absence
+                // of evidence. See known-issues.md →
+                // TD-KASAN-IRQ-CONTEXT-ALLOCATIONS-LOSE-SHADOW-COVERAGE.
+                serial_println!(
+                    "[hunt] Path-Z checkpoint: quarantine parked={} total_parked={} \
+                     evicted={} corruptions={} (scan found {}); kasan violations={} \
+                     shadow_frames={} giveups={}",
+                    qs.parked_now,
+                    qs.total_parked,
+                    qs.total_evicted,
+                    qs.corruptions,
+                    corrupted,
+                    ks.violations,
+                    ks.shadow_frames_mapped,
+                    ks.map_lock_giveups
+                );
+                mm::quarantine::disable();
+                mm::kasan::disable();
+                // Reclaim parked slots (verifying each on the way out).
+                mm::quarantine::drain(|ptr, _class_idx| {
+                    // SAFETY: `ptr` is a slab slot that was live when parked; returning
+                    // it to the global allocator via the standard dealloc path. The
+                    // layout size is reconstructed from the class by the allocator's
+                    // size-class lookup, so a byte-accurate Layout isn't required here —
+                    // we free through the raw slab return used for quarantine eviction.
+                    mm::heap::quarantine_return_slot(ptr, _class_idx);
+                });
+                serial_println!("[hunt] disarmed; quarantine drained back to the slab");
+            }
+        }
+        case();
     }
 
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
@@ -3573,1306 +3729,1336 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: ProcFs self-test failed: {:?}", e);
     }
 
-    // Compression self-tests — pure in-memory, no mounted FS required.
-    if let Err(e) = fs::compress::self_test() {
-        serial_println!("WARNING: Compression self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::bzip2::self_test() {
-        serial_println!("WARNING: Bzip2 self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::xz::self_test() {
-        serial_println!("WARNING: XZ self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::zstd::self_test() {
-        serial_println!("WARNING: Zstd self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::sevenz::self_test() {
-        serial_println!("WARNING: 7z self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::cpio::self_test() {
-        serial_println!("WARNING: CPIO self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::ar::self_test() {
-        serial_println!("WARNING: ar self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::zip::self_test() {
-        serial_println!("WARNING: ZIP self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::tar::self_test() {
-        serial_println!("WARNING: tar self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::lz4::self_test() {
-        serial_println!("WARNING: LZ4 self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::rar::self_test() {
-        serial_println!("WARNING: RAR self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::index::self_test() {
-        serial_println!("WARNING: File index self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::cas::self_test() {
-        serial_println!("WARNING: CAS self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::integrity::self_test() {
-        serial_println!("WARNING: Integrity monitoring self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::history::self_test() {
-        serial_println!("WARNING: File history self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::mime::self_test() {
-        serial_println!("WARNING: MIME detection self-test failed: {:?}", e);
-    }
-    // taskstats backs /proc/taskstats; its self-test builds fixtures via the
-    // real accounting API and resets the table afterward (leaving no
-    // fabricated rows), so it is safe to run during boot and gives the
-    // module automated coverage it otherwise lacks (it was previously only
-    // reachable via the `taskstats test` kshell subcommand).
-    fs::taskstats::self_test();
-    // iolatency backs /proc/iolatency; like taskstats its self-test now builds
-    // fixtures via the real register_device/record API and resets the table
-    // afterward (leaving no fabricated devices), so it is safe at boot and
-    // gives the module automated coverage it previously lacked (it was only
-    // reachable via the `iolatency test` kshell subcommand).
-    fs::iolatency::self_test();
-    // netsock backs /proc/netsock; like taskstats/iolatency its self-test now
-    // builds fixtures via the real open/close/record API and resets the table
-    // afterward (leaving no fabricated sockets), so it is safe at boot and
-    // gives the module automated coverage it previously lacked (it was only
-    // reachable via the `netsock test` kshell subcommand).
-    fs::netsock::self_test();
-    // slabstat backs /proc/slabstat; like taskstats/iolatency/netsock its
-    // self-test now builds fixtures via the real create_cache/alloc/free API
-    // and resets the table afterward (leaving no fabricated caches), so it is
-    // safe at boot and gives the module automated coverage it previously
-    // lacked (it was only reachable via the `slabstat test` kshell subcommand).
-    fs::slabstat::self_test();
-    // futexstat backs /proc/futexstat; like its siblings the self-test now
-    // builds fixtures via the real record_wait/record_wake API and resets the
-    // table afterward (leaving no fabricated futex/process rows), so it is
-    // safe at boot and gives the module automated coverage it previously
-    // lacked (it was only reachable via the `futexstat test` kshell subcommand).
-    fs::futexstat::self_test();
-    // pipestat backs /proc/pipestat; like its siblings the self-test now
-    // builds fixtures via the real create/destroy/record_write/record_read API
-    // and resets the table afterward (leaving no fabricated pipes), so it is
-    // safe at boot and gives the module automated coverage it previously
-    // lacked (it was only reachable via the `pipestat test` kshell subcommand).
-    fs::pipestat::self_test();
-    // epollstat backs /proc/epollstat; like its siblings the self-test now
-    // builds fixtures via the real create_instance/add_fd/record_wait API and
-    // resets the table afterward (leaving no fabricated instances), so it is
-    // safe at boot and gives the module automated coverage it previously
-    // lacked (it was only reachable via the `epollstat test` kshell subcommand).
-    fs::epollstat::self_test();
-    // aiostat backs /proc/aiostat (io_uring-style submission-queue monitoring);
-    // like its siblings the self-test now builds fixtures via the real
-    // create_ring/submit/complete/overflow API and resets the table afterward
-    // (leaving no fabricated rings), so it is safe at boot and gives the module
-    // automated coverage it previously lacked (it was only reachable via the
-    // `aiostat test` kshell subcommand).
-    fs::aiostat::self_test();
-    // netlat backs /proc/netlat (per-interface network RTT/processing latency);
-    // like its siblings the self-test now builds fixtures via the real
-    // register_iface/record_rtt/record_processing API and resets the table
-    // afterward (leaving no fabricated interfaces), so it is safe at boot and
-    // gives the module automated coverage it previously lacked (it was only
-    // reachable via the `netlat test` kshell subcommand).
-    fs::netlat::self_test();
-    // migstat backs /proc/migstat (per-CPU/per-task scheduler migration stats);
-    // like its siblings the self-test now builds fixtures via the real
-    // register_cpu/register_task/record API and resets the table afterward
-    // (leaving no fabricated rows), so it is safe at boot and gives the module
-    // automated coverage it previously lacked (it was only reachable via the
-    // `migstat test` kshell subcommand).
-    fs::migstat::self_test();
-    // rcustat backs /proc/rcustat (RCU grace-period/callback/per-CPU stats);
-    // like its siblings the self-test now builds fixtures via the real
-    // register_cpu/begin_gp/end_gp/queue_callback API and resets the table
-    // afterward (leaving no fabricated rows), so it is safe at boot and gives
-    // the module automated coverage it previously lacked (it was only reachable
-    // via the `rcustat test` kshell subcommand).
-    fs::rcustat::self_test();
-    // tlbstat backs /proc/tlbstat (per-CPU TLB hit/miss/shootdown/flush stats);
-    // like its siblings the self-test now builds fixtures via the real
-    // register_cpu/record_hit/record_miss/record_shootdown/record_flush API and
-    // resets the table afterward (leaving no fabricated rows), so it is safe at
-    // boot and gives the module automated coverage it previously lacked (it was
-    // only reachable via the `tlbstat test` kshell subcommand).
-    fs::tlbstat::self_test();
-    // wqstat backs /proc/wqstat (kernel workqueue work-item stats); like its
-    // siblings the self-test now builds fixtures via the real register/enqueue/
-    // activate/complete/cancel API and resets the table afterward (leaving no
-    // fabricated workqueues), so it is safe at boot and gives the module
-    // automated coverage it previously lacked (it was only reachable via the
-    // `wqstat test` kshell subcommand).
-    fs::wqstat::self_test();
-    // numastat backs /proc/numastat (per-NUMA-node memory placement stats);
-    // like its siblings the self-test now builds fixtures via the real
-    // register_node/set_distance/record_* API and resets the table afterward
-    // (leaving no fabricated nodes), so it is safe at boot and gives the module
-    // automated coverage it previously lacked (it was only reachable via the
-    // `numastat test` kshell subcommand).
-    fs::numastat::self_test();
-    // cpustat backs /proc/cpustat (per-CPU user/system/idle/irq time breakdown);
-    // like its siblings the self-test now builds fixtures via the real
-    // register_cpu/record_time/record_context_switch/record_interrupt API and
-    // resets the table afterward (leaving no fabricated rows), so it is safe at
-    // boot and gives the module automated coverage it previously lacked (it was
-    // only reachable via the `cpustat test` kshell subcommand).
-    fs::cpustat::self_test();
-    // irqstat backs /proc/irqstat (per-IRQ-line counts + per-CPU interrupt
-    // totals and ISR latency); like its siblings the self-test now builds
-    // fixtures via the real register_irq/register_cpu/record/record_latency/
-    // mark_spurious API and resets the table afterward (leaving no fabricated
-    // rows), so it is safe at boot and gives the module automated coverage it
-    // previously lacked (it was only reachable via the `irqstat test` kshell
-    // subcommand).
-    fs::irqstat::self_test();
-    // diskstat backs /proc/diskstat (per-block-device read/write IOPS, bytes,
-    // latency, queue depth, merges); like its siblings the self-test now builds
-    // fixtures via the real register/record_read/record_write/record_discard/
-    // record_flush/record_merge API and resets the table afterward (leaving no
-    // fabricated rows), so it is safe at boot and gives the module automated
-    // coverage it previously lacked (it was only reachable via the
-    // `diskstat test` kshell subcommand).
-    fs::diskstat::self_test();
-    // acpistat backs /proc/acpistat (ACPI event counts, GPE firings, S-state
-    // suspend/resume); like its siblings the self-test now builds fixtures via
-    // the real register_gpe/record_event/record_gpe/set_s_state API and resets
-    // the table afterward (leaving no fabricated rows), so it is safe at boot
-    // and gives the module automated coverage it previously lacked (it was only
-    // reachable via the `acpistat test` kshell subcommand).
-    fs::acpistat::self_test();
-    // bpfstat backs /proc/bpfstat (loaded eBPF programs, maps, run counts,
-    // verifier errors); like its siblings the self-test now builds fixtures via
-    // the real load_program/unload_program/record_run/create_map/
-    // record_verifier_error API and resets the table afterward (leaving no
-    // fabricated rows), so it is safe at boot and gives the module automated
-    // coverage it previously lacked (it was only reachable via the
-    // `bpfstat test` kshell subcommand).
-    fs::bpfstat::self_test();
-    // budstat backs /proc/buddyinfo (per-zone buddy-allocator free counts and
-    // split/coalesce activity); like its siblings the self-test now builds
-    // fixtures via the real register_zone/update_free/record_split/
-    // record_coalesce API and resets the table afterward (leaving no fabricated
-    // rows), so it is safe at boot and gives the module automated coverage it
-    // previously lacked (it was only reachable via the `budstat test` kshell
-    // subcommand).
-    fs::budstat::self_test();
-    // cgiostat backs /proc/cgiostat (per-cgroup disk I/O bytes, IOPS, throttle
-    // events, I/O wait); like its siblings the self-test now builds fixtures via
-    // the real create_cgroup/remove_cgroup/record_read/record_write/
-    // record_throttle/record_io_wait API and resets the table afterward
-    // (leaving no fabricated rows), so it is safe at boot and gives the module
-    // automated coverage it previously lacked (it was only reachable via the
-    // `cgiostat test` kshell subcommand).
-    fs::cgiostat::self_test();
-    // compstat backs /proc/compstat (per-zone memory compaction attempts, page
-    // migrations, scan activity, stalls); like its siblings the self-test now
-    // builds fixtures via the real register_zone/start_compaction/
-    // finish_compaction/record_stall API and resets the table afterward
-    // (leaving no fabricated rows), so it is safe at boot and gives the module
-    // automated coverage it previously lacked (it was only reachable via the
-    // `compstat test` kshell subcommand).
-    fs::compstat::self_test();
-    // dmastat backs /proc/dmastat (per-device DMA mappings, transfers, IOMMU
-    // faults); like its siblings the self-test now builds fixtures via the real
-    // register_device/record_map/record_unmap/record_transfer/record_fault API
-    // and resets the table afterward (leaving no fabricated rows), so it is safe
-    // at boot and gives the module automated coverage it previously lacked (it
-    // was only reachable via the `dmastat test` kshell subcommand).
-    fs::dmastat::self_test();
-    // inodestat backs /proc/inodestat (per-filesystem inode counts + dcache
-    // hit/miss); like its siblings the self-test now builds fixtures via the
-    // real register_fs/alloc_inode/free_inode/evict/dcache_lookup API and resets
-    // the table afterward (leaving no fabricated rows), so it is safe at boot and
-    // gives the module automated coverage it previously lacked (it was only
-    // reachable via the `inodestat test` kshell subcommand).
-    fs::inodestat::self_test();
-    // ksmstat backs /proc/ksmstat (Kernel Same-page Merging: per-process
-    // sharing, merges/unmerges, scan progress, bytes saved); like its siblings
-    // the self-test now builds fixtures via the real register_process/
-    // record_merge/record_unmerge/record_scan/update_process API and resets the
-    // table afterward (leaving no fabricated rows), so it is safe at boot and
-    // gives the module automated coverage it previously lacked (it was only
-    // reachable via the `ksmstat test` kshell subcommand).
-    fs::ksmstat::self_test();
-    // mmapstat backs /proc/mmapstat (per-process mmap/munmap/mprotect counts,
-    // per-type breakdown, total bytes mapped); like its siblings the self-test
-    // now builds fixtures via the real register_process/record_map/record_unmap/
-    // record_protect API and resets the table afterward (leaving no fabricated
-    // rows), so it is safe at boot and gives the module automated coverage it
-    // previously lacked (it was only reachable via the `mmapstat test` kshell
-    // subcommand).
-    fs::mmapstat::self_test();
-    // pagestat backs /proc/pagestat (per-zone page allocator stats, per-order
-    // histogram, huge-page pools); like its siblings the self-test now builds
-    // fixtures via the real register_zone/record_alloc/record_free/
-    // record_reclaim/set_hugepages API and resets the table afterward (leaving no
-    // fabricated rows), so it is safe at boot and gives the module automated
-    // coverage it previously lacked (it was only reachable via the `pagestat
-    // test` kshell subcommand).
-    fs::pagestat::self_test();
-    // pidstat backs /proc/pidstat (per-PID-namespace allocation counts, reuse
-    // rate, high-watermark); like its siblings the self-test now builds fixtures
-    // via the real alloc_pid/free_pid/create_ns API and resets the table
-    // afterward (leaving only the structural root namespace with zeroed
-    // counters, no fabricated activity), so it is safe at boot and gives the
-    // module automated coverage it previously lacked (it was only reachable via
-    // the `pidstat test` kshell subcommand).
-    fs::pidstat::self_test();
-    // pmcstat backs /proc/pmcstat (per-CPU hardware performance counters,
-    // derived IPC + cache-miss rate, event multiplexing); like its siblings the
-    // self-test now builds fixtures via the real register_cpu/record_sample/
-    // configure_event/record_multiplex API and resets the table afterward
-    // (leaving no fabricated rows), so it is safe at boot and gives the module
-    // automated coverage it previously lacked (it was only reachable via the
-    // `pmcstat test` kshell subcommand).
-    fs::pmcstat::self_test();
-    // powerstat backs /proc/powerstat (per-domain power state, energy in uJ,
-    // transitions, wake-event log); like its siblings the self-test now builds
-    // fixtures via the real register_domain/record_transition/update_energy/
-    // record_wake API and resets the table afterward (leaving no fabricated
-    // rows), so it is safe at boot and gives the module automated coverage it
-    // previously lacked (it was only reachable via the `powerstat test` kshell
-    // subcommand).
-    fs::powerstat::self_test();
-    // procstat backs /proc/procstat (per-process CPU/memory/IO/fault/ctx-switch
-    // accounting, top-CPU/top-mem views); like its siblings the self-test now
-    // builds fixtures via the real register/update_cpu/update_memory/unregister
-    // API and resets the table afterward (leaving no fabricated rows), so it is
-    // safe at boot and gives the module automated coverage it previously lacked
-    // (it was only reachable via the `procstat test` kshell subcommand).
-    fs::procstat::self_test();
-    // ratestat backs /proc/ratestat (per-limiter token-bucket rate-limiting
-    // stats: allow/deny counts, current bucket level, burst-exhaustion events);
-    // the self-test now builds fixtures via the real register/record_allow/
-    // record_deny/refill API and resets the table afterward (leaving no
-    // fabricated rows), so it is safe at boot and gives the module automated
-    // coverage it previously lacked (it was only reachable via the `ratestat
-    // test` kshell subcommand).
-    fs::ratestat::self_test();
-    // rqstat backs /proc/rqstat (per-CPU runqueue depth/wait/load-balance stats);
-    // record functions return NotFound for unknown CPUs and there was no register
-    // API, so added register_cpu(cpu_id) (zeroed counters) — the proper fix is to
-    // register real topology rather than seed fake rows. The self-test now builds
-    // fixtures via register_cpu/enqueue/dequeue/record_balance/record_wait and
-    // resets the table afterward (leaving no fabricated rows), so it is safe at
-    // boot and gives the module automated coverage it previously lacked (it was
-    // only reachable via the `rqstat test` kshell subcommand).
-    fs::rqstat::self_test();
-    // schedlat backs /proc/schedlat (per-CPU scheduling-latency stats: wakeup-to-
-    // run / runqueue-wait / preemption latencies + per-CPU latency histograms);
-    // record functions return NotFound for unknown CPUs and there was no register
-    // API, so added register_cpu(cpu_id) (zeroed counters + empty histogram). The
-    // self-test now builds fixtures via register_cpu/record_wakeup/
-    // record_runq_wait/record_preempt with exact bucket-placement assertions and
-    // resets the table afterward (leaving no fabricated rows), so it is safe at
-    // boot and gives the module automated coverage it previously lacked (it was
-    // only reachable via the `schedlat test` kshell subcommand).
-    fs::schedlat::self_test();
-    // ttystat backs /proc/ttystat (per-TTY read/write bytes+ops, line-discipline
-    // signals, buffer overruns, buffer usage); already had a full register/
-    // record_read/record_write/record_signal/record_overrun/set_buf_used API, so
-    // just emptied init_defaults. The self-test now builds fixtures via that real
-    // API with exact byte/op assertions and resets the table afterward (leaving no
-    // fabricated rows), so it is safe at boot and gives the module automated
-    // coverage it previously lacked (it was only reachable via the `ttystat test`
-    // kshell subcommand).
-    fs::ttystat::self_test();
-    // zramstat backs /proc/zramstat (per-ZRAM-device compressed-swap stats:
-    // original/compressed sizes, mem used, read/write/discard ops, compression
-    // ratio); already had a full create_device/remove_device/record_write/
-    // record_read/record_discard API, so just emptied init_defaults. The
-    // self-test now builds fixtures via that real API with exact size/ratio
-    // assertions (incl. saturating mem_used on over-discard) and resets the table
-    // afterward (leaving no fabricated rows), so it is safe at boot and gives the
-    // module automated coverage it previously lacked (it was only reachable via
-    // the `zramstat test` kshell subcommand).
-    fs::zramstat::self_test();
-    // thpstat backs /proc/thpstat (transparent-huge-page promotion/demotion/
-    // split/compaction/khugepaged stats per size class). The two size-class rows
-    // (PMD 2MiB, PUD 1GiB) are real fixed structure kept with zeroed counters; the
-    // self-test now builds fixtures via record_promotion/record_demotion/
-    // record_split/record_alloc_failure/record_compaction/record_khugepaged_scan
-    // with exact byte-credit assertions and resets the table afterward (leaving no
-    // fabricated activity), so it is safe at boot and gives the module automated
-    // coverage it previously lacked (it was only reachable via the `thpstat test`
-    // kshell subcommand).
-    fs::thpstat::self_test();
-    // swapact backs /proc/swapact (per-swap-area swap-in/out counts, pages, and
-    // latencies); already had a full register/record_in/record_out API, so just
-    // emptied init_defaults. The self-test now builds fixtures via that real API
-    // with exact page/latency assertions (incl. swap-in underflow guard and
-    // used_pages clamped to total on swap-out) and resets the table afterward
-    // (leaving no fabricated rows), so it is safe at boot and gives the module
-    // automated coverage it previously lacked (it was only reachable via the
-    // `swapact test` kshell subcommand).
-    fs::swapact::self_test();
-    // writeback backs /proc/writeback (per-device dirty/writeback/written page
-    // counts + flusher-thread state). Record functions returned NotFound for
-    // unknown devices and there was no register API, so added register_device(dev)
-    // (creates a zeroed device row + an idle flusher thread, monotonic id). The
-    // real default dirty threshold (DEFAULT_DIRTY_THRESHOLD_PCT) is kept as a
-    // legitimate config default. The self-test now builds fixtures via
-    // register_device/record_dirty/record_written/start_flush with exact
-    // assertions and resets the table afterward (leaving no fabricated rows), so
-    // it is safe at boot and gives the module automated coverage it previously
-    // lacked (it was only reachable via the `writeback test` kshell subcommand).
-    fs::writeback::self_test();
-    // blkqueue backs /proc/blkqueue (per-device block I/O queue depth, request
-    // merges, plug/unplug events).  Its init_defaults() previously seeded two
-    // fictional devices (sda/nvme0n1) with ~60M fabricated submitted I/Os; that
-    // demo data was removed (real queues are wired via register_device + the
-    // submit/complete/merge/plug/unplug record functions).  The residue-free
-    // self_test builds its fixtures via the real API with exact assertions and
-    // resets the table afterward, so it is safe at boot.
-    fs::blkqueue::self_test();
-    // netqueue backs /proc/netqueue (per-NIC-queue TX/RX packets, drops, NAPI
-    // poll/budget-exhaustion).  Its init_defaults() previously seeded four
-    // fictional eth0 queues with 190M/150M fabricated RX/TX packets; that demo
-    // data was removed (real queues are wired via register_queue + the
-    // record_packets/record_drop/record_napi_poll functions).  The residue-free
-    // self_test builds its fixtures via the real API with exact assertions and
-    // resets the table afterward, so it is safe at boot.
-    fs::netqueue::self_test();
-    // pagecache backs /proc/pagecache (per-device file-cache hits/misses/
-    // evictions/readahead and derived hit-rate/readahead-rate).  Its
-    // init_defaults() previously seeded two fictional devices (sda/nvme0n1) with
-    // 600M fabricated hits and a conjured 97.5% hit rate; that demo data was
-    // removed (real devices are wired via register_device + the record_hit/
-    // record_miss/record_eviction/record_readahead functions).  The residue-free
-    // self_test builds its fixtures via the real API with exact assertions
-    // (including hit_rate/readahead_rate) and resets the table afterward, so it
-    // is safe at boot.
-    fs::pagecache::self_test();
-    // taskio backs /proc/taskio (per-process read/write bytes, syscall counts,
-    // cancelled writes, io-wait time, major faults).  Its init_defaults()
-    // previously seeded three fictional tasks (pid 1/100/200) with 2.6GB/1.25GB
-    // fabricated read/write bytes; that demo data was removed (real tasks are
-    // wired via register + the record_read/record_write/record_cancelled/
-    // record_io_wait/record_page_fault_io functions).  The residue-free
-    // self_test builds its fixtures via the real API with exact assertions and
-    // resets the table afterward, so it is safe at boot.
-    fs::taskio::self_test();
-    // netspeed backs /proc/netspeed (per-interface bandwidth snapshots + speed
-    // test history).  Its init_defaults() previously seeded a placeholder "eth0"
-    // snapshot (fabricating an interface's existence) and its run_test()
-    // fabricated ~100 Mbps download speeds from the HPET clock and showed them as
-    // a real measurement.  Both were removed: init_defaults is empty (interfaces
-    // appear only via update_bandwidth from real net-stack counters) and run_test
-    // now honestly returns NotSupported until a real measurement backend exists.
-    // The residue-free self_test verifies both and resets the table afterward.
-    fs::netspeed::self_test();
-    // diskhealth backs /proc/diskhealth (per-drive S.M.A.R.T. health, temp,
-    // error rates, failure prediction).  Its init_defaults() previously seeded
-    // two fictional disks with INVENTED model/serial numbers ("WDC WD10EZEX",
-    // "Samsung 970 EVO") presented as real attached hardware; that demo data was
-    // removed (real drives are wired via add_disk + update_attrs from the SMART
-    // layer).  The residue-free self_test builds its fixtures via the real API,
-    // exercises the compute_health grading (Excellent/Poor/Critical) with exact
-    // assertions, and resets the table afterward, so it is safe at boot.
-    fs::diskhealth::self_test();
-    // netdev backs /proc/netdev (per-NIC packet/byte/error/drop counters + link
-    // state, like Linux /proc/net/dev).  Its init_defaults() previously seeded
-    // three fictional interfaces (lo/eth0/wlan0) with 51GB/11GB fabricated rx/tx
-    // bytes and invented error/drop totals; that demo data was removed (real
-    // interfaces are wired via register_iface + the record_rx/record_tx/
-    // record_error/record_drop functions).  The residue-free self_test builds its
-    // fixtures via the real API with exact assertions and resets the table
-    // afterward, so it is safe at boot.
-    fs::netdev::self_test();
-    // netfilter backs /proc/netfilter (firewall rules + connection tracking +
-    // packet accept/drop/reject totals).  Its init_defaults() previously seeded
-    // four fictional rules ("allow established" 5M matches/10GB, "allow ssh",
-    // "default deny", "allow all out" 4M matches/8GB), two fabricated conntrack
-    // entries (192.168.0.1→…:22 and 192.168.0.1→8.8.8.8:443) and invented
-    // totals (9.15M packets / 9.05M accepted / 100k dropped); that demo data was
-    // removed.  Rules are registered via add_rule, connections via the new
-    // track_connection/update_connection/set_conn_state/untrack_connection API,
-    // and totals advance only on real record_match calls.  The residue-free
-    // self_test builds its fixtures via the real API with exact assertions and
-    // resets the table afterward, so it is safe at boot.
-    fs::netfilter::self_test();
-    // mempress backs the PSI-style /proc/pressure/memory view (memory stall
-    // times, reclaim activity, OOM proximity).  Its init_defaults() previously
-    // seeded fictional pressure — level Low, 5.5s total stall, 10M reclaim
-    // pages, 100k stall events, 50k reclaim events, OOM proximity 15, 5000 level
-    // changes; that demo data was removed (the state now starts at level None
-    // with all counters zero, advanced only by real record_stall/record_reclaim/
-    // update_level/set_oom_proximity calls from the reclaim/OOM paths).  The
-    // residue-free self_test builds its fixtures via the real API with exact
-    // assertions and resets the table afterward, so it is safe at boot.
-    fs::mempress::self_test();
-    // devfreq backs /proc/devfreq (per-device frequency governors, current
-    // frequency, transition counts, time-in-state).  Its init_defaults()
-    // previously seeded two fictional devices — "gpu0" 200MHz-2GHz OnDemand with
-    // 500k transitions and "membus" 400MHz-3.2GHz Performance with 10k
-    // transitions — plus invented time-in-state buckets and a 510k total; that
-    // demo data was removed (devices are registered via register() by the power-
-    // management subsystem and counters advance only on real record_transition
-    // calls).  The residue-free self_test builds its fixtures via the real API
-    // with exact assertions and resets the table afterward, so it is safe at
-    // boot.
-    fs::devfreq::self_test();
-    // memcg backs /proc/memcg (per-cgroup memory usage, limits, swap, failcnt,
-    // OOM kills, charge/uncharge counts).  Its init_defaults() previously seeded
-    // three fictional cgroups — "/" 2GiB usage / 500k charges, "/system" 512MiB
-    // usage / 1GiB limit, "/user" 1GiB usage / 4GiB limit / 128MiB swap — plus
-    // invented totals (900k charges, 865k uncharges, 2 failures); that demo data
-    // was removed (the cgroup hierarchy is built via create() by the cgroupfs
-    // subsystem and usage is accounted only through real charge/uncharge calls).
-    // The residue-free self_test builds its fixtures via the real API with exact
-    // assertions and resets the table afterward, so it is safe at boot.
-    fs::memcg::self_test();
-    // cgmem backs /proc/cgmem (per-cgroup page-level memory stats: usage/RSS/
-    // cache/swap pages, charges, uncharges, OOM kills, high-watermark events).
-    // Its init_defaults() previously seeded three fictional cgroups — "root"
-    // 500k usage pages / 10M charges, "system" 1M limit / 5M charges / 2 OOM,
-    // "user" 2M limit / 20M charges / 5 OOM — plus invented totals (35M charges,
-    // 33.3M uncharges, 7 OOM kills); that demo data was removed (cgroups are
-    // created via create() and pages accounted only through real record_charge/
-    // record_uncharge calls).  The residue-free self_test builds its fixtures via
-    // the real API with exact assertions and resets the table afterward, so it is
-    // safe at boot.
-    fs::cgmem::self_test();
-    // vmzone backs /proc/vmzone (per-zone page totals, watermarks, free/active/
-    // inactive pages, alloc/free/reclaim activity).  Its init_defaults()
-    // previously seeded four fictional zones — DMA 4096 pages / 10k allocs,
-    // DMA32 262k pages / 1M allocs, Normal 2M pages / 50M allocs / 100k reclaims,
-    // Movable 500k pages / 5M allocs — plus invented totals (56.01M allocs,
-    // 54.76M frees, 125.05k reclaims); that demo data was removed (the page
-    // allocator registers its real zones via register() with their actual page
-    // totals and watermarks, and publishes activity only through real
-    // record_alloc/record_free/record_reclaim calls).  The residue-free self_test
-    // builds its fixtures via the real API with exact assertions and resets the
-    // table afterward, so it is safe at boot.
-    fs::vmzone::self_test();
-    // vmballoon backs /proc/vmballoon (VM memory-balloon status: current/target/
-    // max pages, inflate/deflate counts and page totals, OOM events, free-page
-    // hints).  Its init_defaults() previously seeded a fictional balloon — 100k
-    // current/target pages, 1M max, 500 inflates / 300 deflates, 5M/4.9M
-    // inflate/deflate page totals, 2 OOM events, 10k free-page hints; that demo
-    // data was removed (the balloon driver advertises its capacity via the new
-    // configure() API on attach, and counters advance only on real inflate/
-    // deflate/record_oom/record_free_hint calls).  The residue-free self_test
-    // builds its fixtures via the real API with exact assertions and resets the
-    // status afterward, so it is safe at boot.
-    fs::vmballoon::self_test();
-    // softirq backs /proc/softirq (deferred-interrupt stats: per-CPU softirq/
-    // tasklet/ksoftirqd counts and per-type raised/executed/time).  Its
-    // init_defaults() previously seeded four fictional CPUs with invented
-    // per-type counts (Timer 500k+, NetRx 200k+, Block 100k+, RCU 300k+ each)
-    // and ten type rows with invented bases (Timer 2.6M executed, NetRx 1M, RCU
-    // 1.5M) plus totals (5.71M raised, 5.7M executed, 5200 tasklets); that demo
-    // data was removed.  The ten softirq-vector rows are a fixed kernel taxonomy
-    // so they are kept with ZEROED counters, while per-CPU state is created as
-    // each CPU comes online via the new register_cpu() API; counters advance
-    // only on real raise/run/tasklet_run/ksoftirqd_wakeup calls.  The residue-
-    // free self_test builds its fixtures via the real API with exact assertions
-    // and resets the tables afterward, so it is safe at boot.
-    fs::softirq::self_test();
-    // timerq backs /proc/timerq (kernel timer queue: per-timer id/name/type/
-    // state/deadline/interval/fire-count/overruns plus created/fired/cancelled/
-    // overrun totals).  Its init_defaults() previously seeded three fictional
-    // pending timers — "tick" (periodic 10ms), "watchdog" (periodic 1s), and
-    // "rcu_callback" (deferrable 50ms) — claiming timers were scheduled in the
-    // queue that no subsystem actually armed; that phantom data was removed.
-    // Timers are scheduled through the existing add() API and counters advance
-    // only on real fire/fire_expired/cancel calls.  The residue-free self_test
-    // builds its fixtures via the real API with exact assertions (using a far-
-    // future periodic deadline so fire_expired is deterministic) and resets the
-    // queue afterward, so it is safe at boot.
-    fs::timerq::self_test();
-    // schedclass backs /proc/schedclass (scheduler-class diagnostics: per-task
-    // pid/class/priority/runtime/switches/migrations and per-class task counts,
-    // context switches, runtime, slices, and migrations).  Its init_defaults()
-    // previously seeded three fictional tasks — pid 0 Idle (50s runtime, 100k
-    // switches), pid 1 Normal (10s runtime, 500k switches, 1000 migrations),
-    // pid 2 RealTime (1s runtime, 200k switches, 50 migrations) — with matching
-    // invented per-class stats and totals of 800000 switches / 1050 migrations;
-    // that phantom data was removed.  The five scheduler-class rows (RealTime/
-    // Deadline/Normal/Batch/Idle) are a fixed taxonomy so they are kept with
-    // ZEROED counters, while tasks are tracked as they register via the existing
-    // register_task() API and counters advance only on real record_switch/
-    // record_slice/record_migration calls.  The residue-free self_test builds
-    // its fixtures via the real API with exact assertions and resets the tables
-    // afterward, so it is safe at boot.
-    fs::schedclass::self_test();
-    // schedwait backs /proc/schedwait (scheduler-wait diagnostics: per-reason
-    // wait counts/total-ns/max-ns across runqueue/iowait/lock/sleep/ipc/pgfault
-    // plus a six-bucket latency histogram and global wait totals).  Its
-    // init_defaults() previously seeded fabricated activity — per-reason counts
-    // of 50M/10M/5M/20M/3M/2M waits, hundreds of billions of ns per reason, a
-    // populated histogram, and global totals of 90M waits over 920s; that demo
-    // data was removed.  The six reason slots and six histogram buckets are a
-    // fixed structure so they are kept ZEROED, and counters advance only on real
-    // record_wait calls.  The residue-free self_test builds its fixtures via the
-    // real API with exact assertions (including exact histogram-bucket placement)
-    // and resets the tables afterward, so it is safe at boot.
-    fs::schedwait::self_test();
-    // kthread backs /proc/kthread (kernel-thread lifecycle: per-thread id/name/
-    // cpu/state/cpu-time/wakeups plus created/exited totals).  Its
-    // init_defaults() previously seeded five fictional kernel threads —
-    // "kswapd0", "ksoftirqd/0", "kworker/0:0", "kworker/1:0", and "writeback" —
-    // with invented CPU times and wakeup counts, plus totals of 100 created / 95
-    // exited; that phantom data was removed.  Kernel threads are dynamic (no
-    // fixed taxonomy) so the list starts empty, with threads tracked as they
-    // register via the existing register()/unregister() API and activity
-    // advancing only on real set_state/record_cpu_time calls.  The residue-free
-    // self_test builds its fixtures via the real API with exact assertions and
-    // resets the list afterward, so it is safe at boot.
-    fs::kthread::self_test();
-    // kstack backs /proc/kstack (kernel-stack diagnostics: per-CPU stack size,
-    // current/high-water usage, overflow + guard-page-hit counts, and usage
-    // samples, plus global overflow/guard/sample totals).  Its init_defaults()
-    // previously seeded four fictional CPUs — cpu 0..3 with 16KiB stacks,
-    // invented current/high-water usage, 1,000,000 samples each and
-    // total_used_samples in the billions, plus 1 overflow and 3 guard hits;
-    // that demo data was removed.  Per-CPU stack stats are dynamic so the table
-    // starts empty, with CPUs added as they come online via the existing
-    // register_cpu() API and counters advancing only on real record_usage/
-    // record_overflow/record_guard_hit calls.  The residue-free self_test builds
-    // its fixtures via the real API with exact assertions and resets the table
-    // afterward, so it is safe at boot.
-    fs::kstack::self_test();
-    // kprobes backs /proc/kprobes (dynamic-instrumentation diagnostics: per-probe
-    // id/type/name/address/hits/misses/enabled/overhead plus global hit/miss/
-    // overhead totals).  Its init_defaults() previously seeded three fictional
-    // probes — a "do_page_fault" kprobe (500k hits), a "sys_read" kretprobe (2M
-    // hits, 100 misses), and a "sched:sched_switch" tracepoint (10M hits) — plus
-    // totals of 12.5M hits / 100 misses / 625ms overhead; that phantom data was
-    // removed.  Probes are dynamic so the list starts empty, with probes
-    // installed via the existing register()/unregister() API and counters
-    // advancing only on real record_hit calls.  The residue-free self_test builds
-    // its fixtures via the real API with exact assertions (incl. disabled-probe
-    // miss counting and by_type filtering) and resets the list afterward, so it
-    // is safe at boot.
-    fs::kprobes::self_test();
-    // ftrace backs /proc/ftrace (function-trace diagnostics: per-probe func name/
-    // kind/hits/misses/total-ns/max-ns/enabled plus global hit/miss/overhead
-    // totals and a global tracing on/off flag).  Its init_defaults() previously
-    // seeded four fictional probes — "schedule" (50M hits), "do_page_fault" (10M
-    // hits, 100 misses), "sys_read" (30M hits), and "tcp_sendmsg" (5M hits, 50
-    // misses, disabled) — plus totals of 95M hits / 150 misses / 1.1s overhead
-    // with tracing enabled; that phantom data was removed.  Probes are dynamic so
-    // the list starts empty and global tracing starts OFF (the honest default),
-    // with probes installed via the existing add_probe()/remove_probe() API and
-    // counters advancing only on real record_hit calls.  The residue-free
-    // self_test builds its fixtures via the real API with exact assertions (incl.
-    // disabled-probe miss counting, max-ns tracking, and the global toggle) and
-    // resets the list afterward, so it is safe at boot.
-    fs::ftrace::self_test();
-    // sockbuf backs /proc/sockbuf (socket-buffer pool diagnostics: per-pool
-    // active-buffers/bytes/allocs/frees/drops/peak across tcp/udp/raw/icmp/mcast/
-    // general plus global alloc/free/drop/byte totals).  Its init_defaults()
-    // previously seeded fabricated activity across all six pools — e.g. TCP with
-    // 50,000 active buffers, 100M allocs and 200MB in flight — with global totals
-    // of 176.5M allocs / 176.4M frees / 6,660 drops / 231.6MB; that demo data was
-    // removed.  The six buffer pools are a fixed taxonomy so they are kept with
-    // ZEROED counters, and counters advance only on real alloc/free/record_drop
-    // calls.  The residue-free self_test builds its fixtures via the real API
-    // with exact assertions (incl. peak high-water tracking across frees and
-    // cumulative byte accounting) and resets the table afterward, so it is safe
-    // at boot.
-    fs::sockbuf::self_test();
-    // msivec backs /proc/msivec (MSI/MSI-X interrupt-vector diagnostics:
-    // per-device allocated/active vector counts, delivered-interrupt counts and
-    // target CPU, plus global vector/interrupt/alloc/free totals).  Its
-    // init_defaults() previously seeded four fictional PCIe devices — nvme0
-    // (8 MSI-X vectors, 50M interrupts), eth0 (4 MSI-X, 100M), gpu0 (1 MSI, 5M)
-    // and ahci0 (1 MSI, 10M) — plus totals of 14 vectors / 165M interrupts /
-    // 100 allocs / 86 frees, all surfaced as if real MSI vectors had been
-    // programmed into hardware.  That demo data was removed; the device list now
-    // starts empty and fills only when a driver actually configures an MSI
-    // capability via alloc_vectors().  The residue-free self_test builds its
-    // fixtures via the real API with exact assertions (incl. cumulative
-    // interrupt accounting that is not decremented on free) and resets the table
-    // afterward, so it is safe at boot.
-    fs::msivec::self_test();
-    // clocksrc backs /proc/clocksrc (clock-source diagnostics: per-source
-    // frequency, quality rating, current flag, read count, skew corrections,
-    // total/max skew and read latency, plus global read/skew totals).  Its
-    // init_defaults() previously seeded three fictional clock sources — tsc
-    // (3GHz, Ideal, current, 1B reads, 100 skew corrections), hpet (14.3MHz,
-    // Good, 500K reads) and acpi_pm (3.58MHz, Medium, 10K reads, 200 skews) —
-    // plus totals of 1,000,510,000 reads / 350 skew corrections, surfaced as if
-    // real timekeeping hardware had been calibrated and read.  Clock sources are
-    // discovered hardware, so that demo data was removed; the list now starts
-    // empty and fills only when the timekeeping subsystem actually registers a
-    // calibrated source via register().  The residue-free self_test builds its
-    // fixtures via the real API with exact assertions (incl. total/max skew
-    // accumulation and latest-latency tracking) and resets the table afterward,
-    // so it is safe at boot.
-    fs::clocksrc::self_test();
-    // cpuidle backs /proc/cpuidle (CPU idle / C-state diagnostics: per-CPU
-    // current C-state, per-C-state entry counts and residency times, total
-    // idle/active time, plus global transition/idle totals).  Its
-    // init_defaults() previously seeded four fictional CPUs with invented
-    // C-state entry counts (e.g. CPU0 with 1M C1 / 500K C1E / 100K C3 / 10K C6
-    // entries) and multi-second residency times scaled per core, plus a global
-    // total of 6,480,000 transitions — surfaced as if real C-state residency
-    // had been measured.  CPUs are discovered hardware, so that demo data was
-    // removed; a new register_cpu() API adds each core as SMP brings it online,
-    // and the per-CPU table fills only through real enter_state/exit_state
-    // calls.  The residue-free self_test builds its fixtures via the real API
-    // with exact assertions (entry-counter increments by C-state depth,
-    // transition counting) and resets the table afterward, so it is safe at
-    // boot.
-    fs::cpuidle::self_test();
-    // cpucache backs /proc/cpucache (CPU cache-hierarchy diagnostics: per-level
-    // geometry — size / line size / ways / sets / shared-CPU count — and
-    // hit/miss/eviction counters across L1d/L1i/L2/L3, plus global hit/miss
-    // totals and hit-rate percentages).  Its init_defaults() previously seeded a
-    // plausible-looking but unprobed hierarchy (32KB 8-way L1d/L1i, 256KB L2,
-    // 8MB 16-way L3 shared by 4 CPUs) with fabricated activity of 25,000,000,000
-    // total hits / 850,000,000 misses — surfaced as if the cache topology had
-    // been read from CPUID and its activity measured.  The four levels are a
-    // fixed taxonomy so the rows are kept, but with ZEROED geometry and
-    // counters; a new set_geometry() API lets a CPUID probe fill in real
-    // geometry, and the counters advance only on real record_hit/miss/eviction
-    // calls.  The residue-free self_test builds its fixtures via the real API
-    // with exact assertions (geometry persistence, per-level + overall hit-rate
-    // math, level→index mapping) and resets the table afterward, so it is safe
-    // at boot.
-    fs::cpucache::self_test();
-    // userfault backs /proc/userfault (userfaultfd diagnostics: per-process
-    // registered ranges, missing/write-protect/minor fault counts, resolves,
-    // total/max resolve latency, copy/zero page counts, plus global fault/
-    // resolve/copy/zero totals).  Its init_defaults() previously seeded one
-    // fictional handler — pid 1 with 5 ranges, 100K missing / 50K wp / 10K minor
-    // faults, 160K resolves, 100K copy pages and 60K zero pages — plus global
-    // totals of 160K faults / 160K resolves / 100K copies / 60K zeros, surfaced
-    // as if a process were actually handling page faults in userspace.  That
-    // demo data was removed; the handler list now fills only when a process
-    // really creates a userfaultfd via register().  The residue-free self_test
-    // builds its fixtures via the real API with exact assertions (per-fault-type
-    // counters, copy vs zero resolve accounting, max-latency tracking, cumulative
-    // global totals not decremented on unregister) and resets the table
-    // afterward, so it is safe at boot.
-    fs::userfault::self_test();
-    // iomem backs /proc/iomem (MMIO region diagnostics: per-region name, base,
-    // size, cacheable/prefetchable attributes and read/write access counts,
-    // plus global read/write totals).  Its init_defaults() previously seeded
-    // five fictional regions — LAPIC (50M reads / 10M writes), IOAPIC (1M /
-    // 500K), HPET (5M / 100K), GPU_FB (100M writes) and NVMe_BAR (20M / 15M) —
-    // plus global totals of 76,000,000 reads / 125,600,000 writes, surfaced as
-    // if device memory had been mapped and accessed.  That demo data was
-    // removed; the region list now fills only when the kernel actually maps an
-    // MMIO region via register().  The residue-free self_test builds its
-    // fixtures via the real API with exact assertions (attribute persistence,
-    // per-region + global read/write counting, duplicate-base AlreadyExists,
-    // cumulative totals not decremented on unregister) and resets the table
-    // afterward, so it is safe at boot.
-    fs::iomem::self_test();
-    // pgtable backs /proc/pgtable (page-table diagnostics: per-level (PML4/PDPT/
-    // PD/PT) allocated/freed/active page-table page counts, page-walk count and
-    // average depth, TLB-flush counts by scope (single/range/full/global), plus
-    // the active page-table-page total).  Its init_defaults() previously seeded
-    // fabricated activity — per-level allocs [1, 512, 50K, 2M] / frees
-    // [0, 10, 5K, 500K], 100,000,000 page walks summing 350,000,000 levels, TLB
-    // flushes of 50M single / 1M range / 500K full / 100K global, and 1,550,503
-    // active pages — surfaced as if real paging activity had been measured.  The
-    // four levels are a fixed dimension so per_level always returns four rows,
-    // but with ZEROED counters; they advance only on real record_alloc/free/
-    // walk/tlb_flush calls.  The residue-free self_test builds its fixtures via
-    // the real API with exact assertions (per-level alloc/free/active accounting,
-    // active-page total tracking, average walk depth 366 from 11 levels / 3
-    // walks, per-scope flush counts) and resets the table afterward, so it is
-    // safe at boot.
-    fs::pgtable::self_test();
-    // Memory diagnostics self-test (memdiag) — exercises the RAM-test log and
-    // ECC-error tracking surfaced by the `memdiag` kshell command (test runs
-    // with pass/fail results, correctable/uncorrectable ECC error counts, and
-    // a memory-health summary).  Its init_defaults() previously seeded a
-    // hardcoded total_memory_kb of 1,048,576 (a 1 GB placeholder), so
-    // `memdiag show` always reported "Total memory: 1024 MB" regardless of the
-    // machine's actual RAM.  The size now starts at 0 ("unknown until
-    // detected") and advances only on a real set_total_memory() call by RAM
-    // detection.  The residue-free self_test builds its fixtures via the real
-    // API with exact assertions (test pass/fail accounting, ECC correctable/
-    // uncorrectable counts, and a 2 GB size set explicitly via
-    // set_total_memory) and resets the table afterward, so it is safe at boot.
-    fs::memdiag::self_test();
-    // IPC-namespace statistics self-test (ipcns) — exercises the System V IPC
-    // namespace table surfaced by /proc/ipcns and the `ipcns` kshell command
-    // (per-namespace shared-memory segment / semaphore-set / message-queue
-    // counts and byte totals).  Its init_defaults() previously seeded two
-    // fictional namespaces — "init" with 50 shm segments / 500 MB and
-    // "container-1" with 10 shm / 100 MB, plus global totals of 60 shm / 25 sem
-    // / 13 msg — claiming containers and shared memory existed when nothing
-    // created them.  init_defaults now starts empty; namespaces appear only on
-    // real create_ns() calls and their counters advance only on real
-    // record_shm/sem/msg calls.  The residue-free self_test builds its fixtures
-    // via the real API with exact assertions (first namespace gets id 1, per-
-    // namespace + global SHM/SEM/MSG accounting, cumulative totals not
-    // decremented on destroy) and resets the table afterward, so it is safe at
-    // boot and /proc/ipcns reads as a truthful empty table.
-    fs::ipcns::self_test();
-    // I/O-port statistics self-test (ioport) — exercises the x86 port-I/O
-    // region table surfaced by /proc/ioport and the `ioport` kshell command
-    // (per-region in/out counts + byte totals, plus untracked-access counters).
-    // Its init_defaults() previously seeded five fictional regions — PIC
-    // (1M/500K), PIT (100K/50K), KBD (5M/1M), RTC (500K/200K) and COM1 (10M/8M)
-    // — plus global totals of 16.6M reads / 9.75M writes and 50K/20K untracked,
-    // claiming millions of port accesses that never happened (the kernel does
-    // not instrument in/out yet — nothing calls record_in/out or
-    // register_region outside the kshell).  init_defaults now starts empty;
-    // regions appear only on real register_region() calls and counters advance
-    // only on real record_in/out calls.  The residue-free self_test builds its
-    // fixtures via the real API with exact assertions (region registration,
-    // tracked vs untracked accounting, range-boundary matching at 0x103/0x104,
-    // cumulative totals) and resets the table afterward, so it is safe at boot
-    // and /proc/ioport reads as a truthful empty table.
-    fs::ioport::self_test();
-    // Hardware-RNG statistics self-test (hwrng) — exercises the entropy pool
-    // status and per-source breakdown surfaced by /proc/hwrng and the `hwrng`
-    // kshell command (RDRAND/RDSEED/interrupt/disk/input/jitter byte counts and
-    // failures, pool fill level, reseed count).  Its init_defaults() previously
-    // seeded fabricated activity — per-source bytes [500M, 100M, 50M, 10M, 5M,
-    // 20M], 685M generated / 600M requested, a FULL 4096-bit pool reporting
-    // "ready", and 100K reseeds — claiming cryptographic-quality entropy had
-    // been gathered when none has (a dangerous lie for a security surface).
-    // init_defaults now starts with an EMPTY pool (0 bits, not ready) and all
-    // source/total counters zeroed; only the pool CAPACITY (4096 bits, a
-    // structural constant) is non-zero.  The residue-free self_test builds its
-    // fixtures via the real API with exact assertions (generation adds to the
-    // pool, requests drain it, per-source failure tracking, reseed refills to
-    // capacity, six-source breakdown) and resets afterward, so it is safe at
-    // boot and /proc/hwrng reads as a truthful empty pool.
-    fs::hwrng::self_test();
-    // Certificate-manager self-test.  certmgr previously seeded five well-known
-    // root CAs (ISRG Root X1, DigiCert Global Root G2, GlobalSign, Baltimore
-    // CyberTrust, Amazon Root CA 1) into init_defaults, each marked Root/System/
-    // Valid/pinned but carrying FABRICATED cryptographic material — FNV-hash
-    // "fingerprints" instead of real SHA-256 digests, made-up serials, a
-    // synthetic 10-year validity window, and no backing PEM file.  /proc/certmgr
-    // and the certmgr kshell command surface that list as the real trust store,
-    // so presenting phantom Valid/trusted roots is a dangerous fabrication on a
-    // security surface.  init_defaults now starts with an EMPTY trust store; a
-    // certificate enters only through a real import_cert (a bundled CA PEM) or
-    // the ACME path.  The residue-free self_test (clear_all at start and end,
-    // returns KernelResult) imports/looks-up/renews via the real API with exact
-    // assertions and verifies the empty default, so it is safe at boot.
-    if let Err(e) = fs::certmgr::self_test() {
-        serial_println!("WARNING: Certificate manager self-test failed: {:?}", e);
-    }
-    // Auth-broker self-test.  authbroker previously seeded three fictional
-    // credentials into init_defaults — "root" (Password), "admin" (PublicKey)
-    // and "service_acct" (Token), each with a placeholder hash/key and no real
-    // provisioned account behind it.  /proc/authbroker and the authbroker kshell
-    // command surface the credential list as the real credential store, so
-    // presenting phantom verified credentials for privileged principals is a
-    // dangerous fabrication on a security surface.  init_defaults now starts
-    // with an EMPTY credential store; credentials enter only through a real
-    // store_credential (account provisioning) and grants through
-    // grant_capability.  The residue-free self_test builds its fixtures via the
-    // real API with exact assertions (store/authenticate/lockout/unlock/grant/
-    // revoke) and clears the state afterward, so it is safe at boot.
-    fs::authbroker::self_test();
-    // Security-module (LSM) statistics self-test.  secmod previously seeded two
-    // fictional modules into init_defaults — "capability" (88.8M checks /
-    // 168,700 denials / 50K audits) and "apparmor" (71.93M checks / 338,500
-    // denials / 100K audits), with fabricated per-hook check/denial arrays and
-    // global totals of 160,730,000 checks / 507,200 denials / 150,000 audits.
-    // /proc/secmod and the secmod kshell command surface the module list as the
-    // real security-enforcement activity, so seeding hundreds of millions of
-    // policy checks that never happened is fabricated procfs data.  init_defaults
-    // now starts with NO modules and zeroed totals; a module enters only through
-    // a real register_module and its counters advance via record_check/
-    // record_deny/record_audit on the security-hook path.  The residue-free
-    // self_test builds its fixtures via the real API with exact assertions
-    // (register/check/deny/audit/enable) and clears the state afterward.
-    fs::secmod::self_test();
-    // Binary-format loader statistics self-test.  binfmt previously seeded three
-    // fictional formats into init_defaults — Elf64 (500K loads / 1K errors),
-    // Script (100K / 5K) and Elf32 (10K / 200) — plus an error breakdown
-    // [3000, 500, 200, 1500, 800, 200] and global totals of 610,000 loads /
-    // 6,200 errors.  /proc/binfmt and the binfmt kshell command surface the
-    // format list as the real loader activity, so claiming hundreds of thousands
-    // of executions that never happened is fabricated procfs data.  init_defaults
-    // now starts with NO formats and zeroed totals; a format enters only through
-    // the new register_format API (the real ELF/script/etc. loaders call it) and
-    // its counters advance via record_load/record_error on the exec path.  The
-    // residue-free self_test builds its fixtures via the real API with exact
-    // assertions (register/load/average/max/error/breakdown) and clears the
-    // state afterward.
-    fs::binfmt::self_test();
-    // Recovery-partition self-test.  recoverypart previously seeded a fabricated
-    // 500 MB "Healthy" recovery partition (85 MB used) with four pre-installed
-    // tools — System Repair, Boot Repair, Memory Test, Command Shell — into
-    // init_defaults, none backed by a real partition or tool image.
-    // /proc/recoverypart and the recoverypart kshell command surface the
-    // partition status, tool list and space usage as a real recovery
-    // environment, so claiming recovery tools exist when none are installed
-    // could mislead an operator into thinking recovery is available.
-    // init_defaults now starts with NO partition (status Missing, no tools, zero
-    // space); a real partition is registered via the new register_partition API
-    // (when one is detected on disk) and tools via add_tool.  The residue-free
-    // self_test builds its fixtures via the real API with exact assertions
-    // (register/verify/add/repair/boot/remove) and clears the state afterward.
-    fs::recoverypart::self_test();
-    // Log-rotation self-test.  Unlike the statistics modules above, logrotate's
-    // init_defaults seeds CONFIGURATION (three default rotation rules for
-    // syslog/kern.log/auth.log — the analogue of a shipped /etc/logrotate.d
-    // policy) with ZEROED activity, so it is a legitimate settings module and the
-    // default rules are deliberately kept.  The self_test, however, performs
-    // simulated rotations (rotate/check_all), so it is made residue-free (clears
-    // STATE and restores the clean default policy at the end) to ensure those
-    // simulated rotations never leak into the live /proc/logrotate counters.  It
-    // is wired here so its exact assertions (rule ids, rotation/byte totals) are
-    // actually exercised at boot.
-    fs::logrotate::self_test();
-    // Disk-cleanup self-test.  diskclean's init_defaults was already empty, but
-    // the fabrication lived in scan(): it used to inject nine hardcoded phantom
-    // reclaimable items (~1.46 GB of fake /tmp, /var/cache, trash and crash-dump
-    // junk) that the /proc/diskclean generator and the diskclean kshell command
-    // surfaced as if real, so an operator would believe gigabytes of junk existed
-    // and that cleaning them freed real space.  scan() now honestly finds NOTHING
-    // (no filesystem-walk backend exists yet), reporting each real reclaimable
-    // file via add_item only when a real scanner is implemented.  The residue-free
-    // self_test exercises the honest empty scan plus the real add_item/summarize/
-    // estimate/clean primitives with exact assertions and clears STATE afterward.
-    fs::diskclean::self_test();
-    // Game-mode self-test.  Like logrotate, gamemode is a legitimate SETTINGS
-    // module: its init_defaults seeds only configuration (the default
-    // optimization set, auto_detect flag and F12 capture hotkey) with NO
-    // fabricated games, sessions or activation counts, so /proc/gamemode
-    // honestly reports 0 games / 0 activations at boot.  The self_test, however,
-    // registers a game, runs an activate/deactivate session and flips config
-    // toggles, so it is made residue-free (clears STATE and restores the clean
-    // default config at the end) to ensure the kshell `gamemode test` subcommand
-    // cannot leak those fixtures into the live /proc/gamemode table.  Wired here
-    // so its exact assertions (game id, session/activation totals) are exercised
-    // at boot now that it is safe.
-    fs::gamemode::self_test();
-    // Usage-time self-test.  usagetime is a per-app foreground-time TRACKER, not
-    // a fabricator: its init_defaults seeds only the tracking_enabled flag with
-    // NO fabricated app-usage records (apps empty, all counters 0), so
-    // /proc/usagetime honestly reports 0 tracked apps at boot.  The self_test,
-    // however, tracks "browser"/"editor" sessions and sets a limit + a category,
-    // and never cleared STATE — so the kshell `usagetime test` subcommand would
-    // leak those fabricated usage records into the live /proc/usagetime listing
-    // (which prints per-app foreground hours, making the leak look like real
-    // usage).  It is now residue-free (clears STATE and restores clean defaults
-    // at the end) and wired here so its exact assertions are exercised at boot.
-    fs::usagetime::self_test();
-    // Screen-time self-test.  screentime is a user-activity / app-focus TRACKER,
-    // not a fabricator: its init_defaults seeds only the enabled flag, the
-    // initial Active state and default (unlimited) usage limits, with NO
-    // fabricated app records or daily history (apps empty, counters 0), so
-    // /proc/screentime honestly reports 0 tracked apps at boot.  The self_test,
-    // however, records org.editor/org.browser focus events, adds active time,
-    // sets a daily limit and runs reset_daily (which creates a history entry),
-    // and never cleared STATE — so the kshell `screentime test` subcommand would
-    // leak those fabricated activity records into the live /proc/screentime
-    // table.  It is now residue-free (clears STATE and restores clean defaults
-    // at the end) and wired here so its exact assertions are exercised at boot.
-    fs::screentime::self_test();
-    // Startup-optimization self-test.  startupopt is a boot PROFILER, not a
-    // fabricator: its init_defaults seeds NO boot profile (stages/suggestions
-    // empty, all counters 0, fastest_boot_ms a u64::MAX sentinel reported as 0),
-    // so /proc/startupopt honestly reports 0 boots at boot.  The self_test,
-    // however, records boot stages, runs record_boot() (boot_count → 1) and
-    // analyze() (total_analyses → 1), and never cleared STATE — so the kshell
-    // `startupopt test` subcommand would leak a fabricated boot profile into the
-    // live /proc/startupopt table.  It is now residue-free (clears STATE and
-    // restores clean defaults at the end) and wired here so its exact assertions
-    // (stage counts, 0 suggestions for sub-second stages, boot/analysis totals)
-    // are exercised at boot.
-    fs::startupopt::self_test();
-    // Eye-protection self-test.  Like logrotate/gamemode, eyeprotect is a
-    // legitimate SETTINGS module: its init_defaults seeds two break-reminder
-    // PROFILES (the 20-20-20 rule and an Hourly preset) — the analogue of shipped
-    // default config — with ZEROED activity counters (total_breaks/snoozes/skips
-    // all 0), so /proc/eyeprotect honestly reports no break activity at boot.  The
-    // default profiles are deliberately KEPT.  The self_test, however, runs
-    // breaks/snooze/skip (bumping the activity counters) and changes the 20-20-20
-    // profile's interval, and never cleared STATE — so the kshell `eyeprotect
-    // test` subcommand would leak fabricated break activity into /proc/eyeprotect
-    // AND corrupt the shipped default profile.  It is now residue-free (clears
-    // STATE and restores the clean default profiles at the end) and wired here so
-    // its exact assertions are exercised at boot.
-    fs::eyeprotect::self_test();
-    // File-notification statistics self-test.  fnotify's init_defaults used to
-    // fabricate observed activity — inotify 500 watches / 10,000,000 events / 5
-    // overflows, fanotify 50 watches / 5,000,000 events, dnotify 10 watches /
-    // 100,000 events (15,100,000 phantom events total, with invented per-event-
-    // kind breakdowns) — surfaced via /proc/fnotify and the `fnotify` kshell
-    // command AS IF REAL, when the inotify/fanotify/dnotify subsystems are not
-    // even implemented.  It now seeds only the real three-type taxonomy and the
-    // sysctl-style CAPACITY limits (max_watches / max_queue_depth) with ALL
-    // activity counters ZEROED (case c), so /proc/fnotify honestly reports 0
-    // watches / 0 events.  The residue-free self_test exercises add_watch /
-    // record_event / drain_events with exact assertions and restores the zeroed
-    // baseline afterward.
-    fs::fnotify::self_test();
-    // memlayout previously seeded a FABRICATED physical memory layout in
-    // init_defaults() — a hand-invented ~1 GiB "Main memory" block plus fixed
-    // kernel/heap/APIC ranges — so /proc/memlayout, total_ram() and the
-    // `memlayout` kshell command reported RAM totals with NO relation to the
-    // machine's actual memory.  It is now populated from the REAL Limine memmap
-    // response via populate_from_memmap() (called right after the heap during
-    // boot, above).  This residue-free self_test snapshots the live (real) map,
-    // exercises populate_from_memmap / add_region / the totals with exact
-    // assertions against a synthetic map, then restores the real map so no test
-    // fixtures leak into the live /proc/memlayout table.
-    fs::memlayout::self_test();
-    // netmon backs /proc/netmon and the `netmon` kshell command.  Its
-    // init_defaults() previously seeded three FABRICATED connections (sshd
-    // LISTEN :22, a browser ESTABLISHED to 93.184.216.34:443 with real-looking
-    // byte counts, resolved to 8.8.8.8:53) plus invented aggregate totals, which
-    // the kshell command surfaced as if they were live sockets.  It now seeds an
-    // EMPTY table (connections are tracked via add_connection / record_traffic /
-    // close_connection once the network stack is wired).  This residue-free
-    // self_test builds its own fixtures via the real API with exact assertions
-    // and resets to empty afterward so no test connections leak into
-    // /proc/netmon.
-    fs::netmon::self_test();
-    // swapmon backs /proc/swapmon and the `swapmon` kshell command.  Its
-    // init_defaults() previously seeded a FABRICATED default swap device (a
-    // fictional 4 GiB /dev/sda2 partition shown ~500 MiB used) plus invented
-    // swap-in/out rate counters, which the kshell command and /proc/swapmon
-    // displayed as if they were real swap usage — and none of its mutation APIs
-    // had a single real caller.  Meanwhile the kernel already has a real swap
-    // subsystem (crate::mm::swap, which also backs /proc/swaps).  swapmon is now
-    // a pure read-through over mm::swap + mm::fault with no state of its own, so
-    // this self_test asserts the reporting views are exactly consistent with the
-    // real subsystem (no fabricated fixtures, nothing to leak).
-    fs::swapmon::self_test();
-    // netusage backs /proc/netusage and the `netusage` kshell command.  Its
-    // init_defaults() previously seeded three FABRICATED interfaces (eth0
-    // Ethernet, wlan0 Wi-Fi, lo loopback) with zeroed counters, which the
-    // `netusage interfaces` view displayed as if those NICs existed — presuming
-    // a wired+wifi machine and inconsistent with the real interface registry
-    // (fs::netdev), which seeds empty and registers interfaces only as they come
-    // up.  netusage now seeds an EMPTY table (interfaces appear via
-    // add_interface; per-app usage via record_traffic).  This residue-free
-    // self_test builds its own fixtures via the real API with exact assertions
-    // (including the cap-warning counter, which the old test asserted loosely)
-    // and resets to empty afterward so nothing leaks into /proc/netusage.
-    fs::netusage::self_test();
-    // taskmon is the kernel-side process registry behind /proc/taskmon and the
-    // `taskmon` kshell command.  Its init_defaults() previously seeded three
-    // FABRICATED bootstrap tasks (kernel/init/kshell with invented CPU%, memory,
-    // and thread counts) plus an invented SystemResources snapshot (100% CPU,
-    // 64 MiB used of 1 GiB), which the `taskmon` command displayed as if they
-    // were real processes — while the authoritative live process list is
-    // crate::sched::task_list().  taskmon now seeds an EMPTY registry (tasks
-    // arrive via register_task as proc::spawn / scheduler accounting wire it; see
-    // the DEFERRED PROPER FIX note in todo.txt).  This self_test (never wired
-    // before) builds its own fixtures via the real API with exact assertions and
-    // resets STATE afterward — the old test left `testapp`/`daemon` behind, which
-    // would have leaked into /proc/taskmon now that it runs at boot.
-    fs::taskmon::self_test();
-    // vmmap is the kernel-side VMA monitor behind /proc/vmmap and the `vmmap`
-    // kshell command.  Its init_defaults() previously seeded a FABRICATED pid-1
-    // address space — three invented VMAs ([text] r-x, [heap] rw, [stack] rw)
-    // with made-up resident/dirty page counts and totals — which /proc/vmmap and
-    // the `vmmap` command displayed as if pid 1 were a real process.  The
-    // authoritative per-process VMA list is crate::proc::pcb::list_vmas (already
-    // backing /proc/<pid>/maps).  vmmap now seeds an EMPTY table (VMAs arrive via
-    // create_vma / remove_vma once the memory manager wires mmap/munmap; see the
-    // DEFERRED PROPER FIX note in todo.txt for reading the aggregate view from
-    // pcb::list_vmas).  This self_test (never wired before, and whose old version
-    // relied on the fabricated pid 1 with no end-reset) builds its own fixtures
-    // via the real API with exact assertions and resets STATE afterward so
-    // nothing leaks into /proc/vmmap.
-    fs::vmmap::self_test();
-    // pftrack is the kernel-side page-fault tracker behind /proc/pftrack and the
-    // `pftrack` kshell command.  Its init_defaults() previously seeded three
-    // FABRICATED processes (init pid 1, sshd pid 100, browser pid 200) with
-    // invented minor/major/cow fault counts plus invented system totals
-    // (total_minor 15570, total_major 525, total_faults 16937), which
-    // /proc/pftrack and the hotspots/top_faulters views displayed as if they were
-    // real measured fault activity.  record() has NO real callers — the page-fault
-    // handler does not call it — so the module is entirely unwired; the system-wide
-    // aggregate lives in crate::mm::fault::fault_stats().  pftrack now seeds an
-    // EMPTY table (faults arrive via record once the fault handler wires it; see
-    // the DEFERRED PROPER FIX note in todo.txt).  This self_test (never wired
-    // before, and whose old version relied on the fabricated processes with no
-    // end-reset) builds its own fixtures via the real API with exact assertions
-    // and resets STATE afterward so nothing leaks into /proc/pftrack.
-    fs::pftrack::self_test();
-    // vmfrag is the kernel-side VM-fragmentation monitor behind /proc/vmfrag and
-    // the `vmfrag` kshell command.  Its init_defaults() previously seeded two
-    // FABRICATED zones — `DMA32` and `Normal` (Linux zone names) — with invented
-    // per-order fragmentation indices and compaction counts (5000/50000
-    // compactions) plus invented totals (55000 compactions / 44000 success /
-    // 11000 fail), which /proc/vmfrag displayed as if real.  This kernel has a
-    // single global buddy allocator (crate::mm::frame) with no named-zone taxonomy
-    // and no memory-compaction subsystem, so register_zone/update_index/
-    // record_compaction have NO real callers — the module is entirely unwired.
-    // vmfrag now seeds an EMPTY table (zones arrive via register_zone; see the
-    // DEFERRED PROPER FIX note in todo.txt for computing real indices from the
-    // buddy allocator's per-order free counts).  This self_test (never wired
-    // before, and whose old version relied on the fabricated zones with no
-    // end-reset) builds its own fixtures via the real API with exact assertions
-    // and resets STATE afterward so nothing leaks into /proc/vmfrag.
-    fs::vmfrag::self_test();
-    // ipclog is the kernel-side IPC message log behind /proc/ipclog and the
-    // `ipclog` kshell command.  Its init_defaults() previously seeded three
-    // FABRICATED channels — `system_bus`, `vfs_channel`, `gui_events` — with
-    // invented message/byte/latency/error counts (inconsistent with the system
-    // totals, which were seeded at 0), which /proc/ipclog and the list_channels
-    // view displayed as if real IPC traffic.  record() has NO real callers — the
-    // IPC subsystem (crate::ipc) does not call it — so the module is entirely
-    // unwired.  ipclog now seeds an EMPTY log (channels/messages arrive via record
-    // once the IPC layer wires it; see the DEFERRED PROPER FIX note in todo.txt).
-    // This self_test (never wired before, and whose old version relied on the
-    // fabricated channels with no end-reset) builds its own fixtures via the real
-    // API with exact assertions and resets STATE afterward so nothing leaks into
-    // /proc/ipclog.
-    fs::ipclog::self_test();
-    // telemetry is the kernel-side metric registry behind /proc/telemetry and the
-    // `telemetry` kshell command.  Its init_defaults() previously seeded four
-    // FABRICATED metrics with invented OBSERVED values — cpu.usage_pct 15%,
-    // mem.used_mb 512, disk.iops 1200, net.rx_bytes 1048576 — plus a fabricated
-    // total_samples of 4, which /proc/telemetry and the list_metrics/by_category
-    // views displayed as if real measured telemetry.  record()/register_metric()
-    // have NO real callers — no subsystem publishes telemetry yet — so the registry
-    // is entirely unwired.  telemetry now seeds an EMPTY registry (metrics arrive
-    // via register_metric + record once producers wire it; collection_enabled /
-    // interval are real settings, preserved; see the DEFERRED PROPER FIX note in
-    // todo.txt).  This self_test (never wired before, and whose old version relied
-    // on the fabricated metrics with no end-reset) builds its own fixtures via the
-    // real API with exact assertions and resets STATE afterward so nothing leaks
-    // into /proc/telemetry.
-    fs::telemetry::self_test();
-    // fdtable is the kernel-side FD-table tracker behind /proc/fdtable and the
-    // `fdtable` kshell command.  Its init_defaults() previously seeded two
-    // FABRICATED process FD tables — pid 1 (/dev/console ×3 + /etc/init.conf) and
-    // pid 100 (pipe ×2, /dev/null, socket, /var/log/sshd.log) — plus an invented
-    // total_opens of 9, which /proc/fdtable and the list_tables view displayed as
-    // if real open file descriptors.  The authoritative per-process FD table is the
-    // PCB's linux_fd_table (crate::proc::linux_fd::KernelFdTable); open/close/dup
-    // have NO real callers — the VFS does not call this parallel tracker — so it is
-    // entirely unwired.  fdtable now seeds an EMPTY table (FDs arrive via open/dup
-    // once the VFS wires it; see the DEFERRED PROPER FIX note in todo.txt for
-    // reading the aggregate view from the PCB).  This self_test (never wired before,
-    // and whose old version relied on the fabricated tables with no end-reset)
-    // builds its own fixtures via the real API with exact assertions and resets
-    // STATE afterward so nothing leaks into /proc/fdtable.
-    fs::fdtable::self_test();
-    // sysprofiler is the detailed hardware/software inventory behind
-    // /proc/sysprofiler and the `sysprofiler` kshell command.  Its
-    // init_defaults() previously seeded entirely FABRICATED hardware specs — a
-    // "4-core / 8-thread 3.60 GHz" CPU with invented 256 KB / 1 MB / 8 MB
-    // caches, "8192 MB DDR4 3200 MHz" memory in "2 / 4" slots, an "NVMe SSD
-    // 512 GB / PCIe 4.0 x4" drive, "Integrated Graphics / 512 MB shared", and
-    // "UEFI / Secure Boot Disabled" firmware — none measured, which the
-    // `sysprofiler all`/`summary`/`section` views displayed as if real.  Unlike
-    // the other procfs fabricators in this sweep, REAL sources exist: the CPU
-    // section is now built from live CPUID + topology (crate::cpu /
-    // crate::cpu_topology — vendor/brand/family/cache + logical/physical/SMT
-    // counts) and the Memory section from the real buddy-allocator total
-    // (crate::mm::frame::stats).  Device-dependent sections (Storage, Graphics,
-    // Firmware, …) are left ABSENT rather than fabricated until those
-    // subsystems expose enumeration (see the DEFERRED PROPER FIX note in
-    // todo.txt).  This self_test (never wired before, and whose old version
-    // relied on the fabricated defaults with no end-reset) exercises the real
-    // builders, then rebuilds the real snapshot so /proc/sysprofiler reflects
-    // actual CPU + Memory and not its scratch entries.
-    fs::sysprofiler::self_test();
-    // fs::eventlog is a (redundant, unwired) structured event log behind
-    // /proc/eventlog and the `eventlog` kshell command.  Its init_defaults()
-    // previously seeded two FABRICATED entries — an Info/System/"kernel" "System
-    // boot completed" and "Event log initialized", both stamped with the current
-    // time — plus a fabricated total_logged of 2 and counts_by_severity of
-    // [0, 2, 0, 0, 0], which /proc/eventlog and the query/recent views displayed
-    // as if real logged events.  No subsystem calls log_event(): the kernel's
-    // REAL system event log is the separate crate::eventlog module behind
-    // /proc/sysevents, so this fs::eventlog is an entirely unwired parallel
-    // tracker.  init_defaults now starts EMPTY (no events, zero counters);
-    // entries appear only via log_event once a producer wires it.  This self_test
-    // (never wired before, and whose old version relied on the fabricated entries
-    // with no end-reset) builds its own fixtures via the real API with exact
-    // assertions and resets STATE afterward so nothing leaks into /proc/eventlog.
-    fs::eventlog::self_test();
-    // Register default file type associations, then self-test.
-    fs::associations::register_defaults();
-    if let Err(e) = fs::associations::self_test() {
-        serial_println!("WARNING: File associations self-test failed: {:?}", e);
-    }
-
-    // Filesystem quota self-test.
-    if let Err(e) = fs::quota::self_test() {
-        serial_println!("WARNING: Filesystem quota self-test failed: {:?}", e);
-    }
-    // ACL self-test.
-    if let Err(e) = fs::acl::self_test() {
-        serial_println!("WARNING: ACL self-test failed: {:?}", e);
-    }
-    // Filesystem interceptor self-test.
-    if let Err(e) = fs::intercept::self_test() {
-        serial_println!("WARNING: FS interceptor self-test failed: {:?}", e);
-    }
-    // Symlink/hardlink security self-test.
-    if let Err(e) = fs::symlink_security::self_test() {
-        serial_println!("WARNING: Symlink security self-test failed: {:?}", e);
-    }
-    // Resource limits self-test.
-    if let Err(e) = fs::rlimit::self_test() {
-        serial_println!("WARNING: Resource limits self-test failed: {:?}", e);
-    }
-    // Overlay filesystem self-test.
-    if let Err(e) = fs::overlay::self_test() {
-        serial_println!("WARNING: Overlay filesystem self-test failed: {:?}", e);
-    }
-    // Named pipe self-test.
-    if let Err(e) = fs::pipe::self_test() {
-        serial_println!("WARNING: Named pipe self-test failed: {:?}", e);
-    }
-    // Tmpwatch self-test.
-    if let Err(e) = fs::tmpwatch::self_test() {
-        serial_println!("WARNING: Tmpwatch self-test failed: {:?}", e);
-    }
-    // Filesystem audit self-test.
-    if let Err(e) = fs::audit::self_test() {
-        serial_println!("WARNING: Filesystem audit self-test failed: {:?}", e);
-    }
-    // Mount namespace self-test.
-    if let Err(e) = fs::mount_ns::self_test() {
-        serial_println!("WARNING: Mount namespace self-test failed: {:?}", e);
-    }
-    // The byte-oriented path lexer, which the VFS is being converted onto.
-    // If `Path::components` or `Path::starts_with` is wrong then every
-    // containment check built on them is wrong the same way, and that would
-    // surface as a sandbox-escape rather than as a test failure — so it is
-    // worth checking on every boot rather than trusting it.
-    if let Err(e) = fs::path::self_test() {
-        serial_println!("WARNING: Path self-test failed: {:?}", e);
-    }
-    // The byte-string splitters that the kshell parser is being converted
-    // onto. Each one is claimed to behave exactly like its `str` counterpart,
-    // and a ~1500-site mechanical conversion is only safe while that holds —
-    // a helper that differed in one edge case would plant a bug at whichever
-    // site hit it, with nothing in the diff to show for it.
-    if let Err(e) = bytestr::self_test() {
-        serial_println!("WARNING: bytestr self-test failed: {:?}", e);
-    }
-    // The octal escaper that lets those byte paths be written into the
-    // line-oriented text formats (/proc/mounts, the trash index). A bug here
-    // corrupts a file rather than failing loudly, so it is checked on boot.
-    fs::escape::self_test();
-    // Locale and timezone. Both self-tests existed but were never called from
-    // anywhere — a test that never runs is not a test, and these two are the
-    // only coverage the kernel's POSIX `TZ` rule evaluation has.
-    if let Err(e) = fs::locale::self_test() {
-        serial_println!("WARNING: Locale self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::timezone::self_test() {
-        serial_println!("WARNING: Timezone self-test failed: {:?}", e);
-    }
-    // Both self-tests end by clearing their tables, so populate them after.
-    // Without this the zone database stays empty until someone types
-    // `locale init` at the kernel shell, and every offset query answers 0 —
-    // i.e. the kernel silently believes it is in UTC.
-    fs::locale::init_defaults();
-    fs::timezone::init_defaults();
-
-    // The 21 modules converted to `PreemptSpinMutex` by the Q24 leaf-lock
-    // sweep (see known-issues.md). Every one of them already had a
-    // `self_test()` and not one of them was called from anywhere, so the
-    // conversion would otherwise have shipped with zero boot coverage --
-    // the same "a test that never runs is not a test" trap as locale and
-    // timezone above. These also exercise the three critical sections that
-    // were restructured to stop calling the VFS under a raw spinlock
-    // (`bookmarks::validate`, `thumbcache::get`, `fileops::create`).
-    if let Err(e) = fs::atime::self_test() {
-        serial_println!("WARNING: atime self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::bookmarks::self_test() {
-        serial_println!("WARNING: bookmarks self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::clipboard::self_test() {
-        serial_println!("WARNING: clipboard self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::columnview::self_test() {
-        serial_println!("WARNING: column view self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::directio::self_test() {
-        serial_println!("WARNING: direct I/O self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::dragdrop::self_test() {
-        serial_println!("WARNING: drag-and-drop self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::fileinfo::self_test() {
-        serial_println!("WARNING: fileinfo self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::fileops::self_test() {
-        serial_println!("WARNING: file operations self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::findex::self_test() {
-        serial_println!("WARNING: findex self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::freeze::self_test() {
-        serial_println!("WARNING: fs freeze self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::fstrim::self_test() {
-        serial_println!("WARNING: fstrim self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::pathbar::self_test() {
-        serial_println!("WARNING: pathbar self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::prefetch::self_test() {
-        serial_println!("WARNING: prefetch self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::preview::self_test() {
-        serial_println!("WARNING: preview self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::profile::self_test() {
-        serial_println!("WARNING: fs profile self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::recent::self_test() {
-        serial_println!("WARNING: recent files self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::sealing::self_test() {
-        serial_println!("WARNING: file sealing self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::sparse::self_test() {
-        serial_println!("WARNING: sparse files self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::templates::self_test() {
-        serial_println!("WARNING: templates self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::thumbcache::self_test() {
-        serial_println!("WARNING: thumbnail cache self-test failed: {:?}", e);
-    }
-    if let Err(e) = fs::viewstate::self_test() {
-        serial_println!("WARNING: viewstate self-test failed: {:?}", e);
+    {
+        #[inline(never)]
+        fn case() {
+            // Compression self-tests — pure in-memory, no mounted FS required.
+            if let Err(e) = fs::compress::self_test() {
+                serial_println!("WARNING: Compression self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::bzip2::self_test() {
+                serial_println!("WARNING: Bzip2 self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::xz::self_test() {
+                serial_println!("WARNING: XZ self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::zstd::self_test() {
+                serial_println!("WARNING: Zstd self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::sevenz::self_test() {
+                serial_println!("WARNING: 7z self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::cpio::self_test() {
+                serial_println!("WARNING: CPIO self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::ar::self_test() {
+                serial_println!("WARNING: ar self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::zip::self_test() {
+                serial_println!("WARNING: ZIP self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::tar::self_test() {
+                serial_println!("WARNING: tar self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::lz4::self_test() {
+                serial_println!("WARNING: LZ4 self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::rar::self_test() {
+                serial_println!("WARNING: RAR self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::index::self_test() {
+                serial_println!("WARNING: File index self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::cas::self_test() {
+                serial_println!("WARNING: CAS self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::integrity::self_test() {
+                serial_println!("WARNING: Integrity monitoring self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::history::self_test() {
+                serial_println!("WARNING: File history self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::mime::self_test() {
+                serial_println!("WARNING: MIME detection self-test failed: {:?}", e);
+            }
+            // taskstats backs /proc/taskstats; its self-test builds fixtures via the
+            // real accounting API and resets the table afterward (leaving no
+            // fabricated rows), so it is safe to run during boot and gives the
+            // module automated coverage it otherwise lacks (it was previously only
+            // reachable via the `taskstats test` kshell subcommand).
+            fs::taskstats::self_test();
+            // iolatency backs /proc/iolatency; like taskstats its self-test now builds
+            // fixtures via the real register_device/record API and resets the table
+            // afterward (leaving no fabricated devices), so it is safe at boot and
+            // gives the module automated coverage it previously lacked (it was only
+            // reachable via the `iolatency test` kshell subcommand).
+            fs::iolatency::self_test();
+            // netsock backs /proc/netsock; like taskstats/iolatency its self-test now
+            // builds fixtures via the real open/close/record API and resets the table
+            // afterward (leaving no fabricated sockets), so it is safe at boot and
+            // gives the module automated coverage it previously lacked (it was only
+            // reachable via the `netsock test` kshell subcommand).
+            fs::netsock::self_test();
+            // slabstat backs /proc/slabstat; like taskstats/iolatency/netsock its
+            // self-test now builds fixtures via the real create_cache/alloc/free API
+            // and resets the table afterward (leaving no fabricated caches), so it is
+            // safe at boot and gives the module automated coverage it previously
+            // lacked (it was only reachable via the `slabstat test` kshell subcommand).
+            fs::slabstat::self_test();
+            // futexstat backs /proc/futexstat; like its siblings the self-test now
+            // builds fixtures via the real record_wait/record_wake API and resets the
+            // table afterward (leaving no fabricated futex/process rows), so it is
+            // safe at boot and gives the module automated coverage it previously
+            // lacked (it was only reachable via the `futexstat test` kshell subcommand).
+            fs::futexstat::self_test();
+            // pipestat backs /proc/pipestat; like its siblings the self-test now
+            // builds fixtures via the real create/destroy/record_write/record_read API
+            // and resets the table afterward (leaving no fabricated pipes), so it is
+            // safe at boot and gives the module automated coverage it previously
+            // lacked (it was only reachable via the `pipestat test` kshell subcommand).
+            fs::pipestat::self_test();
+            // epollstat backs /proc/epollstat; like its siblings the self-test now
+            // builds fixtures via the real create_instance/add_fd/record_wait API and
+            // resets the table afterward (leaving no fabricated instances), so it is
+            // safe at boot and gives the module automated coverage it previously
+            // lacked (it was only reachable via the `epollstat test` kshell subcommand).
+            fs::epollstat::self_test();
+            // aiostat backs /proc/aiostat (io_uring-style submission-queue monitoring);
+            // like its siblings the self-test now builds fixtures via the real
+            // create_ring/submit/complete/overflow API and resets the table afterward
+            // (leaving no fabricated rings), so it is safe at boot and gives the module
+            // automated coverage it previously lacked (it was only reachable via the
+            // `aiostat test` kshell subcommand).
+            fs::aiostat::self_test();
+            // netlat backs /proc/netlat (per-interface network RTT/processing latency);
+            // like its siblings the self-test now builds fixtures via the real
+            // register_iface/record_rtt/record_processing API and resets the table
+            // afterward (leaving no fabricated interfaces), so it is safe at boot and
+            // gives the module automated coverage it previously lacked (it was only
+            // reachable via the `netlat test` kshell subcommand).
+            fs::netlat::self_test();
+            // migstat backs /proc/migstat (per-CPU/per-task scheduler migration stats);
+            // like its siblings the self-test now builds fixtures via the real
+            // register_cpu/register_task/record API and resets the table afterward
+            // (leaving no fabricated rows), so it is safe at boot and gives the module
+            // automated coverage it previously lacked (it was only reachable via the
+            // `migstat test` kshell subcommand).
+            fs::migstat::self_test();
+            // rcustat backs /proc/rcustat (RCU grace-period/callback/per-CPU stats);
+            // like its siblings the self-test now builds fixtures via the real
+            // register_cpu/begin_gp/end_gp/queue_callback API and resets the table
+            // afterward (leaving no fabricated rows), so it is safe at boot and gives
+            // the module automated coverage it previously lacked (it was only reachable
+            // via the `rcustat test` kshell subcommand).
+            fs::rcustat::self_test();
+            // tlbstat backs /proc/tlbstat (per-CPU TLB hit/miss/shootdown/flush stats);
+            // like its siblings the self-test now builds fixtures via the real
+            // register_cpu/record_hit/record_miss/record_shootdown/record_flush API and
+            // resets the table afterward (leaving no fabricated rows), so it is safe at
+            // boot and gives the module automated coverage it previously lacked (it was
+            // only reachable via the `tlbstat test` kshell subcommand).
+            fs::tlbstat::self_test();
+            // wqstat backs /proc/wqstat (kernel workqueue work-item stats); like its
+            // siblings the self-test now builds fixtures via the real register/enqueue/
+            // activate/complete/cancel API and resets the table afterward (leaving no
+            // fabricated workqueues), so it is safe at boot and gives the module
+            // automated coverage it previously lacked (it was only reachable via the
+            // `wqstat test` kshell subcommand).
+            fs::wqstat::self_test();
+            // numastat backs /proc/numastat (per-NUMA-node memory placement stats);
+            // like its siblings the self-test now builds fixtures via the real
+            // register_node/set_distance/record_* API and resets the table afterward
+            // (leaving no fabricated nodes), so it is safe at boot and gives the module
+            // automated coverage it previously lacked (it was only reachable via the
+            // `numastat test` kshell subcommand).
+            fs::numastat::self_test();
+            // cpustat backs /proc/cpustat (per-CPU user/system/idle/irq time breakdown);
+            // like its siblings the self-test now builds fixtures via the real
+            // register_cpu/record_time/record_context_switch/record_interrupt API and
+            // resets the table afterward (leaving no fabricated rows), so it is safe at
+            // boot and gives the module automated coverage it previously lacked (it was
+            // only reachable via the `cpustat test` kshell subcommand).
+            fs::cpustat::self_test();
+            // irqstat backs /proc/irqstat (per-IRQ-line counts + per-CPU interrupt
+            // totals and ISR latency); like its siblings the self-test now builds
+            // fixtures via the real register_irq/register_cpu/record/record_latency/
+            // mark_spurious API and resets the table afterward (leaving no fabricated
+            // rows), so it is safe at boot and gives the module automated coverage it
+            // previously lacked (it was only reachable via the `irqstat test` kshell
+            // subcommand).
+            fs::irqstat::self_test();
+            // diskstat backs /proc/diskstat (per-block-device read/write IOPS, bytes,
+            // latency, queue depth, merges); like its siblings the self-test now builds
+            // fixtures via the real register/record_read/record_write/record_discard/
+            // record_flush/record_merge API and resets the table afterward (leaving no
+            // fabricated rows), so it is safe at boot and gives the module automated
+            // coverage it previously lacked (it was only reachable via the
+            // `diskstat test` kshell subcommand).
+            fs::diskstat::self_test();
+            // acpistat backs /proc/acpistat (ACPI event counts, GPE firings, S-state
+            // suspend/resume); like its siblings the self-test now builds fixtures via
+            // the real register_gpe/record_event/record_gpe/set_s_state API and resets
+            // the table afterward (leaving no fabricated rows), so it is safe at boot
+            // and gives the module automated coverage it previously lacked (it was only
+            // reachable via the `acpistat test` kshell subcommand).
+            fs::acpistat::self_test();
+            // bpfstat backs /proc/bpfstat (loaded eBPF programs, maps, run counts,
+            // verifier errors); like its siblings the self-test now builds fixtures via
+            // the real load_program/unload_program/record_run/create_map/
+            // record_verifier_error API and resets the table afterward (leaving no
+            // fabricated rows), so it is safe at boot and gives the module automated
+            // coverage it previously lacked (it was only reachable via the
+            // `bpfstat test` kshell subcommand).
+            fs::bpfstat::self_test();
+            // budstat backs /proc/buddyinfo (per-zone buddy-allocator free counts and
+            // split/coalesce activity); like its siblings the self-test now builds
+            // fixtures via the real register_zone/update_free/record_split/
+            // record_coalesce API and resets the table afterward (leaving no fabricated
+            // rows), so it is safe at boot and gives the module automated coverage it
+            // previously lacked (it was only reachable via the `budstat test` kshell
+            // subcommand).
+            fs::budstat::self_test();
+            // cgiostat backs /proc/cgiostat (per-cgroup disk I/O bytes, IOPS, throttle
+            // events, I/O wait); like its siblings the self-test now builds fixtures via
+            // the real create_cgroup/remove_cgroup/record_read/record_write/
+            // record_throttle/record_io_wait API and resets the table afterward
+            // (leaving no fabricated rows), so it is safe at boot and gives the module
+            // automated coverage it previously lacked (it was only reachable via the
+            // `cgiostat test` kshell subcommand).
+            fs::cgiostat::self_test();
+            // compstat backs /proc/compstat (per-zone memory compaction attempts, page
+            // migrations, scan activity, stalls); like its siblings the self-test now
+            // builds fixtures via the real register_zone/start_compaction/
+            // finish_compaction/record_stall API and resets the table afterward
+            // (leaving no fabricated rows), so it is safe at boot and gives the module
+            // automated coverage it previously lacked (it was only reachable via the
+            // `compstat test` kshell subcommand).
+            fs::compstat::self_test();
+            // dmastat backs /proc/dmastat (per-device DMA mappings, transfers, IOMMU
+            // faults); like its siblings the self-test now builds fixtures via the real
+            // register_device/record_map/record_unmap/record_transfer/record_fault API
+            // and resets the table afterward (leaving no fabricated rows), so it is safe
+            // at boot and gives the module automated coverage it previously lacked (it
+            // was only reachable via the `dmastat test` kshell subcommand).
+            fs::dmastat::self_test();
+            // inodestat backs /proc/inodestat (per-filesystem inode counts + dcache
+            // hit/miss); like its siblings the self-test now builds fixtures via the
+            // real register_fs/alloc_inode/free_inode/evict/dcache_lookup API and resets
+            // the table afterward (leaving no fabricated rows), so it is safe at boot and
+            // gives the module automated coverage it previously lacked (it was only
+            // reachable via the `inodestat test` kshell subcommand).
+            fs::inodestat::self_test();
+            // ksmstat backs /proc/ksmstat (Kernel Same-page Merging: per-process
+            // sharing, merges/unmerges, scan progress, bytes saved); like its siblings
+            // the self-test now builds fixtures via the real register_process/
+            // record_merge/record_unmerge/record_scan/update_process API and resets the
+            // table afterward (leaving no fabricated rows), so it is safe at boot and
+            // gives the module automated coverage it previously lacked (it was only
+            // reachable via the `ksmstat test` kshell subcommand).
+            fs::ksmstat::self_test();
+            // mmapstat backs /proc/mmapstat (per-process mmap/munmap/mprotect counts,
+            // per-type breakdown, total bytes mapped); like its siblings the self-test
+            // now builds fixtures via the real register_process/record_map/record_unmap/
+            // record_protect API and resets the table afterward (leaving no fabricated
+            // rows), so it is safe at boot and gives the module automated coverage it
+            // previously lacked (it was only reachable via the `mmapstat test` kshell
+            // subcommand).
+            fs::mmapstat::self_test();
+            // pagestat backs /proc/pagestat (per-zone page allocator stats, per-order
+            // histogram, huge-page pools); like its siblings the self-test now builds
+            // fixtures via the real register_zone/record_alloc/record_free/
+            // record_reclaim/set_hugepages API and resets the table afterward (leaving no
+            // fabricated rows), so it is safe at boot and gives the module automated
+            // coverage it previously lacked (it was only reachable via the `pagestat
+            // test` kshell subcommand).
+            fs::pagestat::self_test();
+            // pidstat backs /proc/pidstat (per-PID-namespace allocation counts, reuse
+            // rate, high-watermark); like its siblings the self-test now builds fixtures
+            // via the real alloc_pid/free_pid/create_ns API and resets the table
+            // afterward (leaving only the structural root namespace with zeroed
+            // counters, no fabricated activity), so it is safe at boot and gives the
+            // module automated coverage it previously lacked (it was only reachable via
+            // the `pidstat test` kshell subcommand).
+            fs::pidstat::self_test();
+            // pmcstat backs /proc/pmcstat (per-CPU hardware performance counters,
+            // derived IPC + cache-miss rate, event multiplexing); like its siblings the
+            // self-test now builds fixtures via the real register_cpu/record_sample/
+            // configure_event/record_multiplex API and resets the table afterward
+            // (leaving no fabricated rows), so it is safe at boot and gives the module
+            // automated coverage it previously lacked (it was only reachable via the
+            // `pmcstat test` kshell subcommand).
+            fs::pmcstat::self_test();
+            // powerstat backs /proc/powerstat (per-domain power state, energy in uJ,
+            // transitions, wake-event log); like its siblings the self-test now builds
+            // fixtures via the real register_domain/record_transition/update_energy/
+            // record_wake API and resets the table afterward (leaving no fabricated
+            // rows), so it is safe at boot and gives the module automated coverage it
+            // previously lacked (it was only reachable via the `powerstat test` kshell
+            // subcommand).
+            fs::powerstat::self_test();
+            // procstat backs /proc/procstat (per-process CPU/memory/IO/fault/ctx-switch
+            // accounting, top-CPU/top-mem views); like its siblings the self-test now
+            // builds fixtures via the real register/update_cpu/update_memory/unregister
+            // API and resets the table afterward (leaving no fabricated rows), so it is
+            // safe at boot and gives the module automated coverage it previously lacked
+            // (it was only reachable via the `procstat test` kshell subcommand).
+            fs::procstat::self_test();
+            // ratestat backs /proc/ratestat (per-limiter token-bucket rate-limiting
+            // stats: allow/deny counts, current bucket level, burst-exhaustion events);
+            // the self-test now builds fixtures via the real register/record_allow/
+            // record_deny/refill API and resets the table afterward (leaving no
+            // fabricated rows), so it is safe at boot and gives the module automated
+            // coverage it previously lacked (it was only reachable via the `ratestat
+            // test` kshell subcommand).
+            fs::ratestat::self_test();
+            // rqstat backs /proc/rqstat (per-CPU runqueue depth/wait/load-balance stats);
+            // record functions return NotFound for unknown CPUs and there was no register
+            // API, so added register_cpu(cpu_id) (zeroed counters) — the proper fix is to
+            // register real topology rather than seed fake rows. The self-test now builds
+            // fixtures via register_cpu/enqueue/dequeue/record_balance/record_wait and
+            // resets the table afterward (leaving no fabricated rows), so it is safe at
+            // boot and gives the module automated coverage it previously lacked (it was
+            // only reachable via the `rqstat test` kshell subcommand).
+            fs::rqstat::self_test();
+            // schedlat backs /proc/schedlat (per-CPU scheduling-latency stats: wakeup-to-
+            // run / runqueue-wait / preemption latencies + per-CPU latency histograms);
+            // record functions return NotFound for unknown CPUs and there was no register
+            // API, so added register_cpu(cpu_id) (zeroed counters + empty histogram). The
+            // self-test now builds fixtures via register_cpu/record_wakeup/
+            // record_runq_wait/record_preempt with exact bucket-placement assertions and
+            // resets the table afterward (leaving no fabricated rows), so it is safe at
+            // boot and gives the module automated coverage it previously lacked (it was
+            // only reachable via the `schedlat test` kshell subcommand).
+            fs::schedlat::self_test();
+            // ttystat backs /proc/ttystat (per-TTY read/write bytes+ops, line-discipline
+            // signals, buffer overruns, buffer usage); already had a full register/
+            // record_read/record_write/record_signal/record_overrun/set_buf_used API, so
+            // just emptied init_defaults. The self-test now builds fixtures via that real
+            // API with exact byte/op assertions and resets the table afterward (leaving no
+            // fabricated rows), so it is safe at boot and gives the module automated
+            // coverage it previously lacked (it was only reachable via the `ttystat test`
+            // kshell subcommand).
+            fs::ttystat::self_test();
+            // zramstat backs /proc/zramstat (per-ZRAM-device compressed-swap stats:
+            // original/compressed sizes, mem used, read/write/discard ops, compression
+            // ratio); already had a full create_device/remove_device/record_write/
+            // record_read/record_discard API, so just emptied init_defaults. The
+            // self-test now builds fixtures via that real API with exact size/ratio
+            // assertions (incl. saturating mem_used on over-discard) and resets the table
+            // afterward (leaving no fabricated rows), so it is safe at boot and gives the
+            // module automated coverage it previously lacked (it was only reachable via
+            // the `zramstat test` kshell subcommand).
+            fs::zramstat::self_test();
+            // thpstat backs /proc/thpstat (transparent-huge-page promotion/demotion/
+            // split/compaction/khugepaged stats per size class). The two size-class rows
+            // (PMD 2MiB, PUD 1GiB) are real fixed structure kept with zeroed counters; the
+            // self-test now builds fixtures via record_promotion/record_demotion/
+            // record_split/record_alloc_failure/record_compaction/record_khugepaged_scan
+            // with exact byte-credit assertions and resets the table afterward (leaving no
+            // fabricated activity), so it is safe at boot and gives the module automated
+            // coverage it previously lacked (it was only reachable via the `thpstat test`
+            // kshell subcommand).
+            fs::thpstat::self_test();
+            // swapact backs /proc/swapact (per-swap-area swap-in/out counts, pages, and
+            // latencies); already had a full register/record_in/record_out API, so just
+            // emptied init_defaults. The self-test now builds fixtures via that real API
+            // with exact page/latency assertions (incl. swap-in underflow guard and
+            // used_pages clamped to total on swap-out) and resets the table afterward
+            // (leaving no fabricated rows), so it is safe at boot and gives the module
+            // automated coverage it previously lacked (it was only reachable via the
+            // `swapact test` kshell subcommand).
+            fs::swapact::self_test();
+            // writeback backs /proc/writeback (per-device dirty/writeback/written page
+            // counts + flusher-thread state). Record functions returned NotFound for
+            // unknown devices and there was no register API, so added register_device(dev)
+            // (creates a zeroed device row + an idle flusher thread, monotonic id). The
+            // real default dirty threshold (DEFAULT_DIRTY_THRESHOLD_PCT) is kept as a
+            // legitimate config default. The self-test now builds fixtures via
+            // register_device/record_dirty/record_written/start_flush with exact
+            // assertions and resets the table afterward (leaving no fabricated rows), so
+            // it is safe at boot and gives the module automated coverage it previously
+            // lacked (it was only reachable via the `writeback test` kshell subcommand).
+            fs::writeback::self_test();
+            // blkqueue backs /proc/blkqueue (per-device block I/O queue depth, request
+            // merges, plug/unplug events).  Its init_defaults() previously seeded two
+            // fictional devices (sda/nvme0n1) with ~60M fabricated submitted I/Os; that
+            // demo data was removed (real queues are wired via register_device + the
+            // submit/complete/merge/plug/unplug record functions).  The residue-free
+            // self_test builds its fixtures via the real API with exact assertions and
+            // resets the table afterward, so it is safe at boot.
+            fs::blkqueue::self_test();
+            // netqueue backs /proc/netqueue (per-NIC-queue TX/RX packets, drops, NAPI
+            // poll/budget-exhaustion).  Its init_defaults() previously seeded four
+            // fictional eth0 queues with 190M/150M fabricated RX/TX packets; that demo
+            // data was removed (real queues are wired via register_queue + the
+            // record_packets/record_drop/record_napi_poll functions).  The residue-free
+            // self_test builds its fixtures via the real API with exact assertions and
+            // resets the table afterward, so it is safe at boot.
+            fs::netqueue::self_test();
+            // pagecache backs /proc/pagecache (per-device file-cache hits/misses/
+            // evictions/readahead and derived hit-rate/readahead-rate).  Its
+            // init_defaults() previously seeded two fictional devices (sda/nvme0n1) with
+            // 600M fabricated hits and a conjured 97.5% hit rate; that demo data was
+            // removed (real devices are wired via register_device + the record_hit/
+            // record_miss/record_eviction/record_readahead functions).  The residue-free
+            // self_test builds its fixtures via the real API with exact assertions
+            // (including hit_rate/readahead_rate) and resets the table afterward, so it
+            // is safe at boot.
+            fs::pagecache::self_test();
+            // taskio backs /proc/taskio (per-process read/write bytes, syscall counts,
+            // cancelled writes, io-wait time, major faults).  Its init_defaults()
+            // previously seeded three fictional tasks (pid 1/100/200) with 2.6GB/1.25GB
+            // fabricated read/write bytes; that demo data was removed (real tasks are
+            // wired via register + the record_read/record_write/record_cancelled/
+            // record_io_wait/record_page_fault_io functions).  The residue-free
+            // self_test builds its fixtures via the real API with exact assertions and
+            // resets the table afterward, so it is safe at boot.
+            fs::taskio::self_test();
+            // netspeed backs /proc/netspeed (per-interface bandwidth snapshots + speed
+            // test history).  Its init_defaults() previously seeded a placeholder "eth0"
+            // snapshot (fabricating an interface's existence) and its run_test()
+            // fabricated ~100 Mbps download speeds from the HPET clock and showed them as
+            // a real measurement.  Both were removed: init_defaults is empty (interfaces
+            // appear only via update_bandwidth from real net-stack counters) and run_test
+            // now honestly returns NotSupported until a real measurement backend exists.
+            // The residue-free self_test verifies both and resets the table afterward.
+            fs::netspeed::self_test();
+            // diskhealth backs /proc/diskhealth (per-drive S.M.A.R.T. health, temp,
+            // error rates, failure prediction).  Its init_defaults() previously seeded
+            // two fictional disks with INVENTED model/serial numbers ("WDC WD10EZEX",
+            // "Samsung 970 EVO") presented as real attached hardware; that demo data was
+            // removed (real drives are wired via add_disk + update_attrs from the SMART
+            // layer).  The residue-free self_test builds its fixtures via the real API,
+            // exercises the compute_health grading (Excellent/Poor/Critical) with exact
+            // assertions, and resets the table afterward, so it is safe at boot.
+            fs::diskhealth::self_test();
+            // netdev backs /proc/netdev (per-NIC packet/byte/error/drop counters + link
+            // state, like Linux /proc/net/dev).  Its init_defaults() previously seeded
+            // three fictional interfaces (lo/eth0/wlan0) with 51GB/11GB fabricated rx/tx
+            // bytes and invented error/drop totals; that demo data was removed (real
+            // interfaces are wired via register_iface + the record_rx/record_tx/
+            // record_error/record_drop functions).  The residue-free self_test builds its
+            // fixtures via the real API with exact assertions and resets the table
+            // afterward, so it is safe at boot.
+            fs::netdev::self_test();
+            // netfilter backs /proc/netfilter (firewall rules + connection tracking +
+            // packet accept/drop/reject totals).  Its init_defaults() previously seeded
+            // four fictional rules ("allow established" 5M matches/10GB, "allow ssh",
+            // "default deny", "allow all out" 4M matches/8GB), two fabricated conntrack
+            // entries (192.168.0.1→…:22 and 192.168.0.1→8.8.8.8:443) and invented
+            // totals (9.15M packets / 9.05M accepted / 100k dropped); that demo data was
+            // removed.  Rules are registered via add_rule, connections via the new
+            // track_connection/update_connection/set_conn_state/untrack_connection API,
+            // and totals advance only on real record_match calls.  The residue-free
+            // self_test builds its fixtures via the real API with exact assertions and
+            // resets the table afterward, so it is safe at boot.
+            fs::netfilter::self_test();
+            // mempress backs the PSI-style /proc/pressure/memory view (memory stall
+            // times, reclaim activity, OOM proximity).  Its init_defaults() previously
+            // seeded fictional pressure — level Low, 5.5s total stall, 10M reclaim
+            // pages, 100k stall events, 50k reclaim events, OOM proximity 15, 5000 level
+            // changes; that demo data was removed (the state now starts at level None
+            // with all counters zero, advanced only by real record_stall/record_reclaim/
+            // update_level/set_oom_proximity calls from the reclaim/OOM paths).  The
+            // residue-free self_test builds its fixtures via the real API with exact
+            // assertions and resets the table afterward, so it is safe at boot.
+            fs::mempress::self_test();
+            // devfreq backs /proc/devfreq (per-device frequency governors, current
+            // frequency, transition counts, time-in-state).  Its init_defaults()
+            // previously seeded two fictional devices — "gpu0" 200MHz-2GHz OnDemand with
+            // 500k transitions and "membus" 400MHz-3.2GHz Performance with 10k
+            // transitions — plus invented time-in-state buckets and a 510k total; that
+            // demo data was removed (devices are registered via register() by the power-
+            // management subsystem and counters advance only on real record_transition
+            // calls).  The residue-free self_test builds its fixtures via the real API
+            // with exact assertions and resets the table afterward, so it is safe at
+            // boot.
+            fs::devfreq::self_test();
+            // memcg backs /proc/memcg (per-cgroup memory usage, limits, swap, failcnt,
+            // OOM kills, charge/uncharge counts).  Its init_defaults() previously seeded
+            // three fictional cgroups — "/" 2GiB usage / 500k charges, "/system" 512MiB
+            // usage / 1GiB limit, "/user" 1GiB usage / 4GiB limit / 128MiB swap — plus
+            // invented totals (900k charges, 865k uncharges, 2 failures); that demo data
+            // was removed (the cgroup hierarchy is built via create() by the cgroupfs
+            // subsystem and usage is accounted only through real charge/uncharge calls).
+            // The residue-free self_test builds its fixtures via the real API with exact
+            // assertions and resets the table afterward, so it is safe at boot.
+            fs::memcg::self_test();
+            // cgmem backs /proc/cgmem (per-cgroup page-level memory stats: usage/RSS/
+            // cache/swap pages, charges, uncharges, OOM kills, high-watermark events).
+            // Its init_defaults() previously seeded three fictional cgroups — "root"
+            // 500k usage pages / 10M charges, "system" 1M limit / 5M charges / 2 OOM,
+            // "user" 2M limit / 20M charges / 5 OOM — plus invented totals (35M charges,
+            // 33.3M uncharges, 7 OOM kills); that demo data was removed (cgroups are
+            // created via create() and pages accounted only through real record_charge/
+            // record_uncharge calls).  The residue-free self_test builds its fixtures via
+            // the real API with exact assertions and resets the table afterward, so it is
+            // safe at boot.
+            fs::cgmem::self_test();
+            // vmzone backs /proc/vmzone (per-zone page totals, watermarks, free/active/
+            // inactive pages, alloc/free/reclaim activity).  Its init_defaults()
+            // previously seeded four fictional zones — DMA 4096 pages / 10k allocs,
+            // DMA32 262k pages / 1M allocs, Normal 2M pages / 50M allocs / 100k reclaims,
+            // Movable 500k pages / 5M allocs — plus invented totals (56.01M allocs,
+            // 54.76M frees, 125.05k reclaims); that demo data was removed (the page
+            // allocator registers its real zones via register() with their actual page
+            // totals and watermarks, and publishes activity only through real
+            // record_alloc/record_free/record_reclaim calls).  The residue-free self_test
+            // builds its fixtures via the real API with exact assertions and resets the
+            // table afterward, so it is safe at boot.
+            fs::vmzone::self_test();
+            // vmballoon backs /proc/vmballoon (VM memory-balloon status: current/target/
+            // max pages, inflate/deflate counts and page totals, OOM events, free-page
+            // hints).  Its init_defaults() previously seeded a fictional balloon — 100k
+            // current/target pages, 1M max, 500 inflates / 300 deflates, 5M/4.9M
+            // inflate/deflate page totals, 2 OOM events, 10k free-page hints; that demo
+            // data was removed (the balloon driver advertises its capacity via the new
+            // configure() API on attach, and counters advance only on real inflate/
+            // deflate/record_oom/record_free_hint calls).  The residue-free self_test
+            // builds its fixtures via the real API with exact assertions and resets the
+            // status afterward, so it is safe at boot.
+            fs::vmballoon::self_test();
+            // softirq backs /proc/softirq (deferred-interrupt stats: per-CPU softirq/
+            // tasklet/ksoftirqd counts and per-type raised/executed/time).  Its
+            // init_defaults() previously seeded four fictional CPUs with invented
+            // per-type counts (Timer 500k+, NetRx 200k+, Block 100k+, RCU 300k+ each)
+            // and ten type rows with invented bases (Timer 2.6M executed, NetRx 1M, RCU
+            // 1.5M) plus totals (5.71M raised, 5.7M executed, 5200 tasklets); that demo
+            // data was removed.  The ten softirq-vector rows are a fixed kernel taxonomy
+            // so they are kept with ZEROED counters, while per-CPU state is created as
+            // each CPU comes online via the new register_cpu() API; counters advance
+            // only on real raise/run/tasklet_run/ksoftirqd_wakeup calls.  The residue-
+            // free self_test builds its fixtures via the real API with exact assertions
+            // and resets the tables afterward, so it is safe at boot.
+            fs::softirq::self_test();
+            // timerq backs /proc/timerq (kernel timer queue: per-timer id/name/type/
+            // state/deadline/interval/fire-count/overruns plus created/fired/cancelled/
+            // overrun totals).  Its init_defaults() previously seeded three fictional
+            // pending timers — "tick" (periodic 10ms), "watchdog" (periodic 1s), and
+            // "rcu_callback" (deferrable 50ms) — claiming timers were scheduled in the
+            // queue that no subsystem actually armed; that phantom data was removed.
+            // Timers are scheduled through the existing add() API and counters advance
+            // only on real fire/fire_expired/cancel calls.  The residue-free self_test
+            // builds its fixtures via the real API with exact assertions (using a far-
+            // future periodic deadline so fire_expired is deterministic) and resets the
+            // queue afterward, so it is safe at boot.
+            fs::timerq::self_test();
+            // schedclass backs /proc/schedclass (scheduler-class diagnostics: per-task
+            // pid/class/priority/runtime/switches/migrations and per-class task counts,
+            // context switches, runtime, slices, and migrations).  Its init_defaults()
+            // previously seeded three fictional tasks — pid 0 Idle (50s runtime, 100k
+            // switches), pid 1 Normal (10s runtime, 500k switches, 1000 migrations),
+            // pid 2 RealTime (1s runtime, 200k switches, 50 migrations) — with matching
+            // invented per-class stats and totals of 800000 switches / 1050 migrations;
+            // that phantom data was removed.  The five scheduler-class rows (RealTime/
+            // Deadline/Normal/Batch/Idle) are a fixed taxonomy so they are kept with
+            // ZEROED counters, while tasks are tracked as they register via the existing
+            // register_task() API and counters advance only on real record_switch/
+            // record_slice/record_migration calls.  The residue-free self_test builds
+            // its fixtures via the real API with exact assertions and resets the tables
+            // afterward, so it is safe at boot.
+            fs::schedclass::self_test();
+            // schedwait backs /proc/schedwait (scheduler-wait diagnostics: per-reason
+            // wait counts/total-ns/max-ns across runqueue/iowait/lock/sleep/ipc/pgfault
+            // plus a six-bucket latency histogram and global wait totals).  Its
+            // init_defaults() previously seeded fabricated activity — per-reason counts
+            // of 50M/10M/5M/20M/3M/2M waits, hundreds of billions of ns per reason, a
+            // populated histogram, and global totals of 90M waits over 920s; that demo
+            // data was removed.  The six reason slots and six histogram buckets are a
+            // fixed structure so they are kept ZEROED, and counters advance only on real
+            // record_wait calls.  The residue-free self_test builds its fixtures via the
+            // real API with exact assertions (including exact histogram-bucket placement)
+            // and resets the tables afterward, so it is safe at boot.
+            fs::schedwait::self_test();
+            // kthread backs /proc/kthread (kernel-thread lifecycle: per-thread id/name/
+            // cpu/state/cpu-time/wakeups plus created/exited totals).  Its
+            // init_defaults() previously seeded five fictional kernel threads —
+            // "kswapd0", "ksoftirqd/0", "kworker/0:0", "kworker/1:0", and "writeback" —
+            // with invented CPU times and wakeup counts, plus totals of 100 created / 95
+            // exited; that phantom data was removed.  Kernel threads are dynamic (no
+            // fixed taxonomy) so the list starts empty, with threads tracked as they
+            // register via the existing register()/unregister() API and activity
+            // advancing only on real set_state/record_cpu_time calls.  The residue-free
+            // self_test builds its fixtures via the real API with exact assertions and
+            // resets the list afterward, so it is safe at boot.
+            fs::kthread::self_test();
+            // kstack backs /proc/kstack (kernel-stack diagnostics: per-CPU stack size,
+            // current/high-water usage, overflow + guard-page-hit counts, and usage
+            // samples, plus global overflow/guard/sample totals).  Its init_defaults()
+            // previously seeded four fictional CPUs — cpu 0..3 with 16KiB stacks,
+            // invented current/high-water usage, 1,000,000 samples each and
+            // total_used_samples in the billions, plus 1 overflow and 3 guard hits;
+            // that demo data was removed.  Per-CPU stack stats are dynamic so the table
+            // starts empty, with CPUs added as they come online via the existing
+            // register_cpu() API and counters advancing only on real record_usage/
+            // record_overflow/record_guard_hit calls.  The residue-free self_test builds
+            // its fixtures via the real API with exact assertions and resets the table
+            // afterward, so it is safe at boot.
+            fs::kstack::self_test();
+            // kprobes backs /proc/kprobes (dynamic-instrumentation diagnostics: per-probe
+            // id/type/name/address/hits/misses/enabled/overhead plus global hit/miss/
+            // overhead totals).  Its init_defaults() previously seeded three fictional
+            // probes — a "do_page_fault" kprobe (500k hits), a "sys_read" kretprobe (2M
+            // hits, 100 misses), and a "sched:sched_switch" tracepoint (10M hits) — plus
+            // totals of 12.5M hits / 100 misses / 625ms overhead; that phantom data was
+            // removed.  Probes are dynamic so the list starts empty, with probes
+            // installed via the existing register()/unregister() API and counters
+            // advancing only on real record_hit calls.  The residue-free self_test builds
+            // its fixtures via the real API with exact assertions (incl. disabled-probe
+            // miss counting and by_type filtering) and resets the list afterward, so it
+            // is safe at boot.
+            fs::kprobes::self_test();
+            // ftrace backs /proc/ftrace (function-trace diagnostics: per-probe func name/
+            // kind/hits/misses/total-ns/max-ns/enabled plus global hit/miss/overhead
+            // totals and a global tracing on/off flag).  Its init_defaults() previously
+            // seeded four fictional probes — "schedule" (50M hits), "do_page_fault" (10M
+            // hits, 100 misses), "sys_read" (30M hits), and "tcp_sendmsg" (5M hits, 50
+            // misses, disabled) — plus totals of 95M hits / 150 misses / 1.1s overhead
+            // with tracing enabled; that phantom data was removed.  Probes are dynamic so
+            // the list starts empty and global tracing starts OFF (the honest default),
+            // with probes installed via the existing add_probe()/remove_probe() API and
+            // counters advancing only on real record_hit calls.  The residue-free
+            // self_test builds its fixtures via the real API with exact assertions (incl.
+            // disabled-probe miss counting, max-ns tracking, and the global toggle) and
+            // resets the list afterward, so it is safe at boot.
+            fs::ftrace::self_test();
+            // sockbuf backs /proc/sockbuf (socket-buffer pool diagnostics: per-pool
+            // active-buffers/bytes/allocs/frees/drops/peak across tcp/udp/raw/icmp/mcast/
+            // general plus global alloc/free/drop/byte totals).  Its init_defaults()
+            // previously seeded fabricated activity across all six pools — e.g. TCP with
+            // 50,000 active buffers, 100M allocs and 200MB in flight — with global totals
+            // of 176.5M allocs / 176.4M frees / 6,660 drops / 231.6MB; that demo data was
+            // removed.  The six buffer pools are a fixed taxonomy so they are kept with
+            // ZEROED counters, and counters advance only on real alloc/free/record_drop
+            // calls.  The residue-free self_test builds its fixtures via the real API
+            // with exact assertions (incl. peak high-water tracking across frees and
+            // cumulative byte accounting) and resets the table afterward, so it is safe
+            // at boot.
+            fs::sockbuf::self_test();
+            // msivec backs /proc/msivec (MSI/MSI-X interrupt-vector diagnostics:
+            // per-device allocated/active vector counts, delivered-interrupt counts and
+            // target CPU, plus global vector/interrupt/alloc/free totals).  Its
+            // init_defaults() previously seeded four fictional PCIe devices — nvme0
+            // (8 MSI-X vectors, 50M interrupts), eth0 (4 MSI-X, 100M), gpu0 (1 MSI, 5M)
+            // and ahci0 (1 MSI, 10M) — plus totals of 14 vectors / 165M interrupts /
+            // 100 allocs / 86 frees, all surfaced as if real MSI vectors had been
+            // programmed into hardware.  That demo data was removed; the device list now
+            // starts empty and fills only when a driver actually configures an MSI
+            // capability via alloc_vectors().  The residue-free self_test builds its
+            // fixtures via the real API with exact assertions (incl. cumulative
+            // interrupt accounting that is not decremented on free) and resets the table
+            // afterward, so it is safe at boot.
+            fs::msivec::self_test();
+            // clocksrc backs /proc/clocksrc (clock-source diagnostics: per-source
+            // frequency, quality rating, current flag, read count, skew corrections,
+            // total/max skew and read latency, plus global read/skew totals).  Its
+            // init_defaults() previously seeded three fictional clock sources — tsc
+            // (3GHz, Ideal, current, 1B reads, 100 skew corrections), hpet (14.3MHz,
+            // Good, 500K reads) and acpi_pm (3.58MHz, Medium, 10K reads, 200 skews) —
+            // plus totals of 1,000,510,000 reads / 350 skew corrections, surfaced as if
+            // real timekeeping hardware had been calibrated and read.  Clock sources are
+            // discovered hardware, so that demo data was removed; the list now starts
+            // empty and fills only when the timekeeping subsystem actually registers a
+            // calibrated source via register().  The residue-free self_test builds its
+            // fixtures via the real API with exact assertions (incl. total/max skew
+            // accumulation and latest-latency tracking) and resets the table afterward,
+            // so it is safe at boot.
+            fs::clocksrc::self_test();
+            // cpuidle backs /proc/cpuidle (CPU idle / C-state diagnostics: per-CPU
+            // current C-state, per-C-state entry counts and residency times, total
+            // idle/active time, plus global transition/idle totals).  Its
+            // init_defaults() previously seeded four fictional CPUs with invented
+            // C-state entry counts (e.g. CPU0 with 1M C1 / 500K C1E / 100K C3 / 10K C6
+            // entries) and multi-second residency times scaled per core, plus a global
+            // total of 6,480,000 transitions — surfaced as if real C-state residency
+            // had been measured.  CPUs are discovered hardware, so that demo data was
+            // removed; a new register_cpu() API adds each core as SMP brings it online,
+            // and the per-CPU table fills only through real enter_state/exit_state
+            // calls.  The residue-free self_test builds its fixtures via the real API
+            // with exact assertions (entry-counter increments by C-state depth,
+            // transition counting) and resets the table afterward, so it is safe at
+            // boot.
+            fs::cpuidle::self_test();
+            // cpucache backs /proc/cpucache (CPU cache-hierarchy diagnostics: per-level
+            // geometry — size / line size / ways / sets / shared-CPU count — and
+            // hit/miss/eviction counters across L1d/L1i/L2/L3, plus global hit/miss
+            // totals and hit-rate percentages).  Its init_defaults() previously seeded a
+            // plausible-looking but unprobed hierarchy (32KB 8-way L1d/L1i, 256KB L2,
+            // 8MB 16-way L3 shared by 4 CPUs) with fabricated activity of 25,000,000,000
+            // total hits / 850,000,000 misses — surfaced as if the cache topology had
+            // been read from CPUID and its activity measured.  The four levels are a
+            // fixed taxonomy so the rows are kept, but with ZEROED geometry and
+            // counters; a new set_geometry() API lets a CPUID probe fill in real
+            // geometry, and the counters advance only on real record_hit/miss/eviction
+            // calls.  The residue-free self_test builds its fixtures via the real API
+            // with exact assertions (geometry persistence, per-level + overall hit-rate
+            // math, level→index mapping) and resets the table afterward, so it is safe
+            // at boot.
+            fs::cpucache::self_test();
+            // userfault backs /proc/userfault (userfaultfd diagnostics: per-process
+            // registered ranges, missing/write-protect/minor fault counts, resolves,
+            // total/max resolve latency, copy/zero page counts, plus global fault/
+            // resolve/copy/zero totals).  Its init_defaults() previously seeded one
+            // fictional handler — pid 1 with 5 ranges, 100K missing / 50K wp / 10K minor
+            // faults, 160K resolves, 100K copy pages and 60K zero pages — plus global
+            // totals of 160K faults / 160K resolves / 100K copies / 60K zeros, surfaced
+            // as if a process were actually handling page faults in userspace.  That
+            // demo data was removed; the handler list now fills only when a process
+            // really creates a userfaultfd via register().  The residue-free self_test
+            // builds its fixtures via the real API with exact assertions (per-fault-type
+            // counters, copy vs zero resolve accounting, max-latency tracking, cumulative
+            // global totals not decremented on unregister) and resets the table
+            // afterward, so it is safe at boot.
+            fs::userfault::self_test();
+            // iomem backs /proc/iomem (MMIO region diagnostics: per-region name, base,
+            // size, cacheable/prefetchable attributes and read/write access counts,
+            // plus global read/write totals).  Its init_defaults() previously seeded
+            // five fictional regions — LAPIC (50M reads / 10M writes), IOAPIC (1M /
+            // 500K), HPET (5M / 100K), GPU_FB (100M writes) and NVMe_BAR (20M / 15M) —
+            // plus global totals of 76,000,000 reads / 125,600,000 writes, surfaced as
+            // if device memory had been mapped and accessed.  That demo data was
+            // removed; the region list now fills only when the kernel actually maps an
+            // MMIO region via register().  The residue-free self_test builds its
+            // fixtures via the real API with exact assertions (attribute persistence,
+            // per-region + global read/write counting, duplicate-base AlreadyExists,
+            // cumulative totals not decremented on unregister) and resets the table
+            // afterward, so it is safe at boot.
+            fs::iomem::self_test();
+            // pgtable backs /proc/pgtable (page-table diagnostics: per-level (PML4/PDPT/
+            // PD/PT) allocated/freed/active page-table page counts, page-walk count and
+            // average depth, TLB-flush counts by scope (single/range/full/global), plus
+            // the active page-table-page total).  Its init_defaults() previously seeded
+            // fabricated activity — per-level allocs [1, 512, 50K, 2M] / frees
+            // [0, 10, 5K, 500K], 100,000,000 page walks summing 350,000,000 levels, TLB
+            // flushes of 50M single / 1M range / 500K full / 100K global, and 1,550,503
+            // active pages — surfaced as if real paging activity had been measured.  The
+            // four levels are a fixed dimension so per_level always returns four rows,
+            // but with ZEROED counters; they advance only on real record_alloc/free/
+            // walk/tlb_flush calls.  The residue-free self_test builds its fixtures via
+            // the real API with exact assertions (per-level alloc/free/active accounting,
+            // active-page total tracking, average walk depth 366 from 11 levels / 3
+            // walks, per-scope flush counts) and resets the table afterward, so it is
+            // safe at boot.
+            fs::pgtable::self_test();
+            // Memory diagnostics self-test (memdiag) — exercises the RAM-test log and
+            // ECC-error tracking surfaced by the `memdiag` kshell command (test runs
+            // with pass/fail results, correctable/uncorrectable ECC error counts, and
+            // a memory-health summary).  Its init_defaults() previously seeded a
+            // hardcoded total_memory_kb of 1,048,576 (a 1 GB placeholder), so
+            // `memdiag show` always reported "Total memory: 1024 MB" regardless of the
+            // machine's actual RAM.  The size now starts at 0 ("unknown until
+            // detected") and advances only on a real set_total_memory() call by RAM
+            // detection.  The residue-free self_test builds its fixtures via the real
+            // API with exact assertions (test pass/fail accounting, ECC correctable/
+            // uncorrectable counts, and a 2 GB size set explicitly via
+            // set_total_memory) and resets the table afterward, so it is safe at boot.
+            fs::memdiag::self_test();
+            // IPC-namespace statistics self-test (ipcns) — exercises the System V IPC
+            // namespace table surfaced by /proc/ipcns and the `ipcns` kshell command
+            // (per-namespace shared-memory segment / semaphore-set / message-queue
+            // counts and byte totals).  Its init_defaults() previously seeded two
+            // fictional namespaces — "init" with 50 shm segments / 500 MB and
+            // "container-1" with 10 shm / 100 MB, plus global totals of 60 shm / 25 sem
+            // / 13 msg — claiming containers and shared memory existed when nothing
+            // created them.  init_defaults now starts empty; namespaces appear only on
+            // real create_ns() calls and their counters advance only on real
+            // record_shm/sem/msg calls.  The residue-free self_test builds its fixtures
+            // via the real API with exact assertions (first namespace gets id 1, per-
+            // namespace + global SHM/SEM/MSG accounting, cumulative totals not
+            // decremented on destroy) and resets the table afterward, so it is safe at
+            // boot and /proc/ipcns reads as a truthful empty table.
+            fs::ipcns::self_test();
+            // I/O-port statistics self-test (ioport) — exercises the x86 port-I/O
+            // region table surfaced by /proc/ioport and the `ioport` kshell command
+            // (per-region in/out counts + byte totals, plus untracked-access counters).
+            // Its init_defaults() previously seeded five fictional regions — PIC
+            // (1M/500K), PIT (100K/50K), KBD (5M/1M), RTC (500K/200K) and COM1 (10M/8M)
+            // — plus global totals of 16.6M reads / 9.75M writes and 50K/20K untracked,
+            // claiming millions of port accesses that never happened (the kernel does
+            // not instrument in/out yet — nothing calls record_in/out or
+            // register_region outside the kshell).  init_defaults now starts empty;
+            // regions appear only on real register_region() calls and counters advance
+            // only on real record_in/out calls.  The residue-free self_test builds its
+            // fixtures via the real API with exact assertions (region registration,
+            // tracked vs untracked accounting, range-boundary matching at 0x103/0x104,
+            // cumulative totals) and resets the table afterward, so it is safe at boot
+            // and /proc/ioport reads as a truthful empty table.
+            fs::ioport::self_test();
+            // Hardware-RNG statistics self-test (hwrng) — exercises the entropy pool
+            // status and per-source breakdown surfaced by /proc/hwrng and the `hwrng`
+            // kshell command (RDRAND/RDSEED/interrupt/disk/input/jitter byte counts and
+            // failures, pool fill level, reseed count).  Its init_defaults() previously
+            // seeded fabricated activity — per-source bytes [500M, 100M, 50M, 10M, 5M,
+            // 20M], 685M generated / 600M requested, a FULL 4096-bit pool reporting
+            // "ready", and 100K reseeds — claiming cryptographic-quality entropy had
+            // been gathered when none has (a dangerous lie for a security surface).
+            // init_defaults now starts with an EMPTY pool (0 bits, not ready) and all
+            // source/total counters zeroed; only the pool CAPACITY (4096 bits, a
+            // structural constant) is non-zero.  The residue-free self_test builds its
+            // fixtures via the real API with exact assertions (generation adds to the
+            // pool, requests drain it, per-source failure tracking, reseed refills to
+            // capacity, six-source breakdown) and resets afterward, so it is safe at
+            // boot and /proc/hwrng reads as a truthful empty pool.
+            fs::hwrng::self_test();
+            // Certificate-manager self-test.  certmgr previously seeded five well-known
+            // root CAs (ISRG Root X1, DigiCert Global Root G2, GlobalSign, Baltimore
+            // CyberTrust, Amazon Root CA 1) into init_defaults, each marked Root/System/
+            // Valid/pinned but carrying FABRICATED cryptographic material — FNV-hash
+            // "fingerprints" instead of real SHA-256 digests, made-up serials, a
+            // synthetic 10-year validity window, and no backing PEM file.  /proc/certmgr
+            // and the certmgr kshell command surface that list as the real trust store,
+            // so presenting phantom Valid/trusted roots is a dangerous fabrication on a
+            // security surface.  init_defaults now starts with an EMPTY trust store; a
+            // certificate enters only through a real import_cert (a bundled CA PEM) or
+            // the ACME path.  The residue-free self_test (clear_all at start and end,
+            // returns KernelResult) imports/looks-up/renews via the real API with exact
+            // assertions and verifies the empty default, so it is safe at boot.
+            if let Err(e) = fs::certmgr::self_test() {
+                serial_println!("WARNING: Certificate manager self-test failed: {:?}", e);
+            }
+            // Auth-broker self-test.  authbroker previously seeded three fictional
+            // credentials into init_defaults — "root" (Password), "admin" (PublicKey)
+            // and "service_acct" (Token), each with a placeholder hash/key and no real
+            // provisioned account behind it.  /proc/authbroker and the authbroker kshell
+            // command surface the credential list as the real credential store, so
+            // presenting phantom verified credentials for privileged principals is a
+            // dangerous fabrication on a security surface.  init_defaults now starts
+            // with an EMPTY credential store; credentials enter only through a real
+            // store_credential (account provisioning) and grants through
+            // grant_capability.  The residue-free self_test builds its fixtures via the
+            // real API with exact assertions (store/authenticate/lockout/unlock/grant/
+            // revoke) and clears the state afterward, so it is safe at boot.
+            fs::authbroker::self_test();
+            // Security-module (LSM) statistics self-test.  secmod previously seeded two
+            // fictional modules into init_defaults — "capability" (88.8M checks /
+            // 168,700 denials / 50K audits) and "apparmor" (71.93M checks / 338,500
+            // denials / 100K audits), with fabricated per-hook check/denial arrays and
+            // global totals of 160,730,000 checks / 507,200 denials / 150,000 audits.
+            // /proc/secmod and the secmod kshell command surface the module list as the
+            // real security-enforcement activity, so seeding hundreds of millions of
+            // policy checks that never happened is fabricated procfs data.  init_defaults
+            // now starts with NO modules and zeroed totals; a module enters only through
+            // a real register_module and its counters advance via record_check/
+            // record_deny/record_audit on the security-hook path.  The residue-free
+            // self_test builds its fixtures via the real API with exact assertions
+            // (register/check/deny/audit/enable) and clears the state afterward.
+            fs::secmod::self_test();
+            // Binary-format loader statistics self-test.  binfmt previously seeded three
+            // fictional formats into init_defaults — Elf64 (500K loads / 1K errors),
+            // Script (100K / 5K) and Elf32 (10K / 200) — plus an error breakdown
+            // [3000, 500, 200, 1500, 800, 200] and global totals of 610,000 loads /
+            // 6,200 errors.  /proc/binfmt and the binfmt kshell command surface the
+            // format list as the real loader activity, so claiming hundreds of thousands
+            // of executions that never happened is fabricated procfs data.  init_defaults
+            // now starts with NO formats and zeroed totals; a format enters only through
+            // the new register_format API (the real ELF/script/etc. loaders call it) and
+            // its counters advance via record_load/record_error on the exec path.  The
+            // residue-free self_test builds its fixtures via the real API with exact
+            // assertions (register/load/average/max/error/breakdown) and clears the
+            // state afterward.
+            fs::binfmt::self_test();
+            // Recovery-partition self-test.  recoverypart previously seeded a fabricated
+            // 500 MB "Healthy" recovery partition (85 MB used) with four pre-installed
+            // tools — System Repair, Boot Repair, Memory Test, Command Shell — into
+            // init_defaults, none backed by a real partition or tool image.
+            // /proc/recoverypart and the recoverypart kshell command surface the
+            // partition status, tool list and space usage as a real recovery
+            // environment, so claiming recovery tools exist when none are installed
+            // could mislead an operator into thinking recovery is available.
+            // init_defaults now starts with NO partition (status Missing, no tools, zero
+            // space); a real partition is registered via the new register_partition API
+            // (when one is detected on disk) and tools via add_tool.  The residue-free
+            // self_test builds its fixtures via the real API with exact assertions
+            // (register/verify/add/repair/boot/remove) and clears the state afterward.
+            fs::recoverypart::self_test();
+            // Log-rotation self-test.  Unlike the statistics modules above, logrotate's
+            // init_defaults seeds CONFIGURATION (three default rotation rules for
+            // syslog/kern.log/auth.log — the analogue of a shipped /etc/logrotate.d
+            // policy) with ZEROED activity, so it is a legitimate settings module and the
+            // default rules are deliberately kept.  The self_test, however, performs
+            // simulated rotations (rotate/check_all), so it is made residue-free (clears
+            // STATE and restores the clean default policy at the end) to ensure those
+            // simulated rotations never leak into the live /proc/logrotate counters.  It
+            // is wired here so its exact assertions (rule ids, rotation/byte totals) are
+            // actually exercised at boot.
+            fs::logrotate::self_test();
+            // Disk-cleanup self-test.  diskclean's init_defaults was already empty, but
+            // the fabrication lived in scan(): it used to inject nine hardcoded phantom
+            // reclaimable items (~1.46 GB of fake /tmp, /var/cache, trash and crash-dump
+            // junk) that the /proc/diskclean generator and the diskclean kshell command
+            // surfaced as if real, so an operator would believe gigabytes of junk existed
+            // and that cleaning them freed real space.  scan() now honestly finds NOTHING
+            // (no filesystem-walk backend exists yet), reporting each real reclaimable
+            // file via add_item only when a real scanner is implemented.  The residue-free
+            // self_test exercises the honest empty scan plus the real add_item/summarize/
+            // estimate/clean primitives with exact assertions and clears STATE afterward.
+            fs::diskclean::self_test();
+            // Game-mode self-test.  Like logrotate, gamemode is a legitimate SETTINGS
+            // module: its init_defaults seeds only configuration (the default
+            // optimization set, auto_detect flag and F12 capture hotkey) with NO
+            // fabricated games, sessions or activation counts, so /proc/gamemode
+            // honestly reports 0 games / 0 activations at boot.  The self_test, however,
+            // registers a game, runs an activate/deactivate session and flips config
+            // toggles, so it is made residue-free (clears STATE and restores the clean
+            // default config at the end) to ensure the kshell `gamemode test` subcommand
+            // cannot leak those fixtures into the live /proc/gamemode table.  Wired here
+            // so its exact assertions (game id, session/activation totals) are exercised
+            // at boot now that it is safe.
+            fs::gamemode::self_test();
+            // Usage-time self-test.  usagetime is a per-app foreground-time TRACKER, not
+            // a fabricator: its init_defaults seeds only the tracking_enabled flag with
+            // NO fabricated app-usage records (apps empty, all counters 0), so
+            // /proc/usagetime honestly reports 0 tracked apps at boot.  The self_test,
+            // however, tracks "browser"/"editor" sessions and sets a limit + a category,
+            // and never cleared STATE — so the kshell `usagetime test` subcommand would
+            // leak those fabricated usage records into the live /proc/usagetime listing
+            // (which prints per-app foreground hours, making the leak look like real
+            // usage).  It is now residue-free (clears STATE and restores clean defaults
+            // at the end) and wired here so its exact assertions are exercised at boot.
+            fs::usagetime::self_test();
+            // Screen-time self-test.  screentime is a user-activity / app-focus TRACKER,
+            // not a fabricator: its init_defaults seeds only the enabled flag, the
+            // initial Active state and default (unlimited) usage limits, with NO
+            // fabricated app records or daily history (apps empty, counters 0), so
+            // /proc/screentime honestly reports 0 tracked apps at boot.  The self_test,
+            // however, records org.editor/org.browser focus events, adds active time,
+            // sets a daily limit and runs reset_daily (which creates a history entry),
+            // and never cleared STATE — so the kshell `screentime test` subcommand would
+            // leak those fabricated activity records into the live /proc/screentime
+            // table.  It is now residue-free (clears STATE and restores clean defaults
+            // at the end) and wired here so its exact assertions are exercised at boot.
+            fs::screentime::self_test();
+            // Startup-optimization self-test.  startupopt is a boot PROFILER, not a
+            // fabricator: its init_defaults seeds NO boot profile (stages/suggestions
+            // empty, all counters 0, fastest_boot_ms a u64::MAX sentinel reported as 0),
+            // so /proc/startupopt honestly reports 0 boots at boot.  The self_test,
+            // however, records boot stages, runs record_boot() (boot_count → 1) and
+            // analyze() (total_analyses → 1), and never cleared STATE — so the kshell
+            // `startupopt test` subcommand would leak a fabricated boot profile into the
+            // live /proc/startupopt table.  It is now residue-free (clears STATE and
+            // restores clean defaults at the end) and wired here so its exact assertions
+            // (stage counts, 0 suggestions for sub-second stages, boot/analysis totals)
+            // are exercised at boot.
+            fs::startupopt::self_test();
+            // Eye-protection self-test.  Like logrotate/gamemode, eyeprotect is a
+            // legitimate SETTINGS module: its init_defaults seeds two break-reminder
+            // PROFILES (the 20-20-20 rule and an Hourly preset) — the analogue of shipped
+            // default config — with ZEROED activity counters (total_breaks/snoozes/skips
+            // all 0), so /proc/eyeprotect honestly reports no break activity at boot.  The
+            // default profiles are deliberately KEPT.  The self_test, however, runs
+            // breaks/snooze/skip (bumping the activity counters) and changes the 20-20-20
+            // profile's interval, and never cleared STATE — so the kshell `eyeprotect
+            // test` subcommand would leak fabricated break activity into /proc/eyeprotect
+            // AND corrupt the shipped default profile.  It is now residue-free (clears
+            // STATE and restores the clean default profiles at the end) and wired here so
+            // its exact assertions are exercised at boot.
+            fs::eyeprotect::self_test();
+            // File-notification statistics self-test.  fnotify's init_defaults used to
+            // fabricate observed activity — inotify 500 watches / 10,000,000 events / 5
+            // overflows, fanotify 50 watches / 5,000,000 events, dnotify 10 watches /
+            // 100,000 events (15,100,000 phantom events total, with invented per-event-
+            // kind breakdowns) — surfaced via /proc/fnotify and the `fnotify` kshell
+            // command AS IF REAL, when the inotify/fanotify/dnotify subsystems are not
+            // even implemented.  It now seeds only the real three-type taxonomy and the
+            // sysctl-style CAPACITY limits (max_watches / max_queue_depth) with ALL
+            // activity counters ZEROED (case c), so /proc/fnotify honestly reports 0
+            // watches / 0 events.  The residue-free self_test exercises add_watch /
+            // record_event / drain_events with exact assertions and restores the zeroed
+            // baseline afterward.
+            fs::fnotify::self_test();
+            // memlayout previously seeded a FABRICATED physical memory layout in
+            // init_defaults() — a hand-invented ~1 GiB "Main memory" block plus fixed
+            // kernel/heap/APIC ranges — so /proc/memlayout, total_ram() and the
+            // `memlayout` kshell command reported RAM totals with NO relation to the
+            // machine's actual memory.  It is now populated from the REAL Limine memmap
+            // response via populate_from_memmap() (called right after the heap during
+            // boot, above).  This residue-free self_test snapshots the live (real) map,
+            // exercises populate_from_memmap / add_region / the totals with exact
+            // assertions against a synthetic map, then restores the real map so no test
+            // fixtures leak into the live /proc/memlayout table.
+            fs::memlayout::self_test();
+            // netmon backs /proc/netmon and the `netmon` kshell command.  Its
+            // init_defaults() previously seeded three FABRICATED connections (sshd
+            // LISTEN :22, a browser ESTABLISHED to 93.184.216.34:443 with real-looking
+            // byte counts, resolved to 8.8.8.8:53) plus invented aggregate totals, which
+            // the kshell command surfaced as if they were live sockets.  It now seeds an
+            // EMPTY table (connections are tracked via add_connection / record_traffic /
+            // close_connection once the network stack is wired).  This residue-free
+            // self_test builds its own fixtures via the real API with exact assertions
+            // and resets to empty afterward so no test connections leak into
+            // /proc/netmon.
+            fs::netmon::self_test();
+            // swapmon backs /proc/swapmon and the `swapmon` kshell command.  Its
+            // init_defaults() previously seeded a FABRICATED default swap device (a
+            // fictional 4 GiB /dev/sda2 partition shown ~500 MiB used) plus invented
+            // swap-in/out rate counters, which the kshell command and /proc/swapmon
+            // displayed as if they were real swap usage — and none of its mutation APIs
+            // had a single real caller.  Meanwhile the kernel already has a real swap
+            // subsystem (crate::mm::swap, which also backs /proc/swaps).  swapmon is now
+            // a pure read-through over mm::swap + mm::fault with no state of its own, so
+            // this self_test asserts the reporting views are exactly consistent with the
+            // real subsystem (no fabricated fixtures, nothing to leak).
+            fs::swapmon::self_test();
+            // netusage backs /proc/netusage and the `netusage` kshell command.  Its
+            // init_defaults() previously seeded three FABRICATED interfaces (eth0
+            // Ethernet, wlan0 Wi-Fi, lo loopback) with zeroed counters, which the
+            // `netusage interfaces` view displayed as if those NICs existed — presuming
+            // a wired+wifi machine and inconsistent with the real interface registry
+            // (fs::netdev), which seeds empty and registers interfaces only as they come
+            // up.  netusage now seeds an EMPTY table (interfaces appear via
+            // add_interface; per-app usage via record_traffic).  This residue-free
+            // self_test builds its own fixtures via the real API with exact assertions
+            // (including the cap-warning counter, which the old test asserted loosely)
+            // and resets to empty afterward so nothing leaks into /proc/netusage.
+            fs::netusage::self_test();
+            // taskmon is the kernel-side process registry behind /proc/taskmon and the
+            // `taskmon` kshell command.  Its init_defaults() previously seeded three
+            // FABRICATED bootstrap tasks (kernel/init/kshell with invented CPU%, memory,
+            // and thread counts) plus an invented SystemResources snapshot (100% CPU,
+            // 64 MiB used of 1 GiB), which the `taskmon` command displayed as if they
+            // were real processes — while the authoritative live process list is
+            // crate::sched::task_list().  taskmon now seeds an EMPTY registry (tasks
+            // arrive via register_task as proc::spawn / scheduler accounting wire it; see
+            // the DEFERRED PROPER FIX note in todo.txt).  This self_test (never wired
+            // before) builds its own fixtures via the real API with exact assertions and
+            // resets STATE afterward — the old test left `testapp`/`daemon` behind, which
+            // would have leaked into /proc/taskmon now that it runs at boot.
+            fs::taskmon::self_test();
+            // vmmap is the kernel-side VMA monitor behind /proc/vmmap and the `vmmap`
+            // kshell command.  Its init_defaults() previously seeded a FABRICATED pid-1
+            // address space — three invented VMAs ([text] r-x, [heap] rw, [stack] rw)
+            // with made-up resident/dirty page counts and totals — which /proc/vmmap and
+            // the `vmmap` command displayed as if pid 1 were a real process.  The
+            // authoritative per-process VMA list is crate::proc::pcb::list_vmas (already
+            // backing /proc/<pid>/maps).  vmmap now seeds an EMPTY table (VMAs arrive via
+            // create_vma / remove_vma once the memory manager wires mmap/munmap; see the
+            // DEFERRED PROPER FIX note in todo.txt for reading the aggregate view from
+            // pcb::list_vmas).  This self_test (never wired before, and whose old version
+            // relied on the fabricated pid 1 with no end-reset) builds its own fixtures
+            // via the real API with exact assertions and resets STATE afterward so
+            // nothing leaks into /proc/vmmap.
+            fs::vmmap::self_test();
+            // pftrack is the kernel-side page-fault tracker behind /proc/pftrack and the
+            // `pftrack` kshell command.  Its init_defaults() previously seeded three
+            // FABRICATED processes (init pid 1, sshd pid 100, browser pid 200) with
+            // invented minor/major/cow fault counts plus invented system totals
+            // (total_minor 15570, total_major 525, total_faults 16937), which
+            // /proc/pftrack and the hotspots/top_faulters views displayed as if they were
+            // real measured fault activity.  record() has NO real callers — the page-fault
+            // handler does not call it — so the module is entirely unwired; the system-wide
+            // aggregate lives in crate::mm::fault::fault_stats().  pftrack now seeds an
+            // EMPTY table (faults arrive via record once the fault handler wires it; see
+            // the DEFERRED PROPER FIX note in todo.txt).  This self_test (never wired
+            // before, and whose old version relied on the fabricated processes with no
+            // end-reset) builds its own fixtures via the real API with exact assertions
+            // and resets STATE afterward so nothing leaks into /proc/pftrack.
+            fs::pftrack::self_test();
+            // vmfrag is the kernel-side VM-fragmentation monitor behind /proc/vmfrag and
+            // the `vmfrag` kshell command.  Its init_defaults() previously seeded two
+            // FABRICATED zones — `DMA32` and `Normal` (Linux zone names) — with invented
+            // per-order fragmentation indices and compaction counts (5000/50000
+            // compactions) plus invented totals (55000 compactions / 44000 success /
+            // 11000 fail), which /proc/vmfrag displayed as if real.  This kernel has a
+            // single global buddy allocator (crate::mm::frame) with no named-zone taxonomy
+            // and no memory-compaction subsystem, so register_zone/update_index/
+            // record_compaction have NO real callers — the module is entirely unwired.
+            // vmfrag now seeds an EMPTY table (zones arrive via register_zone; see the
+            // DEFERRED PROPER FIX note in todo.txt for computing real indices from the
+            // buddy allocator's per-order free counts).  This self_test (never wired
+            // before, and whose old version relied on the fabricated zones with no
+            // end-reset) builds its own fixtures via the real API with exact assertions
+            // and resets STATE afterward so nothing leaks into /proc/vmfrag.
+            fs::vmfrag::self_test();
+            // ipclog is the kernel-side IPC message log behind /proc/ipclog and the
+            // `ipclog` kshell command.  Its init_defaults() previously seeded three
+            // FABRICATED channels — `system_bus`, `vfs_channel`, `gui_events` — with
+            // invented message/byte/latency/error counts (inconsistent with the system
+            // totals, which were seeded at 0), which /proc/ipclog and the list_channels
+            // view displayed as if real IPC traffic.  record() has NO real callers — the
+            // IPC subsystem (crate::ipc) does not call it — so the module is entirely
+            // unwired.  ipclog now seeds an EMPTY log (channels/messages arrive via record
+            // once the IPC layer wires it; see the DEFERRED PROPER FIX note in todo.txt).
+            // This self_test (never wired before, and whose old version relied on the
+            // fabricated channels with no end-reset) builds its own fixtures via the real
+            // API with exact assertions and resets STATE afterward so nothing leaks into
+            // /proc/ipclog.
+            fs::ipclog::self_test();
+            // telemetry is the kernel-side metric registry behind /proc/telemetry and the
+            // `telemetry` kshell command.  Its init_defaults() previously seeded four
+            // FABRICATED metrics with invented OBSERVED values — cpu.usage_pct 15%,
+            // mem.used_mb 512, disk.iops 1200, net.rx_bytes 1048576 — plus a fabricated
+            // total_samples of 4, which /proc/telemetry and the list_metrics/by_category
+            // views displayed as if real measured telemetry.  record()/register_metric()
+            // have NO real callers — no subsystem publishes telemetry yet — so the registry
+            // is entirely unwired.  telemetry now seeds an EMPTY registry (metrics arrive
+            // via register_metric + record once producers wire it; collection_enabled /
+            // interval are real settings, preserved; see the DEFERRED PROPER FIX note in
+            // todo.txt).  This self_test (never wired before, and whose old version relied
+            // on the fabricated metrics with no end-reset) builds its own fixtures via the
+            // real API with exact assertions and resets STATE afterward so nothing leaks
+            // into /proc/telemetry.
+            fs::telemetry::self_test();
+            // fdtable is the kernel-side FD-table tracker behind /proc/fdtable and the
+            // `fdtable` kshell command.  Its init_defaults() previously seeded two
+            // FABRICATED process FD tables — pid 1 (/dev/console ×3 + /etc/init.conf) and
+            // pid 100 (pipe ×2, /dev/null, socket, /var/log/sshd.log) — plus an invented
+            // total_opens of 9, which /proc/fdtable and the list_tables view displayed as
+            // if real open file descriptors.  The authoritative per-process FD table is the
+            // PCB's linux_fd_table (crate::proc::linux_fd::KernelFdTable); open/close/dup
+            // have NO real callers — the VFS does not call this parallel tracker — so it is
+            // entirely unwired.  fdtable now seeds an EMPTY table (FDs arrive via open/dup
+            // once the VFS wires it; see the DEFERRED PROPER FIX note in todo.txt for
+            // reading the aggregate view from the PCB).  This self_test (never wired before,
+            // and whose old version relied on the fabricated tables with no end-reset)
+            // builds its own fixtures via the real API with exact assertions and resets
+            // STATE afterward so nothing leaks into /proc/fdtable.
+            fs::fdtable::self_test();
+            // sysprofiler is the detailed hardware/software inventory behind
+            // /proc/sysprofiler and the `sysprofiler` kshell command.  Its
+            // init_defaults() previously seeded entirely FABRICATED hardware specs — a
+            // "4-core / 8-thread 3.60 GHz" CPU with invented 256 KB / 1 MB / 8 MB
+            // caches, "8192 MB DDR4 3200 MHz" memory in "2 / 4" slots, an "NVMe SSD
+            // 512 GB / PCIe 4.0 x4" drive, "Integrated Graphics / 512 MB shared", and
+            // "UEFI / Secure Boot Disabled" firmware — none measured, which the
+            // `sysprofiler all`/`summary`/`section` views displayed as if real.  Unlike
+            // the other procfs fabricators in this sweep, REAL sources exist: the CPU
+            // section is now built from live CPUID + topology (crate::cpu /
+            // crate::cpu_topology — vendor/brand/family/cache + logical/physical/SMT
+            // counts) and the Memory section from the real buddy-allocator total
+            // (crate::mm::frame::stats).  Device-dependent sections (Storage, Graphics,
+            // Firmware, …) are left ABSENT rather than fabricated until those
+            // subsystems expose enumeration (see the DEFERRED PROPER FIX note in
+            // todo.txt).  This self_test (never wired before, and whose old version
+            // relied on the fabricated defaults with no end-reset) exercises the real
+            // builders, then rebuilds the real snapshot so /proc/sysprofiler reflects
+            // actual CPU + Memory and not its scratch entries.
+            fs::sysprofiler::self_test();
+            // fs::eventlog is a (redundant, unwired) structured event log behind
+            // /proc/eventlog and the `eventlog` kshell command.  Its init_defaults()
+            // previously seeded two FABRICATED entries — an Info/System/"kernel" "System
+            // boot completed" and "Event log initialized", both stamped with the current
+            // time — plus a fabricated total_logged of 2 and counts_by_severity of
+            // [0, 2, 0, 0, 0], which /proc/eventlog and the query/recent views displayed
+            // as if real logged events.  No subsystem calls log_event(): the kernel's
+            // REAL system event log is the separate crate::eventlog module behind
+            // /proc/sysevents, so this fs::eventlog is an entirely unwired parallel
+            // tracker.  init_defaults now starts EMPTY (no events, zero counters);
+            // entries appear only via log_event once a producer wires it.  This self_test
+            // (never wired before, and whose old version relied on the fabricated entries
+            // with no end-reset) builds its own fixtures via the real API with exact
+            // assertions and resets STATE afterward so nothing leaks into /proc/eventlog.
+            fs::eventlog::self_test();
+            // Register default file type associations, then self-test.
+            fs::associations::register_defaults();
+            if let Err(e) = fs::associations::self_test() {
+                serial_println!("WARNING: File associations self-test failed: {:?}", e);
+            }
+        }
+        case();
     }
 
-    // Run cryptographic self-tests.
-    if let Err(e) = crypto::self_test() {
-        serial_println!("WARNING: SHA-256 self-test failed: {:?}", e);
+    {
+        #[inline(never)]
+        fn case() {
+            // Filesystem quota self-test.
+            if let Err(e) = fs::quota::self_test() {
+                serial_println!("WARNING: Filesystem quota self-test failed: {:?}", e);
+            }
+            // ACL self-test.
+            if let Err(e) = fs::acl::self_test() {
+                serial_println!("WARNING: ACL self-test failed: {:?}", e);
+            }
+            // Filesystem interceptor self-test.
+            if let Err(e) = fs::intercept::self_test() {
+                serial_println!("WARNING: FS interceptor self-test failed: {:?}", e);
+            }
+            // Symlink/hardlink security self-test.
+            if let Err(e) = fs::symlink_security::self_test() {
+                serial_println!("WARNING: Symlink security self-test failed: {:?}", e);
+            }
+            // Resource limits self-test.
+            if let Err(e) = fs::rlimit::self_test() {
+                serial_println!("WARNING: Resource limits self-test failed: {:?}", e);
+            }
+            // Overlay filesystem self-test.
+            if let Err(e) = fs::overlay::self_test() {
+                serial_println!("WARNING: Overlay filesystem self-test failed: {:?}", e);
+            }
+            // Named pipe self-test.
+            if let Err(e) = fs::pipe::self_test() {
+                serial_println!("WARNING: Named pipe self-test failed: {:?}", e);
+            }
+            // Tmpwatch self-test.
+            if let Err(e) = fs::tmpwatch::self_test() {
+                serial_println!("WARNING: Tmpwatch self-test failed: {:?}", e);
+            }
+            // Filesystem audit self-test.
+            if let Err(e) = fs::audit::self_test() {
+                serial_println!("WARNING: Filesystem audit self-test failed: {:?}", e);
+            }
+            // Mount namespace self-test.
+            if let Err(e) = fs::mount_ns::self_test() {
+                serial_println!("WARNING: Mount namespace self-test failed: {:?}", e);
+            }
+            // The byte-oriented path lexer, which the VFS is being converted onto.
+            // If `Path::components` or `Path::starts_with` is wrong then every
+            // containment check built on them is wrong the same way, and that would
+            // surface as a sandbox-escape rather than as a test failure — so it is
+            // worth checking on every boot rather than trusting it.
+            if let Err(e) = fs::path::self_test() {
+                serial_println!("WARNING: Path self-test failed: {:?}", e);
+            }
+            // The byte-string splitters that the kshell parser is being converted
+            // onto. Each one is claimed to behave exactly like its `str` counterpart,
+            // and a ~1500-site mechanical conversion is only safe while that holds —
+            // a helper that differed in one edge case would plant a bug at whichever
+            // site hit it, with nothing in the diff to show for it.
+            if let Err(e) = bytestr::self_test() {
+                serial_println!("WARNING: bytestr self-test failed: {:?}", e);
+            }
+            // The octal escaper that lets those byte paths be written into the
+            // line-oriented text formats (/proc/mounts, the trash index). A bug here
+            // corrupts a file rather than failing loudly, so it is checked on boot.
+            fs::escape::self_test();
+            // Locale and timezone. Both self-tests existed but were never called from
+            // anywhere — a test that never runs is not a test, and these two are the
+            // only coverage the kernel's POSIX `TZ` rule evaluation has.
+            if let Err(e) = fs::locale::self_test() {
+                serial_println!("WARNING: Locale self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::timezone::self_test() {
+                serial_println!("WARNING: Timezone self-test failed: {:?}", e);
+            }
+            // Both self-tests end by clearing their tables, so populate them after.
+            // Without this the zone database stays empty until someone types
+            // `locale init` at the kernel shell, and every offset query answers 0 —
+            // i.e. the kernel silently believes it is in UTC.
+            fs::locale::init_defaults();
+            fs::timezone::init_defaults();
+        }
+        case();
     }
-    if let Err(e) = crypto::self_test_crc32c() {
-        serial_println!("WARNING: CRC32C self-test failed: {:?}", e);
+
+    {
+        #[inline(never)]
+        fn case() {
+            // The 21 modules converted to `PreemptSpinMutex` by the Q24 leaf-lock
+            // sweep (see known-issues.md). Every one of them already had a
+            // `self_test()` and not one of them was called from anywhere, so the
+            // conversion would otherwise have shipped with zero boot coverage --
+            // the same "a test that never runs is not a test" trap as locale and
+            // timezone above. These also exercise the three critical sections that
+            // were restructured to stop calling the VFS under a raw spinlock
+            // (`bookmarks::validate`, `thumbcache::get`, `fileops::create`).
+            if let Err(e) = fs::atime::self_test() {
+                serial_println!("WARNING: atime self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::bookmarks::self_test() {
+                serial_println!("WARNING: bookmarks self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::clipboard::self_test() {
+                serial_println!("WARNING: clipboard self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::columnview::self_test() {
+                serial_println!("WARNING: column view self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::directio::self_test() {
+                serial_println!("WARNING: direct I/O self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::dragdrop::self_test() {
+                serial_println!("WARNING: drag-and-drop self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::fileinfo::self_test() {
+                serial_println!("WARNING: fileinfo self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::fileops::self_test() {
+                serial_println!("WARNING: file operations self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::findex::self_test() {
+                serial_println!("WARNING: findex self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::freeze::self_test() {
+                serial_println!("WARNING: fs freeze self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::fstrim::self_test() {
+                serial_println!("WARNING: fstrim self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::pathbar::self_test() {
+                serial_println!("WARNING: pathbar self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::prefetch::self_test() {
+                serial_println!("WARNING: prefetch self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::preview::self_test() {
+                serial_println!("WARNING: preview self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::profile::self_test() {
+                serial_println!("WARNING: fs profile self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::recent::self_test() {
+                serial_println!("WARNING: recent files self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::sealing::self_test() {
+                serial_println!("WARNING: file sealing self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::sparse::self_test() {
+                serial_println!("WARNING: sparse files self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::templates::self_test() {
+                serial_println!("WARNING: templates self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::thumbcache::self_test() {
+                serial_println!("WARNING: thumbnail cache self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::viewstate::self_test() {
+                serial_println!("WARNING: viewstate self-test failed: {:?}", e);
+            }
+        }
+        case();
     }
-    if let Err(e) = crypto::self_test_crc32() {
-        serial_println!("WARNING: CRC-32 self-test failed: {:?}", e);
-    }
-    if let Err(e) = crypto::self_test_tls_crypto() {
-        serial_println!("WARNING: TLS crypto self-test failed: {:?}", e);
-    }
-    if let Err(e) = crypto::self_test_ed25519() {
-        serial_println!("WARNING: Ed25519/SHA-512 self-test failed: {:?}", e);
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Run cryptographic self-tests.
+            if let Err(e) = crypto::self_test() {
+                serial_println!("WARNING: SHA-256 self-test failed: {:?}", e);
+            }
+            if let Err(e) = crypto::self_test_crc32c() {
+                serial_println!("WARNING: CRC32C self-test failed: {:?}", e);
+            }
+            if let Err(e) = crypto::self_test_crc32() {
+                serial_println!("WARNING: CRC-32 self-test failed: {:?}", e);
+            }
+            if let Err(e) = crypto::self_test_tls_crypto() {
+                serial_println!("WARNING: TLS crypto self-test failed: {:?}", e);
+            }
+            if let Err(e) = crypto::self_test_ed25519() {
+                serial_println!("WARNING: Ed25519/SHA-512 self-test failed: {:?}", e);
+            }
+        }
+        case();
     }
 
     console::boot_step_update(console::BootStatus::Ok, "Storage & filesystems");
 
-    // Interrupts were already enabled earlier (Step 21, just before the ring-3
-    // self-test battery) so the battery runs preemptively.  The two validations
-    // below genuinely require interrupts to be live but do NOT need to run
-    // before the battery, so they stay here at the tail of boot.
+    {
+        #[inline(never)]
+        fn case() {
+            // Interrupts were already enabled earlier (Step 21, just before the ring-3
+            // self-test battery) so the battery runs preemptively.  The two validations
+            // below genuinely require interrupts to be live but do NOT need to run
+            // before the battery, so they stay here at the tail of boot.
 
-    // Test sleep_ns (requires interrupts for hrtimer-based wake).
-    // Runs after interrupts are enabled because the hrtimer callback fires from
-    // the APIC timer ISR.
-    if let Err(e) = sched::test_sleep_ns_postboot() {
-        serial_println!("FATAL: sleep_ns self-test failed: {}", e);
-        cpu::halt_loop();
+            // Test sleep_ns (requires interrupts for hrtimer-based wake).
+            // Runs after interrupts are enabled because the hrtimer callback fires from
+            // the APIC timer ISR.
+            if let Err(e) = sched::test_sleep_ns_postboot() {
+                serial_println!("FATAL: sleep_ns self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+        }
+        case();
     }
 
     // Softirq self-test — verify raise/process/reentry-guard work.
@@ -5227,18 +5413,24 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("[WARN] SSH self-test failed: {:?}", e);
     }
 
-    // Step 22e⅞++++p9: Container lifecycle manager init + self-test.
-    // Unified container abstraction tying PID/user/network namespaces + cgroup
-    // into a single lifecycle with create/start/stop/delete state machine.
-    container::init();
-    container::self_test();
-    // Named-volume registry self-test (Docker `docker volume`). Runs after the
-    // container self-test; exercises the registry against real backing dirs.
-    volume::self_test();
-    // Container-network registry + IPAM self-test (Docker `docker network`).
-    cnetwork::self_test();
-    // Pure parser self-test for the `oci run --memory`/`--cpus` CLI helpers.
-    kshell::cli_resource_parser_self_test();
+    {
+        #[inline(never)]
+        fn case() {
+            // Step 22e⅞++++p9: Container lifecycle manager init + self-test.
+            // Unified container abstraction tying PID/user/network namespaces + cgroup
+            // into a single lifecycle with create/start/stop/delete state machine.
+            container::init();
+            container::self_test();
+            // Named-volume registry self-test (Docker `docker volume`). Runs after the
+            // container self-test; exercises the registry against real backing dirs.
+            volume::self_test();
+            // Container-network registry + IPAM self-test (Docker `docker network`).
+            cnetwork::self_test();
+            // Pure parser self-test for the `oci run --memory`/`--cpus` CLI helpers.
+            kshell::cli_resource_parser_self_test();
+        }
+        case();
+    }
 
     // Step 22e⅞++++p10a: JSON parser self-test.
     // Minimal recursive-descent JSON parser for OCI image manifests.
@@ -5479,24 +5671,30 @@ extern "C" fn kernel_main() -> ! {
 
     console::boot_step_update(console::BootStatus::Ok, "Keyboard & multi-core");
 
-    // Step 22e2: Harden page permissions — set NX on HHDM and fix kernel
-    // section permissions (W^X enforcement for kernel's own pages).
-    console::boot_step(console::BootStatus::Running, "Security hardening");
     {
-        let pml4 = mm::page_table::active_pml4_phys();
+        #[inline(never)]
+        fn case() {
+            // Step 22e2: Harden page permissions — set NX on HHDM and fix kernel
+            // section permissions (W^X enforcement for kernel's own pages).
+            console::boot_step(console::BootStatus::Running, "Security hardening");
+            {
+                let pml4 = mm::page_table::active_pml4_phys();
 
-        let hhdm_hardened = mm::protect::harden_hhdm_nx(pml4);
-        serial_println!(
-            "[protect] HHDM NX hardened: {} PML4 entries updated",
-            hhdm_hardened
-        );
+                let hhdm_hardened = mm::protect::harden_hhdm_nx(pml4);
+                serial_println!(
+                    "[protect] HHDM NX hardened: {} PML4 entries updated",
+                    hhdm_hardened
+                );
 
-        let (sections_hardened, section_errors) = mm::protect::harden_kernel_sections(pml4);
-        serial_println!(
-            "[protect] Kernel section permissions hardened: {} PTEs updated, {} errors",
-            sections_hardened,
-            section_errors
-        );
+                let (sections_hardened, section_errors) = mm::protect::harden_kernel_sections(pml4);
+                serial_println!(
+                    "[protect] Kernel section permissions hardened: {} PTEs updated, {} errors",
+                    sections_hardened,
+                    section_errors
+                );
+            }
+        }
+        case();
     }
 
     // Step 22e3: Memory protection (mprotect / W^X) self-test.
@@ -5587,65 +5785,71 @@ extern "C" fn kernel_main() -> ! {
     virtio::blk::enable_interrupts();
     virtio::net::enable_interrupts();
 
-    // Step 23: Verify the CMOS Real-Time Clock.
-    // No initialization needed — the RTC is always running on battery.
-    // We just verify we can read a plausible date/time.
-    if let Err(e) = rtc::self_test() {
-        serial_println!("WARNING: RTC self-test failed: {}", e);
-        // Non-fatal — the system can function without a correct clock.
-    }
-
-    // Step 23b: Run benchmark infrastructure self-test (fast, validates runner).
-    // The actual micro-benchmarks (bench::run_all) are deferred to a
-    // background kernel task so init can start immediately.  This shaves
-    // ~15-20s off the time-to-usable under QEMU TCG.
-    bench::self_test();
-
-    // Self-test hardware performance counters (PMU).
-    // Must be after CPU feature detection (uses pmu_version/counters from
-    // cpu::features()).  If PMU is unavailable (QEMU without -cpu host),
-    // the test gracefully skips.
-    pmc::self_test();
-
-    // Print a boot-time memory summary via the unified MemoryInfo API.
     {
-        let info = mm::memory_info();
-        serial_println!("=== Memory summary ===");
-        serial_println!("{}", info);
-    }
+        #[inline(never)]
+        fn case() {
+            // Step 23: Verify the CMOS Real-Time Clock.
+            // No initialization needed — the RTC is always running on battery.
+            // We just verify we can read a plausible date/time.
+            if let Err(e) = rtc::self_test() {
+                serial_println!("WARNING: RTC self-test failed: {}", e);
+                // Non-fatal — the system can function without a correct clock.
+            }
 
-    console::boot_step_update(console::BootStatus::Ok, "Performance tuning");
+            // Step 23b: Run benchmark infrastructure self-test (fast, validates runner).
+            // The actual micro-benchmarks (bench::run_all) are deferred to a
+            // background kernel task so init can start immediately.  This shaves
+            // ~15-20s off the time-to-usable under QEMU TCG.
+            bench::self_test();
 
-    // Step 22b: Spawn kswapd (background page reclaimer).
-    // Must be after swap init (Step 9c/20e) and scheduler (Step 10).
-    // kswapd proactively reclaims pages when free memory drops below
-    // the low watermark, preventing allocation stalls under memory
-    // pressure.
-    match mm::kswapd::spawn() {
-        Ok(()) => {}
-        Err(e) => {
-            serial_println!("[boot] WARNING: failed to spawn kswapd: {:?}", e);
-            // Non-fatal — the system will fall back to synchronous
-            // reclamation in alloc_order().
+            // Self-test hardware performance counters (PMU).
+            // Must be after CPU feature detection (uses pmu_version/counters from
+            // cpu::features()).  If PMU is unavailable (QEMU without -cpu host),
+            // the test gracefully skips.
+            pmc::self_test();
+
+            // Print a boot-time memory summary via the unified MemoryInfo API.
+            {
+                let info = mm::memory_info();
+                serial_println!("=== Memory summary ===");
+                serial_println!("{}", info);
+            }
+
+            console::boot_step_update(console::BootStatus::Ok, "Performance tuning");
+
+            // Step 22b: Spawn kswapd (background page reclaimer).
+            // Must be after swap init (Step 9c/20e) and scheduler (Step 10).
+            // kswapd proactively reclaims pages when free memory drops below
+            // the low watermark, preventing allocation stalls under memory
+            // pressure.
+            match mm::kswapd::spawn() {
+                Ok(()) => {}
+                Err(e) => {
+                    serial_println!("[boot] WARNING: failed to spawn kswapd: {:?}", e);
+                    // Non-fatal — the system will fall back to synchronous
+                    // reclamation in alloc_order().
+                }
+            }
+            mm::kswapd::self_test();
+            mm::oom::self_test();
+            mm::accounting::self_test();
+            mm::rlimits::self_test();
+            mm::pressure::self_test();
+            mm::mempool::self_test();
+
+            // Step 22c: Spawn workqueue worker task.
+            // Provides deferred work execution in full process context (can sleep,
+            // allocate, take locks).  Must be after scheduler (Step 10).
+            match workqueue::init() {
+                Ok(()) => {}
+                Err(e) => {
+                    serial_println!("[boot] WARNING: failed to spawn workqueue worker: {:?}", e);
+                }
+            }
+            workqueue::self_test();
         }
+        case();
     }
-    mm::kswapd::self_test();
-    mm::oom::self_test();
-    mm::accounting::self_test();
-    mm::rlimits::self_test();
-    mm::pressure::self_test();
-    mm::mempool::self_test();
-
-    // Step 22c: Spawn workqueue worker task.
-    // Provides deferred work execution in full process context (can sleep,
-    // allocate, take locks).  Must be after scheduler (Step 10).
-    match workqueue::init() {
-        Ok(()) => {}
-        Err(e) => {
-            serial_println!("[boot] WARNING: failed to spawn workqueue worker: {:?}", e);
-        }
-    }
-    workqueue::self_test();
 
     // Step 22d: Kernel timers self-test.
     // ktimer fires callbacks via the workqueue after a tick-based delay.
@@ -5691,194 +5895,206 @@ extern "C" fn kernel_main() -> ! {
     // entropy during the boot process (ISR timing mixed in).
     rng::self_test();
 
-    // Zero-on-free test — runs here because it needs HHDM + per-CPU
-    // caches, which aren't available during the early frame allocator
-    // self-test (test 7 skips there with "HHDM not ready").
-    if let Err(e) = mm::frame::test_zero_on_free() {
-        serial_println!("[FATAL] Zero-on-free self-test failed: {:?}", e);
-    }
-
-    boot_timing::mark(boot_timing::Milestone::SelfTests);
-
-    // Security posture summary — one consolidated view of active protections.
-    print_security_posture();
-
-    // End-to-end cgroup memory-charging test.  Runs as a live scheduler
-    // task (not an inline kmain self-test) so `current_task_cgroup()`
-    // resolves to a real task and the ambient frame-allocator charging
-    // path is exercised — the piece D-CGROUP-TASK-UNASSIGNED said was
-    // untestable in the no-task kmain self-test context.  Spawned and
-    // awaited *before* BOOT_OK so its PASS/FAIL line lands on the serial
-    // log before the boot harness tears QEMU down.
     {
-        let e2e_pml4 = mm::page_table::active_pml4_phys();
-        match sched::spawn(
-            b"cgroup-e2e",
-            sched::task::DEFAULT_PRIORITY,
-            cgroup_e2e_test_task,
-            0,
-            e2e_pml4,
-        ) {
-            Ok(tid) => {
-                serial_println!("[boot] cgroup e2e test task spawned (tid={})", tid);
-                // Bounded wait: yield until the task signals completion.
-                // Capped so a hung test can never wedge boot — if the cap
-                // is hit we log a warning and proceed (the boot still
-                // succeeds; the test result is simply absent).
-                let mut spins: u32 = 0;
-                while !CGROUP_E2E_DONE.load(core::sync::atomic::Ordering::Acquire) {
-                    sched::yield_now();
-                    spins = spins.saturating_add(1);
-                    if spins >= 2_000_000 {
-                        serial_println!("[boot] WARNING: cgroup e2e task did not finish in time");
-                        break;
+        #[inline(never)]
+        fn case() {
+            // Zero-on-free test — runs here because it needs HHDM + per-CPU
+            // caches, which aren't available during the early frame allocator
+            // self-test (test 7 skips there with "HHDM not ready").
+            if let Err(e) = mm::frame::test_zero_on_free() {
+                serial_println!("[FATAL] Zero-on-free self-test failed: {:?}", e);
+            }
+
+            boot_timing::mark(boot_timing::Milestone::SelfTests);
+
+            // Security posture summary — one consolidated view of active protections.
+            print_security_posture();
+
+            // End-to-end cgroup memory-charging test.  Runs as a live scheduler
+            // task (not an inline kmain self-test) so `current_task_cgroup()`
+            // resolves to a real task and the ambient frame-allocator charging
+            // path is exercised — the piece D-CGROUP-TASK-UNASSIGNED said was
+            // untestable in the no-task kmain self-test context.  Spawned and
+            // awaited *before* BOOT_OK so its PASS/FAIL line lands on the serial
+            // log before the boot harness tears QEMU down.
+            {
+                let e2e_pml4 = mm::page_table::active_pml4_phys();
+                match sched::spawn(
+                    b"cgroup-e2e",
+                    sched::task::DEFAULT_PRIORITY,
+                    cgroup_e2e_test_task,
+                    0,
+                    e2e_pml4,
+                ) {
+                    Ok(tid) => {
+                        serial_println!("[boot] cgroup e2e test task spawned (tid={})", tid);
+                        // Bounded wait: yield until the task signals completion.
+                        // Capped so a hung test can never wedge boot — if the cap
+                        // is hit we log a warning and proceed (the boot still
+                        // succeeds; the test result is simply absent).
+                        let mut spins: u32 = 0;
+                        while !CGROUP_E2E_DONE.load(core::sync::atomic::Ordering::Acquire) {
+                            sched::yield_now();
+                            spins = spins.saturating_add(1);
+                            if spins >= 2_000_000 {
+                                serial_println!("[boot] WARNING: cgroup e2e task did not finish in time");
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        serial_println!("[boot] WARNING: failed to spawn cgroup e2e task: {:?}", e);
                     }
                 }
             }
-            Err(e) => {
-                serial_println!("[boot] WARNING: failed to spawn cgroup e2e task: {:?}", e);
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Net→userspace cutover (§63/§66), switch-ON branch. Deferred to here — past
+            // every boot self-test — for the same reason as the health monitor below:
+            // the persistent daemon owns the NIC and runs continuously, which would
+            // perturb the timing-sensitive timeout self-tests (channel/futex/eventfd
+            // recv-with-timeout) and the hrtimer pending-count assertions if it were
+            // already running while they execute. Spawning it here — after POST, before
+            // BOOT_OK and before any userspace process — means the NIC is owned for the
+            // system's lifetime by the time init/shell come up, while kernel
+            // self-verification still ran in a quiet system. Skipped when the switch is
+            // off (the in-kernel resident stack owns the NIC; bounded net self-tests
+            // already ran earlier).
+            if crate::net::netstack_client::userspace_enabled() {
+                if let Err(e) = proc::spawn::run_persistent_netstack() {
+                    serial_println!(
+                        "WARNING: persistent userspace netstack (ring 3) startup failed: {:?}",
+                        e
+                    );
+                }
+            }
+
+            // Arm the container healthcheck supervisor. Deferred to here — after every
+            // timer self-test (the hrtimer self-test asserts an exact `pending_count`,
+            // which a persistent repeating timer would break) — so it only goes live
+            // once the system is otherwise fully initialised. The periodic tick fires in
+            // ISR context and hands off to the (already-live) workqueue worker.
+            container::start_health_monitor();
+
+            // Re-verify lockdep's O(1) class index now that the table is populated.
+            //
+            // The same check runs inside `lockdep::self_test()`, but that executes in
+            // early boot with ~3 classes registered, while by this point there are ~43.
+            // A probe-sequence bug in the hash index needs a populated table to show
+            // itself, and its symptom is silence — a missed lookup registers a second
+            // class for the same lock, splits that lock's dependency edges across two
+            // graph nodes, and stops cycles ever being found through it.
+            //
+            // Deliberately placed BEFORE the BOOT_OK marker. It was first written after
+            // it, which meant `boot-test.sh` (which kills QEMU at BOOT_OK unless
+            // `--bench` is given) never saw the line — a check that in practice ran only
+            // on the longer benchmark boots, i.e. only when someone was already looking.
+            // That is the exact failure mode this check exists to prevent, so it must
+            // sit inside the window the boot test observes.
+            lockdep::verify_class_index("populated");
+
+            // The syscall filter's pid index, same reasoning one subsystem over — but
+            // note honestly what this call does and does not prove.  By BOOT_OK the
+            // filter table is normally *empty*, so the lookup paths are barely
+            // exercised here; the real index test is inside `scfilter::self_test`,
+            // which verifies with filters installed and with two pids deliberately
+            // forced into the same hash bucket.
+            //
+            // What this placement does prove is that the self-tests drained what they
+            // installed: `ACTIVE_FILTERS` must agree with a linear count of active
+            // slots.  If a test leaked a filter, that counter stays non-zero and every
+            // syscall for the rest of the boot takes a table lock it does not need —
+            // precisely the failure the namespace self-tests had, where a leaked
+            // `NS_FEATURES_ACTIVE` silently cost every VFS operation three spinlocks
+            // for the whole run and went unnoticed until a benchmark contradicted it.
+            scfilter::verify_index("boot");
+
+            // Kernel-stack depth census.  Sited here — after every self-test, but
+            // BEFORE the BOOT_OK marker — for two independent reasons:
+            //
+            //  * The scheduler's own self-test runs ~1100 log lines before the
+            //    process-spawn tests, which drive by far the deepest kernel stacks in
+            //    the system (spawn_process -> ELF parse -> page-table walk).  A census
+            //    there would systematically miss the tasks that matter.
+            //  * Anything printed after BOOT_OK is not printed at all as far as the
+            //    boot test is concerned: the harness stops at the marker and kills
+            //    QEMU, so output below it never reaches the log.
+            //
+            // It reports rather than gates: a deep stack is a condition the operator
+            // needs to see, not a reason to refuse to boot.
+            sched::report_stack_census();
+
+            // Boot success marker — the boot test script greps for this.
+            // Printed synchronously so it appears within seconds of power-on,
+            // regardless of how long deferred benchmarks take.
+            serial_println!("=== Kernel boot complete ===");
+            serial_println!("BOOT_OK");
+            boot_timing::mark(boot_timing::Milestone::ShellReady);
+
+            // Disarm the boot-window liveness watchdog: past BOOT_OK the system may
+            // legitimately go idle at an interactive prompt (all tasks blocked on the
+            // keyboard), which — without a per-task block-reason field — is
+            // indistinguishable from the hang the watchdog looks for.  Its job (guard
+            // the continuous-progress boot window) is done.
+            sched::liveness_disarm();
+
+            // Disarm the hard-lockup NMI watchdog too: past BOOT_OK the BSP may
+            // legitimately go long stretches without a timer tick (idle at a prompt),
+            // which would otherwise trip the watchdog. No-op if it was never present.
+            hardlockup::disarm();
+
+            // Enable file-history auto-versioning now that boot is complete. It starts
+            // disabled (see fs::history's static HISTORY init) so that the boot-time
+            // staging of OS system files — which runs with interrupts disabled before
+            // "Step 21: Enable hardware interrupts" — does not trigger multi-megabyte
+            // SHA-256 hashes of overwritten content under IF=0. Such a hash starved the
+            // timer-driven hard-lockup watchdog kick and tripped a false-positive NMI
+            // that looked like an intermittent BSP-dead hang (known-issues.md
+            // B-PTHREAD-YIELDBUDGET). Past BOOT_OK the BSP is preemptible (IF=1) and OS
+            // staging is done, so auto-versioning of real user-data writes is safe.
+            fs::history::set_auto_version(true);
+
+            // Show boot-complete on the framebuffer console too.
+            console_println!();
+            console_println!("=== Kernel boot complete ===");
+
+            // Play the boot-complete notification sound (uses mixer if available,
+            // falls back to PC speaker chime).
+            audio_notify::play(audio_notify::NotifySound::BootComplete);
+
+            // Spawn the background mouse cursor task.
+            // Continuously drains mouse events and updates the framebuffer cursor,
+            // keeping cursor movement smooth even under load.
+            mouse::spawn_cursor_task();
+
+            // Spawn a low-priority kernel task to run micro-benchmarks in the
+            // background.  This lets init start immediately while benchmarks
+            // run interleaved with normal scheduling.
+            let pml4 = mm::page_table::active_pml4_phys();
+            match sched::spawn(
+                b"bench",
+                sched::task::DEFAULT_PRIORITY.saturating_add(2), // slightly below default
+                deferred_bench_task,
+                0,
+                pml4,
+            ) {
+                Ok(tid) => {
+                    serial_println!("[boot] Deferred benchmark task spawned (tid={})", tid);
+                }
+                Err(e) => {
+                    serial_println!("[boot] WARNING: failed to spawn bench task: {:?}", e);
+                    // Fall back to inline benchmarks so we still get numbers.
+                    bench::run_all();
+                    serial_println!("BENCH_OK");
+                }
             }
         }
-    }
-
-    // Net→userspace cutover (§63/§66), switch-ON branch. Deferred to here — past
-    // every boot self-test — for the same reason as the health monitor below:
-    // the persistent daemon owns the NIC and runs continuously, which would
-    // perturb the timing-sensitive timeout self-tests (channel/futex/eventfd
-    // recv-with-timeout) and the hrtimer pending-count assertions if it were
-    // already running while they execute. Spawning it here — after POST, before
-    // BOOT_OK and before any userspace process — means the NIC is owned for the
-    // system's lifetime by the time init/shell come up, while kernel
-    // self-verification still ran in a quiet system. Skipped when the switch is
-    // off (the in-kernel resident stack owns the NIC; bounded net self-tests
-    // already ran earlier).
-    if crate::net::netstack_client::userspace_enabled() {
-        if let Err(e) = proc::spawn::run_persistent_netstack() {
-            serial_println!(
-                "WARNING: persistent userspace netstack (ring 3) startup failed: {:?}",
-                e
-            );
-        }
-    }
-
-    // Arm the container healthcheck supervisor. Deferred to here — after every
-    // timer self-test (the hrtimer self-test asserts an exact `pending_count`,
-    // which a persistent repeating timer would break) — so it only goes live
-    // once the system is otherwise fully initialised. The periodic tick fires in
-    // ISR context and hands off to the (already-live) workqueue worker.
-    container::start_health_monitor();
-
-    // Re-verify lockdep's O(1) class index now that the table is populated.
-    //
-    // The same check runs inside `lockdep::self_test()`, but that executes in
-    // early boot with ~3 classes registered, while by this point there are ~43.
-    // A probe-sequence bug in the hash index needs a populated table to show
-    // itself, and its symptom is silence — a missed lookup registers a second
-    // class for the same lock, splits that lock's dependency edges across two
-    // graph nodes, and stops cycles ever being found through it.
-    //
-    // Deliberately placed BEFORE the BOOT_OK marker. It was first written after
-    // it, which meant `boot-test.sh` (which kills QEMU at BOOT_OK unless
-    // `--bench` is given) never saw the line — a check that in practice ran only
-    // on the longer benchmark boots, i.e. only when someone was already looking.
-    // That is the exact failure mode this check exists to prevent, so it must
-    // sit inside the window the boot test observes.
-    lockdep::verify_class_index("populated");
-
-    // The syscall filter's pid index, same reasoning one subsystem over — but
-    // note honestly what this call does and does not prove.  By BOOT_OK the
-    // filter table is normally *empty*, so the lookup paths are barely
-    // exercised here; the real index test is inside `scfilter::self_test`,
-    // which verifies with filters installed and with two pids deliberately
-    // forced into the same hash bucket.
-    //
-    // What this placement does prove is that the self-tests drained what they
-    // installed: `ACTIVE_FILTERS` must agree with a linear count of active
-    // slots.  If a test leaked a filter, that counter stays non-zero and every
-    // syscall for the rest of the boot takes a table lock it does not need —
-    // precisely the failure the namespace self-tests had, where a leaked
-    // `NS_FEATURES_ACTIVE` silently cost every VFS operation three spinlocks
-    // for the whole run and went unnoticed until a benchmark contradicted it.
-    scfilter::verify_index("boot");
-
-    // Kernel-stack depth census.  Sited here — after every self-test, but
-    // BEFORE the BOOT_OK marker — for two independent reasons:
-    //
-    //  * The scheduler's own self-test runs ~1100 log lines before the
-    //    process-spawn tests, which drive by far the deepest kernel stacks in
-    //    the system (spawn_process -> ELF parse -> page-table walk).  A census
-    //    there would systematically miss the tasks that matter.
-    //  * Anything printed after BOOT_OK is not printed at all as far as the
-    //    boot test is concerned: the harness stops at the marker and kills
-    //    QEMU, so output below it never reaches the log.
-    //
-    // It reports rather than gates: a deep stack is a condition the operator
-    // needs to see, not a reason to refuse to boot.
-    sched::report_stack_census();
-
-    // Boot success marker — the boot test script greps for this.
-    // Printed synchronously so it appears within seconds of power-on,
-    // regardless of how long deferred benchmarks take.
-    serial_println!("=== Kernel boot complete ===");
-    serial_println!("BOOT_OK");
-    boot_timing::mark(boot_timing::Milestone::ShellReady);
-
-    // Disarm the boot-window liveness watchdog: past BOOT_OK the system may
-    // legitimately go idle at an interactive prompt (all tasks blocked on the
-    // keyboard), which — without a per-task block-reason field — is
-    // indistinguishable from the hang the watchdog looks for.  Its job (guard
-    // the continuous-progress boot window) is done.
-    sched::liveness_disarm();
-
-    // Disarm the hard-lockup NMI watchdog too: past BOOT_OK the BSP may
-    // legitimately go long stretches without a timer tick (idle at a prompt),
-    // which would otherwise trip the watchdog. No-op if it was never present.
-    hardlockup::disarm();
-
-    // Enable file-history auto-versioning now that boot is complete. It starts
-    // disabled (see fs::history's static HISTORY init) so that the boot-time
-    // staging of OS system files — which runs with interrupts disabled before
-    // "Step 21: Enable hardware interrupts" — does not trigger multi-megabyte
-    // SHA-256 hashes of overwritten content under IF=0. Such a hash starved the
-    // timer-driven hard-lockup watchdog kick and tripped a false-positive NMI
-    // that looked like an intermittent BSP-dead hang (known-issues.md
-    // B-PTHREAD-YIELDBUDGET). Past BOOT_OK the BSP is preemptible (IF=1) and OS
-    // staging is done, so auto-versioning of real user-data writes is safe.
-    fs::history::set_auto_version(true);
-
-    // Show boot-complete on the framebuffer console too.
-    console_println!();
-    console_println!("=== Kernel boot complete ===");
-
-    // Play the boot-complete notification sound (uses mixer if available,
-    // falls back to PC speaker chime).
-    audio_notify::play(audio_notify::NotifySound::BootComplete);
-
-    // Spawn the background mouse cursor task.
-    // Continuously drains mouse events and updates the framebuffer cursor,
-    // keeping cursor movement smooth even under load.
-    mouse::spawn_cursor_task();
-
-    // Spawn a low-priority kernel task to run micro-benchmarks in the
-    // background.  This lets init start immediately while benchmarks
-    // run interleaved with normal scheduling.
-    let pml4 = mm::page_table::active_pml4_phys();
-    match sched::spawn(
-        b"bench",
-        sched::task::DEFAULT_PRIORITY.saturating_add(2), // slightly below default
-        deferred_bench_task,
-        0,
-        pml4,
-    ) {
-        Ok(tid) => {
-            serial_println!("[boot] Deferred benchmark task spawned (tid={})", tid);
-        }
-        Err(e) => {
-            serial_println!("[boot] WARNING: failed to spawn bench task: {:?}", e);
-            // Fall back to inline benchmarks so we still get numbers.
-            bench::run_all();
-            serial_println!("BENCH_OK");
-        }
+        case();
     }
 
     // Step 24: Spawn the userspace init process (PID 1).

@@ -38,6 +38,33 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "bench-history.py")
 HISTORY = os.path.join(REPO_ROOT, "bench", "history.jsonl")
 
+#: `bench/history.jsonl` frozen at cdca0c86d (2026-08-15, 26 records), the
+#: commit that characterised `http_build_response_1KiB`'s two modes and added
+#: the controls that assert them.
+#:
+#: Most tests here read the *live* HISTORY on purpose, and should keep doing so:
+#: they either check a property that must survive growth ("every committed
+#: record still loads", "the detector stays quiet on most real runs") or they
+#: SKIP by design once the runs they name age out.  Two did neither.  They
+#: assert an exact verdict -- `mode-structured` -- for one named series, and
+#: that is a claim about a *particular set of measurements*, so every later
+#: benchmark boot appending to the file was evidence they never consented to.
+#: 37 rows later the series classifies as `run-noise` and both failed, with no
+#: code change: on 2026-08-18 the file at cdca0c86d still passes them and the
+#: file at HEAD does not.
+#:
+#: A positive control has to be reproducible to be a control, so it gets the
+#: data it was written against.  This is still real project data, not a
+#: synthetic fixture -- it is the very history the false bisection happened on.
+FROZEN_HISTORY = os.path.join(
+    REPO_ROOT, "scripts", "fixtures", "bench-history-2026-08-15.jsonl")
+
+#: The commit both records of the documented A/A pair were measured at -- two
+#: runs of one binary that the harness once reported as regressions against each
+#: other.  Named here rather than reached as "the last two records", which is
+#: what it was when the control was written and what quietly disabled it.
+AA_COMMIT = "602fc62e0"
+
 _FAILURES = []
 
 
@@ -1814,12 +1841,16 @@ def test_mode_structure_on_the_real_history(bh):
     `http_build_response_1KiB` is the series that was bisected across three
     commits for a regression that did not exist; `vfs_stat_root` is the series
     from the same runs that is *not* mode-structured. The check has to
-    separate them, on the real file, or it has not earned the right to
-    suppress a build failure.
+    separate them, on real data, or it has not earned the right to suppress a
+    build failure.
+
+    Reads FROZEN_HISTORY, not the live file: this asserts a verdict about a
+    specific set of measurements, and the live file grows on every benchmark
+    boot. See FROZEN_HISTORY for what that cost.
     """
-    records = bh.load_history(os.path.join(REPO_ROOT, "bench", "history.jsonl"))
+    records = bh.load_history(FROZEN_HISTORY)
     if not records:
-        print("SKIP  mode structure on real history (no history file)")
+        check("the frozen history fixture is present", False, True)
         return
 
     http = bh.mode_structure(
@@ -1845,10 +1876,13 @@ def test_mode_split_search_finds_what_a_fixed_fence_misses(bh):
     fence (9103 ns) had been widened by the baseline window already containing
     both modes, landing it inside the HIGH mode's spread where commit
     `26c1c7330` straddles it. The build kept failing on a layout re-roll.
+
+    Reads FROZEN_HISTORY for the same reason as the control above: the split it
+    looks for is the gap between two modes in one particular set of runs.
     """
-    records = bh.load_history(os.path.join(REPO_ROOT, "bench", "history.jsonl"))
+    records = bh.load_history(FROZEN_HISTORY)
     if not records:
-        print("SKIP  mode split search on real history (no history file)")
+        check("the frozen history fixture is present", False, True)
         return
     args = (records, "Logoplex3", "release", "http_build_response_1KiB")
 
@@ -2101,13 +2135,22 @@ def test_replication_declines_the_measured_false_positives(bh):
     records = [json.loads(line) for line in
                open(HISTORY, encoding="utf-8").read().splitlines()
                if line.strip()]
-    if len(records) < 2 or records[-1].get("commit") != records[-2].get("commit"):
-        print("SKIP  A/A control (the last two records no longer share a commit)")
+
+    # The pair is found by the commit it is documented under, not by taking the
+    # last two records.  It *was* the tail when this was written, and reading it
+    # that way meant every later benchmark boot pushed the control out of reach:
+    # by 2026-08-18 it had been silently SKIPping for 29 appended rows, which is
+    # a positive control that has stopped controlling while still printing a
+    # line.  The pair itself is still right there at indices 33/34.
+    at = [i for i, r in enumerate(records) if r.get("commit") == AA_COMMIT]
+    if len(at) < 2:
+        check(f"the documented A/A pair ({AA_COMMIT}) is still in history",
+              False, True)
         return
 
-    run_b = records[-1]
+    run_b = records[at[1]]
     host, profile = run_b["host"], bh.record_profile(run_b)
-    prior = records[:-1]
+    prior = records[:at[1]]
     previous = bh.previous_for_host(prior, host, profile)
     current = {name: (value, 10 ** 9, "OK", None, None)
                for name, value in run_b["entries"].items()}

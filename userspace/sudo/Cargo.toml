@@ -9,3 +9,8 @@ description = "SlateOS sudo utility"
 # admitted *everyone* if the file was absent. See `design-decisions.md` §330.
 [dependencies]
 userdb = { path = "../userdb" }
+
+# The defensive lint set from `CLAUDE.md`. The crate that grants root is the
+# last one that should panic on an argument someone chose.
+[lints]
+workspace = true

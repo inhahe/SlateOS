@@ -53,7 +53,7 @@ use std::path::Path;
 use std::process;
 
 use coreutils::errmsg::strerror;
-use ere::{Regex, bre};
+use ere::{MatchLimit, Regex, bre};
 
 /// Which language the patterns are written in.
 #[derive(Clone, Copy, Default)]
@@ -367,18 +367,33 @@ fn accepted(span: (usize, usize), line: &[u8], opts: &Options) -> bool {
     true
 }
 
+/// Where a match sits, or that the search gave up.
+///
+/// The third outcome is the point of the `Result`. `-v` prints every line that
+/// did *not* match, and `grep -v` feeding an `xargs rm` is a real shape of
+/// script; reading "I abandoned the search" as "did not match" would delete
+/// files on the strength of a question grep declined to answer. Only a pattern
+/// with a backreference can produce one.
+type Match = Result<Option<(usize, usize)>, MatchLimit>;
+
+/// Report an abandoned search as an I/O error, which is the channel this
+/// program already uses to fail a file with a diagnostic and a non-zero status.
+fn limit_err(e: MatchLimit) -> io::Error {
+    io::Error::other(e.to_string())
+}
+
 /// The leftmost-longest match of any pattern at or after byte offset `from`.
 ///
 /// Several patterns are several searches; the winner is the one that starts
 /// earliest, and among those the longest — the same rule the engine applies
 /// within one pattern, extended across the set so that `-e ab -e abc` behaves
 /// like `abc\|ab`.
-fn leftmost(pats: &[Pat], line: &[u8], from: usize) -> Option<(usize, usize)> {
+fn leftmost(pats: &[Pat], line: &[u8], from: usize) -> Match {
     let mut best: Option<(usize, usize)> = None;
     for p in pats {
         let found = match p {
             Pat::Empty => (from <= line.len()).then_some((from, from)),
-            Pat::Re(re) => re.find_at(line, from),
+            Pat::Re(re) => re.find_at(line, from)?,
         };
         if let Some((s, e)) = found {
             best = Some(match best {
@@ -387,16 +402,18 @@ fn leftmost(pats: &[Pat], line: &[u8], from: usize) -> Option<(usize, usize)> {
             });
         }
     }
-    best
+    Ok(best)
 }
 
 /// The leftmost match at or after `from` that also satisfies `-w`/`-x`.
-fn next_match(pats: &[Pat], line: &[u8], from: usize, opts: &Options) -> Option<(usize, usize)> {
+fn next_match(pats: &[Pat], line: &[u8], from: usize, opts: &Options) -> Match {
     let mut pos = from;
     loop {
-        let cand = leftmost(pats, line, pos)?;
+        let Some(cand) = leftmost(pats, line, pos)? else {
+            return Ok(None);
+        };
         if accepted(cand, line, opts) {
-            return Some(cand);
+            return Ok(Some(cand));
         }
         // Retry one byte on rather than past the candidate: a match that *is* a
         // word can begin inside one that is not, as `-w` on `xfoo foo` shows.
@@ -404,17 +421,21 @@ fn next_match(pats: &[Pat], line: &[u8], from: usize, opts: &Options) -> Option<
         // byte cannot land inside a character.
         pos = cand.0.saturating_add(1);
         if pos > line.len() {
-            return None;
+            return Ok(None);
         }
     }
 }
 
 /// Every non-overlapping accepted match of the line, left to right — what `-o`
 /// prints.
-fn matches_in(pats: &[Pat], line: &[u8], opts: &Options) -> Vec<(usize, usize)> {
+fn matches_in(
+    pats: &[Pat],
+    line: &[u8],
+    opts: &Options,
+) -> Result<Vec<(usize, usize)>, MatchLimit> {
     let mut out = Vec::new();
     let mut pos = 0;
-    while let Some((s, e)) = next_match(pats, line, pos, opts) {
+    while let Some((s, e)) = next_match(pats, line, pos, opts)? {
         out.push((s, e));
         // An empty match is at a position rather than over one, so the scan has
         // to step past it or it would be found here for ever.
@@ -423,13 +444,13 @@ fn matches_in(pats: &[Pat], line: &[u8], opts: &Options) -> Vec<(usize, usize)> 
             break;
         }
     }
-    out
+    Ok(out)
 }
 
 /// Whether the line is selected, `-v` included.
-fn line_selected(line: &[u8], pats: &[Pat], opts: &Options) -> bool {
-    let matched = next_match(pats, line, 0, opts).is_some();
-    matched != opts.invert
+fn line_selected(line: &[u8], pats: &[Pat], opts: &Options) -> Result<bool, MatchLimit> {
+    let matched = next_match(pats, line, 0, opts)?.is_some();
+    Ok(matched != opts.invert)
 }
 
 /// What a file is called in output. Standard input is spelled `-` on the
@@ -620,7 +641,7 @@ fn search_stream(
         // is still a line.
         let body = line.strip_suffix(b"\n").unwrap_or(&line);
 
-        if line_selected(body, pats, opts) {
+        if line_selected(body, pats, opts).map_err(limit_err)? {
             match_count = match_count.saturating_add(1);
             if stop_at_first {
                 return Ok(true);
@@ -632,7 +653,7 @@ fn search_stream(
                     // did not match is the whole line, and GNU declines to call
                     // that a match.
                     if !opts.invert {
-                        for (s, e) in matches_in(pats, body, opts) {
+                        for (s, e) in matches_in(pats, body, opts).map_err(limit_err)? {
                             out.write_all(prefix.as_bytes())?;
                             out.write_all(body.get(s..e).unwrap_or_default())?;
                             out.write_all(b"\n")?;
@@ -699,8 +720,10 @@ mod tests {
         compile_patterns(&[pattern.as_bytes().to_vec()], opts).unwrap()
     }
 
+    /// The `unwrap` is the assertion: a test pattern that exhausted the
+    /// backtracking budget would be a bug in the budget, not in the test.
     fn selects(line: &str, pattern: &str, opts: &Options) -> bool {
-        line_selected(line.as_bytes(), &pats(pattern, opts), opts)
+        line_selected(line.as_bytes(), &pats(pattern, opts), opts).unwrap()
     }
 
     // ---------------- parse_args ----------------
@@ -933,10 +956,39 @@ mod tests {
         };
         let err = compile_patterns(&[b"a[".to_vec()], &o).err().unwrap();
         assert!(err.contains("a["), "{err}");
-        // A backreference cannot be evaluated by this engine, and is refused
-        // rather than quietly becoming the digit it looks like.
-        let err = compile_patterns(&[b"\\(a\\)\\1".to_vec()], &Options::default()).err();
-        assert!(err.is_some_and(|e| !e.is_empty()));
+        // A reference to a group the pattern does not have is a compile error,
+        // not a literal digit.
+        let err = compile_patterns(&[b"\\(a\\)\\2".to_vec()], &Options::default())
+            .err()
+            .unwrap();
+        assert!(err.contains("backreference"), "{err}");
+    }
+
+    #[test]
+    fn a_backreference_selects_a_line_that_repeats_itself() {
+        let o = Options::default();
+        assert!(selects("abcabc", "\\(abc\\)\\1", &o));
+        assert!(!selects("abcdef", "\\(abc\\)\\1", &o));
+        // The same pattern in ERE syntax, where the parentheses are bare.
+        let e = Options {
+            syntax: Syntax::Extended,
+            ..Options::default()
+        };
+        assert!(selects("xyxy", "(xy)\\1", &e));
+        assert!(!selects("xyzy", "(xy)\\1", &e));
+    }
+
+    #[test]
+    fn a_pathological_backreference_gives_up_rather_than_hanging() {
+        // Backreference matching is NP-hard, so the engine spends a budget and
+        // then declines to answer. `line_selected` must report that as an error
+        // and not as "did not match" — `-v` would otherwise print the line.
+        let o = Options::default();
+        let pats =
+            compile_patterns(&[b"\\(a*\\)\\(a*\\)\\(a*\\)\\(a*\\)\\(a*\\)\\1\\2\\3\\4\\5b".to_vec()], &o)
+                .unwrap();
+        let line = vec![b'a'; 300];
+        assert!(line_selected(&line, &pats, &o).is_err());
     }
 
     #[test]
@@ -951,9 +1003,9 @@ mod tests {
     fn several_patterns_are_matched_as_one_set() {
         let o = Options::default();
         let p = compile_patterns(&[b"foo".to_vec(), b"^bar".to_vec()], &o).unwrap();
-        assert!(line_selected(b"a foo b", &p, &o));
-        assert!(line_selected(b"bar b", &p, &o));
-        assert!(!line_selected(b"a bar", &p, &o));
+        assert!(line_selected(b"a foo b", &p, &o).unwrap());
+        assert!(line_selected(b"bar b", &p, &o).unwrap());
+        assert!(!line_selected(b"a bar", &p, &o).unwrap());
     }
 
     // ---------------- -w / -x / -o ----------------
@@ -994,7 +1046,7 @@ mod tests {
             ..Options::default()
         };
         let p = pats("[0-9]+", &o);
-        let spans = matches_in(&p, b"ab12cd345", &o);
+        let spans = matches_in(&p, b"ab12cd345", &o).unwrap();
         assert_eq!(spans, vec![(2, 4), (6, 9)]);
     }
 
@@ -1007,10 +1059,10 @@ mod tests {
             ..Options::default()
         };
         let p = pats("a|ab", &o);
-        assert_eq!(matches_in(&p, b"ab", &o), vec![(0, 2)]);
+        assert_eq!(matches_in(&p, b"ab", &o).unwrap(), vec![(0, 2)]);
         // …and across `-e` patterns, which are a set and not an order.
         let p = compile_patterns(&[b"a".to_vec(), b"ab".to_vec()], &o).unwrap();
-        assert_eq!(matches_in(&p, b"ab", &o), vec![(0, 2)]);
+        assert_eq!(matches_in(&p, b"ab", &o).unwrap(), vec![(0, 2)]);
     }
 
     // ---------------- lines are bytes ----------------

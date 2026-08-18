@@ -487,9 +487,23 @@ report_bench_absence() {
     fi
 
     # Escalate only if perf-critical code moved since the last recorded run.
-    local last_commit=""
+    #
+    # `last_dirty` matters as much as `last_commit`: a row written from a tree
+    # with uncommitted changes names the nearest *ancestor* of what was actually
+    # benchmarked, so `git diff $last_commit HEAD` over-reports (it lists files
+    # whose changes were in fact measured, just not committed yet).  That is the
+    # safe direction, so the comparison still runs -- but it is said out loud
+    # rather than presented as exact.
+    local last_commit="" last_row="" last_dirty=""
     if [ -f "$hist" ]; then
-        last_commit="$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p' "$hist" | tail -1)"
+        # The last row that *has* a commit, not simply the last row -- the file
+        # is appended to from three worktrees and a truncated tail must not be
+        # read as "no history".
+        last_row="$(grep -a '"commit"' "$hist" | tail -1)"
+        last_commit="$(printf '%s' "$last_row" | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p')"
+        case "$last_row" in
+            *'"dirty": true'*|*'"dirty":true'*) last_dirty=1 ;;
+        esac
     fi
 
     if [ -z "$last_commit" ]; then
@@ -516,10 +530,19 @@ report_bench_absence() {
         local n
         n="$(echo "$changed" | grep -c .)"
         [ "$n" -gt 8 ] && echo "       ... and $((n - 8)) more"
+        if [ -n "$last_dirty" ]; then
+            echo "     (That run measured $last_commit plus uncommitted changes, so some"
+            echo "      of the files above may already have been benchmarked.)"
+        fi
         echo "     Run: ./scripts/boot-test.sh --bench"
     else
         echo "  No perf-critical changes since the last benchmarked commit ($last_commit),"
         echo "  so skipping the suite is reasonable here."
+        if [ -n "$last_dirty" ]; then
+            echo "  Caveat: that run's tree was dirty, so it measured $last_commit plus"
+            echo "  changes that are not in any commit; 'no changes since' is only as"
+            echo "  precise as that."
+        fi
     fi
     return 0
 }
@@ -539,12 +562,28 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 #
 # So say it.  A wrong tree, a wrong branch or an unexpectedly clean/dirty
 # worktree is then visible in line 1 rather than inferable from a pid tree.
-_bt_branch="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
-_bt_head="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
+# These three are captured once, here, and are deliberately NOT recomputed when
+# the run ends -- they are what the recorders stamp their rows with.  A boot
+# test takes ten to twenty minutes and committing during one is normal and
+# encouraged, so a recorder that asks git for HEAD on its way out attributes the
+# run to a commit that was never built.  Observed 2026-08-18:
+# bench/boot-history.jsonl gained a PASS row for 88e93fecf, a commit created
+# while QEMU was already running, whose entire content was a paragraph of
+# known-issues.md.
+#
+# That is not a cosmetic mislabel.  report_bench_absence() above diffs HEAD
+# against the last recorded commit to decide whether perf-critical code needs
+# re-benchmarking, so a row stamped *newer* than the tree it measured hides
+# precisely the changes the check exists to catch -- and it fails silently, by
+# printing the reassuring branch.
+BT_BRANCH="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+BT_HEAD="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
+BT_DIRTY=0
+git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null || BT_DIRTY=1
 _bt_dirty=""
-git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null || _bt_dirty=" +uncommitted"
-echo "=== Tree under test: $PROJECT_ROOT [$_bt_branch @ $_bt_head$_bt_dirty] ==="
-unset _bt_branch _bt_head _bt_dirty
+[ "$BT_DIRTY" = 1 ] && _bt_dirty=" +uncommitted"
+echo "=== Tree under test: $PROJECT_ROOT [$BT_BRANCH @ $BT_HEAD$_bt_dirty] ==="
+unset _bt_dirty
 
 # Convert to Windows paths if running under MSYS/Git Bash (QEMU needs them).
 to_win_path() {
@@ -1093,8 +1132,15 @@ print_bench_results() {
     # alone.  The wall figure is omitted entirely (not passed as 0) when the
     # QEMU window was never timed, because bench-history.py's whole discipline
     # is that an absent measurement is unknown, not clean.
+    #
+    # --commit/--dirty carry the state captured before the build rather than
+    # whatever HEAD is now; see the BT_HEAD block near the top of this file for
+    # why re-deriving it at exit is wrong, and wrong in the hiding direction.
     local bench_args=(--serial "$file" --profile "$BENCH_PROFILE"
-                      --host-load "$HOST_LOAD")
+                      --host-load "$HOST_LOAD" --commit "${BT_HEAD:-unknown}")
+    if [ "${BT_DIRTY:-0}" = 1 ]; then
+        bench_args+=(--dirty)
+    fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
         # Spelt as a full `if` rather than `[ ... ] && ...`: under `set -e` a
@@ -1157,8 +1203,14 @@ record_boot_outcome() {
         return 0
     fi
 
+    # --commit/--branch/--dirty carry the state captured before the build, not
+    # whatever HEAD happens to be now; see the BT_HEAD block near the top.
     local args=(--serial "$SERIAL_FILE" --exit-code "$rc"
-                --marker "$WAIT_MARKER" --profile "${BENCH_PROFILE:-debug}")
+                --marker "$WAIT_MARKER" --profile "${BENCH_PROFILE:-debug}"
+                --commit "${BT_HEAD:-unknown}" --branch "${BT_BRANCH:-unknown}")
+    if [ "${BT_DIRTY:-0}" = 1 ]; then
+        args+=(--dirty)
+    fi
     if [ -n "${BOOT_LABEL:-}" ]; then
         args+=(--label "$BOOT_LABEL")
     fi

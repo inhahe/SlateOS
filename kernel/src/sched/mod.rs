@@ -7626,11 +7626,15 @@ fn test_workload_profiles() -> KernelResult<()> {
 /// requiring actual SMP hardware.
 fn test_per_cpu_work_stealing() -> KernelResult<()> {
     use self::priority_rr::PerCpuScheduler;
-    use alloc::boxed::Box;
 
-    // PerCpuScheduler is ~58 KB (MAX_CPUS=64 × ~900 bytes each).
-    // Must be heap-allocated — kernel task stacks are only 32 KB.
-    let sched = Box::new(PerCpuScheduler::new_const());
+    // A PerCpuScheduler is ~18 KiB (MAX_CPUS=16 backends of ~1.1 KiB each) and
+    // a kernel task stack is 32 KiB, so it has to live on the heap.
+    // `new_boxed` is what actually achieves that.  `Box::new(new_const())`,
+    // which stood here before, builds the whole structure in this frame *and*
+    // in `new_const`'s and then copies it into the allocation — measured at
+    // 19 504 + 18 752 bytes of stack, i.e. past the limit the comment above it
+    // was written to respect.  See `PerCpuScheduler::new_boxed`.
+    let sched = PerCpuScheduler::new_boxed();
     sched.init(4); // Simulate 4 CPUs
 
     // Enqueue several tasks on CPU 1.

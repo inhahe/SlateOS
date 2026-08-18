@@ -22,6 +22,7 @@
 
 use guitk::color::Color;
 use guitk::kv;
+use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -344,19 +345,25 @@ impl Deck {
             .collect()
     }
 
-    /// Shuffle the cards using a simple deterministic shuffle (seed-based).
-    fn shuffle(&mut self, seed: u32) {
-        let len = self.cards.len();
-        if len <= 1 {
-            return;
-        }
-        // Fisher-Yates using a simple LCG
-        let mut state = seed.wrapping_add(1);
-        for i in (1..len).rev() {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let j = (state as usize) % (i + 1);
-            self.cards.swap(i, j);
-        }
+    /// Shuffle the cards into a new study order.
+    ///
+    /// This used to take a `seed: u32` and run its own Fisher-Yates over a
+    /// 32-bit LCG (`1_664_525` / `1_013_904_223`), reducing with
+    /// `state % (i + 1)`. That is the broken reduction: the generator's
+    /// modulus is 2^32, so bit *k* of its state has period 2^(k+1) and the
+    /// low bits are a counter rather than a draw. A shuffle is the worst
+    /// possible caller for it, because its bound counts all the way down to 2
+    /// and so passes through every power of two on the way.
+    ///
+    /// Measured against the app's own seed schedule (`42`, then `+7` per press
+    /// of `r`) on a twenty-card deck: over forty presses exactly **four** of
+    /// the twenty cards ever reached the last slot -- cards 3, 8, 13 and 18, an
+    /// arithmetic progression of step 5 -- and the final swap's coin flip came
+    /// up `1, 0, 1, 0, ...` for forty presses in a row. A four-card deck
+    /// reached 11 of its 24 orderings. Those were not shuffles; they were a
+    /// fixed function of how many times the user had pressed the key.
+    fn shuffle(&mut self, rng: &mut SeededRng) {
+        rng.shuffle(&mut self.cards);
     }
 
     /// Export deck to a simple text format.
@@ -630,9 +637,18 @@ struct FlashcardsApp {
     scroll_offset: usize,
     /// Status message displayed at the bottom.
     status_msg: String,
-    /// Shuffle seed counter.
-    shuffle_seed: u32,
+    /// Draws the study order for `r`. Seeded from the system in `new`; the
+    /// app owns the generator rather than a seed because nothing here ever
+    /// replays one.
+    rng: SeededRng,
 }
+
+/// Seed used when the kernel's entropy source cannot be reached.
+///
+/// A per-crate constant rather than a shared one, so that two programs which
+/// lose entropy on the same boot do not then produce correlated streams. The
+/// bytes spell `FLASHCRD`.
+const FALLBACK_SEED: u64 = 0x464C_4153_4843_5244;
 
 impl FlashcardsApp {
     fn new() -> Self {
@@ -659,7 +675,21 @@ impl FlashcardsApp {
             editor_tags: String::new(),
             scroll_offset: 0,
             status_msg: String::from("Welcome to Flashcards"),
-            shuffle_seed: 42,
+            // Was `shuffle_seed: 42`, incremented by 7 per press, so every
+            // user on every machine got the same study order in the same
+            // order. A study order is novelty, not a secret, so this asks
+            // the kernel and falls back rather than refusing -- see
+            // `randrange::seeded_from_system`.
+            rng: seeded_from_system(FALLBACK_SEED),
+        }
+    }
+
+    /// A deck whose shuffles replay from `seed`, for tests.
+    #[cfg(test)]
+    fn with_seed(seed: u64) -> Self {
+        Self {
+            rng: SeededRng::new(seed),
+            ..Self::new()
         }
     }
 
@@ -1088,11 +1118,15 @@ impl FlashcardsApp {
             "Delete" | "x" => self.delete_selected_card(),
             "d" => self.advance_day(),
             "r" => {
-                self.shuffle_seed = self.shuffle_seed.wrapping_add(7);
-                let seed = self.shuffle_seed;
+                // The generator has to come out of `self` before
+                // `current_deck_mut` borrows `self` mutably; taking it and
+                // putting it back keeps the stream continuous, which is what
+                // makes consecutive shuffles independent of each other.
+                let mut rng = core::mem::replace(&mut self.rng, SeededRng::new(0));
                 if let Some(deck) = self.current_deck_mut() {
-                    deck.shuffle(seed);
+                    deck.shuffle(&mut rng);
                 }
+                self.rng = rng;
                 self.status_msg = String::from("Deck shuffled");
             }
             "t" => {
@@ -2380,6 +2414,18 @@ fn main() {
 // ── Tests ───────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ── ReviewData / SM-2 tests ─────────────────────────────────────
@@ -2736,7 +2782,7 @@ mod tests {
             deck.add_card(&format!("Q{i}"), &format!("A{i}"));
         }
         let original_ids: Vec<u32> = deck.cards.iter().map(|c| c.id).collect();
-        deck.shuffle(42);
+        deck.shuffle(&mut SeededRng::new(42));
         let shuffled_ids: Vec<u32> = deck.cards.iter().map(|c| c.id).collect();
         // Very unlikely that 20 cards stay in the same order
         assert_ne!(original_ids, shuffled_ids);
@@ -2746,15 +2792,105 @@ mod tests {
     fn test_deck_shuffle_single_card() {
         let mut deck = Deck::new("Test", "");
         deck.add_card("Q1", "A1");
-        deck.shuffle(42);
+        deck.shuffle(&mut SeededRng::new(42));
         assert_eq!(deck.cards.len(), 1);
     }
 
     #[test]
     fn test_deck_shuffle_empty() {
         let mut deck = Deck::new("Test", "");
-        deck.shuffle(42); // should not panic
+        deck.shuffle(&mut SeededRng::new(42)); // should not panic
         assert!(deck.cards.is_empty());
+    }
+
+    /// The card in each slot after each of `presses` consecutive shuffles of
+    /// one deck, driven by one generator.
+    ///
+    /// Consecutive presses off one stream, not one press each off `presses`
+    /// fresh seeds: a low-bit defect is a counter *along* one stream, so
+    /// re-seeding between samples hides it behind the variety of the seeds
+    /// themselves, and the test then passes on exactly the code it exists to
+    /// catch.
+    fn consecutive_shuffles(cards: usize, presses: usize) -> Vec<Vec<u32>> {
+        let mut deck = Deck::new("Test", "");
+        for i in 0..cards {
+            deck.add_card(&format!("Q{i}"), &format!("A{i}"));
+        }
+        let mut rng = SeededRng::new(0x9E37_79B9_7F4A_7C15);
+        (0..presses)
+            .map(|_| {
+                deck.shuffle(&mut rng);
+                deck.cards.iter().map(|c| c.id).collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_card_can_end_up_last() {
+        // The measurement that condemned the old shuffle. Against the app's
+        // own seed schedule (42, then +7 per press) a twenty-card deck put
+        // only four of its twenty cards in the last slot across forty presses
+        // -- cards 3, 8, 13 and 18, step 5 -- because the last swap of a
+        // Fisher-Yates draws at bound 2, and `state % 2` on a 2^32-modulus
+        // LCG is the state's low bit, which is a counter. The fix reaches 18
+        // of 20 at the same deck size and press count; the floor is 15, low
+        // enough that honest sampling never trips it and far above 4.
+        let orders = consecutive_shuffles(20, 40);
+        let mut last_slot: Vec<u32> = Vec::new();
+        for order in &orders {
+            if let Some(id) = order.last() {
+                if !last_slot.contains(id) {
+                    last_slot.push(*id);
+                }
+            }
+        }
+        assert!(
+            last_slot.len() >= 15,
+            "only {} of 20 cards ever finished last across 40 shuffles: {last_slot:?}",
+            last_slot.len()
+        );
+    }
+
+    #[test]
+    fn a_small_deck_reaches_most_of_its_orderings() {
+        // Four cards have 24 orderings. The old shuffle reached 11 of them
+        // over 40 presses; the fix reaches 20, at the same deck size and the
+        // same press count. The floor is 18.
+        let orders = consecutive_shuffles(4, 40);
+        let mut distinct: Vec<Vec<u32>> = Vec::new();
+        for order in orders {
+            if !distinct.contains(&order) {
+                distinct.push(order);
+            }
+        }
+        assert!(
+            distinct.len() >= 18,
+            "40 shuffles of a four-card deck reached only {} of 24 orderings",
+            distinct.len()
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_fresh_app_is_seeded_by_the_system_and_not_by_a_literal() {
+        // A host `cargo test` has no SlateOS kernel to ask, so
+        // `seeded_from_system` takes the fallback -- which is what makes this
+        // checkable. Asserting *which* seed, not that two apps differ: a
+        // variety check would pass on the old hardcoded 42 and fail on the fix.
+        let draws = |app: &mut FlashcardsApp| -> Vec<usize> {
+            (0..12).map(|_| app.rng.below(1000)).collect()
+        };
+        let from_system = draws(&mut FlashcardsApp::new());
+        assert_eq!(
+            from_system,
+            draws(&mut FlashcardsApp::with_seed(FALLBACK_SEED)),
+            "a fresh app did not ask the system for its seed"
+        );
+        assert_ne!(
+            from_system,
+            draws(&mut FlashcardsApp::with_seed(42)),
+            "a fresh app still shuffles from a literal"
+        );
     }
 
     // ── Export/Import tests ─────────────────────────────────────────

@@ -6,6 +6,7 @@
 //! use the Catppuccin Mocha dark theme.
 
 use crate::color::Color;
+use crate::cycle;
 use crate::event::{Key, KeyEvent};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
@@ -286,11 +287,11 @@ impl ContextMenu {
                 Some(MenuAction::Closed)
             }
             Key::Up => {
-                self.move_hover(-1);
+                self.move_hover(false);
                 Some(MenuAction::None)
             }
             Key::Down => {
-                self.move_hover(1);
+                self.move_hover(true);
                 Some(MenuAction::None)
             }
             Key::Enter => {
@@ -632,46 +633,40 @@ impl ContextMenu {
         offset
     }
 
-    /// Move hover up or down, skipping separators and disabled items.
-    fn move_hover(&mut self, direction: i32) {
-        let count = self.items.len();
-        if count == 0 {
-            return;
-        }
-
+    /// Move hover to the next selectable row, skipping separators and disabled
+    /// items and wrapping round the ends.
+    ///
+    /// A menu with no selectable row at all — every entry a separator, or every
+    /// action disabled — leaves the hover where it was, which for a freshly
+    /// opened menu is nowhere. That is the only outcome that does not lie: there
+    /// is no row for the arrow key to land on, so pretending one is highlighted
+    /// would make Enter act on a disabled item.
+    fn move_hover(&mut self, forward: bool) {
+        let len = self.items.len();
+        // The current row is not a candidate for its own successor, so the walk
+        // starts at its neighbour — `cycle::indices` visits its start first. It
+        // still comes back round to the current row last, which is what makes a
+        // menu with exactly one selectable row keep it under repeated presses.
         let start = match self.hover_index {
-            Some(idx) => idx as i32 + direction,
-            None => {
-                if direction > 0 {
-                    0
+            Some(idx) => {
+                if forward {
+                    cycle::after(len, idx)
                 } else {
-                    count as i32 - 1
+                    cycle::before(len, idx)
                 }
             }
+            None if forward => 0,
+            None => len.saturating_sub(1),
         };
 
-        // Scan in the given direction, wrapping around once.
-        let mut pos = start;
-        for _ in 0..count {
-            if pos < 0 {
-                pos = count as i32 - 1;
-            } else if pos >= count as i32 {
-                pos = 0;
-            }
-
-            let idx = pos as usize;
-            let selectable = matches!(
+        let landed = cycle::indices(len, start, forward).find(|&idx| {
+            matches!(
                 self.items.get(idx),
                 Some(MenuItem::Action { enabled: true, .. })
                     | Some(MenuItem::Submenu { enabled: true, .. })
-            );
-
-            if selectable {
-                self.hover_index = Some(idx);
-                return;
-            }
-            pos += direction;
-        }
+            )
+        });
+        self.hover_index = landed.or(self.hover_index);
     }
 }
 
@@ -1016,6 +1011,120 @@ mod tests {
         // Press Up from no selection — should wrap to last selectable item (index 4).
         menu.handle_key(&make_key(Key::Up));
         assert_eq!(menu.hover_index, Some(4));
+    }
+
+    fn action(id: MenuItemId, enabled: bool) -> MenuItem {
+        MenuItem::Action {
+            id,
+            label: format!("item {id}"),
+            shortcut: None,
+            icon: None,
+            enabled,
+            checked: None,
+        }
+    }
+
+    /// Down from the last selectable row comes back to the first, and Up from
+    /// the first goes to the last — in both cases stepping over the separator
+    /// and the disabled row in between. `sample_items` is selectable at 0, 1 and
+    /// 4; 2 is a separator and 3 is disabled.
+    #[test]
+    fn the_hover_wraps_past_separators_and_disabled_rows_in_both_directions() {
+        let mut menu = ContextMenu::new(sample_items());
+        menu.show(0.0, 0.0);
+
+        menu.hover_index = Some(4);
+        menu.handle_key(&make_key(Key::Down));
+        assert_eq!(
+            menu.hover_index,
+            Some(0),
+            "past the end, round to the first"
+        );
+
+        menu.handle_key(&make_key(Key::Up));
+        assert_eq!(
+            menu.hover_index,
+            Some(4),
+            "back the other way, over the disabled row and the separator"
+        );
+
+        menu.handle_key(&make_key(Key::Up));
+        assert_eq!(menu.hover_index, Some(1), "and on up the list");
+    }
+
+    /// Walking the whole menu with the arrow keys must visit every selectable
+    /// row and nothing else, whichever way it goes — the property the old signed
+    /// cursor could only be checked for one step at a time.
+    #[test]
+    fn arrowing_all_the_way_round_visits_exactly_the_selectable_rows() {
+        for (key, mut expected) in [(Key::Down, vec![0, 1, 4]), (Key::Up, vec![4, 1, 0])] {
+            let mut menu = ContextMenu::new(sample_items());
+            menu.show(0.0, 0.0);
+            let mut seen = Vec::new();
+            // One more press than there are rows, to catch a walk that stalls
+            // or that lands somewhere twice before coming round.
+            for _ in 0..=expected.len() {
+                menu.handle_key(&make_key(key));
+                seen.push(menu.hover_index.expect("a selectable row exists"));
+            }
+            expected.push(expected[0]);
+            assert_eq!(seen, expected, "{key:?}");
+        }
+    }
+
+    /// One selectable row surrounded by unselectable ones stays put under
+    /// repeated presses rather than being stepped off and lost. The walk comes
+    /// back round to the current row last, which is what makes this hold.
+    #[test]
+    fn a_lone_selectable_row_survives_repeated_presses() {
+        let items = vec![
+            MenuItem::Separator,
+            action(1, false),
+            action(2, true),
+            MenuItem::Separator,
+        ];
+        let mut menu = ContextMenu::new(items);
+        menu.show(0.0, 0.0);
+
+        for press in 0..4 {
+            menu.handle_key(&make_key(Key::Down));
+            assert_eq!(menu.hover_index, Some(2), "down press {press}");
+        }
+        for press in 0..4 {
+            menu.handle_key(&make_key(Key::Up));
+            assert_eq!(menu.hover_index, Some(2), "up press {press}");
+        }
+    }
+
+    /// A menu with nothing to land on must leave the hover alone rather than
+    /// highlight a separator or a disabled row — Enter acts on whatever is
+    /// hovered, so a lie here would fire a disabled action.
+    #[test]
+    fn a_menu_with_no_selectable_row_highlights_nothing() {
+        let items = vec![MenuItem::Separator, action(1, false), MenuItem::Separator];
+        let mut menu = ContextMenu::new(items);
+        menu.show(0.0, 0.0);
+
+        menu.handle_key(&make_key(Key::Down));
+        assert_eq!(menu.hover_index, None);
+        menu.handle_key(&make_key(Key::Up));
+        assert_eq!(menu.hover_index, None);
+        assert_eq!(
+            menu.handle_key(&make_key(Key::Enter)),
+            Some(MenuAction::None),
+            "Enter on nothing selects nothing"
+        );
+    }
+
+    /// An empty menu has no index at all; the arrow keys must not underflow
+    /// looking for one.
+    #[test]
+    fn an_empty_menu_can_be_arrowed_through_without_panicking() {
+        let mut menu = ContextMenu::new(Vec::new());
+        menu.show(0.0, 0.0);
+        menu.handle_key(&make_key(Key::Down));
+        menu.handle_key(&make_key(Key::Up));
+        assert_eq!(menu.hover_index, None);
     }
 
     #[test]

@@ -646,6 +646,9 @@ version = "0.1.0"
 [[package]]
 name = "backup"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "backup-app"
@@ -1875,6 +1878,7 @@ dependencies = [
  "bignum",
  "charwidth",
  "ere",
+ "sha2",
 ]
 
 [[package]]
@@ -2020,6 +2024,7 @@ name = "cryptsetup"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "sha2",
 ]
 
 [[package]]
@@ -2491,6 +2496,9 @@ version = "0.1.0"
 [[package]]
 name = "doas"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "docker"
@@ -3173,6 +3181,9 @@ version = "0.1.0"
 [[package]]
 name = "fio"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "fio-cli"
@@ -9000,6 +9011,9 @@ dependencies = [
 [[package]]
 name = "rsync"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "rsyslog-cli"
@@ -9453,6 +9467,9 @@ version = "0.1.0"
 [[package]]
 name = "sha256sum"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "shared-mime-info-cli"
@@ -10023,14 +10040,23 @@ version = "0.1.0"
 [[package]]
 name = "ssh"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "ssh-keygen"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "sshd"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "st-cli"

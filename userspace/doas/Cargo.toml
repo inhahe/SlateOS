@@ -3,4 +3,8 @@ name = "doas"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS doas - lightweight privilege elevation"
+
+# `sha2` for password hashing. This crate carried its own SHA-256 under a
+# header claiming it matched the `passwd` utility -- a claim nothing checked.
 [dependencies]
+sha2 = { path = "../../sha2" }

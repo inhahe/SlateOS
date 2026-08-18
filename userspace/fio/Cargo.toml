@@ -3,4 +3,8 @@ name = "fio"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS flexible I/O tester"
+
+# `sha2` for verify mode. This crate carried its own SHA-256, so its readback
+# check could only ever agree with itself.
 [dependencies]
+sha2 = { path = "../../sha2" }

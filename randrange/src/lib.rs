@@ -671,10 +671,35 @@ impl SecretSource for SystemRandom {
 /// ```
 #[must_use]
 pub fn seeded_from_system(fallback: u64) -> SeededRng {
+    SeededRng::new(seed_from_system(fallback))
+}
+
+/// One seed from the kernel, falling back to `fallback` when the kernel cannot
+/// be reached.
+///
+/// The same rule and the same tradeoff as [`seeded_from_system`] — read that
+/// first — but yielding the seed rather than a generator built from it. Use
+/// this when the caller *stores* the seed: several games keep it so that "new
+/// board" can be `with_seed(self.seed + 1)`, and one that held a generator
+/// instead would have to reseed one generator from another's output, which
+/// silently correlates the two.
+///
+/// # Examples
+///
+/// ```
+/// use randrange::{seed_from_system, SeededRng, RandomSource};
+///
+/// let seed = seed_from_system(0x5445_5452_4953);
+/// let mut first_board = SeededRng::new(seed);
+/// let mut next_board = SeededRng::new(seed.wrapping_add(1));
+/// assert_ne!(first_board.next_u64(), next_board.next_u64());
+/// ```
+#[must_use]
+pub fn seed_from_system(fallback: u64) -> u64 {
     match SystemRandom::open() {
-        Ok(mut kernel) => SeededRng::new(kernel.next_u64()),
+        Ok(mut kernel) => kernel.next_u64(),
         // The kernel is out of reach: a fixed board beats no board at all.
-        Err(_) => SeededRng::new(fallback),
+        Err(_) => fallback,
     }
 }
 
@@ -1326,5 +1351,24 @@ mod tests {
         let mut a = seeded_from_system(0x4D41_5A45);
         let mut b = seeded_from_system(0x5449_4C45);
         assert_ne!(a.next_u64(), b.next_u64());
+    }
+
+    /// The generator form must be exactly the seed form wrapped, so that a
+    /// caller which stores the seed and a caller which takes the generator
+    /// agree about what "this session's randomness" means.
+    #[test]
+    fn the_generator_form_is_the_seed_form_wrapped() {
+        const FALLBACK: u64 = 0x1111_2222_3333_4444;
+        let mut wrapped = seeded_from_system(FALLBACK);
+        // Not comparable to a second live draw on a kernel-backed host -- two
+        // calls there give two different seeds, which is the point -- so this
+        // checks the relationship on the host where the fallback is taken.
+        #[cfg(not(unix))]
+        {
+            let mut built = SeededRng::new(seed_from_system(FALLBACK));
+            assert_eq!(wrapped.next_u64(), built.next_u64());
+        }
+        // On any host, the wrapper must at least produce a working generator.
+        assert!(wrapped.below(10) < 10);
     }
 }

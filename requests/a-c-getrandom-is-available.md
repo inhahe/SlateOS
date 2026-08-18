@@ -74,12 +74,20 @@ should propagate the failure: a vault that refuses to create a salt is
 recoverable; a vault created with a predictable salt is not, and nothing later
 can tell you it happened.
 
-## One caveat: the `GRND_*` flags do not work yet
+## One caveat: on *our* ABI the `GRND_*` flags do not work yet
 
-libc's `getrandom()` accepts `GRND_NONBLOCK`, `GRND_RANDOM` and
-`GRND_INSECURE`, **validates them, and then discards them** — they never reach
-the kernel. This is not new, but it matters more now that the call can block:
-if you pass `GRND_NONBLOCK` you may still be made to wait.
+There are two ways into this syscall, and they differ on flags:
+
+| | used by | flags |
+|---|---|---|
+| **native, `SYS_GETRANDOM` = 90** | our own libc — i.e. **you** | ignored |
+| Linux-ABI, `getrandom` = 318 | ported Linux binaries under translation | fully honoured |
+
+So the one that matters for `gui/credentials` is the one without flags. libc's
+`getrandom()` accepts `GRND_NONBLOCK`, `GRND_RANDOM` and `GRND_INSECURE`,
+**validates them, and then discards them** — they never reach the kernel. Not
+new, but it matters more now that the call can block: if you pass
+`GRND_NONBLOCK` you may still be made to wait.
 
 The cause is an ABI detail in lane B's tree: `posix/src/random.rs` reaches the
 kernel through a two-argument stub, so the register the flags word would travel
@@ -91,6 +99,13 @@ coordinated ABI change, filed as
 If you have a call site that genuinely must not block, tell me and I will
 prioritise that ABI change. Otherwise it can wait — as above, the blocking case
 is unreachable from a GUI process.
+
+Worth knowing for the future: on the Linux ABI, `GRND_INSECURE` is the caller
+saying "bytes now, I accept they may be weak", and it is the *only* way to
+obtain output from an uncredited pool. Nothing in `gui/credentials` should ever
+want it — a vault salt is exactly the case it is wrong for — but if you later
+need randomness for something that genuinely is not a secret (a UI jitter, a
+retry backoff), that is the flag, once the ABI change lands.
 
 ## Where to look
 

@@ -11947,6 +11947,36 @@ bits; we cap at 8, which needs ~32 qualifying ticks — about 0.32 s at 100 Hz.
 conservative about how much any single observation is worth, and 0.32 s is
 invisible next to the rest of boot.
 
+### The bug this decision had, for about an hour: a guarantee with two doors
+
+Gating the native `SYS_GETRANDOM` (90) guaranteed nothing on its own, because
+there are **two** getrandom entry points. The Linux-ABI translation (318,
+`kernel/src/syscall/linux.rs`) fills from the same CSPRNG, had no gate, and
+documented that as "we never block". A caller who wanted uncredited bytes could
+simply ask through the other door.
+
+This was caught by the boot log rather than by reasoning — the serial output
+showed a `getrandom` self-test *passing* at line 790, hundreds of lines before
+`rng::init` runs at all, which is impossible for a gated path. It is worth
+recording as a class of mistake rather than a one-off: **when a guarantee is
+added to a syscall, the compatibility translation of that same syscall is a
+second implementation and needs the same audit.** The two live in different
+files, are written at different times, and nothing in the type system links
+them. There are ~450 Linux syscall translations in `linux.rs`; any future
+kernel-side guarantee attached to a native syscall has this same trap.
+
+The fix also produced something better than parity. 318 receives a genuine
+three-argument call, so it could implement the **full** Linux semantics that
+the native path cannot yet reach: `GRND_INSECURE` skips the gate (and is now
+the only way to obtain uncredited output), `GRND_NONBLOCK` returns `EAGAIN`
+instead of waiting, `GRND_RANDOM` shares pool and gate as Linux has since 5.6.
+So the compatibility path is temporarily *more* correct than the native one,
+and the native one now has a written, tested reference to transcribe from once
+lane B widens the libc stub.
+
+Both share `GETRANDOM_WAIT_NS` rather than each defining a timeout, so they
+cannot drift on what "too long" means.
+
 ### The early-boot hazard this had to survive
 
 `main` runs the syscall self-tests (which dispatch `SYS_GETRANDOM`) at a point

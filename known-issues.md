@@ -35655,6 +35655,20 @@ existing configuration can newly be rejected.
 block can be made to wait anyway — up to 15 seconds — and a program that says
 "give me bytes now, I accept they may be weak" has no way to say that at all.
 
+**Scope: the native ABI only.** There are two entry points, and the
+Linux-compatibility one is already correct:
+
+| | reached by | `GRND_*` |
+|---|---|---|
+| native `SYS_GETRANDOM` = 90 | our own libc (`posix/src/random.rs`) | **ignored — this entry** |
+| Linux-ABI `getrandom` = 318 | ported Linux binaries under translation | honoured in full |
+
+318 received the complete semantics in `50d869caf`, because a three-argument
+call genuinely reaches it. Everything below concerns 90 only. A useful
+consequence: the behaviour the native path needs is already written and
+regression-tested on the 318 path, so closing this is a transcription rather
+than a design exercise.
+
 **Where it lives:** `posix/src/unistd.rs:2053` accepts `GRND_NONBLOCK`,
 `GRND_RANDOM` and `GRND_INSECURE`, validates them, and then never passes them
 on. `posix/src/random.rs` calls `syscall2(SYS_GETRANDOM, buf, len)`, and

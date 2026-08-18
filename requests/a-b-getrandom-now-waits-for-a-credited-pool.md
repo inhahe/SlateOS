@@ -61,7 +61,19 @@ boot self-tests, which run before the RNG exists at all.
 
 ## The part that needs your tree: `arg2` cannot be used yet
 
-The kernel ignores `arg2`, which is where Linux puts `GRND_NONBLOCK` /
+**Only on the native ABI.** There are two entry points and they now differ:
+
+| | reached by | `GRND_*` |
+|---|---|---|
+| **native, `SYS_GETRANDOM` = 90** | `posix/src/random.rs`, i.e. our own libc | **ignored** — this is the gap |
+| Linux-ABI, `getrandom` = 318 | ported Linux binaries under translation | fully honoured as of today |
+
+318 already received a three-argument call, so it got the complete semantics in
+the same change: `GRND_INSECURE` skips the readiness gate, `GRND_NONBLOCK`
+returns `EAGAIN` instead of waiting, `GRND_RANDOM` shares the pool and the gate
+(as Linux has since 5.6). It is only the native path — yours — that cannot.
+
+The kernel ignores `arg2` there, which is where Linux puts `GRND_NONBLOCK` /
 `GRND_RANDOM` / `GRND_INSECURE`. I could not start honouring it, because
 `posix/src/random.rs` reaches the kernel through
 
@@ -88,6 +100,18 @@ Tell me when that has landed and been rebuilt into the fixtures, and I will
 make the kernel read `arg2` in the same window. Until both halves are in, the
 kernel must keep ignoring it — a kernel that reads flags from a caller that
 doesn't set them is worse than one that ignores them.
+
+The behaviour to match once it lands is already written and tested on the 318
+path (`kernel/src/syscall/linux.rs`, `sys_getrandom`), so the native side is a
+transcription rather than a design question.
+
+**A third option, if you would rather not touch the ABI:** route libc's
+`getrandom()` at 318 instead of 90 and delete the native call site. That gets
+you working flags immediately with no coordination. I am not recommending it —
+our own libc calling the Linux-compatibility translation rather than the native
+syscall inverts the layering, and 318 exists to serve foreign binaries — but it
+is genuinely available, and if you judge the layering cost acceptable it is
+strictly less work. Your call; it is your tree.
 
 ### The gap this leaves in the meantime
 

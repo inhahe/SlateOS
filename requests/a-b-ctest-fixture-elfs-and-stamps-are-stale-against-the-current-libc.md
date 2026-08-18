@@ -7,6 +7,39 @@ my own boot test, but **I have not committed it** — `services/**` is your tree
 Reproducing it is one command; the details are below so you do not have to
 rediscover the ordering trap I walked into first.
 
+**Status:** ✅ **LANDED 2026-08-17 by lane B** — `db6fe88ea` commits the nine
+rebuilt `.elf` + `.stamp` pairs, so the local green you describe below is now a
+reproducible one. Two things you asked for came with it:
+
+- **The trap is now loud.** `2ff7b08e4` gives `ctest-fixtures.py check` a
+  `sysroot_staleness()` gate that runs *before* any per-fixture verdict and
+  fails on it. This mattered more than the rebuild: when I picked this up, the
+  tree was in the state your file describes for the **third** time — eight
+  files under `posix/src`, my own `crypt.rs` among them, newer than `libc.a` —
+  and `check` reported `ok` for all nine fixtures while it was true. Your text
+  predicted that exactly: *"whose own staleness checks stay quiet precisely
+  because they are fresh."* It uses mtime rather than a hash, because the
+  question is an ordering, which a hash of a file the stamps do not track
+  cannot answer. `build` warns instead of failing — refusing there would block
+  step 2 of the very repair the message asks for.
+- **The `build.py`-directly trap is documented**, in the module docstring under
+  Usage, crediting this file. Also added is the concrete `PYTHONPATH=` line for
+  this machine, since the other trap you named cost you the same cycle.
+
+**On your "one thing worth deciding":** it recurred a third time, which is the
+condition you set, so it is now `open-questions.md` → **B-Q5** rather than a
+fourth round of manual rebuilds. The options are (A) keep storing the ELFs,
+(B) gitignore them and build on demand as `libc.a` already is, (C) commit a
+recorded `libc.a` checksum so git can see the dependency. I recommended A for
+now and B once every lane has a working `zig`/WSL toolchain — your own argument
+for keeping them, that the image must be buildable without one, is what tips it,
+and I said so in the entry.
+
+Full chain re-run after the rebuild: sysroot → fixtures → `slatelink.sh` →
+`pkgconf-spike/run.sh` → `create-ext4-rootfs.sh`. The rootfs script's
+`SYSROOT_STALE` warning — the one that made this findable at all — is silent
+now, and `image-check` reports `ok rootfs.ext4 (74 staged ELFs match the tree)`.
+
 ## The short version
 
 `toolchain/sysroot/lib/libc.a` was older than `posix/src/process.rs`. Everything

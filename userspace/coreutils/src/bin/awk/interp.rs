@@ -42,6 +42,19 @@ impl From<String> for Fatal {
     }
 }
 
+/// A regex search that gave up is fatal, not a non-match.
+///
+/// Only a pattern with a backreference can produce one. Folding it into "did
+/// not match" would make `$0 !~ /re/` true for a line we never actually
+/// examined — a silently wrong answer in a program whose whole output is
+/// selected by such tests. Stopping with a diagnostic is the only honest
+/// reading, and it is what `gawk` does with its own regex-cost limits.
+impl From<ere::MatchLimit> for Fatal {
+    fn from(e: ere::MatchLimit) -> Fatal {
+        Fatal(e.to_string())
+    }
+}
+
 type R<T> = Result<T, Fatal>;
 
 /// An awk array: shared, because arrays are passed to functions by reference.
@@ -249,7 +262,8 @@ impl Interp {
         // effect, and it is `set_var` that recompiles the splitter when `FS` or
         // `RS` changes. Writing the slot directly stored the new value where
         // nothing would read it until the next assignment.
-        self.set_var(VarRef::Global(slot), Value::from_input(value));
+        self.set_var(VarRef::Global(slot), Value::from_input(value))
+            .map_err(|e| e.0)?;
         Ok(())
     }
 
@@ -684,7 +698,7 @@ impl Interp {
             // A bare regex in a value context asks whether it matches `$0`.
             Expr::Regex(re) => {
                 let rec = self.record().clone();
-                Ok(Value::Num(f64::from(u8::from(re.is_match(&rec)))))
+                Ok(Value::Num(f64::from(u8::from(re.is_match(&rec)?))))
             }
             Expr::Get(lv) => self.load(lv),
             Expr::Assign(lv, rhs) => {
@@ -731,7 +745,7 @@ impl Interp {
                 let subject = self.eval(lhs)?;
                 let subject = self.to_str(&subject);
                 let re = self.regex_of(rhs)?;
-                let m = re.is_match(&subject);
+                let m = re.is_match(&subject)?;
                 Ok(Value::Num(f64::from(u8::from(m != *neg))))
             }
             Expr::Cmp(op, a, b) => {
@@ -785,10 +799,10 @@ impl Interp {
 
     fn load(&mut self, lv: &Lvalue) -> R<Value> {
         match lv {
-            Lvalue::Var(v) => Ok(self.get_var(*v)),
+            Lvalue::Var(v) => self.get_var(*v),
             Lvalue::Field(e) => {
                 let n = self.field_index(e)?;
-                Ok(self.get_field(n))
+                self.get_field(n)
             }
             Lvalue::Index(v, subs) => {
                 let key = self.subscript(subs)?;
@@ -804,15 +818,11 @@ impl Interp {
 
     fn assign(&mut self, lv: &Lvalue, v: Value) -> R<()> {
         match lv {
-            Lvalue::Var(r) => {
-                self.set_var(*r, v);
-                Ok(())
-            }
+            Lvalue::Var(r) => self.set_var(*r, v),
             Lvalue::Field(e) => {
                 let n = self.field_index(e)?;
                 let s = self.to_str(&v).as_ref().clone();
-                self.set_field(n, s);
-                Ok(())
+                self.set_field(n, s)
             }
             Lvalue::Index(r, subs) => {
                 let key = self.subscript(subs)?;
@@ -838,26 +848,26 @@ impl Interp {
         Ok(i)
     }
 
-    fn get_var(&mut self, v: VarRef) -> Value {
+    fn get_var(&mut self, v: VarRef) -> R<Value> {
         if v == VarRef::Global(V_NF) {
-            self.ensure_split();
+            self.ensure_split()?;
             let n = self.f.fields.len();
-            return Value::Num(f64::from(u32::try_from(n).unwrap_or(u32::MAX)));
+            return Ok(Value::Num(f64::from(u32::try_from(n).unwrap_or(u32::MAX))));
         }
-        match self.cell(v) {
+        Ok(match self.cell(v) {
             Some(Cell::Val(val)) => val.clone(),
             // Using an array where a scalar was wanted is a program bug, but it
             // is not worth killing the run over: the empty value is what an
             // unset variable gives and it keeps the diagnostic in one place.
             _ => Value::Uninit,
-        }
+        })
     }
 
-    fn set_var(&mut self, v: VarRef, val: Value) {
+    fn set_var(&mut self, v: VarRef, val: Value) -> R<()> {
         if let VarRef::Global(slot) = v {
             match slot {
                 V_NF => {
-                    self.ensure_split();
+                    self.ensure_split()?;
                     let n = val.to_num();
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let n = if n < 0.0 {
@@ -868,17 +878,18 @@ impl Interp {
                     self.f.fields.resize(n, Str::new());
                     self.f.record_valid = false;
                     self.f.split_valid = true;
-                    return;
+                    return Ok(());
                 }
                 V_FS | V_RS => {
                     self.set_global(slot, val);
                     self.refresh_separators();
-                    return;
+                    return Ok(());
                 }
                 _ => {}
             }
         }
         self.set_cell(v, Cell::Val(val));
+        Ok(())
     }
 
     fn get_global(&self, slot: usize) -> Value {
@@ -951,25 +962,25 @@ impl Interp {
         Ok(out)
     }
 
-    fn get_field(&mut self, n: usize) -> Value {
+    fn get_field(&mut self, n: usize) -> R<Value> {
         if n == 0 {
-            return Value::from_input(self.record().clone());
+            return Ok(Value::from_input(self.record().clone()));
         }
-        self.ensure_split();
-        match self.f.fields.get(n.saturating_sub(1)) {
+        self.ensure_split()?;
+        Ok(match self.f.fields.get(n.saturating_sub(1)) {
             Some(s) => Value::from_input(s.clone()),
             // Past NF is the empty string, and reading it does not extend the
             // record — only assigning does.
             None => Value::Uninit,
-        }
+        })
     }
 
-    fn set_field(&mut self, n: usize, s: Str) {
+    fn set_field(&mut self, n: usize, s: Str) -> R<()> {
         if n == 0 {
             self.set_record(s);
-            return;
+            return Ok(());
         }
-        self.ensure_split();
+        self.ensure_split()?;
         if self.f.fields.len() < n {
             self.f.fields.resize(n, Str::new());
         }
@@ -977,6 +988,7 @@ impl Interp {
             *slot = s;
         }
         self.f.record_valid = false;
+        Ok(())
     }
 
     fn set_record(&mut self, rec: Str) {
@@ -985,17 +997,23 @@ impl Interp {
         self.f.split_valid = false;
     }
 
-    fn ensure_split(&mut self) {
+    fn ensure_split(&mut self) -> R<()> {
         if self.f.split_valid {
-            return;
+            return Ok(());
         }
         let rec = self.record().clone();
-        self.f.fields = self.split_record(&rec);
+        self.f.fields = self.split_record(&rec)?;
         self.f.split_valid = true;
+        Ok(())
     }
 
     /// Split a record into fields by the current `FS`.
-    fn split_record(&self, rec: &[u8]) -> Vec<Str> {
+    ///
+    /// Fallible because `FS` is a regular expression the program chose, and one
+    /// containing a backreference can exhaust the matcher's budget. Splitting
+    /// on "as much as we managed to match" would silently misnumber every
+    /// field, so the run stops instead.
+    fn split_record(&self, rec: &[u8]) -> R<Vec<Str>> {
         // In paragraph mode a newline separates fields whatever FS says, which
         // is what makes `RS=""` useful for stanza-structured files.
         let paragraph = matches!(self.rs, Rs::Paragraph);
@@ -1286,8 +1304,8 @@ impl Interp {
                     }
                 };
                 let parts = match &fs {
-                    None => self.split_record(&s),
-                    Some(f) => split_with(f, &s, false),
+                    None => self.split_record(&s)?,
+                    Some(f) => split_with(f, &s, false)?,
                 };
                 let a = self.array_ref(arr);
                 {
@@ -1310,7 +1328,7 @@ impl Interp {
                     return Err(Fatal("match: missing pattern".to_string()));
                 };
                 let re = self.regex_of(pat)?;
-                match re.find(&s) {
+                match re.find(&s)? {
                     Some((a, b2)) => {
                         // RSTART and RLENGTH are in characters, so the byte
                         // offsets the engine gives have to be converted.
@@ -1451,7 +1469,8 @@ impl Interp {
         let mut out = Str::new();
         let mut last = 0usize;
         let mut count = 0u32;
-        for (s, e) in re.find_iter(&hay) {
+        for span in re.find_iter(&hay) {
+            let (s, e) = span?;
             out.extend_from_slice(hay.get(last..s).unwrap_or_default());
             expand_ampersand(&repl, hay.get(s..e).unwrap_or_default(), &mut out);
             last = e;
@@ -1518,8 +1537,8 @@ impl Interp {
 }
 
 /// Split `text` by `fs`.
-fn split_with(fs: &Fs, text: &[u8], paragraph_mode: bool) -> Vec<Str> {
-    match fs {
+fn split_with(fs: &Fs, text: &[u8], paragraph_mode: bool) -> R<Vec<Str>> {
+    Ok(match fs {
         Fs::Whitespace => text
             .split(|b| matches!(b, b' ' | b'\t' | b'\n'))
             .filter(|p| !p.is_empty())
@@ -1528,23 +1547,24 @@ fn split_with(fs: &Fs, text: &[u8], paragraph_mode: bool) -> Vec<Str> {
         Fs::Chars => ch::chars(text).map(ch::Ch::to_str).collect(),
         Fs::Char(c) => {
             if text.is_empty() {
-                return Vec::new();
+                return Ok(Vec::new());
             }
             if paragraph_mode {
-                return text
+                return Ok(text
                     .split(|b| b == c || *b == b'\n')
                     .map(<[u8]>::to_vec)
-                    .collect();
+                    .collect());
             }
             text.split(|b| b == c).map(<[u8]>::to_vec).collect()
         }
         Fs::Regex(re) => {
             if text.is_empty() {
-                return Vec::new();
+                return Ok(Vec::new());
             }
             let mut out = Vec::new();
             let mut last = 0usize;
-            for (s, e) in re.find_iter(text) {
+            for span in re.find_iter(text) {
+                let (s, e) = span?;
                 // A separator that matches nothing would split between every
                 // pair of characters and never advance; skip it.
                 if e == s {
@@ -1555,18 +1575,18 @@ fn split_with(fs: &Fs, text: &[u8], paragraph_mode: bool) -> Vec<Str> {
             }
             out.push(text.get(last..).unwrap_or_default().to_vec());
             if paragraph_mode {
-                return out
+                return Ok(out
                     .into_iter()
                     .flat_map(|p| {
                         p.split(|b| *b == b'\n')
                             .map(<[u8]>::to_vec)
                             .collect::<Vec<_>>()
                     })
-                    .collect();
+                    .collect());
             }
             out
         }
-    }
+    })
 }
 
 /// Build the field splitter `FS` describes.

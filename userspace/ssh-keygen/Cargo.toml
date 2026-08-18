@@ -3,7 +3,12 @@ name = "ssh-keygen"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS SSH key generation and management"
+# `sha2` for key fingerprints and signature digests. This crate carried its own
+# SHA-256, which in a key tool is a private copy of a public agreement: the
+# fingerprint it prints is compared by hand against one printed by somebody
+# else. SHA-512 stays local -- Ed25519 needs it and `sha2` does not provide it.
 [dependencies]
+sha2 = { path = "../../sha2" }
 
 [lints]
 workspace = true

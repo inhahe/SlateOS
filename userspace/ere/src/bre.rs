@@ -30,11 +30,12 @@
 //! * **Backslash is *not* special inside `[...]`.** `[\]` is a bracket holding
 //!   a backslash. The ERE engine this hands off to does honour escapes there,
 //!   so a backslash copied out of a bracket expression is doubled on the way.
-//! * **Backreferences (`\1`–`\9`) are refused, not mistranslated.** The engine
-//!   is a Pike VM, which cannot express them at all (that is the same property
-//!   that makes it immune to catastrophic backtracking). Passing `\1` through
-//!   would reach [`crate::engine`]'s escape rule and quietly become a literal
-//!   `1` — a wrong answer with no diagnostic, which is worse than a refusal.
+//! * **Backreferences (`\1`–`\9`) pass through unchanged.** [`crate::engine`]
+//!   reads them the same way, so the translation is the identity and the two
+//!   dialects cannot come to differ about what one means. A pattern holding one
+//!   is matched by the engine's backtracker rather than its Pike VM; everything
+//!   else keeps the linear guarantee. They were refused outright until
+//!   2026-08-18, when the backtracker was added.
 //!
 //! ## GNU spellings that are accepted
 //!
@@ -149,15 +150,15 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                             .concat(),
                         ));
                     }
-                    Some(d @ '1'..='9') => {
-                        return Err(EreError(
-                            [
-                                b"backreference \\".as_slice(),
-                                &[d as u8],
-                                b" is not supported",
-                            ]
-                            .concat(),
-                        ));
+                    // A backreference passes straight through: the ERE parser
+                    // reads `\1`-`\9` the same way, so the translation is the
+                    // identity and the two dialects cannot disagree about what
+                    // one means. It quantifies like an atom -- `\(a\)\1*` is
+                    // legal -- which is what `prev_atom` records here.
+                    Some('1'..='9') => {
+                        out.push(b'\\');
+                        e.push_to(&mut out);
+                        prev_atom = true;
                     }
                     // Every other escape denotes a literal, and stays escaped so
                     // that the engine reads it as one too.
@@ -362,7 +363,7 @@ mod tests {
     fn m(bre: &str, subject: &str) -> bool {
         compile(bre.as_bytes(), false)
             .unwrap()
-            .is_match(subject.as_bytes())
+            .is_match(subject.as_bytes()).unwrap()
     }
 
     #[test]
@@ -453,9 +454,6 @@ mod tests {
 
     #[test]
     fn what_the_engine_cannot_express_is_refused_not_mistranslated() {
-        // A backreference would otherwise reach the engine's escape rule and
-        // become a literal digit — a wrong answer with no diagnostic.
-        assert!(err(r"\(a\)\1").contains("backreference"));
         assert!(err(r"\<word\>").contains("word boundary"));
         assert!(err(r"a\").contains("trailing backslash"));
         assert!(err(r"\(a").contains(r"unmatched \("));
@@ -481,14 +479,41 @@ mod tests {
         // byte is one character and denotes itself.
         let pat = b"a\xffb*";
         let re = compile(pat, false).unwrap();
-        assert!(re.is_match(b"xa\xffbbby"));
-        assert!(re.is_match(b"a\xff"));
-        assert!(!re.is_match(b"ab"));
+        assert!(re.is_match(b"xa\xffbbby").unwrap());
+        assert!(re.is_match(b"a\xff").unwrap());
+        assert!(!re.is_match(b"ab").unwrap());
+    }
+
+    #[test]
+    fn a_backreference_survives_the_translation() {
+        // The translation is the identity: the ERE parser reads `\1`-`\9` the
+        // same way BRE does, so the two dialects cannot disagree about what
+        // one means. Before 2026-08-18 this was a hard error.
+        assert_eq!(t(r"\(a\)\1"), "(a)\\1");
+        assert!(m(r"\(a\)\1", "aa"));
+        assert!(!m(r"\(a\)\1", "ab"));
+        // It quantifies like an atom.
+        assert_eq!(t(r"\(a\)\1*"), "(a)\\1*");
+        assert!(m(r"^\(a\)\1*$", "aaaa"));
+        // The classic one-liner behind this feature: `sed '$!N;/^\(.*\)\n\1$/!P;D'`
+        // drops adjacent duplicate lines.
+        assert!(m(r"^\(.*\)\n\1$", "x\nx"));
+        assert!(!m(r"^\(.*\)\n\1$", "x\ny"));
+        // A reference to a group the pattern does not have is a compile error,
+        // not a literal digit. The translator does not check it itself: the
+        // ERE parser counts groups the same way, so checking here would be a
+        // second copy of the rule to keep in step with the first.
+        let e = compile(br"\(a\)\2", false).unwrap_err();
+        assert!(
+            String::from_utf8_lossy(&e.0).contains("invalid backreference"),
+            "{}",
+            String::from_utf8_lossy(&e.0)
+        );
     }
 
     #[test]
     fn case_folding_reaches_the_translated_pattern() {
-        assert!(compile(b"^[a-z]*$", true).unwrap().is_match(b"ABC"));
-        assert!(compile(br"\(ab\)\{2\}", true).unwrap().is_match(b"ABAB"));
+        assert!(compile(b"^[a-z]*$", true).unwrap().is_match(b"ABC").unwrap());
+        assert!(compile(br"\(ab\)\{2\}", true).unwrap().is_match(b"ABAB").unwrap());
     }
 }

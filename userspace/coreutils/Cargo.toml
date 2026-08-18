@@ -21,3 +21,8 @@ bignum = { path = "../bignum" }
 # on the same terminal as osh's `select` menu, so a disagreement about how wide
 # a character is shows up as a misaligned screen. See `userspace/charwidth`.
 charwidth = { path = "../charwidth" }
+# One SHA-256, shared with `pkg`, `backup`, `rsync`, `ssh` and the rest. The
+# `sha256sum` binary carried its own, which is the least defensible place for a
+# private copy: the whole output of that utility is a digest another machine
+# will compare against its own.
+sha2 = { path = "../../sha2" }

@@ -18,7 +18,10 @@
 
 use std::env;
 use std::fs;
+use std::io;
 use std::process;
+
+use userdb::UserDb;
 
 // ============================================================================
 // Constants
@@ -113,83 +116,33 @@ fn do_setgroups(_gids: &[u32]) -> Result<(), String> {
 // User/group database reading
 // ============================================================================
 
-const USER_DB_PATH: &str = "/etc/users.yaml";
-
-/// A resolved user entry from the Slate OS user database.
-struct UserEntry {
-    uid: u32,
-    username: String,
-    groups: Vec<String>,
-}
-
 /// A resolved group with a numeric GID.
 struct GroupEntry {
     gid: u32,
     name: String,
 }
 
-/// Read all users from /etc/users.yaml (same format as useradm/chown).
-fn read_users() -> Vec<UserEntry> {
-    let content = match fs::read_to_string(USER_DB_PATH) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut users = Vec::new();
-    let mut uid: u32 = 0;
-    let mut username = String::new();
-    let mut groups: Vec<String> = Vec::new();
-    let mut in_entry = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("- uid:") || trimmed.starts_with("-  uid:") {
-            // Flush previous entry.
-            if in_entry && !username.is_empty() {
-                users.push(UserEntry {
-                    uid,
-                    username: username.clone(),
-                    groups: groups.clone(),
-                });
+/// Read the user database, treating an absent or unreadable file as empty.
+///
+/// An empty database means `--userspec alice` fails with "unknown user" rather
+/// than resolving to something else. That is the right failure for a program
+/// whose next act is to drop privilege: guessing an id here would drop into an
+/// identity the caller did not name.
+fn read_users() -> UserDb {
+    match UserDb::load(userdb::DEFAULT_PATH) {
+        Ok(db) => db,
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!("chroot: cannot read {}: {e}", userdb::DEFAULT_PATH);
             }
-            uid = trimmed
-                .split(':')
-                .nth(1)
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(0);
-            username.clear();
-            groups.clear();
-            in_entry = true;
-        } else if in_entry {
-            if let Some(val) = trimmed.strip_prefix("username:") {
-                username = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("groups:") {
-                let val = val.trim().trim_matches(|c: char| c == '[' || c == ']');
-                groups = val
-                    .split(',')
-                    .map(|g| g.trim().trim_matches('"').to_string())
-                    .filter(|g| !g.is_empty())
-                    .collect();
-            }
+            UserDb::new()
         }
     }
-
-    // Flush the last entry.
-    if in_entry && !username.is_empty() {
-        users.push(UserEntry {
-            uid,
-            username,
-            groups,
-        });
-    }
-
-    users
 }
 
 /// Build the group table by collecting every unique group name from all users
 /// and assigning GIDs in order. Well-known groups get fixed IDs.
-fn build_group_table(users: &[UserEntry]) -> Vec<GroupEntry> {
+fn build_group_table(users: &UserDb) -> Vec<GroupEntry> {
     let mut groups = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -203,14 +156,22 @@ fn build_group_table(users: &[UserEntry]) -> Vec<GroupEntry> {
     }
 
     let mut next_gid: u32 = 101;
-    for user in users {
-        for g in &user.groups {
-            if !seen.contains(g) {
+    for user in users.records() {
+        // An administrator is a member of `wheel` whether or not the field
+        // lists it: the database records administrator-ness as a flag, and
+        // `--userspec root:wheel` failing with "unknown group" on a machine
+        // that has administrators would be inexplicable.
+        let mut names = user.groups();
+        if user.is_admin() {
+            names.push("wheel".to_string());
+        }
+        for g in names {
+            if !seen.contains(&g) {
                 groups.push(GroupEntry {
                     gid: next_gid,
                     name: g.clone(),
                 });
-                seen.insert(g.clone());
+                seen.insert(g);
                 next_gid = next_gid.saturating_add(1);
             }
         }
@@ -220,11 +181,11 @@ fn build_group_table(users: &[UserEntry]) -> Vec<GroupEntry> {
 }
 
 /// Resolve a username or numeric UID string to a UID.
-fn resolve_uid(name: &str, users: &[UserEntry]) -> Option<u32> {
+fn resolve_uid(name: &str, users: &UserDb) -> Option<u32> {
     if let Ok(n) = name.parse::<u32>() {
         return Some(n);
     }
-    users.iter().find(|u| u.username == name).map(|u| u.uid)
+    users.find(name).and_then(userdb::Record::uid)
 }
 
 /// Resolve a group name or numeric GID string to a GID.
@@ -243,23 +204,26 @@ fn resolve_gid(name: &str, groups: &[GroupEntry]) -> Option<u32> {
 ///
 /// Tries /proc/self/status first, then falls back to the USER env var
 /// matched against the user database, then defaults to u32::MAX (nobody).
-fn get_caller_uid(users: &[UserEntry]) -> u32 {
+fn get_caller_uid(users: &UserDb) -> u32 {
     // Try /proc/self/status for the real UID.
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
             if let Some(rest) = line.strip_prefix("Uid:")
                 && let Some(uid_str) = rest.split_whitespace().next()
-                    && let Ok(uid) = uid_str.parse::<u32>() {
-                        return uid;
-                    }
+                && let Ok(uid) = uid_str.parse::<u32>()
+            {
+                return uid;
+            }
         }
     }
 
     // Fallback: resolve USER env var against the database.
     if let Ok(name) = env::var("USER")
-        && let Some(user) = users.iter().find(|u| u.username == name) {
-            return user.uid;
-        }
+        && let Some(user) = users.find(&name)
+        && let Some(uid) = user.uid()
+    {
+        return uid;
+    }
 
     // Unknown caller.
     u32::MAX
@@ -296,7 +260,7 @@ struct Options {
 /// - `USER:` -> (Some(uid), None)
 fn parse_userspec(
     spec: &str,
-    users: &[UserEntry],
+    users: &UserDb,
     groups: &[GroupEntry],
 ) -> Result<(Option<u32>, Option<u32>), String> {
     if let Some(colon_pos) = spec.find(':') {
@@ -324,36 +288,27 @@ fn parse_userspec(
         Ok((uid, gid))
     } else {
         // No colon -- just a user.
-        let uid = resolve_uid(spec, users)
-            .ok_or_else(|| format!("invalid user: '{spec}'"))?;
+        let uid = resolve_uid(spec, users).ok_or_else(|| format!("invalid user: '{spec}'"))?;
         Ok((Some(uid), None))
     }
 }
 
 /// Parse a comma-separated list of group names or numeric GIDs.
-fn parse_group_list(
-    list: &str,
-    groups: &[GroupEntry],
-) -> Result<Vec<u32>, String> {
+fn parse_group_list(list: &str, groups: &[GroupEntry]) -> Result<Vec<u32>, String> {
     let mut gids = Vec::new();
     for item in list.split(',') {
         let item = item.trim();
         if item.is_empty() {
             continue;
         }
-        let gid = resolve_gid(item, groups)
-            .ok_or_else(|| format!("invalid group: '{item}'"))?;
+        let gid = resolve_gid(item, groups).ok_or_else(|| format!("invalid group: '{item}'"))?;
         gids.push(gid);
     }
     Ok(gids)
 }
 
 /// Parse command-line arguments into an `Options` struct.
-fn parse_args(
-    args: &[String],
-    users: &[UserEntry],
-    groups: &[GroupEntry],
-) -> Result<Options, String> {
+fn parse_args(args: &[String], users: &UserDb, groups: &[GroupEntry]) -> Result<Options, String> {
     let mut opts = Options {
         newroot: String::new(),
         command: DEFAULT_SHELL.to_string(),
@@ -478,23 +433,15 @@ fn validate_newroot(path: &str) -> Result<(), String> {
         Err(e) => {
             let kind = e.kind();
             match kind {
-                std::io::ErrorKind::NotFound => {
-                    Err(format!(
-                        "cannot change root directory to '{path}': \
+                std::io::ErrorKind::NotFound => Err(format!(
+                    "cannot change root directory to '{path}': \
                          no such file or directory"
-                    ))
-                }
-                std::io::ErrorKind::PermissionDenied => {
-                    Err(format!(
-                        "cannot change root directory to '{path}': \
+                )),
+                std::io::ErrorKind::PermissionDenied => Err(format!(
+                    "cannot change root directory to '{path}': \
                          permission denied"
-                    ))
-                }
-                _ => {
-                    Err(format!(
-                        "cannot change root directory to '{path}': {e}"
-                    ))
-                }
+                )),
+                _ => Err(format!("cannot change root directory to '{path}': {e}")),
             }
         }
     }
@@ -571,9 +518,7 @@ fn main() {
     // Root privilege check: only uid 0 may use chroot.
     let caller_uid = get_caller_uid(&users);
     if caller_uid != 0 {
-        eprintln!(
-            "chroot: only root can use chroot (current uid: {caller_uid})"
-        );
+        eprintln!("chroot: only root can use chroot (current uid: {caller_uid})");
         process::exit(125);
     }
 
@@ -591,32 +536,36 @@ fn main() {
 
     // Step 2: Change working directory to / (unless --skip-chdir).
     if !opts.skip_chdir
-        && let Err(e) = do_chdir("/") {
-            eprintln!("chroot: cannot change directory to '/': {e}");
-            process::exit(125);
-        }
+        && let Err(e) = do_chdir("/")
+    {
+        eprintln!("chroot: cannot change directory to '/': {e}");
+        process::exit(125);
+    }
 
     // Step 3: Set supplementary groups (before dropping to non-root).
     if !opts.supplementary_gids.is_empty()
-        && let Err(e) = do_setgroups(&opts.supplementary_gids) {
-            eprintln!("chroot: failed to set supplementary groups: {e}");
-            process::exit(125);
-        }
+        && let Err(e) = do_setgroups(&opts.supplementary_gids)
+    {
+        eprintln!("chroot: failed to set supplementary groups: {e}");
+        process::exit(125);
+    }
 
     // Step 4: Set group ID (before user ID -- setgid may fail after setuid
     // drops root privileges).
     if let Some(gid) = opts.userspec_gid
-        && let Err(e) = do_setgid(gid) {
-            eprintln!("chroot: failed to set group ID to {gid}: {e}");
-            process::exit(125);
-        }
+        && let Err(e) = do_setgid(gid)
+    {
+        eprintln!("chroot: failed to set group ID to {gid}: {e}");
+        process::exit(125);
+    }
 
     // Step 5: Set user ID (last, since this drops root).
     if let Some(uid) = opts.userspec_uid
-        && let Err(e) = do_setuid(uid) {
-            eprintln!("chroot: failed to set user ID to {uid}: {e}");
-            process::exit(125);
-        }
+        && let Err(e) = do_setuid(uid)
+    {
+        eprintln!("chroot: failed to set user ID to {uid}: {e}");
+        process::exit(125);
+    }
 
     // Step 6: Execute the command.
     let mut cmd = process::Command::new(&opts.command);
@@ -650,10 +599,7 @@ fn main() {
                     process::exit(126);
                 }
                 _ => {
-                    eprintln!(
-                        "chroot: failed to run command '{}': {e}",
-                        opts.command
-                    );
+                    eprintln!("chroot: failed to run command '{}': {e}", opts.command);
                     process::exit(126);
                 }
             }
@@ -671,33 +617,29 @@ mod tests {
 
     // ---- Helper: build a test user/group database ----
 
-    fn test_users() -> Vec<UserEntry> {
-        vec![
-            UserEntry {
-                uid: 0,
-                username: "root".to_string(),
-                groups: vec![
-                    "root".to_string(),
-                    "admin".to_string(),
-                    "wheel".to_string(),
-                ],
-            },
-            UserEntry {
-                uid: 1000,
-                username: "alice".to_string(),
-                groups: vec!["users".to_string(), "audio".to_string()],
-            },
-            UserEntry {
-                uid: 1001,
-                username: "bob".to_string(),
-                groups: vec!["users".to_string()],
-            },
-            UserEntry {
-                uid: 65534,
-                username: "nobody".to_string(),
-                groups: vec!["nogroup".to_string()],
-            },
-        ]
+    /// A database in the form `useradm` writes it.
+    ///
+    /// Written as text rather than built from struct literals so that the
+    /// parser this crate now shares is exercised on the bytes the writer
+    /// produces. The hand-rolled parser it replaces was only ever tested
+    /// against fixtures built in memory, which is why nothing noticed that it
+    /// read no field the writer had renamed.
+    fn test_users() -> UserDb {
+        UserDb::parse(
+            "users:\n\
+             \x20 - uid: 0\n\
+             \x20   username: \"root\"\n\
+             \x20   groups: [\"root\", \"admin\", \"wheel\"]\n\
+             \x20 - uid: 1000\n\
+             \x20   username: \"alice\"\n\
+             \x20   groups: [\"users\", \"audio\"]\n\
+             \x20 - uid: 1001\n\
+             \x20   username: \"bob\"\n\
+             \x20   groups: [\"users\"]\n\
+             \x20 - uid: 65534\n\
+             \x20   username: \"nobody\"\n\
+             \x20   groups: [\"nogroup\"]\n",
+        )
     }
 
     fn test_groups() -> Vec<GroupEntry> {
@@ -815,8 +757,7 @@ mod tests {
     fn test_parse_userspec_user_and_group_by_name() {
         let users = test_users();
         let groups = test_groups();
-        let (uid, gid) =
-            parse_userspec("alice:users", &users, &groups).unwrap();
+        let (uid, gid) = parse_userspec("alice:users", &users, &groups).unwrap();
         assert_eq!(uid, Some(1000));
         assert_eq!(gid, Some(100)); // "users" is well-known gid=100
     }
@@ -825,8 +766,7 @@ mod tests {
     fn test_parse_userspec_numeric() {
         let users = test_users();
         let groups = test_groups();
-        let (uid, gid) =
-            parse_userspec("500:600", &users, &groups).unwrap();
+        let (uid, gid) = parse_userspec("500:600", &users, &groups).unwrap();
         assert_eq!(uid, Some(500));
         assert_eq!(gid, Some(600));
     }
@@ -835,8 +775,7 @@ mod tests {
     fn test_parse_userspec_user_only() {
         let users = test_users();
         let groups = test_groups();
-        let (uid, gid) =
-            parse_userspec("root", &users, &groups).unwrap();
+        let (uid, gid) = parse_userspec("root", &users, &groups).unwrap();
         assert_eq!(uid, Some(0));
         assert_eq!(gid, None);
     }
@@ -845,8 +784,7 @@ mod tests {
     fn test_parse_userspec_group_only() {
         let users = test_users();
         let groups = test_groups();
-        let (uid, gid) =
-            parse_userspec(":admin", &users, &groups).unwrap();
+        let (uid, gid) = parse_userspec(":admin", &users, &groups).unwrap();
         assert_eq!(uid, None);
         assert_eq!(gid, Some(1)); // "admin" is well-known gid=1
     }
@@ -855,8 +793,7 @@ mod tests {
     fn test_parse_userspec_user_colon_empty() {
         let users = test_users();
         let groups = test_groups();
-        let (uid, gid) =
-            parse_userspec("bob:", &users, &groups).unwrap();
+        let (uid, gid) = parse_userspec("bob:", &users, &groups).unwrap();
         assert_eq!(uid, Some(1001));
         assert_eq!(gid, None);
     }
@@ -865,8 +802,7 @@ mod tests {
     fn test_parse_userspec_invalid_user() {
         let users = test_users();
         let groups = test_groups();
-        let err =
-            parse_userspec("nonexistent:users", &users, &groups).unwrap_err();
+        let err = parse_userspec("nonexistent:users", &users, &groups).unwrap_err();
         assert!(err.contains("invalid user"), "got: {err}");
     }
 
@@ -874,8 +810,7 @@ mod tests {
     fn test_parse_userspec_invalid_group() {
         let users = test_users();
         let groups = test_groups();
-        let err =
-            parse_userspec("root:nonexistent", &users, &groups).unwrap_err();
+        let err = parse_userspec("root:nonexistent", &users, &groups).unwrap_err();
         assert!(err.contains("invalid group"), "got: {err}");
     }
 
@@ -963,12 +898,10 @@ mod tests {
 
     #[test]
     fn test_validate_newroot_nonexistent() {
-        let err = validate_newroot(
-            "/this/path/does/not/exist/chroot_test_9817236"
-        )
-        .unwrap_err();
+        let err = validate_newroot("/this/path/does/not/exist/chroot_test_9817236").unwrap_err();
         assert!(
-            err.contains("no such file") || err.contains("not found")
+            err.contains("no such file")
+                || err.contains("not found")
                 || err.contains("cannot change root"),
             "got: {err}"
         );
@@ -995,6 +928,42 @@ mod tests {
     fn test_resolve_uid_nonexistent() {
         let users = test_users();
         assert_eq!(resolve_uid("ghost", &users), None);
+    }
+
+    #[test]
+    fn an_administrator_is_a_member_of_wheel() {
+        // The database records administrator-ness as `is_admin: true` rather
+        // than as a group, so `--userspec alice:wheel` would otherwise fail
+        // with "unknown group" on a machine that plainly has administrators.
+        let users = UserDb::parse(
+            "users:\n\
+             \x20 - uid: 1000\n\
+             \x20   username: \"alice\"\n\
+             \x20   is_admin: true\n",
+        );
+        let groups = build_group_table(&users);
+        assert!(resolve_gid("wheel", &groups).is_some());
+    }
+
+    #[test]
+    fn a_userspec_resolves_through_a_database_the_writer_produced() {
+        // Serialise and re-parse: the only step at which a reader and a writer
+        // that disagree about the format can be seen to disagree.
+        let mut db = UserDb::new();
+        let mut alice = userdb::Record::new();
+        alice.set_uid(1000);
+        alice.set(userdb::field::USERNAME, "alice");
+        alice.set_groups(&["users".to_string(), "audio".to_string()]);
+        db.push(alice);
+
+        let reparsed = UserDb::parse(&db.to_text());
+        let groups = build_group_table(&reparsed);
+        assert_eq!(
+            parse_userspec("alice:audio", &reparsed, &groups),
+            // `users` is well-known at 100; `audio` is the first name the
+            // database contributes, so it takes the first free gid.
+            Ok((Some(1000), Some(101)))
+        );
     }
 
     #[test]

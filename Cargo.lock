@@ -646,6 +646,9 @@ version = "0.1.0"
 [[package]]
 name = "backup"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "backup-app"
@@ -1506,6 +1509,9 @@ version = "0.1.0"
 [[package]]
 name = "chown"
 version = "0.1.0"
+dependencies = [
+ "userdb",
+]
 
 [[package]]
 name = "chpasswd"
@@ -1537,6 +1543,9 @@ version = "0.1.0"
 [[package]]
 name = "chroot"
 version = "0.1.0"
+dependencies = [
+ "userdb",
+]
 
 [[package]]
 name = "chroot-cli"
@@ -1869,6 +1878,7 @@ dependencies = [
  "bignum",
  "charwidth",
  "ere",
+ "sha2",
 ]
 
 [[package]]
@@ -2014,6 +2024,7 @@ name = "cryptsetup"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "sha2",
 ]
 
 [[package]]
@@ -2485,6 +2496,9 @@ version = "0.1.0"
 [[package]]
 name = "doas"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "docker"
@@ -3167,6 +3181,9 @@ version = "0.1.0"
 [[package]]
 name = "fio"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "fio-cli"
@@ -8089,6 +8106,9 @@ version = "0.1.0"
 [[package]]
 name = "polkit"
 version = "0.1.0"
+dependencies = [
+ "userdb",
+]
 
 [[package]]
 name = "polkit-cli"
@@ -8991,6 +9011,9 @@ dependencies = [
 [[package]]
 name = "rsync"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "rsyslog-cli"
@@ -9444,6 +9467,9 @@ version = "0.1.0"
 [[package]]
 name = "sha256sum"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "shared-mime-info-cli"
@@ -10014,14 +10040,23 @@ version = "0.1.0"
 [[package]]
 name = "ssh"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "ssh-keygen"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "sshd"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "st-cli"

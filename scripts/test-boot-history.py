@@ -590,12 +590,44 @@ def test_tail_is_bounded(bh):
           max(len(ln) for ln in rec["tail"]) <= bh.TAIL_WIDTH, True)
 
 
+def test_caller_supplied_commit_wins_over_git(bh):
+    """The row must name the tree that was *built*, not HEAD at record time.
+
+    This runs from the EXIT trap of a boot test that took ten to twenty
+    minutes, and committing during one is normal here -- so asking git for HEAD
+    now can stamp the row with a commit made while QEMU was already running.
+    That happened on 2026-08-18: a PASS was filed against a commit whose entire
+    content was a paragraph of markdown.  It is not a cosmetic mislabel, because
+    boot-test.sh's report_bench_absence() diffs HEAD against the last recorded
+    commit to decide whether perf-critical code still needs benchmarking, and a
+    row stamped too *new* hides exactly the changes that check exists to find.
+    """
+    args = _Args()
+    args.commit = "deadbee"
+    args.branch = "lane-z"
+    args.dirty = True
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("the supplied commit is recorded", rec["commit"], "deadbee")
+    check("the supplied branch is recorded", rec["branch"], "lane-z")
+    check("a dirty build tree is recorded", rec["dirty"], True)
+
+    clean = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check("a clean build tree is recorded as such", clean["dirty"], False)
+    check_true("no supplied commit falls back to git", clean["commit"])
+
+
 class _Args:
     exit_code = 1
     marker = "BOOT_OK"
     label = ""
     profile = "debug"
     wall_seconds = None
+    # Empty, as argparse leaves them when boot-test.sh does not pass them, so
+    # build_record() takes the git fallback -- which is the path these tests
+    # were written against.
+    commit = ""
+    branch = ""
+    dirty = False
 
 
 # --------------------------------------------------------------------------

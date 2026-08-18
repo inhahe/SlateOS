@@ -527,10 +527,22 @@ def append_record(path: str, record: dict) -> bool:
 
 
 def build_record(serial: Serial | None, verdict: str, args) -> dict:
+    # `--commit`/`--branch` win over asking git, and boot-test.sh always passes
+    # them.  It reads HEAD once, before the build, and hands that value down;
+    # this function runs at the *end* of a run that took ten to twenty minutes,
+    # by which time HEAD may well have moved -- committing while a boot test
+    # runs is normal here.  Falling back to `git_commit()` keeps a standalone
+    # invocation working, but for a real run it would stamp the row with a
+    # commit that was never built.
     rec: dict = {
         "ts": _now_iso(),
-        "commit": git_commit(),
-        "branch": git_branch(),
+        "commit": args.commit or git_commit(),
+        "branch": args.branch or git_branch(),
+        # True when the tree carried uncommitted changes at build time, so the
+        # `commit` above names the nearest ancestor rather than what ran.  A
+        # consumer that diffs against this row must say so; see
+        # report_bench_absence() in boot-test.sh.
+        "dirty": bool(args.dirty),
         "host": socket.gethostname(),
         "os": platform.system(),
         "verdict": verdict,
@@ -716,6 +728,16 @@ def main(argv=None) -> int:
     parser.add_argument("--label", default="",
                         help="free-form run tag, e.g. 'soak-iter3'")
     parser.add_argument("--profile", default="debug")
+    parser.add_argument("--commit", default="",
+                        help="commit the tested kernel was built from; pass "
+                             "the value read BEFORE the build, since HEAD can "
+                             "move during a run (default: ask git now)")
+    parser.add_argument("--branch", default="",
+                        help="branch the tested kernel was built from "
+                             "(default: ask git now)")
+    parser.add_argument("--dirty", action="store_true",
+                        help="the tree had uncommitted changes at build time, "
+                             "so --commit names an ancestor of what ran")
     parser.add_argument("--no-record", action="store_true",
                         help="classify and report, write nothing")
     parser.add_argument("--classify", action="store_true",

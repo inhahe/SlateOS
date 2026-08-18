@@ -32994,6 +32994,50 @@ tracked-not-scored for that reason, and the only experiment that would settle
 it is the alternating-runs design at the end of this entry - not another single
 observation.
 
+### Run 87 settles it: the same binary, twice, 3853 -> 5659
+
+Run 86 flagged `sched_pick_next_d8` as `REGRESSED, UNREPLICATED` and the report
+prescribed its own remedy - re-run `--bench` *without rebuilding*.  That was
+done immediately (run 87, 2026-08-17 23:0x EDT).  `cargo` reported
+`Finished release profile in 6.00s` with no compilation and the ELF's mtime
+stayed at 22:36:38, so runs 86 and 87 measured a **byte-identical kernel**.
+
+| benchmark | run 86 | run 87 | verdict |
+|---|---:|---:|---|
+| `sched_pick_next_d8` | 45 ns | **38 ns** | contradicted; inside its 34-44 range |
+| `page_alloc_zeroed_free` | 3853 ns | **5659 ns** | +47% on an unchanged binary |
+
+Two conclusions, one for each row.
+
+**The SCHED lock-order hoists did not regress `sched_pick_next_d8`.** The 45 ns
+reading was environmental: the whole `sched_pick_next_*` family sat at 44-45 ns
+in run 86 (d1, d8, d64, d256, d1024 all within 1 ns of each other, against
+per-benchmark medians of 38-42 ns), which is the signature of a suite-wide floor
+shift, not of a change that would have to be depth-dependent to be real.  Run 86
+was flagged `RUN CONTAMINATED` and run 87 put the family back at 38 ns.
+
+**The `page_alloc_zeroed_free` bimodality is environmental, and is now proven so
+without needing any of the earlier reasoning.** This is the alternating-runs
+experiment's first pair, and it came back as clean a result as that design could
+produce:
+
+* Same binary. No rebuild, no code change, no commit between the two readings.
+* Back to back, ~20 minutes apart.
+* **The orphaned QEMU spinner was dead for both.** So the elevated mode occurs
+    with the spinner gone - which retires the spinner hypothesis outright,
+    rather than merely failing to support it as the run-86 reading did.
+* The elevated reading is the *second* of the pair, so it cannot be dismissed as
+    a warm-up artefact of a cold host.
+
+That is a 1.47x swing in a **minimum over 500 iterations** with the code held
+fixed.  Nothing about a commit can be read off this benchmark, and the
+`In short:` headline of this entry - an unstable measurement, not a regression -
+is now supported by direct replication rather than by inference from the series.
+
+**The prediction two sections up is therefore moot** and should not be cited:
+its low-cluster outcome was uninformative at 1.2:1, and this pair supersedes it
+with a controlled comparison.
+
 ### What to do
 
 * **Do not cite this benchmark as evidence for or against any commit**,

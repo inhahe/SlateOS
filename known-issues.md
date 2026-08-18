@@ -31571,6 +31571,71 @@ clearing 1200 warnings in the middle of the transport work would have buried a
 functional change under a formatting one — but it should not wait long, because
 the backlog grows with the crate.
 
+### Correction, 2026-08-17: the "~1200 warnings" figure was wrong, and so was the crate list
+
+Two errors in the original entry, both of which made the job look bigger and
+narrower than it is.
+
+**The count.** `-W clippy::pedantic` on the command line *bypasses the
+workspace's `[workspace.lints.clippy]` table entirely*, including its ~26
+deliberate, documented `allow`s (`doc_markdown`, `format_push_string`,
+`uninlined_format_args`, `single_match_else`, …). So that measurement counted
+warnings the workspace has already decided not to care about — 162
+`doc_markdown` hits, to pick the clearest example, are allowed workspace-wide
+and would never have appeared. **The only honest way to measure this is to add
+`[lints] workspace = true` and build**, which is what the numbers below are.
+The corollary is general: never quote a warning count obtained with `-W` flags
+in a workspace that has a lints table.
+
+**The crate list.** `gui/` has ten crates, not five; the entry's table omitted
+`appearance`, `clipboard`, `credentials`, `desktop` and `notifications`.
+
+**Where it now stands.** Five of ten opt in:
+
+| Crate | `[lints] workspace = true` | Warnings remaining |
+|---|---|---|
+| `gui/appearance` | yes | 0 |
+| `gui/clipboard` | yes | 0 |
+| `gui/compositor` | yes | 0 |
+| `gui/credentials` | yes | 0 |
+| `gui/font` | yes | 0 |
+| `gui/desktop` | no | ~1752 |
+| `gui/toolkit` | no | ~946 |
+| `gui/remote` | no | ~720 |
+| `gui/window` | no | ~660 |
+| `gui/notifications` | no | ~598 |
+
+**What the opt-in has actually found**, which is the reason to keep doing it
+crate by crate rather than by adding `allow`s: every warning family
+investigated so far has contained at least one real defect, not a style
+complaint.
+
+- `gui/clipboard`, `gui/compositor`: logged separately (a negative-spread
+  shadow filling the screen; four security defects).
+- `gui/credentials`: a two-time pad (every encryption reused nonce zero), a
+  key-derivation function that did not stretch, a verifier that made a
+  password guess cost one SHA-256 rather than one unlock, two non-constant-time
+  secret comparisons, a `% bound` modulo reduction in the password generator, a
+  byte/character confusion in the hex decoder, and five copies of a
+  check-then-index whose failure branch was silently wrong. Fixed in
+  `765949194`, `d8ad84f54` and `eb6e77799`.
+
+**One thing the credentials pass changed about the method.** That crate did not
+merely lack the opt-in; it had *its own* lint policy — `#![deny(clippy::all,
+clippy::pedantic)]` plus forty-two `#![allow(...)]` lines — which is worse than
+having none, because it looks compliant. Deleting the private policy outright
+and letting the workspace govern left **eleven** warnings, all fixable, none
+needing an allow: thirty-seven of the forty-two allows were suppressing lints
+that do not fire at all. So for the remaining five crates the first step is
+**delete any inner lint attributes and see what is left**, not translate them.
+
+**Also note** the counts above are pre-fix and will shrink faster than they
+look: 96 of `gui/credentials`'s 97 were in one hand-copied SHA-256, and were
+removed by deleting it rather than by fixing 96 sites (see
+`C-SHA-256-IS-IMPLEMENTED-ELEVEN-TIMES-IN-THIS-TREE`). Expect the same shape
+elsewhere — a large warning count usually means a duplicated *shape*, and the
+cheap fix and the correct fix are the same one.
+
 
 ## C-TEXT-WAS-CUT-BY-COUNTING-CHARACTERS-INSTEAD-OF-MEASURING-IT (lane C, 2026-08-17) - **fixed**
 
@@ -32373,3 +32438,125 @@ can extract its three into a small top-level crate alongside the existing
 have to opt in themselves, so the cross-lane half is a request rather than an
 edit. Note `kernel/` is `no_std`, so the shared crate must be `no_std` with an
 `alloc`-free one-shot API to be adoptable by all three lanes.
+
+### Correction and progress, 2026-08-17
+
+**It is twenty-six, not eleven.** The original count came from
+`grep "fn sha256"`, which misses every copy that names its entry point
+something else or exposes only a `Sha256` struct. Two greps are needed to see
+them all, and neither alone is sufficient:
+
+```
+grep -rln "0x6a09e667" --include=*.rs .   # the eight IV words
+grep -rln "fn sha256\|struct Sha256" --include=*.rs .
+```
+
+The union is 26 files. The original entry also missed one of lane C's own:
+**`apps/diskimager`** has a streaming copy, so lane C had four, not three.
+
+**Done.** `sha2/` now exists at the workspace root — `no_std`, no `alloc`, the
+four FIPS 180-4 vectors, a streaming form cross-checked against the one-shot
+one at every length up to three blocks and every split within each length, and
+a `benches/rate.rs` (commit `d8ad84f54`). `gui/credentials` is migrated
+(`eb6e77799`), which is also the first evidence for the claim that the copies
+cost something: it was **22% faster** afterwards (1.20 vs 1.54 µs/iter on a
+70-byte input, both measured in one process), because that copy allocated a
+`Vec` per call for the padded message. That matters concretely — the
+credential KDF runs 100 000 hashes per unlock.
+
+**Remaining, 25 copies.** Lane C's three: `apps/backup` (streaming +
+`sha256_bytes`/`sha256_hex`/`sha256_file`), `apps/diskimager` (streaming),
+`apps/lockscreen` (one-shot). Lanes A and B own the other 22 and must opt in
+themselves; requests are filed rather than edits made.
+
+**What consolidating does and does not buy.** It does not make the primitive
+vetted — a single unvetted SHA-256 is still unvetted, and whether this tree
+should be writing its own crypto at all is `open-questions.md` C-Q5. What it
+buys is that the answer has one place to land, that a mistake is caught once
+rather than needing to be caught 26 times, and — per the measurement above —
+that the duplication was costing performance as well as review budget.
+
+
+## C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256 (lane C, 2026-08-17)
+
+**In short.** `apps/diskimager` offers to checksum an image with MD5, SHA-1 or
+SHA-256 and shows you a digest of exactly the right length. None of the three
+is the algorithm it claims. All three are the same made-up mixing function, so
+the "SHA-256" it prints for a downloaded `.iso` will never match the SHA-256
+the publisher printed — and its "verify after write" tick box is checking the
+disk against a number that means nothing outside this program.
+
+**Where.** `apps/diskimager/src/main.rs`, `HashState` (~lines 205-290).
+
+**What it actually computes.** `new()` seeds `state` with the genuine
+published initial values for whichever algorithm you picked — the real
+SHA-256 IV (`0x6a09e667, 0xbb67ae85, …`), the real MD5 and SHA-1 ones. That
+is the entire resemblance. `update()` then ignores all of it:
+
+```rust
+for (idx, &byte) in data.iter().enumerate() {
+    let slot = idx % 8;
+    if let Some(s) = self.state.get_mut(slot) {
+        *s = s.wrapping_mul(31).wrapping_add(byte as u64);
+    }
+}
+```
+
+That is eight interleaved `u64` polynomial accumulators — a Rabin-style
+rolling fingerprint with base 31 — and it is identical for all three
+algorithms. `finalize()` then stirs the eight words together and truncates the
+hex to 32, 40 or 64 characters depending on which name you asked for. The
+choice of algorithm affects **only the length of the output string** and the
+eight seed constants.
+
+**How it survived.** Two ways, both worth noting because they generalise.
+
+1. *The tests check shape, not value.* There are eight tests over `HashState`.
+   They assert the digest is 64 characters, that it is all hex digits, that
+   the same input twice gives the same output, and that two different inputs
+   give different outputs. Every one of those passes for `*s = s*31 + byte`.
+   Not one test compares against a known answer — and a known-answer vector is
+   the *only* test that can distinguish a hash from a plausible-looking
+   function, which is precisely why FIPS publishes them.
+
+2. *It has already been "fixed" once, at the wrong level.* There is a
+   nine-line comment in `finalize()` explaining that the previous version
+   emitted the raw state words and truncated, so that bytes landing in
+   discarded words produced identical digests — "a real collision" — and that
+   folding all eight words in fixes it. That diagnosis is correct and the fix
+   works. But it treats the stub as the thing to repair rather than the thing
+   to replace, which is the band-aid accumulation `CLAUDE.md` warns about: the
+   collision was a symptom, and the disease is that this is not a hash.
+
+**Impact.** Two distinct failures, one much worse than the other.
+
+- **Comparing against a published checksum is broken outright, and silently.**
+  This is the headline use of a disk imager: download an install image, paste
+  in the checksum from the download page, confirm it matches. It never will.
+  The user sees `Mismatch`, concludes their download is corrupt, and
+  re-downloads forever. Worse in the other direction: the Verify tab will
+  happily *display* a 64-character "SHA-256" that a user may copy and publish
+  as if it were one.
+- **Verify-after-write is weaker than it looks but not worthless.** It
+  compares the source against the written-back data using the same function on
+  both sides, so it is a self-consistency check, and a base-31 polynomial over
+  `u64` does catch random corruption with high probability. It will not catch
+  deliberate tampering, and it is not what the UI implies.
+
+**Severity.** High. It is a correctness bug in the feature the application
+exists for, it is invisible to the user (the output is well-formed and
+stable), and the tests are green.
+
+**Proper fix.** Not "write the missing rounds into `update()`" — delegate.
+`sha2/` already exists at the workspace root (`d8ad84f54`): `no_std`, no
+`alloc`, checked against all four FIPS 180-4 vectors. SHA-1 and MD5 need the
+same treatment — they are obsolete *for security* but a disk imager needs them
+precisely because publishers still post them, so they should be shared crates
+in the same shape, each with the known-answer vectors from FIPS 180-4 and RFC
+1321 respectively. Then `HashState` becomes a thin enum over three real
+implementations.
+
+**And add value-checking tests**, in `diskimager` as well as in the crates, so
+the next stub cannot pass. The minimum bar for any hash in this tree: the
+digest of the empty input, and the digest of `"abc"`. Both are published for
+all three algorithms.

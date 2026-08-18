@@ -12,6 +12,8 @@
 //! This satisfies link-time references from programs that call
 //! gettext for i18n without requiring actual catalog files.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 // ---------------------------------------------------------------------------
 // gettext / dgettext / dcgettext
 // ---------------------------------------------------------------------------
@@ -86,6 +88,35 @@ pub extern "C" fn dcngettext(
 // textdomain / bindtextdomain / bind_textdomain_codeset
 // ---------------------------------------------------------------------------
 
+/// Spinlock guarding writes to [`CURRENT_DOMAIN`].
+///
+/// The copy below used to carry the comment "SAFETY: single-threaded access",
+/// which nothing enforced — this is a libc, and two threads calling
+/// `textdomain` is ordinary.  Without the lock the two byte-copies interleave
+/// and the buffer ends up holding neither name: the workspace test run of
+/// 2026-08-18 read back `messa\0`, which is five bytes of one caller's
+/// "messages" terminated by the other caller's NUL from "myapp".
+static DOMAIN_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// RAII guard for [`DOMAIN_LOCK`], following `sys_timex.rs`.
+struct DomainLockGuard;
+impl Drop for DomainLockGuard {
+    fn drop(&mut self) {
+        DOMAIN_LOCK.store(false, Ordering::Release);
+    }
+}
+
+/// Acquire [`DOMAIN_LOCK`], spinning until it is free.
+fn lock_domain() -> DomainLockGuard {
+    while DOMAIN_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    DomainLockGuard
+}
+
 /// Static storage for the current text domain name.
 ///
 /// Default is "messages" per POSIX.
@@ -116,8 +147,15 @@ pub extern "C" fn textdomain(domainname: *const u8) -> *const u8 {
         return (&raw const CURRENT_DOMAIN).cast::<u8>();
     }
 
-    // Copy the new domain name into static storage.
-    // SAFETY: single-threaded access.
+    // Copy the new domain name into static storage.  The lock makes the copy
+    // atomic with respect to another `textdomain` caller, so the buffer always
+    // holds one whole name.  It does not — and cannot — extend to the pointer
+    // handed back: POSIX says that string is valid only until the next call,
+    // and glibc has the same property.
+    let _guard = lock_domain();
+    // SAFETY: `DOMAIN_LOCK` is held for the whole copy, so this is the only
+    // writer, and `i` is bounded by `MAX` one below the buffer length so both
+    // the copy and the terminator stay in bounds.
     unsafe {
         let mut i = 0usize;
         // 256-byte buffer, reserve 1 for null.
@@ -133,6 +171,34 @@ pub extern "C" fn textdomain(domainname: *const u8) -> *const u8 {
         *(&raw mut CURRENT_DOMAIN).cast::<u8>().add(i) = 0;
         (&raw const CURRENT_DOMAIN).cast::<u8>()
     }
+}
+
+/// Copy the current domain name into `out`, under [`DOMAIN_LOCK`].
+///
+/// Returns the number of bytes written, excluding the terminator.
+///
+/// `textdomain(NULL)` cannot offer this: it hands back a pointer, and the
+/// caller dereferences it after the lock is gone, so a writer can be halfway
+/// through the buffer by then.  That is the C API's contract, not a defect —
+/// POSIX makes the returned string valid only until the next call.  This
+/// function is the Rust-side reader that *can* hold the lock across the read,
+/// which is what makes the lock's guarantee observable at all.
+pub fn snapshot_domain(out: &mut [u8; 256]) -> usize {
+    let _guard = lock_domain();
+    // Copied through the raw pointer rather than through a `&CURRENT_DOMAIN`:
+    // taking a reference to a `static mut` is the thing `&raw const` exists to
+    // avoid, and the writer above reaches the same storage the same way.
+    // SAFETY: `DOMAIN_LOCK` is held, so no writer can run concurrently; both
+    // buffers are exactly 256 bytes, so the copy is in bounds on both sides;
+    // and `out` is a distinct caller-owned buffer, so they cannot overlap.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (&raw const CURRENT_DOMAIN).cast::<u8>(),
+            out.as_mut_ptr(),
+            out.len(),
+        );
+    }
+    out.iter().position(|&b| b == 0).unwrap_or(out.len())
 }
 
 /// `bindtextdomain` — bind a text domain to a directory.
@@ -311,8 +377,24 @@ mod tests {
     // textdomain
     // -----------------------------------------------------------------------
 
+    /// Serialises the tests that set the domain and then read it back.
+    ///
+    /// `DOMAIN_LOCK` makes each individual write whole, which is the fix a
+    /// libc owes its callers, but it cannot make *set-then-query* — two
+    /// separate calls — atomic, and neither can any lock inside the C API.
+    /// The tests below are the only place that needs that stronger property,
+    /// so they take a lock of their own, as `crypt.rs` and `crt.rs` do for
+    /// their own process-global state.
+    static DOMAIN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take [`DOMAIN_TEST_LOCK`], ignoring poisoning from an unrelated failure.
+    fn domain_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        DOMAIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn test_textdomain_query() {
+        let _guard = domain_test_guard();
         // Query without changing.
         let result = textdomain(core::ptr::null());
         assert!(!result.is_null());
@@ -323,6 +405,7 @@ mod tests {
 
     #[test]
     fn test_textdomain_set_and_query() {
+        let _guard = domain_test_guard();
         // Set a domain.
         let domain = b"myapp\0".as_ptr();
         let result = textdomain(domain);
@@ -340,11 +423,54 @@ mod tests {
 
     #[test]
     fn test_textdomain_overwrite() {
+        let _guard = domain_test_guard();
         textdomain(b"first\0".as_ptr());
         textdomain(b"second\0".as_ptr());
         let q = textdomain(core::ptr::null());
         let name = unsafe { core::ffi::CStr::from_ptr(q.cast()) };
         assert_eq!(name.to_bytes(), b"second");
+
+        // Restore.
+        textdomain(b"messages\0".as_ptr());
+    }
+
+    #[test]
+    fn concurrent_setters_never_leave_a_spliced_name() {
+        // The regression the lock exists for.  Without it the two copies
+        // interleave and the buffer holds a splice of both names — the
+        // observed failure was `messa`, five bytes of one name closed by the
+        // other's terminator.  Read through `snapshot_domain`, which holds the
+        // lock across the read; `textdomain(NULL)` deliberately cannot, since
+        // it returns a pointer the caller dereferences later.
+        //
+        // The two names differ in length on purpose: equal-length names would
+        // splice into something that is still one of them for most
+        // interleavings, and the bug would survive the test.
+        // Every loop below is bounded.  A `stop`-flag design deadlocks the
+        // scope on failure — the assertion unwinds past the store, the writers
+        // spin forever, and the implicit join never returns, so a failing test
+        // becomes a hung test harness holding the binary open.  A fixed
+        // iteration count cannot do that.
+        const ROUNDS: usize = 20_000;
+        let _guard = domain_test_guard();
+        std::thread::scope(|scope| {
+            for name in [b"alpha\0".as_slice(), b"bravocharlie\0".as_slice()] {
+                scope.spawn(move || {
+                    for _ in 0..ROUNDS {
+                        textdomain(name.as_ptr());
+                    }
+                });
+            }
+            let mut seen_buf = [0u8; 256];
+            for _ in 0..ROUNDS {
+                let len = snapshot_domain(&mut seen_buf);
+                let seen = seen_buf.get(..len).unwrap_or(&[]);
+                assert!(
+                    seen == b"alpha" || seen == b"bravocharlie" || seen == b"messages",
+                    "spliced domain name: {seen:?}"
+                );
+            }
+        });
 
         // Restore.
         textdomain(b"messages\0".as_ptr());

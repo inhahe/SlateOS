@@ -972,10 +972,12 @@ impl SvgDocument {
     /// Parse an SVG string into a document tree.
     pub fn parse(svg_data: &str) -> Result<Self, SvgError> {
         let elements = parse_xml(svg_data)?;
-        if elements.is_empty() {
-            return Err(SvgError::MalformedXml("empty document".into()));
-        }
-        let root = build_node(&elements[0])?;
+        // `first` rather than an `is_empty` check followed by `[0]`: the check
+        // and the read are one expression, so they cannot drift apart.
+        let first = elements
+            .first()
+            .ok_or_else(|| SvgError::MalformedXml("empty document".into()))?;
+        let root = build_node(first)?;
         Ok(Self { root })
     }
 
@@ -1562,12 +1564,15 @@ fn parse_viewbox(s: &str) -> Result<(f32, f32, f32, f32), SvgError> {
         .map(|s| s.parse::<f32>())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| SvgError::MalformedXml(format!("bad viewBox: {s}")))?;
-    if parts.len() != 4 {
+    // A slice pattern states the count once, where the values are bound. The
+    // `len() != 4` form stated it twice — in the check and again in the four
+    // indexes — and only the first of those was checked.
+    let [min_x, min_y, width, height] = *parts.as_slice() else {
         return Err(SvgError::MalformedXml(format!(
             "viewBox needs 4 values: {s}"
         )));
-    }
-    Ok((parts[0], parts[1], parts[2], parts[3]))
+    };
+    Ok((min_x, min_y, width, height))
 }
 
 fn parse_points(s: &str) -> Result<Vec<(f32, f32)>, SvgError> {
@@ -1582,7 +1587,16 @@ fn parse_points(s: &str) -> Result<Vec<(f32, f32)>, SvgError> {
             "points needs even number of values".into(),
         ));
     }
-    Ok(numbers.chunks(2).map(|c| (c[0], c[1])).collect())
+    // `chunks_exact` rather than `chunks`: it yields only full pairs, so the
+    // pattern below is the exhaustive case rather than a length assumption. The
+    // `_` arm is unreachable for that reason, not merely unlikely.
+    Ok(numbers
+        .chunks_exact(2)
+        .filter_map(|pair| match *pair {
+            [x, y] => Some((x, y)),
+            _ => None,
+        })
+        .collect())
 }
 
 // ─── Bézier Flattening ───────────────────────────────────────────────────────
@@ -1613,10 +1627,18 @@ fn flatten_cubic(
         x3,
         y3,
         flatness * flatness,
-        0,
+        MAX_SUBDIVISIONS,
         output,
     );
 }
+
+/// How many times a curve may be halved before we accept the chord as-is.
+///
+/// Each level doubles the segment count, so 17 is already 131072 segments —
+/// far past anything a display can resolve. The cap exists to bound the stack
+/// on degenerate curves (cusps, coincident control points) where the flatness
+/// test can fail to converge, not to bound quality.
+const MAX_SUBDIVISIONS: u32 = 17;
 
 fn flatten_cubic_recursive(
     x0: f32,
@@ -1628,14 +1650,18 @@ fn flatten_cubic_recursive(
     x3: f32,
     y3: f32,
     flatness_sq: f32,
-    depth: u32,
+    budget: u32,
     output: &mut Vec<(f32, f32)>,
 ) {
-    // Maximum recursion depth to avoid stack overflow on degenerate curves
-    if depth > 16 {
+    // A budget spent downwards rather than a depth counted upwards: the
+    // recursion cannot outlive its bound, because the bound *is* the value
+    // being passed down. Counting up and comparing against a separate constant
+    // put the limit and the counter in two places, either of which could be
+    // changed without the other.
+    let Some(remaining) = budget.checked_sub(1) else {
         output.push((x3, y3));
         return;
-    }
+    };
 
     // Check flatness: distance of control points from the line (x0,y0)-(x3,y3)
     let dx = x3 - x0;
@@ -1680,7 +1706,7 @@ fn flatten_cubic_recursive(
         mx0123,
         my0123,
         flatness_sq,
-        depth + 1,
+        remaining,
         output,
     );
     flatten_cubic_recursive(
@@ -1693,7 +1719,7 @@ fn flatten_cubic_recursive(
         x3,
         y3,
         flatness_sq,
-        depth + 1,
+        remaining,
         output,
     );
 }
@@ -1777,8 +1803,11 @@ fn flatten_arc(
     let cyp = sign * sq * -(ry * x1p / rx);
 
     // Step 3: compute (cx, cy) from (cx', cy')
-    let cx = cos_phi * cxp - sin_phi * cyp + (cursor_x + target_x) / 2.0;
-    let cy = sin_phi * cxp + cos_phi * cyp + (cursor_y + target_y) / 2.0;
+    // `midpoint` rather than `(a + b) / 2.0`: it cannot overflow to infinity on
+    // the way to a result that is representable, which the sum can for endpoints
+    // near `f32::MAX` — reachable here because the coordinates come from a file.
+    let cx = cos_phi * cxp - sin_phi * cyp + f32::midpoint(cursor_x, target_x);
+    let cy = sin_phi * cxp + cos_phi * cyp + f32::midpoint(cursor_y, target_y);
 
     // Step 4: compute theta1 and delta_theta
     let theta1 = angle_between(1.0, 0.0, (x1p - cxp) / rx, (y1p - cyp) / ry);
@@ -1822,6 +1851,39 @@ fn angle_between(ux: f32, uy: f32, vx: f32, vy: f32) -> f32 {
     } else {
         angle
     }
+}
+
+/// The segments of an open point list: each point paired with the next.
+///
+/// This is `windows(2)` with the length put into the type. `windows` yields a
+/// slice, so all six callers in this file read it back out as `w[0]` and
+/// `w[1]` — indexes the compiler cannot check against a length it was never
+/// told. Destructuring it once, here, hands them a pair instead.
+fn segments(points: &[(f32, f32)]) -> impl Iterator<Item = ((f32, f32), (f32, f32))> + '_ {
+    points.windows(2).filter_map(|w| match *w {
+        [a, b] => Some((a, b)),
+        // Unreachable: `windows(2)` yields nothing else. Expressed as a
+        // fallthrough rather than an index so it stays unreachable.
+        _ => None,
+    })
+}
+
+/// The closing segment of a polygon: its last point back to its first.
+///
+/// `None` for fewer than two points — which is the `len() >= 2` test that used
+/// to stand beside each of the four `points[len - 1]` / `points[0]` pairs this
+/// replaces. Here the test is the thing that produces the two points, so an
+/// edit cannot separate them.
+fn closing_segment(points: &[(f32, f32)]) -> Option<((f32, f32), (f32, f32))> {
+    match points {
+        [first, .., last] => Some((*last, *first)),
+        _ => None,
+    }
+}
+
+/// Every edge of a closed polygon, the closing one included.
+fn closed_edges(points: &[(f32, f32)]) -> impl Iterator<Item = ((f32, f32), (f32, f32))> + '_ {
+    segments(points).chain(closing_segment(points))
 }
 
 /// Convert path commands into a series of polygon outlines (lists of points).
@@ -2020,7 +2082,17 @@ struct SvgRenderer {
 
 impl SvgRenderer {
     fn new(width: u32, height: u32) -> Self {
-        let size = (width as usize) * (height as usize) * 4;
+        // A size that does not fit in `usize` could not be allocated even if it
+        // were computed, so an empty buffer is the honest answer rather than a
+        // wrapped one. Every write goes through `pixel_mut`, which checks the
+        // buffer's real length, so a short buffer renders blank instead of out
+        // of bounds.
+        let size = usize::try_from(width)
+            .ok()
+            .zip(usize::try_from(height).ok())
+            .and_then(|(w, h)| w.checked_mul(h))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .unwrap_or(0);
         Self {
             width,
             height,
@@ -2112,15 +2184,9 @@ impl SvgRenderer {
                     .map(|(px, py)| combined.apply(*px, *py))
                     .collect();
                 if let Some(color) = resolved.effective_stroke_color() {
-                    for w in transformed.windows(2) {
-                        self.draw_line(
-                            w[0].0,
-                            w[0].1,
-                            w[1].0,
-                            w[1].1,
-                            resolved.stroke_width,
-                            color,
-                        );
+                    // A polyline is open: no closing segment.
+                    for ((x1, y1), (x2, y2)) in segments(&transformed) {
+                        self.draw_line(x1, y1, x2, y2, resolved.stroke_width, color);
                     }
                 }
             }
@@ -2139,26 +2205,8 @@ impl SvgRenderer {
                     self.fill_polygon(&transformed, fill_color);
                 }
                 if let Some(stroke_color) = resolved.effective_stroke_color() {
-                    for w in transformed.windows(2) {
-                        self.draw_line(
-                            w[0].0,
-                            w[0].1,
-                            w[1].0,
-                            w[1].1,
-                            resolved.stroke_width,
-                            stroke_color,
-                        );
-                    }
-                    if transformed.len() >= 2 {
-                        let last = transformed.len() - 1;
-                        self.draw_line(
-                            transformed[last].0,
-                            transformed[last].1,
-                            transformed[0].0,
-                            transformed[0].1,
-                            resolved.stroke_width,
-                            stroke_color,
-                        );
+                    for ((x1, y1), (x2, y2)) in closed_edges(&transformed) {
+                        self.draw_line(x1, y1, x2, y2, resolved.stroke_width, stroke_color);
                     }
                 }
             }
@@ -2177,15 +2225,8 @@ impl SvgRenderer {
                 }
                 if let Some(stroke_color) = resolved.effective_stroke_color() {
                     for poly in &polygons {
-                        for w in poly.windows(2) {
-                            self.draw_line(
-                                w[0].0,
-                                w[0].1,
-                                w[1].0,
-                                w[1].1,
-                                resolved.stroke_width,
-                                stroke_color,
-                            );
+                        for ((x1, y1), (x2, y2)) in segments(poly) {
+                            self.draw_line(x1, y1, x2, y2, resolved.stroke_width, stroke_color);
                         }
                     }
                 }
@@ -2212,21 +2253,15 @@ impl SvgRenderer {
                 transform.apply(x + w, y + h),
                 transform.apply(x, y + h),
             ];
-            let poly: Vec<(f32, f32)> = corners.to_vec();
             if let Some(fill_color) = style.effective_fill_color() {
-                self.fill_polygon(&poly, fill_color);
+                self.fill_polygon(&corners, fill_color);
             }
             if let Some(stroke_color) = style.effective_stroke_color() {
-                for i in 0..4 {
-                    let j = (i + 1) % 4;
-                    self.draw_line(
-                        poly[i].0,
-                        poly[i].1,
-                        poly[j].0,
-                        poly[j].1,
-                        style.stroke_width,
-                        stroke_color,
-                    );
+                // `closed_edges` is the four sides including the one from the
+                // last corner back to the first, which the `(i + 1) % 4` walk
+                // spelled out with an index the compiler could not check.
+                for ((x0, y0), (x1, y1)) in closed_edges(&corners) {
+                    self.draw_line(x0, y0, x1, y1, style.stroke_width, stroke_color);
                 }
             }
         } else {
@@ -2273,26 +2308,8 @@ impl SvgRenderer {
                 self.fill_polygon(&points, fill_color);
             }
             if let Some(stroke_color) = style.effective_stroke_color() {
-                for w in points.windows(2) {
-                    self.draw_line(
-                        w[0].0,
-                        w[0].1,
-                        w[1].0,
-                        w[1].1,
-                        style.stroke_width,
-                        stroke_color,
-                    );
-                }
-                if points.len() >= 2 {
-                    let last = points.len() - 1;
-                    self.draw_line(
-                        points[last].0,
-                        points[last].1,
-                        points[0].0,
-                        points[0].1,
-                        style.stroke_width,
-                        stroke_color,
-                    );
+                for ((x1, y1), (x2, y2)) in closed_edges(&points) {
+                    self.draw_line(x1, y1, x2, y2, style.stroke_width, stroke_color);
                 }
             }
         }
@@ -2322,16 +2339,8 @@ impl SvgRenderer {
             self.fill_polygon(&points, fill_color);
         }
         if let Some(stroke_color) = style.effective_stroke_color() {
-            for i in 0..points.len() {
-                let j = (i + 1) % points.len();
-                self.draw_line(
-                    points[i].0,
-                    points[i].1,
-                    points[j].0,
-                    points[j].1,
-                    style.stroke_width,
-                    stroke_color,
-                );
+            for ((x1, y1), (x2, y2)) in closed_edges(&points) {
+                self.draw_line(x1, y1, x2, y2, style.stroke_width, stroke_color);
             }
         }
     }
@@ -2357,32 +2366,43 @@ impl SvgRenderer {
             return;
         }
 
+        // The clamps above hold both starts at or above zero and both ends at
+        // or below the surface, and the early return proved each start is below
+        // its end — so neither conversion can fail. They are written as
+        // conversions rather than casts so that a later change to the clamping
+        // is caught here, instead of wrapping a negative into a column index
+        // near `usize::MAX` and an allocation to match.
+        let (Ok(col_first), Ok(col_last)) = (usize::try_from(x_start), usize::try_from(x_end))
+        else {
+            return;
+        };
+        let x_range = col_last.saturating_sub(col_first);
+        let x_start_f = x_start as f32;
+        let x_end_f = x_end as f32;
+
         let ss = self.ss_factor;
         let ss_f = ss as f32;
+        let total_ss = ss.saturating_mul(ss);
 
-        // For each pixel row, subsample vertically
+        // One coverage row, cleared per scanline rather than reallocated: the
+        // width does not change between rows.
+        let mut coverage = vec![0u32; x_range];
+        let mut intersections: Vec<f32> = Vec::new();
+
         for py in y_start..y_end {
-            // Accumulate coverage per pixel column
-            let x_range = (x_end - x_start) as usize;
-            let mut coverage = vec![0u32; x_range];
+            coverage.fill(0);
 
             for sub_y in 0..ss {
                 let scan_y = py as f32 + (sub_y as f32 + 0.5) / ss_f;
 
-                // Find all x-intersections for this scanline
-                let mut intersections = Vec::new();
-                let n = points.len();
-                for i in 0..n {
-                    let j = (i + 1) % n;
-                    let (_, y0) = points[i];
-                    let (_, y1) = points[j];
-
+                // Where this scanline crosses the polygon's edges.
+                intersections.clear();
+                for ((x0, y0), (x1, y1)) in closed_edges(points) {
+                    // Half-open in y: a vertex shared by two edges is counted
+                    // once, which is what keeps the even-odd parity below right.
                     if (y0 <= scan_y && y1 > scan_y) || (y1 <= scan_y && y0 > scan_y) {
-                        let (x0, _) = points[i];
-                        let (x1, _) = points[j];
                         let t = (scan_y - y0) / (y1 - y0);
-                        let ix = x0 + t * (x1 - x0);
-                        intersections.push(ix);
+                        intersections.push(x0 + t * (x1 - x0));
                     }
                 }
 
@@ -2390,42 +2410,53 @@ impl SvgRenderer {
                     a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal)
                 });
 
-                // Even-odd rule: fill between pairs of intersections
-                for pair in intersections.chunks(2) {
-                    if pair.len() < 2 {
-                        break;
-                    }
-                    let left = pair[0].max(x_start as f32);
-                    let right = pair[1].min(x_end as f32);
+                // Even-odd rule: fill between successive pairs of crossings.
+                for pair in intersections.chunks_exact(2) {
+                    // `chunks_exact(2)` yields exactly two. The fallthrough is
+                    // the formality that lets this be a destructuring rather
+                    // than a `pair[0]`/`pair[1]`.
+                    let &[span_left, span_right] = pair else {
+                        continue;
+                    };
+                    let left = span_left.max(x_start_f);
+                    let right = span_right.min(x_end_f);
                     if left >= right {
                         continue;
                     }
 
-                    let col_start = (left.floor() as i32 - x_start).max(0) as usize;
-                    let col_end = (right.ceil() as i32 - x_start).min(x_range as i32) as usize;
+                    // Columns relative to the left edge of the coverage row.
+                    // `left` is at or right of `x_start` and `x_start` is a
+                    // whole number, so the subtraction cannot go negative.
+                    let first = (left.floor() - x_start_f) as usize;
+                    let last = ((right.ceil() - x_start_f) as usize).min(x_range);
+                    let Some(row) = coverage.get_mut(first..last) else {
+                        continue;
+                    };
 
-                    for (col_idx, cov_slot) in coverage[col_start..col_end].iter_mut().enumerate() {
-                        let px_left = ((col_idx + col_start) as i32 + x_start) as f32;
+                    for (offset, cov_slot) in row.iter_mut().enumerate() {
+                        let column = col_first.saturating_add(first).saturating_add(offset);
+                        let px_left = column as f32;
                         let px_right = px_left + 1.0;
-                        // Calculate horizontal coverage for this sub-pixel row
+                        // How much of this pixel this span covers, horizontally.
                         let covered_left = left.max(px_left);
                         let covered_right = right.min(px_right);
                         if covered_right > covered_left {
-                            // Quantize sub-pixel coverage to integer (out of ss*ss)
+                            // Quantised to an integer out of `ss * ss`.
                             let frac = ((covered_right - covered_left) * ss_f) as u32;
-                            *cov_slot += frac;
+                            *cov_slot = cov_slot.saturating_add(frac);
                         }
                     }
                 }
             }
 
-            // Blend pixels based on accumulated coverage
-            let total_ss = ss * ss;
-            for (col_idx, &cov) in coverage.iter().enumerate() {
+            // Blend the row according to the coverage it accumulated.
+            for (offset, &cov) in coverage.iter().enumerate() {
                 if cov == 0 {
                     continue;
                 }
-                let px = (col_idx as i32 + x_start) as u32;
+                let Ok(px) = u32::try_from(col_first.saturating_add(offset)) else {
+                    continue;
+                };
                 let alpha = ((cov.min(total_ss) as f32 / total_ss as f32) * color.a as f32) as u8;
                 let c = Color::rgba(color.r, color.g, color.b, alpha);
                 self.blend_pixel(px, py as u32, c);
@@ -2456,28 +2487,39 @@ impl SvgRenderer {
         self.fill_polygon(&poly, color);
     }
 
+    /// The four bytes of one pixel, or `None` if it lies outside the surface.
+    ///
+    /// The buffer is `[R, G, B, A]` per pixel, and every access used to compute
+    /// an offset and then index four times at `offset`, `+1`, `+2`, `+3` —
+    /// eight indexes behind a single bounds test on the last of them. Returning
+    /// the four bytes as an array makes the test and the reads one operation
+    /// and puts the arity in the type, so a five-byte format could not be half
+    /// introduced.
+    fn pixel_mut(&mut self, x: u32, y: u32) -> Option<&mut [u8; 4]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        // Checked rather than plain arithmetic: on a surface large enough for
+        // `width * height * 4` to exceed `u32`, wrapping would name a *valid*
+        // offset belonging to some other pixel, which is a silently corrupted
+        // image rather than a caught error.
+        let offset = y
+            .checked_mul(self.width)
+            .and_then(|row| row.checked_add(x))
+            .and_then(|index| index.checked_mul(4))
+            .and_then(|byte| usize::try_from(byte).ok())?;
+        let end = offset.checked_add(4)?;
+        self.buffer.get_mut(offset..end)?.try_into().ok()
+    }
+
     /// Blend a single pixel (alpha compositing).
     fn blend_pixel(&mut self, x: u32, y: u32, color: Color) {
-        if x >= self.width || y >= self.height {
+        let Some(pixel) = self.pixel_mut(x, y) else {
             return;
-        }
-        let offset = ((y * self.width + x) * 4) as usize;
-        if offset + 3 >= self.buffer.len() {
-            return;
-        }
-
-        // Buffer format: [R, G, B, A]
-        let dst = Color::rgba(
-            self.buffer[offset],
-            self.buffer[offset + 1],
-            self.buffer[offset + 2],
-            self.buffer[offset + 3],
-        );
-        let result = color.over(dst);
-        self.buffer[offset] = result.r;
-        self.buffer[offset + 1] = result.g;
-        self.buffer[offset + 2] = result.b;
-        self.buffer[offset + 3] = result.a;
+        };
+        let [r, g, b, a] = *pixel;
+        let result = color.over(Color::rgba(r, g, b, a));
+        *pixel = [result.r, result.g, result.b, result.a];
     }
 }
 
@@ -2527,10 +2569,12 @@ fn collect_render_commands(
 
             let corner_radii = if *rx > 0.0 || *ry > 0.0 {
                 let r = rx.max(*ry);
-                // Scale radius by transform
-                let scale = ((combined.a * combined.a + combined.c * combined.c).sqrt()
-                    + (combined.b * combined.b + combined.d * combined.d).sqrt())
-                    / 2.0;
+                // Scale radius by transform: the mean of the two column norms,
+                // which is the closest single number to a non-uniform scale.
+                let scale = f32::midpoint(
+                    (combined.a * combined.a + combined.c * combined.c).sqrt(),
+                    (combined.b * combined.b + combined.d * combined.d).sqrt(),
+                );
                 let sr = r * scale;
                 CornerRadii {
                     top_left: sr,
@@ -2595,9 +2639,10 @@ fn collect_render_commands(
             let combined = transform.then(*local_xf);
             let resolved = parent_style.with_overrides(style);
             if let Some(stroke_color) = resolved.effective_stroke_color() {
-                for w in points.windows(2) {
-                    let (tx1, ty1) = combined.apply(w[0].0, w[0].1);
-                    let (tx2, ty2) = combined.apply(w[1].0, w[1].1);
+                // A polyline is open: no closing segment.
+                for ((x1, y1), (x2, y2)) in segments(points) {
+                    let (tx1, ty1) = combined.apply(x1, y1);
+                    let (tx2, ty2) = combined.apply(x2, y2);
                     cmds.push(RenderCommand::Line {
                         x1: tx1,
                         y1: ty1,
@@ -2673,26 +2718,11 @@ fn collect_render_commands(
         } => {
             let combined = transform.then(*local_xf);
             let resolved = parent_style.with_overrides(style);
-            // Emit as line segments for stroke
+            // Emit as line segments for stroke, the closing one included.
             if let Some(stroke_color) = resolved.effective_stroke_color() {
-                for w in points.windows(2) {
-                    let (tx1, ty1) = combined.apply(w[0].0, w[0].1);
-                    let (tx2, ty2) = combined.apply(w[1].0, w[1].1);
-                    cmds.push(RenderCommand::Line {
-                        x1: tx1,
-                        y1: ty1,
-                        x2: tx2,
-                        y2: ty2,
-                        color: stroke_color,
-                        width: resolved.stroke_width,
-                    });
-                }
-                if points.len() >= 2 {
-                    let (tx1, ty1) = combined.apply(
-                        points.last().map(|p| p.0).unwrap_or(0.0),
-                        points.last().map(|p| p.1).unwrap_or(0.0),
-                    );
-                    let (tx2, ty2) = combined.apply(points[0].0, points[0].1);
+                for ((x1, y1), (x2, y2)) in closed_edges(points) {
+                    let (tx1, ty1) = combined.apply(x1, y1);
+                    let (tx2, ty2) = combined.apply(x2, y2);
                     cmds.push(RenderCommand::Line {
                         x1: tx1,
                         y1: ty1,
@@ -2748,12 +2778,12 @@ fn collect_render_commands(
             // Emit strokes as Line commands
             if let Some(stroke_color) = resolved.effective_stroke_color() {
                 for poly in &polygons {
-                    for w in poly.windows(2) {
+                    for ((x1, y1), (x2, y2)) in segments(poly) {
                         cmds.push(RenderCommand::Line {
-                            x1: w[0].0,
-                            y1: w[0].1,
-                            x2: w[1].0,
-                            y2: w[1].1,
+                            x1,
+                            y1,
+                            x2,
+                            y2,
                             color: stroke_color,
                             width: resolved.stroke_width,
                         });
@@ -2814,6 +2844,68 @@ mod tests {
         let t = parse_transform("translate(10,20) scale(2)").unwrap();
         assert_eq!(t.apply(0.0, 0.0), (10.0, 20.0));
         assert_eq!(t.apply(1.0, 1.0), (12.0, 22.0));
+    }
+
+    #[test]
+    fn a_viewbox_is_four_numbers_and_nothing_else() {
+        assert_eq!(parse_viewbox("0 0 100 50").unwrap(), (0.0, 0.0, 100.0, 50.0));
+        assert_eq!(
+            parse_viewbox("-1,-2, 3 ,4").unwrap(),
+            (-1.0, -2.0, 3.0, 4.0)
+        );
+        // Too few and too many are both errors: the slice pattern that binds
+        // the four values is the same expression that rejects any other count.
+        assert!(parse_viewbox("0 0 100").is_err());
+        assert!(parse_viewbox("0 0 100 50 7").is_err());
+        assert!(parse_viewbox("").is_err());
+        assert!(parse_viewbox("0 0 wide tall").is_err());
+    }
+
+    #[test]
+    fn points_are_read_in_pairs_and_an_odd_count_is_refused() {
+        assert_eq!(
+            parse_points("1,2 3,4 5 6").unwrap(),
+            vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]
+        );
+        assert_eq!(parse_points("").unwrap(), vec![]);
+        assert!(parse_points("1,2 3").is_err());
+    }
+
+    #[test]
+    fn a_document_with_no_elements_is_an_error_not_a_panic() {
+        // The emptiness check and the read of the first element used to be two
+        // statements; only the first of them was enforced.
+        assert!(SvgDocument::parse("").is_err());
+        assert!(SvgDocument::parse("   \n\t ").is_err());
+        assert!(SvgDocument::parse("<?xml version=\"1.0\"?>").is_err());
+        assert!(SvgDocument::parse("<!-- just a comment -->").is_err());
+    }
+
+    #[test]
+    fn a_curve_that_never_flattens_still_terminates() {
+        // Coincident control points make the flatness test degenerate; the
+        // subdivision budget is what stops the recursion, and it is spent
+        // downwards so it cannot be outlived.
+        let mut out = Vec::new();
+        flatten_cubic(0.0, 0.0, 1e30, 1e30, -1e30, -1e30, 0.0, 0.0, 0.0, &mut out);
+        assert!(!out.is_empty(), "a flattened curve always ends somewhere");
+        // 2^MAX_SUBDIVISIONS chords is the worst case; anything more means the
+        // budget stopped bounding the recursion.
+        assert!(out.len() <= 1usize << MAX_SUBDIVISIONS);
+        assert_eq!(out.last().copied(), Some((0.0, 0.0)), "ends at the endpoint");
+    }
+
+    #[test]
+    fn a_render_size_that_cannot_be_allocated_yields_no_pixels() {
+        // `width * height * 4` overflowing `usize` used to wrap. `render` is
+        // public, so the dimensions are the caller's, and a wrapped size is a
+        // buffer smaller than the image it claims to be.
+        let doc = SvgDocument::parse("<svg width=\"10\" height=\"10\"><rect x=\"0\" y=\"0\" width=\"10\" height=\"10\" fill=\"red\"/></svg>")
+            .unwrap();
+        let pixels = doc.render(4, 4);
+        assert_eq!(pixels.len(), 4 * 4 * 4);
+        // A degenerate size is empty rather than wrapped or panicking.
+        assert!(doc.render(0, 0).is_empty());
     }
 
     // --- XML parsing tests ---

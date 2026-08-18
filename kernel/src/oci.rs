@@ -683,23 +683,18 @@ pub fn verify_digest(data: &[u8], expected_digest: &str) -> KernelResult<()> {
         return Err(KernelError::NotSupported);
     }
 
-    let hash = crate::crypto::sha256(data);
+    // `sha2::Hex` wraps a fixed `[u8; 64]` rather than a `String`, so this stays
+    // allocation-free exactly as the hand-rolled nibble loop it replaces was —
+    // and it drops that loop's `from_utf8` error path, which was unreachable
+    // (every byte written came from the hex alphabet) but still had to be
+    // mapped to a `KernelError`.
+    let computed = sha2::sha256_hex(data);
+    let computed_hex = computed.as_str();
 
-    // Convert hash to hex and compare.
-    let mut hex_buf = [0u8; 64];
-    for (i, &byte) in hash.iter().enumerate() {
-        let hi = byte >> 4;
-        let lo = byte & 0x0F;
-        if let Some(slot) = hex_buf.get_mut(i.wrapping_mul(2)) {
-            *slot = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
-        }
-        if let Some(slot) = hex_buf.get_mut(i.wrapping_mul(2).wrapping_add(1)) {
-            *slot = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
-        }
-    }
-
-    let computed_hex = core::str::from_utf8(&hex_buf).map_err(|_| KernelError::InternalError)?;
-
+    // A plain comparison rather than a constant-time one, deliberately: an OCI
+    // digest is a public content address and the caller supplied the expected
+    // value, so there is no secret here for a timing difference to leak.
+    // Forging a match still requires a preimage.
     if computed_hex != expected_hex {
         serial_println!(
             "[oci] Digest mismatch: expected {}, got sha256:{}",
@@ -1030,21 +1025,15 @@ impl Default for ImageSpec {
     }
 }
 
-/// Lowercase-hex encode a byte slice.
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len().saturating_mul(2));
-    for &b in bytes {
-        let hi = b >> 4;
-        let lo = b & 0x0F;
-        s.push(char::from(if hi < 10 { b'0' + hi } else { b'a' + hi - 10 }));
-        s.push(char::from(if lo < 10 { b'0' + lo } else { b'a' + lo - 10 }));
-    }
-    s
-}
-
 /// Compute the `sha256:<hex>` digest string of `data`.
+///
+/// The `hex_lower` helper that used to sit here took a `&[u8]` of any length,
+/// but this was its only caller and it always passed a 32-byte digest — so the
+/// generality was never exercised, and `sha2::sha256_hex` covers the one real
+/// case without a second nibble-to-ASCII loop to keep correct. (`Hex`
+/// implements `Display`, so it substitutes for the `String` here directly.)
 fn sha256_digest(data: &[u8]) -> String {
-    format!("sha256:{}", hex_lower(&crate::crypto::sha256(data)))
+    format!("sha256:{}", sha2::sha256_hex(data))
 }
 
 /// Append `s` as a JSON string literal (with surrounding quotes and escaping)

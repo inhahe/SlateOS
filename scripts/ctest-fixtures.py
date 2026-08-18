@@ -131,7 +131,18 @@ Usage
 
 `build` needs zig and the fastpy `compiler` package importable (each fixture's
 own `build.py` documents this); `check` and `stamp` need neither, so the gate
-runs anywhere.
+runs anywhere. Concretely, on this machine:
+
+    PYTHONPATH="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
+
+**Rebuild through this script, not by running `services/<name>/build.py`
+directly.** `build.py` produces a correct ELF and does not touch the `.stamp`,
+which still describes the *previous* one — so `check` then reports STALE for a
+fixture you just rebuilt, which reads like a failed build rather than an
+unwritten stamp. Lane A lost a cycle to exactly this and asked for the line
+(`requests/a-b-ctest-fixture-elfs-and-stamps-are-stale-against-the-current-libc.md`).
+`build` runs each `build.py` and then stamps, which is the only ordering that
+leaves the pair consistent.
 
 `stamp` exists for one narrow case: adopting fixtures that are already known
 good (as when this script was introduced, the nine ELFs having just been

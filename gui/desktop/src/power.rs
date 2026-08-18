@@ -17,6 +17,7 @@
 use crate::Rect;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng};
 use guitk::style::{Border, CornerRadii};
 use guitk::text;
 
@@ -863,6 +864,26 @@ struct MatrixColumn {
     length: u32,
 }
 
+/// How wide one column of matrix rain is, in pixels.
+const COLUMN_WIDTH_PX: u32 = 14;
+
+/// How tall one glyph of matrix rain is, in pixels.
+const GLYPH_HEIGHT_PX: f32 = 16.0;
+
+/// The shortest and longest a column of rain may be, in glyphs.
+const MIN_COLUMN_GLYPHS: u64 = 5;
+const MAX_COLUMN_GLYPHS: u64 = 24;
+
+/// The printable ASCII range the rain is drawn from: `!` through `~`.
+const FIRST_GLYPH: u8 = b'!';
+const LAST_GLYPH: u8 = b'~';
+
+/// How much dimmer each glyph is than the one above it, out of 255.
+const FADE_PER_GLYPH: u32 = 8;
+
+/// The most a tail glyph may be dimmed, so it never fades to invisible.
+const TAIL_DIMMING: u32 = 200;
+
 /// Screen saver renderer.
 pub struct ScreenSaver {
     style: ScreenSaverStyle,
@@ -884,8 +905,14 @@ pub struct ScreenSaver {
     width: u32,
     /// Height of the screen.
     height: u32,
-    /// Simple PRNG state.
-    rng_state: u64,
+    /// Where the scatter comes from.
+    ///
+    /// A screen saver wants variety, not secrecy, so a seeded generator is
+    /// exactly right here — see `guitk::rng`. What was here before was the
+    /// same xorshift written out three times in this one file: once as
+    /// `next_random`, and twice more inlined into `render_starfield` to dodge
+    /// a borrow that a disjoint field borrow solves properly.
+    rng: SeededRng,
 }
 
 impl ScreenSaver {
@@ -902,7 +929,7 @@ impl ScreenSaver {
             logo_vel: (0.003, 0.002),
             width,
             height,
-            rng_state: 0x12345678_9ABCDEF0,
+            rng: SeededRng::new(0x1234_5678_9ABC_DEF0),
         };
         ss.init();
         ss
@@ -919,33 +946,45 @@ impl ScreenSaver {
     fn init_starfield(&mut self) {
         self.stars.clear();
         for _ in 0..200 {
-            let x = self.next_random_f32() * 2.0 - 1.0;
-            let y = self.next_random_f32() * 2.0 - 1.0;
-            let z = self.next_random_f32() * 0.99 + 0.01;
-            let speed = self.next_random_f32() * 0.01 + 0.002;
+            let x = self.rng.f32_in_range(-1.0, 1.0);
+            let y = self.rng.f32_in_range(-1.0, 1.0);
+            let z = self.rng.f32_in_range(0.01, 1.0);
+            let speed = self.rng.f32_in_range(0.002, 0.012);
             self.stars.push(Star { x, y, z, speed });
         }
     }
 
     fn init_matrix(&mut self) {
         self.columns.clear();
-        let col_count = self.width / 14; // ~14px per character column
+        let col_count = self.width / COLUMN_WIDTH_PX;
         for i in 0..col_count {
-            let len = self.next_random_u32() % 20 + 5;
-            let mut chars = Vec::with_capacity(len as usize);
-            for _ in 0..len {
-                chars.push((self.next_random_u32() % 94 + 33) as u8); // printable ASCII
+            let len = self.rng.in_range(MIN_COLUMN_GLYPHS, MAX_COLUMN_GLYPHS);
+            let glyphs = usize::try_from(len).unwrap_or(0);
+            let mut chars = Vec::with_capacity(glyphs);
+            for _ in 0..glyphs {
+                chars.push(self.random_glyph());
             }
-            let col_y = -(self.next_random_f32() * self.height as f32);
-            let col_speed = self.next_random_f32() * 3.0 + 1.0;
+            let col_y = -self.rng.f32_in_range(0.0, self.height as f32);
+            let col_speed = self.rng.f32_in_range(1.0, 4.0);
             self.columns.push(MatrixColumn {
-                x: i * 14,
+                // `col_count` is `width / COLUMN_WIDTH_PX`, so this cannot
+                // reach the screen edge, let alone overflow — but saying so in
+                // the arithmetic beats saying so in a comment.
+                x: i.saturating_mul(COLUMN_WIDTH_PX),
                 y: col_y,
                 speed: col_speed,
                 chars,
-                length: len,
+                length: u32::try_from(glyphs).unwrap_or(0),
             });
         }
+    }
+
+    /// One printable ASCII character, which is what the rain is made of.
+    fn random_glyph(&mut self) -> u8 {
+        let code = self
+            .rng
+            .in_range(u64::from(FIRST_GLYPH), u64::from(LAST_GLYPH));
+        u8::try_from(code).unwrap_or(FIRST_GLYPH)
     }
 
     /// Advance one frame and produce render commands.
@@ -1016,7 +1055,7 @@ impl ScreenSaver {
     }
 
     fn render_starfield(&mut self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::with_capacity(self.stars.len() + 1);
+        let mut cmds = Vec::with_capacity(self.stars.len().saturating_add(1));
 
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -1032,20 +1071,18 @@ impl ScreenSaver {
         let w = self.width as f32;
         let h = self.height as f32;
 
-        // Operate on rng_state directly to avoid borrowing &mut self while
-        // iterating over &mut self.stars.
-        let mut rng = self.rng_state;
-        for star in &mut self.stars {
+        // Borrow the two fields separately rather than the whole `self`, so
+        // the generator can be used while the stars are being walked. The
+        // previous version copied the PRNG state into a local and inlined the
+        // xorshift twice to work around the borrow — which is how this file
+        // came to contain three copies of one generator.
+        let Self { stars, rng, .. } = self;
+        for star in stars.iter_mut() {
             star.z -= star.speed;
             if star.z <= 0.01 {
-                rng ^= rng << 13;
-                rng ^= rng >> 7;
-                rng ^= rng << 17;
-                star.x = ((rng & 0xFFFFFFFF) as f32 / u32::MAX as f32) * 2.0 - 1.0;
-                rng ^= rng << 13;
-                rng ^= rng >> 7;
-                rng ^= rng << 17;
-                star.y = ((rng & 0xFFFFFFFF) as f32 / u32::MAX as f32) * 2.0 - 1.0;
+                // Recycle the star to a fresh position at the far plane.
+                star.x = rng.f32_in_range(-1.0, 1.0);
+                star.y = rng.f32_in_range(-1.0, 1.0);
                 star.z = 1.0;
             }
 
@@ -1065,13 +1102,13 @@ impl ScreenSaver {
                 });
             }
         }
-        self.rng_state = rng;
 
         cmds
     }
 
     fn render_matrix(&mut self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::with_capacity(self.columns.len() * 10 + 1);
+        // A rough guess at the glyph count, to save a few reallocations.
+        let mut cmds = Vec::with_capacity(self.columns.len().saturating_mul(10).saturating_add(1));
 
         // Semi-transparent black overlay for trail effect.
         cmds.push(RenderCommand::FillRect {
@@ -1084,27 +1121,35 @@ impl ScreenSaver {
         });
 
         let h = self.height as f32;
-        for col in &mut self.columns {
+        let height = self.height as f32;
+        let Self { columns, rng, .. } = self;
+        for col in columns.iter_mut() {
             col.y += col.speed;
-            if col.y > h + (col.length as f32 * 16.0) {
-                col.y = -(col.length as f32 * 16.0);
-                // Randomize chars.
+            if col.y > h + (col.length as f32 * GLYPH_HEIGHT_PX) {
+                col.y = -(col.length as f32 * GLYPH_HEIGHT_PX);
+                // Draw a fresh column. This used to add 7 to each existing
+                // character code — the same shift for every column, every
+                // time, so the "randomised" rain repeated a fixed cycle of
+                // ninety-four frames and every column showed the same one.
                 for c in &mut col.chars {
-                    // Simple variation without full PRNG access.
-                    *c = ((*c as u32).wrapping_add(7) % 94 + 33) as u8;
+                    let code = rng.in_range(u64::from(FIRST_GLYPH), u64::from(LAST_GLYPH));
+                    *c = u8::try_from(code).unwrap_or(FIRST_GLYPH);
                 }
             }
 
             for (i, ch) in col.chars.iter().enumerate() {
-                let cy = col.y + (i as f32 * 16.0);
-                if cy < 0.0 || cy >= self.height as f32 {
+                let cy = col.y + (i as f32 * GLYPH_HEIGHT_PX);
+                if cy < 0.0 || cy >= height {
                     continue;
                 }
-                let green = if i == 0 {
-                    255u8 // brightest at the head
-                } else {
-                    (255u32.saturating_sub((i as u32 * 8).min(200))) as u8
-                };
+                // The head of the column is brightest and the tail fades, but
+                // never past `TAIL_DIMMING` so the oldest glyphs stay legible.
+                let fade = u32::try_from(i)
+                    .unwrap_or(u32::MAX)
+                    .saturating_mul(FADE_PER_GLYPH)
+                    .min(TAIL_DIMMING);
+                let green =
+                    u8::try_from(u32::from(u8::MAX).saturating_sub(fade)).unwrap_or(u8::MAX);
                 cmds.push(RenderCommand::Text {
                     x: col.x as f32,
                     y: cy,
@@ -1112,7 +1157,7 @@ impl ScreenSaver {
                     color: Color::rgba(0, green, 0, 255),
                     font_size: 14.0,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(14.0),
+                    max_width: Some(COLUMN_WIDTH_PX as f32),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
@@ -1178,29 +1223,6 @@ impl ScreenSaver {
         });
 
         cmds
-    }
-
-    /// Simple xorshift64 PRNG.
-    fn next_random(&mut self) -> u64 {
-        let mut x = self.rng_state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.rng_state = x;
-        x
-    }
-
-    fn next_random_u32(&mut self) -> u32 {
-        (self.next_random() & 0xFFFFFFFF) as u32
-    }
-
-    fn next_random_f32(&mut self) -> f32 {
-        (self.next_random_u32() as f32) / (u32::MAX as f32)
-    }
-
-    /// Random without &mut self (uses internal state mutation via frame counter trick).
-    fn next_random_f32_from_state(&mut self) -> f32 {
-        self.next_random_f32()
     }
 }
 
@@ -1403,7 +1425,7 @@ pub fn render_power_menu(
     style: PowerMenuStyle,
 ) -> Vec<RenderCommand> {
     // Panel, outline, and one label per row.
-    let mut cmds = Vec::with_capacity(2 + rows.len());
+    let mut cmds = Vec::with_capacity(rows.len().saturating_add(2));
 
     cmds.push(RenderCommand::FillRect {
         x: panel.x,
@@ -1975,6 +1997,138 @@ mod tests {
         let mut ss = ScreenSaver::new(ScreenSaverStyle::Disabled, 800, 600);
         let cmds = ss.render_frame();
         assert!(cmds.is_empty());
+    }
+
+    /// Every column must start inside the screen and be drawn from printable
+    /// characters, whatever the screen size — including sizes narrower than a
+    /// single column, where the loop must simply produce none.
+    #[test]
+    fn matrix_columns_start_on_screen_and_use_printable_characters() {
+        for width in [0, 1, 13, 14, 15, 800, 3840] {
+            let ss = ScreenSaver::new(ScreenSaverStyle::MatrixRain, width, 600);
+            assert_eq!(
+                ss.columns.len() as u32,
+                width / COLUMN_WIDTH_PX,
+                "width={width}"
+            );
+            for col in &ss.columns {
+                assert!(
+                    col.x < width.max(1),
+                    "column at {} off a {width}px screen",
+                    col.x
+                );
+                assert!(
+                    (MIN_COLUMN_GLYPHS..=MAX_COLUMN_GLYPHS).contains(&u64::from(col.length)),
+                    "column of {} glyphs",
+                    col.length
+                );
+                assert_eq!(col.chars.len() as u32, col.length);
+                for &c in &col.chars {
+                    assert!((FIRST_GLYPH..=LAST_GLYPH).contains(&c), "glyph {c:#x}");
+                }
+                assert!(col.y <= 0.0, "a column must start above the screen");
+                assert!(col.speed >= 1.0, "a stalled column never falls");
+            }
+        }
+    }
+
+    /// The rain used to "randomise" a recycled column by adding 7 to every
+    /// character code. That is not random at all: every column advanced by the
+    /// same step, so they all showed the same ninety-four-frame cycle, in
+    /// lockstep. A recycled column must now differ from its predecessor.
+    #[test]
+    fn a_recycled_matrix_column_gets_genuinely_new_characters() {
+        let mut ss = ScreenSaver::new(ScreenSaverStyle::MatrixRain, 800, 600);
+        assert!(ss.columns.len() > 1);
+        let before: Vec<Vec<u8>> = ss.columns.iter().map(|c| c.chars.clone()).collect();
+
+        // Drive every column past the bottom so all of them recycle.
+        for col in &mut ss.columns {
+            col.y = 10_000.0;
+        }
+        let _ = ss.render_frame();
+
+        let after: Vec<Vec<u8>> = ss.columns.iter().map(|c| c.chars.clone()).collect();
+        assert_ne!(before, after, "recycling must change the characters");
+
+        // The old code shifted every column by the same amount, so the
+        // difference between old and new was identical across columns. It must
+        // not be.
+        let shifts: Vec<Vec<i32>> = before
+            .iter()
+            .zip(&after)
+            .map(|(old, new)| {
+                old.iter()
+                    .zip(new)
+                    .map(|(o, n)| i32::from(*n) - i32::from(*o))
+                    .collect()
+            })
+            .collect();
+        assert!(
+            shifts.windows(2).any(|pair| pair[0] != pair[1]),
+            "every column changed by the same amount — that is a cycle, not randomness"
+        );
+
+        for col in &ss.columns {
+            for &c in &col.chars {
+                assert!((FIRST_GLYPH..=LAST_GLYPH).contains(&c), "glyph {c:#x}");
+            }
+            assert!(col.y < 0.0, "a recycled column restarts above the screen");
+        }
+    }
+
+    /// A star that reaches the viewer is recycled to the far plane with a new
+    /// position. Both coordinates must land in the visible span — the borrow
+    /// dodge this replaced updated them through an inlined generator, so the
+    /// two were easy to get out of step with `init_starfield`.
+    #[test]
+    fn a_recycled_star_returns_to_the_far_plane_inside_the_field() {
+        let mut ss = ScreenSaver::new(ScreenSaverStyle::Starfield, 800, 600);
+        for star in &mut ss.stars {
+            star.z = 0.005;
+        }
+        let _ = ss.render_frame();
+
+        for star in &ss.stars {
+            assert!((-1.0..=1.0).contains(&star.x), "x={}", star.x);
+            assert!((-1.0..=1.0).contains(&star.y), "y={}", star.y);
+            assert!(star.z > 0.0 && star.z <= 1.0, "z={}", star.z);
+        }
+        // And they must not all have been given the same position.
+        let first = (ss.stars.first().map(|s| s.x), ss.stars.first().map(|s| s.y));
+        assert!(
+            ss.stars.iter().any(|s| (Some(s.x), Some(s.y)) != first),
+            "every star was recycled to the same place"
+        );
+    }
+
+    /// Two screen savers built the same way must animate the same way: the
+    /// generator is seeded, deliberately, so a screen saver is reproducible.
+    #[test]
+    fn two_screensavers_of_the_same_style_and_size_agree() {
+        let mut first = ScreenSaver::new(ScreenSaverStyle::Starfield, 800, 600);
+        let mut second = ScreenSaver::new(ScreenSaverStyle::Starfield, 800, 600);
+        for _ in 0..20 {
+            assert_eq!(first.render_frame().len(), second.render_frame().len());
+        }
+        assert!(
+            first
+                .stars
+                .iter()
+                .zip(&second.stars)
+                .all(|(a, b)| a.x == b.x && a.y == b.y && a.z == b.z)
+        );
+    }
+
+    /// A screen with no room for a column, and one with no stars to draw, must
+    /// still render a frame rather than panic on an empty buffer.
+    #[test]
+    fn a_screen_too_small_for_anything_still_renders() {
+        for style in [ScreenSaverStyle::MatrixRain, ScreenSaverStyle::Starfield] {
+            let mut ss = ScreenSaver::new(style, 0, 0);
+            let cmds = ss.render_frame();
+            assert!(!cmds.is_empty(), "{style:?} drew nothing at all");
+        }
     }
 
     #[test]

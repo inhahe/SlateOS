@@ -2941,7 +2941,7 @@ mod window_manager_tests {
         assert!(raised > z_of(&shell, middle));
         assert!(raised > z_of(&shell, top));
         assert_eq!(shell.visible_windows().last().map(|w| w.id), Some(bottom));
-        assert!(shell.windows.get(&middle).unwrap().focused == false);
+        assert!(!shell.windows.get(&middle).unwrap().focused);
     }
 
     /// The z counter is bumped on every focus change, so a long-running session

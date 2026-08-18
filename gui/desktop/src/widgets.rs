@@ -465,9 +465,7 @@ impl DesktopWidgetManager {
         // Refusing when the ID space is exhausted is the only answer that
         // keeps IDs unique — wrapping or saturating would alias two widgets,
         // and every lookup here is by ID.
-        let Some(next) = self.next_id.checked_add(1) else {
-            return None;
-        };
+        let next = self.next_id.checked_add(1)?;
         let id = self.next_id;
         self.next_id = next;
         self.widgets.push(WidgetInstance::new(id, kind, position));

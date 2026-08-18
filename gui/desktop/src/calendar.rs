@@ -1992,7 +1992,7 @@ mod tests {
             assert_eq!(week.len(), 7);
             // The week number is read from the row's first cell, so every
             // row must have one.
-            assert!(week.first().is_some());
+            assert!(!week.is_empty());
         }
         // And consecutive rows are seven days apart.
         for pair in rows.windows(2) {

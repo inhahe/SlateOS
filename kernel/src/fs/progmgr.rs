@@ -908,78 +908,113 @@ pub fn self_test() -> KernelResult<()> {
     let prog = get_program("test.app")?;
     assert_eq!(prog.priority, PriorityLevel::High);
 
-    // Test 3: grant/revoke capabilities.
-    serial_println!("progmgr::self_test 3: capabilities");
-    grant_capability("test.app", ProgCapability::Network)?;
-    grant_capability("test.app", ProgCapability::Audio)?;
-    assert!(has_capability("test.app", ProgCapability::Network));
-    revoke_capability("test.app", ProgCapability::Network)?;
-    assert!(!has_capability("test.app", ProgCapability::Network));
-    assert!(has_capability("test.app", ProgCapability::Audio));
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 3: grant/revoke capabilities.
+            serial_println!("progmgr::self_test 3: capabilities");
+            grant_capability("test.app", ProgCapability::Network)?;
+            grant_capability("test.app", ProgCapability::Audio)?;
+            assert!(has_capability("test.app", ProgCapability::Network));
+            revoke_capability("test.app", ProgCapability::Network)?;
+            assert!(!has_capability("test.app", ProgCapability::Network));
+            assert!(has_capability("test.app", ProgCapability::Audio));
+            Ok(())
+        }
+        case()?;
+    }
 
-    // Test 4: notifications.
-    serial_println!("progmgr::self_test 4: notifications");
-    add_notification("test.app", "alert")?;
-    add_notification("test.app", "update")?;
-    set_notification_config(
-        "test.app",
-        "alert",
-        Some(false),
-        Some("ding.wav"),
-        None,
-        None,
-    )?;
-    let prog = get_program("test.app")?;
-    assert_eq!(prog.notifications.len(), 2);
-    let alert = prog
-        .notifications
-        .iter()
-        .find(|n| n.name == "alert")
-        .expect("alert notif");
-    assert!(!alert.show);
-    assert_eq!(alert.sound, "ding.wav");
-    remove_notification("test.app", "update")?;
-    let prog = get_program("test.app")?;
-    assert_eq!(prog.notifications.len(), 1);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 4: notifications.
+            serial_println!("progmgr::self_test 4: notifications");
+            add_notification("test.app", "alert")?;
+            add_notification("test.app", "update")?;
+            set_notification_config(
+                "test.app",
+                "alert",
+                Some(false),
+                Some("ding.wav"),
+                None,
+                None,
+            )?;
+            let prog = get_program("test.app")?;
+            assert_eq!(prog.notifications.len(), 2);
+            let alert = prog
+                .notifications
+                .iter()
+                .find(|n| n.name == "alert")
+                .expect("alert notif");
+            assert!(!alert.show);
+            assert_eq!(alert.sound, "ding.wav");
+            remove_notification("test.app", "update")?;
+            let prog = get_program("test.app")?;
+            assert_eq!(prog.notifications.len(), 1);
+            Ok(())
+        }
+        case()?;
+    }
 
-    // Test 5: snapshots (tree structure).
-    serial_println!("progmgr::self_test 5: snapshots");
-    let s1 = create_snapshot("test.app", "initial", SnapshotScope::Full, 0)?;
-    let s2 = create_snapshot("test.app", "after-config", SnapshotScope::SettingsOnly, s1)?;
-    let snaps = list_snapshots("test.app")?;
-    assert_eq!(snaps.len(), 2);
-    // Cannot delete parent with children.
-    assert!(delete_snapshot("test.app", s1).is_err());
-    // Can delete leaf.
-    delete_snapshot("test.app", s2)?;
-    delete_snapshot("test.app", s1)?;
-    let snaps = list_snapshots("test.app")?;
-    assert!(snaps.is_empty());
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 5: snapshots (tree structure).
+            serial_println!("progmgr::self_test 5: snapshots");
+            let s1 = create_snapshot("test.app", "initial", SnapshotScope::Full, 0)?;
+            let s2 = create_snapshot("test.app", "after-config", SnapshotScope::SettingsOnly, s1)?;
+            let snaps = list_snapshots("test.app")?;
+            assert_eq!(snaps.len(), 2);
+            // Cannot delete parent with children.
+            assert!(delete_snapshot("test.app", s1).is_err());
+            // Can delete leaf.
+            delete_snapshot("test.app", s2)?;
+            delete_snapshot("test.app", s1)?;
+            let snaps = list_snapshots("test.app")?;
+            assert!(snaps.is_empty());
+            Ok(())
+        }
+        case()?;
+    }
 
-    // Test 6: build records.
-    serial_println!("progmgr::self_test 6: build records");
-    set_compilable("test.app", "/src/testapp", "--release")?;
-    let prog = get_program("test.app")?;
-    assert!(prog.compilable);
-    let build = prog.build.as_ref().expect("build record");
-    assert!(build.source_changed);
-    record_compile("test.app", 0xDEAD_BEEF)?;
-    let prog = get_program("test.app")?;
-    let build = prog.build.as_ref().expect("build record");
-    assert!(!build.source_changed);
-    assert_eq!(build.source_hash, 0xDEAD_BEEF);
-    mark_source_changed("test.app")?;
-    let prog = get_program("test.app")?;
-    assert!(prog.build.as_ref().expect("build").source_changed);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 6: build records.
+            serial_println!("progmgr::self_test 6: build records");
+            set_compilable("test.app", "/src/testapp", "--release")?;
+            let prog = get_program("test.app")?;
+            assert!(prog.compilable);
+            let build = prog.build.as_ref().expect("build record");
+            assert!(build.source_changed);
+            record_compile("test.app", 0xDEAD_BEEF)?;
+            let prog = get_program("test.app")?;
+            let build = prog.build.as_ref().expect("build record");
+            assert!(!build.source_changed);
+            assert_eq!(build.source_hash, 0xDEAD_BEEF);
+            mark_source_changed("test.app")?;
+            let prog = get_program("test.app")?;
+            assert!(prog.build.as_ref().expect("build").source_changed);
+            Ok(())
+        }
+        case()?;
+    }
 
-    // Test 7: uninstall.
-    serial_println!("progmgr::self_test 7: uninstall");
-    register("test.app2", "App2", "2.0", "/opt/app2", 512)?;
-    uninstall("test.app2", UninstallOption::KeepSettings)?;
-    let prog = get_program("test.app2")?;
-    assert!(!prog.installed);
-    uninstall("test.app", UninstallOption::Full)?;
-    assert!(get_program("test.app").is_err());
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 7: uninstall.
+            serial_println!("progmgr::self_test 7: uninstall");
+            register("test.app2", "App2", "2.0", "/opt/app2", 512)?;
+            uninstall("test.app2", UninstallOption::KeepSettings)?;
+            let prog = get_program("test.app2")?;
+            assert!(!prog.installed);
+            uninstall("test.app", UninstallOption::Full)?;
+            assert!(get_program("test.app").is_err());
+            Ok(())
+        }
+        case()?;
+    }
 
     clear_all();
     serial_println!("progmgr::self_test: all 7 tests passed");

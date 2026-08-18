@@ -24,12 +24,26 @@
 //! 4. **Interrupt timing** — ISR arrival times mixed into the entropy
 //!    pool via [`add_interrupt_entropy()`].
 //!
+//! ## Seeded vs. credited
+//!
+//! Being *keyed* and being *seeded* are different states, and this module
+//! tracks them separately. [`fill()`] always produces a keystream — early-boot
+//! consumers such as stack canaries and ASLR offsets need bytes before any
+//! entropy source has had time to accumulate. [`is_ready()`] additionally says
+//! whether at least 256 bits of that key material were genuinely
+//! *unpredictable*, which is what userspace key generation requires and what
+//! `SYS_GETRANDOM` waits for. Clock reads are stirred in but credited nothing:
+//! on a VM booted twice from one image they correlate across boots. See the
+//! "Entropy credit" section further down.
+//!
 //! ## API
 //!
 //! - [`fill(buf)`] — fill a buffer with random bytes (primary API)
 //! - [`next_u64()`] — get a random u64
 //! - [`next_u32()`] — get a random u32
 //! - [`add_interrupt_entropy(timestamp)`] — mix in ISR timing data
+//! - [`is_ready()`] — whether the pool is credited enough for key material
+//! - [`wait_until_ready(timeout_ns)`] — block a task until it is
 //! - [`init()`] — initialize the RNG (called once at boot)
 //!
 //! ## Thread Safety
@@ -44,7 +58,7 @@
 //! - Linux `drivers/char/random.c` — ChaCha20-based CRNG
 //! - RFC 7539 — ChaCha20 specification
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use spin::Mutex;
 
@@ -289,6 +303,113 @@ static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
 static RESEED_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
+// Entropy credit — "is this pool actually seeded, or merely keyed?"
+// ---------------------------------------------------------------------------
+//
+// Seeding and *crediting* are different things, and conflating them is the
+// specific bug Linux shipped for years: `/dev/urandom` handed out output from
+// a pool keyed only with boot-time clock reads, which an attacker who can
+// guess the uptime to within a few hundred nanoseconds can reproduce.  The fix
+// there — and here — is to track how much of the key material is genuinely
+// *unpredictable* and to make that a queryable state.
+//
+// So the pool has two independent properties:
+//
+// - `KernelRng::seeded` — the ChaCha state holds a key and `fill()` will
+//   produce a keystream.  Always true after `init()`, and made true lazily by
+//   `fill()` itself so early-boot kernel consumers (stack canaries, ASLR
+//   offsets) are never handed zeros.
+// - `CRNG_READY` — that key contains at least [`CREDIT_TARGET_BITS`] bits that
+//   an observer of an identically-configured machine could not have predicted.
+//   This is what [`is_ready()`] reports and what `SYS_GETRANDOM` waits for.
+//
+// **A clock read contributes key material but zero credit.** `init()` mixes
+// the HPET counter, TSC jitter and the APIC tick count into the key because
+// they cost nothing and can only help; none of them is credited, because on a
+// VM booted twice from the same image they are correlated across boots — which
+// is exactly the case `requests/c-a-userspace-entropy-syscall.md` names in its
+// acceptance criteria.  Only RDSEED/RDRAND and interrupt-arrival timing are
+// credited.
+//
+// References:
+// - Linux `drivers/char/random.c` — `crng_init`, `crng_ready()`, and the
+//   `credit_init_bits()` accounting this mirrors.
+// - Linux commit history around 5.18's random.c rewrite (Jason A. Donenfeld),
+//   which is where the "credit, don't just stir" distinction is stated most
+//   plainly.
+
+/// Bits of entropy that must be credited before the pool is declared ready.
+///
+/// 256 bits, matching Linux's `POOL_READY_BITS`.  It is the security level of
+/// the ChaCha20 key, so crediting more would be accounting fiction and
+/// crediting less would declare readiness at a strength the cipher does not
+/// have.
+const CREDIT_TARGET_BITS: u32 = 256;
+
+/// Bits of entropy credited so far, saturating at [`CREDIT_TARGET_BITS`].
+static CREDIT_BITS: AtomicU32 = AtomicU32::new(0);
+
+/// Set once [`CREDIT_BITS`] first reaches [`CREDIT_TARGET_BITS`].
+///
+/// A separate flag rather than a comparison on `CREDIT_BITS` so the
+/// ready-transition can be detected exactly once (for the boot log line) from
+/// an interrupt handler, without a read-modify-write race between two CPUs.
+static CRNG_READY: AtomicBool = AtomicBool::new(false);
+
+/// Previous interrupt timestamp, and the first two orders of difference.
+///
+/// Used by [`add_interrupt_entropy`] to decide whether an interrupt's arrival
+/// time was actually unpredictable.  Relaxed atomics: a torn interleaving
+/// between CPUs makes the deltas *noisier*, never less conservative, and the
+/// values are not otherwise load-bearing.
+static LAST_TIME: AtomicU64 = AtomicU64::new(0);
+/// First-order difference of [`LAST_TIME`].
+static LAST_DELTA: AtomicU64 = AtomicU64::new(0);
+/// Second-order difference of [`LAST_TIME`].
+static LAST_DELTA2: AtomicU64 = AtomicU64::new(0);
+
+/// Interrupts whose timing was credited (diagnostic).
+static CREDITED_IRQS: AtomicU64 = AtomicU64::new(0);
+
+/// [`ENTROPY_COUNT`] sampled at the instant the pool became ready.
+///
+/// Recorded at the transition rather than read when the readiness message is
+/// printed, because those are not the same moment and reading it late is
+/// actively misleading. The message is emitted from a work item, and the
+/// workqueue worker is spawned very late in boot — on the first boot to carry
+/// this code the item sat queued from the moment of readiness until the worker
+/// started, by which time `ENTROPY_COUNT` had reached 29 287 and the line
+/// claimed "32 of 29287 interrupts qualified". The true denominator was the
+/// handful of ticks it actually took.
+static READY_AT_IRQ: AtomicU64 = AtomicU64::new(0);
+
+/// HPET nanoseconds at the instant the pool became ready (0 if not yet).
+static READY_AT_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Credit `bits` of entropy to the pool.
+///
+/// Saturates at [`CREDIT_TARGET_BITS`]; safe to call from hard IRQ context
+/// (atomics only, no locks, no allocation).  Returns `true` on the single call
+/// that takes the pool from not-ready to ready, so exactly one caller reports
+/// the transition.
+fn credit_entropy(bits: u32) -> bool {
+    if bits == 0 || CRNG_READY.load(Ordering::Relaxed) {
+        return false;
+    }
+    let before = CREDIT_BITS.fetch_add(bits, Ordering::Relaxed);
+    let after = before.saturating_add(bits);
+    if after < CREDIT_TARGET_BITS {
+        return false;
+    }
+    // Clamp so the counter reads as a credit total, not a running sum of every
+    // contribution ever made.
+    CREDIT_BITS.store(CREDIT_TARGET_BITS, Ordering::Relaxed);
+    // `swap` rather than `store` so only the first arrival claims the
+    // transition, even if two CPUs cross the threshold in the same instant.
+    !CRNG_READY.swap(true, Ordering::AcqRel)
+}
+
+// ---------------------------------------------------------------------------
 // Hardware entropy sources
 // ---------------------------------------------------------------------------
 
@@ -405,21 +526,35 @@ fn gather_tsc_jitter() -> u64 {
 pub fn init() {
     let mut key = [0u32; 8];
 
+    // Entropy *credit* accrues only from the two hardware sources below.  The
+    // clock reads that follow are mixed into the key but credited nothing —
+    // see the "Entropy credit" section above for why.
+    let mut credited: u32 = 0;
+
     // Source 1: RDSEED (best quality — true randomness).
     for word in &mut key {
         if let Some(val) = try_rdseed() {
             *word = val as u32;
+            // 32 bits per word, which is all of this word's key material.
+            credited = credited.saturating_add(32);
         }
     }
 
     // Source 2: RDRAND (hardware CSPRNG output).
+    //
+    // Credited 64 bits per successful read.  RDRAND is a CSPRNG rather than a
+    // raw noise source, but it is reseeded from the same on-die entropy RDSEED
+    // draws from, so its output is unpredictable to anything outside the CPU
+    // package.  Linux makes the same call (`random.trust_cpu`, default on).
     if let Some(r1) = try_rdrand() {
         key[0] ^= r1 as u32;
         key[1] ^= (r1 >> 32) as u32;
+        credited = credited.saturating_add(64);
     }
     if let Some(r2) = try_rdrand() {
         key[2] ^= r2 as u32;
         key[3] ^= (r2 >> 32) as u32;
+        credited = credited.saturating_add(64);
     }
 
     // Source 3: HPET counter (contributes unpredictable low bits).
@@ -445,6 +580,8 @@ pub fn init() {
     INITIALIZED.store(true, Ordering::Release);
     RESEED_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    let became_ready = credit_entropy(credited);
+
     // Report entropy sources.
     let has_rdrand = try_rdrand().is_some();
     let has_rdseed = try_rdseed().is_some();
@@ -455,6 +592,24 @@ pub fn init() {
         hpet_ns,
         jitter,
     );
+    // State the credit explicitly rather than leaving it to be inferred from
+    // the RDRAND/RDSEED line above: on a machine with neither (QEMU's default
+    // CPU model is one), the pool is keyed but *not* ready, and userspace
+    // `getrandom` will block until interrupt timing has made up the shortfall.
+    // A reader debugging a stalled boot needs that stated, not deduced.
+    if became_ready {
+        serial_println!(
+            "[rng] crng init done ({} bits credited from the CPU RNG)",
+            credited.min(CREDIT_TARGET_BITS),
+        );
+    } else {
+        serial_println!(
+            "[rng] crng NOT ready: {}/{} bits credited (no usable CPU RNG); \
+             waiting on interrupt timing",
+            CREDIT_BITS.load(Ordering::Relaxed),
+            CREDIT_TARGET_BITS,
+        );
+    }
 }
 
 /// Fill a buffer with cryptographically-secure random bytes.
@@ -545,10 +700,94 @@ pub fn next_bounded(bound: u64) -> u64 {
 /// the CSPRNG over time.
 ///
 /// This is lock-free and safe to call from hard IRQ context.
+///
+/// # Entropy credit
+///
+/// The timestamp is *always* stirred into the pool; whether it also earns
+/// [`credit_entropy`] is decided by the third-order timing test from Linux's
+/// `add_timer_randomness` (`drivers/char/random.c`): take the first, second
+/// and third differences of successive arrival times and credit the event only
+/// if all three are non-zero.  A perfectly periodic source — which is what a
+/// free-running timer looks like on an idle machine — has a zero second or
+/// third difference and earns nothing, so a metronome cannot talk the pool
+/// into declaring itself seeded.
+///
+/// A qualifying event is credited `min(ilog2(min_delta), 8)` bits, where
+/// `min_delta` is the smallest of the three differences — Linux's accounting,
+/// with the cap lowered from its 11 bits to 8.  The quantity being estimated
+/// is the unpredictability of the low bits of a TSC difference, and 8 says we
+/// never claim more than one byte of it from a single tick.  At the 100 Hz
+/// APIC timer that is ~32 ticks, so roughly a third of a second from the first
+/// tick to `crng init done`, paid once per boot.
 pub fn add_interrupt_entropy(timestamp: u64) {
     // XOR-fold into the accumulator (lock-free).
     ENTROPY_ACCUM.fetch_xor(timestamp, Ordering::Relaxed);
     ENTROPY_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    // Nothing below changes the pool once it is ready, so skip the whole
+    // heuristic on the hot path after boot: this runs on every timer tick.
+    if CRNG_READY.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let last = LAST_TIME.swap(timestamp, Ordering::Relaxed);
+    if last == 0 {
+        // First sample: no delta to take yet.
+        return;
+    }
+    let delta = timestamp.wrapping_sub(last);
+    let last_delta = LAST_DELTA.swap(delta, Ordering::Relaxed);
+    let delta2 = delta.abs_diff(last_delta);
+    let last_delta2 = LAST_DELTA2.swap(delta2, Ordering::Relaxed);
+    let delta3 = delta2.abs_diff(last_delta2);
+
+    if delta == 0 || delta2 == 0 || delta3 == 0 {
+        return;
+    }
+    // `ilog2` is the position of the highest set bit, i.e. Linux's `fls() - 1`.
+    // `min_delta` is non-zero by the test above, so `ilog2` is defined.
+    let min_delta = delta.min(delta2).min(delta3);
+    let bits = min_delta.ilog2().min(8);
+    CREDITED_IRQS.fetch_add(1, Ordering::Relaxed);
+    if credit_entropy(bits) {
+        // Snapshot the counters *here*, at the transition.  By the time the
+        // work item below actually runs they will have moved on — see
+        // `READY_AT_IRQ`.  `hpet::elapsed_ns` is a counter read, safe from ISR
+        // context.
+        READY_AT_IRQ.store(ENTROPY_COUNT.load(Ordering::Relaxed), Ordering::Relaxed);
+        READY_AT_NS.store(crate::hpet::elapsed_ns(), Ordering::Relaxed);
+        // Report from a work item, not from here.  `serial_println!` takes the
+        // serial spinlock, and this is hard IRQ context: if the interrupted
+        // task happened to hold that lock, printing would spin against itself
+        // forever.  `workqueue::submit` is documented ISR-safe (a `try_lock`
+        // and an atomic) and runs the callback in task context, which is
+        // Linux's `execute_in_process_context(crng_set_ready, …)` in
+        // `drivers/char/random.c` for the same reason.
+        //
+        // A dropped submission costs only the log line: readiness itself is
+        // already published by `credit_entropy`, and `is_ready()` is what
+        // every caller actually consults.
+        let _ = crate::workqueue::submit(report_crng_ready, 0);
+    }
+}
+
+/// Work-item callback: announce that the pool reached its credit target.
+///
+/// Runs in task context (see the call site in [`add_interrupt_entropy`]), so
+/// taking the serial lock here is safe.
+fn report_crng_ready(_arg: u64) {
+    // Every number here is the snapshot taken at the transition, not a live
+    // read: this runs from a work item, which can be an arbitrarily long time
+    // later (the worker task is spawned late in boot), and live reads would
+    // describe that later moment while appearing to describe this one.
+    serial_println!(
+        "[rng] crng init done ({} bits credited from interrupt timing; \
+         {} of the first {} interrupts qualified; ready {} ms into boot)",
+        CREDIT_TARGET_BITS,
+        CREDITED_IRQS.load(Ordering::Relaxed),
+        READY_AT_IRQ.load(Ordering::Relaxed),
+        READY_AT_NS.load(Ordering::Relaxed).saturating_div(1_000_000),
+    );
 }
 
 /// Total random bytes generated since boot.
@@ -566,8 +805,10 @@ pub fn reseed_count() -> u64 {
 }
 
 /// Whether the RNG has been properly initialized.
+///
+/// Says only that [`init`] has run and the generator is keyed — *not* that the
+/// key material is unpredictable.  For that, ask [`is_ready`].
 #[must_use]
-#[allow(dead_code)]
 pub fn is_initialized() -> bool {
     INITIALIZED.load(Ordering::Relaxed)
 }
@@ -577,6 +818,111 @@ pub fn is_initialized() -> bool {
 #[allow(dead_code)]
 pub fn entropy_contributions() -> u64 {
     ENTROPY_COUNT.load(Ordering::Relaxed)
+}
+
+/// Whether the pool holds enough *credited* entropy to be used for keys.
+///
+/// This is the question `SYS_GETRANDOM` asks, and it is **not** the same as
+/// [`is_initialized()`]: a pool keyed from nothing but clock reads is
+/// initialised and will happily produce a keystream, but two boots of the same
+/// VM image can produce correlated output from it.  See the "Entropy credit"
+/// section above.
+///
+/// Kernel-internal consumers ([`fill`], [`next_u64`], …) deliberately do *not*
+/// consult this — ASLR offsets and stack canaries are wanted at boot, before
+/// any pool could be credited, and weak randomness there is better than none.
+/// Userspace, which asks for key material and can be made to wait, does.
+#[must_use]
+pub fn is_ready() -> bool {
+    CRNG_READY.load(Ordering::Acquire)
+}
+
+/// Bits of entropy credited to the pool, out of [`credit_target_bits()`].
+#[must_use]
+pub fn credited_bits() -> u32 {
+    CREDIT_BITS.load(Ordering::Relaxed)
+}
+
+/// Credit required before [`is_ready`] turns true.
+#[must_use]
+pub fn credit_target_bits() -> u32 {
+    CREDIT_TARGET_BITS
+}
+
+/// Interrupts whose arrival timing passed the third-difference test.
+#[must_use]
+pub fn credited_interrupts() -> u64 {
+    CREDITED_IRQS.load(Ordering::Relaxed)
+}
+
+/// Poll interval used by [`wait_until_ready`], in milliseconds.
+///
+/// The wait is resolved by a *condition* an interrupt handler publishes, not
+/// by an event a waker can be handed, so this polls rather than parking on a
+/// wait queue.  That is deliberate:
+///
+/// - The wake would have to come from hard IRQ context, where the only legal
+///   wake primitive is `WaitQueue::try_wake_one` (`wake_all` takes a blocking
+///   spinlock).  Bouncing it through a work item to reach `wake_all`
+///   reintroduces the "was the submission dropped?" question, which would then
+///   need its own timeout fallback — i.e. a poll, one level down.
+/// - `WaitQueue` has no timed wait, and this wait **must** be bounded.
+/// - The wait only exists before the pool is credited, i.e. during boot.
+///
+/// 25 ms, chosen to exceed the 10 ms period of the 100 Hz APIC timer: the loop
+/// treats "no interrupt at all arrived during one poll interval" as proof that
+/// nothing can feed the pool, and that inference is only sound if a healthy
+/// system is *certain* to deliver a tick within the interval.
+const READY_POLL_MS: u64 = 25;
+
+/// Block the calling task until the pool is credited, or give up.
+///
+/// Returns `true` if the pool is ready.  Returns `false` if `timeout_ns`
+/// elapses, or — much more usefully — as soon as it can prove that waiting is
+/// futile because no interrupts are arriving to be credited.  That second exit
+/// is what keeps the early-boot syscall self-tests fast: they run before the
+/// APIC timer is configured, so on a machine with no CPU RNG the pool cannot
+/// become ready at that point no matter how long anyone waits.
+///
+/// A `false` return means the caller should **fail**, not proceed with weak
+/// bytes — see `syscall::handlers::sys_getrandom`, which turns it into an
+/// error rather than fabricating key material.
+///
+/// Must be called from task context: past the two early-outs below it sleeps.
+pub fn wait_until_ready(timeout_ns: u64) -> bool {
+    if is_ready() {
+        return true;
+    }
+    // Refuse to sleep before [`init`] has run.  This is not merely an
+    // optimisation, it is what makes the function safe to call at all during
+    // early boot: `main` runs the syscall self-tests (which dispatch
+    // `SYS_GETRANDOM`) well before it brings up the HPET, the TSC calibration
+    // and `rng::init` itself.  With no timebase there is no honest deadline to
+    // measure against and `sched::sleep_ms`'s own fallbacks have nothing to
+    // spin on, so a wait started here could not be bounded.  It would also be
+    // pointless: nothing has been credited and nothing can be until the
+    // interrupt sources this pool feeds on are running.
+    if !is_initialized() {
+        return false;
+    }
+    let start = crate::hpet::elapsed_ns();
+    loop {
+        let irqs_before = ENTROPY_COUNT.load(Ordering::Relaxed);
+        crate::sched::sleep_ms(READY_POLL_MS);
+        if is_ready() {
+            return true;
+        }
+        if ENTROPY_COUNT.load(Ordering::Relaxed) == irqs_before {
+            // Not one interrupt in a whole poll interval — longer than the
+            // timer period — so the only source that could credit this pool is
+            // not running.  Waiting out the full timeout would just be a
+            // slower way to return the same answer.
+            return false;
+        }
+        if crate::hpet::elapsed_ns().saturating_sub(start) >= timeout_ns {
+            return false;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +1005,43 @@ pub fn self_test() {
         reseed_count(),
         entropy_contributions(),
     );
+
+    // --- 6. Credited entropy ---
+    //
+    // Reported unconditionally, and deliberately *not* asserted on.  This runs
+    // late enough that interrupt timing should long since have credited the
+    // pool, so on a healthy boot it reads "ready".  But readiness is a property
+    // of the machine, not of this code: a host that delivered perfectly
+    // periodic interrupts would legitimately leave the pool uncredited, and
+    // failing the self-test for that would be blaming the RNG for the
+    // environment.  What matters is that the state is *visible* — an
+    // uncredited pool means every userspace `getrandom` is failing, which is a
+    // condition nobody should have to discover by bisecting a boot log.
+    //
+    // This is also the only place the state is reliably printed: the
+    // ready-transition message is emitted from a work item queued by an
+    // interrupt handler, and a dropped submission loses the line (never the
+    // readiness itself).
+    if is_ready() {
+        serial_println!(
+            "[rng]   Credited: READY ({}/{} bits; {} of the first {} interrupts \
+             qualified; ready {} ms into boot)",
+            credited_bits(),
+            credit_target_bits(),
+            credited_interrupts(),
+            READY_AT_IRQ.load(Ordering::Relaxed),
+            READY_AT_NS.load(Ordering::Relaxed).saturating_div(1_000_000),
+        );
+    } else {
+        serial_println!(
+            "[rng]   Credited: NOT READY ({}/{} bits; {} of {} interrupts qualified) \
+             -- userspace getrandom will fail",
+            credited_bits(),
+            credit_target_bits(),
+            credited_interrupts(),
+            entropy_contributions(),
+        );
+    }
 
     serial_println!("[rng] Self-test PASSED");
 }

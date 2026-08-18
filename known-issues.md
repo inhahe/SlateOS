@@ -28539,7 +28539,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 16 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 17 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -29392,6 +29392,68 @@ target, where argv is bytes; such a case would measure the Windows command
 line rather than `printf`. Non-UTF-8 bytes are still tested where they can be:
 in the *format*, where they arrive as escapes the program decodes itself, and
 in `cfmt`'s unit tests, which take a byte slice directly.
+
+### Progress (appended 2026-08-18, `tr`)
+
+`tr` is the seventeenth (`scripts/tr-diff.sh`: 289 passed, 0 differed, 2 differ
+on purpose — the `--help` referral tail and the `--version` banner, both of
+which name an upstream project this is not; 70 differ when pointed at MSYS2's
+`tr` with `OURS=/usr/bin/tr`, which is the harness proving it still
+discriminates rather than passing everything put in front of it).
+
+The shipped version was a 265-line skeleton with `-d` and ranges and nothing
+else: no `-s`, no `-c`, no `-t`, no character classes, no equivalence classes,
+no `[c*n]` repeat, escape decoding that handled a handful of letters, and a
+`--help` of one line where GNU's is 54. Six things worth carrying forward,
+five of which the harness found and the sixth of which it structurally cannot:
+
+- **`tr` does not quote with `quote()`. It has two private renderers, and
+  which one runs depends on the message.** `make_printable_char` — printable
+  byte as itself, anything else as `\NNN` octal, *never* a named escape —
+  renders the reverse-range message. `make_printable_str` — named escapes for
+  `\a\b\t\n\v\f\r`, printable-or-octal otherwise — renders the `[=c=]` operand.
+  And `invalid character class` and `invalid repeat count` run
+  `make_printable_str` *then* `quote()`, so a backslash the first one produced
+  comes back out doubled: `tr -d '[:no\377such:]'` says
+  `invalid character class 'no\\377such'`, with two backslashes. Neither
+  renderer escapes `'` or `\`. **None of this is visible on printable input**,
+  which is why the first 250-case harness passed these cases while the code was
+  wrong — every diagnostic case in it had been written with printable text. The
+  general lesson for the next utility: a case that echoes caller bytes back
+  must use *unprintable* bytes, or it is not testing the renderer at all.
+- **I suspected the shared module before the caller, and was wrong.** Range
+  endpoints were printing as raw high bytes, and `coreutils::quote` was the
+  obvious suspect. It was read in full and is correct — measured against an
+  8333-row GNU fixture. The bug was `byte as char` in `tr`'s own `parse_set`.
+  A module with a fixture behind it is evidence; reach for the caller first.
+- **The repeat count is `strtoumax`'s grammar, not a string of digits.**
+  Leading whitespace is skipped and a leading `+` accepted (`[x* +1]` is one),
+  but `-` is not and `+` before whitespace is not. The trap is that the base is
+  chosen from the field's **raw first byte** — `*digit_str == '0' ? 8 : 10` —
+  *before* the whitespace is skipped, so `[x*010]` is eight and `[x* 010]` is
+  ten. Discriminating those two needs a SET1 of at least 11 bytes; with a short
+  SET1 the padding hides the difference, and the harness's original repeat
+  cases all used `a-f`.
+- **`find_bracketed_repeat` aborts at the first escaped byte of any kind**,
+  rather than scanning past it for the `]`. So `[x*\]]` is six literal bytes,
+  and so is `[x*\062]` — even though its `]` is unescaped and would otherwise
+  close the construct. `find_closing_delim`, which serves `[:…:]` and `[=…=]`,
+  has no such rule and reads straight through. Two scanners, two behaviours,
+  in one file.
+- **The mode decides which operand is "extra".** `tr -d a b c` names `'b'`;
+  `tr -s a b c` names `'c'`. Deleting *without* squeezing is the one mode that
+  takes a single set, so it is the one mode whose first-too-many operand is the
+  second. Ours had one rule for all modes and named the third every time. The
+  explanatory second line appears only at *exactly* one excess operand.
+- **One defect a byte-for-byte harness cannot see, so it is a unit test.**
+  Upstream reaches SET2 through a lazy generator that stops once SET1 is
+  exhausted; ours expanded it eagerly, so `tr a '[x*4294967296]'` was a 4 GiB
+  allocation and a 50-second wait against GNU's 0.29s. The *output* was
+  correct, so every comparison the harness makes passed. It is pinned by
+  `set2_is_not_materialised_past_set1` instead. SET1 is deliberately left
+  uncapped, because GNU grinds on a huge SET1 too and parity is the goal.
+
+35 unit tests, clippy clean.
 
 ## TD-PRINTF-BUILDS-THE-WHOLE-FIELD-IN-MEMORY (lane B, 2026-08-17) — **open, low priority**
 
@@ -33842,6 +33904,152 @@ Verified: `cargo build` clean with zero warnings, `split-frames.py --check`
 23/23 (two new cases - a `const` read three paragraphs later, and a diverging
 tail), and a full boot test.
 
+### Progress - 2026-08-18: the floor is now the standard library
+
+Eight more `kshell` dispatchers, seven more self-tests, and one function that
+was never an `opt-level = 0` artifact at all.  The census below is the whole
+point of this section: **the kernel has essentially stopped being the tallest
+thing on its own stack.**
+
+| Function | before | after (peak) | how |
+|---|---:|---:|---|
+| `audio_mixer::mix_output` | 13 168 | off the top-22 | moved to a static |
+| `self_test_remap_ioprio_futex2` | 13 712 | **6 000** | `--flat`, 9 cases |
+| `sched::backend::self_test` | 13 680 | **6 160** | `--flat`, 8 cases |
+| `mm::alloc_trace::self_test` | 13 520 | **~4 550** | `--flat`, 8 cases |
+| `mm::tlb_gather::self_test` | 13 168 | **4 416** | block, 5 cases |
+| `fs::fat::self_test` | 11 952 | **3 168** | `--flat`, 24 cases |
+| `fs::progmgr::self_test` | 11 264 | **6 608** | `--flat`, 5 cases |
+| `kshell::cmd_progmgr` | 11 280 | **2 240** | `--arms`, 23 cases |
+| `kshell::cmd_netsettings` | 11 240 | **2 944** | `--arms`, 21 cases |
+| `kshell::cmd_schedtune` | 11 088 | **4 224** | `--arms`, 17 cases |
+| `kshell::cmd_capsettings` | 10 976 | off the top-25 | `--arms`, 22 cases |
+| `kshell::cmd_filepicker` | 10 672 | off the top-25 | `--arms`, 19 cases |
+| `kshell::cmd_tasksched` | 10 656 | **2 224** | `--arms`, 19 cases |
+| `kshell::cmd_fsearch` | 10 656 | **2 864** | `--arms`, 7 cases |
+| `kshell::cmd_useracct` | 10 432 | **2 496** | `--arms`, 23 cases |
+
+Prologues claiming >= 4 KiB: 470 -> 459.
+
+**Stop when you reach 13 088.**  The raw ranking now reads:
+
+| bytes | symbol |
+|---:|---|
+| 13 344 | `kshell::cmd_oci::case` (the `"run" \| "create"` arm) |
+| **13 088** | **`alloc::collections::btree::node::Handle::insert_recursing`** |
+| 12 448 | `net::ssh::init` |
+| 12 432 | `fs::vfs::self_test` |
+| 12 416 | `fs::xz::lzma2_decode` |
+| 12 288 | `fs::handle::self_test` |
+| 11 920 | `self_test_eventfd_futex_pkey` |
+| **11 648** | **`alloc::...::BalancingContext::bulk_steal_left`** |
+| **11 616** | **`alloc::...::BalancingContext::bulk_steal_right`** |
+
+Three of the top nine frames are `alloc`'s B-tree monomorphisations.  They are
+not ours to split, they are on the stack whenever any `BTreeMap` insert
+rebalances, and no amount of work on kernel functions moves them.  **This is a
+floor.**  Driving a kernel function from 12 KiB to 4 KiB below it buys headroom
+on that function's own path - which is worth having, see the reversal below -
+but it no longer moves the kernel's peak.  Only `cmd_oci::case` still does.
+
+**A prediction that was wrong, recorded because the reasoning was reasonable.**
+All eight dispatchers in the table above already sat *below* the 13 088 floor,
+so by the peak argument alone the split could not help and was pure churn - the
+same reasoning that correctly reverted four earlier splits.  I expected to
+revert the batch.  The measurement said 4-5x, not the 1-6% those reverts were
+made of.  The lesson is not "always split": it is that *below the floor* and
+*not worth doing* are different claims, and only the first follows from the
+floor.  Measure, then decide.
+
+**`audio_mixer::mix_output` was a different animal entirely** and is worth
+separating from everything else here.  Its 13 168 bytes were not `opt-level=0`
+slop - they were `[i32; 2048]` plus `[u8; 4096]`, two real buffers that do not
+shrink under `-O`.  Splitting could never have touched it.  It is now a
+lock-guarded static, which also supplied the mutual exclusion the function had
+always assumed and never had (two CPUs would each have summed a private
+accumulator and then both written the same output slice).  **When a frame
+resists splitting, check whether it is actually data before assuming the tool
+is at fault** - `audio_notify.rs:133`'s `[0u8; 8192]`, still open, is the same
+shape.
+
+**Two transformer defects fixed**, both of the same kind as the earlier three -
+the tool silently emitting code that could not compile:
+
+- `--arms` never checked that a fixture the arms read was actually threaded in.
+  Every dispatcher binds `parts` in its preamble and reads it in nearly every
+  arm, so omitting `--param` did not fail here and there; it made the file
+  uncompilable.  Eight dispatchers split in one batch surfaced as 320 errors
+  258 seconds later, with the real cause - a missing argument to the script -
+  nowhere in the output.  It now refuses up front and names the local.
+- The leading *fixture* paragraph, skipped by `--flat` and correctly left in
+  the outer frame, was not added to the set of outer locals, so every cluster
+  below it was judged as though it had never existed.  36 `E0434`s.
+
+`split-frames.py --check` is now 26/26.
+
+**What is left.**  `cmd_oci::case` (13 344) is the only frame above the floor
+that is ours.  It is 1 178 lines of sequential container-configuration build-up
+with ~126 genuinely-live locals, so it is a restructuring job, not a splitting
+one.  Below it, `fs::vfs::self_test` (12 432) and `fs::handle::self_test`
+(12 288) are refused by the transformer for a good reason - each contains a
+bare `return` that `case()?` would silently change the meaning of - and need
+hand splitting.  `net::ssh::init` (12 448) and `fs::procfs::generate` (11 072)
+have no case structure at all.
+
+### Progress - 2026-08-18: the kernel is now entirely below the stdlib floor
+
+`cmd_oci`'s `run`/`create` arm - the "restructuring job, not a splitting one"
+the paragraph above left as the last item above the floor - is done, by hand
+rather than by `split-frames.py`.  **With it, the largest prologue in the kernel
+is `alloc`'s own `Handle::insert_recursing` at 13 088 bytes.  Every remaining
+kernel function is below it.**  That is the terminal state for this line of
+work as originally framed: there is no longer any kernel frame whose shrinking
+would lower the kernel's peak.
+
+| | before | after |
+|---|---:|---:|
+| largest single frame on the `oci run` path | 13 344 | **4 048** |
+| peak over that path (`cmd_oci` -> `oci_run` -> `OciRunFlags::parse`) | 19 640 | **10 344** |
+| `cmd_oci` as `--peak` reports it | 13 344 | **2 432** |
+| prologues claiming >= 4 KiB | 459 | **458** |
+
+Nine siblings along the container lifecycle: `prepare_rootfs`, `build_config`,
+`report_created`, `bind_network`, `mount_jail`, `apply_created_state`,
+`merge_env`, `effective_workdir` / `effective_uid_gid`, `launch_init`.  Largest
+of them is `launch_init` at 2 160.
+
+**Two things worth keeping from how it was done.**
+
+- **The transformer was the wrong tool and that was clear in advance.**
+  `--arms` splits *at a `match`*; this arm's cost was not in a match, it was in
+  700 lines of straight-line configuration where every local really is live at
+  the end.  The split had to follow the container's lifecycle, which no
+  structural rule can infer.  Attempting it with `--arms` anyway would have
+  produced one arm containing everything.
+- **It was moved by script, not retyped.**  `build/split-oci-run.py` (untracked;
+  `build/` is git-ignored) extracts each paragraph by line range, re-indents it,
+  and applies a list of asserted renames.  The reason is not tedium: the arm is
+  ~700 lines of console output whose exact wording is the shell's user
+  interface, and retyping it is precisely how wording drifts without anyone
+  noticing.  Every rename is asserted to have matched at least once, so a range
+  that moved fails in the script rather than 700 lines away in rustc.
+
+**Two structural changes fell out and were kept**, both because they are
+clearer than what they replace, not merely smaller: the 23-binding
+`let OciRunFlags { .. } = ` destructure goes back to a single `f` threaded as
+`&OciRunFlags`, and `match container::create` becomes a `let ... else` early
+return, which de-nests 440 lines by a level.
+
+**What is left after this** is all below 13 088 and therefore does not move the
+kernel's peak - it buys headroom on its own call path only, which is still worth
+having (see the wrong prediction recorded above) but is no longer urgent:
+`net::ssh::init` (12 448), `fs::vfs::self_test` (12 432), `fs::xz::lzma2_decode`
+(12 416), `fs::handle::self_test` (12 288), `fs::procfs::generate` (11 072),
+`fs::ext4::fsck::fsck_ext4` (10 656), and the ~9.6-10.2 KiB kshell dispatchers
+`cmd_sysinfo`, `cmd_focusassist`, `cmd_autostart`, `cmd_wallpaper`, `cmd_nc`,
+`cmd_appnotify`, `cmd_parental`.  On the `oci run` path specifically the
+dominant term is now `OciRunFlags::parse` at 6 088.
+
 ---
 
 ## A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT (lane A, 2026-08-18) - **not a bug; methodology, recorded so it stops being rediscovered**
@@ -35265,29 +35473,143 @@ Scratch also accumulates unattended: `os-lane-a/build/` held 1.16 GB of
 logs left by earlier sessions. That directory is gitignored, so nothing ever
 prompts anyone to look at it. Pruned by hand on 2026-08-18; it will refill.
 
-### Proper fix
+### Fix, part 1 — landed 2026-08-18: `scripts/reclaim-space.py`
 
-Two pieces, neither written yet:
+Run `python scripts/reclaim-space.py` for a dry run, `--yes` to act, `--need N`
+to set the target in GiB (default 20, the boot test's floor).
 
-1. **A reclaim helper** — `scripts/reclaim-space.py <n_gib>` that frees space
-   without guessing. It must establish *idleness* rather than infer it: check
-   for a live `cargo`/`rustc`/`qemu` process, and take the same lock
-   `scripts/boot-test.sh` uses to serialise QEMU, so it cannot race a boot test.
-   Prune in a defined order — this lane's `build/` scratch older than N days
-   first, then `target/` directories belonging to worktrees with no live build,
-   integration checkout first. Never touch a source tree.
-2. **A retention rule for `build/`** — the scratch directory has no policy at
-   all. Either the helper ages files out of it, or the boot test prints its size
-   when it exceeds a threshold, so it stops being invisible.
+It answers "is this directory in use?" with a **fact rather than a heuristic**:
+it *renames* the directory before deleting anything. Windows refuses to rename a
+directory that has any file open inside it, and the rename is atomic, so a
+success proves nothing held it at that instant and no observer ever sees a
+half-deleted tree; a failure means "in use" and the candidate is skipped rather
+than forced. That replaces the idleness check this entry originally proposed —
+checking for a live `cargo`/`rustc` process — which was tried first and does not
+work: `os/target` showed 122 s of write-idleness and was still locked 13 minutes
+later, because a QEMU boot phase writes nothing to `target/` for ~8 minutes.
 
-Until then the workaround is manual: measure with
-`Get-ChildItem -Recurse -File | Measure-Object -Property Length -Sum`, confirm
-no live build with `Get-CimInstance Win32_Process -Filter "Name='cargo.exe'"`,
-and prune `os/target` only when the integration checkout is genuinely idle.
+Order of attack: this lane's `build/` scratch older than `--scratch-age-days`
+(default 3), then the integration checkout's `target/`, then **our own**, and
+only with `--allow-lane-targets` any other lane's. Ours precedes theirs
+deliberately: another lane's `target/` is that lane's rebuild exactly as ours is
+ours, so a default run can only ever cost this lane and the integration tree.
+Nothing outside a worktree root is touched and nothing git does not consider
+ignored is touched; both are asserted rather than assumed, and the ignore query
+is issued from the worktree that *owns* the path (`git check-ignore` fails
+outright on a sibling worktree's path, which would otherwise read as "not
+ignored").
+
+Two things it deliberately keeps: `build/*.elf` (a `kernel-kasan-capture.elf` is
+the symbol table an open bug's backtrace decodes against, and the commit that
+produced it is gone from every build tree) and the boot test's disk images.
+
+### Fix, part 2 — still to do: a retention rule for `build/`
+
+`--scratch-age-days` prunes top-level `build/` files on demand, but only when
+someone runs the script. The directory still has no standing policy, so it
+refills silently between runs. Either the boot test should print `build/`'s size
+when it exceeds a threshold, or it should age the directory out itself on every
+run, so the accumulation stops being invisible.
+
+### Status
+
+**Status:** PARTIALLY FIXED — 2026-08-18. The reclaim helper exists and works;
+the retention rule does not.
+
+The underlying scarcity is not fixed and cannot be fixed by a script: three
+lanes building concurrently consumed ~250 MB/min on 2026-08-18 and drove free
+space from 19 GiB down to 14 GiB *while* the helper was retrying, with all four
+`target/` directories locked the whole time. The helper's honest answer in that
+window is "everything else is in use or not ours", and waiting is then the
+correct behaviour — the space came back (14 GiB → 32 GiB) the moment the other
+lanes' test runs finished.
 
 **Severity:** high — it does not corrupt anything by itself (the guard sees to
 that), but it stops the one test that gates merging to `main`, and the failure
 mode it guards against has already destroyed a source file once.
+
+---
+
+## A-27-KERNEL-SOURCES-ARE-CRLF-IN-THE-WORKING-TREE-WHILE-EVERY-BLOB-IS-LF (lane A, 2026-08-18) — **tooling fixed; the divergence itself remains**
+
+**In short:** twenty-seven of the kernel's `.rs` files end their lines with
+carriage-return + newline; every other file, and every version of *all* of them
+stored in git, ends with newline alone. Git is configured in a way that makes
+both spellings look identical to it, so `git status` is clean, `git diff` is
+empty, and the compiler does not care. Nothing is broken until a tool reads the
+files line by line — at which point it silently sees a stray `\r` glued to the
+end of every line.
+
+### How the two spellings coexist without git noticing
+
+`core.autocrlf` is `input` in these worktrees. That setting converts CRLF to LF
+**on check-in** and never converts anything **on checkout**. So:
+
+- every blob in the repository is LF (verified: `git show HEAD:kernel/src/fs/handle.rs`
+  contains 2044 LF and zero CRLF);
+- a working-tree file that is LF hashes to that blob — clean;
+- a working-tree file that is CRLF *also* hashes to that blob, because the
+  check-in conversion strips the `\r` before hashing — also clean.
+
+Both therefore report clean, forever, and no amount of `git status`/`git diff`
+will ever surface the difference. Normalising the working copies produces a
+**zero-line diff** for the same reason.
+
+The 27 files were almost certainly written by something that opened them in
+Python text mode on Windows, where `open(p, "w")` translates `\n` to `\r\n` on
+write. That is a guess about provenance; the file list is not:
+
+`lockdep.rs`, `drm/driver.rs`, `drm/ati/backend.rs`, `drm/ati/tests.rs`, and
+under `fs/`: `atime.rs`, `bookmarks.rs`, `clipboard.rs`, `columnview.rs`,
+`directio.rs`, `dragdrop.rs`, `fileinfo.rs`, `fileops.rs`, `findex.rs`,
+`freeze.rs`, `fstrim.rs`, `handle.rs`, `pathbar.rs`, `prefetch.rs`,
+`preview.rs`, `profile.rs`, `recent.rs`, `sealing.rs`, `sparse.rs`,
+`templates.rs`, `thumbcache.rs`, `viewstate.rs`, `ext4/driver.rs`.
+
+Each is *uniformly* CRLF — no file mixes the two, which is what makes the tool
+fix below safe.
+
+### How it showed up
+
+`scripts/split-frames.py` refused `kernel/src/fs/handle.rs` outright with
+`AssertionError: file has CRLF; this transformer assumes LF`, blocking the split
+of that file's 12 288-byte `self_test` frame. The assertion was doing its job —
+the transformer indexes offsets produced by `text.split("\n")` and emits `"\n"`
+at a couple of dozen sites, so running it on CRLF text would have produced a
+file with mixed endings — but it stated an internal invariant as if it were a
+limit on what the tool accepts.
+
+### Fixed in the tool (2026-08-18)
+
+`split-frames.py` now normalises at its I/O boundary: `main` strips CRLF on read
+and restores it on write, leaving `rewrite()` the pure LF function its assertion
+describes. A file that *mixes* the two endings is still refused, deliberately —
+unifying it would bury a whole-file whitespace change inside a commit whose
+subject is a stack frame. `--check` still passes 23/23 and `fs/handle.rs` is now
+accepted.
+
+`rustfmt` was never affected: its default `newline_style = "Auto"` preserves
+whatever a file already uses.
+
+### Still to do
+
+The tool is fixed; the condition is not, and it can recur — anything that writes
+a kernel source through Python text mode on Windows re-creates it, and the next
+line-based tool will hit the same wall with a less obvious error message. Two
+candidate fixes, neither done:
+
+1. **Normalise the 27 files.** Costs nothing in git terms (zero-line diff, per
+   above) and makes the crate internally consistent. Does not prevent
+   recurrence.
+2. **Add a root `.gitattributes`** (`*.rs text eol=lf`) so checkout enforces the
+   policy rather than leaving it to whatever wrote the file last. This is the
+   durable fix, but `.gitattributes` is a repository-root file shared by all
+   three lanes, and adding it would make every lane's CRLF working copies
+   convert on their next checkout. It needs to be coordinated, not dropped in by
+   one lane — file a request or raise it in `open-questions.md` first.
+
+**Severity:** low — invisible to git, the compiler, and rustfmt; it costs a
+confusing failure in a line-based script roughly once per script.
 
 ---
 
@@ -35360,3 +35682,129 @@ failed. The precondition this entry set for making the behaviour change —
 "a look at whether the installer ships a `/etc/sudoers` that would newly fail"
 — was checked: `git grep -ln "etc/sudoers"` finds no shipped file, so no
 existing configuration can newly be rejected.
+
+---
+
+## A-GETRANDOM-VALIDATES-THE-GRND-FLAGS-THEN-THROWS-THEM-AWAY (lane A, 2026-08-18) — **open; needs an ABI change in lane B's tree first**
+
+**What a user would see:** a program that explicitly asks `getrandom` *not* to
+block can be made to wait anyway — up to 15 seconds — and a program that says
+"give me bytes now, I accept they may be weak" has no way to say that at all.
+
+**Scope: the native ABI only.** There are two entry points, and the
+Linux-compatibility one is already correct:
+
+| | reached by | `GRND_*` |
+|---|---|---|
+| native `SYS_GETRANDOM` = 90 | our own libc (`posix/src/random.rs`) | **ignored — this entry** |
+| Linux-ABI `getrandom` = 318 | ported Linux binaries under translation | honoured in full |
+
+318 received the complete semantics in `50d869caf`, because a three-argument
+call genuinely reaches it. Everything below concerns 90 only. A useful
+consequence: the behaviour the native path needs is already written and
+regression-tested on the 318 path, so closing this is a transcription rather
+than a design exercise.
+
+**Where it lives:** `posix/src/unistd.rs:2053` accepts `GRND_NONBLOCK`,
+`GRND_RANDOM` and `GRND_INSECURE`, validates them, and then never passes them
+on. `posix/src/random.rs` calls `syscall2(SYS_GETRANDOM, buf, len)`, and
+`posix/src/syscall.rs:548`'s `syscall2` declares only `in("rdi")`/`in("rsi")`,
+so the flags never reach the kernel. `kernel/src/syscall/handlers.rs`'s
+`sys_getrandom` correspondingly ignores `arg2`.
+
+**Why it is newly a problem.** This has been true for as long as the syscall
+has existed, but it was harmless until 2026-08-18: `getrandom` never blocked,
+so `GRND_NONBLOCK` was accidentally honoured by doing nothing. `4381365de` made
+the call wait until the CSPRNG holds credited entropy, so the flag is now
+genuinely wrong rather than vacuously right. `GRND_INSECURE` is the flag that
+would make the wait harmless — it is precisely the "I'll take weak bytes"
+escape hatch — and it is the one that cannot be honoured.
+
+**Why the kernel cannot just start reading `arg2`.** `rdx` holds whatever the
+compiler last left there when the caller went through `syscall2`. A kernel that
+interpreted it as a flags word would make every already-built binary pass
+garbage flags, including all nine committed `services/ctest-*` ELFs. It is a
+syscall ABI change and both halves must land together.
+
+**The proper fix**, in order:
+
+1. Lane B switches `posix/src/random.rs` to
+   `syscall3(SYS_GETRANDOM, buf, len, u64::from(flags))` and rebuilds the
+   fixtures. Filed as
+   `requests/a-b-getrandom-now-waits-for-a-credited-pool.md`.
+2. Lane A then makes `sys_getrandom` read `arg2`: `GRND_NONBLOCK` returns
+   `WouldBlock` instead of waiting, `GRND_INSECURE` skips the readiness check
+   entirely, `GRND_RANDOM` is a no-op (we have one pool, as Linux now does
+   since 5.6).
+
+**How much it bites today:** very little. Credit accrues from the 100 Hz timer,
+and the 2026-08-18 boot test measured the pool ready 330 ms after `cpu::sti()`
+(33 ticks, 32 of them credited) — long before any userspace process runs. Note
+the measurement is from `sti`, not from `apic::init`: those are ~7.9 s apart on
+this boot, and the gap is the pre-preemption half of boot, not slow entropy.
+The wait is only reachable from the kernel's own boot self-tests, which take
+the early-out and never sleep. The entry exists
+because the *contract* is wrong, not because anything currently hangs on it.
+
+### A-RECLAIM-SPACE-CANNOT-FREE-A-LANE'S-OWN-TARGET — the rename probe is vetoed by an unattributed handle
+
+**Where:** `scripts/reclaim-space.py` step 3 ("*our own* `target/`"), via
+`reclaim_dir`'s rename probe.
+
+**Symptom.** On 2026-08-18, with no build running anywhere and the boot lock
+free, the probe reported:
+
+```
+Step 2: target/ directories, integration checkout first
+  SKIP (in use)  D:\visual studio projects\os-lane-a\target  [Access is denied]
+```
+
+Reproducible with a bare `os.rename` outside the script, so it is a property of
+the tree and not of the script's logic (WinError 5).
+
+**Narrowed, but not resolved.** Renaming the *children* of `target/` one at a
+time isolates it to exactly one:
+
+| child | rename |
+|---|---|
+| `.rustc_info.json`, `CACHEDIR.TAG`, `debug`, `release`, `x86_64-unknown-none` | OK |
+| **`x86_64-pc-windows-gnu`** | **Access is denied** |
+
+That `debug` renames while `x86_64-pc-windows-gnu` does not is the informative
+part. An open file *inside* a directory blocks renaming every ancestor, so if
+the handle were on some file below `x86_64-pc-windows-gnu/debug/` then renaming
+`debug` would have failed too — it did not. The handle is therefore on the
+`x86_64-pc-windows-gnu` directory node itself, which is the signature of a
+process holding it as its **current working directory** rather than having a
+file open in it.
+
+That also explains why it could not be attributed: a cwd is not an image path,
+so `Get-Process | Where Path -like` finds nothing (checked — no process runs
+from under `target/`), and `D:\utils\handle.exe` is v3.2 and refuses to
+enumerate without administrator rights ("Initialization error: Make sure that
+you are an administrator"), which this session does not have.
+
+**Why it matters.** Step 3 is the step that spends *this lane's* build output
+before any other lane's — the script's stated fairness rule. If it is
+permanently vetoed, a reclaim run can only finish orphaned staging directories
+and clear old `build/` scratch. On the day this was found that was the
+difference between freeing ~27 GiB and freeing 1.6 GiB, and the boot test's
+`--reclaim-space` retry therefore fails to clear the floor in exactly the
+situation it was added for.
+
+**Not a defect in the probe.** The rename test is behaving correctly: it is
+refusing to delete a directory the OS says is in use, which is the whole reason
+it renames instead of consulting timestamps. The bug, if any, is whatever holds
+the cwd.
+
+**Next step when it recurs:** run `handle.exe` (or Process Explorer's
+Find-Handle) from an elevated shell against `x86_64-pc-windows-gnu` and record
+the owning process. If it turns out to be a long-lived tool (rust-analyzer, a
+shell, an editor) the fix is on that side; if it is an orphaned test process,
+it is `scripts/run-timeout.py`'s job-object teardown that let one escape and
+that is the real bug. Until it is attributed, do not "fix" it by weakening the
+probe — a reclaim that deletes a directory something is using is far worse than
+one that frees less than it hoped.
+
+**Discovered:** 2026-08-18, while testing `boot-test.sh --reclaim-space`
+end-to-end.

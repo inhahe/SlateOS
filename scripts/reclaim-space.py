@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -126,19 +127,32 @@ def worktrees(repo):
     return result
 
 
-def is_ignored(tree, relpath):
-    """True if the worktree at `tree` considers `relpath` ignored.
+def is_ignored_dir(tree, relpath):
+    """True if the worktree at `tree` considers the *directory* `relpath` ignored.
 
     A safety interlock, not an optimisation: everything this script deletes is
     build output, and build output is ignored.  If git disagrees, the path is
     not what we think it is and we must not touch it.
 
+    Two details, both learned the hard way:
+
     Ask the worktree that *owns* the path.  `git check-ignore` answers only for
     the repository rooted at its cwd and fails outright ("is outside repository
     at ...") on a sibling worktree's path, which would otherwise read as "not
     ignored" and refuse every candidate but our own.
+
+    Pass the trailing slash.  `check-ignore` matches a *string*, not a path on
+    disk -- it never stats anything -- so it cannot tell that `target` names a
+    directory, and a directory-only pattern (`**/target/`, which is what this
+    repo's .gitignore carries) therefore does not match it.  Asking for `target`
+    returns rc=1, "not ignored", on a tree whose .gitignore plainly ignores it.
+    That is not a near miss: it made the interlock refuse *every* candidate
+    including our own, so step 2 of this script could never delete anything and
+    the whole thing was a no-op the first time the free-space floor was hit for
+    real.  A guard that always says no is indistinguishable from a broken guard,
+    which is why this is asserted below by asking about the real path.
     """
-    rc, _ = run(["git", "check-ignore", "-q", "--", relpath], cwd=tree)
+    rc, _ = run(["git", "check-ignore", "-q", "--", relpath + "/"], cwd=tree)
     return rc == 0
 
 
@@ -172,7 +186,15 @@ def reclaim_dir(path, dry_run, sizes, log):
         log("  WOULD reclaim  %s%s"
             % (path, ("  (%.1f GiB)" % size) if sizes else "  (not in use)"))
         return size
-    before = free_gib(path)
+    # Measure the volume through the *parent* directory, never through `path`.
+    # By this line `path` has been renamed out of existence by the rename above,
+    # and shutil.disk_usage raises FileNotFoundError on a name that no longer
+    # resolves -- which aborted the whole run on the first candidate it managed
+    # to rename, so steps 3 and 4 were never reached.  The parent is the
+    # worktree root: it is on the same volume by construction, and it outlives
+    # both the rename and the delete.
+    volume = os.path.dirname(path) or path
+    before = free_gib(volume)
     log("  reclaiming     %s" % path)
     shutil.rmtree(staged, ignore_errors=True)
     if os.path.exists(staged):
@@ -180,8 +202,65 @@ def reclaim_dir(path, dry_run, sizes, log):
         # The tree is already out of the way under a name nothing looks for, so
         # this is a leak of space, not a correctness problem -- say so.
         log("  WARNING: %s could not be fully removed; remove it by hand" % staged)
-    freed = free_gib(path) - before
+    freed = free_gib(volume) - before
     log("                 freed %.1f GiB" % freed)
+    return freed
+
+
+STAGED = re.compile(r"\.reclaim-\d+$")
+
+
+def reclaim_staged(trees, dry_run, log):
+    """Finish deletions a previous run started and could not complete.
+
+    `reclaim_dir` renames before it deletes, and when the delete then fails --
+    a stray handle can outlive the rename and block individual unlinks -- it
+    logs "remove it by hand" and moves on.  Nothing ever did.  `os-lane-b` was
+    found holding an entire orphaned `target.reclaim-74628`, invisible to every
+    later run because it no longer matched the name those runs look for, while
+    the volume it sat on was under the boot test's free-space floor.
+
+    That makes this the cheapest and most clearly disposable thing the script
+    can touch -- more so than `build/` scratch, which at least might be wanted.
+    A `.reclaim-<pid>` directory is not a build tree that happens to be idle;
+    it is one whose owner already renamed it *for deletion* and then died
+    trying.  Finishing that deletion cannot cost anyone more than the original
+    `rmtree` would have.
+
+    The two safety properties still hold and are still checked: the name must
+    be one this script itself generates, and the path it was staged from must
+    be git-ignored.  A live run's own staging is skipped by pid, so two
+    concurrent runs cannot fight over one tree.
+    """
+    freed = 0.0
+    mine = ".reclaim-%d" % os.getpid()
+    for tree in trees:
+        try:
+            names = sorted(os.listdir(tree))
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(tree, name)
+            if not STAGED.search(name) or name.endswith(mine):
+                continue
+            if not os.path.isdir(path):
+                continue
+            # Ask about the path it was staged *from*: `target.reclaim-74628`
+            # is not itself in any .gitignore, but `target/` is, and that is
+            # the interlock that says this is build output.
+            if not is_ignored_dir(tree, STAGED.sub("", name)):
+                log("  REFUSING %s: its origin is not git-ignored" % path)
+                continue
+            if dry_run:
+                log("  WOULD finish   %s  (orphaned by an earlier run)" % path)
+                continue
+            before = free_gib(tree)
+            log("  finishing      %s" % path)
+            shutil.rmtree(path, ignore_errors=True)
+            if os.path.exists(path):
+                log("  WARNING: %s still will not delete; a process holds it "
+                    "open" % path)
+            freed += free_gib(tree) - before
     return freed
 
 
@@ -288,6 +367,18 @@ def main(argv=None):
         return 2
     main_tree = trees[0][0]
 
+    # Before anything anyone might still want: finish the deletions a previous
+    # run abandoned half-way.  This runs across *every* worktree regardless of
+    # --allow-lane-targets, because an orphaned staging directory is not a
+    # lane's build tree -- it is the wreckage of one that lane already agreed
+    # to destroy, and leaving it costs that lane nothing but costs everyone the
+    # space.
+    log("Step 0: staging directories orphaned by earlier runs")
+    reclaim_staged([p for p, _b in trees], dry, log)
+    if not dry and free_gib(root) >= args.need:
+        log("Done: %.1f GiB free." % free_gib(root))
+        return 0
+
     log("Step 1: scratch under %s/build older than %.0f days"
         % (root, args.scratch_age_days))
     reclaim_scratch(root, args.scratch_age_days, dry, log)
@@ -312,16 +403,34 @@ def main(argv=None):
             unique.append(tree)
 
     log("Step 2: target/ directories, integration checkout first")
+    considered = refused = 0
     for tree in unique:
         target = os.path.normpath(os.path.join(tree, "target"))
         if not os.path.isdir(target):
             continue
-        if not is_ignored(tree, "target"):
+        considered += 1
+        if not is_ignored_dir(tree, "target"):
+            refused += 1
             log("  REFUSING %s: git does not consider it ignored" % target)
             continue
         reclaim_dir(target, dry, args.sizes, log)
         if not dry and free_gib(root) >= args.need:
             break
+
+    if considered and refused == considered:
+        # Every candidate refused is not a plausible state of the world: these
+        # are cargo's own output directories in checkouts of one repository, and
+        # that repository ignores them.  It is what a *broken interlock* looks
+        # like, and it is indistinguishable from a correct one by its output
+        # alone -- which is exactly how a trailing-slash bug in `is_ignored_dir`
+        # went unnoticed until the free-space floor was hit for real and the
+        # script freed nothing.  Say so, rather than reporting a tidy failure.
+        log("  NOTE: all %d candidate(s) were refused. That is far more likely"
+            % considered)
+        log("        to be a bug in this script's ignore probe than %d trees"
+            % considered)
+        log("        genuinely un-ignoring their build output. Check it with:")
+        log("          git -C <tree> check-ignore -v -- target/")
 
     end = free_gib(root)
     log("Free now: %.1f GiB (was %.1f)" % (end, start))

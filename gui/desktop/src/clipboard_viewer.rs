@@ -5,9 +5,13 @@
 //! Integrates with the gui/clipboard service.
 
 use guitk::color::Color;
+use guitk::listview::ListViewport;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+
+/// How many entries the popup shows at its default height.
+const DEFAULT_VISIBLE_ENTRIES: usize = 8;
 
 // ============================================================================
 // Theme
@@ -183,10 +187,9 @@ impl ClipEntry {
 
     /// Create a file paths entry.
     pub fn files(id: u64, paths: &[&str], timestamp: u64) -> Self {
-        let preview = if paths.len() == 1 {
-            paths[0].to_string()
-        } else {
-            format!("{} files", paths.len())
+        let preview = match paths {
+            [only] => (*only).to_string(),
+            _ => format!("{} files", paths.len()),
         };
         let total_bytes: usize = paths.iter().map(|p| p.len()).sum();
         Self {
@@ -395,16 +398,16 @@ pub struct ClipboardViewer {
     pub search_query: String,
     /// Whether search is focused.
     pub search_focused: bool,
-    /// Currently selected entry index.
-    pub selected_index: Option<usize>,
-    /// Scroll offset (in entries).
-    pub scroll_offset: usize,
+    /// Which entry is picked and which slice of the list is on screen.
+    ///
+    /// Private, unlike the three public fields it replaced: the selection and
+    /// the scroll position are only meaningful together, and every rule tying
+    /// them lives in [`ListViewport`].
+    list: ListViewport,
     /// Width of the popup.
     pub width: f32,
     /// Height of the popup.
     pub height: f32,
-    /// Maximum visible entries (depends on height).
-    pub max_visible: usize,
     /// Active filter (None = all formats).
     pub format_filter: Option<ClipFormat>,
     /// Current timestamp for age display.
@@ -419,11 +422,9 @@ impl ClipboardViewer {
             history: ClipboardHistory::new(),
             search_query: String::new(),
             search_focused: false,
-            selected_index: None,
-            scroll_offset: 0,
+            list: ListViewport::new(DEFAULT_VISIBLE_ENTRIES),
             width: 360.0,
             height: 500.0,
-            max_visible: 8,
             format_filter: None,
             now_timestamp: 0,
         }
@@ -435,9 +436,36 @@ impl ClipboardViewer {
         if self.is_open {
             self.search_query.clear();
             self.search_focused = false;
-            self.selected_index = None;
-            self.scroll_offset = 0;
+            self.list.reset();
         }
+    }
+
+    /// Which entry is picked, as an index into the filtered list.
+    pub const fn selected_index(&self) -> Option<usize> {
+        self.list.selected()
+    }
+
+    /// The filtered-list index of the first entry drawn.
+    pub const fn scroll_offset(&self) -> usize {
+        self.list.first_visible()
+    }
+
+    /// How many entries fit in the popup at once.
+    pub const fn max_visible(&self) -> usize {
+        self.list.height()
+    }
+
+    /// Change how many entries fit, scrolling if that would hide the
+    /// selection.
+    pub fn set_max_visible(&mut self, max_visible: usize) {
+        let count = self.filtered_count();
+        self.list.set_height(max_visible, count);
+    }
+
+    /// Pick an entry by index, or clear the selection with `None`.
+    pub fn select(&mut self, index: Option<usize>) {
+        let count = self.filtered_count();
+        self.list.select(index, count);
     }
 
     /// Get the visible entries (filtered and scrolled).
@@ -450,10 +478,11 @@ impl ClipboardViewer {
             self.history.entries().iter().collect()
         };
 
+        let window = self.list.visible_range(filtered.len());
         filtered
             .into_iter()
-            .skip(self.scroll_offset)
-            .take(self.max_visible)
+            .skip(window.start)
+            .take(window.len())
             .collect()
     }
 
@@ -472,8 +501,9 @@ impl ClipboardViewer {
     pub fn type_search_char(&mut self, ch: char) {
         if self.search_focused {
             self.search_query.push(ch);
-            self.scroll_offset = 0;
-            self.selected_index = None;
+            // The list underneath has been replaced, not edited, so a position
+            // into the old one means nothing.
+            self.list.reset();
         }
     }
 
@@ -481,44 +511,20 @@ impl ClipboardViewer {
     pub fn search_backspace(&mut self) {
         if self.search_focused {
             self.search_query.pop();
-            self.scroll_offset = 0;
+            self.list.reset();
         }
     }
 
     /// Move selection up.
     pub fn select_prev(&mut self) {
         let count = self.filtered_count();
-        if count == 0 {
-            return;
-        }
-        match self.selected_index {
-            Some(0) => {} // Already at top.
-            Some(i) => {
-                self.selected_index = Some(i - 1);
-                if i - 1 < self.scroll_offset {
-                    self.scroll_offset = i - 1;
-                }
-            }
-            None => self.selected_index = Some(0),
-        }
+        self.list.select_prev(count);
     }
 
     /// Move selection down.
     pub fn select_next(&mut self) {
         let count = self.filtered_count();
-        if count == 0 {
-            return;
-        }
-        match self.selected_index {
-            Some(i) if i + 1 < count => {
-                self.selected_index = Some(i + 1);
-                if i + 1 >= self.scroll_offset + self.max_visible {
-                    self.scroll_offset = (i + 1).saturating_sub(self.max_visible - 1);
-                }
-            }
-            None => self.selected_index = Some(0),
-            _ => {}
-        }
+        self.list.select_next(count);
     }
 
     /// Render the clipboard viewer popup.
@@ -675,10 +681,10 @@ impl ClipboardViewer {
                 overflow: TextOverflow::Ellipsis,
             });
         } else {
-            for (i, entry) in visible.iter().enumerate() {
+            let window = self.list.visible_range(self.filtered_count());
+            for ((i, entry), abs_idx) in visible.iter().enumerate().zip(window) {
                 let ey = list_y + (i as f32 * entry_h);
-                let abs_idx = self.scroll_offset + i;
-                let is_selected = self.selected_index == Some(abs_idx);
+                let is_selected = self.list.selected() == Some(abs_idx);
 
                 // Row background.
                 if is_selected {
@@ -1202,11 +1208,11 @@ mod tests {
         v.history.push_text("c", 300);
 
         v.select_next();
-        assert_eq!(v.selected_index, Some(0));
+        assert_eq!(v.selected_index(), Some(0));
         v.select_next();
-        assert_eq!(v.selected_index, Some(1));
+        assert_eq!(v.selected_index(), Some(1));
         v.select_prev();
-        assert_eq!(v.selected_index, Some(0));
+        assert_eq!(v.selected_index(), Some(0));
     }
 
     #[test]
@@ -1214,9 +1220,9 @@ mod tests {
         let mut v = ClipboardViewer::new();
         v.toggle();
         v.history.push_text("a", 100);
-        v.selected_index = Some(0);
+        v.select(Some(0));
         v.select_prev();
-        assert_eq!(v.selected_index, Some(0)); // Stays at 0.
+        assert_eq!(v.selected_index(), Some(0)); // Stays at 0.
     }
 
     #[test]
@@ -1227,7 +1233,102 @@ mod tests {
         }
         v.is_open = true;
         let visible = v.visible_entries();
-        assert_eq!(visible.len(), v.max_visible);
+        assert_eq!(visible.len(), v.max_visible());
+    }
+
+    #[test]
+    fn the_selected_entry_is_always_one_of_the_drawn_ones() {
+        // The old navigation scrolled up to reach a selection above the window
+        // but never down to reach one below it, and computed the downward
+        // scroll from `max_visible - 1`, which panicked at a height of zero.
+        let mut v = ClipboardViewer::new();
+        for i in 0..30u64 {
+            v.history.push_text(&format!("entry {i}"), i * 100);
+        }
+        v.is_open = true;
+
+        for height in [0usize, 1, 3, 8, 40] {
+            v.set_max_visible(height);
+            v.select(None);
+            for _ in 0..40 {
+                v.select_next();
+                assert_selection_visible(&v);
+            }
+            for _ in 0..40 {
+                v.select_prev();
+                assert_selection_visible(&v);
+            }
+            // Jumping straight to an out-of-range row clamps rather than
+            // leaving the list pointing past its own end.
+            v.select(Some(1000));
+            assert_eq!(v.selected_index(), Some(29));
+            assert_selection_visible(&v);
+        }
+    }
+
+    /// The invariant the viewer exists to keep: what is picked is on screen,
+    /// and the window never runs off the end of the list.
+    fn assert_selection_visible(v: &ClipboardViewer) {
+        let count = v.filtered_count();
+        let start = v.scroll_offset();
+        let shown = v.visible_entries().len();
+        assert!(
+            start + shown <= count,
+            "window {start}..{} runs past the {count} entries",
+            start + shown
+        );
+        assert_eq!(
+            shown,
+            v.max_visible().min(count.saturating_sub(start)),
+            "the window left blank rows it could have filled"
+        );
+        if let Some(selected) = v.selected_index() {
+            assert!(selected < count, "selection {selected} is past the end");
+            if v.max_visible() > 0 {
+                assert!(
+                    selected >= start && selected < start + shown,
+                    "selection {selected} is outside the drawn {start}..{}",
+                    start + shown
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn narrowing_the_search_does_not_leave_a_stale_selection() {
+        let mut v = ClipboardViewer::new();
+        for i in 0..20u64 {
+            v.history.push_text(&format!("entry {i}"), i * 100);
+        }
+        v.is_open = true;
+        for _ in 0..15 {
+            v.select_next();
+        }
+        assert_eq!(v.selected_index(), Some(14));
+
+        // Typing narrows the list to one match; the old code left the
+        // selection and the scroll offset pointing into the wider list.
+        v.search_focused = true;
+        for ch in "entry 7".chars() {
+            v.type_search_char(ch);
+        }
+        assert_eq!(v.filtered_count(), 1);
+        assert_eq!(v.selected_index(), None);
+        assert_eq!(v.scroll_offset(), 0);
+        v.select_next();
+        assert_eq!(v.selected_index(), Some(0));
+        assert_selection_visible(&v);
+    }
+
+    #[test]
+    fn a_single_file_entry_previews_its_path() {
+        let one = ClipEntry::files(1, &["/home/a/notes.txt"], 100);
+        assert_eq!(one.preview, "/home/a/notes.txt");
+        let many = ClipEntry::files(2, &["/a", "/b"], 100);
+        assert_eq!(many.preview, "2 files");
+        // An empty list is not a path, and must not be read as one.
+        let none = ClipEntry::files(3, &[], 100);
+        assert_eq!(none.preview, "0 files");
     }
 
     #[test]

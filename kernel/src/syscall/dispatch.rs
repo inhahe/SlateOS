@@ -2641,6 +2641,20 @@ fn test_dispatch_clock_monotonic() -> KernelResult<()> {
 /// The over-length clamp is deliberately *not* exercised: with validation
 /// bypassed, passing a length above `GETRANDOM_MAX` would really write a
 /// megabyte through a small buffer and corrupt the kernel stack.
+///
+/// # Which half of the contract runs here
+///
+/// `SYS_GETRANDOM` refuses to hand out bytes until the CSPRNG has been
+/// *credited* real entropy (`rng::is_ready`), so this test has two arms and
+/// picks between them by asking that same question.  On a QEMU guest — no
+/// RDRAND, no RDSEED — the answer here is always "not ready": `main` runs the
+/// syscall self-tests long before it calls `rng::init`, let alone before any
+/// interrupt has arrived to be credited.  So the arm that normally runs in the
+/// boot test is the **refusal** arm, and that is the more important one to
+/// hold: the whole point of the change is that a caller asking for key
+/// material gets an error rather than output from an uncredited pool.  The
+/// success arm is kept for hardware that has a CPU RNG, where `rng::init`
+/// credits 256 bits outright and the pool is ready before anything runs.
 fn test_dispatch_getrandom() -> KernelResult<()> {
     // Zero length is a success returning 0, even for a null pointer: callers
     // that loop until a count is exhausted must not have to special-case the
@@ -2676,11 +2690,6 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // The success path (see the note above about the kernel-context bypass).
-    // The returned count must equal the requested length, and the buffer must
-    // actually have been written: a handler that returned `len` without
-    // filling anything would hand the caller its own uninitialised memory as
-    // key material.
     let mut sink = [0u8; 32];
     let good = SyscallArgs {
         arg0: sink.as_mut_ptr() as u64,
@@ -2690,6 +2699,42 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
         arg4: 0,
         arg5: 0,
     };
+
+    if !crate::rng::is_ready() {
+        // The refusal arm.  Two things must hold, and the second matters more
+        // than the first: the call must report an error, *and* it must not
+        // have touched the buffer.  A handler that filled the buffer and then
+        // returned an error would leave a caller who ignores the return value
+        // — which is exactly the caller this guarantee exists to protect —
+        // holding uncredited bytes it believes are key material.
+        let result = dispatch(SYS_GETRANDOM, &good);
+        if result.value >= 0 {
+            serial_println!(
+                "[syscall]   FAIL: getrandom(buf, 32) returned {} with an uncredited \
+                 pool, expected an error",
+                result.value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if sink != [0u8; 32] {
+            serial_println!(
+                "[syscall]   FAIL: getrandom failed but still wrote to the buffer"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall]   Dispatch SYS_GETRANDOM: OK (refused: pool uncredited, {}/{} bits)",
+            crate::rng::credited_bits(),
+            crate::rng::credit_target_bits()
+        );
+        return Ok(());
+    }
+
+    // The success path (see the note above about the kernel-context bypass).
+    // The returned count must equal the requested length, and the buffer must
+    // actually have been written: a handler that returned `len` without
+    // filling anything would hand the caller its own uninitialised memory as
+    // key material.
     let result = dispatch(SYS_GETRANDOM, &good);
     if result.value != 32 {
         serial_println!(
@@ -2726,7 +2771,7 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    serial_println!("[syscall]   Dispatch SYS_GETRANDOM: OK");
+    serial_println!("[syscall]   Dispatch SYS_GETRANDOM: OK (pool credited)");
     Ok(())
 }
 

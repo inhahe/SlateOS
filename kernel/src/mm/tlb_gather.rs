@@ -334,73 +334,93 @@ pub fn self_test() {
 
     // Test 1: Empty gather does nothing.
     {
-        let mut g = TlbGather::new();
-        assert!(g.is_empty());
-        let freed = g.finish();
-        assert_eq!(freed, 0);
+        #[inline(never)]
+        fn case() {
+            let mut g = TlbGather::new();
+            assert!(g.is_empty());
+            let freed = g.finish();
+            assert_eq!(freed, 0);
+        }
+        case();
     }
     serial_println!("[tlb_gather]   Empty gather: OK");
 
     // Test 2: Single entry gather (allocate frame, add, finish → freed).
     {
-        let frame = frame::alloc_frame().expect("alloc for gather test");
-        let phys = frame.addr();
-        let virt_addr: u64 = 0xFFFF_C900_0010_0000; // Test area.
+        #[inline(never)]
+        fn case() {
+            let frame = frame::alloc_frame().expect("alloc for gather test");
+            let phys = frame.addr();
+            let virt_addr: u64 = 0xFFFF_C900_0010_0000; // Test area.
 
-        let mut g = TlbGather::new();
-        g.add(virt_addr, phys);
-        assert_eq!(g.buffered_count(), 1);
-        assert!(!g.is_empty());
+            let mut g = TlbGather::new();
+            g.add(virt_addr, phys);
+            assert_eq!(g.buffered_count(), 1);
+            assert!(!g.is_empty());
 
-        let freed = g.finish();
-        assert_eq!(freed, 1);
-        assert!(g.is_empty());
+            let freed = g.finish();
+            assert_eq!(freed, 1);
+            assert!(g.is_empty());
+        }
+        case();
     }
     serial_println!("[tlb_gather]   Single entry: OK");
 
     // Test 3: Multiple entries, verify range tracking.
     {
-        let f1 = frame::alloc_frame().expect("alloc f1");
-        let f2 = frame::alloc_frame().expect("alloc f2");
-        let f3 = frame::alloc_frame().expect("alloc f3");
+        #[inline(never)]
+        fn case() {
+            let f1 = frame::alloc_frame().expect("alloc f1");
+            let f2 = frame::alloc_frame().expect("alloc f2");
+            let f3 = frame::alloc_frame().expect("alloc f3");
 
-        let base: u64 = 0xFFFF_C900_0020_0000;
+            let base: u64 = 0xFFFF_C900_0020_0000;
 
-        let mut g = TlbGather::new();
-        g.add(base, f1.addr());
-        g.add(base + FRAME_SIZE as u64, f2.addr());
-        g.add(base + 2 * FRAME_SIZE as u64, f3.addr());
-        assert_eq!(g.buffered_count(), 3);
+            let mut g = TlbGather::new();
+            g.add(base, f1.addr());
+            g.add(base + FRAME_SIZE as u64, f2.addr());
+            g.add(base + 2 * FRAME_SIZE as u64, f3.addr());
+            assert_eq!(g.buffered_count(), 3);
 
-        let freed = g.finish();
-        assert_eq!(freed, 3);
+            let freed = g.finish();
+            assert_eq!(freed, 3);
+        }
+        case();
     }
     serial_println!("[tlb_gather]   Multiple entries: OK");
 
     // Test 4: Flush-only entries (no frame to free).
     {
-        let mut g = TlbGather::new();
-        let base: u64 = 0xFFFF_C900_0030_0000;
-        g.add_flush_only(base);
-        g.add_flush_only(base + FRAME_SIZE as u64);
-        assert_eq!(g.buffered_count(), 0); // No frames buffered.
-        assert!(!g.is_empty()); // But dirty (needs flush).
+        #[inline(never)]
+        fn case() {
+            let mut g = TlbGather::new();
+            let base: u64 = 0xFFFF_C900_0030_0000;
+            g.add_flush_only(base);
+            g.add_flush_only(base + FRAME_SIZE as u64);
+            assert_eq!(g.buffered_count(), 0); // No frames buffered.
+            assert!(!g.is_empty()); // But dirty (needs flush).
 
-        let freed = g.finish();
-        assert_eq!(freed, 0);
+            let freed = g.finish();
+            assert_eq!(freed, 0);
+        }
+        case();
     }
     serial_println!("[tlb_gather]   Flush-only entries: OK");
 
     // Test 5: Drop without finish (safety net).
     {
-        let frame = frame::alloc_frame().expect("alloc for drop test");
-        let phys = frame.addr();
-        let virt_addr: u64 = 0xFFFF_C900_0040_0000;
+        #[inline(never)]
+        fn case() {
+            let frame = frame::alloc_frame().expect("alloc for drop test");
+            let phys = frame.addr();
+            let virt_addr: u64 = 0xFFFF_C900_0040_0000;
 
-        let mut g = TlbGather::new();
-        g.add(virt_addr, phys);
-        // Intentionally drop without finish — Drop impl should free.
-        drop(g);
+            let mut g = TlbGather::new();
+            g.add(virt_addr, phys);
+            // Intentionally drop without finish — Drop impl should free.
+            drop(g);
+        }
+        case();
     }
     serial_println!("[tlb_gather]   Drop safety net: OK");
 

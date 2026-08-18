@@ -657,10 +657,16 @@ pub(crate) fn lzma2_decode(data: &[u8], dict_size: u32) -> KernelResult<Vec<u8>>
         if control == 0x01 || control == 0x02 {
             // Uncompressed chunk.
             // 0x01 = dictionary reset, 0x02 = no reset.
-            let size_hi = u16::from(*data.get(pos).ok_or(KernelError::CorruptedData)?);
-            let size_lo = u16::from(*data.get(pos + 1).ok_or(KernelError::CorruptedData)?);
+            let size_hi = usize::from(*data.get(pos).ok_or(KernelError::CorruptedData)?);
+            let size_lo = usize::from(*data.get(pos + 1).ok_or(KernelError::CorruptedData)?);
             pos = pos.saturating_add(2);
-            let chunk_size = ((size_hi << 8) | size_lo).wrapping_add(1) as usize;
+            // The field holds (size - 1) in two big-endian bytes, so a chunk
+            // spans 1..=65536 -- and 65536 is not a corner case, it is exactly
+            // what xz emits for every incompressible 64 KiB region. Widening
+            // before the +1 is therefore load-bearing: done in `u16`, as this
+            // was, 0xFFFF wrapped to 0 and a full chunk decoded as an empty
+            // one, silently truncating the output with no error anywhere.
+            let chunk_size = ((size_hi << 8) | size_lo).saturating_add(1);
 
             let chunk = data
                 .get(pos..pos.saturating_add(chunk_size))
@@ -697,10 +703,13 @@ pub(crate) fn lzma2_decode(data: &[u8], dict_size: u32) -> KernelResult<Vec<u8>>
             ((uncomp_hi << 16) | (u32::from(uncomp_mid) << 8) | u32::from(uncomp_lo))
                 .wrapping_add(1) as usize;
 
-        let comp_hi = u16::from(*data.get(pos).ok_or(KernelError::CorruptedData)?);
-        let comp_lo = u16::from(*data.get(pos + 1).ok_or(KernelError::CorruptedData)?);
+        let comp_hi = usize::from(*data.get(pos).ok_or(KernelError::CorruptedData)?);
+        let comp_lo = usize::from(*data.get(pos + 1).ok_or(KernelError::CorruptedData)?);
         pos = pos.saturating_add(2);
-        let compressed_size = ((comp_hi << 8) | comp_lo).wrapping_add(1) as usize;
+        // Same (size - 1) encoding, same 1..=65536 range, same wrap: in `u16` a
+        // maximal compressed chunk became a zero-length slice, and `lzma_decode`
+        // then failed the whole archive as CorruptedData on valid input.
+        let compressed_size = ((comp_hi << 8) | comp_lo).saturating_add(1);
 
         // Determine reset level from control byte range.
         let needs_props_reset = control >= 0xC0;
@@ -2034,7 +2043,59 @@ pub fn self_test() -> KernelResult<()> {
     // Test 9: Compression round-trips
     test_compress_roundtrip()?;
 
+    // Test 10: LZMA2 chunk sizes at the top of their range
+    test_lzma2_max_uncompressed_chunk()?;
+
     serial_println!("[xz] === self-test passed ===");
+    Ok(())
+}
+
+/// A maximal LZMA2 uncompressed chunk must decode to 65536 bytes, not zero.
+///
+/// The chunk header stores `size - 1` in two big-endian bytes, so `0xFFFF`
+/// means a full 65536-byte chunk. Computing `size - 1 + 1` in `u16` wrapped
+/// that to zero, and the chunk decoded as empty with no error raised anywhere
+/// -- silent truncation, which is the worst failure mode a decompressor has.
+///
+/// This is not an exotic input: xz emits exactly this chunk for every
+/// incompressible 64 KiB region, so any archive containing already-compressed
+/// data (a `.png`, a nested `.xz`, an encrypted blob) hits it.  The regression
+/// therefore pins the boundary itself: 0xFFFE must give 65535 and 0xFFFF must
+/// give 65536, which no wrapping arithmetic can satisfy at once.
+fn test_lzma2_max_uncompressed_chunk() -> KernelResult<()> {
+    for (field, want) in [(0xFFFEu16, 65535usize), (0xFFFF, 65536)] {
+        // Control 0x01 = uncompressed chunk with dictionary reset, then the
+        // two size bytes, then `want` payload bytes, then 0x00 = end of stream.
+        let mut stream = Vec::with_capacity(want.saturating_add(4));
+        stream.push(0x01);
+        stream.push((field >> 8) as u8);
+        stream.push((field & 0xFF) as u8);
+        // A position-dependent byte, so a decoder that returns the right
+        // *length* from the wrong offset is still caught.
+        stream.extend((0..want).map(|i| (i % 251) as u8));
+        stream.push(0x00);
+
+        let out = lzma2_decode(&stream, 1 << 16)?;
+        if out.len() != want {
+            serial_println!(
+                "[xz]   FAIL: lzma2 chunk size field {:#06x} decoded {} bytes, expected {}",
+                field,
+                out.len(),
+                want,
+            );
+            return Err(KernelError::InternalError);
+        }
+        if out.iter().enumerate().any(|(i, &b)| b != (i % 251) as u8) {
+            serial_println!("[xz]   FAIL: lzma2 chunk {:#06x} payload mismatch", field);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[xz]   lzma2 uncompressed chunk {:#06x} -> {} bytes OK",
+            field,
+            want
+        );
+    }
+
     Ok(())
 }
 

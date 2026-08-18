@@ -495,94 +495,142 @@ fn current_cpu_fast() -> u8 {
 pub fn self_test() {
     serial_println!("[alloc_trace] Running self-test...");
 
-    // Test 1: Enable, reset, verify zero events.
-    enable();
-    reset();
-    assert!(is_enabled());
-    let s = stats();
-    assert_eq!(s.total_events, 0);
-    assert_eq!(s.valid_entries, 0);
-    serial_println!("[alloc_trace]   Initial state: OK");
-
-    // Test 2: Record events and verify count.
-    record_alloc(42, Owner::HeapSlab);
-    record_alloc_zeroed(43, Owner::UserAnon);
-    record_free(42);
-    let s = stats();
-    assert_eq!(s.total_events, 3);
-    assert_eq!(s.valid_entries, 3);
-    serial_println!("[alloc_trace]   Record events: OK");
-
-    // Test 3: Snapshot returns correct entries.
-    let snap = snapshot();
-    assert_eq!(snap.count, 3);
-    assert_eq!(snap.entries[0].frame_idx, 42);
-    assert_eq!(snap.entries[0].operation(), AllocOp::Alloc);
-    assert_eq!(snap.entries[1].frame_idx, 43);
-    assert_eq!(snap.entries[1].operation(), AllocOp::AllocZeroed);
-    assert_eq!(snap.entries[2].frame_idx, 42);
-    assert_eq!(snap.entries[2].operation(), AllocOp::Free);
-    serial_println!("[alloc_trace]   Snapshot: OK");
-
-    // Test 4: recent() returns newest first.
-    let mut buf = [TraceEntry::empty(); 4];
-    let n = recent(&mut buf);
-    assert_eq!(n, 3);
-    assert_eq!(buf[0].frame_idx, 42); // Most recent (the free).
-    assert_eq!(buf[0].operation(), AllocOp::Free);
-    assert_eq!(buf[1].frame_idx, 43); // Second most recent.
-    serial_println!("[alloc_trace]   Recent (newest first): OK");
-
-    // Test 5: alloc_free_balance.
-    let (allocs, frees) = alloc_free_balance();
-    assert_eq!(allocs, 2);
-    assert_eq!(frees, 1);
-    serial_println!(
-        "[alloc_trace]   Alloc/free balance: allocs={}, frees={}",
-        allocs,
-        frees
-    );
-
-    // Test 6: Disable suppresses recording.
-    disable();
-    assert!(!is_enabled());
-    record_alloc(99, Owner::Dma);
-    let s = stats();
-    assert_eq!(s.total_events, 3); // Unchanged — disabled, event silently dropped.
-    // Note: DROPPED_EVENTS is not incremented on the hot path (by design —
-    // an atomic inc on every alloc/free when tracing is off would add cost).
-    enable();
-    assert!(is_enabled());
-    serial_println!("[alloc_trace]   Disable/enable: OK");
-
-    // Test 7: Ring wrapping (fill past capacity).
-    reset();
-    for i in 0..300u32 {
-        record_alloc(i, Owner::SelfTest);
-    }
-    let s = stats();
-    assert_eq!(s.total_events, 300);
-    assert_eq!(s.valid_entries, RING_SIZE); // Capped at ring size.
-    // Oldest entry should be 300 - 256 = 44.
-    let snap = snapshot();
-    assert_eq!(snap.count, RING_SIZE);
-    assert_eq!(snap.entries[0].frame_idx, 44); // Oldest after wrap.
-    assert_eq!(snap.entries[RING_SIZE - 1].frame_idx, 299); // Newest.
-    serial_println!("[alloc_trace]   Ring wrap (300 events, 256 retained): OK");
-
-    // Test 8: Timestamps are monotonically increasing.
-    let snap = snapshot();
-    let mut prev_ts = 0u64;
-    for i in 0..snap.count {
-        if snap.entries[i].is_valid() {
-            assert!(
-                snap.entries[i].timestamp >= prev_ts,
-                "timestamps should be monotonic"
-            );
-            prev_ts = snap.entries[i].timestamp;
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 1: Enable, reset, verify zero events.
+            enable();
+            reset();
+            assert!(is_enabled());
+            let s = stats();
+            assert_eq!(s.total_events, 0);
+            assert_eq!(s.valid_entries, 0);
+            serial_println!("[alloc_trace]   Initial state: OK");
         }
+        case();
     }
-    serial_println!("[alloc_trace]   Timestamps monotonic: OK");
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 2: Record events and verify count.
+            record_alloc(42, Owner::HeapSlab);
+            record_alloc_zeroed(43, Owner::UserAnon);
+            record_free(42);
+            let s = stats();
+            assert_eq!(s.total_events, 3);
+            assert_eq!(s.valid_entries, 3);
+            serial_println!("[alloc_trace]   Record events: OK");
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 3: Snapshot returns correct entries.
+            let snap = snapshot();
+            assert_eq!(snap.count, 3);
+            assert_eq!(snap.entries[0].frame_idx, 42);
+            assert_eq!(snap.entries[0].operation(), AllocOp::Alloc);
+            assert_eq!(snap.entries[1].frame_idx, 43);
+            assert_eq!(snap.entries[1].operation(), AllocOp::AllocZeroed);
+            assert_eq!(snap.entries[2].frame_idx, 42);
+            assert_eq!(snap.entries[2].operation(), AllocOp::Free);
+            serial_println!("[alloc_trace]   Snapshot: OK");
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 4: recent() returns newest first.
+            let mut buf = [TraceEntry::empty(); 4];
+            let n = recent(&mut buf);
+            assert_eq!(n, 3);
+            assert_eq!(buf[0].frame_idx, 42); // Most recent (the free).
+            assert_eq!(buf[0].operation(), AllocOp::Free);
+            assert_eq!(buf[1].frame_idx, 43); // Second most recent.
+            serial_println!("[alloc_trace]   Recent (newest first): OK");
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 5: alloc_free_balance.
+            let (allocs, frees) = alloc_free_balance();
+            assert_eq!(allocs, 2);
+            assert_eq!(frees, 1);
+            serial_println!(
+                "[alloc_trace]   Alloc/free balance: allocs={}, frees={}",
+                allocs,
+                frees
+            );
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 6: Disable suppresses recording.
+            disable();
+            assert!(!is_enabled());
+            record_alloc(99, Owner::Dma);
+            let s = stats();
+            assert_eq!(s.total_events, 3); // Unchanged — disabled, event silently dropped.
+            // Note: DROPPED_EVENTS is not incremented on the hot path (by design —
+            // an atomic inc on every alloc/free when tracing is off would add cost).
+            enable();
+            assert!(is_enabled());
+            serial_println!("[alloc_trace]   Disable/enable: OK");
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 7: Ring wrapping (fill past capacity).
+            reset();
+            for i in 0..300u32 {
+                record_alloc(i, Owner::SelfTest);
+            }
+            let s = stats();
+            assert_eq!(s.total_events, 300);
+            assert_eq!(s.valid_entries, RING_SIZE); // Capped at ring size.
+            // Oldest entry should be 300 - 256 = 44.
+            let snap = snapshot();
+            assert_eq!(snap.count, RING_SIZE);
+            assert_eq!(snap.entries[0].frame_idx, 44); // Oldest after wrap.
+            assert_eq!(snap.entries[RING_SIZE - 1].frame_idx, 299); // Newest.
+            serial_println!("[alloc_trace]   Ring wrap (300 events, 256 retained): OK");
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 8: Timestamps are monotonically increasing.
+            let snap = snapshot();
+            let mut prev_ts = 0u64;
+            for i in 0..snap.count {
+                if snap.entries[i].is_valid() {
+                    assert!(
+                        snap.entries[i].timestamp >= prev_ts,
+                        "timestamps should be monotonic"
+                    );
+                    prev_ts = snap.entries[i].timestamp;
+                }
+            }
+            serial_println!("[alloc_trace]   Timestamps monotonic: OK");
+        }
+        case();
+    }
 
     // Cleanup: disable (sysctl default is off) and reset ring buffer.
     reset();

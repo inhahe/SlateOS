@@ -975,11 +975,15 @@ def find_flat_cases(
     that rebinds it without reading it first.
 
     **Items are not locals.**  A `const`, `static`, `fn` or `use` written inside
-    the body is scoped to its *block*, and a nested `fn` may freely name an item
-    from an enclosing block -- so an item crossing a boundary is not the
-    `E0434` that guards locals, and nothing about the paragraph it sits in looks
-    wrong.  It surfaces as `E0425` somewhere else entirely.  `reserve_tail` and
-    the weld below exist for the two shapes of that, both found in `kernel_main`.
+    the body is scoped to its *block*, wherever in that block it stands, and a
+    nested `fn` may freely name one.  So a case that *reads* an item is fine
+    however far it is from the declaration, above it or below it; what is not
+    fine is casing the paragraph that *declares* it, which would re-scope the
+    item into that case body and cost every other case -- and the tail -- the
+    ability to name it.  That failure is not the `E0434` that guards locals; it
+    surfaces as `E0425` somewhere else entirely, which is how it was found in
+    `kernel_main`.  A declaring paragraph is therefore held back from being a
+    case and left in the outer body, which is the whole of the item rule.
 
     Note what is *not* checked: whether the split is worth doing.  A single
     case is always a no-op -- the peak becomes `outer + case`, which is what it
@@ -996,7 +1000,6 @@ def find_flat_cases(
     uses = {s: _reads(masked[s]) for s in stmts}
     tail = _masked(text, code, starts[stmts[-1][1] + 1], starts[close_idx + 1] - 1)
     tail_uses = _reads(tail)
-    tail_names = set(IDENT.findall(tail))
 
     if reserve_tail and len(groups) > 1:
         # A `-> !` body's last statement stands in tail position and has to
@@ -1009,7 +1012,6 @@ def find_flat_cases(
         # reads join `tail_uses` so the locals it needs still count as live.
         for s in groups.pop():
             tail_uses |= uses[s]
-            tail_names |= set(IDENT.findall(masked[s]))
 
     # A group's reads are what it mentions before its own `let`s introduce it,
     # walking its statements in order so `foo(x); let x = ..;` still counts as
@@ -1024,61 +1026,40 @@ def find_flat_cases(
         g_binds.append(seen)
         g_reads.append(reads)
 
-    # Weld together every paragraph that mentions a block-scoped item.
+    # Which paragraphs *declare* a block-scoped item.
     #
-    # The local walk further down grows a cluster *forward*, which is sound for
-    # locals because a local cannot be read above the `let` that binds it.  An
-    # item can: `fn helper()` declared at the bottom of a body is callable from
-    # the top of it, and `const HELLO_ELF: &[u8] = include_bytes!(..)` in
-    # `kernel_main` is read three paragraphs below its declaration.  So the
-    # item constraint is a two-sided one and is resolved first, by fusing every
-    # paragraph from the first mention of the name to the last into a single
-    # super-paragraph.  After this the forward walk cannot cut one, because any
-    # cluster it starts inside a fused run started at the run's own first group.
+    # An item is not a local and needs no weld: items in a block are scoped to
+    # the whole block regardless of where they stand, and a nested `fn` may name
+    # one freely.  Both halves are checked, not assumed -- this compiles and
+    # prints 123:
     #
-    # Mentions, not reads: a name is looked for anywhere in the paragraph's
-    # text, since an item's whole point is that it is in scope for the block
-    # regardless of where it stands.
+    #     fn outer() -> u32 {
+    #         fn a() -> u32 { BLOB.len() as u32 }   // *above* the declaration
+    #         let t = a();
+    #         const BLOB: &[u8] = b"xyz";
+    #         fn b() -> u32 { BLOB[0] as u32 }
+    #         t + b()
+    #     }
+    #
+    # So the only thing that must not happen is the declaration being *moved
+    # into* a case, which would re-scope it to that case's body and leave every
+    # other case unable to name it.  Refusing to case the declaring paragraph is
+    # therefore the whole constraint: the item stays in the outer body, where it
+    # was already visible to everything, and every other paragraph is free.
+    #
+    # This used to fuse every paragraph from an item's first mention to its last
+    # into one super-paragraph, which is sound but far stronger than Rust
+    # requires -- and expensive, because the fused run then has to clear the
+    # min-length and escape tests as a unit.  One `const` near the top of a body
+    # welded 637 lines of `self_test_seccomp_ptrace_clone3`'s futex case into a
+    # single case, and a single case is arithmetically a no-op: its peak is
+    # `outer + case`, which is what it already was.
     g_items: list[set[str]] = []
-    g_names: list[set[str]] = []
     for g in groups:
         it: set[str] = set()
-        nm: set[str] = set()
         for s in g:
             it |= _item_binds(masked[s])
-            nm |= set(IDENT.findall(masked[s]))
         g_items.append(it)
-        g_names.append(nm)
-
-    reach = list(range(len(groups)))
-    for j, decl in enumerate(g_items):
-        for name in decl:
-            hits = [q for q in range(len(groups)) if name in g_names[q]] or [j]
-            for q in range(min(hits), max(hits) + 1):
-                reach[q] = max(reach[q], max(hits))
-
-    fused: list[list[tuple[int, int]]] = []
-    f_binds: list[set[str]] = []
-    f_reads: list[set[str]] = []
-    f_items: list[set[str]] = []
-    k = 0
-    while k < len(groups):
-        end, j = k, k
-        while j <= end:
-            end = max(end, reach[j])
-            j += 1
-        b, r, i, stmt_list = set(), set(), set(), []
-        for q in range(k, end + 1):
-            r |= g_reads[q] - b
-            b |= g_binds[q]
-            i |= g_items[q]
-            stmt_list += groups[q]
-        fused.append(stmt_list)
-        f_binds.append(b)
-        f_reads.append(r)
-        f_items.append(i)
-        k = end + 1
-    groups, g_binds, g_reads, g_items = fused, f_binds, f_reads, f_items
 
     def last_reader(k: int, name: str) -> int:
         """Index of the last group that can still see group `k`'s `name`.
@@ -1125,6 +1106,7 @@ def find_flat_cases(
 
     clusters: list[list[int]] = []
     leading_skipped = 0
+    leading_binds: set[str] = set()
     k = 0
     while k < len(groups):
         end = grow(k)
@@ -1132,6 +1114,15 @@ def find_flat_cases(
             g = groups[0]
             if g[-1][1] - _first_code_line(lines, g[0]) + 1 >= min_lines:
                 leading_skipped += 1
+            # Dropping the group from `clusters` is only half of leaving it
+            # where it is.  Its `let`s are now *outer* locals -- that is what
+            # "left in the outer frame" means -- so they have to join `before`,
+            # or every cluster below is judged as though the fixture paragraph
+            # had never existed and is free to read it.  Skipping that step is
+            # not caught by anything here; it surfaces as a pile of `E0434`s at
+            # the end of a six-minute build.  `self_test_remap_ioprio_futex2`
+            # opens with eleven such `let`s and produced 36 of them.
+            leading_binds |= g_binds[0]
             k = 1
             continue
         clusters.append(list(range(k, end + 1)))
@@ -1139,7 +1130,7 @@ def find_flat_cases(
 
     cases: list[tuple[int, int]] = []
     skipped = leading_skipped
-    before = set(outer) - declared
+    before = (set(outer) | leading_binds) - declared
     for cl in clusters:
         c_binds: set[str] = set()
         c_reads: set[str] = set()
@@ -1153,13 +1144,18 @@ def find_flat_cases(
         long_enough = end - top + 1 >= min_lines
         # Nothing bound in the cluster can be read after it: the walk above
         # only stops where that is true, except at the tail, which it cannot
-        # extend past.  An *item* has no such walk -- the weld covers only the
-        # paragraphs -- so its escape into the tail is checked directly, and at
-        # any position, since `reserve_tail` may have put a whole paragraph
-        # there.
+        # extend past.
+        #
+        # `c_items` is the separate, unconditional bar: a cluster that *declares*
+        # a block-scoped item cannot become a case at all, because wrapping it
+        # would re-scope the item into the case body and every other case --
+        # and the tail -- would stop being able to name it.  Left in the outer
+        # body it stays visible to all of them.  Unconditional rather than
+        # "escapes into the tail", because a case three paragraphs *above* the
+        # declaration may name it just as legally as one below.
         escapes = (
             any(n in tail_uses for n in c_binds) and cl[-1] == len(groups) - 1
-        ) or any(n in tail_names for n in c_items)
+        ) or bool(c_items)
         if long_enough and not (c_reads & before) and not escapes:
             cases.append((top, end))
         elif long_enough:
@@ -1283,6 +1279,56 @@ def _mentions(masked: str, name: str) -> bool:
     return any(m.group(0) == name for m in _value_idents(masked))
 
 
+def _unthreaded_arm_locals(
+    text: str,
+    code: bytearray,
+    starts: list[int],
+    b_open: int,
+    m_open: int,
+    cases: list[tuple[int, int]],
+    params: list[tuple[str, str, str]],
+) -> tuple[list[str], int]:
+    """Outer locals an arm body reads that no `--param` threads in.
+
+    The block and `--flat` chunkers *derive* their fixtures: they know which
+    locals cross a boundary and either refuse the split or leave the paragraph
+    alone.  `--arms` cannot, because an arm always sits below the preamble that
+    binds `parts` and always reads it -- deriving the same rule would refuse
+    every dispatcher in the kernel.  So the fixture list is supplied by hand,
+    with `--param`, and until this check existed there was nothing that noticed
+    when the hand forgot.
+
+    What that cost, concretely: eight kshell dispatchers were split in one batch
+    with the `--param` left off, and the mistake surfaced 258 seconds later as
+    320 compiler errors in a 100 000-line file, with the *real* diagnosis --
+    "you omitted an argument to this script" -- nowhere in the output.  A tool
+    that can emit uncompilable code should say so itself, immediately, and name
+    the local it is missing.
+
+    Textual, like `_used_params`, and for the same reason: it does not need to
+    be sound, because rustc is.  Its job is to turn the common, cheap mistake
+    into a one-line message instead of a build.
+
+    Returns `(names, line)` -- the missing locals and the 1-based line of the
+    first arm that reads one, so the message can point at something.
+    """
+    declared = {p[0] for p in params}
+    # The preamble is everything between the body's `{` and the `match`: exactly
+    # the region whose `let`s are in scope at every arm and inside none of them.
+    outer = _binds(_masked(text, code, starts[b_open + 1], starts[m_open])) - declared
+    if not outer:
+        return [], 0
+    missing: set[str] = set()
+    first = 0
+    for o, c in cases:
+        body = _masked(text, code, starts[o + 1], starts[c])
+        hit = {n for n in outer if _mentions(body, n)}
+        if hit and not first:
+            first = o + 1
+        missing |= hit
+    return sorted(missing), first
+
+
 def rewrite(
     text: str,
     fn_name: str,
@@ -1294,7 +1340,10 @@ def rewrite(
     # A fixture's call expression defaults to its own name; `--param` lets it
     # differ, so a `Vec` local can be handed to a `&[T]` parameter.
     params = [(p[0], p[1], p[2] if len(p) > 2 else p[0]) for p in (params or [])]
-    assert "\r\n" not in text, "file has CRLF; this transformer assumes LF"
+    # An internal invariant, not a limitation on what the tool accepts: `main`
+    # normalises CRLF on read and restores it on write.  Kept as an assertion
+    # because everything below indexes offsets produced by splitting on "\n".
+    assert "\r\n" not in text, "rewrite() takes LF text; normalise before calling"
     lines = text.split("\n")
     starts = line_starts(lines)
     depth, code, lits = scan(text)
@@ -1320,6 +1369,20 @@ def rewrite(
         )
         cases, skipped = find_arm_cases(
             lines, depth, code, starts, text, m_open, m_close, inner + 1
+        )
+        missing, where = _unthreaded_arm_locals(
+            text, code, starts, b_open, m_open, cases, params
+        )
+        assert not missing, (
+            f"`fn {fn_name}`: arm bodies read the outer local(s) "
+            + ", ".join(f"`{n}`" for n in missing)
+            + f", which no --param threads in (first at line {where}). A nested "
+            f"`fn` cannot capture its environment, so writing this out would "
+            f"produce code that fails to compile with E0434. Re-run with a "
+            f"--param for each, e.g. --param '"
+            + f"{missing[0]}:&str' -- or, when the call expression differs from "
+            f"the name (a `Vec` local handed to a `&[T]` parameter), "
+            f"--param '{missing[0]}=&{missing[0]}:&[&str]'"
         )
         noun = "arm whose body is not a block on its own lines"
     else:
@@ -1897,6 +1960,74 @@ _case(
 )
 
 _case(
+    # The mistake that costs the most: `--arms` with the `--param` left off.
+    # Every kshell dispatcher binds `parts` in its preamble and reads it in
+    # nearly every arm, so omitting the fixture does not fail here and there --
+    # it makes the whole file uncompilable, four minutes later, with the actual
+    # cause ("you forgot an argument to this script") absent from the output.
+    "--arms refuses an arm that reads an outer local with no --param",
+    """fn self_test(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "a" => {
+            println!("{}", parts.get(1).copied().unwrap_or(""));
+        }
+        _ => {
+            println!("b");
+        }
+    }
+}
+""",
+    AssertionError,
+    arms=True,
+)
+
+_case(
+    # ... and accepts the same function once the fixture is declared, threading
+    # it only into the arm that names it.  `sub` is bound in the same preamble
+    # but read by neither arm -- it is the match scrutinee, which stays outside
+    # -- so it must not be demanded.
+    "--arms accepts it once the outer local is threaded",
+    """fn self_test(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "a" => {
+            println!("{}", parts.get(1).copied().unwrap_or(""));
+        }
+        _ => {
+            println!("b");
+        }
+    }
+}
+""",
+    """fn self_test(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "a" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                println!("{}", parts.get(1).copied().unwrap_or(""));
+            }
+            case(&parts);
+        }
+        _ => {
+            #[inline(never)]
+            fn case() {
+                println!("b");
+            }
+            case();
+        }
+    }
+}
+""",
+    [("parts", "&[&str]", "&parts")],
+    arms=True,
+)
+
+_case(
     # A dispatcher that returns a value cannot use this shape at all: `return x`
     # inside an arm would return from the case, not the command.
     "--arms refuses a function that returns a value",
@@ -2146,13 +2277,13 @@ _case(
 )
 
 _case(
-    # An item is not a local, and gets no `E0434` to protect it: a nested `fn`
-    # may name a `const` from an enclosing block, so cutting between the
-    # declaration and the use compiles the *declaring* case fine and fails in
-    # the reading one, three paragraphs away.  The three paragraphs are
-    # therefore welded into one case -- note the second, which mentions nothing
-    # at all, is dragged in because it stands between them.
-    "a const used three paragraphs later welds them into one case",
+    # An item is not a local.  It is scoped to its whole block wherever it
+    # stands, so the paragraph three below may name it from inside a case --
+    # what must not happen is the *declaring* paragraph being wrapped, which
+    # would re-scope the item into that one case body.  Only the declaring
+    # paragraph is therefore held back; the other three all become cases,
+    # including the one that reads `BLOB`.
+    "an item's declaring paragraph is held back, its readers are not",
     """fn self_test() {
     const BLOB: &[u8] = b"x";
     step_one();
@@ -2172,17 +2303,23 @@ _case(
 }
 """,
     """fn self_test() {
+    const BLOB: &[u8] = b"x";
+    step_one();
+    step_two();
+
     {
         #[inline(never)]
         fn case() {
-            const BLOB: &[u8] = b"x";
-            step_one();
-            step_two();
-
             step_three();
             step_four();
             step_five();
+        }
+        case();
+    }
 
+    {
+        #[inline(never)]
+        fn case() {
             write(BLOB);
             step_six();
             step_seven();
@@ -2249,6 +2386,54 @@ _case(
     loop {
         halt();
     }
+}
+""",
+    flat=3,
+)
+
+_case(
+    # A leading fixture paragraph whose locals reach the bottom of the body is
+    # left in the outer frame rather than merged -- merging would produce one
+    # case containing everything, whose peak is `outer + case`.  Being left
+    # there makes its `let`s *outer* locals, so a paragraph below that reads one
+    # must be refused exactly as if it read a parameter.
+    #
+    # Dropping the paragraph without also recording what it binds is the shape
+    # of the bug this guards: `fixture` would look unbound, the last paragraph
+    # would be cased, and a nested `fn` cannot capture -- `E0434`, 36 of them in
+    # `self_test_remap_ioprio_futex2`, discovered only at the end of a build.
+    # Note the middle paragraph, which reads nothing outer, still splits.
+    "a skipped leading fixture still counts as an outer local",
+    """fn self_test() {
+    let fixture = make();
+    let spare = make_spare();
+
+    step_one();
+    step_two();
+    step_three();
+
+    use_it(fixture);
+    step_five();
+    step_six();
+}
+""",
+    """fn self_test() {
+    let fixture = make();
+    let spare = make_spare();
+
+    {
+        #[inline(never)]
+        fn case() {
+            step_one();
+            step_two();
+            step_three();
+        }
+        case();
+    }
+
+    use_it(fixture);
+    step_five();
+    step_six();
 }
 """,
     flat=3,
@@ -2384,6 +2569,29 @@ def main() -> int:
 
     with io.open(args.file, encoding="utf-8", newline="") as f:
         text = f.read()
+    # `rewrite` is a pure LF function -- it splits on "\n", indexes by the
+    # offsets that produces, and emits "\n" at a couple of dozen sites -- so
+    # the ending is normalised here, at the one boundary, rather than threaded
+    # through the transformer.  27 of the kernel's sources are CRLF in the
+    # working tree (they were written by something that opened them in text
+    # mode on Windows) while every blob in the repository is LF, because
+    # `core.autocrlf=input` normalises on check-in and never converts on
+    # checkout.  Git therefore calls both clean and the difference is invisible
+    # until a line-based tool trips over it -- which is precisely what an
+    # assertion inside `rewrite` did, refusing `fs/handle.rs` and its 12 288-byte
+    # self-test for a reason that has nothing to do with the refactor.
+    #
+    # A *mixed* file is refused rather than unified: unifying it would smuggle a
+    # whole-file whitespace change into a commit whose subject is a stack frame.
+    crlf = text.count("\r\n")
+    if crlf:
+        if crlf != text.count("\n"):
+            ap.error(
+                f"{args.file} mixes CRLF and LF line endings; normalise it "
+                "first -- rewriting it here would bury a whole-file whitespace "
+                "change inside a refactor commit"
+            )
+        text = text.replace("\r\n", "\n")
     if args.arms and args.flat:
         ap.error("--arms and --flat are different shapes; pick one")
     out, cases = rewrite(
@@ -2421,7 +2629,11 @@ def main() -> int:
         print("  (dry run; nothing written)")
         return 0
     with io.open(args.file, "w", encoding="utf-8", newline="") as f:
-        f.write(out)
+        # Put back whatever the file had.  Writing LF into a CRLF file would be
+        # a correct-looking edit that shows up as a whole-file diff on any
+        # checkout whose git is configured to convert, and there is no reason
+        # for a stack-frame refactor to have an opinion about line endings.
+        f.write(out.replace("\n", "\r\n") if crlf else out)
     print(f"  wrote {args.file}")
     return 0
 

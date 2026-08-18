@@ -371,56 +371,119 @@ pub struct AccessibilitySettings {
     pub magnifier: MagnifierConfig,
 }
 
+/// A top-level accessibility feature: one the user switches on or off as a
+/// whole, as opposed to a setting that merely refines one of these (caption
+/// font size refines captions; "follow cursor" refines the magnifier).
+///
+/// This enum exists because "the list of accessibility features" was
+/// previously written out twice — once as fifteen `if … { count += 1 }` arms
+/// in `active_feature_count`, and once as the toggle rows the settings pane
+/// renders — with nothing tying the two together. They had already drifted:
+/// `flash_screen` has a toggle row and is a peer of `visual_alerts` and
+/// `mono_audio`, both of which were counted, but it was not. A user who
+/// switched on Flash Screen and nothing else was told "0 features active",
+/// which the pane renders by showing no banner at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum A11yFeature {
+    HighContrast,
+    ColorFilter,
+    ReduceMotion,
+    ReduceTransparency,
+    CursorIndicator,
+    StickyKeys,
+    FilterKeys,
+    MouseKeys,
+    OnScreenKeyboard,
+    AutoClick,
+    VisualAlerts,
+    FlashScreen,
+    MonoAudio,
+    Captions,
+    ScreenReader,
+    Magnifier,
+}
+
+impl A11yFeature {
+    /// Every feature, in the order the settings pane presents them.
+    pub const ALL: [Self; 16] = [
+        Self::HighContrast,
+        Self::ColorFilter,
+        Self::ReduceMotion,
+        Self::ReduceTransparency,
+        Self::CursorIndicator,
+        Self::StickyKeys,
+        Self::FilterKeys,
+        Self::MouseKeys,
+        Self::OnScreenKeyboard,
+        Self::AutoClick,
+        Self::VisualAlerts,
+        Self::FlashScreen,
+        Self::MonoAudio,
+        Self::Captions,
+        Self::ScreenReader,
+        Self::Magnifier,
+    ];
+
+    /// Human-readable name, matching the settings pane's toggle labels.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::HighContrast => "High Contrast",
+            Self::ColorFilter => "Color Filter",
+            Self::ReduceMotion => "Reduce Motion",
+            Self::ReduceTransparency => "Reduce Transparency",
+            Self::CursorIndicator => "Cursor Indicator",
+            Self::StickyKeys => "Sticky Keys",
+            Self::FilterKeys => "Filter Keys",
+            Self::MouseKeys => "Mouse Keys",
+            Self::OnScreenKeyboard => "On-Screen Keyboard",
+            Self::AutoClick => "Auto Click",
+            Self::VisualAlerts => "Visual Alerts",
+            Self::FlashScreen => "Flash Screen",
+            Self::MonoAudio => "Mono Audio",
+            Self::Captions => "Captions",
+            Self::ScreenReader => "Screen Reader",
+            Self::Magnifier => "Magnifier",
+        }
+    }
+}
+
 impl AccessibilitySettings {
+    /// Whether one named feature is switched on.
+    ///
+    /// The `match` is exhaustive, so a new variant of [`A11yFeature`] cannot
+    /// be added without deciding here what makes it active — which is the
+    /// enforcement the fifteen parallel `if` arms did not have.
+    pub const fn is_active(&self, feature: A11yFeature) -> bool {
+        match feature {
+            A11yFeature::HighContrast => !matches!(self.visual.contrast_mode, ContrastMode::Off),
+            A11yFeature::ColorFilter => !matches!(self.visual.color_filter, ColorFilter::Off),
+            A11yFeature::ReduceMotion => self.visual.reduce_motion,
+            A11yFeature::ReduceTransparency => self.visual.reduce_transparency,
+            A11yFeature::CursorIndicator => {
+                !matches!(self.visual.cursor_indicator, CursorIndicator::Off)
+            }
+            A11yFeature::StickyKeys => self.input.sticky_keys.enabled,
+            A11yFeature::FilterKeys => self.input.filter_keys.enabled,
+            A11yFeature::MouseKeys => self.input.mouse_keys.enabled,
+            A11yFeature::OnScreenKeyboard => self.input.on_screen_keyboard,
+            A11yFeature::AutoClick => self.input.auto_click,
+            A11yFeature::VisualAlerts => self.audio.visual_alerts,
+            A11yFeature::FlashScreen => self.audio.flash_screen,
+            A11yFeature::MonoAudio => self.audio.mono_audio,
+            A11yFeature::Captions => self.audio.show_captions,
+            A11yFeature::ScreenReader => self.screen_reader.enabled,
+            A11yFeature::Magnifier => self.magnifier.enabled,
+        }
+    }
+
+    /// Every feature currently switched on, in presentation order.
+    pub fn active_features(&self) -> impl Iterator<Item = A11yFeature> + '_ {
+        A11yFeature::ALL.into_iter().filter(|&f| self.is_active(f))
+    }
+
     /// Count of active accessibility features.
     pub fn active_feature_count(&self) -> usize {
-        let mut count = 0;
-        if self.visual.contrast_mode != ContrastMode::Off {
-            count += 1;
-        }
-        if self.visual.color_filter != ColorFilter::Off {
-            count += 1;
-        }
-        if self.visual.reduce_motion {
-            count += 1;
-        }
-        if self.visual.reduce_transparency {
-            count += 1;
-        }
-        if self.visual.cursor_indicator != CursorIndicator::Off {
-            count += 1;
-        }
-        if self.input.sticky_keys.enabled {
-            count += 1;
-        }
-        if self.input.filter_keys.enabled {
-            count += 1;
-        }
-        if self.input.mouse_keys.enabled {
-            count += 1;
-        }
-        if self.input.on_screen_keyboard {
-            count += 1;
-        }
-        if self.input.auto_click {
-            count += 1;
-        }
-        if self.audio.visual_alerts {
-            count += 1;
-        }
-        if self.audio.mono_audio {
-            count += 1;
-        }
-        if self.audio.show_captions {
-            count += 1;
-        }
-        if self.screen_reader.enabled {
-            count += 1;
-        }
-        if self.magnifier.enabled {
-            count += 1;
-        }
-        count
+        self.active_features().count()
     }
 }
 
@@ -1086,11 +1149,121 @@ mod tests {
         s.input.on_screen_keyboard = true;
         s.input.auto_click = true;
         s.audio.visual_alerts = true;
+        s.audio.flash_screen = true;
         s.audio.mono_audio = true;
         s.audio.show_captions = true;
         s.screen_reader.enabled = true;
         s.magnifier.enabled = true;
-        assert_eq!(s.active_feature_count(), 15);
+        assert_eq!(s.active_feature_count(), A11yFeature::ALL.len());
+    }
+
+    /// Switch on exactly the named feature.
+    ///
+    /// The `match` is exhaustive, so this helper cannot fall behind
+    /// [`A11yFeature`] the way the old fifteen-arm counter fell behind the
+    /// settings pane. That is the whole point of routing the tests below
+    /// through it rather than through a hand-written list of fields.
+    fn switch_on(s: &mut AccessibilitySettings, feature: A11yFeature) {
+        match feature {
+            A11yFeature::HighContrast => s.visual.contrast_mode = ContrastMode::HighContrast,
+            A11yFeature::ColorFilter => s.visual.color_filter = ColorFilter::Grayscale,
+            A11yFeature::ReduceMotion => s.visual.reduce_motion = true,
+            A11yFeature::ReduceTransparency => s.visual.reduce_transparency = true,
+            A11yFeature::CursorIndicator => s.visual.cursor_indicator = CursorIndicator::Ring,
+            A11yFeature::StickyKeys => s.input.sticky_keys.enabled = true,
+            A11yFeature::FilterKeys => s.input.filter_keys.enabled = true,
+            A11yFeature::MouseKeys => s.input.mouse_keys.enabled = true,
+            A11yFeature::OnScreenKeyboard => s.input.on_screen_keyboard = true,
+            A11yFeature::AutoClick => s.input.auto_click = true,
+            A11yFeature::VisualAlerts => s.audio.visual_alerts = true,
+            A11yFeature::FlashScreen => s.audio.flash_screen = true,
+            A11yFeature::MonoAudio => s.audio.mono_audio = true,
+            A11yFeature::Captions => s.audio.show_captions = true,
+            A11yFeature::ScreenReader => s.screen_reader.enabled = true,
+            A11yFeature::Magnifier => s.magnifier.enabled = true,
+        }
+    }
+
+    /// Where each feature sits in [`A11yFeature::ALL`].
+    ///
+    /// Exhaustive, so a new variant must be given a position; the assertion
+    /// in `every_feature_appears_in_all_exactly_once` then checks `ALL`
+    /// really holds it there. Between them, a variant cannot be added to the
+    /// enum and forgotten in the list.
+    fn position_in_all(feature: A11yFeature) -> usize {
+        match feature {
+            A11yFeature::HighContrast => 0,
+            A11yFeature::ColorFilter => 1,
+            A11yFeature::ReduceMotion => 2,
+            A11yFeature::ReduceTransparency => 3,
+            A11yFeature::CursorIndicator => 4,
+            A11yFeature::StickyKeys => 5,
+            A11yFeature::FilterKeys => 6,
+            A11yFeature::MouseKeys => 7,
+            A11yFeature::OnScreenKeyboard => 8,
+            A11yFeature::AutoClick => 9,
+            A11yFeature::VisualAlerts => 10,
+            A11yFeature::FlashScreen => 11,
+            A11yFeature::MonoAudio => 12,
+            A11yFeature::Captions => 13,
+            A11yFeature::ScreenReader => 14,
+            A11yFeature::Magnifier => 15,
+        }
+    }
+
+    #[test]
+    fn every_feature_appears_in_all_exactly_once() {
+        for (i, &feature) in A11yFeature::ALL.iter().enumerate() {
+            assert_eq!(position_in_all(feature), i, "{feature:?} is out of place");
+        }
+        assert_eq!(
+            A11yFeature::ALL.len(),
+            16,
+            "a variant was added to the enum but not to ALL"
+        );
+    }
+
+    #[test]
+    fn switching_on_one_feature_makes_exactly_that_one_active() {
+        // The bug this closes: `flash_screen` had a toggle row in the pane
+        // and was a peer of two counted features, but the counter's
+        // hand-written list omitted it -- so switching it on alone reported
+        // "0 features active" and the banner did not appear at all.
+        for feature in A11yFeature::ALL {
+            let mut s = AccessibilitySettings::default();
+            assert!(!s.is_active(feature), "{feature:?} is on by default");
+            switch_on(&mut s, feature);
+            assert!(s.is_active(feature), "{feature:?} did not switch on");
+            assert_eq!(
+                s.active_features().collect::<Vec<_>>(),
+                vec![feature],
+                "switching on {feature:?} moved something else"
+            );
+            assert_eq!(s.active_feature_count(), 1, "{feature:?}");
+        }
+    }
+
+    #[test]
+    fn switching_features_on_one_at_a_time_counts_them_all() {
+        let mut s = AccessibilitySettings::default();
+        for (i, feature) in A11yFeature::ALL.into_iter().enumerate() {
+            switch_on(&mut s, feature);
+            assert_eq!(s.active_feature_count(), i + 1, "after {feature:?}");
+        }
+        assert_eq!(
+            s.active_features().collect::<Vec<_>>(),
+            A11yFeature::ALL.to_vec(),
+            "active features come back in presentation order"
+        );
+    }
+
+    #[test]
+    fn no_two_features_share_a_label() {
+        let mut labels: Vec<&str> = A11yFeature::ALL.iter().map(|f| f.label()).collect();
+        labels.sort_unstable();
+        let count = labels.len();
+        labels.dedup();
+        assert_eq!(labels.len(), count, "two features are labelled the same");
     }
 
     #[test]

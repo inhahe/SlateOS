@@ -11,3 +11,9 @@ description = "SlateOS polkit - authorization framework (polkitd/pkexec/pkaction
 # `design-decisions.md` §330.
 [dependencies]
 userdb = { path = "../userdb" }
+
+# The defensive lint set from `CLAUDE.md`. This crate answers "may this person
+# become root?", so a panic on shaped input is a denial of the authorization
+# service, not a crashed utility.
+[lints]
+workspace = true

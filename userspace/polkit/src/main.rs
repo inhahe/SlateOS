@@ -486,28 +486,26 @@ fn extract_xml_text(line: &str, tag: &str) -> Option<String> {
 fn extract_action_id(line: &str) -> Option<String> {
     let prefix = "<action id=\"";
     if let Some(rest) = line.strip_prefix(prefix)
-        && let Some(end_quote) = rest.find('"')
+        && let Some((id, _after)) = rest.split_once('"')
     {
-        return Some(rest[..end_quote].to_string());
+        return Some(id.to_string());
     }
     None
 }
 
 /// Extract an annotation: `<annotate key="key">value</annotate>`.
 fn extract_annotate(line: &str) -> Option<(String, String)> {
+    // `split_once` rather than `find` plus two slices: it yields both halves
+    // already past the delimiter, so there is no `end_quote + 1` whose
+    // correctness rests on the delimiter being one byte wide.
     let prefix = "<annotate key=\"";
     if let Some(rest) = line.strip_prefix(prefix)
-        && let Some(end_quote) = rest.find('"')
-    {
-        let key = rest[..end_quote].to_string();
-        let after_key = &rest[end_quote + 1..];
+        && let Some((key, after_key)) = rest.split_once('"')
         // Skip the `>`
-        if let Some(after_gt) = after_key.strip_prefix('>')
-            && let Some(val_end) = after_gt.find("</annotate>")
-        {
-            let val = after_gt[..val_end].to_string();
-            return Some((key, val));
-        }
+        && let Some(after_gt) = after_key.strip_prefix('>')
+        && let Some((val, _tail)) = after_gt.split_once("</annotate>")
+    {
+        return Some((key.to_string(), val.to_string()));
     }
     None
 }
@@ -726,9 +724,14 @@ fn run_polkitd(args: &[String]) -> i32 {
     let mut replace = false;
     let mut no_debug = false;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    // A slice cursor rather than an index, here and in the three other option
+    // loops below. `split_first` is what makes an option-with-a-value safe: the
+    // value is taken from the tail that is known to exist, so there is no
+    // `i + 1` to bounds-check separately from the `args[i + 1]` that follows it.
+    let mut rest = args;
+    while let Some((arg, tail)) = rest.split_first() {
+        rest = tail;
+        match arg.as_str() {
             "--no-debug" => no_debug = true,
             "--replace" | "-r" => replace = true,
             "--help" | "-h" => {
@@ -740,15 +743,13 @@ fn run_polkitd(args: &[String]) -> i32 {
                 return 0;
             }
             _ => {
-                if !args[i].starts_with('-') {
-                    foreground = true; // positional: treat as foreground flag
-                } else {
-                    eprintln!("polkitd: unknown option: {}", args[i]);
+                if arg.starts_with('-') {
+                    eprintln!("polkitd: unknown option: {arg}");
                     return 1;
                 }
+                foreground = true; // positional: treat as foreground flag
             }
         }
-        i += 1;
     }
 
     // In a daemon, we would fork into the background. On Slate OS the service
@@ -804,14 +805,20 @@ fn run_polkitd(args: &[String]) -> i32 {
             continue;
         }
 
-        match parts[0].to_uppercase().as_str() {
+        let Some((command, operands)) = parts.split_first() else {
+            continue;
+        };
+
+        match command.to_uppercase().as_str() {
             "CHECK" => {
-                if parts.len() < 3 {
+                // A slice pattern rather than a length test followed by two
+                // indexes: the guard and the accesses were two statements of
+                // one fact, and only the pattern keeps them from disagreeing.
+                let [action_id, uid_text, ..] = operands else {
                     println!("ERR: usage: CHECK <action_id> <uid>");
                     continue;
-                }
-                let action_id = parts[1];
-                let uid: u32 = match parts[2].parse() {
+                };
+                let uid: u32 = match uid_text.parse() {
                     Ok(u) => u,
                     Err(_) => {
                         println!("ERR: invalid uid");
@@ -846,7 +853,7 @@ fn run_polkitd(args: &[String]) -> i32 {
                 break;
             }
             _ => {
-                println!("ERR: unknown command '{}'", parts[0]);
+                println!("ERR: unknown command '{command}'");
             }
         }
         let _ = io::stdout().flush();
@@ -900,14 +907,14 @@ fn run_pkexec(args: &[String]) -> i32 {
     let mut command_args: Vec<String> = Vec::new();
     let mut found_command = false;
 
-    let mut i = 0;
-    while i < args.len() {
+    let mut rest = args;
+    while let Some((arg, tail)) = rest.split_first() {
+        rest = tail;
         if found_command {
-            command_args.push(args[i].clone());
-            i += 1;
+            command_args.push(arg.clone());
             continue;
         }
-        match args[i].as_str() {
+        match arg.as_str() {
             "--help" | "-h" => {
                 print_pkexec_usage();
                 return 0;
@@ -917,12 +924,12 @@ fn run_pkexec(args: &[String]) -> i32 {
                 return 0;
             }
             "--user" => {
-                i += 1;
-                if i >= args.len() {
+                let Some((value, after_value)) = rest.split_first() else {
                     eprintln!("pkexec: --user requires a username");
                     return 127;
-                }
-                target_user = args[i].clone();
+                };
+                target_user = value.clone();
+                rest = after_value;
             }
             "--disable-internal-agent" => {
                 disable_internal = true;
@@ -931,29 +938,27 @@ fn run_pkexec(args: &[String]) -> i32 {
                 allow_gui = true;
             }
             _ => {
-                if args[i].starts_with('-') {
-                    // Check for --user=value form.
-                    if let Some(val) = args[i].strip_prefix("--user=") {
-                        target_user = val.to_string();
-                    } else {
-                        eprintln!("pkexec: unknown option: {}", args[i]);
-                        return 127;
-                    }
-                } else {
+                if !arg.starts_with('-') {
                     // First non-option argument is the command.
-                    command_args.push(args[i].clone());
+                    command_args.push(arg.clone());
                     found_command = true;
+                } else if let Some(val) = arg.strip_prefix("--user=") {
+                    target_user = val.to_string();
+                } else {
+                    eprintln!("pkexec: unknown option: {arg}");
+                    return 127;
                 }
             }
         }
-        i += 1;
     }
 
-    if command_args.is_empty() {
+    // Binds the command path in the same step that proves there is one, so the
+    // two uses below cannot outlive the emptiness check the way an index would.
+    let Some(command_path) = command_args.first().cloned() else {
         eprintln!("pkexec: no command specified");
         print_pkexec_usage();
         return 127;
-    }
+    };
 
     let _ = allow_gui;
     let _ = disable_internal;
@@ -977,8 +982,7 @@ fn run_pkexec(args: &[String]) -> i32 {
 
     // Determine the action ID. If the command has a polkit annotation, use it;
     // otherwise use the generic pkexec action.
-    let command_path = &command_args[0];
-    let action_id = determine_pkexec_action(command_path);
+    let action_id = determine_pkexec_action(&command_path);
 
     let store = PolicyStore::load();
     let result = store.check_authorization(&action_id, &caller, true);
@@ -986,10 +990,7 @@ fn run_pkexec(args: &[String]) -> i32 {
     match result {
         AuthResult::Yes => exec_command(&command_args, &target_user, &users),
         AuthResult::No => {
-            eprintln!(
-                "pkexec: not authorized to execute '{}' as '{target_user}'",
-                command_args[0]
-            );
+            eprintln!("pkexec: not authorized to execute '{command_path}' as '{target_user}'");
             126
         }
         AuthResult::AuthAdmin => {
@@ -1039,11 +1040,14 @@ fn exec_command(command_args: &[String], target_user: &str, users: &UserDb) -> i
 
     // On Slate OS we would use exec() to replace the process. Since we cannot
     // exec in this stub environment, we simulate with std::process::Command.
-    let program = &command_args[0];
-    let program_args = if command_args.len() > 1 {
-        &command_args[1..]
-    } else {
-        &[]
+    //
+    // `split_first` rather than `[0]` and `[1..]`: every caller checks the slice
+    // is non-empty first, but a function that runs a command as another user is
+    // the wrong place to trust a caller's guard. 127 is the shell's "command not
+    // found", which is what an empty argv amounts to.
+    let Some((program, program_args)) = command_args.split_first() else {
+        eprintln!("pkexec: no command to execute");
+        return 127;
     };
 
     let mut cmd = std::process::Command::new(program);
@@ -1116,9 +1120,10 @@ fn run_pkaction(args: &[String]) -> i32 {
     let mut verbose = false;
     let mut action_id_filter: Option<String> = None;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    let mut rest = args;
+    while let Some((arg, tail)) = rest.split_first() {
+        rest = tail;
+        match arg.as_str() {
             "--verbose" | "-v" => verbose = true,
             "--help" | "-h" => {
                 print_pkaction_usage();
@@ -1129,26 +1134,25 @@ fn run_pkaction(args: &[String]) -> i32 {
                 return 0;
             }
             "--action-id" => {
-                i += 1;
-                if i >= args.len() {
+                let Some((value, after_value)) = rest.split_first() else {
                     eprintln!("pkaction: --action-id requires a value");
                     return 1;
-                }
-                action_id_filter = Some(args[i].clone());
+                };
+                action_id_filter = Some(value.clone());
+                rest = after_value;
             }
             _ => {
-                if let Some(val) = args[i].strip_prefix("--action-id=") {
+                if let Some(val) = arg.strip_prefix("--action-id=") {
                     action_id_filter = Some(val.to_string());
-                } else if args[i].starts_with('-') {
-                    eprintln!("pkaction: unknown option: {}", args[i]);
+                } else if arg.starts_with('-') {
+                    eprintln!("pkaction: unknown option: {arg}");
                     return 1;
                 } else {
                     // Treat as action-id filter.
-                    action_id_filter = Some(args[i].clone());
+                    action_id_filter = Some(arg.clone());
                 }
             }
         }
-        i += 1;
     }
 
     let store = PolicyStore::load();
@@ -1237,9 +1241,10 @@ fn run_pkcheck(args: &[String]) -> i32 {
     let mut allow_user_interaction = false;
     let mut enable_internal_agent = true;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    let mut rest = args;
+    while let Some((arg, tail)) = rest.split_first() {
+        rest = tail;
+        match arg.as_str() {
             "--help" | "-h" => {
                 print_pkcheck_usage();
                 return 0;
@@ -1249,23 +1254,23 @@ fn run_pkcheck(args: &[String]) -> i32 {
                 return 0;
             }
             "--action-id" => {
-                i += 1;
-                if i >= args.len() {
+                let Some((value, after_value)) = rest.split_first() else {
                     eprintln!("pkcheck: --action-id requires a value");
                     return 1;
-                }
-                action_id = Some(args[i].clone());
+                };
+                action_id = Some(value.clone());
+                rest = after_value;
             }
             "--process" | "-p" => {
-                i += 1;
-                if i >= args.len() {
+                let Some((value, after_value)) = rest.split_first() else {
                     eprintln!("pkcheck: --process requires a PID");
                     return 1;
-                }
-                match args[i].parse::<u32>() {
+                };
+                rest = after_value;
+                match value.parse::<u32>() {
                     Ok(pid) => process_pid = Some(pid),
                     Err(_) => {
-                        eprintln!("pkcheck: invalid PID: {}", args[i]);
+                        eprintln!("pkcheck: invalid PID: {value}");
                         return 1;
                     }
                 }
@@ -1280,9 +1285,9 @@ fn run_pkcheck(args: &[String]) -> i32 {
                 enable_internal_agent = false;
             }
             _ => {
-                if let Some(val) = args[i].strip_prefix("--action-id=") {
+                if let Some(val) = arg.strip_prefix("--action-id=") {
                     action_id = Some(val.to_string());
-                } else if let Some(val) = args[i].strip_prefix("--process=") {
+                } else if let Some(val) = arg.strip_prefix("--process=") {
                     match val.parse::<u32>() {
                         Ok(pid) => process_pid = Some(pid),
                         Err(_) => {
@@ -1290,18 +1295,15 @@ fn run_pkcheck(args: &[String]) -> i32 {
                             return 1;
                         }
                     }
-                } else if args[i].starts_with('-') {
-                    eprintln!("pkcheck: unknown option: {}", args[i]);
+                } else if arg.starts_with('-') {
+                    eprintln!("pkcheck: unknown option: {arg}");
                     return 1;
-                } else {
+                } else if action_id.is_none() {
                     // Positional: treat as action-id if not set.
-                    if action_id.is_none() {
-                        action_id = Some(args[i].clone());
-                    }
+                    action_id = Some(arg.clone());
                 }
             }
         }
-        i += 1;
     }
 
     let action_id = match action_id {
@@ -1458,17 +1460,26 @@ fn run_main() -> i32 {
     let args: Vec<String> = env::args().collect();
     let personality = detect_personality(&args);
 
-    // Strip the subcommand if present to get remaining args.
-    let sub_args: Vec<String> = if args.len() > 1
-        && matches!(
-            args[1].as_str(),
-            "daemon" | "polkitd" | "exec" | "pkexec" | "action" | "pkaction" | "check" | "pkcheck"
-        ) {
-        args[2..].to_vec()
-    } else if args.len() > 1 {
-        args[1..].to_vec()
-    } else {
-        Vec::new()
+    // Strip the subcommand if present to get remaining args. `split_first`
+    // twice: argv[0] and the subcommand are each present-or-not, and dropping
+    // each one where it is proved to exist says so without a length test that
+    // could drift from the index it guards.
+    let sub_args: Vec<String> = match args.split_first() {
+        None => Vec::new(),
+        Some((_argv0, after_argv0)) => match after_argv0.split_first() {
+            Some((
+                sub,
+                after_sub,
+            )) if matches!(
+                sub.as_str(),
+                "daemon" | "polkitd" | "exec" | "pkexec" | "action" | "pkaction" | "check"
+                    | "pkcheck"
+            ) =>
+            {
+                after_sub.to_vec()
+            }
+            _ => after_argv0.to_vec(),
+        },
     };
 
     match personality {

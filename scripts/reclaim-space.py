@@ -186,7 +186,15 @@ def reclaim_dir(path, dry_run, sizes, log):
         log("  WOULD reclaim  %s%s"
             % (path, ("  (%.1f GiB)" % size) if sizes else "  (not in use)"))
         return size
-    before = free_gib(path)
+    # Measure the volume through the *parent* directory, never through `path`.
+    # By this line `path` has been renamed out of existence by the rename above,
+    # and shutil.disk_usage raises FileNotFoundError on a name that no longer
+    # resolves -- which aborted the whole run on the first candidate it managed
+    # to rename, so steps 3 and 4 were never reached.  The parent is the
+    # worktree root: it is on the same volume by construction, and it outlives
+    # both the rename and the delete.
+    volume = os.path.dirname(path) or path
+    before = free_gib(volume)
     log("  reclaiming     %s" % path)
     shutil.rmtree(staged, ignore_errors=True)
     if os.path.exists(staged):
@@ -194,7 +202,7 @@ def reclaim_dir(path, dry_run, sizes, log):
         # The tree is already out of the way under a name nothing looks for, so
         # this is a leak of space, not a correctness problem -- say so.
         log("  WARNING: %s could not be fully removed; remove it by hand" % staged)
-    freed = free_gib(path) - before
+    freed = free_gib(volume) - before
     log("                 freed %.1f GiB" % freed)
     return freed
 

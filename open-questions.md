@@ -291,12 +291,74 @@ as of this update, up from the 41 GiB in the table above, because the other lane
 pruned during the day. So the immediate emergency is over and the choice can be
 made on its merits rather than under pressure.
 
-**If never answered:** the disk fills again — more slowly now, and it will
-announce itself as a refused boot test rather than as a truncated source file.
-Today's damage was one committed file and cost a minute; the same event during a
-large uncommitted change loses that change outright. Note the floor protects the
-*harness* only: a `cargo build` you run by hand, or an editor writing a file, is
-still unguarded, so this reduces the blast radius without removing it.
+### 2026-08-18 — the floor fired for real, and we now know the refill rate
+
+Lane B's boot test was refused at 13 GiB free
+(`requests/b-a-q47-floor-fired-for-real-and-here-is-the-refill-rate.md`). That is
+option C working as designed, for the first time: it cost one command instead of
+a truncated file. **Nothing is broken; this is the safety net doing its job.**
+
+What it adds to the decision is a *rate*, which the question was missing:
+
+| Date | Free on `D:` |
+|---|---|
+| 2026-08-15 | 0 GiB — the incident |
+| 2026-08-15 (later) | 41 GiB — after the emergency prune |
+| ~2026-08-16 | 91 GiB — "the emergency is over" |
+| **2026-08-18** | **13 GiB** — floor fires |
+
+**~78 GiB consumed in about two days.** So the margin a prune buys is roughly a
+**two-to-three-day** margin at three-lane pace — the same order as one
+rate-limit window.
+
+That is the number that prices option B. B's cost was written above as "the
+pruning has to be remembered"; it can now be stated concretely as **a chore that
+recurs every two to three days, with no owner, landing on whichever lane happens
+to trip the floor first while it is in the middle of something else.** That is
+what happened to Lane B today.
+
+One thing does move in B's favour, though, and it is worth weighing against the
+above: the reclaim is **cheap, safe and well-targeted**. `cargo clean` on the
+integration checkout freed 13 GiB → 32 GiB in a single command, and that tree is
+regenerable output that nobody develops in. So B is not "prune something you
+might still need"; it is "prune the merge tree", which is a rule that can be
+written down rather than remembered. Re-measured sizes, which also update the
+table above:
+
+| Where | `target/` |
+|---|---|
+| `os` (integration checkout) | 21.4 GiB |
+| `os-lane-a` | 27.0 GiB |
+
+The shape from 2026-08-15 holds: the checkout nobody develops in is a large
+share of the footprint and the cheapest thing to reclaim.
+
+**This does not change the recommendation, and it does not decide A vs B.** It
+means that if you pick B, it should be picked *with* an automated trigger rather
+than as a habit — see the `--prune-integration-target` note under "If never
+answered" below.
+
+**If never answered:** the disk fills again every two to three days — but it now
+announces itself as a refused boot test rather than as a truncated source file,
+and the 2026-08-18 firing shows the refusal costs about one command to clear.
+Note the floor protects the *harness* only: a `cargo build` you run by hand, or
+an editor writing a file, is still unguarded, so this reduces the blast radius
+without removing it.
+
+So the honest answer to "what if you never decide" is now: **it keeps working,
+at a cost of one interruption per lane per few days.** That is a real tax but
+not a rising one, which is why this question is not urgent even though it fires
+regularly.
+
+Lane A has since closed the gap that made that interruption expensive. The
+remedy already existed — `scripts/reclaim-space.py`, which frees space by
+*renaming* a directory before deleting it (Windows refuses to rename a
+directory with an open file inside, so a successful rename is proof nothing was
+using it, rather than a timestamp guess) — but `boot-test.sh` did not name it.
+It advised a manual `cargo clean`, which is why Lane B cleaned by hand. The
+floor now names the tool and accepts `--reclaim-space` to run it and retry.
+That reduces B's cost but deliberately does **not** pick B: it is opt-in per
+run and changes nothing unless asked for.
 
 ## Q48 — [B] Finishing §312 will make "set the system clock", "listen on port 80" and "raise your own resource limit" permanently impossible. Give each of them a real kernel object to hang off, or leave them denied? — Status: OPEN
 

@@ -737,6 +737,12 @@ HOST_LOAD="unknown"
 # `cargo clean`, and losing an uncommitted file costs the work.
 MIN_FREE_GB="${BOOT_TEST_MIN_FREE_GB:-20}"
 
+# Opt-in: when the floor trips, run scripts/reclaim-space.py and retry once
+# instead of refusing outright.  Off by default because freeing space deletes
+# another tree's build output, and a run should not do that merely because it
+# happened to be the one that noticed.  See check_free_space.
+RECLAIM_SPACE="${BOOT_TEST_RECLAIM_SPACE:-0}"
+
 # Parse args
 for arg in "$@"; do
     case "$arg" in
@@ -771,6 +777,7 @@ for arg in "$@"; do
         --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
         --host-load=*) HOST_LOAD="${arg#*=}" ;;
         --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
+        --reclaim-space) RECLAIM_SPACE=1 ;;
     esac
 done
 
@@ -786,26 +793,72 @@ done
 # load-bearing, and a df that cannot parse must not be able to block every boot
 # test on every machine.  But it says so, rather than printing nothing and
 # letting a silent skip pass for a clean bill of health.
-check_free_space() {
-    local phase="$1"
-    [ "$MIN_FREE_GB" = "0" ] && return 0
-
+#
+# Split out from check_free_space so the floor can be re-tested after a reclaim
+# without duplicating the parsing or recursing back into the refusal path.
+# Prints the free space in GiB and returns 0; prints nothing and returns 1 if
+# df could not produce a number.
+measure_free_gb() {
     # -P forces POSIX single-line output: without it a long filesystem name
     # wraps onto its own line and $4 is then the wrong column.
     local avail_kib
     avail_kib="$(df -Pk "$PROJECT_ROOT" 2>/dev/null | awk 'NR==2 {print $4}')"
-
     case "$avail_kib" in
-        ''|*[!0-9]*)
-            echo "WARNING: could not measure free space on $PROJECT_ROOT " \
-                 "(df gave '${avail_kib:-no output}'); the ${MIN_FREE_GB} GiB " \
-                 "floor is NOT being enforced for this run." >&2
-            return 0
-            ;;
+        ''|*[!0-9]*) return 1 ;;
     esac
+    echo $((avail_kib / 1024 / 1024))
+}
 
-    local avail_gb=$((avail_kib / 1024 / 1024))
+check_free_space() {
+    local phase="$1"
+    [ "$MIN_FREE_GB" = "0" ] && return 0
+
+    local avail_gb
+    if ! avail_gb="$(measure_free_gb)"; then
+        echo "WARNING: could not measure free space on $PROJECT_ROOT " \
+             "(df gave no usable number); the ${MIN_FREE_GB} GiB " \
+             "floor is NOT being enforced for this run." >&2
+        return 0
+    fi
+
     if [ "$avail_gb" -lt "$MIN_FREE_GB" ]; then
+        # --reclaim-space: try the remedy before refusing.
+        #
+        # reclaim-space.py is safe to invoke unattended because it does not
+        # guess whether a directory is in use: it *renames* each candidate
+        # first, and Windows refuses to rename a directory that has any file
+        # open inside it, so a successful rename is proof rather than a
+        # timestamp heuristic.  At its defaults it can only cost the
+        # integration checkout and this worktree.
+        if [ "$RECLAIM_SPACE" = "1" ]; then
+            echo "Only ${avail_gb} GiB free (floor ${MIN_FREE_GB} GiB, ${phase});" \
+                 "--reclaim-space given, running scripts/reclaim-space.py." >&2
+            local py=""
+            if command -v python &>/dev/null; then py=python
+            elif command -v python3 &>/dev/null; then py=python3
+            fi
+            if [ -z "$py" ]; then
+                echo "WARNING: --reclaim-space given but no python interpreter" \
+                     "was found; cannot run the remedy." >&2
+            else
+                # Ask for headroom above the floor rather than the floor
+                # exactly.  The build this is clearing the way for is itself
+                # what consumes the margin, so stopping at the floor would
+                # simply trip the second (pre-staging) check minutes later.
+                #
+                # The exit status is deliberately not tested: a run that could
+                # not reach floor+10 may still have freed enough to clear the
+                # floor, and the re-measurement below is the authority on that.
+                "$py" "$SCRIPT_DIR/reclaim-space.py" \
+                    --need "$((MIN_FREE_GB + 10))" --yes || true
+                if avail_gb="$(measure_free_gb)" && [ "$avail_gb" -ge "$MIN_FREE_GB" ]; then
+                    echo "Free space OK after reclaim: ${avail_gb} GiB" \
+                         "(floor ${MIN_FREE_GB} GiB, ${phase})."
+                    return 0
+                fi
+                echo "Reclaim ran but free space is still below the floor." >&2
+            fi
+        fi
         echo "" >&2
         echo "ERROR: only ${avail_gb} GiB free on the build volume; the floor is ${MIN_FREE_GB} GiB (${phase})." >&2
         echo "" >&2
@@ -814,10 +867,17 @@ check_free_space() {
         echo "file to zero bytes; a part-way link can also leave a stale kernel staged in the" >&2
         echo "ESP, which a later --no-build run boots as if it were current." >&2
         echo "" >&2
-        echo "To free space, prune build output from a worktree nobody is building in:" >&2
-        echo "    cargo clean --manifest-path '<other-worktree>/Cargo.toml'" >&2
-        echo "The integration checkout (…/os) is usually the largest and the safest --" >&2
-        echo "target/ is entirely regenerable, so this costs a rebuild and never source." >&2
+        echo "To free space, use the tool built for it:" >&2
+        echo "    python scripts/reclaim-space.py --need $((MIN_FREE_GB + 10)) --yes" >&2
+        echo "or re-run this script with --reclaim-space to do that and retry automatically." >&2
+        echo "" >&2
+        echo "Prefer it over a bare 'cargo clean' in another worktree.  It renames each" >&2
+        echo "directory before deleting it, and Windows refuses to rename a directory with" >&2
+        echo "any file open inside, so it can tell 'idle' from 'in use' as a fact rather" >&2
+        echo "than by a timestamp -- a target/ that has been untouched for minutes may" >&2
+        echo "still belong to a lane sitting in a QEMU boot phase.  Run without --yes first" >&2
+        echo "to see what it would remove.  target/ is entirely regenerable, so the worst" >&2
+        echo "case is a rebuild and never lost source." >&2
         echo "" >&2
         echo "To override for one run:  --min-free-gb=N   (or BOOT_TEST_MIN_FREE_GB=N, 0 disables)" >&2
         exit 1

@@ -87926,105 +87926,139 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   clone3 forward-compat trailing-zero E2BIG: OK");
             // clone3 with CLONE_PIDFD set in flags -> EINVAL (no pidfd kind yet).
             {
-                let mut ca = [0u64; 8];
-                ca[0] = 0x1000; // CLONE_PIDFD
-                let a = SyscallArgs {
-                    arg0: (&raw const ca[0]) as u64,
-                    arg1: 64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: clone3 CLONE_PIDFD not EINVAL");
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let mut ca = [0u64; 8];
+                    ca[0] = 0x1000; // CLONE_PIDFD
+                    let a = SyscallArgs {
+                        arg0: (&raw const ca[0]) as u64,
+                        arg1: 64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: clone3 CLONE_PIDFD not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
+                case()?;
             }
             // clone3 with CSIGNAL bits in flags -> EINVAL (must go in exit_signal).
             {
-                let mut ca = [0u64; 8];
-                ca[0] = 17; // SIGCHLD in low byte of flags — illegal in clone3.
-                let a = SyscallArgs {
-                    arg0: (&raw const ca[0]) as u64,
-                    arg1: 64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: clone3 CSIGNAL-in-flags not EINVAL");
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let mut ca = [0u64; 8];
+                    ca[0] = 17; // SIGCHLD in low byte of flags — illegal in clone3.
+                    let a = SyscallArgs {
+                        arg0: (&raw const ca[0]) as u64,
+                        arg1: 64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: clone3 CSIGNAL-in-flags not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
+                case()?;
             }
             // clone3 with exit_signal > 0xFF -> EINVAL.
             {
-                let mut ca = [0u64; 8];
-                ca[4] = 0x100; // exit_signal out of CSIGNAL byte.
-                let a = SyscallArgs {
-                    arg0: (&raw const ca[0]) as u64,
-                    arg1: 64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: clone3 huge exit_signal not EINVAL");
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let mut ca = [0u64; 8];
+                    ca[4] = 0x100; // exit_signal out of CSIGNAL byte.
+                    let a = SyscallArgs {
+                        arg0: (&raw const ca[0]) as u64,
+                        arg1: 64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: clone3 huge exit_signal not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
+                case()?;
             }
             // clone3 with stack_base set but stack_size=0 -> EINVAL.
             {
-                let mut ca = [0u64; 8];
-                ca[5] = 0x1000_0000; // stack_base only.
-                let a = SyscallArgs {
-                    arg0: (&raw const ca[0]) as u64,
-                    arg1: 64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: clone3 lopsided stack not EINVAL");
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let mut ca = [0u64; 8];
+                    ca[5] = 0x1000_0000; // stack_base only.
+                    let a = SyscallArgs {
+                        arg0: (&raw const ca[0]) as u64,
+                        arg1: 64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: clone3 lopsided stack not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
+                case()?;
             }
             // clone3 with set_tid_size != 0 -> EINVAL (no manual TID assignment).
             {
-                let mut ca = [0u64; 10];
-                ca[9] = 1; // set_tid_size = 1
-                let a = SyscallArgs {
-                    arg0: (&raw const ca[0]) as u64,
-                    arg1: 80,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: clone3 set_tid_size not EINVAL");
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let mut ca = [0u64; 10];
+                    ca[9] = 1; // set_tid_size = 1
+                    let a = SyscallArgs {
+                        arg0: (&raw const ca[0]) as u64,
+                        arg1: 80,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: clone3 set_tid_size not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
+                case()?;
             }
             // clone3 with CLONE_NEWPID -> EINVAL (no namespace subsystem).
             {
-                let mut ca = [0u64; 8];
-                ca[0] = 0x2000_0000; // CLONE_NEWPID
-                let a = SyscallArgs {
-                    arg0: (&raw const ca[0]) as u64,
-                    arg1: 64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: clone3 CLONE_NEWPID not EINVAL");
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let mut ca = [0u64; 8];
+                    ca[0] = 0x2000_0000; // CLONE_NEWPID
+                    let a = SyscallArgs {
+                        arg0: (&raw const ca[0]) as u64,
+                        arg1: 64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: clone3 CLONE_NEWPID not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
+                case()?;
             }
             serial_println!(
                 "[syscall/linux]   clone3 size-E2BIG > size-EINVAL > NULL-EFAULT gate order: OK"
@@ -88040,630 +88074,651 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // path is entered.  Boot self-tests must never block.
             // -----------------------------------------------------------------
             {
-                // 4-byte aligned futex word holding value 0.
-                let futex_word: [u32; 1] = [0];
-                let futex_ptr = futex_word.as_ptr() as u64;
-                // 16-byte timespec at (tv_sec=0, tv_nsec=0) — absolute time
-                // is the epoch / boot for the respective clock, so any
-                // current time exceeds it: the abs->rel conversion
-                // saturates at 0 and the wait falls through immediately.
-                let ts_buf = [0u8; 16];
-                let ts_ptr = ts_buf.as_ptr() as u64;
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // 4-byte aligned futex word holding value 0.
+                    let futex_word: [u32; 1] = [0];
+                    let futex_ptr = futex_word.as_ptr() as u64;
+                    // 16-byte timespec at (tv_sec=0, tv_nsec=0) — absolute time
+                    // is the epoch / boot for the respective clock, so any
+                    // current time exceeds it: the abs->rel conversion
+                    // saturates at 0 and the wait falls through immediately.
+                    let ts_buf = [0u8; 16];
+                    let ts_ptr = ts_buf.as_ptr() as u64;
 
-                const FUTEX_WAIT_OP: u64 = 0;
-                const FUTEX_WAKE_OP: u64 = 1;
-                const FUTEX_WAIT_BITSET_OP: u64 = 9;
-                const FUTEX_WAKE_BITSET_OP: u64 = 10;
-                const FUTEX_PRIVATE_FLAG_BIT: u64 = 0x80;
-                const FUTEX_CLOCK_REALTIME_BIT: u64 = 0x100;
+                    const FUTEX_WAIT_OP: u64 = 0;
+                    const FUTEX_WAKE_OP: u64 = 1;
+                    const FUTEX_WAIT_BITSET_OP: u64 = 9;
+                    const FUTEX_WAKE_BITSET_OP: u64 = 10;
+                    const FUTEX_PRIVATE_FLAG_BIT: u64 = 0x80;
+                    const FUTEX_CLOCK_REALTIME_BIT: u64 = 0x100;
 
-                // FUTEX_WAKE_BITSET with mask=0 -> EINVAL (validated before
-                // any addr touch, so address need not be canonical).
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAKE_BITSET_OP,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_BITSET mask=0 not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-                // FUTEX_WAIT_BITSET with mask=0 -> EINVAL.
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAIT_BITSET_OP,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET mask=0 not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-                // FUTEX_WAKE_BITSET with mask!=0, val=0 (wake nobody)
-                // -> 0 (no waiters, futex_wake reports 0).
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAKE_BITSET_OP,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0xFFFF_FFFF,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_BITSET val=0 not 0");
-                    return Err(KernelError::InternalError);
-                }
-                // FUTEX_WAKE_BITSET with mask=1, val=10 -> 0 (no waiters).
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAKE_BITSET_OP,
-                    arg2: 10,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 1,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_BITSET val=10 not 0");
-                    return Err(KernelError::InternalError);
-                }
-                // FUTEX_WAIT_BITSET with mask=MATCH_ANY, expected=1, value=0,
-                // NULL timeout -> value mismatch.  Linux returns -EAGAIN for a
-                // futex-wait whose word does not equal the expected value at
-                // entry (the native Ok(false) is mapped by linux_from_futex_wait).
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAIT_BITSET_OP,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0xFFFF_FFFF,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_WAIT_BITSET mismatch not EAGAIN"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // FUTEX_WAIT_BITSET with absolute past timeout (ts at (0,0))
-                // and value mismatch -> futex_wait_timeout returns Ok(false)
-                // (value checked before the deadline) -> Linux -EAGAIN.
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAIT_BITSET_OP,
-                    arg2: 1,
-                    arg3: ts_ptr,
-                    arg4: 0,
-                    arg5: 0xFFFF_FFFF,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_WAIT_BITSET past abs not EAGAIN"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Flag stripping: FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG with
-                // mask=0 still yields EINVAL after the op is recovered.
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAKE_BITSET_OP | FUTEX_PRIVATE_FLAG_BIT,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_WAKE_BITSET|PRIVATE mask=0 not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // FUTEX_CLOCK_REALTIME selects clock_realtime() in the abs->rel
-                // path.  With ts=(0,0) and value mismatch -> Linux -EAGAIN.
-                // The wait path runs to completion exercising the realtime branch.
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAIT_BITSET_OP | FUTEX_CLOCK_REALTIME_BIT | FUTEX_PRIVATE_FLAG_BIT,
-                    arg2: 1,
-                    arg3: ts_ptr,
-                    arg4: 0,
-                    arg5: 0xFFFF_FFFF,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_WAIT_BITSET|REALTIME not EAGAIN"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Unknown op (op=14 is past the highest defined FUTEX command,
-                // FUTEX_LOCK_PI2=13) -> ENOSYS.  (ops 11/12 are now implemented
-                // as FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI.)
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: 14,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX unknown op not ENOSYS");
-                    return Err(KernelError::InternalError);
-                }
-                // FUTEX_REQUEUE (op=3): no waiters, uaddr2=0 (wake-only),
-                // val=nr_wake=1, arg3=nr_requeue=0 -> 0.  Argument overload:
-                // arg2=val(nr_wake), arg3=val2(nr_requeue), arg4=uaddr2.
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: 3,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_REQUEUE no-waiters not 0");
-                    return Err(KernelError::InternalError);
-                }
-                // FUTEX_CMP_REQUEUE (op=4): val3 (arg5) is the compare value.
-                // *futex_ptr == 0, so cmpval=0 matches -> proceeds, 0 waiters
-                // -> 0.
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: 4,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE match not 0");
-                    return Err(KernelError::InternalError);
-                }
-                // FUTEX_CMP_REQUEUE with stale cmpval=1 != *futex_ptr(0)
-                // -> EAGAIN (the broadcast race-detection path).
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: 4,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 1,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE mismatch not EAGAIN"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // FUTEX_WAKE_OP (op=5): atomic RMW on uaddr2 + conditional
-                // double wake.  Use a *separate* scratch word so the shared
-                // futex_word (which later tests expect to read as 0) is not
-                // disturbed.  All these are non-blocking: no waiters exist, so
-                // both wake counts are 0 and the return is always 0 — what we
-                // verify is the RMW side effect and the error gating.
-                //
-                // Argument overload: arg2=val(nr_wake), arg3=val2(nr_wake2),
-                // arg4=uaddr2 (RMW target), arg5=encoded op.
-                const FUTEX_WAKE_OP_NR: u64 = 5;
-                let mut wop_word: [u32; 1] = [7];
-                let wop_ptr = wop_word.as_mut_ptr() as u64;
-
-                // ADD 3, compare old GT 0 (true) → word 7 becomes 10, 0 woken.
-                let enc_add = (1u64 << 28) | (4u64 << 24) | (3u64 << 12);
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAKE_OP_NR,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: wop_ptr,
-                    arg5: enc_add,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP ADD not 0");
-                    return Err(KernelError::InternalError);
-                }
-                if wop_word.first().copied() != Some(10) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_WAKE_OP ADD left {:?} (expected 10)",
-                        wop_word.first()
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Unknown op selector (op field = 7) → EINVAL, word untouched.
-                let enc_bad = 7u64 << 28;
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAKE_OP_NR,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: wop_ptr,
-                    arg5: enc_bad,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP bad-op not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-                if wop_word.first().copied() != Some(10) {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP bad-op mutated word");
-                    return Err(KernelError::InternalError);
-                }
-                // Flag stripping: op=5 | FUTEX_PRIVATE_FLAG still dispatches.
-                // SET 0, compare old(10) NE 0 (true) → word becomes 0, 0 woken.
-                let enc_set = 1u64 << 24; // op=SET(0), cmp=NE(1)
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAKE_OP_NR | FUTEX_PRIVATE_FLAG_BIT,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: wop_ptr,
-                    arg5: enc_set,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP|PRIVATE not 0");
-                    return Err(KernelError::InternalError);
-                }
-                if wop_word.first().copied() != Some(0) {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP SET left word nonzero");
-                    return Err(KernelError::InternalError);
-                }
-
-                // Regression: FUTEX_WAKE with no waiters -> 0.
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAKE_OP,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE regression not 0");
-                    return Err(KernelError::InternalError);
-                }
-                // Regression: FUTEX_WAIT value mismatch -> Ok(false) -> Linux
-                // -EAGAIN (the word is 0 here, expected 1; glibc requires the
-                // EAGAIN-on-mismatch contract — a positive return aborts it).
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: FUTEX_WAIT_OP,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT regression not EAGAIN");
-                    return Err(KernelError::InternalError);
-                }
-
-                // --- PI futex ops (LOCK_PI=6, UNLOCK_PI=7, TRYLOCK_PI=8,
-                //     LOCK_PI2=13) ---
-                // These verify the classic-op routing into the native PI
-                // handlers.  Ownership identity is packed into the low 30 bits
-                // of the futex word, so a caller with TID 0 (the boot thread
-                // runs these self-tests) cannot represent ownership: CAS(0, 0)
-                // looks like acquiring a free lock.  Real userspace threads
-                // never have TID 0, and the *primitive*-level deadlock checks
-                // run in a spawned (nonzero-TID) worker in `futex::self_test`.
-                // Here we test the parts that are meaningful regardless of TID:
-                //   - the contended path (foreign owner tid → EAGAIN),
-                //   - the uncontended LOCK/UNLOCK round trip,
-                //   - the LOCK_PI2 absolute-timeout argument wiring.
-                const FUTEX_LOCK_PI_OP: u64 = 6;
-                const FUTEX_UNLOCK_PI_OP: u64 = 7;
-                const FUTEX_TRYLOCK_PI_OP: u64 = 8;
-                const FUTEX_LOCK_PI2_OP: u64 = 13;
-                #[allow(clippy::cast_possible_truncation)]
-                let cur_tid = (crate::sched::current_task_id() as u32) & 0x3FFF_FFFF;
-
-                // (a) Contended: plant a foreign owner tid (nonzero, != ours)
-                //     → TRYLOCK_PI must report EAGAIN without touching the word.
-                let foreign_tid = {
-                    let t = (cur_tid ^ 1) & 0x3FFF_FFFF;
-                    if t == 0 { 2 } else { t }
-                };
-                let mut pi_word: [u32; 1] = [foreign_tid];
-                let pi_ptr = pi_word.as_mut_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: pi_ptr,
-                    arg1: FUTEX_TRYLOCK_PI_OP,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_TRYLOCK_PI contended not EAGAIN"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                if pi_word.first().copied() != Some(foreign_tid) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_TRYLOCK_PI contended mutated word"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-
-                // (b) If self-deadlock is representable (nonzero TID), TRYLOCK_PI
-                //     on a word we own must report EDEADLK.
-                if cur_tid != 0 {
-                    let mut owned: [u32; 1] = [cur_tid];
-                    let owned_ptr = owned.as_mut_ptr() as u64;
+                    // FUTEX_WAKE_BITSET with mask=0 -> EINVAL (validated before
+                    // any addr touch, so address need not be canonical).
                     let a = SyscallArgs {
-                        arg0: owned_ptr,
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAKE_BITSET_OP,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_WAKE_BITSET mask=0 not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // FUTEX_WAIT_BITSET with mask=0 -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAIT_BITSET_OP,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_WAIT_BITSET mask=0 not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // FUTEX_WAKE_BITSET with mask!=0, val=0 (wake nobody)
+                    // -> 0 (no waiters, futex_wake reports 0).
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAKE_BITSET_OP,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0xFFFF_FFFF,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_BITSET val=0 not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // FUTEX_WAKE_BITSET with mask=1, val=10 -> 0 (no waiters).
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAKE_BITSET_OP,
+                        arg2: 10,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 1,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_BITSET val=10 not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // FUTEX_WAIT_BITSET with mask=MATCH_ANY, expected=1, value=0,
+                    // NULL timeout -> value mismatch.  Linux returns -EAGAIN for a
+                    // futex-wait whose word does not equal the expected value at
+                    // entry (the native Ok(false) is mapped by linux_from_futex_wait).
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAIT_BITSET_OP,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0xFFFF_FFFF,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_WAIT_BITSET mismatch not EAGAIN"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // FUTEX_WAIT_BITSET with absolute past timeout (ts at (0,0))
+                    // and value mismatch -> futex_wait_timeout returns Ok(false)
+                    // (value checked before the deadline) -> Linux -EAGAIN.
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAIT_BITSET_OP,
+                        arg2: 1,
+                        arg3: ts_ptr,
+                        arg4: 0,
+                        arg5: 0xFFFF_FFFF,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_WAIT_BITSET past abs not EAGAIN"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Flag stripping: FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG with
+                    // mask=0 still yields EINVAL after the op is recovered.
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAKE_BITSET_OP | FUTEX_PRIVATE_FLAG_BIT,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_WAKE_BITSET|PRIVATE mask=0 not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // FUTEX_CLOCK_REALTIME selects clock_realtime() in the abs->rel
+                    // path.  With ts=(0,0) and value mismatch -> Linux -EAGAIN.
+                    // The wait path runs to completion exercising the realtime branch.
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAIT_BITSET_OP
+                            | FUTEX_CLOCK_REALTIME_BIT
+                            | FUTEX_PRIVATE_FLAG_BIT,
+                        arg2: 1,
+                        arg3: ts_ptr,
+                        arg4: 0,
+                        arg5: 0xFFFF_FFFF,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_WAIT_BITSET|REALTIME not EAGAIN"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Unknown op (op=14 is past the highest defined FUTEX command,
+                    // FUTEX_LOCK_PI2=13) -> ENOSYS.  (ops 11/12 are now implemented
+                    // as FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI.)
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: 14,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX unknown op not ENOSYS");
+                        return Err(KernelError::InternalError);
+                    }
+                    // FUTEX_REQUEUE (op=3): no waiters, uaddr2=0 (wake-only),
+                    // val=nr_wake=1, arg3=nr_requeue=0 -> 0.  Argument overload:
+                    // arg2=val(nr_wake), arg3=val2(nr_requeue), arg4=uaddr2.
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: 3,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_REQUEUE no-waiters not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // FUTEX_CMP_REQUEUE (op=4): val3 (arg5) is the compare value.
+                    // *futex_ptr == 0, so cmpval=0 matches -> proceeds, 0 waiters
+                    // -> 0.
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: 4,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE match not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // FUTEX_CMP_REQUEUE with stale cmpval=1 != *futex_ptr(0)
+                    // -> EAGAIN (the broadcast race-detection path).
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: 4,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 1,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE mismatch not EAGAIN"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // FUTEX_WAKE_OP (op=5): atomic RMW on uaddr2 + conditional
+                    // double wake.  Use a *separate* scratch word so the shared
+                    // futex_word (which later tests expect to read as 0) is not
+                    // disturbed.  All these are non-blocking: no waiters exist, so
+                    // both wake counts are 0 and the return is always 0 — what we
+                    // verify is the RMW side effect and the error gating.
+                    //
+                    // Argument overload: arg2=val(nr_wake), arg3=val2(nr_wake2),
+                    // arg4=uaddr2 (RMW target), arg5=encoded op.
+                    const FUTEX_WAKE_OP_NR: u64 = 5;
+                    let mut wop_word: [u32; 1] = [7];
+                    let wop_ptr = wop_word.as_mut_ptr() as u64;
+
+                    // ADD 3, compare old GT 0 (true) → word 7 becomes 10, 0 woken.
+                    let enc_add = (1u64 << 28) | (4u64 << 24) | (3u64 << 12);
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAKE_OP_NR,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: wop_ptr,
+                        arg5: enc_add,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP ADD not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    if wop_word.first().copied() != Some(10) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_WAKE_OP ADD left {:?} (expected 10)",
+                            wop_word.first()
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Unknown op selector (op field = 7) → EINVAL, word untouched.
+                    let enc_bad = 7u64 << 28;
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAKE_OP_NR,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: wop_ptr,
+                        arg5: enc_bad,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP bad-op not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    if wop_word.first().copied() != Some(10) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_WAKE_OP bad-op mutated word"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Flag stripping: op=5 | FUTEX_PRIVATE_FLAG still dispatches.
+                    // SET 0, compare old(10) NE 0 (true) → word becomes 0, 0 woken.
+                    let enc_set = 1u64 << 24; // op=SET(0), cmp=NE(1)
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAKE_OP_NR | FUTEX_PRIVATE_FLAG_BIT,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: wop_ptr,
+                        arg5: enc_set,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP|PRIVATE not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    if wop_word.first().copied() != Some(0) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_WAKE_OP SET left word nonzero"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Regression: FUTEX_WAKE with no waiters -> 0.
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAKE_OP,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE regression not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // Regression: FUTEX_WAIT value mismatch -> Ok(false) -> Linux
+                    // -EAGAIN (the word is 0 here, expected 1; glibc requires the
+                    // EAGAIN-on-mismatch contract — a positive return aborts it).
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: FUTEX_WAIT_OP,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT regression not EAGAIN");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // --- PI futex ops (LOCK_PI=6, UNLOCK_PI=7, TRYLOCK_PI=8,
+                    //     LOCK_PI2=13) ---
+                    // These verify the classic-op routing into the native PI
+                    // handlers.  Ownership identity is packed into the low 30 bits
+                    // of the futex word, so a caller with TID 0 (the boot thread
+                    // runs these self-tests) cannot represent ownership: CAS(0, 0)
+                    // looks like acquiring a free lock.  Real userspace threads
+                    // never have TID 0, and the *primitive*-level deadlock checks
+                    // run in a spawned (nonzero-TID) worker in `futex::self_test`.
+                    // Here we test the parts that are meaningful regardless of TID:
+                    //   - the contended path (foreign owner tid → EAGAIN),
+                    //   - the uncontended LOCK/UNLOCK round trip,
+                    //   - the LOCK_PI2 absolute-timeout argument wiring.
+                    const FUTEX_LOCK_PI_OP: u64 = 6;
+                    const FUTEX_UNLOCK_PI_OP: u64 = 7;
+                    const FUTEX_TRYLOCK_PI_OP: u64 = 8;
+                    const FUTEX_LOCK_PI2_OP: u64 = 13;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let cur_tid = (crate::sched::current_task_id() as u32) & 0x3FFF_FFFF;
+
+                    // (a) Contended: plant a foreign owner tid (nonzero, != ours)
+                    //     → TRYLOCK_PI must report EAGAIN without touching the word.
+                    let foreign_tid = {
+                        let t = (cur_tid ^ 1) & 0x3FFF_FFFF;
+                        if t == 0 { 2 } else { t }
+                    };
+                    let mut pi_word: [u32; 1] = [foreign_tid];
+                    let pi_ptr = pi_word.as_mut_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: pi_ptr,
                         arg1: FUTEX_TRYLOCK_PI_OP,
                         arg2: 0,
                         arg3: 0,
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EDEADLK) {
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: FUTEX_TRYLOCK_PI self not EDEADLK"
+                            "[syscall/linux]   FAIL: FUTEX_TRYLOCK_PI contended not EAGAIN"
                         );
                         return Err(KernelError::InternalError);
                     }
-                    let _ = owned.first();
-                }
-
-                // (c) Uncontended LOCK_PI (NULL timeout) → 0, then UNLOCK_PI → 0.
-                let mut free_word: [u32; 1] = [0];
-                let free_ptr = free_word.as_mut_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: free_ptr,
-                    arg1: FUTEX_LOCK_PI_OP,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_LOCK_PI uncontended not 0");
-                    return Err(KernelError::InternalError);
-                }
-                let a = SyscallArgs {
-                    arg0: free_ptr,
-                    arg1: FUTEX_UNLOCK_PI_OP,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_UNLOCK_PI not 0");
-                    return Err(KernelError::InternalError);
-                }
-
-                // (d) LOCK_PI2 with an absolute (already-elapsed, ts=0,0) timeout
-                //     → rel_ns saturates to 0 → try-once → uncontended acquire →
-                //     0.  Exercises read_timespec + abs->rel wiring for the PI
-                //     path.  Follow with UNLOCK_PI to restore the word.
-                let a = SyscallArgs {
-                    arg0: free_ptr,
-                    arg1: FUTEX_LOCK_PI2_OP,
-                    arg2: 0,
-                    arg3: ts_ptr,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_LOCK_PI2 timeout-acquire not 0");
-                    return Err(KernelError::InternalError);
-                }
-                let a = SyscallArgs {
-                    arg0: free_ptr,
-                    arg1: FUTEX_UNLOCK_PI_OP,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                let _ = dispatch_linux(nr::FUTEX, &a);
-                let _ = free_word.first();
-
-                // --- Requeue-PI ops (WAIT_REQUEUE_PI=11, CMP_REQUEUE_PI=12) ---
-                // The condvar→PI-mutex handoff.  The *functional* multi-waiter
-                // handoff (acquire → unlock → transfer) is covered by
-                // `futex::self_test::test_requeue_pi`, which runs in spawned
-                // nonzero-TID workers.  Here we verify the ABI translation: the
-                // argument overload mapping and the error gates, all of which are
-                // non-blocking and TID-agnostic.
-                const FUTEX_WAIT_REQUEUE_PI_OP: u64 = 11;
-                const FUTEX_CMP_REQUEUE_PI_OP: u64 = 12;
-                let mut rq_cond: [u32; 1] = [0];
-                let rq_cond_ptr = rq_cond.as_mut_ptr() as u64;
-                let mut rq_pi: [u32; 1] = [0];
-                let rq_pi_ptr = rq_pi.as_mut_ptr() as u64;
-
-                // (a) WAIT_REQUEUE_PI value mismatch: *cond(0) != val(9) → EAGAIN,
-                //     no blocking.  uaddr2 (arg4) is the PI mutex; NULL timeout.
-                let a = SyscallArgs {
-                    arg0: rq_cond_ptr,
-                    arg1: FUTEX_WAIT_REQUEUE_PI_OP,
-                    arg2: 9,
-                    arg3: 0,
-                    arg4: rq_pi_ptr,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_WAIT_REQUEUE_PI mismatch not EAGAIN"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // (b) WAIT_REQUEUE_PI with uaddr == uaddr2 → EINVAL (Linux forbids
-                //     requeuing a word onto itself).  Value matches so the EINVAL
-                //     gate, not the compare, is what fires.
-                let a = SyscallArgs {
-                    arg0: rq_cond_ptr,
-                    arg1: FUTEX_WAIT_REQUEUE_PI_OP,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: rq_cond_ptr,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_WAIT_REQUEUE_PI uaddr==uaddr2 not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // (c) CMP_REQUEUE_PI broadcast onto an empty condvar: *cond(0) ==
-                //     val3(0), nr_wake=val=1 (mandated), nr_requeue=arg3=MAX,
-                //     uaddr2=arg4.  No waiters parked → 0 affected.
-                let a = SyscallArgs {
-                    arg0: rq_cond_ptr,
-                    arg1: FUTEX_CMP_REQUEUE_PI_OP,
-                    arg2: 1,
-                    arg3: 0xFFFF_FFFF,
-                    arg4: rq_pi_ptr,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE_PI empty not 0");
-                    return Err(KernelError::InternalError);
-                }
-                // (d) CMP_REQUEUE_PI stale compare: val3(1) != *cond(0) → EAGAIN.
-                let a = SyscallArgs {
-                    arg0: rq_cond_ptr,
-                    arg1: FUTEX_CMP_REQUEUE_PI_OP,
-                    arg2: 1,
-                    arg3: 0xFFFF_FFFF,
-                    arg4: rq_pi_ptr,
-                    arg5: 1,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE_PI mismatch not EAGAIN"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // (e) CMP_REQUEUE_PI requires nr_wake == 1: val=2 → EINVAL before
-                //     any compare or queue access.
-                let a = SyscallArgs {
-                    arg0: rq_cond_ptr,
-                    arg1: FUTEX_CMP_REQUEUE_PI_OP,
-                    arg2: 2,
-                    arg3: 0,
-                    arg4: rq_pi_ptr,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE_PI nr_wake!=1 not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                let _ = rq_cond.first();
-                let _ = rq_pi.first();
-
-                // Batch 352: FUTEX op int truncation.
-                //
-                // Linux's SYSCALL_DEFINE6(futex, ..., int op, ...) truncates
-                // rsi to its low 32 bits before the switch.  Pre-batch we
-                // kept raw_op = args.arg1 at u64 width, so high-half garbage
-                // skipped past every match arm to the ENOSYS default arm
-                // where Linux would dispatch the truncated op.
-
-                // (a) op = 0x1_0000_0001 (high garbage + FUTEX_WAKE_OP=1)
-                //     with futex_ptr/val=0 -> truncates to 1, dispatches
-                //     FUTEX_WAKE, no waiters -> 0.  Pre-batch: ENOSYS.
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: 0x1_0000_0001,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX(high|WAKE) not 0");
-                    return Err(KernelError::InternalError);
-                }
-
-                // (b) op = 0xFFFF_FFFF_0000_0009 (sign-extended-looking high
-                //     half + FUTEX_WAIT_BITSET=9) with mask=0xFFFFFFFF,
-                //     val=1, futex_ptr value=0 (mismatch) -> -EAGAIN (Linux
-                //     value-mismatch contract; the low-32 op truncation still
-                //     resolves to WAIT_BITSET).  Pre-batch: ENOSYS.
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: 0xFFFF_FFFF_0000_0009,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0xFFFF_FFFF,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX(sxhigh|WAIT_BITSET) not EAGAIN");
-                    return Err(KernelError::InternalError);
-                }
-
-                // (c) op = 0x1_0000_000E (high garbage + 14, past the highest
-                //     defined FUTEX command).  Truncates to 14 -> still ENOSYS.
-                //     Regression guard: an unsupported truncated op must still
-                //     return ENOSYS.  (Was op 11 before WAIT_REQUEUE_PI landed.)
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: 0x1_0000_000E,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX(high|unknown-14) not ENOSYS");
-                    return Err(KernelError::InternalError);
-                }
-
-                // (d) op = 0x1_0000_0081 (high garbage + FUTEX_WAKE_OP=1 |
-                //     FUTEX_PRIVATE_FLAG=0x80) -> truncates to 0x81, FUTEX_
-                //     CMD_MASK strips 0x80 leaving op=1, dispatches
-                //     FUTEX_WAKE -> 0.  Verifies that the PRIVATE flag bit
-                //     survives truncation and stripping in the right order.
-                let a = SyscallArgs {
-                    arg0: futex_ptr,
-                    arg1: 0x1_0000_0081,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: FUTEX(high|WAKE|PRIVATE) not 0");
-                    return Err(KernelError::InternalError);
-                }
-
-                // (e) Cast-isolation: 4-case table verifying the u64 -> u32
-                //     -> u64 widening preserves the low-32 bit pattern and
-                //     zeroes the high half.
-                let cases: [(u64, u64); 4] = [
-                    (0x1_0000_0001, 1),
-                    (0xFFFF_FFFF_0000_0009, 9),
-                    (0x1_0000_000B, 11),
-                    (0x1_0000_0081, 0x81),
-                ];
-                for &(input, expect) in &cases {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let got = u64::from(input as u32);
-                    if got != expect {
+                    if pi_word.first().copied() != Some(foreign_tid) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: futex trunc {:#x} -> {:#x} (want {:#x})",
-                            input,
-                            got,
-                            expect
+                            "[syscall/linux]   FAIL: FUTEX_TRYLOCK_PI contended mutated word"
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
 
-                serial_println!("[syscall/linux]   futex op int truncation: OK");
+                    // (b) If self-deadlock is representable (nonzero TID), TRYLOCK_PI
+                    //     on a word we own must report EDEADLK.
+                    if cur_tid != 0 {
+                        let mut owned: [u32; 1] = [cur_tid];
+                        let owned_ptr = owned.as_mut_ptr() as u64;
+                        let a = SyscallArgs {
+                            arg0: owned_ptr,
+                            arg1: FUTEX_TRYLOCK_PI_OP,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EDEADLK) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: FUTEX_TRYLOCK_PI self not EDEADLK"
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                        let _ = owned.first();
+                    }
+
+                    // (c) Uncontended LOCK_PI (NULL timeout) → 0, then UNLOCK_PI → 0.
+                    let mut free_word: [u32; 1] = [0];
+                    let free_ptr = free_word.as_mut_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: free_ptr,
+                        arg1: FUTEX_LOCK_PI_OP,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_LOCK_PI uncontended not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    let a = SyscallArgs {
+                        arg0: free_ptr,
+                        arg1: FUTEX_UNLOCK_PI_OP,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_UNLOCK_PI not 0");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // (d) LOCK_PI2 with an absolute (already-elapsed, ts=0,0) timeout
+                    //     → rel_ns saturates to 0 → try-once → uncontended acquire →
+                    //     0.  Exercises read_timespec + abs->rel wiring for the PI
+                    //     path.  Follow with UNLOCK_PI to restore the word.
+                    let a = SyscallArgs {
+                        arg0: free_ptr,
+                        arg1: FUTEX_LOCK_PI2_OP,
+                        arg2: 0,
+                        arg3: ts_ptr,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_LOCK_PI2 timeout-acquire not 0"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    let a = SyscallArgs {
+                        arg0: free_ptr,
+                        arg1: FUTEX_UNLOCK_PI_OP,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    let _ = dispatch_linux(nr::FUTEX, &a);
+                    let _ = free_word.first();
+
+                    // --- Requeue-PI ops (WAIT_REQUEUE_PI=11, CMP_REQUEUE_PI=12) ---
+                    // The condvar→PI-mutex handoff.  The *functional* multi-waiter
+                    // handoff (acquire → unlock → transfer) is covered by
+                    // `futex::self_test::test_requeue_pi`, which runs in spawned
+                    // nonzero-TID workers.  Here we verify the ABI translation: the
+                    // argument overload mapping and the error gates, all of which are
+                    // non-blocking and TID-agnostic.
+                    const FUTEX_WAIT_REQUEUE_PI_OP: u64 = 11;
+                    const FUTEX_CMP_REQUEUE_PI_OP: u64 = 12;
+                    let mut rq_cond: [u32; 1] = [0];
+                    let rq_cond_ptr = rq_cond.as_mut_ptr() as u64;
+                    let mut rq_pi: [u32; 1] = [0];
+                    let rq_pi_ptr = rq_pi.as_mut_ptr() as u64;
+
+                    // (a) WAIT_REQUEUE_PI value mismatch: *cond(0) != val(9) → EAGAIN,
+                    //     no blocking.  uaddr2 (arg4) is the PI mutex; NULL timeout.
+                    let a = SyscallArgs {
+                        arg0: rq_cond_ptr,
+                        arg1: FUTEX_WAIT_REQUEUE_PI_OP,
+                        arg2: 9,
+                        arg3: 0,
+                        arg4: rq_pi_ptr,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_WAIT_REQUEUE_PI mismatch not EAGAIN"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (b) WAIT_REQUEUE_PI with uaddr == uaddr2 → EINVAL (Linux forbids
+                    //     requeuing a word onto itself).  Value matches so the EINVAL
+                    //     gate, not the compare, is what fires.
+                    let a = SyscallArgs {
+                        arg0: rq_cond_ptr,
+                        arg1: FUTEX_WAIT_REQUEUE_PI_OP,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: rq_cond_ptr,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_WAIT_REQUEUE_PI uaddr==uaddr2 not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (c) CMP_REQUEUE_PI broadcast onto an empty condvar: *cond(0) ==
+                    //     val3(0), nr_wake=val=1 (mandated), nr_requeue=arg3=MAX,
+                    //     uaddr2=arg4.  No waiters parked → 0 affected.
+                    let a = SyscallArgs {
+                        arg0: rq_cond_ptr,
+                        arg1: FUTEX_CMP_REQUEUE_PI_OP,
+                        arg2: 1,
+                        arg3: 0xFFFF_FFFF,
+                        arg4: rq_pi_ptr,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE_PI empty not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // (d) CMP_REQUEUE_PI stale compare: val3(1) != *cond(0) → EAGAIN.
+                    let a = SyscallArgs {
+                        arg0: rq_cond_ptr,
+                        arg1: FUTEX_CMP_REQUEUE_PI_OP,
+                        arg2: 1,
+                        arg3: 0xFFFF_FFFF,
+                        arg4: rq_pi_ptr,
+                        arg5: 1,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE_PI mismatch not EAGAIN"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (e) CMP_REQUEUE_PI requires nr_wake == 1: val=2 → EINVAL before
+                    //     any compare or queue access.
+                    let a = SyscallArgs {
+                        arg0: rq_cond_ptr,
+                        arg1: FUTEX_CMP_REQUEUE_PI_OP,
+                        arg2: 2,
+                        arg3: 0,
+                        arg4: rq_pi_ptr,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE_PI nr_wake!=1 not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    let _ = rq_cond.first();
+                    let _ = rq_pi.first();
+
+                    // Batch 352: FUTEX op int truncation.
+                    //
+                    // Linux's SYSCALL_DEFINE6(futex, ..., int op, ...) truncates
+                    // rsi to its low 32 bits before the switch.  Pre-batch we
+                    // kept raw_op = args.arg1 at u64 width, so high-half garbage
+                    // skipped past every match arm to the ENOSYS default arm
+                    // where Linux would dispatch the truncated op.
+
+                    // (a) op = 0x1_0000_0001 (high garbage + FUTEX_WAKE_OP=1)
+                    //     with futex_ptr/val=0 -> truncates to 1, dispatches
+                    //     FUTEX_WAKE, no waiters -> 0.  Pre-batch: ENOSYS.
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: 0x1_0000_0001,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX(high|WAKE) not 0");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // (b) op = 0xFFFF_FFFF_0000_0009 (sign-extended-looking high
+                    //     half + FUTEX_WAIT_BITSET=9) with mask=0xFFFFFFFF,
+                    //     val=1, futex_ptr value=0 (mismatch) -> -EAGAIN (Linux
+                    //     value-mismatch contract; the low-32 op truncation still
+                    //     resolves to WAIT_BITSET).  Pre-batch: ENOSYS.
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: 0xFFFF_FFFF_0000_0009,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0xFFFF_FFFF,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX(sxhigh|WAIT_BITSET) not EAGAIN"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // (c) op = 0x1_0000_000E (high garbage + 14, past the highest
+                    //     defined FUTEX command).  Truncates to 14 -> still ENOSYS.
+                    //     Regression guard: an unsupported truncated op must still
+                    //     return ENOSYS.  (Was op 11 before WAIT_REQUEUE_PI landed.)
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: 0x1_0000_000E,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FUTEX(high|unknown-14) not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // (d) op = 0x1_0000_0081 (high garbage + FUTEX_WAKE_OP=1 |
+                    //     FUTEX_PRIVATE_FLAG=0x80) -> truncates to 0x81, FUTEX_
+                    //     CMD_MASK strips 0x80 leaving op=1, dispatches
+                    //     FUTEX_WAKE -> 0.  Verifies that the PRIVATE flag bit
+                    //     survives truncation and stripping in the right order.
+                    let a = SyscallArgs {
+                        arg0: futex_ptr,
+                        arg1: 0x1_0000_0081,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: FUTEX(high|WAKE|PRIVATE) not 0");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // (e) Cast-isolation: 4-case table verifying the u64 -> u32
+                    //     -> u64 widening preserves the low-32 bit pattern and
+                    //     zeroes the high half.
+                    let cases: [(u64, u64); 4] = [
+                        (0x1_0000_0001, 1),
+                        (0xFFFF_FFFF_0000_0009, 9),
+                        (0x1_0000_000B, 11),
+                        (0x1_0000_0081, 0x81),
+                    ];
+                    for &(input, expect) in &cases {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let got = u64::from(input as u32);
+                        if got != expect {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: futex trunc {:#x} -> {:#x} (want {:#x})",
+                                input,
+                                got,
+                                expect
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+
+                    serial_println!("[syscall/linux]   futex op int truncation: OK");
+                    Ok(())
+                }
+                case()?;
             }
 
             // membarrier (batch 114): full cmd set.
@@ -97667,535 +97722,266 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             let waiters_buf = [0u8; 48];
             let waiters_ptr = waiters_buf.as_ptr() as u64;
 
-            // remap_file_pages misaligned addr -> EINVAL.
-            //   Pre-batch's alignment check (kept post-batch as a fidelity
-            //   approximation of Linux's `start & PAGE_MASK` round-down)
-            //   yields EINVAL ahead of the prot gate.  Use prot=0 here so
-            //   the test isolates the alignment cause.
-            let a = SyscallArgs {
-                arg0: 0x4001,
-                arg1: 0x4000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: remap_file_pages misaligned not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // Batch 368: Linux's remap_file_pages rejects ANY non-zero prot
-            // (`if (prot) return -EINVAL;`).  Pre-batch only rejected bits
-            // outside the PROT_* mask, so PROT_READ (1) etc. fell through
-            // to ENOSYS where Linux returns EINVAL.
-            // remap_file_pages prot=PROT_READ (1) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0x4000,
-                arg1: 0x4000,
-                arg2: 1,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: remap_file_pages prot=PROT_READ not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // remap_file_pages prot=PROT_READ|WRITE|EXEC (7) -> EINVAL.
-            //   Pre-batch fell through to ENOSYS (all bits in the 0x37 mask).
-            let a = SyscallArgs {
-                arg0: 0x4000,
-                arg1: 0x4000,
-                arg2: 7,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: remap_file_pages prot=RWX not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // remap_file_pages prot=0x80 (out of pre-batch's 0x37 mask) -> EINVAL.
-            //   Pre-batch caught this via the bit-mask gate; post-batch via
-            //   the new `prot != 0` gate.  Same errno, different cause.
-            let a = SyscallArgs {
-                arg0: 0x4000,
-                arg1: 0x4000,
-                arg2: 0x80,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: remap_file_pages prot=0x80 not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // remap_file_pages prot=0x1_0000_0000 (i32 truncation trap) -> EINVAL.
-            //   Pre-batch cast prot to i32: 0x1_0000_0000 truncates to 0,
-            //   passes the bit-mask gate, falls through to ENOSYS.
-            //   Post-batch compares args.arg2 directly (u64): high bit set,
-            //   prot != 0 gate fires -> EINVAL (matches Linux's unsigned
-            //   long prot).
-            let a = SyscallArgs {
-                arg0: 0x4000,
-                arg1: 0x4000,
-                arg2: 0x1_0000_0000,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: remap_file_pages prot=0x1_0000_0000 not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // remap_file_pages aligned + prot=0 -> ENOSYS.
-            //   The only "valid" prot in Linux is 0; we have no non-linear
-            //   mapping backing, so terminal ENOSYS.
-            let a = SyscallArgs {
-                arg0: 0x4000,
-                arg1: 0x4000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::ENOSYS) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: remap_file_pages valid (prot=0) not ENOSYS"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   remap_file_pages prot!=0 EINVAL (all non-zero prots): OK"
-            );
-
-            // Batch 390: Linux's mm/mmap.c::SYSCALL_DEFINE5(remap_file_pages)
-            // gates after prot:
-            //
-            //   start = start & PAGE_MASK; size = size & PAGE_MASK;
-            //   if (start + size <= start) return -EINVAL;
-            //   if (pgoff + (size >> PAGE_SHIFT) < pgoff) return -EINVAL;
-            //
-            // Pre-batch we ignored both checks: size=0 (and size<PAGE_SIZE)
-            // flowed through to ENOSYS where Linux returns EINVAL, and
-            // pgoff overflow was never validated at all.
-            //
-            // remap_file_pages size=0 -> EINVAL (start+size <= start at start=0).
-            let a = SyscallArgs {
-                arg0: 0x4000,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: remap_file_pages size=0 not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // remap_file_pages size=0x3fff (sub-page, mask -> 0) -> EINVAL.
-            //   Linux's `size & PAGE_MASK` drops low bits; if everything
-            //   was sub-page, size_masked == 0 -> same EINVAL as size=0.
-            let a = SyscallArgs {
-                arg0: 0x4000,
-                arg1: 0x3fff,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: remap_file_pages sub-page size not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // remap_file_pages start+size overflow -> EINVAL.
-            //   addr = 0xffff_ffff_ffff_c000 (aligned, max u64 rounded down),
-            //   size = 0x4000 -> end wraps to 0 <= addr -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0xffff_ffff_ffff_c000,
-                arg1: 0x4000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: remap_file_pages addr+size overflow not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // remap_file_pages pgoff overflow -> EINVAL.
-            //   pgoff = u64::MAX, size = 0x4000 (pages = 1) ->
-            //   pgoff + 1 wraps to 0 < pgoff -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0x4000,
-                arg1: 0x4000,
-                arg2: 0,
-                arg3: u64::MAX,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: remap_file_pages pgoff overflow not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   remap_file_pages size/pgoff overflow EINVAL gates (start+size, pgoff+pages): OK"
-            );
-
-            // ioprio_set bad which -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 99,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: ioprio_set bad which not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // ioprio_set bad class -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: 0,
-                arg2: 4 << 13,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: ioprio_set bad class not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // ioprio_set kernel context with who=0 -> ESRCH (no caller PCB).
-            // This replaces the pre-batch behaviour where the stub
-            // returned 0 unconditionally; the batch-87 round-trip
-            // implementation surfaces "no such target" instead.
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: 0,
-                arg2: (2 << 13) | 4,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::ESRCH) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: ioprio_set kernel-ctx who=0 not ESRCH ({})",
-                    dispatch_linux(nr::IOPRIO_SET, &a).value
-                );
-                return Err(KernelError::InternalError);
-            }
-            // ioprio_get kernel context with who=0 -> ESRCH for the
-            // same reason.
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::ESRCH) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: ioprio_get kernel-ctx who=0 not ESRCH ({})",
-                    dispatch_linux(nr::IOPRIO_GET, &a).value
-                );
-                return Err(KernelError::InternalError);
-            }
-            // ioprio_get bad which -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 99,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: ioprio_get bad which not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-
-            // Batch 87 round-trip via a real PCB.
-            //
-            //   1. Fresh process observes IOPRIO_DEFAULT = (BE << 13) | 4.
-            //   2. ioprio_set(IOPRIO_WHO_PROCESS, target_pid, (RT << 13) | 0)
-            //      succeeds; ioprio_get returns the same value.
-            //   3. Same with class=NONE (0), class=IDLE (3), and a range
-            //      of data values.
-            //   4. data > 7 -> EINVAL.
-            //   5. class > 3 (class==4, 5, 6, 7) -> EINVAL.
-            //   6. who < 0 -> ESRCH.
-            //   7. IOPRIO_WHO_PGRP / _USER with who > 0 -> ESRCH.
-            //   8. ioprio_set on a destroyed pid -> ESRCH.
             {
-                let test_pid = pcb::create("ioprio-test", 0);
-                // Default value.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: test_pid,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::IOPRIO_GET, &a).value != i64::from(pcb::LINUX_IOPRIO_DEFAULT)
-                {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: ioprio_get default not LINUX_IOPRIO_DEFAULT ({})",
-                        dispatch_linux(nr::IOPRIO_GET, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Set BE/7, IDLE/4, NONE/0 — each must round-trip.
-                // RT (class=1) is no longer in this loop because batch 431
-                // routes RT through the EPERM gate (CAP_SYS_NICE absent in
-                // this ABI); see the dedicated RT probe below.
-                for (class, data) in [(2, 7), (3, 4), (0, 0)] {
-                    let packed: i32 = (class << pcb::LINUX_IOPRIO_CLASS_SHIFT) | data;
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // remap_file_pages misaligned addr -> EINVAL.
+                    //   Pre-batch's alignment check (kept post-batch as a fidelity
+                    //   approximation of Linux's `start & PAGE_MASK` round-down)
+                    //   yields EINVAL ahead of the prot gate.  Use prot=0 here so
+                    //   the test isolates the alignment cause.
                     let a = SyscallArgs {
-                        arg0: 1,
-                        arg1: test_pid,
-                        arg2: packed as u64,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::IOPRIO_SET, &a).value != 0 {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: ioprio_set({},{}) not 0 ({})",
-                            class,
-                            data,
-                            dispatch_linux(nr::IOPRIO_SET, &a).value,
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    let a = SyscallArgs {
-                        arg0: 1,
-                        arg1: test_pid,
+                        arg0: 0x4001,
+                        arg1: 0x4000,
                         arg2: 0,
                         arg3: 0,
                         arg4: 0,
                         arg5: 0,
                     };
-                    let r = dispatch_linux(nr::IOPRIO_GET, &a).value;
-                    if r != i64::from(packed) {
+                    if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: ioprio_get after set({},{}) -> {}, expected {}",
-                            class,
-                            data,
-                            r,
-                            packed,
+                            "[syscall/linux]   FAIL: remap_file_pages misaligned not EINVAL"
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // Batch 431 — RT class → EPERM (CAP_SYS_NICE check is the
-                // first thing Linux runs; we expose no way to acquire it).
-                for data in [0i32, 3, 7] {
-                    let packed: i32 =
-                        (pcb::LINUX_IOPRIO_CLASS_RT << pcb::LINUX_IOPRIO_CLASS_SHIFT) | data;
+                    // Batch 368: Linux's remap_file_pages rejects ANY non-zero prot
+                    // (`if (prot) return -EINVAL;`).  Pre-batch only rejected bits
+                    // outside the PROT_* mask, so PROT_READ (1) etc. fell through
+                    // to ENOSYS where Linux returns EINVAL.
+                    // remap_file_pages prot=PROT_READ (1) -> EINVAL.
                     let a = SyscallArgs {
-                        arg0: 1,
-                        arg1: test_pid,
-                        arg2: packed as u64,
+                        arg0: 0x4000,
+                        arg1: 0x4000,
+                        arg2: 1,
                         arg3: 0,
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EPERM) {
+                    if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: ioprio_set(RT,{}) not EPERM ({})",
-                            data,
-                            dispatch_linux(nr::IOPRIO_SET, &a).value,
+                            "[syscall/linux]   FAIL: remap_file_pages prot=PROT_READ not EINVAL"
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // Batch 431 — NONE class with non-zero data → EINVAL.
-                // Pre-batch this silently succeeded (data field stored
-                // alongside an empty class), hiding caller bugs.
-                for data in [1i32, 4, 7] {
-                    let packed: i32 =
-                        (pcb::LINUX_IOPRIO_CLASS_NONE << pcb::LINUX_IOPRIO_CLASS_SHIFT) | data;
+                    // remap_file_pages prot=PROT_READ|WRITE|EXEC (7) -> EINVAL.
+                    //   Pre-batch fell through to ENOSYS (all bits in the 0x37 mask).
                     let a = SyscallArgs {
-                        arg0: 1,
-                        arg1: test_pid,
-                        arg2: packed as u64,
+                        arg0: 0x4000,
+                        arg1: 0x4000,
+                        arg2: 7,
                         arg3: 0,
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: ioprio_set(NONE,{}) not EINVAL ({})",
-                            data,
-                            dispatch_linux(nr::IOPRIO_SET, &a).value,
+                            "[syscall/linux]   FAIL: remap_file_pages prot=RWX not EINVAL"
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // Batch 431 — IDLE class with arbitrary data → succeeds
-                // (Linux's IDLE arm has no data-range check; pre-batch
-                // we rejected data>=8 here with EINVAL).
-                for data in [0i32, 7, 8, 99, pcb::LINUX_IOPRIO_DATA_MASK] {
-                    let packed: i32 =
-                        (pcb::LINUX_IOPRIO_CLASS_IDLE << pcb::LINUX_IOPRIO_CLASS_SHIFT) | data;
+                    // remap_file_pages prot=0x80 (out of pre-batch's 0x37 mask) -> EINVAL.
+                    //   Pre-batch caught this via the bit-mask gate; post-batch via
+                    //   the new `prot != 0` gate.  Same errno, different cause.
                     let a = SyscallArgs {
-                        arg0: 1,
-                        arg1: test_pid,
-                        arg2: packed as u64,
+                        arg0: 0x4000,
+                        arg1: 0x4000,
+                        arg2: 0x80,
                         arg3: 0,
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::IOPRIO_SET, &a).value != 0 {
+                    if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: ioprio_set(IDLE,{}) not 0 ({})",
-                            data,
-                            dispatch_linux(nr::IOPRIO_SET, &a).value,
+                            "[syscall/linux]   FAIL: remap_file_pages prot=0x80 not EINVAL"
                         );
                         return Err(KernelError::InternalError);
                     }
-                    // Round-trip the value through the PCB store.
+                    // remap_file_pages prot=0x1_0000_0000 (i32 truncation trap) -> EINVAL.
+                    //   Pre-batch cast prot to i32: 0x1_0000_0000 truncates to 0,
+                    //   passes the bit-mask gate, falls through to ENOSYS.
+                    //   Post-batch compares args.arg2 directly (u64): high bit set,
+                    //   prot != 0 gate fires -> EINVAL (matches Linux's unsigned
+                    //   long prot).
                     let a = SyscallArgs {
-                        arg0: 1,
-                        arg1: test_pid,
+                        arg0: 0x4000,
+                        arg1: 0x4000,
+                        arg2: 0x1_0000_0000,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: remap_file_pages prot=0x1_0000_0000 not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // remap_file_pages aligned + prot=0 -> ENOSYS.
+                    //   The only "valid" prot in Linux is 0; we have no non-linear
+                    //   mapping backing, so terminal ENOSYS.
+                    let a = SyscallArgs {
+                        arg0: 0x4000,
+                        arg1: 0x4000,
                         arg2: 0,
                         arg3: 0,
                         arg4: 0,
                         arg5: 0,
                     };
-                    let r = dispatch_linux(nr::IOPRIO_GET, &a).value;
-                    if r != i64::from(packed) {
+                    if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::ENOSYS) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: ioprio_get after IDLE/{} -> {}, expected {}",
-                            data,
-                            r,
-                            packed,
+                            "[syscall/linux]   FAIL: remap_file_pages valid (prot=0) not ENOSYS"
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // Batch 431 gate-order probe — bad which combined with
-                // RT class: Linux runs class gate first (EPERM), pre-
-                // batch we ran which gate first (EINVAL).
-                {
-                    let packed: i32 = pcb::LINUX_IOPRIO_CLASS_RT << pcb::LINUX_IOPRIO_CLASS_SHIFT;
-                    let a = SyscallArgs {
-                        arg0: 99,
-                        arg1: test_pid,
-                        arg2: packed as u64,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EPERM) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: ioprio_set(which=99, RT) not EPERM ({})",
-                            dispatch_linux(nr::IOPRIO_SET, &a).value,
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // Batch 431 gate-order probe — bad which combined with
-                // NONE class + non-zero data: Linux runs class gate
-                // first (EINVAL on data), pre-batch we ran which gate
-                // first (also EINVAL, but for a different reason).
-                // Same errno, so we only verify it's still EINVAL — the
-                // gate-order change is internal but worth recording.
-                {
-                    let packed: i32 =
-                        (pcb::LINUX_IOPRIO_CLASS_NONE << pcb::LINUX_IOPRIO_CLASS_SHIFT) | 5;
-                    let a = SyscallArgs {
-                        arg0: 99,
-                        arg1: test_pid,
-                        arg2: packed as u64,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: ioprio_set(which=99, NONE+5) not EINVAL ({})",
-                            dispatch_linux(nr::IOPRIO_SET, &a).value,
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // data > 7 -> EINVAL.
-                for bad_data in [8i32, 9, 0xFF, pcb::LINUX_IOPRIO_DATA_MASK] {
-                    let packed: i32 = (2 << pcb::LINUX_IOPRIO_CLASS_SHIFT) | bad_data;
-                    let a = SyscallArgs {
-                        arg0: 1,
-                        arg1: test_pid,
-                        arg2: packed as u64,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: ioprio_set bad data {} not EINVAL ({})",
-                            bad_data,
-                            dispatch_linux(nr::IOPRIO_SET, &a).value,
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // class > 3 -> EINVAL.
-                for bad_class in [4i32, 5, 6, 7] {
-                    let packed: i32 = bad_class << pcb::LINUX_IOPRIO_CLASS_SHIFT;
-                    let a = SyscallArgs {
-                        arg0: 1,
-                        arg1: test_pid,
-                        arg2: packed as u64,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: ioprio_set bad class {} not EINVAL ({})",
-                            bad_class,
-                            dispatch_linux(nr::IOPRIO_SET, &a).value,
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // who < 0 -> ESRCH.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: (-1i64) as u64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::ESRCH) {
                     serial_println!(
-                        "[syscall/linux]   FAIL: ioprio_get who=-1 not ESRCH ({})",
-                        dispatch_linux(nr::IOPRIO_GET, &a).value
+                        "[syscall/linux]   remap_file_pages prot!=0 EINVAL (all non-zero prots): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // IOPRIO_WHO_PGRP / _USER with who > 0 -> ESRCH.
-                for which in [2u64, 3] {
+                case()?;
+            }
+
+            {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Batch 390: Linux's mm/mmap.c::SYSCALL_DEFINE5(remap_file_pages)
+                    // gates after prot:
+                    //
+                    //   start = start & PAGE_MASK; size = size & PAGE_MASK;
+                    //   if (start + size <= start) return -EINVAL;
+                    //   if (pgoff + (size >> PAGE_SHIFT) < pgoff) return -EINVAL;
+                    //
+                    // Pre-batch we ignored both checks: size=0 (and size<PAGE_SIZE)
+                    // flowed through to ENOSYS where Linux returns EINVAL, and
+                    // pgoff overflow was never validated at all.
+                    //
+                    // remap_file_pages size=0 -> EINVAL (start+size <= start at start=0).
                     let a = SyscallArgs {
-                        arg0: which,
-                        arg1: test_pid,
+                        arg0: 0x4000,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: remap_file_pages size=0 not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // remap_file_pages size=0x3fff (sub-page, mask -> 0) -> EINVAL.
+                    //   Linux's `size & PAGE_MASK` drops low bits; if everything
+                    //   was sub-page, size_masked == 0 -> same EINVAL as size=0.
+                    let a = SyscallArgs {
+                        arg0: 0x4000,
+                        arg1: 0x3fff,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: remap_file_pages sub-page size not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // remap_file_pages start+size overflow -> EINVAL.
+                    //   addr = 0xffff_ffff_ffff_c000 (aligned, max u64 rounded down),
+                    //   size = 0x4000 -> end wraps to 0 <= addr -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0xffff_ffff_ffff_c000,
+                        arg1: 0x4000,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: remap_file_pages addr+size overflow not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // remap_file_pages pgoff overflow -> EINVAL.
+                    //   pgoff = u64::MAX, size = 0x4000 (pages = 1) ->
+                    //   pgoff + 1 wraps to 0 < pgoff -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0x4000,
+                        arg1: 0x4000,
+                        arg2: 0,
+                        arg3: u64::MAX,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: remap_file_pages pgoff overflow not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   remap_file_pages size/pgoff overflow EINVAL gates (start+size, pgoff+pages): OK"
+                    );
+                    Ok(())
+                }
+                case()?;
+            }
+
+            {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // ioprio_set bad which -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 99,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: ioprio_set bad which not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // ioprio_set bad class -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 0,
+                        arg2: 4 << 13,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: ioprio_set bad class not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // ioprio_set kernel context with who=0 -> ESRCH (no caller PCB).
+                    // This replaces the pre-batch behaviour where the stub
+                    // returned 0 unconditionally; the batch-87 round-trip
+                    // implementation surfaces "no such target" instead.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 0,
+                        arg2: (2 << 13) | 4,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::ESRCH) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: ioprio_set kernel-ctx who=0 not ESRCH ({})",
+                            dispatch_linux(nr::IOPRIO_SET, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // ioprio_get kernel context with who=0 -> ESRCH for the
+                    // same reason.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 0,
                         arg2: 0,
                         arg3: 0,
                         arg4: 0,
@@ -98203,793 +97989,1146 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     };
                     if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::ESRCH) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: ioprio_get which={} who>0 not ESRCH ({})",
-                            which,
+                            "[syscall/linux]   FAIL: ioprio_get kernel-ctx who=0 not ESRCH ({})",
                             dispatch_linux(nr::IOPRIO_GET, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
+                    // ioprio_get bad which -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 99,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: ioprio_get bad which not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
+                case()?;
+            }
 
-                // pcb helper round-trip.  The last successful syscall-
-                // level set was the IDLE/LINUX_IOPRIO_DATA_MASK probe
-                // from the batch-431 IDLE loop, packed value
-                // (CLASS_IDLE << SHIFT) | DATA_MASK = (3<<13)|8191 =
-                // 32767.  Re-pack here so the assertion tracks the
-                // constants instead of a magic number.
-                let last_packed: i32 = (pcb::LINUX_IOPRIO_CLASS_IDLE
-                    << pcb::LINUX_IOPRIO_CLASS_SHIFT)
-                    | pcb::LINUX_IOPRIO_DATA_MASK;
-                assert_eq!(pcb::get_ioprio(test_pid), Some(last_packed));
-                // Helper bypass: install an arbitrary value; returns the
-                // prior value (the last_packed we just confirmed above).
-                assert_eq!(pcb::set_ioprio(test_pid, 0x1234_5678), Some(last_packed));
-                assert_eq!(pcb::get_ioprio(test_pid), Some(0x1234_5678));
+            {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Batch 87 round-trip via a real PCB.
+                    //
+                    //   1. Fresh process observes IOPRIO_DEFAULT = (BE << 13) | 4.
+                    //   2. ioprio_set(IOPRIO_WHO_PROCESS, target_pid, (RT << 13) | 0)
+                    //      succeeds; ioprio_get returns the same value.
+                    //   3. Same with class=NONE (0), class=IDLE (3), and a range
+                    //      of data values.
+                    //   4. data > 7 -> EINVAL.
+                    //   5. class > 3 (class==4, 5, 6, 7) -> EINVAL.
+                    //   6. who < 0 -> ESRCH.
+                    //   7. IOPRIO_WHO_PGRP / _USER with who > 0 -> ESRCH.
+                    //   8. ioprio_set on a destroyed pid -> ESRCH.
+                    {
+                        let test_pid = pcb::create("ioprio-test", 0);
+                        // Default value.
+                        let a = SyscallArgs {
+                            arg0: 1,
+                            arg1: test_pid,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::IOPRIO_GET, &a).value
+                            != i64::from(pcb::LINUX_IOPRIO_DEFAULT)
+                        {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: ioprio_get default not LINUX_IOPRIO_DEFAULT ({})",
+                                dispatch_linux(nr::IOPRIO_GET, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                        // Set BE/7, IDLE/4, NONE/0 — each must round-trip.
+                        // RT (class=1) is no longer in this loop because batch 431
+                        // routes RT through the EPERM gate (CAP_SYS_NICE absent in
+                        // this ABI); see the dedicated RT probe below.
+                        for (class, data) in [(2, 7), (3, 4), (0, 0)] {
+                            let packed: i32 = (class << pcb::LINUX_IOPRIO_CLASS_SHIFT) | data;
+                            let a = SyscallArgs {
+                                arg0: 1,
+                                arg1: test_pid,
+                                arg2: packed as u64,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            if dispatch_linux(nr::IOPRIO_SET, &a).value != 0 {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: ioprio_set({},{}) not 0 ({})",
+                                    class,
+                                    data,
+                                    dispatch_linux(nr::IOPRIO_SET, &a).value,
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                            let a = SyscallArgs {
+                                arg0: 1,
+                                arg1: test_pid,
+                                arg2: 0,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            let r = dispatch_linux(nr::IOPRIO_GET, &a).value;
+                            if r != i64::from(packed) {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: ioprio_get after set({},{}) -> {}, expected {}",
+                                    class,
+                                    data,
+                                    r,
+                                    packed,
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
+                        // Batch 431 — RT class → EPERM (CAP_SYS_NICE check is the
+                        // first thing Linux runs; we expose no way to acquire it).
+                        for data in [0i32, 3, 7] {
+                            let packed: i32 = (pcb::LINUX_IOPRIO_CLASS_RT
+                                << pcb::LINUX_IOPRIO_CLASS_SHIFT)
+                                | data;
+                            let a = SyscallArgs {
+                                arg0: 1,
+                                arg1: test_pid,
+                                arg2: packed as u64,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EPERM)
+                            {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: ioprio_set(RT,{}) not EPERM ({})",
+                                    data,
+                                    dispatch_linux(nr::IOPRIO_SET, &a).value,
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
+                        // Batch 431 — NONE class with non-zero data → EINVAL.
+                        // Pre-batch this silently succeeded (data field stored
+                        // alongside an empty class), hiding caller bugs.
+                        for data in [1i32, 4, 7] {
+                            let packed: i32 = (pcb::LINUX_IOPRIO_CLASS_NONE
+                                << pcb::LINUX_IOPRIO_CLASS_SHIFT)
+                                | data;
+                            let a = SyscallArgs {
+                                arg0: 1,
+                                arg1: test_pid,
+                                arg2: packed as u64,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL)
+                            {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: ioprio_set(NONE,{}) not EINVAL ({})",
+                                    data,
+                                    dispatch_linux(nr::IOPRIO_SET, &a).value,
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
+                        // Batch 431 — IDLE class with arbitrary data → succeeds
+                        // (Linux's IDLE arm has no data-range check; pre-batch
+                        // we rejected data>=8 here with EINVAL).
+                        for data in [0i32, 7, 8, 99, pcb::LINUX_IOPRIO_DATA_MASK] {
+                            let packed: i32 = (pcb::LINUX_IOPRIO_CLASS_IDLE
+                                << pcb::LINUX_IOPRIO_CLASS_SHIFT)
+                                | data;
+                            let a = SyscallArgs {
+                                arg0: 1,
+                                arg1: test_pid,
+                                arg2: packed as u64,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            if dispatch_linux(nr::IOPRIO_SET, &a).value != 0 {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: ioprio_set(IDLE,{}) not 0 ({})",
+                                    data,
+                                    dispatch_linux(nr::IOPRIO_SET, &a).value,
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                            // Round-trip the value through the PCB store.
+                            let a = SyscallArgs {
+                                arg0: 1,
+                                arg1: test_pid,
+                                arg2: 0,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            let r = dispatch_linux(nr::IOPRIO_GET, &a).value;
+                            if r != i64::from(packed) {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: ioprio_get after IDLE/{} -> {}, expected {}",
+                                    data,
+                                    r,
+                                    packed,
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
+                        // Batch 431 gate-order probe — bad which combined with
+                        // RT class: Linux runs class gate first (EPERM), pre-
+                        // batch we ran which gate first (EINVAL).
+                        {
+                            let packed: i32 =
+                                pcb::LINUX_IOPRIO_CLASS_RT << pcb::LINUX_IOPRIO_CLASS_SHIFT;
+                            let a = SyscallArgs {
+                                arg0: 99,
+                                arg1: test_pid,
+                                arg2: packed as u64,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EPERM)
+                            {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: ioprio_set(which=99, RT) not EPERM ({})",
+                                    dispatch_linux(nr::IOPRIO_SET, &a).value,
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
+                        // Batch 431 gate-order probe — bad which combined with
+                        // NONE class + non-zero data: Linux runs class gate
+                        // first (EINVAL on data), pre-batch we ran which gate
+                        // first (also EINVAL, but for a different reason).
+                        // Same errno, so we only verify it's still EINVAL — the
+                        // gate-order change is internal but worth recording.
+                        {
+                            let packed: i32 =
+                                (pcb::LINUX_IOPRIO_CLASS_NONE << pcb::LINUX_IOPRIO_CLASS_SHIFT) | 5;
+                            let a = SyscallArgs {
+                                arg0: 99,
+                                arg1: test_pid,
+                                arg2: packed as u64,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL)
+                            {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: ioprio_set(which=99, NONE+5) not EINVAL ({})",
+                                    dispatch_linux(nr::IOPRIO_SET, &a).value,
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
+                        // data > 7 -> EINVAL.
+                        for bad_data in [8i32, 9, 0xFF, pcb::LINUX_IOPRIO_DATA_MASK] {
+                            let packed: i32 = (2 << pcb::LINUX_IOPRIO_CLASS_SHIFT) | bad_data;
+                            let a = SyscallArgs {
+                                arg0: 1,
+                                arg1: test_pid,
+                                arg2: packed as u64,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL)
+                            {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: ioprio_set bad data {} not EINVAL ({})",
+                                    bad_data,
+                                    dispatch_linux(nr::IOPRIO_SET, &a).value,
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
+                        // class > 3 -> EINVAL.
+                        for bad_class in [4i32, 5, 6, 7] {
+                            let packed: i32 = bad_class << pcb::LINUX_IOPRIO_CLASS_SHIFT;
+                            let a = SyscallArgs {
+                                arg0: 1,
+                                arg1: test_pid,
+                                arg2: packed as u64,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL)
+                            {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: ioprio_set bad class {} not EINVAL ({})",
+                                    bad_class,
+                                    dispatch_linux(nr::IOPRIO_SET, &a).value,
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
+                        // who < 0 -> ESRCH.
+                        let a = SyscallArgs {
+                            arg0: 1,
+                            arg1: (-1i64) as u64,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::ESRCH) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: ioprio_get who=-1 not ESRCH ({})",
+                                dispatch_linux(nr::IOPRIO_GET, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                        // IOPRIO_WHO_PGRP / _USER with who > 0 -> ESRCH.
+                        for which in [2u64, 3] {
+                            let a = SyscallArgs {
+                                arg0: which,
+                                arg1: test_pid,
+                                arg2: 0,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::ESRCH)
+                            {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: ioprio_get which={} who>0 not ESRCH ({})",
+                                    which,
+                                    dispatch_linux(nr::IOPRIO_GET, &a).value
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
 
-                // Destroy and verify ESRCH from both surfaces.
-                pcb::destroy(test_pid);
-                assert_eq!(pcb::get_ioprio(test_pid), None);
-                assert_eq!(pcb::set_ioprio(test_pid, 0), None);
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: test_pid,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::ESRCH) {
+                        // pcb helper round-trip.  The last successful syscall-
+                        // level set was the IDLE/LINUX_IOPRIO_DATA_MASK probe
+                        // from the batch-431 IDLE loop, packed value
+                        // (CLASS_IDLE << SHIFT) | DATA_MASK = (3<<13)|8191 =
+                        // 32767.  Re-pack here so the assertion tracks the
+                        // constants instead of a magic number.
+                        let last_packed: i32 = (pcb::LINUX_IOPRIO_CLASS_IDLE
+                            << pcb::LINUX_IOPRIO_CLASS_SHIFT)
+                            | pcb::LINUX_IOPRIO_DATA_MASK;
+                        assert_eq!(pcb::get_ioprio(test_pid), Some(last_packed));
+                        // Helper bypass: install an arbitrary value; returns the
+                        // prior value (the last_packed we just confirmed above).
+                        assert_eq!(pcb::set_ioprio(test_pid, 0x1234_5678), Some(last_packed));
+                        assert_eq!(pcb::get_ioprio(test_pid), Some(0x1234_5678));
+
+                        // Destroy and verify ESRCH from both surfaces.
+                        pcb::destroy(test_pid);
+                        assert_eq!(pcb::get_ioprio(test_pid), None);
+                        assert_eq!(pcb::set_ioprio(test_pid, 0), None);
+                        let a = SyscallArgs {
+                            arg0: 1,
+                            arg1: test_pid,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::ESRCH) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: ioprio_get on dead pid not ESRCH ({})",
+                                dispatch_linux(nr::IOPRIO_GET, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+
+                        // Constant sanity.
+                        assert_eq!(pcb::LINUX_IOPRIO_CLASS_NONE, 0);
+                        assert_eq!(pcb::LINUX_IOPRIO_CLASS_RT, 1);
+                        assert_eq!(pcb::LINUX_IOPRIO_CLASS_BE, 2);
+                        assert_eq!(pcb::LINUX_IOPRIO_CLASS_IDLE, 3);
+                        assert_eq!(pcb::LINUX_IOPRIO_CLASS_SHIFT, 13);
+                        assert_eq!(pcb::LINUX_IOPRIO_DATA_MASK, (1 << 13) - 1);
+                        assert_eq!(pcb::LINUX_IOPRIO_DEFAULT, (2 << 13) | 4);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: ioprio_get on dead pid not ESRCH ({})",
-                        dispatch_linux(nr::IOPRIO_GET, &a).value
+                        "[syscall/linux]   ioprio_set class-switch matches Linux block/ioprio.c (RT→EPERM, NONE+data→EINVAL, IDLE+any-data→0, class gate ordered before which gate): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
+                case()?;
+            }
 
-                // Constant sanity.
-                assert_eq!(pcb::LINUX_IOPRIO_CLASS_NONE, 0);
-                assert_eq!(pcb::LINUX_IOPRIO_CLASS_RT, 1);
-                assert_eq!(pcb::LINUX_IOPRIO_CLASS_BE, 2);
-                assert_eq!(pcb::LINUX_IOPRIO_CLASS_IDLE, 3);
-                assert_eq!(pcb::LINUX_IOPRIO_CLASS_SHIFT, 13);
-                assert_eq!(pcb::LINUX_IOPRIO_DATA_MASK, (1 << 13) - 1);
-                assert_eq!(pcb::LINUX_IOPRIO_DEFAULT, (2 << 13) | 4);
-            }
-            serial_println!(
-                "[syscall/linux]   ioprio_set class-switch matches Linux block/ioprio.c (RT→EPERM, NONE+data→EINVAL, IDLE+any-data→0, class gate ordered before which gate): OK"
-            );
-
-            // io_pgetevents (min_nr=5, nr=3): the min_nr/nr ordering check lives
-            // in read_events, reachable only AFTER a valid ctx, so on this kernel
-            // (no AIO context) it is unreachable and collapses into the terminal
-            // EINVAL from the failed lookup_ioctx. Batch 542 stopped treating it
-            // as a leading gate; the observable errno is unchanged (EINVAL).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 5,
-                arg2: 3,
-                arg3: events_ptr,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: io_pgetevents min>nr not EINVAL (terminal)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // io_pgetevents valid (no ctx) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 1,
-                arg3: events_ptr,
-                arg4: ts_ptr,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: io_pgetevents valid not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // io_pgetevents __aio_sigset gating.  Build dedicated 16-byte sigset
-            // buffers exercising sigmask/sigsetsize handling.
-            // Layout: [sigmask u64 LE][sigsetsize u64 LE].
-            //
-            // Kernel-context note: validate_user_read/copy_from_user bypass
-            // validation when there's no owning user process (see
-            // mm/user::is_kernel_context). We cannot synthesize the EFAULT path
-            // from kernel-context tests — pointer validity is always treated as OK.
-            // The sigsetsize EINVAL gate is logic-testable, but only when
-            // sigmask != 0: set_user_sigmask early-returns 0 on a NULL mask BEFORE
-            // the size check (kernel/signal.c), so a NULL mask with any sigsetsize
-            // skips the gate entirely. At boot every path still surfaces EINVAL
-            // (the gate value equals the terminal), so these cases prove the
-            // premises (which path is taken) rather than distinguishing by errno.
-            //
-            // (a) sigmask=NULL, sigsetsize=8 -> set_user_sigmask returns 0 ->
-            //     terminal EINVAL (no ctx).
-            let aio_sig_null: [u8; 16] = {
-                let mut b = [0u8; 16];
-                b[8..16].copy_from_slice(&8u64.to_ne_bytes());
-                b
-            };
-            let aio_sig_null_ptr = aio_sig_null.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: aio_sig_null_ptr,
-            };
-            if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: io_pgetevents sigset null mask sz=8 not EINVAL (terminal)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (b) Batch 542 correctness: sigmask=NULL, sigsetsize=7 (bogus). Linux
-            //     set_user_sigmask early-returns 0 on the NULL mask and NEVER
-            //     reaches the size check — so this does NOT hit the sigsetsize
-            //     EINVAL gate; it falls through to the terminal EINVAL. (Pre-batch
-            //     wrongly applied the size gate here.)
-            let aio_sig_null_badsz: [u8; 16] = {
-                let mut b = [0u8; 16];
-                b[8..16].copy_from_slice(&7u64.to_ne_bytes());
-                b
-            };
-            let aio_sig_null_badsz_ptr = aio_sig_null_badsz.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: aio_sig_null_badsz_ptr,
-            };
-            if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: io_pgetevents null mask sz=7 not EINVAL (terminal)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (c) Non-NULL sigmask exercises the real sigsetsize gate. mask points
-            //     at a valid kernel-stack buffer (validates in kernel context).
-            let sigmask_buf = [0u8; 8];
-            let sigmask_ptr = sigmask_buf.as_ptr() as u64;
-            for &sz in &[7u64, 9, 0] {
-                let aio_sig: [u8; 16] = {
-                    let mut b = [0u8; 16];
-                    b[0..8].copy_from_slice(&sigmask_ptr.to_ne_bytes());
-                    b[8..16].copy_from_slice(&sz.to_ne_bytes());
-                    b
-                };
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: aio_sig.as_ptr() as u64,
-                };
-                if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+            {
+                #[inline(never)]
+                fn case(events_ptr: u64, ts_ptr: u64) -> crate::error::KernelResult<()> {
+                    // io_pgetevents (min_nr=5, nr=3): the min_nr/nr ordering check lives
+                    // in read_events, reachable only AFTER a valid ctx, so on this kernel
+                    // (no AIO context) it is unreachable and collapses into the terminal
+                    // EINVAL from the failed lookup_ioctx. Batch 542 stopped treating it
+                    // as a leading gate; the observable errno is unchanged (EINVAL).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 5,
+                        arg2: 3,
+                        arg3: events_ptr,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: io_pgetevents min>nr not EINVAL (terminal)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // io_pgetevents valid (no ctx) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 1,
+                        arg3: events_ptr,
+                        arg4: ts_ptr,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: io_pgetevents valid not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // io_pgetevents __aio_sigset gating.  Build dedicated 16-byte sigset
+                    // buffers exercising sigmask/sigsetsize handling.
+                    // Layout: [sigmask u64 LE][sigsetsize u64 LE].
+                    //
+                    // Kernel-context note: validate_user_read/copy_from_user bypass
+                    // validation when there's no owning user process (see
+                    // mm/user::is_kernel_context). We cannot synthesize the EFAULT path
+                    // from kernel-context tests — pointer validity is always treated as OK.
+                    // The sigsetsize EINVAL gate is logic-testable, but only when
+                    // sigmask != 0: set_user_sigmask early-returns 0 on a NULL mask BEFORE
+                    // the size check (kernel/signal.c), so a NULL mask with any sigsetsize
+                    // skips the gate entirely. At boot every path still surfaces EINVAL
+                    // (the gate value equals the terminal), so these cases prove the
+                    // premises (which path is taken) rather than distinguishing by errno.
+                    //
+                    // (a) sigmask=NULL, sigsetsize=8 -> set_user_sigmask returns 0 ->
+                    //     terminal EINVAL (no ctx).
+                    let aio_sig_null: [u8; 16] = {
+                        let mut b = [0u8; 16];
+                        b[8..16].copy_from_slice(&8u64.to_ne_bytes());
+                        b
+                    };
+                    let aio_sig_null_ptr = aio_sig_null.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: aio_sig_null_ptr,
+                    };
+                    if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: io_pgetevents sigset null mask sz=8 not EINVAL (terminal)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (b) Batch 542 correctness: sigmask=NULL, sigsetsize=7 (bogus). Linux
+                    //     set_user_sigmask early-returns 0 on the NULL mask and NEVER
+                    //     reaches the size check — so this does NOT hit the sigsetsize
+                    //     EINVAL gate; it falls through to the terminal EINVAL. (Pre-batch
+                    //     wrongly applied the size gate here.)
+                    let aio_sig_null_badsz: [u8; 16] = {
+                        let mut b = [0u8; 16];
+                        b[8..16].copy_from_slice(&7u64.to_ne_bytes());
+                        b
+                    };
+                    let aio_sig_null_badsz_ptr = aio_sig_null_badsz.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: aio_sig_null_badsz_ptr,
+                    };
+                    if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: io_pgetevents null mask sz=7 not EINVAL (terminal)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (c) Non-NULL sigmask exercises the real sigsetsize gate. mask points
+                    //     at a valid kernel-stack buffer (validates in kernel context).
+                    let sigmask_buf = [0u8; 8];
+                    let sigmask_ptr = sigmask_buf.as_ptr() as u64;
+                    for &sz in &[7u64, 9, 0] {
+                        let aio_sig: [u8; 16] = {
+                            let mut b = [0u8; 16];
+                            b[0..8].copy_from_slice(&sigmask_ptr.to_ne_bytes());
+                            b[8..16].copy_from_slice(&sz.to_ne_bytes());
+                            b
+                        };
+                        let a = SyscallArgs {
+                            arg0: 0,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: aio_sig.as_ptr() as u64,
+                        };
+                        if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL)
+                        {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: io_pgetevents non-null mask bad sigsetsize not EINVAL"
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // (d) Non-NULL sigmask + sigsetsize=8 -> size gate passes, the sigmask
+                    //     copy is bypassed in kernel context -> terminal EINVAL.
+                    let aio_sig_valid: [u8; 16] = {
+                        let mut b = [0u8; 16];
+                        b[0..8].copy_from_slice(&sigmask_ptr.to_ne_bytes());
+                        b[8..16].copy_from_slice(&8u64.to_ne_bytes());
+                        b
+                    };
+                    let aio_sig_valid_ptr = aio_sig_valid.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: aio_sig_valid_ptr,
+                    };
+                    if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: io_pgetevents valid sigset not EINVAL (terminal)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: io_pgetevents non-null mask bad sigsetsize not EINVAL"
+                        "[syscall/linux]   io_pgetevents timeout/sigset order + NULL-mask short-circuit (batch 542): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
+                case(events_ptr, ts_ptr)?;
             }
-            // (d) Non-NULL sigmask + sigsetsize=8 -> size gate passes, the sigmask
-            //     copy is bypassed in kernel context -> terminal EINVAL.
-            let aio_sig_valid: [u8; 16] = {
-                let mut b = [0u8; 16];
-                b[0..8].copy_from_slice(&sigmask_ptr.to_ne_bytes());
-                b[8..16].copy_from_slice(&8u64.to_ne_bytes());
-                b
-            };
-            let aio_sig_valid_ptr = aio_sig_valid.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: aio_sig_valid_ptr,
-            };
-            if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: io_pgetevents valid sigset not EINVAL (terminal)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   io_pgetevents timeout/sigset order + NULL-mask short-circuit (batch 542): OK"
-            );
 
-            // Batch 493: Linux v6.6 fs/namespace.c::SYSCALL_DEFINE5(
-            // mount_setattr) line 4651 runs `if (!may_mount()) return
-            // -EPERM;` BETWEEN size-VER0 (line 4648) and
-            // copy_struct_from_user (line 4654).  Probes for gates 1-3
-            // (flags-EINVAL, size-E2BIG, size-EINVAL) remain — Linux runs
-            // them BEFORE may_mount.  Probes for gates 5+ (NULL/EFAULT,
-            // trailing-zero/E2BIG, attr_set/clr/propagation/userns_fd
-            // EINVAL, terminal ENOSYS) all flip to EPERM because they
-            // pass size validation and hit gate-4 may_mount → EPERM.
-            //
-            // Gates 1-3 (preserved errnos):
-            //
-            // (1a) bad flags -> EINVAL (gate 1).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0x80,
-                arg3: attr_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: mount_setattr bad flags not EINVAL");
-                return Err(KernelError::InternalError);
+            {
+                #[inline(never)]
+                fn case(attr_ptr: u64, path_ptr: u64) -> crate::error::KernelResult<()> {
+                    // Batch 493: Linux v6.6 fs/namespace.c::SYSCALL_DEFINE5(
+                    // mount_setattr) line 4651 runs `if (!may_mount()) return
+                    // -EPERM;` BETWEEN size-VER0 (line 4648) and
+                    // copy_struct_from_user (line 4654).  Probes for gates 1-3
+                    // (flags-EINVAL, size-E2BIG, size-EINVAL) remain — Linux runs
+                    // them BEFORE may_mount.  Probes for gates 5+ (NULL/EFAULT,
+                    // trailing-zero/E2BIG, attr_set/clr/propagation/userns_fd
+                    // EINVAL, terminal ENOSYS) all flip to EPERM because they
+                    // pass size validation and hit gate-4 may_mount → EPERM.
+                    //
+                    // Gates 1-3 (preserved errnos):
+                    //
+                    // (1a) bad flags -> EINVAL (gate 1).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0x80,
+                        arg3: attr_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr bad flags not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (1b) too-small size -> EINVAL (gate 3 — size < VER0).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: attr_ptr,
+                        arg4: 16,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr small size not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (1c) size > PAGE_SIZE (4097) -> E2BIG (gate 2).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: attr_ptr,
+                        arg4: 4097,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::E2BIG) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr size>PAGE_SIZE not E2BIG"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (1d) Batch 223 discriminator: (attr=NULL, size=8192) — Linux
+                    // gates `usize > PAGE_SIZE` BEFORE NULL/access AND BEFORE
+                    // may_mount, so size-E2BIG outranks both attr=NULL and EPERM.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 8192,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::E2BIG) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr (NULL, size=8192) not E2BIG"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (1e) Batch 223 discriminator: (attr=NULL, size=16) — size <
+                    // VER0, so gate-3 EINVAL fires before may_mount EPERM.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 16,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr (NULL, size=16) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // ----- Gate 4 (may_mount → EPERM) probes -----
+                    //
+                    // (2a) valid path/flags/size=32, attr=valid -> EPERM
+                    // (was ENOSYS pre-batch 493).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0x8000,
+                        arg3: attr_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr valid not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2b) Batch 223 → 493: (attr=NULL, size=64) — gates 1-3 pass,
+                    // gate-4 EPERM fires before copy_struct_from_user EFAULT.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 64,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr (NULL, size=64) not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Batch 493: all the following probes pass gates 1-3 (flags
+                    // & size validation), so they reach gate-4 may_mount → EPERM.
+                    // Pre-batch each surfaced an EINVAL / ENOSYS / E2BIG from the
+                    // (now-unreachable) gate-5+ logic; post-batch all return EPERM.
+                    //
+                    // (2c) attr_set has bit outside MOUNT_ATTR_MASK (0x400) -> EPERM
+                    // (was EINVAL pre-batch).
+                    let bad_attr_set: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[0..8].copy_from_slice(&0x400u64.to_ne_bytes());
+                        b
+                    };
+                    let bad_attr_set_ptr = bad_attr_set.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: bad_attr_set_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr bad attr_set not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2d) attr_clr has bit outside MOUNT_ATTR_MASK -> EPERM (was
+                    // EINVAL).
+                    let bad_attr_clr: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[8..16].copy_from_slice(&0x400u64.to_ne_bytes());
+                        b
+                    };
+                    let bad_attr_clr_ptr = bad_attr_clr.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: bad_attr_clr_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr bad attr_clr not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2e) attr_set NOATIME|STRICTATIME conflict -> EPERM (was EINVAL).
+                    let conflicting_atime: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[0..8].copy_from_slice(&0x30u64.to_ne_bytes());
+                        b
+                    };
+                    let conflicting_atime_ptr = conflicting_atime.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: conflicting_atime_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr conflicting ATIME not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2f) attr_set ATIME=0x40 undef bit -> EPERM (was EINVAL).
+                    let undef_atime: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[0..8].copy_from_slice(&0x40u64.to_ne_bytes());
+                        b
+                    };
+                    let undef_atime_ptr = undef_atime.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: undef_atime_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr undef ATIME not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2g) attr_clr ATIME without attr_set ATIME -> EPERM (was EINVAL).
+                    let clr_atime_only: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[8..16].copy_from_slice(&0x10u64.to_ne_bytes());
+                        b
+                    };
+                    let clr_atime_only_ptr = clr_atime_only.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: clr_atime_only_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr clr ATIME without set not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2h) propagation=MS_SHARED valid -> EPERM (was ENOSYS).
+                    let prop_shared: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[16..24].copy_from_slice(&0x100000u64.to_ne_bytes());
+                        b
+                    };
+                    let prop_shared_ptr = prop_shared.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: prop_shared_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr MS_SHARED not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2i) propagation=SHARED|PRIVATE two-types -> EPERM (was EINVAL).
+                    let prop_both: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[16..24].copy_from_slice(&(0x100000u64 | 0x40000u64).to_ne_bytes());
+                        b
+                    };
+                    let prop_both_ptr = prop_both.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: prop_both_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr two prop types not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2j) propagation=0xdead bogus -> EPERM (was EINVAL).
+                    let prop_bogus: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[16..24].copy_from_slice(&0xdeadu64.to_ne_bytes());
+                        b
+                    };
+                    let prop_bogus_ptr = prop_bogus.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: prop_bogus_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr bogus prop not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2k) attr_set/clr overlap on RDONLY -> EPERM (was EINVAL).
+                    let attr_set_clr_overlap: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
+                        b[8..16].copy_from_slice(&0x1u64.to_ne_bytes());
+                        b
+                    };
+                    let attr_set_clr_overlap_ptr = attr_set_clr_overlap.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: attr_set_clr_overlap_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr set/clr overlap not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2l) attr_set=RDONLY, attr_clr=NOSUID distinct -> EPERM (was ENOSYS).
+                    let attr_set_clr_distinct: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
+                        b[8..16].copy_from_slice(&0x2u64.to_ne_bytes());
+                        b
+                    };
+                    let attr_set_clr_distinct_ptr = attr_set_clr_distinct.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: attr_set_clr_distinct_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr set/clr distinct not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2m) userns_fd=5 without MOUNT_ATTR_IDMAP -> EPERM (was EINVAL).
+                    let userns_no_idmap: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
+                        b[24..32].copy_from_slice(&5u64.to_ne_bytes());
+                        b
+                    };
+                    let userns_no_idmap_ptr = userns_no_idmap.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: userns_no_idmap_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr userns_fd without IDMAP not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2n) userns_fd=INT_MAX+1 with IDMAP -> EPERM (was EINVAL).
+                    let userns_overflow: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
+                        b[24..32].copy_from_slice(&0x80000000u64.to_ne_bytes());
+                        b
+                    };
+                    let userns_overflow_ptr = userns_overflow.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: userns_overflow_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr userns_fd > INT_MAX not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2o) userns_fd=5 + IDMAP -> EPERM (was ENOSYS).
+                    let userns_ok: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
+                        b[24..32].copy_from_slice(&5u64.to_ne_bytes());
+                        b
+                    };
+                    let userns_ok_ptr = userns_ok.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: userns_ok_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr IDMAP+sane userns_fd not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2p) userns_fd=0 + IDMAP -> EPERM (was ENOSYS).
+                    let userns_zero_with_idmap: [u8; 32] = {
+                        let mut b = [0u8; 32];
+                        b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
+                        b
+                    };
+                    let userns_zero_with_idmap_ptr = userns_zero_with_idmap.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: userns_zero_with_idmap_ptr,
+                        arg4: 32,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr IDMAP+fd=0 not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2q) Batch 229 → 493 forward-compat: size=40 with all-zero
+                    // trailing 8 bytes -> EPERM (was ENOSYS).
+                    let mount_attr_pad_zero = [0u8; 40];
+                    let mount_attr_pad_zero_ptr = mount_attr_pad_zero.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: mount_attr_pad_zero_ptr,
+                        arg4: 40,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr size=40 (zero pad) not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (2r) Batch 229 → 493 forward-compat: size=40 with byte[32]=1
+                    // -> EPERM (was E2BIG).  Linux's copy_struct_from_user trailing-
+                    // zero E2BIG runs INSIDE copy_struct_from_user at line 4654,
+                    // AFTER may_mount at line 4651, so gate-4 EPERM outranks.
+                    let mut mount_attr_pad_nonzero = [0u8; 40];
+                    mount_attr_pad_nonzero[32] = 1;
+                    let mount_attr_pad_nonzero_ptr = mount_attr_pad_nonzero.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0,
+                        arg3: mount_attr_pad_nonzero_ptr,
+                        arg4: 40,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mount_setattr size=40 (byte[32]=1) not EPERM (batch 493)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   mount_setattr may_mount() EPERM gate (batch 493): OK"
+                    );
+                    Ok(())
+                }
+                case(attr_ptr, path_ptr)?;
             }
-            // (1b) too-small size -> EINVAL (gate 3 — size < VER0).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: attr_ptr,
-                arg4: 16,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: mount_setattr small size not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // (1c) size > PAGE_SIZE (4097) -> E2BIG (gate 2).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: attr_ptr,
-                arg4: 4097,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::E2BIG) {
-                serial_println!("[syscall/linux]   FAIL: mount_setattr size>PAGE_SIZE not E2BIG");
-                return Err(KernelError::InternalError);
-            }
-            // (1d) Batch 223 discriminator: (attr=NULL, size=8192) — Linux
-            // gates `usize > PAGE_SIZE` BEFORE NULL/access AND BEFORE
-            // may_mount, so size-E2BIG outranks both attr=NULL and EPERM.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: 0,
-                arg4: 8192,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::E2BIG) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr (NULL, size=8192) not E2BIG"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (1e) Batch 223 discriminator: (attr=NULL, size=16) — size <
-            // VER0, so gate-3 EINVAL fires before may_mount EPERM.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: 0,
-                arg4: 16,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: mount_setattr (NULL, size=16) not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // ----- Gate 4 (may_mount → EPERM) probes -----
-            //
-            // (2a) valid path/flags/size=32, attr=valid -> EPERM
-            // (was ENOSYS pre-batch 493).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0x8000,
-                arg3: attr_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr valid not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2b) Batch 223 → 493: (attr=NULL, size=64) — gates 1-3 pass,
-            // gate-4 EPERM fires before copy_struct_from_user EFAULT.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: 0,
-                arg4: 64,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr (NULL, size=64) not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // Batch 493: all the following probes pass gates 1-3 (flags
-            // & size validation), so they reach gate-4 may_mount → EPERM.
-            // Pre-batch each surfaced an EINVAL / ENOSYS / E2BIG from the
-            // (now-unreachable) gate-5+ logic; post-batch all return EPERM.
-            //
-            // (2c) attr_set has bit outside MOUNT_ATTR_MASK (0x400) -> EPERM
-            // (was EINVAL pre-batch).
-            let bad_attr_set: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[0..8].copy_from_slice(&0x400u64.to_ne_bytes());
-                b
-            };
-            let bad_attr_set_ptr = bad_attr_set.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: bad_attr_set_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr bad attr_set not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2d) attr_clr has bit outside MOUNT_ATTR_MASK -> EPERM (was
-            // EINVAL).
-            let bad_attr_clr: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[8..16].copy_from_slice(&0x400u64.to_ne_bytes());
-                b
-            };
-            let bad_attr_clr_ptr = bad_attr_clr.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: bad_attr_clr_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr bad attr_clr not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2e) attr_set NOATIME|STRICTATIME conflict -> EPERM (was EINVAL).
-            let conflicting_atime: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[0..8].copy_from_slice(&0x30u64.to_ne_bytes());
-                b
-            };
-            let conflicting_atime_ptr = conflicting_atime.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: conflicting_atime_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr conflicting ATIME not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2f) attr_set ATIME=0x40 undef bit -> EPERM (was EINVAL).
-            let undef_atime: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[0..8].copy_from_slice(&0x40u64.to_ne_bytes());
-                b
-            };
-            let undef_atime_ptr = undef_atime.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: undef_atime_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr undef ATIME not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2g) attr_clr ATIME without attr_set ATIME -> EPERM (was EINVAL).
-            let clr_atime_only: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[8..16].copy_from_slice(&0x10u64.to_ne_bytes());
-                b
-            };
-            let clr_atime_only_ptr = clr_atime_only.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: clr_atime_only_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr clr ATIME without set not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2h) propagation=MS_SHARED valid -> EPERM (was ENOSYS).
-            let prop_shared: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[16..24].copy_from_slice(&0x100000u64.to_ne_bytes());
-                b
-            };
-            let prop_shared_ptr = prop_shared.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: prop_shared_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr MS_SHARED not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2i) propagation=SHARED|PRIVATE two-types -> EPERM (was EINVAL).
-            let prop_both: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[16..24].copy_from_slice(&(0x100000u64 | 0x40000u64).to_ne_bytes());
-                b
-            };
-            let prop_both_ptr = prop_both.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: prop_both_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr two prop types not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2j) propagation=0xdead bogus -> EPERM (was EINVAL).
-            let prop_bogus: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[16..24].copy_from_slice(&0xdeadu64.to_ne_bytes());
-                b
-            };
-            let prop_bogus_ptr = prop_bogus.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: prop_bogus_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr bogus prop not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2k) attr_set/clr overlap on RDONLY -> EPERM (was EINVAL).
-            let attr_set_clr_overlap: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
-                b[8..16].copy_from_slice(&0x1u64.to_ne_bytes());
-                b
-            };
-            let attr_set_clr_overlap_ptr = attr_set_clr_overlap.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: attr_set_clr_overlap_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr set/clr overlap not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2l) attr_set=RDONLY, attr_clr=NOSUID distinct -> EPERM (was ENOSYS).
-            let attr_set_clr_distinct: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
-                b[8..16].copy_from_slice(&0x2u64.to_ne_bytes());
-                b
-            };
-            let attr_set_clr_distinct_ptr = attr_set_clr_distinct.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: attr_set_clr_distinct_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr set/clr distinct not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2m) userns_fd=5 without MOUNT_ATTR_IDMAP -> EPERM (was EINVAL).
-            let userns_no_idmap: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
-                b[24..32].copy_from_slice(&5u64.to_ne_bytes());
-                b
-            };
-            let userns_no_idmap_ptr = userns_no_idmap.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: userns_no_idmap_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr userns_fd without IDMAP not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2n) userns_fd=INT_MAX+1 with IDMAP -> EPERM (was EINVAL).
-            let userns_overflow: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
-                b[24..32].copy_from_slice(&0x80000000u64.to_ne_bytes());
-                b
-            };
-            let userns_overflow_ptr = userns_overflow.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: userns_overflow_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr userns_fd > INT_MAX not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2o) userns_fd=5 + IDMAP -> EPERM (was ENOSYS).
-            let userns_ok: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
-                b[24..32].copy_from_slice(&5u64.to_ne_bytes());
-                b
-            };
-            let userns_ok_ptr = userns_ok.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: userns_ok_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr IDMAP+sane userns_fd not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2p) userns_fd=0 + IDMAP -> EPERM (was ENOSYS).
-            let userns_zero_with_idmap: [u8; 32] = {
-                let mut b = [0u8; 32];
-                b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
-                b
-            };
-            let userns_zero_with_idmap_ptr = userns_zero_with_idmap.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: userns_zero_with_idmap_ptr,
-                arg4: 32,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr IDMAP+fd=0 not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2q) Batch 229 → 493 forward-compat: size=40 with all-zero
-            // trailing 8 bytes -> EPERM (was ENOSYS).
-            let mount_attr_pad_zero = [0u8; 40];
-            let mount_attr_pad_zero_ptr = mount_attr_pad_zero.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: mount_attr_pad_zero_ptr,
-                arg4: 40,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr size=40 (zero pad) not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (2r) Batch 229 → 493 forward-compat: size=40 with byte[32]=1
-            // -> EPERM (was E2BIG).  Linux's copy_struct_from_user trailing-
-            // zero E2BIG runs INSIDE copy_struct_from_user at line 4654,
-            // AFTER may_mount at line 4651, so gate-4 EPERM outranks.
-            let mut mount_attr_pad_nonzero = [0u8; 40];
-            mount_attr_pad_nonzero[32] = 1;
-            let mount_attr_pad_nonzero_ptr = mount_attr_pad_nonzero.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0,
-                arg3: mount_attr_pad_nonzero_ptr,
-                arg4: 40,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount_setattr size=40 (byte[32]=1) not EPERM (batch 493)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   mount_setattr may_mount() EPERM gate (batch 493): OK"
-            );
 
-            // Batch 485: sys_fchmodat2 split AT_EMPTY_PATH branch + empty-
-            // path → ENOENT.  Linux v6.6 fs/open.c::do_fchmodat validates
-            // flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) → EINVAL, and
-            // its getname()/getname_uflags() routes empty paths to either
-            // -ENOENT (no AT_EMPTY_PATH) or operate-on-dirfd (with
-            // AT_EMPTY_PATH).  Pre-batch we forwarded to sys_fchmodat
-            // unconditionally — which after batch 484 added empty-path
-            // ENOENT, broke the AT_EMPTY_PATH branch (gave ENOENT instead
-            // of EROFS).
-            let fchm2_empty: [u8; 1] = [0u8];
-            core::hint::black_box(&fchm2_empty);
-            let fchm2_e = fchm2_empty.as_ptr() as u64;
+            {
+                #[inline(never)]
+                fn case(path_ptr: u64) -> crate::error::KernelResult<()> {
+                    // Batch 485: sys_fchmodat2 split AT_EMPTY_PATH branch + empty-
+                    // path → ENOENT.  Linux v6.6 fs/open.c::do_fchmodat validates
+                    // flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) → EINVAL, and
+                    // its getname()/getname_uflags() routes empty paths to either
+                    // -ENOENT (no AT_EMPTY_PATH) or operate-on-dirfd (with
+                    // AT_EMPTY_PATH).  Pre-batch we forwarded to sys_fchmodat
+                    // unconditionally — which after batch 484 added empty-path
+                    // ENOENT, broke the AT_EMPTY_PATH branch (gave ENOENT instead
+                    // of EROFS).
+                    let fchm2_empty: [u8; 1] = [0u8];
+                    core::hint::black_box(&fchm2_empty);
+                    let fchm2_e = fchm2_empty.as_ptr() as u64;
 
-            // fchmodat2 bad flag -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0o644,
-                arg3: 0x800_0000,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: fchmodat2 bad flag not EINVAL");
-                return Err(KernelError::InternalError);
+                    // fchmodat2 bad flag -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0o644,
+                        arg3: 0x800_0000,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: fchmodat2 bad flag not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // fchmodat2 valid NOFOLLOW -> EROFS (non-AT_EMPTY_PATH branch).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0o644,
+                        arg3: 0x100,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
+                        serial_println!("[syscall/linux]   FAIL: fchmodat2 valid not EROFS");
+                        return Err(KernelError::InternalError);
+                    }
+                    // fchmodat2(_, "", _, 0) -> ENOENT (Linux getname empty-path,
+                    // non-AT_EMPTY_PATH).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: fchm2_e,
+                        arg2: 0o644,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::ENOENT) {
+                        serial_println!("[syscall/linux]   FAIL: fchmodat2(\"\") not ENOENT");
+                        return Err(KernelError::InternalError);
+                    }
+                    // fchmodat2(AT_FDCWD, "", _, AT_EMPTY_PATH) -> EROFS (operate
+                    // on dirfd directly; AT_FDCWD always valid).  Pre-batch 485
+                    // this returned ENOENT due to the batch-484 forward.
+                    // AT_FDCWD = -100, signed-extended to u64 = 0xFFFFFFFFFFFFFF9C.
+                    let at_fdcwd: u64 = (-100_i64) as u64;
+                    let a = SyscallArgs {
+                        arg0: at_fdcwd,
+                        arg1: fchm2_e,
+                        arg2: 0o644,
+                        arg3: 0x1000,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: fchmodat2(AT_FDCWD, \"\", AT_EMPTY_PATH) not EROFS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // fchmodat2(AT_FDCWD, valid, _, NOFOLLOW|AT_EMPTY_PATH) -> EROFS
+                    // (both flag bits accepted; AT_EMPTY_PATH branch dominates).
+                    let a = SyscallArgs {
+                        arg0: at_fdcwd,
+                        arg1: path_ptr,
+                        arg2: 0o644,
+                        arg3: 0x1100,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: fchmodat2(NOFOLLOW|EMPTY_PATH) not EROFS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // fchmodat2 int truncation: high-half garbage in flags arg
+                    // must be stripped (Linux's `unsigned int flags` parameter).
+                    // arg3 = 0x1_0000_0100 → low 32 = 0x100 (NOFOLLOW) → mask
+                    // passes, EROFS terminal.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0o644,
+                        arg3: 0x1_0000_0100,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: fchmodat2(high|NOFOLLOW) not EROFS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // arg3 = 0x1_0000_0010 → low 32 = 0x10 (unknown bit) → mask
+                    // rejects → EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: path_ptr,
+                        arg2: 0o644,
+                        arg3: 0x1_0000_0010,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: fchmodat2(high|bad-low) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   fchmodat2 AT_EMPTY_PATH branch + empty-path -> ENOENT + int-truncation (Linux v6.6 fs/open.c do_fchmodat): OK"
+                    );
+                    Ok(())
+                }
+                case(path_ptr)?;
             }
-            // fchmodat2 valid NOFOLLOW -> EROFS (non-AT_EMPTY_PATH branch).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0o644,
-                arg3: 0x100,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
-                serial_println!("[syscall/linux]   FAIL: fchmodat2 valid not EROFS");
-                return Err(KernelError::InternalError);
-            }
-            // fchmodat2(_, "", _, 0) -> ENOENT (Linux getname empty-path,
-            // non-AT_EMPTY_PATH).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: fchm2_e,
-                arg2: 0o644,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::ENOENT) {
-                serial_println!("[syscall/linux]   FAIL: fchmodat2(\"\") not ENOENT");
-                return Err(KernelError::InternalError);
-            }
-            // fchmodat2(AT_FDCWD, "", _, AT_EMPTY_PATH) -> EROFS (operate
-            // on dirfd directly; AT_FDCWD always valid).  Pre-batch 485
-            // this returned ENOENT due to the batch-484 forward.
-            // AT_FDCWD = -100, signed-extended to u64 = 0xFFFFFFFFFFFFFF9C.
-            let at_fdcwd: u64 = (-100_i64) as u64;
-            let a = SyscallArgs {
-                arg0: at_fdcwd,
-                arg1: fchm2_e,
-                arg2: 0o644,
-                arg3: 0x1000,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: fchmodat2(AT_FDCWD, \"\", AT_EMPTY_PATH) not EROFS"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // fchmodat2(AT_FDCWD, valid, _, NOFOLLOW|AT_EMPTY_PATH) -> EROFS
-            // (both flag bits accepted; AT_EMPTY_PATH branch dominates).
-            let a = SyscallArgs {
-                arg0: at_fdcwd,
-                arg1: path_ptr,
-                arg2: 0o644,
-                arg3: 0x1100,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
-                serial_println!("[syscall/linux]   FAIL: fchmodat2(NOFOLLOW|EMPTY_PATH) not EROFS");
-                return Err(KernelError::InternalError);
-            }
-            // fchmodat2 int truncation: high-half garbage in flags arg
-            // must be stripped (Linux's `unsigned int flags` parameter).
-            // arg3 = 0x1_0000_0100 → low 32 = 0x100 (NOFOLLOW) → mask
-            // passes, EROFS terminal.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0o644,
-                arg3: 0x1_0000_0100,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
-                serial_println!("[syscall/linux]   FAIL: fchmodat2(high|NOFOLLOW) not EROFS");
-                return Err(KernelError::InternalError);
-            }
-            // arg3 = 0x1_0000_0010 → low 32 = 0x10 (unknown bit) → mask
-            // rejects → EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: path_ptr,
-                arg2: 0o644,
-                arg3: 0x1_0000_0010,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: fchmodat2(high|bad-low) not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   fchmodat2 AT_EMPTY_PATH branch + empty-path -> ENOENT + int-truncation (Linux v6.6 fs/open.c do_fchmodat): OK"
-            );
 
             // futex2 wake/wait — batch 120 plumbs these through to the
             // legacy handlers.  flags use the FUTEX2 layout: size in bits
@@ -98998,159 +99137,173 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             const F2_NUMA: u64 = 0x4;
             const F2_PRIVATE: u64 = 0x80;
 
-            // Batch 378: sys_futex2_wake gate-order fix.  Linux's
-            // SYSCALL_DEFINE4(futex_wake) runs flag-mask + size + mask==0
-            // gates BEFORE futex_wake() touches uaddr (via get_user_key).
-            // Pre-batch we ran uaddr==0 -> EFAULT FIRST and also
-            // rejected nr<0 with EINVAL where Linux returns 0 (the wake
-            // loop's break condition `++ret >= nr_wake` is immediately
-            // true on the first iteration).
+            {
+                #[inline(never)]
+                fn case(u32_ptr: u64) -> crate::error::KernelResult<()> {
+                    // Batch 378: sys_futex2_wake gate-order fix.  Linux's
+                    // SYSCALL_DEFINE4(futex_wake) runs flag-mask + size + mask==0
+                    // gates BEFORE futex_wake() touches uaddr (via get_user_key).
+                    // Pre-batch we ran uaddr==0 -> EFAULT FIRST and also
+                    // rejected nr<0 with EINVAL where Linux returns 0 (the wake
+                    // loop's break condition `++ret >= nr_wake` is immediately
+                    // true on the first iteration).
 
-            // futex2 wake NULL + valid U32-size + mask=1 -> EFAULT
-            // (uaddr gate fires AFTER flag/mask gates, but all flag/mask
-            // gates pass here, so the terminal is still EFAULT).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: 1,
-                arg3: F2_SIZE_U32,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EFAULT) {
-                serial_println!("[syscall/linux]   FAIL: futex2 wake NULL valid-flags not EFAULT");
-                return Err(KernelError::InternalError);
+                    // futex2 wake NULL + valid U32-size + mask=1 -> EFAULT
+                    // (uaddr gate fires AFTER flag/mask gates, but all flag/mask
+                    // gates pass here, so the terminal is still EFAULT).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: 1,
+                        arg3: F2_SIZE_U32,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futex2 wake NULL valid-flags not EFAULT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wake NULL + bad flag bit (0x100) -> EINVAL
+                    // (verifies flag-mask gate now wins over uaddr gate; pre-batch
+                    // returned EFAULT because uaddr was checked first).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: 1,
+                        arg3: 0x100,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futex2 wake NULL+bad-flag not EINVAL (gate order)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wake NULL + mask=0 + valid flags -> EINVAL
+                    // (verifies mask==0 gate now wins over uaddr gate).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 1,
+                        arg3: F2_SIZE_U32,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futex2 wake NULL+mask=0 not EINVAL (gate order)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wake valid + nr<0 -> 0 (no waiters; Linux returns 0
+                    // because the wake loop breaks on `++ret >= nr_wake` first
+                    // iteration).  Pre-batch returned EINVAL.
+                    let a = SyscallArgs {
+                        arg0: u32_ptr,
+                        arg1: 1,
+                        arg2: u64::MAX,
+                        arg3: F2_SIZE_U32,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    let r = dispatch_linux(nr::FUTEX_WAKE, &a).value;
+                    if r != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futex2 wake nr<0 not 0 (got {})",
+                            r
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wake unknown flag bit (0x100) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: u32_ptr,
+                        arg1: 1,
+                        arg2: 1,
+                        arg3: 0x100,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: futex2 wake bad flag not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wake size != U32 (flags=0 -> SIZE_U8) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: u32_ptr,
+                        arg1: 1,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futex2 wake non-U32 size not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wake NUMA -> ENOSYS.
+                    let a = SyscallArgs {
+                        arg0: u32_ptr,
+                        arg1: 1,
+                        arg2: 1,
+                        arg3: F2_SIZE_U32 | F2_NUMA,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!("[syscall/linux]   FAIL: futex2 wake NUMA not ENOSYS");
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wake mask=0 -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: u32_ptr,
+                        arg1: 0,
+                        arg2: 1,
+                        arg3: F2_SIZE_U32,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: futex2 wake mask=0 not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wake valid PRIVATE+U32, nr=0 -> 0 (no waiters).
+                    let a = SyscallArgs {
+                        arg0: u32_ptr,
+                        arg1: u64::MAX,
+                        arg2: 0,
+                        arg3: F2_SIZE_U32 | F2_PRIVATE,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAKE, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: futex2 wake valid not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wake valid U32, nr=10 -> 0 (no waiters).
+                    let a = SyscallArgs {
+                        arg0: u32_ptr,
+                        arg1: 1,
+                        arg2: 10,
+                        arg3: F2_SIZE_U32,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAKE, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: futex2 wake nr=10 not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   futex2_wake flag-mask-before-uaddr + nr<0 benign: OK"
+                    );
+                    Ok(())
+                }
+                case(u32_ptr)?;
             }
-            // futex2 wake NULL + bad flag bit (0x100) -> EINVAL
-            // (verifies flag-mask gate now wins over uaddr gate; pre-batch
-            // returned EFAULT because uaddr was checked first).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: 1,
-                arg3: 0x100,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: futex2 wake NULL+bad-flag not EINVAL (gate order)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // futex2 wake NULL + mask=0 + valid flags -> EINVAL
-            // (verifies mask==0 gate now wins over uaddr gate).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 1,
-                arg3: F2_SIZE_U32,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: futex2 wake NULL+mask=0 not EINVAL (gate order)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // futex2 wake valid + nr<0 -> 0 (no waiters; Linux returns 0
-            // because the wake loop breaks on `++ret >= nr_wake` first
-            // iteration).  Pre-batch returned EINVAL.
-            let a = SyscallArgs {
-                arg0: u32_ptr,
-                arg1: 1,
-                arg2: u64::MAX,
-                arg3: F2_SIZE_U32,
-                arg4: 0,
-                arg5: 0,
-            };
-            let r = dispatch_linux(nr::FUTEX_WAKE, &a).value;
-            if r != 0 {
-                serial_println!("[syscall/linux]   FAIL: futex2 wake nr<0 not 0 (got {})", r);
-                return Err(KernelError::InternalError);
-            }
-            // futex2 wake unknown flag bit (0x100) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: u32_ptr,
-                arg1: 1,
-                arg2: 1,
-                arg3: 0x100,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: futex2 wake bad flag not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // futex2 wake size != U32 (flags=0 -> SIZE_U8) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: u32_ptr,
-                arg1: 1,
-                arg2: 1,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: futex2 wake non-U32 size not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // futex2 wake NUMA -> ENOSYS.
-            let a = SyscallArgs {
-                arg0: u32_ptr,
-                arg1: 1,
-                arg2: 1,
-                arg3: F2_SIZE_U32 | F2_NUMA,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::ENOSYS) {
-                serial_println!("[syscall/linux]   FAIL: futex2 wake NUMA not ENOSYS");
-                return Err(KernelError::InternalError);
-            }
-            // futex2 wake mask=0 -> EINVAL.
-            let a = SyscallArgs {
-                arg0: u32_ptr,
-                arg1: 0,
-                arg2: 1,
-                arg3: F2_SIZE_U32,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: futex2 wake mask=0 not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // futex2 wake valid PRIVATE+U32, nr=0 -> 0 (no waiters).
-            let a = SyscallArgs {
-                arg0: u32_ptr,
-                arg1: u64::MAX,
-                arg2: 0,
-                arg3: F2_SIZE_U32 | F2_PRIVATE,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAKE, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: futex2 wake valid not 0");
-                return Err(KernelError::InternalError);
-            }
-            // futex2 wake valid U32, nr=10 -> 0 (no waiters).
-            let a = SyscallArgs {
-                arg0: u32_ptr,
-                arg1: 1,
-                arg2: 10,
-                arg3: F2_SIZE_U32,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAKE, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: futex2 wake nr=10 not 0");
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   futex2_wake flag-mask-before-uaddr + nr<0 benign: OK"
-            );
 
             // futex2 wait bad clockid (99) -> EINVAL.
             let a = SyscallArgs {
@@ -99306,82 +99459,89 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!("[syscall/linux]   futex2_wait timespec value gating: OK");
 
-            // Batch 379: sys_futex2_wait gate-order fix.  Linux's
-            // SYSCALL_DEFINE6(futex_wait) runs clockid + flag-mask + size
-            // gates BEFORE __futex_wait() touches uaddr (via get_user).
-            // Pre-batch we ran uaddr==0 -> EFAULT FIRST, so any probe
-            // that should hit a flag/clockid EINVAL instead saw EFAULT
-            // when uaddr was NULL.
+            {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Batch 379: sys_futex2_wait gate-order fix.  Linux's
+                    // SYSCALL_DEFINE6(futex_wait) runs clockid + flag-mask + size
+                    // gates BEFORE __futex_wait() touches uaddr (via get_user).
+                    // Pre-batch we ran uaddr==0 -> EFAULT FIRST, so any probe
+                    // that should hit a flag/clockid EINVAL instead saw EFAULT
+                    // when uaddr was NULL.
 
-            // futex2 wait NULL + bad flag bit (0x100) -> EINVAL
-            // (verifies flag-mask gate now wins over uaddr; pre-batch
-            // returned EFAULT).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: 1,
-                arg3: 0x100,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: futex2 wait NULL+bad-flag not EINVAL (gate order)"
-                );
-                return Err(KernelError::InternalError);
+                    // futex2 wait NULL + bad flag bit (0x100) -> EINVAL
+                    // (verifies flag-mask gate now wins over uaddr; pre-batch
+                    // returned EFAULT).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: 1,
+                        arg3: 0x100,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futex2 wait NULL+bad-flag not EINVAL (gate order)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wait NULL + size != U32 (flags=0) -> EINVAL
+                    // (verifies size gate now wins over uaddr).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futex2 wait NULL+bad-size not EINVAL (gate order)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wait NULL + bad clockid (99) -> EINVAL
+                    // (verifies clockid gate now wins over uaddr; pre-batch
+                    // returned EFAULT).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: 1,
+                        arg3: F2_SIZE_U32,
+                        arg4: 0,
+                        arg5: 99,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futex2 wait NULL+bad-clockid not EINVAL (gate order)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // futex2 wait NULL + mask=0 + valid flags + valid clockid
+                    // -> EINVAL (verifies mask==0 gate now wins over uaddr).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: F2_SIZE_U32,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futex2 wait NULL+mask=0 not EINVAL (gate order)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   futex2_wait flag/clockid/mask-before-uaddr gate order: OK"
+                    );
+                    Ok(())
+                }
+                case()?;
             }
-            // futex2 wait NULL + size != U32 (flags=0) -> EINVAL
-            // (verifies size gate now wins over uaddr).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: 1,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: futex2 wait NULL+bad-size not EINVAL (gate order)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // futex2 wait NULL + bad clockid (99) -> EINVAL
-            // (verifies clockid gate now wins over uaddr; pre-batch
-            // returned EFAULT).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: 1,
-                arg3: F2_SIZE_U32,
-                arg4: 0,
-                arg5: 99,
-            };
-            if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: futex2 wait NULL+bad-clockid not EINVAL (gate order)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // futex2 wait NULL + mask=0 + valid flags + valid clockid
-            // -> EINVAL (verifies mask==0 gate now wins over uaddr).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: 0,
-                arg3: F2_SIZE_U32,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: futex2 wait NULL+mask=0 not EINVAL (gate order)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   futex2_wait flag/clockid/mask-before-uaddr gate order: OK"
-            );
 
             // futex_requeue nonzero flags -> EINVAL.
             let a = SyscallArgs {

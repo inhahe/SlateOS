@@ -4387,142 +4387,179 @@ pub fn init(device_name: &str) -> KernelResult<()> {
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[fat] Running self-test...");
 
-    // List root directory.
-    let entries = crate::fs::Vfs::readdir("/")?;
-    crate::serial_println!("[fat]   Root directory ({} entries):", entries.len());
-    for entry in &entries {
-        let type_str = match entry.entry_type {
-            EntryType::File => "FILE",
-            EntryType::Directory => "DIR ",
-            EntryType::Symlink => "LINK",
-            EntryType::VolumeLabel => "VOL ",
-        };
-        crate::serial_println!(
-            "[fat]     {} {:12} {} bytes",
-            type_str,
-            entry.name.display(),
-            entry.size
-        );
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // List root directory.
+            let entries = crate::fs::Vfs::readdir("/")?;
+            crate::serial_println!("[fat]   Root directory ({} entries):", entries.len());
+            for entry in &entries {
+                let type_str = match entry.entry_type {
+                    EntryType::File => "FILE",
+                    EntryType::Directory => "DIR ",
+                    EntryType::Symlink => "LINK",
+                    EntryType::VolumeLabel => "VOL ",
+                };
+                crate::serial_println!(
+                    "[fat]     {} {:12} {} bytes",
+                    type_str,
+                    entry.name.display(),
+                    entry.size
+                );
+            }
+            Ok(())
+        }
+        case()?;
     }
 
-    // Try to read HELLO.TXT.
-    match crate::fs::Vfs::read_file("/HELLO.TXT") {
-        Ok(data) => {
-            let text = core::str::from_utf8(&data).unwrap_or("<binary>");
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Try to read HELLO.TXT.
+            match crate::fs::Vfs::read_file("/HELLO.TXT") {
+                Ok(data) => {
+                    let text = core::str::from_utf8(&data).unwrap_or("<binary>");
+                    crate::serial_println!(
+                        "[fat]   HELLO.TXT ({} bytes): {}",
+                        data.len(),
+                        text.trim_end()
+                    );
+                }
+                Err(KernelError::NotFound) => {
+                    crate::serial_println!(
+                        "[fat]   HELLO.TXT not found (OK if disk has no test files)"
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+            Ok(())
+        }
+        case()?;
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test write: create a new file, read it back, then delete it.
+            let test_data = b"FAT16 write test: the quick brown fox jumps over the lazy dog.\n";
+            crate::serial_println!("[fat]   Testing write...");
+
+            crate::fs::Vfs::write_file("/TEST.TXT", test_data)?;
+
+            // Read it back and verify.
+            let readback = crate::fs::Vfs::read_file("/TEST.TXT")?;
+            if readback.as_slice() != test_data.as_slice() {
+                crate::serial_println!(
+                    "[fat]   Write verification FAILED: expected {} bytes, got {}",
+                    test_data.len(),
+                    readback.len()
+                );
+                return Err(KernelError::IoError);
+            }
             crate::serial_println!(
-                "[fat]   HELLO.TXT ({} bytes): {}",
-                data.len(),
-                text.trim_end()
+                "[fat]   Write+read verified: {} bytes match",
+                readback.len()
             );
+            Ok(())
         }
-        Err(KernelError::NotFound) => {
-            crate::serial_println!("[fat]   HELLO.TXT not found (OK if disk has no test files)");
-        }
-        Err(e) => return Err(e),
+        case()?;
     }
-
-    // Test write: create a new file, read it back, then delete it.
-    let test_data = b"FAT16 write test: the quick brown fox jumps over the lazy dog.\n";
-    crate::serial_println!("[fat]   Testing write...");
-
-    crate::fs::Vfs::write_file("/TEST.TXT", test_data)?;
-
-    // Read it back and verify.
-    let readback = crate::fs::Vfs::read_file("/TEST.TXT")?;
-    if readback.as_slice() != test_data.as_slice() {
-        crate::serial_println!(
-            "[fat]   Write verification FAILED: expected {} bytes, got {}",
-            test_data.len(),
-            readback.len()
-        );
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!(
-        "[fat]   Write+read verified: {} bytes match",
-        readback.len()
-    );
 
     // Delete the test file.
     crate::fs::Vfs::remove("/TEST.TXT")?;
 
-    // Verify it's gone.
-    match crate::fs::Vfs::read_file("/TEST.TXT") {
-        Err(KernelError::NotFound) => {
-            crate::serial_println!("[fat]   Delete verified: file not found (correct)");
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Verify it's gone.
+            match crate::fs::Vfs::read_file("/TEST.TXT") {
+                Err(KernelError::NotFound) => {
+                    crate::serial_println!("[fat]   Delete verified: file not found (correct)");
+                }
+                Ok(_) => {
+                    crate::serial_println!("[fat]   Delete verification FAILED: file still exists");
+                    return Err(KernelError::IoError);
+                }
+                Err(e) => return Err(e),
+            }
+            Ok(())
         }
-        Ok(_) => {
-            crate::serial_println!("[fat]   Delete verification FAILED: file still exists");
-            return Err(KernelError::IoError);
-        }
-        Err(e) => return Err(e),
+        case()?;
     }
 
     // Test subdirectory support.
     crate::serial_println!("[fat]   Testing mkdir...");
 
-    // Clean up any leftover TESTDIR from previous runs.
-    // A previous boot may have left SUB.TXT inside the directory,
-    // so remove it before attempting rmdir (which requires an empty dir).
-    // Clean up any leftover TESTDIR from previous boots.
-    let _ = crate::fs::Vfs::remove("/TESTDIR/SUB.TXT");
-    let _ = crate::fs::Vfs::rmdir("/TESTDIR");
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Clean up any leftover TESTDIR from previous runs.
+            // A previous boot may have left SUB.TXT inside the directory,
+            // so remove it before attempting rmdir (which requires an empty dir).
+            // Clean up any leftover TESTDIR from previous boots.
+            let _ = crate::fs::Vfs::remove("/TESTDIR/SUB.TXT");
+            let _ = crate::fs::Vfs::rmdir("/TESTDIR");
 
-    crate::fs::Vfs::mkdir("/TESTDIR")?;
+            crate::fs::Vfs::mkdir("/TESTDIR")?;
 
-    // Verify the directory appears in root listing.
-    let entries = crate::fs::Vfs::readdir("/")?;
-    let has_testdir = entries
-        .iter()
-        .any(|e| e.name.eq_ignore_ascii_case("TESTDIR") && e.entry_type == EntryType::Directory);
-    if !has_testdir {
-        crate::serial_println!("[fat]   mkdir FAILED: TESTDIR not in root listing");
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!("[fat]   mkdir verified: TESTDIR in root");
+            // Verify the directory appears in root listing.
+            let entries = crate::fs::Vfs::readdir("/")?;
+            let has_testdir = entries.iter().any(|e| {
+                e.name.eq_ignore_ascii_case("TESTDIR") && e.entry_type == EntryType::Directory
+            });
+            if !has_testdir {
+                crate::serial_println!("[fat]   mkdir FAILED: TESTDIR not in root listing");
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   mkdir verified: TESTDIR in root");
 
-    // Write a file into the subdirectory.
-    let sub_data = b"File inside a subdirectory.\n";
-    crate::fs::Vfs::write_file("/TESTDIR/SUB.TXT", sub_data)?;
+            // Write a file into the subdirectory.
+            let sub_data = b"File inside a subdirectory.\n";
+            crate::fs::Vfs::write_file("/TESTDIR/SUB.TXT", sub_data)?;
 
-    // Read it back.
-    let sub_readback = crate::fs::Vfs::read_file("/TESTDIR/SUB.TXT")?;
-    if sub_readback.as_slice() != sub_data.as_slice() {
-        crate::serial_println!(
-            "[fat]   Subdir write FAILED: expected {} bytes, got {}",
-            sub_data.len(),
-            sub_readback.len()
-        );
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!(
-        "[fat]   Subdir write+read verified: {} bytes",
-        sub_data.len()
-    );
+            // Read it back.
+            let sub_readback = crate::fs::Vfs::read_file("/TESTDIR/SUB.TXT")?;
+            if sub_readback.as_slice() != sub_data.as_slice() {
+                crate::serial_println!(
+                    "[fat]   Subdir write FAILED: expected {} bytes, got {}",
+                    sub_data.len(),
+                    sub_readback.len()
+                );
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!(
+                "[fat]   Subdir write+read verified: {} bytes",
+                sub_data.len()
+            );
 
-    // List subdirectory contents.
-    let sub_entries = crate::fs::Vfs::readdir("/TESTDIR")?;
-    crate::serial_println!("[fat]   TESTDIR has {} entries", sub_entries.len());
-    let has_sub_txt = sub_entries
-        .iter()
-        .any(|e| e.name.eq_ignore_ascii_case("SUB.TXT"));
-    if !has_sub_txt {
-        crate::serial_println!("[fat]   Subdir listing FAILED: SUB.TXT not found");
-        return Err(KernelError::IoError);
-    }
+            // List subdirectory contents.
+            let sub_entries = crate::fs::Vfs::readdir("/TESTDIR")?;
+            crate::serial_println!("[fat]   TESTDIR has {} entries", sub_entries.len());
+            let has_sub_txt = sub_entries
+                .iter()
+                .any(|e| e.name.eq_ignore_ascii_case("SUB.TXT"));
+            if !has_sub_txt {
+                crate::serial_println!("[fat]   Subdir listing FAILED: SUB.TXT not found");
+                return Err(KernelError::IoError);
+            }
 
-    // Delete the file in the subdirectory.
-    crate::fs::Vfs::remove("/TESTDIR/SUB.TXT")?;
+            // Delete the file in the subdirectory.
+            crate::fs::Vfs::remove("/TESTDIR/SUB.TXT")?;
 
-    // Verify it's gone.
-    match crate::fs::Vfs::read_file("/TESTDIR/SUB.TXT") {
-        Err(KernelError::NotFound) => {
-            crate::serial_println!("[fat]   Subdir delete verified");
+            // Verify it's gone.
+            match crate::fs::Vfs::read_file("/TESTDIR/SUB.TXT") {
+                Err(KernelError::NotFound) => {
+                    crate::serial_println!("[fat]   Subdir delete verified");
+                }
+                Ok(_) => {
+                    crate::serial_println!("[fat]   Subdir delete FAILED: file still exists");
+                    return Err(KernelError::IoError);
+                }
+                Err(e) => return Err(e),
+            }
+            Ok(())
         }
-        Ok(_) => {
-            crate::serial_println!("[fat]   Subdir delete FAILED: file still exists");
-            return Err(KernelError::IoError);
-        }
-        Err(e) => return Err(e),
+        case()?;
     }
 
     // Clean up: remove the empty test directory.
@@ -4537,119 +4574,140 @@ pub fn self_test() -> KernelResult<()> {
     // Known epoch: 0 date → 0 ns.
     assert_eq!(dos_datetime_to_ns(0, 0), 0);
 
-    // 1980-01-01 00:00:00 — DOS epoch.
-    //   date = (1980-1980)<<9 | 1<<5 | 1 = 0x0021
-    //   time = 0
-    //   Expected: 315532800 seconds since Unix epoch = 315_532_800_000_000_000 ns.
-    let dos_epoch_date: u16 = (1 << 5) | 1;
-    let dos_epoch_ns = dos_datetime_to_ns(dos_epoch_date, 0);
-    // 1980-01-01T00:00:00Z = 315532800 seconds * 1e9.
-    let expected_dos_epoch_ns: u64 = 315_532_800_000_000_000;
-    if dos_epoch_ns != expected_dos_epoch_ns {
-        crate::serial_println!(
-            "[fat]   dos_datetime_to_ns FAILED: DOS epoch = {}, expected {}",
-            dos_epoch_ns,
-            expected_dos_epoch_ns
-        );
-        return Err(KernelError::IoError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // 1980-01-01 00:00:00 — DOS epoch.
+            //   date = (1980-1980)<<9 | 1<<5 | 1 = 0x0021
+            //   time = 0
+            //   Expected: 315532800 seconds since Unix epoch = 315_532_800_000_000_000 ns.
+            let dos_epoch_date: u16 = (1 << 5) | 1;
+            let dos_epoch_ns = dos_datetime_to_ns(dos_epoch_date, 0);
+            // 1980-01-01T00:00:00Z = 315532800 seconds * 1e9.
+            let expected_dos_epoch_ns: u64 = 315_532_800_000_000_000;
+            if dos_epoch_ns != expected_dos_epoch_ns {
+                crate::serial_println!(
+                    "[fat]   dos_datetime_to_ns FAILED: DOS epoch = {}, expected {}",
+                    dos_epoch_ns,
+                    expected_dos_epoch_ns
+                );
+                return Err(KernelError::IoError);
+            }
+            Ok(())
+        }
+        case()?;
     }
 
-    // 2000-06-15 14:30:00.
-    //   date = (2000-1980)<<9 | 6<<5 | 15 = 20<<9 | 6<<5 | 15 = 10240 + 192 + 15 = 10447
-    //   time = 14<<11 | 30<<5 | 0 = 28672 + 960 = 29632
-    let y2k_date: u16 = (20 << 9) | (6 << 5) | 15;
-    let y2k_time: u16 = (14 << 11) | (30 << 5);
-    let y2k_ns = dos_datetime_to_ns(y2k_date, y2k_time);
-    // 2000-06-15T14:30:00Z = 961078200 seconds * 1e9.
-    let expected_y2k_ns: u64 = 961_078_200_000_000_000;
-    if y2k_ns != expected_y2k_ns {
-        crate::serial_println!(
-            "[fat]   dos_datetime_to_ns FAILED: 2000-06-15 14:30 = {}, expected {}",
-            y2k_ns,
-            expected_y2k_ns
-        );
-        return Err(KernelError::IoError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // 2000-06-15 14:30:00.
+            //   date = (2000-1980)<<9 | 6<<5 | 15 = 20<<9 | 6<<5 | 15 = 10240 + 192 + 15 = 10447
+            //   time = 14<<11 | 30<<5 | 0 = 28672 + 960 = 29632
+            let y2k_date: u16 = (20 << 9) | (6 << 5) | 15;
+            let y2k_time: u16 = (14 << 11) | (30 << 5);
+            let y2k_ns = dos_datetime_to_ns(y2k_date, y2k_time);
+            // 2000-06-15T14:30:00Z = 961078200 seconds * 1e9.
+            let expected_y2k_ns: u64 = 961_078_200_000_000_000;
+            if y2k_ns != expected_y2k_ns {
+                crate::serial_println!(
+                    "[fat]   dos_datetime_to_ns FAILED: 2000-06-15 14:30 = {}, expected {}",
+                    y2k_ns,
+                    expected_y2k_ns
+                );
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   dos_datetime_to_ns verified");
+            Ok(())
+        }
+        case()?;
     }
-    crate::serial_println!("[fat]   dos_datetime_to_ns verified");
 
     // ---------------------------------------------------------------
     // FAT metadata integration test
     // ---------------------------------------------------------------
     crate::serial_println!("[fat]   Testing metadata...");
 
-    // Create a test file, fetch its metadata, verify fields.
-    let meta_test_data = b"Metadata test file content.\n";
-    crate::fs::Vfs::write_file("/METATST.TXT", meta_test_data)?;
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Create a test file, fetch its metadata, verify fields.
+            let meta_test_data = b"Metadata test file content.\n";
+            crate::fs::Vfs::write_file("/METATST.TXT", meta_test_data)?;
 
-    let meta = crate::fs::Vfs::metadata("/METATST.TXT")?;
-    if meta.size != meta_test_data.len() as u64 {
-        crate::serial_println!(
-            "[fat]   metadata FAILED: size = {}, expected {}",
-            meta.size,
-            meta_test_data.len()
-        );
-        crate::fs::Vfs::remove("/METATST.TXT")?;
-        return Err(KernelError::IoError);
-    }
-    if meta.entry_type != EntryType::File {
-        crate::serial_println!("[fat]   metadata FAILED: entry_type is not File");
-        crate::fs::Vfs::remove("/METATST.TXT")?;
-        return Err(KernelError::IoError);
-    }
-    // FAT has no ownership — uid/gid should be 0.
-    if meta.uid != 0 || meta.gid != 0 {
-        crate::serial_println!(
-            "[fat]   metadata FAILED: uid={}, gid={}",
-            meta.uid,
-            meta.gid
-        );
-        crate::fs::Vfs::remove("/METATST.TXT")?;
-        return Err(KernelError::IoError);
-    }
-    // Verify newly written files have non-zero timestamps (RTC-stamped).
-    // DOS epoch (1980-01-01) in ns = 315_532_800_000_000_000.
-    let dos_epoch_ns: u64 = 315_532_800_000_000_000;
-    if meta.created_ns < dos_epoch_ns {
-        crate::serial_println!(
-            "[fat]   metadata WARNING: created_ns={} is before DOS epoch (RTC may not be set)",
-            meta.created_ns
-        );
-    }
-    if meta.modified_ns < dos_epoch_ns {
-        crate::serial_println!(
-            "[fat]   metadata WARNING: modified_ns={} is before DOS epoch",
-            meta.modified_ns
-        );
-    }
-    // Timestamps should be non-zero since we now stamp them on write.
-    if meta.created_ns == 0 || meta.modified_ns == 0 {
-        crate::serial_println!(
-            "[fat]   metadata WARNING: timestamps are zero — write_dir_entry may not be stamping"
-        );
-    }
-    crate::serial_println!(
-        "[fat]   metadata OK: size={}, type=File, created_ns={}, modified_ns={}, accessed_ns={}",
-        meta.size,
-        meta.created_ns,
-        meta.modified_ns,
-        meta.accessed_ns
-    );
+            let meta = crate::fs::Vfs::metadata("/METATST.TXT")?;
+            if meta.size != meta_test_data.len() as u64 {
+                crate::serial_println!(
+                    "[fat]   metadata FAILED: size = {}, expected {}",
+                    meta.size,
+                    meta_test_data.len()
+                );
+                crate::fs::Vfs::remove("/METATST.TXT")?;
+                return Err(KernelError::IoError);
+            }
+            if meta.entry_type != EntryType::File {
+                crate::serial_println!("[fat]   metadata FAILED: entry_type is not File");
+                crate::fs::Vfs::remove("/METATST.TXT")?;
+                return Err(KernelError::IoError);
+            }
+            // FAT has no ownership — uid/gid should be 0.
+            if meta.uid != 0 || meta.gid != 0 {
+                crate::serial_println!(
+                    "[fat]   metadata FAILED: uid={}, gid={}",
+                    meta.uid,
+                    meta.gid
+                );
+                crate::fs::Vfs::remove("/METATST.TXT")?;
+                return Err(KernelError::IoError);
+            }
+            // Verify newly written files have non-zero timestamps (RTC-stamped).
+            // DOS epoch (1980-01-01) in ns = 315_532_800_000_000_000.
+            let dos_epoch_ns: u64 = 315_532_800_000_000_000;
+            if meta.created_ns < dos_epoch_ns {
+                crate::serial_println!(
+                    "[fat]   metadata WARNING: created_ns={} is before DOS epoch (RTC may not be set)",
+                    meta.created_ns
+                );
+            }
+            if meta.modified_ns < dos_epoch_ns {
+                crate::serial_println!(
+                    "[fat]   metadata WARNING: modified_ns={} is before DOS epoch",
+                    meta.modified_ns
+                );
+            }
+            // Timestamps should be non-zero since we now stamp them on write.
+            if meta.created_ns == 0 || meta.modified_ns == 0 {
+                crate::serial_println!(
+                    "[fat]   metadata WARNING: timestamps are zero — write_dir_entry may not be stamping"
+                );
+            }
+            crate::serial_println!(
+                "[fat]   metadata OK: size={}, type=File, created_ns={}, modified_ns={}, accessed_ns={}",
+                meta.size,
+                meta.created_ns,
+                meta.modified_ns,
+                meta.accessed_ns
+            );
 
-    // Test round-trip: rtc_to_dos_datetime → dos_datetime_to_ns should
-    // produce a timestamp within a few seconds of "now" (from RTC).
-    let dt = crate::rtc::read_datetime();
-    let (rt_date, rt_time) = rtc_to_dos_datetime(&dt);
-    let rt_ns = dos_datetime_to_ns(rt_date, rt_time);
-    crate::serial_println!(
-        "[fat]   RTC round-trip: {} → date=0x{:04X} time=0x{:04X} → {} ns",
-        dt,
-        rt_date,
-        rt_time,
-        rt_ns
-    );
-    // Sanity check: the round-tripped timestamp should be >= DOS epoch.
-    if rt_ns < dos_epoch_ns {
-        crate::serial_println!("[fat]   RTC round-trip WARNING: result before DOS epoch");
+            // Test round-trip: rtc_to_dos_datetime → dos_datetime_to_ns should
+            // produce a timestamp within a few seconds of "now" (from RTC).
+            let dt = crate::rtc::read_datetime();
+            let (rt_date, rt_time) = rtc_to_dos_datetime(&dt);
+            let rt_ns = dos_datetime_to_ns(rt_date, rt_time);
+            crate::serial_println!(
+                "[fat]   RTC round-trip: {} → date=0x{:04X} time=0x{:04X} → {} ns",
+                dt,
+                rt_date,
+                rt_time,
+                rt_ns
+            );
+            // Sanity check: the round-tripped timestamp should be >= DOS epoch.
+            if rt_ns < dos_epoch_ns {
+                crate::serial_println!("[fat]   RTC round-trip WARNING: result before DOS epoch");
+            }
+            Ok(())
+        }
+        case()?;
     }
 
     // Test directory metadata.
@@ -4657,17 +4715,26 @@ pub fn self_test() -> KernelResult<()> {
     let _ = crate::fs::Vfs::rmdir("/METADIR");
     crate::fs::Vfs::mkdir("/METADIR")?;
 
-    let dir_meta = crate::fs::Vfs::metadata("/METADIR")?;
-    if dir_meta.entry_type != EntryType::Directory {
-        crate::serial_println!("[fat]   metadata FAILED: METADIR entry_type is not Directory");
-        crate::fs::Vfs::rmdir("/METADIR")?;
-        crate::fs::Vfs::remove("/METATST.TXT")?;
-        return Err(KernelError::IoError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            let dir_meta = crate::fs::Vfs::metadata("/METADIR")?;
+            if dir_meta.entry_type != EntryType::Directory {
+                crate::serial_println!(
+                    "[fat]   metadata FAILED: METADIR entry_type is not Directory"
+                );
+                crate::fs::Vfs::rmdir("/METADIR")?;
+                crate::fs::Vfs::remove("/METATST.TXT")?;
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!(
+                "[fat]   directory metadata OK: type=Directory, size={}",
+                dir_meta.size
+            );
+            Ok(())
+        }
+        case()?;
     }
-    crate::serial_println!(
-        "[fat]   directory metadata OK: type=Directory, size={}",
-        dir_meta.size
-    );
 
     // Clean up.
     crate::fs::Vfs::rmdir("/METADIR")?;
@@ -4683,102 +4750,141 @@ pub fn self_test() -> KernelResult<()> {
     let _ = crate::fs::Vfs::remove("/ATTRTST.TXT");
     crate::fs::Vfs::write_file("/ATTRTST.TXT", attr_test_data)?;
 
-    // Initially, no special attributes should be set.
-    let m1 = crate::fs::Vfs::metadata("/ATTRTST.TXT")?;
-    if m1.attributes != FileAttr::NONE {
-        crate::serial_println!(
-            "[fat]   set_attributes FAILED: new file has attrs={:?}, expected NONE",
-            m1.attributes
-        );
-        crate::fs::Vfs::remove("/ATTRTST.TXT")?;
-        return Err(KernelError::IoError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Initially, no special attributes should be set.
+            let m1 = crate::fs::Vfs::metadata("/ATTRTST.TXT")?;
+            if m1.attributes != FileAttr::NONE {
+                crate::serial_println!(
+                    "[fat]   set_attributes FAILED: new file has attrs={:?}, expected NONE",
+                    m1.attributes
+                );
+                crate::fs::Vfs::remove("/ATTRTST.TXT")?;
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   new file attributes = NONE (correct)");
+            Ok(())
+        }
+        case()?;
     }
-    crate::serial_println!("[fat]   new file attributes = NONE (correct)");
 
     // Set immutable + hidden.
     let new_attrs = FileAttr::IMMUTABLE.union(FileAttr::HIDDEN);
     crate::fs::Vfs::set_attributes("/ATTRTST.TXT", new_attrs)?;
 
-    let m2 = crate::fs::Vfs::metadata("/ATTRTST.TXT")?;
-    if !m2.attributes.contains(FileAttr::IMMUTABLE) || !m2.attributes.contains(FileAttr::HIDDEN) {
-        crate::serial_println!(
-            "[fat]   set_attributes FAILED: expected IMMUTABLE|HIDDEN, got {:?}",
-            m2.attributes
-        );
-        // Clear before cleanup (immutable files can't be deleted on some FSes).
-        let _ = crate::fs::Vfs::set_attributes("/ATTRTST.TXT", FileAttr::NONE);
-        crate::fs::Vfs::remove("/ATTRTST.TXT")?;
-        return Err(KernelError::IoError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            let m2 = crate::fs::Vfs::metadata("/ATTRTST.TXT")?;
+            if !m2.attributes.contains(FileAttr::IMMUTABLE)
+                || !m2.attributes.contains(FileAttr::HIDDEN)
+            {
+                crate::serial_println!(
+                    "[fat]   set_attributes FAILED: expected IMMUTABLE|HIDDEN, got {:?}",
+                    m2.attributes
+                );
+                // Clear before cleanup (immutable files can't be deleted on some FSes).
+                let _ = crate::fs::Vfs::set_attributes("/ATTRTST.TXT", FileAttr::NONE);
+                crate::fs::Vfs::remove("/ATTRTST.TXT")?;
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   set IMMUTABLE|HIDDEN verified");
+            Ok(())
+        }
+        case()?;
     }
-    crate::serial_println!("[fat]   set IMMUTABLE|HIDDEN verified");
 
     // Clear all attributes.
     crate::fs::Vfs::set_attributes("/ATTRTST.TXT", FileAttr::NONE)?;
 
-    let m3 = crate::fs::Vfs::metadata("/ATTRTST.TXT")?;
-    if m3.attributes != FileAttr::NONE {
-        crate::serial_println!(
-            "[fat]   set_attributes FAILED: clear returned {:?}, expected NONE",
-            m3.attributes
-        );
-        crate::fs::Vfs::remove("/ATTRTST.TXT")?;
-        return Err(KernelError::IoError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            let m3 = crate::fs::Vfs::metadata("/ATTRTST.TXT")?;
+            if m3.attributes != FileAttr::NONE {
+                crate::serial_println!(
+                    "[fat]   set_attributes FAILED: clear returned {:?}, expected NONE",
+                    m3.attributes
+                );
+                crate::fs::Vfs::remove("/ATTRTST.TXT")?;
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   clear attributes verified");
+            Ok(())
+        }
+        case()?;
     }
-    crate::serial_println!("[fat]   clear attributes verified");
 
-    // Test set_permissions and set_owner return NotSupported (as expected for FAT).
-    match crate::fs::Vfs::set_permissions("/ATTRTST.TXT", 0o644) {
-        Err(KernelError::NotSupported) => {
-            crate::serial_println!("[fat]   set_permissions correctly returns NotSupported");
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test set_permissions and set_owner return NotSupported (as expected for FAT).
+            match crate::fs::Vfs::set_permissions("/ATTRTST.TXT", 0o644) {
+                Err(KernelError::NotSupported) => {
+                    crate::serial_println!(
+                        "[fat]   set_permissions correctly returns NotSupported"
+                    );
+                }
+                other => {
+                    crate::serial_println!(
+                        "[fat]   set_permissions FAILED: expected NotSupported, got {:?}",
+                        other
+                    );
+                    crate::fs::Vfs::remove("/ATTRTST.TXT")?;
+                    return Err(KernelError::IoError);
+                }
+            }
+            match crate::fs::Vfs::set_owner("/ATTRTST.TXT", 1000, 1000) {
+                Err(KernelError::NotSupported) => {
+                    crate::serial_println!("[fat]   set_owner correctly returns NotSupported");
+                }
+                other => {
+                    crate::serial_println!(
+                        "[fat]   set_owner FAILED: expected NotSupported, got {:?}",
+                        other
+                    );
+                    crate::fs::Vfs::remove("/ATTRTST.TXT")?;
+                    return Err(KernelError::IoError);
+                }
+            }
+            Ok(())
         }
-        other => {
-            crate::serial_println!(
-                "[fat]   set_permissions FAILED: expected NotSupported, got {:?}",
-                other
-            );
-            crate::fs::Vfs::remove("/ATTRTST.TXT")?;
-            return Err(KernelError::IoError);
-        }
-    }
-    match crate::fs::Vfs::set_owner("/ATTRTST.TXT", 1000, 1000) {
-        Err(KernelError::NotSupported) => {
-            crate::serial_println!("[fat]   set_owner correctly returns NotSupported");
-        }
-        other => {
-            crate::serial_println!(
-                "[fat]   set_owner FAILED: expected NotSupported, got {:?}",
-                other
-            );
-            crate::fs::Vfs::remove("/ATTRTST.TXT")?;
-            return Err(KernelError::IoError);
-        }
+        case()?;
     }
 
     // Clean up.
     crate::fs::Vfs::remove("/ATTRTST.TXT")?;
     crate::serial_println!("[fat]   set_attributes tests passed");
 
-    // ---------------------------------------------------------------
-    // ns_to_dos_datetime round-trip test
-    // ---------------------------------------------------------------
-    crate::serial_println!("[fat]   Testing ns_to_dos_datetime round-trip...");
     {
-        // 2000-06-15 14:30:00 → ns → dos → ns should be idempotent.
-        let orig_date: u16 = (20 << 9) | (6 << 5) | 15;
-        let orig_time: u16 = (14 << 11) | (30 << 5);
-        let ns = dos_datetime_to_ns(orig_date, orig_time);
-        let (rt_date, rt_time) = ns_to_dos_datetime(ns);
-        if rt_date != orig_date || rt_time != orig_time {
-            crate::serial_println!(
-                "[fat]   ns_to_dos_datetime round-trip FAILED: ({:#06X},{:#06X}) → ns → ({:#06X},{:#06X})",
-                orig_date,
-                orig_time,
-                rt_date,
-                rt_time
-            );
-            return Err(KernelError::IoError);
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // ---------------------------------------------------------------
+            // ns_to_dos_datetime round-trip test
+            // ---------------------------------------------------------------
+            crate::serial_println!("[fat]   Testing ns_to_dos_datetime round-trip...");
+            {
+                // 2000-06-15 14:30:00 → ns → dos → ns should be idempotent.
+                let orig_date: u16 = (20 << 9) | (6 << 5) | 15;
+                let orig_time: u16 = (14 << 11) | (30 << 5);
+                let ns = dos_datetime_to_ns(orig_date, orig_time);
+                let (rt_date, rt_time) = ns_to_dos_datetime(ns);
+                if rt_date != orig_date || rt_time != orig_time {
+                    crate::serial_println!(
+                        "[fat]   ns_to_dos_datetime round-trip FAILED: ({:#06X},{:#06X}) → ns → ({:#06X},{:#06X})",
+                        orig_date,
+                        orig_time,
+                        rt_date,
+                        rt_time
+                    );
+                    return Err(KernelError::IoError);
+                }
+                crate::serial_println!("[fat]   ns_to_dos_datetime round-trip verified");
+            }
+            Ok(())
         }
-        crate::serial_println!("[fat]   ns_to_dos_datetime round-trip verified");
+        case()?;
     }
 
     // ---------------------------------------------------------------
@@ -4786,73 +4892,82 @@ pub fn self_test() -> KernelResult<()> {
     // ---------------------------------------------------------------
     crate::serial_println!("[fat]   Testing fallocate...");
 
-    // Test 1: fallocate on a new file.
-    let alloc_path = "/FALLOC.TXT";
-    // Pre-allocate 8192 bytes (should allocate 1+ clusters).
-    crate::fs::Vfs::fallocate(alloc_path, 8192)?;
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 1: fallocate on a new file.
+            let alloc_path = "/FALLOC.TXT";
+            // Pre-allocate 8192 bytes (should allocate 1+ clusters).
+            crate::fs::Vfs::fallocate(alloc_path, 8192)?;
 
-    // File should exist now with size 0 (pre-allocated but no data written).
-    let m_alloc = crate::fs::Vfs::stat(alloc_path)?;
-    if m_alloc.size != 0 {
-        crate::serial_println!(
-            "[fat]   fallocate FAILED: expected size 0, got {}",
-            m_alloc.size
-        );
-        let _ = crate::fs::Vfs::remove(alloc_path);
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!("[fat]   fallocate new file: size correctly 0 after pre-alloc");
+            // File should exist now with size 0 (pre-allocated but no data written).
+            let m_alloc = crate::fs::Vfs::stat(alloc_path)?;
+            if m_alloc.size != 0 {
+                crate::serial_println!(
+                    "[fat]   fallocate FAILED: expected size 0, got {}",
+                    m_alloc.size
+                );
+                let _ = crate::fs::Vfs::remove(alloc_path);
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   fallocate new file: size correctly 0 after pre-alloc");
 
-    // Write some data — should succeed without new allocation since space is reserved.
-    let falloc_data = b"pre-allocated data";
-    crate::fs::Vfs::write_file(alloc_path, falloc_data)?;
-    let readback = crate::fs::Vfs::read_file(alloc_path)?;
-    if readback.as_slice() != falloc_data.as_slice() {
-        crate::serial_println!("[fat]   fallocate FAILED: write-after-alloc mismatch");
-        let _ = crate::fs::Vfs::remove(alloc_path);
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!("[fat]   fallocate write-after-alloc verified");
+            // Write some data — should succeed without new allocation since space is reserved.
+            let falloc_data = b"pre-allocated data";
+            crate::fs::Vfs::write_file(alloc_path, falloc_data)?;
+            let readback = crate::fs::Vfs::read_file(alloc_path)?;
+            if readback.as_slice() != falloc_data.as_slice() {
+                crate::serial_println!("[fat]   fallocate FAILED: write-after-alloc mismatch");
+                let _ = crate::fs::Vfs::remove(alloc_path);
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   fallocate write-after-alloc verified");
 
-    // Test 2: fallocate on an existing file should not shrink the chain.
-    crate::fs::Vfs::fallocate(alloc_path, 1)?; // Smaller than existing
-    let m_alloc2 = crate::fs::Vfs::stat(alloc_path)?;
-    // Size should be unchanged from our write.
-    if m_alloc2.size != falloc_data.len() as u64 {
-        crate::serial_println!(
-            "[fat]   fallocate FAILED: small fallocate changed size to {}",
-            m_alloc2.size
-        );
-        let _ = crate::fs::Vfs::remove(alloc_path);
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!("[fat]   fallocate no-shrink verified");
+            // Test 2: fallocate on an existing file should not shrink the chain.
+            crate::fs::Vfs::fallocate(alloc_path, 1)?; // Smaller than existing
+            let m_alloc2 = crate::fs::Vfs::stat(alloc_path)?;
+            // Size should be unchanged from our write.
+            if m_alloc2.size != falloc_data.len() as u64 {
+                crate::serial_println!(
+                    "[fat]   fallocate FAILED: small fallocate changed size to {}",
+                    m_alloc2.size
+                );
+                let _ = crate::fs::Vfs::remove(alloc_path);
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   fallocate no-shrink verified");
 
-    // Test 3: fallocate with size 0 is a no-op.
-    crate::fs::Vfs::fallocate(alloc_path, 0)?;
-    crate::serial_println!("[fat]   fallocate(0) no-op verified");
+            // Test 3: fallocate with size 0 is a no-op.
+            crate::fs::Vfs::fallocate(alloc_path, 0)?;
+            crate::serial_println!("[fat]   fallocate(0) no-op verified");
 
-    // Test 4: fallocate on a directory should fail.
-    crate::fs::Vfs::mkdir("/FALLOCDIR")?;
-    match crate::fs::Vfs::fallocate("/FALLOCDIR", 4096) {
-        Err(KernelError::IsADirectory) => {
-            crate::serial_println!("[fat]   fallocate on directory correctly returns IsADirectory");
-        }
-        other => {
-            crate::serial_println!(
-                "[fat]   fallocate on directory FAILED: expected IsADirectory, got {:?}",
-                other
-            );
-            let _ = crate::fs::Vfs::remove(alloc_path);
+            // Test 4: fallocate on a directory should fail.
+            crate::fs::Vfs::mkdir("/FALLOCDIR")?;
+            match crate::fs::Vfs::fallocate("/FALLOCDIR", 4096) {
+                Err(KernelError::IsADirectory) => {
+                    crate::serial_println!(
+                        "[fat]   fallocate on directory correctly returns IsADirectory"
+                    );
+                }
+                other => {
+                    crate::serial_println!(
+                        "[fat]   fallocate on directory FAILED: expected IsADirectory, got {:?}",
+                        other
+                    );
+                    let _ = crate::fs::Vfs::remove(alloc_path);
+                    let _ = crate::fs::Vfs::rmdir("/FALLOCDIR");
+                    return Err(KernelError::IoError);
+                }
+            }
             let _ = crate::fs::Vfs::rmdir("/FALLOCDIR");
-            return Err(KernelError::IoError);
-        }
-    }
-    let _ = crate::fs::Vfs::rmdir("/FALLOCDIR");
 
-    // Clean up.
-    crate::fs::Vfs::remove(alloc_path)?;
-    crate::serial_println!("[fat]   fallocate tests passed");
+            // Clean up.
+            crate::fs::Vfs::remove(alloc_path)?;
+            crate::serial_println!("[fat]   fallocate tests passed");
+            Ok(())
+        }
+        case()?;
+    }
 
     // ---------------------------------------------------------------
     // Long Filename (LFN) tests
@@ -4864,101 +4979,121 @@ pub fn self_test() -> KernelResult<()> {
     let cksum = lfn_checksum(&test_name83);
     crate::serial_println!("[fat]   lfn_checksum(\"HELLO   TXT\") = 0x{:02X}", cksum);
 
-    // Unit test: needs_lfn
-    assert!(!needs_lfn("HELLO.TXT"));
-    assert!(!needs_lfn("FILE"));
-    assert!(needs_lfn("Hello.txt")); // lowercase
-    assert!(needs_lfn("long filename.txt")); // spaces + lowercase
-    assert!(needs_lfn("document.docx")); // lowercase
-    assert!(needs_lfn("a.b.c")); // multiple dots
-    assert!(needs_lfn("verylongbasename.txt")); // base > 8
-    crate::serial_println!("[fat]   needs_lfn checks passed");
+    {
+        #[inline(never)]
+        fn case() {
+            // Unit test: needs_lfn
+            assert!(!needs_lfn("HELLO.TXT"));
+            assert!(!needs_lfn("FILE"));
+            assert!(needs_lfn("Hello.txt")); // lowercase
+            assert!(needs_lfn("long filename.txt")); // spaces + lowercase
+            assert!(needs_lfn("document.docx")); // lowercase
+            assert!(needs_lfn("a.b.c")); // multiple dots
+            assert!(needs_lfn("verylongbasename.txt")); // base > 8
+            crate::serial_println!("[fat]   needs_lfn checks passed");
+        }
+        case();
+    }
 
-    // Unit test: encode/decode round-trip
-    let test_name = "Hello World.txt";
-    let encoded = encode_lfn(test_name);
-    if let Some(ref _ucs2) = encoded {
-        // Build LFN entries and decode.
-        let mut test83 = generate_basis_name(test_name);
-        set_basis_tail(&mut test83, 1);
-        if let Some(lfn_entries) = build_lfn_entries(test_name, &test83) {
-            crate::serial_println!(
-                "[fat]   LFN encode/build: '{}' → {} LFN entries",
-                test_name,
-                lfn_entries.len()
-            );
-
-            // Verify checksum in entries matches.
-            let expected_cksum = lfn_checksum(&test83);
-            for raw in &lfn_entries {
-                let entry_cksum = raw[13];
-                if entry_cksum != expected_cksum {
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Unit test: encode/decode round-trip
+            let test_name = "Hello World.txt";
+            let encoded = encode_lfn(test_name);
+            if let Some(ref _ucs2) = encoded {
+                // Build LFN entries and decode.
+                let mut test83 = generate_basis_name(test_name);
+                set_basis_tail(&mut test83, 1);
+                if let Some(lfn_entries) = build_lfn_entries(test_name, &test83) {
                     crate::serial_println!(
-                        "[fat]   LFN checksum FAILED: entry has 0x{:02X}, expected 0x{:02X}",
-                        entry_cksum,
-                        expected_cksum
+                        "[fat]   LFN encode/build: '{}' → {} LFN entries",
+                        test_name,
+                        lfn_entries.len()
                     );
-                    return Err(KernelError::IoError);
+
+                    // Verify checksum in entries matches.
+                    let expected_cksum = lfn_checksum(&test83);
+                    for raw in &lfn_entries {
+                        let entry_cksum = raw[13];
+                        if entry_cksum != expected_cksum {
+                            crate::serial_println!(
+                                "[fat]   LFN checksum FAILED: entry has 0x{:02X}, expected 0x{:02X}",
+                                entry_cksum,
+                                expected_cksum
+                            );
+                            return Err(KernelError::IoError);
+                        }
+                    }
+                    crate::serial_println!("[fat]   LFN checksum consistency verified");
                 }
             }
-            crate::serial_println!("[fat]   LFN checksum consistency verified");
+            Ok(())
         }
+        case()?;
     }
 
-    // Integration test: write and read a file with a long filename.
-    let lfn_test_data = b"Long filename test content.\n";
-    let lfn_path = "/Hello World.txt";
-    // Clean up any leftover from previous runs.
-    let _ = crate::fs::Vfs::remove(lfn_path);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Integration test: write and read a file with a long filename.
+            let lfn_test_data = b"Long filename test content.\n";
+            let lfn_path = "/Hello World.txt";
+            // Clean up any leftover from previous runs.
+            let _ = crate::fs::Vfs::remove(lfn_path);
 
-    crate::fs::Vfs::write_file(lfn_path, lfn_test_data)?;
+            crate::fs::Vfs::write_file(lfn_path, lfn_test_data)?;
 
-    // Read it back.
-    let lfn_readback = crate::fs::Vfs::read_file(lfn_path)?;
-    if lfn_readback.as_slice() != lfn_test_data.as_slice() {
-        crate::serial_println!(
-            "[fat]   LFN write FAILED: expected {} bytes, got {}",
-            lfn_test_data.len(),
-            lfn_readback.len()
-        );
-        let _ = crate::fs::Vfs::remove(lfn_path);
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!(
-        "[fat]   LFN write+read verified: '{}' ({} bytes)",
-        lfn_path,
-        lfn_readback.len()
-    );
+            // Read it back.
+            let lfn_readback = crate::fs::Vfs::read_file(lfn_path)?;
+            if lfn_readback.as_slice() != lfn_test_data.as_slice() {
+                crate::serial_println!(
+                    "[fat]   LFN write FAILED: expected {} bytes, got {}",
+                    lfn_test_data.len(),
+                    lfn_readback.len()
+                );
+                let _ = crate::fs::Vfs::remove(lfn_path);
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!(
+                "[fat]   LFN write+read verified: '{}' ({} bytes)",
+                lfn_path,
+                lfn_readback.len()
+            );
 
-    // Verify the long name appears in directory listing.
-    let root_entries = crate::fs::Vfs::readdir("/")?;
-    let has_lfn = root_entries
-        .iter()
-        .any(|e| e.name.as_path() == Path::new("Hello World.txt"));
-    if !has_lfn {
-        crate::serial_println!("[fat]   LFN listing FAILED: 'Hello World.txt' not in root");
-        // Check if it appears under the short name instead.
-        for e in &root_entries {
-            crate::serial_println!("[fat]     found: '{}'", e.name.display());
+            // Verify the long name appears in directory listing.
+            let root_entries = crate::fs::Vfs::readdir("/")?;
+            let has_lfn = root_entries
+                .iter()
+                .any(|e| e.name.as_path() == Path::new("Hello World.txt"));
+            if !has_lfn {
+                crate::serial_println!("[fat]   LFN listing FAILED: 'Hello World.txt' not in root");
+                // Check if it appears under the short name instead.
+                for e in &root_entries {
+                    crate::serial_println!("[fat]     found: '{}'", e.name.display());
+                }
+                let _ = crate::fs::Vfs::remove(lfn_path);
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   LFN directory listing verified");
+
+            // Clean up.
+            crate::fs::Vfs::remove(lfn_path)?;
+
+            // Verify it's gone.
+            match crate::fs::Vfs::read_file(lfn_path) {
+                Err(KernelError::NotFound) => {
+                    crate::serial_println!("[fat]   LFN delete verified");
+                }
+                Ok(_) => {
+                    crate::serial_println!("[fat]   LFN delete FAILED: file still exists");
+                    return Err(KernelError::IoError);
+                }
+                Err(e) => return Err(e),
+            }
+            Ok(())
         }
-        let _ = crate::fs::Vfs::remove(lfn_path);
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!("[fat]   LFN directory listing verified");
-
-    // Clean up.
-    crate::fs::Vfs::remove(lfn_path)?;
-
-    // Verify it's gone.
-    match crate::fs::Vfs::read_file(lfn_path) {
-        Err(KernelError::NotFound) => {
-            crate::serial_println!("[fat]   LFN delete verified");
-        }
-        Ok(_) => {
-            crate::serial_println!("[fat]   LFN delete FAILED: file still exists");
-            return Err(KernelError::IoError);
-        }
-        Err(e) => return Err(e),
+        case()?;
     }
 
     crate::serial_println!("[fat]   LFN tests passed");
@@ -4969,231 +5104,273 @@ pub fn self_test() -> KernelResult<()> {
     // ---------------------------------------------------------------
     crate::serial_println!("[fat]   Testing LFN operations...");
 
-    // --- LFN mkdir + file-in-LFN-dir ---
-    let lfn_dir = "/My Documents";
-    let _ = crate::fs::Vfs::remove("/My Documents/notes.txt");
-    let _ = crate::fs::Vfs::rmdir(lfn_dir);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // --- LFN mkdir + file-in-LFN-dir ---
+            let lfn_dir = "/My Documents";
+            let _ = crate::fs::Vfs::remove("/My Documents/notes.txt");
+            let _ = crate::fs::Vfs::rmdir(lfn_dir);
 
-    crate::fs::Vfs::mkdir(lfn_dir)?;
+            crate::fs::Vfs::mkdir(lfn_dir)?;
 
-    // Verify the long-named directory appears in root listing.
-    let root_entries = crate::fs::Vfs::readdir("/")?;
-    let has_lfn_dir = root_entries.iter().any(|e| {
-        e.name.as_path() == Path::new("My Documents") && e.entry_type == EntryType::Directory
-    });
-    if !has_lfn_dir {
-        crate::serial_println!("[fat]   LFN mkdir FAILED: 'My Documents' not in root");
-        for e in &root_entries {
-            crate::serial_println!("[fat]     found: '{}' {:?}", e.name.display(), e.entry_type);
+            // Verify the long-named directory appears in root listing.
+            let root_entries = crate::fs::Vfs::readdir("/")?;
+            let has_lfn_dir = root_entries.iter().any(|e| {
+                e.name.as_path() == Path::new("My Documents")
+                    && e.entry_type == EntryType::Directory
+            });
+            if !has_lfn_dir {
+                crate::serial_println!("[fat]   LFN mkdir FAILED: 'My Documents' not in root");
+                for e in &root_entries {
+                    crate::serial_println!(
+                        "[fat]     found: '{}' {:?}",
+                        e.name.display(),
+                        e.entry_type
+                    );
+                }
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   LFN mkdir verified: '{}'", lfn_dir);
+
+            // Write a file inside the long-named directory.
+            let lfn_sub_data = b"File inside LFN directory.\n";
+            crate::fs::Vfs::write_file("/My Documents/notes.txt", lfn_sub_data)?;
+
+            let lfn_sub_read = crate::fs::Vfs::read_file("/My Documents/notes.txt")?;
+            if lfn_sub_read.as_slice() != lfn_sub_data.as_slice() {
+                crate::serial_println!("[fat]   LFN subdir write FAILED: data mismatch");
+                let _ = crate::fs::Vfs::remove("/My Documents/notes.txt");
+                let _ = crate::fs::Vfs::rmdir(lfn_dir);
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   LFN subdir write+read verified");
+
+            // Clean up file, then rmdir with long name.
+            crate::fs::Vfs::remove("/My Documents/notes.txt")?;
+            crate::fs::Vfs::rmdir(lfn_dir)?;
+
+            // Verify the directory is gone.
+            let root_after = crate::fs::Vfs::readdir("/")?;
+            let still_has = root_after
+                .iter()
+                .any(|e| e.name.as_path() == Path::new("My Documents"));
+            if still_has {
+                crate::serial_println!("[fat]   LFN rmdir FAILED: 'My Documents' still in root");
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   LFN rmdir verified: '{}' removed", lfn_dir);
+            Ok(())
         }
-        return Err(KernelError::IoError);
+        case()?;
     }
-    crate::serial_println!("[fat]   LFN mkdir verified: '{}'", lfn_dir);
 
-    // Write a file inside the long-named directory.
-    let lfn_sub_data = b"File inside LFN directory.\n";
-    crate::fs::Vfs::write_file("/My Documents/notes.txt", lfn_sub_data)?;
-
-    let lfn_sub_read = crate::fs::Vfs::read_file("/My Documents/notes.txt")?;
-    if lfn_sub_read.as_slice() != lfn_sub_data.as_slice() {
-        crate::serial_println!("[fat]   LFN subdir write FAILED: data mismatch");
-        let _ = crate::fs::Vfs::remove("/My Documents/notes.txt");
-        let _ = crate::fs::Vfs::rmdir(lfn_dir);
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!("[fat]   LFN subdir write+read verified");
-
-    // Clean up file, then rmdir with long name.
-    crate::fs::Vfs::remove("/My Documents/notes.txt")?;
-    crate::fs::Vfs::rmdir(lfn_dir)?;
-
-    // Verify the directory is gone.
-    let root_after = crate::fs::Vfs::readdir("/")?;
-    let still_has = root_after
-        .iter()
-        .any(|e| e.name.as_path() == Path::new("My Documents"));
-    if still_has {
-        crate::serial_println!("[fat]   LFN rmdir FAILED: 'My Documents' still in root");
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!("[fat]   LFN rmdir verified: '{}' removed", lfn_dir);
-
-    // --- LFN rename ---
-    let lfn_src = "/original name.txt";
-    let lfn_dst = "/renamed file.txt";
-    let _ = crate::fs::Vfs::remove(lfn_src);
-    let _ = crate::fs::Vfs::remove(lfn_dst);
-
-    let rename_data = b"LFN rename test data.\n";
-    crate::fs::Vfs::write_file(lfn_src, rename_data)?;
-
-    crate::fs::Vfs::rename(lfn_src, lfn_dst)?;
-
-    // Source should be gone.
-    match crate::fs::Vfs::read_file(lfn_src) {
-        Err(KernelError::NotFound) => {}
-        Ok(_) => {
-            crate::serial_println!("[fat]   LFN rename FAILED: source still exists");
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // --- LFN rename ---
+            let lfn_src = "/original name.txt";
+            let lfn_dst = "/renamed file.txt";
             let _ = crate::fs::Vfs::remove(lfn_src);
             let _ = crate::fs::Vfs::remove(lfn_dst);
-            return Err(KernelError::IoError);
-        }
-        Err(e) => return Err(e),
-    }
 
-    // Destination should have the data.
-    let rename_read = crate::fs::Vfs::read_file(lfn_dst)?;
-    if rename_read.as_slice() != rename_data.as_slice() {
-        crate::serial_println!("[fat]   LFN rename FAILED: destination data mismatch");
-        let _ = crate::fs::Vfs::remove(lfn_dst);
-        return Err(KernelError::IoError);
-    }
+            let rename_data = b"LFN rename test data.\n";
+            crate::fs::Vfs::write_file(lfn_src, rename_data)?;
 
-    // Verify the long destination name appears in directory listing.
-    let root_entries = crate::fs::Vfs::readdir("/")?;
-    let has_renamed = root_entries
-        .iter()
-        .any(|e| e.name.as_path() == Path::new("renamed file.txt"));
-    if !has_renamed {
-        crate::serial_println!("[fat]   LFN rename FAILED: 'renamed file.txt' not in root");
-        let _ = crate::fs::Vfs::remove(lfn_dst);
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!(
-        "[fat]   LFN rename verified: '{}' -> '{}'",
-        lfn_src,
-        lfn_dst
-    );
+            crate::fs::Vfs::rename(lfn_src, lfn_dst)?;
 
-    // --- rename overwrite test (POSIX semantics) ---
-    // Rename should replace an existing destination file.
-    let overwrite_src = "/rename src.txt";
-    let _ = crate::fs::Vfs::remove(overwrite_src);
+            // Source should be gone.
+            match crate::fs::Vfs::read_file(lfn_src) {
+                Err(KernelError::NotFound) => {}
+                Ok(_) => {
+                    crate::serial_println!("[fat]   LFN rename FAILED: source still exists");
+                    let _ = crate::fs::Vfs::remove(lfn_src);
+                    let _ = crate::fs::Vfs::remove(lfn_dst);
+                    return Err(KernelError::IoError);
+                }
+                Err(e) => return Err(e),
+            }
 
-    crate::fs::Vfs::write_file(overwrite_src, b"source data\n")?;
-    // lfn_dst still exists from above with "LFN rename test data.\n"
-    crate::fs::Vfs::rename(overwrite_src, lfn_dst)?;
+            // Destination should have the data.
+            let rename_read = crate::fs::Vfs::read_file(lfn_dst)?;
+            if rename_read.as_slice() != rename_data.as_slice() {
+                crate::serial_println!("[fat]   LFN rename FAILED: destination data mismatch");
+                let _ = crate::fs::Vfs::remove(lfn_dst);
+                return Err(KernelError::IoError);
+            }
 
-    // Source should be gone.
-    match crate::fs::Vfs::read_file(overwrite_src) {
-        Err(KernelError::NotFound) => {}
-        _ => {
-            crate::serial_println!("[fat]   rename overwrite FAILED: source still exists");
+            // Verify the long destination name appears in directory listing.
+            let root_entries = crate::fs::Vfs::readdir("/")?;
+            let has_renamed = root_entries
+                .iter()
+                .any(|e| e.name.as_path() == Path::new("renamed file.txt"));
+            if !has_renamed {
+                crate::serial_println!("[fat]   LFN rename FAILED: 'renamed file.txt' not in root");
+                let _ = crate::fs::Vfs::remove(lfn_dst);
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!(
+                "[fat]   LFN rename verified: '{}' -> '{}'",
+                lfn_src,
+                lfn_dst
+            );
+
+            // --- rename overwrite test (POSIX semantics) ---
+            // Rename should replace an existing destination file.
+            let overwrite_src = "/rename src.txt";
             let _ = crate::fs::Vfs::remove(overwrite_src);
-            let _ = crate::fs::Vfs::remove(lfn_dst);
-            return Err(KernelError::IoError);
+
+            crate::fs::Vfs::write_file(overwrite_src, b"source data\n")?;
+            // lfn_dst still exists from above with "LFN rename test data.\n"
+            crate::fs::Vfs::rename(overwrite_src, lfn_dst)?;
+
+            // Source should be gone.
+            match crate::fs::Vfs::read_file(overwrite_src) {
+                Err(KernelError::NotFound) => {}
+                _ => {
+                    crate::serial_println!("[fat]   rename overwrite FAILED: source still exists");
+                    let _ = crate::fs::Vfs::remove(overwrite_src);
+                    let _ = crate::fs::Vfs::remove(lfn_dst);
+                    return Err(KernelError::IoError);
+                }
+            }
+
+            // Destination should have the NEW data.
+            let overwrite_read = crate::fs::Vfs::read_file(lfn_dst)?;
+            if overwrite_read.as_slice() != b"source data\n" {
+                crate::serial_println!(
+                    "[fat]   rename overwrite FAILED: destination has wrong data"
+                );
+                let _ = crate::fs::Vfs::remove(lfn_dst);
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   rename overwrite verified (POSIX semantics)");
+
+            crate::fs::Vfs::remove(lfn_dst)?;
+            Ok(())
         }
+        case()?;
     }
 
-    // Destination should have the NEW data.
-    let overwrite_read = crate::fs::Vfs::read_file(lfn_dst)?;
-    if overwrite_read.as_slice() != b"source data\n" {
-        crate::serial_println!("[fat]   rename overwrite FAILED: destination has wrong data");
-        let _ = crate::fs::Vfs::remove(lfn_dst);
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!("[fat]   rename overwrite verified (POSIX semantics)");
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // --- LFN write_at ---
+            let lfn_wa_path = "/write at test.bin";
+            let _ = crate::fs::Vfs::remove(lfn_wa_path);
 
-    crate::fs::Vfs::remove(lfn_dst)?;
+            // Create a file with initial content.
+            let initial = b"AAAAAAAAAA"; // 10 bytes of 'A'
+            crate::fs::Vfs::write_file(lfn_wa_path, initial)?;
 
-    // --- LFN write_at ---
-    let lfn_wa_path = "/write at test.bin";
-    let _ = crate::fs::Vfs::remove(lfn_wa_path);
+            // Overwrite bytes 3..7 with 'BBBB'.
+            crate::fs::Vfs::write_at(lfn_wa_path, 3, b"BBBB")?;
 
-    // Create a file with initial content.
-    let initial = b"AAAAAAAAAA"; // 10 bytes of 'A'
-    crate::fs::Vfs::write_file(lfn_wa_path, initial)?;
+            let wa_read = crate::fs::Vfs::read_file(lfn_wa_path)?;
+            let expected_wa = b"AAABBBBAAA";
+            if wa_read.as_slice() != expected_wa.as_slice() {
+                crate::serial_println!(
+                    "[fat]   LFN write_at FAILED: expected {:?}, got {:?}",
+                    expected_wa,
+                    wa_read.as_slice()
+                );
+                let _ = crate::fs::Vfs::remove(lfn_wa_path);
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   LFN write_at verified");
 
-    // Overwrite bytes 3..7 with 'BBBB'.
-    crate::fs::Vfs::write_at(lfn_wa_path, 3, b"BBBB")?;
-
-    let wa_read = crate::fs::Vfs::read_file(lfn_wa_path)?;
-    let expected_wa = b"AAABBBBAAA";
-    if wa_read.as_slice() != expected_wa.as_slice() {
-        crate::serial_println!(
-            "[fat]   LFN write_at FAILED: expected {:?}, got {:?}",
-            expected_wa,
-            wa_read.as_slice()
-        );
-        let _ = crate::fs::Vfs::remove(lfn_wa_path);
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!("[fat]   LFN write_at verified");
-
-    crate::fs::Vfs::remove(lfn_wa_path)?;
-
-    // --- LFN truncate ---
-    let lfn_trunc_path = "/truncate test.dat";
-    let _ = crate::fs::Vfs::remove(lfn_trunc_path);
-
-    let trunc_data = b"This content will be truncated.\n";
-    crate::fs::Vfs::write_file(lfn_trunc_path, trunc_data)?;
-
-    // Truncate to 12 bytes.
-    crate::fs::Vfs::truncate(lfn_trunc_path, 12)?;
-
-    let trunc_read = crate::fs::Vfs::read_file(lfn_trunc_path)?;
-    if trunc_read.len() != 12 {
-        crate::serial_println!(
-            "[fat]   LFN truncate FAILED: expected 12 bytes, got {}",
-            trunc_read.len()
-        );
-        let _ = crate::fs::Vfs::remove(lfn_trunc_path);
-        return Err(KernelError::IoError);
-    }
-    if trunc_read.as_slice() != &trunc_data[..12] {
-        crate::serial_println!("[fat]   LFN truncate FAILED: content mismatch");
-        let _ = crate::fs::Vfs::remove(lfn_trunc_path);
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!(
-        "[fat]   LFN truncate verified: {} -> 12 bytes",
-        trunc_data.len()
-    );
-
-    crate::fs::Vfs::remove(lfn_trunc_path)?;
-
-    // --- LFN fallocate ---
-    let lfn_falloc_path = "/preallocated file.bin";
-    let _ = crate::fs::Vfs::remove(lfn_falloc_path);
-
-    crate::fs::Vfs::fallocate(lfn_falloc_path, 4096)?;
-
-    // File should exist with size 0 (pre-allocated but no data).
-    let falloc_stat = crate::fs::Vfs::stat(lfn_falloc_path)?;
-    if falloc_stat.size != 0 {
-        crate::serial_println!(
-            "[fat]   LFN fallocate FAILED: expected size 0, got {}",
-            falloc_stat.size
-        );
-        let _ = crate::fs::Vfs::remove(lfn_falloc_path);
-        return Err(KernelError::IoError);
+            crate::fs::Vfs::remove(lfn_wa_path)?;
+            Ok(())
+        }
+        case()?;
     }
 
-    // Write data into the pre-allocated file.
-    let falloc_data = b"Pre-allocated LFN file data.\n";
-    crate::fs::Vfs::write_file(lfn_falloc_path, falloc_data)?;
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // --- LFN truncate ---
+            let lfn_trunc_path = "/truncate test.dat";
+            let _ = crate::fs::Vfs::remove(lfn_trunc_path);
 
-    let falloc_read = crate::fs::Vfs::read_file(lfn_falloc_path)?;
-    if falloc_read.as_slice() != falloc_data.as_slice() {
-        crate::serial_println!("[fat]   LFN fallocate FAILED: write-after-alloc mismatch");
-        let _ = crate::fs::Vfs::remove(lfn_falloc_path);
-        return Err(KernelError::IoError);
+            let trunc_data = b"This content will be truncated.\n";
+            crate::fs::Vfs::write_file(lfn_trunc_path, trunc_data)?;
+
+            // Truncate to 12 bytes.
+            crate::fs::Vfs::truncate(lfn_trunc_path, 12)?;
+
+            let trunc_read = crate::fs::Vfs::read_file(lfn_trunc_path)?;
+            if trunc_read.len() != 12 {
+                crate::serial_println!(
+                    "[fat]   LFN truncate FAILED: expected 12 bytes, got {}",
+                    trunc_read.len()
+                );
+                let _ = crate::fs::Vfs::remove(lfn_trunc_path);
+                return Err(KernelError::IoError);
+            }
+            if trunc_read.as_slice() != &trunc_data[..12] {
+                crate::serial_println!("[fat]   LFN truncate FAILED: content mismatch");
+                let _ = crate::fs::Vfs::remove(lfn_trunc_path);
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!(
+                "[fat]   LFN truncate verified: {} -> 12 bytes",
+                trunc_data.len()
+            );
+
+            crate::fs::Vfs::remove(lfn_trunc_path)?;
+            Ok(())
+        }
+        case()?;
     }
-    crate::serial_println!("[fat]   LFN fallocate verified: '{}'", lfn_falloc_path);
 
-    // Verify long name in listing.
-    let root_entries = crate::fs::Vfs::readdir("/")?;
-    let has_falloc = root_entries
-        .iter()
-        .any(|e| e.name.as_path() == Path::new("preallocated file.bin"));
-    if !has_falloc {
-        crate::serial_println!("[fat]   LFN fallocate FAILED: file not in root listing");
-        let _ = crate::fs::Vfs::remove(lfn_falloc_path);
-        return Err(KernelError::IoError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // --- LFN fallocate ---
+            let lfn_falloc_path = "/preallocated file.bin";
+            let _ = crate::fs::Vfs::remove(lfn_falloc_path);
+
+            crate::fs::Vfs::fallocate(lfn_falloc_path, 4096)?;
+
+            // File should exist with size 0 (pre-allocated but no data).
+            let falloc_stat = crate::fs::Vfs::stat(lfn_falloc_path)?;
+            if falloc_stat.size != 0 {
+                crate::serial_println!(
+                    "[fat]   LFN fallocate FAILED: expected size 0, got {}",
+                    falloc_stat.size
+                );
+                let _ = crate::fs::Vfs::remove(lfn_falloc_path);
+                return Err(KernelError::IoError);
+            }
+
+            // Write data into the pre-allocated file.
+            let falloc_data = b"Pre-allocated LFN file data.\n";
+            crate::fs::Vfs::write_file(lfn_falloc_path, falloc_data)?;
+
+            let falloc_read = crate::fs::Vfs::read_file(lfn_falloc_path)?;
+            if falloc_read.as_slice() != falloc_data.as_slice() {
+                crate::serial_println!("[fat]   LFN fallocate FAILED: write-after-alloc mismatch");
+                let _ = crate::fs::Vfs::remove(lfn_falloc_path);
+                return Err(KernelError::IoError);
+            }
+            crate::serial_println!("[fat]   LFN fallocate verified: '{}'", lfn_falloc_path);
+
+            // Verify long name in listing.
+            let root_entries = crate::fs::Vfs::readdir("/")?;
+            let has_falloc = root_entries
+                .iter()
+                .any(|e| e.name.as_path() == Path::new("preallocated file.bin"));
+            if !has_falloc {
+                crate::serial_println!("[fat]   LFN fallocate FAILED: file not in root listing");
+                let _ = crate::fs::Vfs::remove(lfn_falloc_path);
+                return Err(KernelError::IoError);
+            }
+
+            crate::fs::Vfs::remove(lfn_falloc_path)?;
+            Ok(())
+        }
+        case()?;
     }
-
-    crate::fs::Vfs::remove(lfn_falloc_path)?;
 
     crate::serial_println!("[fat]   LFN operations tests passed");
 
@@ -5328,55 +5505,62 @@ pub fn self_test() -> KernelResult<()> {
     // ---------------------------------------------------------------
     crate::serial_println!("[fat]   Testing fsck...");
 
-    // Flush all pending writes so fsck sees a consistent on-disk state.
-    crate::fs::cache::flush_expired();
-    let _ = crate::fs::Vfs::sync();
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Flush all pending writes so fsck sees a consistent on-disk state.
+            crate::fs::cache::flush_expired();
+            let _ = crate::fs::Vfs::sync();
 
-    // Run fsck in read-only mode on the root device.
-    // fsck_fat creates its own FatFs mount directly on the block device,
-    // so it does not conflict with the VFS mount.
-    match fsck_fat("vda", false) {
-        Ok(report) => {
-            for msg in &report.messages {
-                crate::serial_println!("[fat]     fsck: {}", msg);
+            // Run fsck in read-only mode on the root device.
+            // fsck_fat creates its own FatFs mount directly on the block device,
+            // so it does not conflict with the VFS mount.
+            match fsck_fat("vda", false) {
+                Ok(report) => {
+                    for msg in &report.messages {
+                        crate::serial_println!("[fat]     fsck: {}", msg);
+                    }
+                    crate::serial_println!(
+                        "[fat]     fsck summary: {} files, {} dirs, {} errors, {} lost, {} cross-linked",
+                        report.files,
+                        report.dirs,
+                        report.errors,
+                        report.lost_clusters,
+                        report.cross_linked
+                    );
+                    // A clean volume should have no cross-linked clusters.
+                    // Lost clusters may exist from previous incomplete operations,
+                    // so we only warn (not fail) for those.
+                    if report.cross_linked > 0 {
+                        crate::serial_println!(
+                            "[fat]   fsck FAILED: {} cross-linked clusters detected",
+                            report.cross_linked
+                        );
+                        return Err(KernelError::IoError);
+                    }
+                    if report.errors > 0 {
+                        crate::serial_println!(
+                            "[fat]   fsck WARNING: {} errors (may be from previous boots)",
+                            report.errors
+                        );
+                    }
+                    crate::serial_println!("[fat]   fsck passed");
+                }
+                Err(e) => {
+                    crate::serial_println!("[fat]   fsck could not run: {:?} (non-fatal)", e);
+                }
             }
-            crate::serial_println!(
-                "[fat]     fsck summary: {} files, {} dirs, {} errors, {} lost, {} cross-linked",
-                report.files,
-                report.dirs,
-                report.errors,
-                report.lost_clusters,
-                report.cross_linked
-            );
-            // A clean volume should have no cross-linked clusters.
-            // Lost clusters may exist from previous incomplete operations,
-            // so we only warn (not fail) for those.
-            if report.cross_linked > 0 {
-                crate::serial_println!(
-                    "[fat]   fsck FAILED: {} cross-linked clusters detected",
-                    report.cross_linked
-                );
-                return Err(KernelError::IoError);
-            }
-            if report.errors > 0 {
-                crate::serial_println!(
-                    "[fat]   fsck WARNING: {} errors (may be from previous boots)",
-                    report.errors
-                );
-            }
-            crate::serial_println!("[fat]   fsck passed");
-        }
-        Err(e) => {
-            crate::serial_println!("[fat]   fsck could not run: {:?} (non-fatal)", e);
-        }
-    }
 
-    // Report dcache statistics.
-    match crate::fs::Vfs::debug_stats("/") {
-        Ok(stats) if !stats.is_empty() => {
-            crate::serial_println!("[fat]   {}", stats);
+            // Report dcache statistics.
+            match crate::fs::Vfs::debug_stats("/") {
+                Ok(stats) if !stats.is_empty() => {
+                    crate::serial_println!("[fat]   {}", stats);
+                }
+                _ => {}
+            }
+            Ok(())
         }
-        _ => {}
+        case()?;
     }
 
     crate::serial_println!("[fat] Self-test PASSED");

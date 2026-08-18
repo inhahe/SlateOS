@@ -1121,185 +1121,232 @@ impl XmlElement {
     }
 }
 
+/// A cursor over the bytes of an XML document.
+///
+/// The five functions below used to take `(bytes: &[u8], pos: &mut usize)` —
+/// a cursor split into two loose parameters that nothing kept together. Every
+/// read was `bytes[*pos]` guarded by a `*pos < bytes.len()` written out again
+/// at each site (thirty-odd times), and every step was a `*pos += 1` that eight
+/// separate loops each had to remember. Neither the bound nor the advance was
+/// anywhere the compiler could enforce them.
+///
+/// Making the pair a type puts both in one place: `peek` returns `None` at the
+/// end rather than needing a length test beside it, and `bump`/`advance` are
+/// the only things that move, so they are the only things that can move past
+/// the end — which they cannot, being clamped.
+struct XmlCursor<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> XmlCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, at: 0 }
+    }
+
+    /// The byte under the cursor, or `None` at the end of the document.
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.at).copied()
+    }
+
+    /// The byte `n` positions further on, for the two-byte lookaheads (`</`,
+    /// `<!`, `<?`) that decide what kind of thing is starting.
+    fn peek_at(&self, n: usize) -> Option<u8> {
+        self.bytes.get(self.at.saturating_add(n)).copied()
+    }
+
+    /// The unread remainder.
+    fn rest(&self) -> &'a [u8] {
+        // `get` rather than a slice: the invariant says `at <= len`, and an
+        // empty tail is the honest answer if it ever is not.
+        self.bytes.get(self.at..).unwrap_or(&[])
+    }
+
+    /// Does the document continue with exactly these bytes?
+    fn starts_with(&self, prefix: &[u8]) -> bool {
+        self.rest().starts_with(prefix)
+    }
+
+    fn at_end(&self) -> bool {
+        self.peek().is_none()
+    }
+
+    fn bump(&mut self) {
+        self.advance(1);
+    }
+
+    /// Move on `n` bytes, stopping at the end of the document.
+    ///
+    /// Clamping is what makes every `peek` above safe without a length test of
+    /// its own: the cursor cannot be put past the end in the first place.
+    fn advance(&mut self, n: usize) {
+        self.at = self.at.saturating_add(n).min(self.bytes.len());
+    }
+
+    /// Abandon the rest of the document (an unterminated comment swallows it).
+    fn finish(&mut self) {
+        self.at = self.bytes.len();
+    }
+
+    /// Consume the byte under the cursor if it is `want`, reporting whether it
+    /// was. Callers that merely tolerate its absence ignore the answer.
+    fn eat(&mut self, want: u8) -> bool {
+        let found = self.peek() == Some(want);
+        if found {
+            self.bump();
+        }
+        found
+    }
+
+    fn skip_while(&mut self, keep: impl Fn(u8) -> bool) {
+        while self.peek().is_some_and(&keep) {
+            self.bump();
+        }
+    }
+
+    fn skip_whitespace(&mut self) {
+        self.skip_while(|b| b.is_ascii_whitespace());
+    }
+
+    /// Consume bytes while `keep` holds and return them as text.
+    ///
+    /// Lossy, because an SVG file is not required to be valid UTF-8 and a tag
+    /// or attribute name that is not is still better named by its replacement
+    /// characters than by rejecting the whole document.
+    fn take_while(&mut self, keep: impl Fn(u8) -> bool) -> String {
+        let start = self.at;
+        self.skip_while(keep);
+        String::from_utf8_lossy(self.bytes.get(start..self.at).unwrap_or(&[])).into_owned()
+    }
+}
+
 /// Parse minimal SVG-subset XML.
 fn parse_xml(input: &str) -> Result<Vec<XmlElement>, SvgError> {
-    let mut pos = 0;
-    let bytes = input.as_bytes();
+    let mut c = XmlCursor::new(input.as_bytes());
 
-    // Skip BOM, XML declaration, DOCTYPE, comments before root element
-    skip_prolog(bytes, &mut pos);
+    // Skip the BOM, XML declaration, DOCTYPE and any comments before the root.
+    skip_prolog(&mut c);
 
     let mut elements = Vec::new();
-    while pos < bytes.len() {
-        skip_whitespace(bytes, &mut pos);
-        if pos >= bytes.len() {
-            break;
+    loop {
+        c.skip_whitespace();
+        let Some(byte) = c.peek() else { break };
+        if byte != b'<' {
+            // Text content: this parser has no use for text nodes.
+            c.bump();
+            continue;
         }
-        if bytes[pos] == b'<' {
-            if pos + 1 < bytes.len() && bytes[pos + 1] == b'/' {
-                break; // closing tag — handled by caller
-            }
-            if pos + 1 < bytes.len() && (bytes[pos + 1] == b'!' || bytes[pos + 1] == b'?') {
-                skip_special(bytes, &mut pos);
-                continue;
-            }
-            let elem = parse_element(bytes, &mut pos)?;
-            elements.push(elem);
-        } else {
-            // Skip text content (we don't use text nodes)
-            pos += 1;
+        match c.peek_at(1) {
+            Some(b'/') => break, // a closing tag — the caller's business
+            Some(b'!' | b'?') => skip_special(&mut c),
+            _ => elements.push(parse_element(&mut c)?),
         }
     }
 
     Ok(elements)
 }
 
-fn skip_prolog(bytes: &[u8], pos: &mut usize) {
+fn skip_prolog(c: &mut XmlCursor) {
     loop {
-        skip_whitespace(bytes, pos);
-        if *pos >= bytes.len() {
-            break;
-        }
-        if bytes[*pos] == b'<' {
-            if *pos + 1 < bytes.len() && (bytes[*pos + 1] == b'?' || bytes[*pos + 1] == b'!') {
-                skip_special(bytes, pos);
-            } else {
-                break;
-            }
+        c.skip_whitespace();
+        let Some(byte) = c.peek() else { break };
+        if byte != b'<' {
+            c.bump();
+        } else if matches!(c.peek_at(1), Some(b'?' | b'!')) {
+            skip_special(c);
         } else {
-            *pos += 1;
+            // The root element: the prolog is over.
+            break;
         }
     }
 }
 
-fn skip_special(bytes: &[u8], pos: &mut usize) {
-    // Skip <!-- comments --> and <?...?> and <!DOCTYPE...>
-    if *pos + 3 < bytes.len()
-        && bytes[*pos + 1] == b'!'
-        && bytes[*pos + 2] == b'-'
-        && bytes[*pos + 3] == b'-'
-    {
-        // Comment
-        *pos += 4;
-        while *pos + 2 < bytes.len() {
-            if bytes[*pos] == b'-' && bytes[*pos + 1] == b'-' && bytes[*pos + 2] == b'>' {
-                *pos += 3;
+/// Skip a `<!-- comment -->`, a `<?processing instruction?>` or a `<!DOCTYPE>`.
+///
+/// Always consumes at least one byte, which is what stops its callers' loops.
+fn skip_special(c: &mut XmlCursor) {
+    if c.starts_with(b"<!--") {
+        c.advance(4);
+        while !c.at_end() {
+            if c.starts_with(b"-->") {
+                c.advance(3);
                 return;
             }
-            *pos += 1;
+            c.bump();
         }
-        *pos = bytes.len();
-    } else {
-        // Processing instruction or DOCTYPE — skip to matching '>'
-        *pos += 1;
-        let mut depth = 1;
-        while *pos < bytes.len() && depth > 0 {
-            if bytes[*pos] == b'<' {
-                depth += 1;
-            } else if bytes[*pos] == b'>' {
-                depth -= 1;
-            }
-            *pos += 1;
+        // Unterminated: the remainder of the document is inside the comment.
+        c.finish();
+        return;
+    }
+
+    // A processing instruction or DOCTYPE, skipped to its matching '>'. The
+    // depth count is for DOCTYPE's internal subset, which may contain '<'.
+    c.bump();
+    let mut depth = 1usize;
+    while depth > 0 {
+        let Some(byte) = c.peek() else { break };
+        match byte {
+            b'<' => depth = depth.saturating_add(1),
+            b'>' => depth = depth.saturating_sub(1),
+            _ => {}
         }
+        c.bump();
     }
 }
 
-fn skip_whitespace(bytes: &[u8], pos: &mut usize) {
-    while *pos < bytes.len() && bytes[*pos].is_ascii_whitespace() {
-        *pos += 1;
-    }
-}
-
-fn parse_element(bytes: &[u8], pos: &mut usize) -> Result<XmlElement, SvgError> {
-    // Expect '<'
-    if *pos >= bytes.len() || bytes[*pos] != b'<' {
+fn parse_element(c: &mut XmlCursor) -> Result<XmlElement, SvgError> {
+    if !c.eat(b'<') {
         return Err(SvgError::MalformedXml("expected '<'".into()));
     }
-    *pos += 1;
 
-    // Tag name
-    let tag_start = *pos;
-    while *pos < bytes.len()
-        && !bytes[*pos].is_ascii_whitespace()
-        && bytes[*pos] != b'>'
-        && bytes[*pos] != b'/'
-    {
-        *pos += 1;
-    }
-    let tag = String::from_utf8_lossy(&bytes[tag_start..*pos]).to_string();
+    let tag = c.take_while(|b| !b.is_ascii_whitespace() && b != b'>' && b != b'/');
 
-    // Attributes
     let mut attrs = Vec::new();
     loop {
-        skip_whitespace(bytes, pos);
-        if *pos >= bytes.len() {
+        c.skip_whitespace();
+        // End of document, or the '/>' or '>' that ends the open tag.
+        if matches!(c.peek(), None | Some(b'/' | b'>')) {
             break;
         }
-        if bytes[*pos] == b'/' || bytes[*pos] == b'>' {
-            break;
-        }
-        // Attribute name
-        let attr_start = *pos;
-        while *pos < bytes.len()
-            && bytes[*pos] != b'='
-            && !bytes[*pos].is_ascii_whitespace()
-            && bytes[*pos] != b'>'
-            && bytes[*pos] != b'/'
-        {
-            *pos += 1;
-        }
-        let attr_name = String::from_utf8_lossy(&bytes[attr_start..*pos]).to_string();
-        skip_whitespace(bytes, pos);
-
-        if *pos < bytes.len() && bytes[*pos] == b'=' {
-            *pos += 1;
-            skip_whitespace(bytes, pos);
-            let value = parse_attr_value(bytes, pos)?;
-            attrs.push((attr_name, value));
+        let name = c.take_while(|b| b != b'=' && !b.is_ascii_whitespace() && b != b'>' && b != b'/');
+        c.skip_whitespace();
+        if c.eat(b'=') {
+            c.skip_whitespace();
+            let value = parse_attr_value(c)?;
+            attrs.push((name, value));
         } else {
-            // Boolean attribute (rare in SVG but handle gracefully)
-            attrs.push((attr_name, String::new()));
+            // A valueless attribute — rare in SVG, but taken rather than
+            // refused. Note this consumed the name, so the loop still advances.
+            attrs.push((name, String::new()));
         }
     }
 
-    // Self-closing or opening tag
     let mut children = Vec::new();
-    if *pos < bytes.len() && bytes[*pos] == b'/' {
-        // Self-closing: <tag ... />
-        *pos += 1;
-        if *pos < bytes.len() && bytes[*pos] == b'>' {
-            *pos += 1;
-        }
-    } else if *pos < bytes.len() && bytes[*pos] == b'>' {
-        *pos += 1;
-        // Parse children until closing tag
+    if c.eat(b'/') {
+        // Self-closing, `<tag ... />`. If the document ends before the '>',
+        // the element is still what it is; there is nothing to recover.
+        c.eat(b'>');
+    } else if c.eat(b'>') {
         loop {
-            skip_whitespace(bytes, pos);
-            if *pos >= bytes.len() {
-                break;
+            c.skip_whitespace();
+            let Some(byte) = c.peek() else { break };
+            if byte != b'<' {
+                // Text content, which this parser has no use for.
+                c.bump();
+                continue;
             }
-            if *pos + 1 < bytes.len() && bytes[*pos] == b'<' && bytes[*pos + 1] == b'/' {
-                // Closing tag
-                *pos += 2;
-                // Skip tag name and '>'
-                while *pos < bytes.len() && bytes[*pos] != b'>' {
-                    *pos += 1;
+            match c.peek_at(1) {
+                Some(b'/') => {
+                    // Our closing tag. Skip its name and the '>' after it; the
+                    // name is not checked against ours, which is why a
+                    // mismatched document parses rather than erroring.
+                    c.advance(2);
+                    c.skip_while(|b| b != b'>');
+                    c.eat(b'>');
+                    break;
                 }
-                if *pos < bytes.len() {
-                    *pos += 1;
-                }
-                break;
-            }
-            if bytes[*pos] == b'<' {
-                if *pos + 1 < bytes.len() && (bytes[*pos + 1] == b'!' || bytes[*pos + 1] == b'?') {
-                    skip_special(bytes, pos);
-                } else {
-                    let child = parse_element(bytes, pos)?;
-                    children.push(child);
-                }
-            } else {
-                // Skip text content
-                *pos += 1;
+                Some(b'!' | b'?') => skip_special(c),
+                _ => children.push(parse_element(c)?),
             }
         }
     }
@@ -1311,32 +1358,19 @@ fn parse_element(bytes: &[u8], pos: &mut usize) -> Result<XmlElement, SvgError> 
     })
 }
 
-fn parse_attr_value(bytes: &[u8], pos: &mut usize) -> Result<String, SvgError> {
-    if *pos >= bytes.len() {
+fn parse_attr_value(c: &mut XmlCursor) -> Result<String, SvgError> {
+    let Some(quote) = c.peek() else {
         return Err(SvgError::MalformedXml("expected attribute value".into()));
-    }
-    let quote = bytes[*pos];
+    };
+
     if quote != b'"' && quote != b'\'' {
-        // Unquoted value (non-standard but handle gracefully)
-        let start = *pos;
-        while *pos < bytes.len()
-            && !bytes[*pos].is_ascii_whitespace()
-            && bytes[*pos] != b'>'
-            && bytes[*pos] != b'/'
-        {
-            *pos += 1;
-        }
-        return Ok(String::from_utf8_lossy(&bytes[start..*pos]).to_string());
+        // An unquoted value: not well-formed XML, but taken rather than refused.
+        return Ok(c.take_while(|b| !b.is_ascii_whitespace() && b != b'>' && b != b'/'));
     }
-    *pos += 1; // skip opening quote
-    let start = *pos;
-    while *pos < bytes.len() && bytes[*pos] != quote {
-        *pos += 1;
-    }
-    let value = String::from_utf8_lossy(&bytes[start..*pos]).to_string();
-    if *pos < bytes.len() {
-        *pos += 1; // skip closing quote
-    }
+
+    c.bump(); // the opening quote
+    let value = c.take_while(|b| b != quote);
+    c.eat(quote); // the closing quote, if the document has one
     Ok(value)
 }
 

@@ -596,21 +596,78 @@ pub fn init(hhdm_offset: u64) {
     }
 }
 
-/// Self-test: verify device is initialized and can be queried.
+/// Self-test: verify the device is initialized and that TX works end to end.
 #[allow(dead_code)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[virtio-net] Running self-test...");
 
-    let result = with_device(|dev| {
+    let Some(mac) = with_device(|dev| {
         crate::serial_println!("[virtio-net]   MAC: {}", dev.mac());
         crate::serial_println!("[virtio-net]   RX pending: {}", dev.rx_pending());
-    });
-
-    if result.is_none() {
+        dev.mac()
+    }) else {
         crate::serial_println!("[virtio-net] Self-test SKIPPED (no device)");
         return Ok(());
-    }
+    };
+
+    tx_datapath_test(mac)?;
 
     crate::serial_println!("[virtio-net] Self-test PASSED");
+    Ok(())
+}
+
+/// Transmit one inert frame and confirm the device completed the chain.
+///
+/// Reading back the MAC and the RX-pending count proves the config space is
+/// mapped, and nothing else.  This test exercises the part that can actually
+/// be wrong: [`VirtioNetDevice::send`] builds a two-descriptor chain out of
+/// *physical* addresses, rings the queue-1 doorbell, and then waits for the
+/// device to publish the chain head in the used ring.  A completion therefore
+/// proves the descriptor table and the available/used rings are where the
+/// device was told they are, that the DMA buffer addresses are physical rather
+/// than virtual, and that the notify offset for queue 1 is right — none of
+/// which any config-space read-back can establish.
+///
+/// No peer is required on the wire: the device reports completion itself.
+fn tx_datapath_test(mac: MacAddress) -> KernelResult<()> {
+    /// IEEE Std 802 Local Experimental EtherType 1 — reserved for exactly this
+    /// kind of use, so the frame cannot be confused with a real protocol.
+    const ETHERTYPE_LOCAL_EXPERIMENTAL: u16 = 0x88B5;
+    /// Minimum Ethernet frame length excluding the FCS.
+    const ETH_MIN_FRAME_LEN: usize = 60;
+
+    // Addressed to ourselves, from ourselves, so it is inert wherever the host
+    // backend forwards it.
+    let mut frame = [0u8; ETH_MIN_FRAME_LEN];
+    frame[0..6].copy_from_slice(&mac.0);
+    frame[6..12].copy_from_slice(&mac.0);
+    frame[12..14].copy_from_slice(&ETHERTYPE_LOCAL_EXPERIMENTAL.to_be_bytes());
+    for (i, b) in frame.iter_mut().enumerate().skip(14) {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            *b = (i as u8).wrapping_mul(0x11);
+        }
+    }
+
+    let Some(result) = with_device(|dev| dev.send(&frame)) else {
+        crate::serial_println!("[virtio-net] Self-test FAILED: device vanished mid-test");
+        return Err(KernelError::NotFound);
+    };
+
+    if let Err(e) = result {
+        crate::serial_println!(
+            "[virtio-net] Self-test FAILED: TX of {} bytes returned {:?} — the device never \
+             published the chain in the used ring, so the ring addresses, the descriptor \
+             layout or the queue-1 notify offset is wrong",
+            frame.len(),
+            e
+        );
+        return Err(e);
+    }
+
+    crate::serial_println!(
+        "[virtio-net]   TX datapath: sent {} bytes, chain returned in the used ring",
+        frame.len()
+    );
     Ok(())
 }

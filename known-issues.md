@@ -32789,3 +32789,491 @@ carry the genuine SHA-256 IV and no K table at all — exactly the disk imager's
 shape. It is worth running over any transcribed algorithm in this tree,
 because it costs nothing and, unlike a test that checks the digest's shape, it
 cannot be satisfied by a plausible-looking function.
+
+## A-INTERMITTENT-STACK-CANARY-HALT-AT-REAP-TIME (lane A, 2026-08-17) - **ROOT CAUSE FOUND AND FIXED 2026-08-17**
+
+**In short:** roughly one boot in ten dies with `FATAL: Stack canary
+corrupted`, naming a task that exited tens of thousands of log lines
+earlier, and halts the machine - throwing away the rest of the boot's
+self-tests. Two very different faults produce that message and they want
+opposite fixes, and the message as written could not tell them apart. The
+halt itself was also wrong at that call site, and is fixed; the underlying
+corruption is now instrumented to identify itself on the next occurrence.
+
+**Symptom** (observed once in 74 boots' history; ~9.5% of boots fail for
+some reason, this fingerprint is new):
+
+```
+[sched]   sleep_ns: PASSED (slept 21.563ms for 20ms request)
+FATAL: Stack canary corrupted for task 100 (spawn-test-linux-sysv)!
+  Expected: 0xdeadbeefcafebabe, Found: 0x0000000000000000
+  stack_bottom=0xffffc10000004000, stack_top=0xffffc10000014000
+FATAL: Kernel stack overflow is unrecoverable. Halting.
+```
+
+### What the evidence establishes
+
+- The check fired from the **reaper** (`reap_dead_tasks`), not from a
+  context switch: task 100 is not `current`, and the message lands
+  immediately after another task exited and triggered a reap.
+- Task 100 was created at serial line 1474 and **exited at line 1482**; the
+  canary was not read until line **25349**. It stayed in the task table that
+  whole time because the reaper skips any task still recorded as `current`
+  on some CPU. So the corruption happened ~24000 lines before it was noticed.
+- `stack_bottom = 0xffffc10000004000` decodes to **slot 0** of the kstack
+  allocator (`KSTACK_REGION_BASE = 0xFFFF_C100_0000_0000`, `GUARD_SIZE =
+  0x4000`) - the first slot the bitmap allocator hands out and the first it
+  re-issues after a free.
+- Task 100 predates the per-boot canary randomisation (line 1597), so
+  `0xdeadbeefcafebabe` is genuinely the value that was planted.
+- `stack_bottom` was non-zero, so `free_stack()` - which zeroes it - had not
+  run on that `Task`.
+
+### The two candidate causes
+
+| | **Real marginal overflow** | **Stale reference to a recycled slot** |
+|---|---|---|
+| What happened | the task's own frames reached the bottom of its 64 KiB stack and overwrote the canary | the slot was freed and re-issued; `kstack::alloc` memsets the whole stack, and this `Task` still pointed at it |
+| Where the bug is | the deep path, or `TASK_STACK_SIZE` | the stack free path |
+
+**The guard page does not rule out the first.** The guard sits *below*
+`stack_bottom`, so a write landing exactly on the canary corrupts it without
+ever leaving the mapped stack - which is precisely the case the canary
+exists to catch. Reading exactly zero is consistent with a zero-initialised
+local buffer or a `write_bytes` reaching the bottom eight bytes.
+
+The second is much weaker than it first looks: `kstack::alloc` zeroes the
+stack, but `Task::new_kernel` then plants a fresh (randomised, non-zero)
+canary a few instructions later. A stale read would therefore have to land
+inside that window to see zero rather than the *new* task's canary. Possible,
+but it requires a coincidence that a 24000-line-later reap does not offer.
+
+Intermittency fits the first cause well: the code path is deterministic, but
+an interrupt taken near the deepest point pushes an IRET frame, a register
+save and the handler's own frames onto the *same* kernel stack. `spawn_process`
+-> ELF parse -> page-table work is among the deepest paths in the kernel.
+
+### What was fixed now
+
+1. **The reaper no longer halts.** Its comment already said *"the task is
+   already dead so we can't halt"* while calling `check_stack_canary()`,
+   which halts unconditionally - intent and behaviour had silently disagreed.
+   Split into two:
+   - `check_stack_canary()` - still halts. Correct for the context-switch
+     callers, where a live task is about to resume on a stack known to be bad.
+   - `report_stack_canary() -> bool` - diagnoses and returns. Correct for the
+     reaper, where the task is dead and already removed from the table, so a
+     halt buys no safety and costs the rest of the boot's diagnostics.
+
+2. **The failure now identifies its own cause.** The post-mortem prints the
+   stack watermark, the kstack slot, and the composition (zero / sentinel /
+   other words) of the bottom 512 bytes *and* the top 512 bytes. That last
+   pair is the discriminator: a real overflow leaves the top of the stack
+   full of ordinary frame data, whereas a recycled slot has been zeroed or
+   repainted end to end. It prints an explicit `VERDICT:` line either way.
+
+3. **A system-wide stack census now runs every boot** (`report_stack_census`,
+   last in the scheduler self-test). It reports the five deepest kernel
+   stacks and warns above 75%. This is the measurement whose absence made the
+   bug undiagnosable: `test_stack_watermark` proved the watermark *API*
+   worked, but only ever measured a purpose-built task that touches 256
+   bytes, so "is any real kernel stack close to overflowing?" was a question
+   nothing in the tree could answer - despite every stack already being
+   painted with a sentinel that answers it for free.
+
+### First census results (2026-08-17) - the headroom is smaller than assumed
+
+The census ran on the next green boot and answered the question directly:
+
+```
+[sched]   Stack peak this boot: 43896 bytes (66% of 65536) by task 283 (spawn-test-glibc-forkexec)
+[sched]   Stack census: 5 live task(s) with allocated stacks, deepest first
+[sched]     task 397  kworker                   42424 bytes ( 64% of 65536)
+[sched]     task 396  kswapd                     5048 bytes (  7% of 65536)
+[sched]     task 406  efd-to-test                4904 bytes (  7% of 65536)
+[sched]     task 407  svc-accept                 4552 bytes (  6% of 65536)
+[sched]     task 408  cgroup-e2e                 4200 bytes (  6% of 65536)
+```
+
+Three things in that are worth reading carefully.
+
+**The deepest stack of the boot belonged to a task that was already dead** -
+task 283 was reaped long before the census ran, and is visible only because
+the reaper folds each dying task's watermark into the peak before freeing its
+stack. A census of live tasks alone would have reported 64% and missed the
+real maximum. This is the half that makes the instrument honest, and it is
+also the half that was easiest to leave out.
+
+**`kworker` sits at 64% at steady state, and it is long-lived.** The peak is
+not a one-off spike in a short-lived spawn task; a permanent kernel worker is
+routinely two-thirds of the way down its stack. The distance from there to the
+canary is about 23 KiB.
+
+**The deep tasks are the spawn family** - `spawn-test-glibc-forkexec` at the
+peak, and `spawn-test-linux-sysv` is the task whose canary failed. Same family
+of paths (`spawn_process` -> ELF parse -> page-table work), which is what
+hypothesis (a) predicted.
+
+What this does *not* yet do is prove (a). 23 KiB is a large amount for one
+interrupt to consume, so a single badly-timed IRQ at `kworker`'s depth does not
+obviously reach the canary; nested interrupts, or a spawn path deeper than any
+seen in these boots, would be needed. The census will show that as a rising
+number, which is the point of printing it every boot: the next occurrence now
+arrives with both a `VERDICT:` line and a depth history to compare against.
+
+No task crossed the 75% warning line on this boot, so the threshold has not yet
+been exercised in anger.
+
+### Generalisation
+
+Two rules fell out of this one.
+
+**An assertion that halts must be sited where halting helps.** The same
+canary check was correct at the context-switch callers and wrong at the
+reaper, for the same reason in both cases: whether anything is going to
+*run* on that stack again. A check copied to a second call site inherits its
+severity, and severity is a property of the site, not of the condition.
+
+**When a diagnostic fires intermittently, the first fix is to make the
+diagnostic conclusive, not to guess at the cause.** Both hypotheses here are
+plausible, they want opposite fixes, and picking one on a hunch had an even
+chance of hardening the wrong path while leaving the real one live. The
+evidence needed to choose was cheap - it was sitting unread in a sentinel
+pattern the kernel already paints on every stack.
+
+---
+
+### RESOLVED 2026-08-17 - hypothesis (a) was right, and the cause was one field
+
+Everything above stands as written except its conclusion.  Hypothesis (a)
+(a real marginal overflow on the spawn path) is now **proven**, and the
+reason 23 KiB of headroom was not in fact enough is a single struct field.
+
+**In short:** `Task` embedded its 4096-byte FPU save area *by value*.  That
+made `Task` a ~4.4 KiB type, and in Rust a by-value move of a large type is
+a `memcpy` through a stack temporary.  The spawn path performs several such
+moves back to back, and at `opt-level = 0` - which is what
+`scripts/boot-test.sh` builds by default, and the profile every observed
+halt came from - the compiler elides none of them.  Three frames on one
+call chain therefore claimed **40 640 bytes of a 64 KiB stack** for nothing
+but copies of a zeroed 4 KiB array.
+
+#### How it was found
+
+A watermark says *which task* came closest to its canary.  It structurally
+cannot say *which function* put it there.  That gap is what kept the bug
+alive for as long as it did, and it is now closed by a new tool,
+**`scripts/stack-frames.py`**, which disassembles the built kernel and
+reports, per function, the stack its prologue claims.
+
+Two traps in writing that tool are worth recording, because either one
+alone would have produced a confident wrong answer:
+
+1. **Stack-probe chains.**  A function needing more than a page does not
+   emit one `sub $N, %rsp`.  It emits `sub $0x1000, %rsp; movq $0, (%rsp)`
+   repeated a page at a time, so a guard page can never be jumped over
+   untouched.  A naive "first `sub` in the prologue" reading therefore
+   reports **exactly 4096 for every large function** - hiding precisely the
+   ones worth finding.  The first version of the tool did exactly this, and
+   the uniform 4096s looked like a clean bill of health.  The chain must be
+   summed.
+2. **Profile matters enormously.**  Measuring the release build and
+   concluding the kernel is fine is a real way to be wrong here: the same
+   spawn path measured **40 640 bytes in debug and 8 960 in release**.
+
+#### The measurement
+
+Static, debug profile, before and after boxing `FpuState`:
+
+| Frame | before | after |
+|---|---:|---:|
+| `FpuState::new_default` | 8 320 | off path |
+| `Task::new_kernel` | 9 600 | 1 256 |
+| `sched::spawn_inner::{{closure}}` | 22 720 | 2 000 |
+| **total on one call chain** | **40 640** | **3 256** |
+
+40 640 bytes is **93% of the 43 896-byte peak the census measured**, in
+three frames.  There was never 23 KiB of headroom to spend on an unlucky
+interrupt; the frames themselves had already spent it.
+
+Two independent confirmations, taken before any fix:
+
+- **Static:** the identical source measured 40 640 in debug and 8 960 in
+  release - a 4.5x profile gap that only a by-value-copy explanation
+  accounts for.
+- **Runtime:** booting release instead of debug moved the census peak from
+  43 896 (66%) to 13 560 (20%), and `kworker` from 42 424 (64%) to
+  10 200 (15%).
+
+#### The fix
+
+`Task::fpu_state` is now `Box<FpuState>`, built by a new
+`FpuState::new_default_boxed()` that allocates zeroed memory and patches
+the 14 non-zero bytes **in place**.  This detail is the whole point:
+`Box::new(FpuState::new_default())` would have fixed *nothing*, because it
+builds the value in the caller's frame and only then copies it to the heap.
+Only allocate-then-initialise-in-place keeps it off the stack.
+
+A second instance of the same defect was found by the same tool and fixed
+in the same way: `KernelFdTable` is `[Option<FdEntry>; 256]` = 8192 bytes,
+and was likewise built by value and then `Box::new`'d, at two sites.  It
+now has `new_boxed()` / `with_stdio_boxed()`.  (`alloc_zeroed` is
+deliberately *not* used there - `Option<FdEntry>`'s `None` is not
+guaranteed to be all-zero bytes, a layout detail Rust does not promise.
+`Box::new_uninit()` plus an explicit per-element `write(None)` is.)
+
+Together the two fixes removed roughly **85 KiB of stack claims across nine
+functions**:
+
+| Function | before | after |
+|---|---:|---:|
+| `sched::spawn_inner::{{closure}}` | 22 720 | 2 000 |
+| `proc::pcb::fork_create::{{closure}}` | 16 624 | 0 |
+| `Task::new_kernel` | 9 600 | 1 256 |
+| `sched::init` | 9 344 | 0 |
+| `sched::register_ap_idle` | 9 216 | 0 |
+| `proc::pcb::linux_fd_install_stdio` | 8 336 | 0 |
+| `Result::<Task, _>::branch` | 4 608 | 0 |
+| `Task::new_ap_idle` | 4 352 | 0 |
+| `Task::new_idle` | 4 352 | 0 |
+
+`linux_fd_install_stdio` also stopped allocating while holding
+`PROCESS_TABLE`'s spinlock, which is a separate latent bug (see the Q24
+allocation-under-spinlock sweep) fixed incidentally by the same change.
+
+#### Runtime confirmation
+
+Debug boot, after both fixes (boot 81, PASS, streak 8):
+
+```
+[sched]   Stack peak this boot: 38280 bytes (58% of 65536) by task 283 (spawn-test-glibc-forkexec)
+[sched]   Stack census: 5 live task(s) with allocated stacks, deepest first
+[sched]     task 397  kworker                    7664 bytes ( 11% of 65536)
+[sched]     task 396  kswapd                     5048 bytes (  7% of 65536)
+[sched]     task 406  efd-to-test                4904 bytes (  7% of 65536)
+[sched]     task 407  svc-accept                 4552 bytes (  6% of 65536)
+[sched]     task 408  cgroup-e2e                 4200 bytes (  6% of 65536)
+```
+
+`kworker` - the long-lived task that sat at **64%** for the whole boot, and
+the one whose 23 KiB of remaining headroom the entry above worried about -
+is now at **11%**.  That is 34.8 KiB freed on a permanent kernel thread, a
+5.5x drop, and headroom from 23 KiB to 57 KiB.  This is the number that
+closes the bug: `spawn_inner` runs on the *caller's* stack, and the caller
+is `kworker`.
+
+The **peak** moved less - 43 896 to 38 280 - and this is expected rather
+than disappointing.  The peak belongs to task 283's own stack, so it
+measures code running *inside* the spawned task, not the spawn machinery.
+See the follow-on entry below for what is still down there.
+
+#### Generalisation (added to the two rules above)
+
+**A large struct destined for the heap must never be built by value.**
+This is recorded as `design-decisions.md` §226 with the pattern to use.
+The rule has teeth because the failure is invisible in release builds and
+invisible in code review: `Box::new(Big::new())` reads exactly like
+heap allocation, and is not.
+
+**A watermark localises a symptom to a task; only static frame analysis
+localises it to a function.** The census was a real improvement and still
+could not have found this. `scripts/stack-frames.py` is now part of the
+tree; run it after any change to a spawn, fork, or context-switch path.
+
+---
+
+## A-LARGE-KERNEL-STACK-FRAMES-REMAIN-IN-SELF-TESTS-AND-KSHELL (lane A, 2026-08-17) - **open, low severity**
+
+**In short:** after the two fixes above, the biggest remaining stack frames
+in the kernel are no longer on core paths - they are in boot self-tests and
+in `kshell` command handlers.  None is currently close to overflowing, but
+several are large enough that adding a few locals to one could push it
+over, and they are the reason the boot's peak is still 38 280 bytes rather
+than something in the low thousands.
+
+Measured with `python scripts/stack-frames.py --profile debug` on the debug
+kernel after both fixes landed (top offenders, bytes claimed by the
+prologue):
+
+| Function | bytes |
+|---|---:|
+| `self_test_prctl_dispatch` | 32 160 |
+| `kshell::cmd_oci` | 31 760 |
+| `linux_fd::self_test` | 28 224 |
+| `kshell::cmd_container` | 27 432 |
+| `eventlog::self_test` | 26 720 |
+| `scfilter::init` | 21 872 |
+| `kernel_main` | 19 776 |
+| `self_test_numa_sched_landlock` | 19 664 |
+| `test_per_cpu_work_stealing` | 19 504 |
+| `self_test_legacy_deprecated_syscalls` | 18 832 |
+| `PerCpuScheduler::new_const` | 18 752 |
+| `net::httpd::self_test` | 17 152 |
+| `xhci::init` | 15 504 |
+| `oci::build_one_stage_inner` | 15 000 |
+
+Plus some large stack *locals* found by inspection rather than by the tool:
+
+- `kernel/src/audio_notify.rs:133` - `[0u8; 8192]`
+- `kernel/src/audio_mixer.rs:420,425` - ~12 KiB combined
+- `kernel/src/syscall/linux.rs:80592` - `[0u8; 4096]`
+- `kernel/src/kshell.rs:106303-4`
+
+And one core-path remnant: `proc::pcb::fork_create` itself is still 6 328
+bytes, because it builds a ~35-field tuple by value.
+
+**Why this is low severity, not zero severity.** These frames are real but
+they do not nest: a self-test is called from `kernel_main`'s test runner at
+shallow depth, and a `kshell` handler from the shell loop.  The census
+after both fixes shows the deepest live stack at 11% and the boot peak at
+58%, so nothing is near the canary today.  The risk is that 32 KiB is half
+a stack, and the next person to add a buffer to `self_test_prctl_dispatch`
+has no warning that they are spending the second half.
+
+**Proper fix.** Not "make the tests smaller" one at a time - the pattern is
+the bug.  These functions accumulate dozens of independent test fixtures as
+distinct locals in one frame, and at `opt-level = 0` every one of them is
+live for the whole function.  Either split each self-test into
+`#[inline(never)]` per-case functions so the fixtures' frames are disjoint,
+or move the fixtures behind boxed allocation as `FpuState` now is.  The
+first is preferable: it costs nothing at runtime and the frames genuinely
+do not overlap in time.
+
+**How to reproduce / verify.** `python scripts/stack-frames.py --profile
+debug --top 40`, and `--diff BEFORE_ELF AFTER_ELF` to check a change.
+Note the profile: these numbers are debug, which is what `boot-test.sh`
+builds and therefore what any canary halt will come from.
+
+---
+
+## A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT (lane A, 2026-08-18) - **not a bug; methodology, recorded so it stops being rediscovered**
+
+**In short:** the benchmark suite flags "regressions" that are not real, on
+roughly half of all runs.  This is not a fault in the suite or in the
+contamination canary - both are working.  It is that the machine running the
+benchmarks is somebody's desktop, with Unreal Editor, Chrome, Creative Cloud,
+the Epic Games launcher and assorted node processes resident, and it is never
+going to be quiet.  The only thing that separates a code regression from
+ambient noise on this host is **replication**, and this entry records the
+measurement that proves it, so the next session does not spend an hour
+re-deriving it.
+
+### The measurement
+
+Two `--bench` runs of the **byte-identical kernel binary**, back to back, with
+nothing started by the agent during either QEMU window:
+
+| | run 1 (2026-08-18T00:49) | run 2 (replication) |
+|---|---|---|
+| benchmarks flagged `REGRESSED, UNREPLICATED` | 9 | 12 |
+| whole-suite vs 8-run median | x1.216 | x1.291 |
+| canary verdict | contaminated (spread 76%) | contaminated (spread 164%) |
+
+**Overlap between the two sets: 1 benchmark out of 20. Jaccard 0.05.**
+
+Run 1 flagged `net_arp_lookup`, `vfs_stat_deep`, `crypto_ed25519_sign`,
+`crypto_x25519`, `service_connect`, `page_alloc_zeroed_free`,
+`cp_try_wait_empty`, `crypto_sha256_64B`, `ipc_channel_sync`.
+Run 2 flagged `http_gzip_1KiB`, `http_build_response_1KiB`,
+`vfs_stat_breakdown_prologue`, `vfs_write_256`, `dashboard_api_status`,
+`ipc_channel_roundtrip_64k`, `vfs_stat_3comp`, `crypto_sha256_1KiB`,
+`page_alloc_zeroed_free`, `ipc_channel`, `vfs_stat_breakdown_ns`, `ipc_pipe`.
+
+Same code.  Nineteen of the twenty are noise.
+
+### Three wrong hypotheses, recorded because each was plausible
+
+Getting to that answer took three attempts, and the two failures are worth
+keeping because both are the sort of thing that sounds right:
+
+1. **"A single unlucky sample condemns the run."**  Wrong.  `ab_interleaved`
+   already takes the **minimum over 500 interleaved rounds** per arm, which is
+   a sound estimator against an interrupt landing in one measurement.  The
+   sampling was never the weak part.
+2. **"The canary is reading the suite's own TLB residue, not the host."**
+   This one had real evidence behind it - run 1's `CANARY-TRACE` showed the
+   elevation confined to two *adjacent* positions (48:10.6, 56:9.4) with
+   everything else flat at 6.0-6.6, which is not what ambient load looks like,
+   and the two endpoints agreed to 2% (`start=6, end=6, pct=102`), ruling out
+   drift.  It predicted the bump would recur at the same positions on an
+   identical binary.  It did not: run 2's bump was at 40 (11.6) and 64 (16.5).
+   Refuted by its own prediction, which is the good outcome.
+3. **"The host is busy."**  Correct.  Cumulative CPU on the box is dominated by
+   `UnrealEditor`, `explorer`, `Creative Cloud`, `EpicGamesLauncher`, `chrome`
+   and `node`.  Every instrument was reporting this accurately the whole time.
+
+The general lesson is the one this project keeps relearning from the other end:
+*before concluding an instrument is lying, check whether the thing it is
+measuring is actually true.*  Two sessions have now gone looking for a defect
+in this canary that was not there.
+
+### What to actually do
+
+- **Never accept or reject a benchmark movement from one run.**  The harness
+  already says this (`REGRESSED, UNREPLICATED` -> "re-run WITHOUT rebuilding to
+  confirm").  Follow it literally: `git stash` any uncommitted source changes
+  first, so `cargo` has nothing to rebuild and the second run is provably the
+  same binary.
+- **A `RUN CONTAMINATED` verdict does not invalidate the boot test.**  Both runs
+  above passed every correctness gate.  Contamination taints the *numbers*, not
+  the *pass*.
+- **Do not chase a whole-suite outlier.**  `!! OUTLIER RUN: everything measured
+  slower than usual by N%` means the comparison denominator is bad; drift
+  correction removes the uniform part but cannot remove a non-uniform one.
+- The one thing that *would* be worth building: a mode that runs the suite
+  **twice in one boot** and reports only benchmarks that moved in both halves.
+  That gets replication without paying a second 17-minute release build, and it
+  is the only change here that would improve the signal rather than just
+  documenting the noise.  Not built yet.
+
+---
+
+## A-BENCH-PAGE-ALLOC-ZEROED-FREE-HAS-LEFT-ITS-HISTORICAL-RANGE (lane A, 2026-08-18) - **open, unattributed**
+
+**In short:** one benchmark, `page_alloc_zeroed_free`, is now measuring about
+80% slower than it used to and is well outside the range it has held for the
+last eight runs.  It is the *only* benchmark that was flagged in both of the
+back-to-back identical-binary runs described in the entry above, so unlike the
+other nineteen it is not obviously noise.  It is also not yet attributable to
+any code change, and the evidence for that is specific rather than a shrug.
+
+### The numbers
+
+| run | value | own recent range | median over 8 runs |
+|---|---:|---|---:|
+| baseline (commit `61a4998c1`) | 3 680 ns | 2 909-4 717 ns | 3 645 ns |
+| run 1 (`e2f2a2726`) | 5 125 ns | " | " |
+| run 2 (**identical binary** to run 1) | 6 652 ns | " | " |
+
+Flagged `+35%` then `+27%` against the suite, i.e. after drift correction, and
+run-over-run drift itself was small both times (+2.8%, +2.1%).
+
+### Why it is *not* being attributed to the FpuState / KernelFdTable boxing
+
+The tempting story is that boxing `FpuState` (4 KiB) and `KernelFdTable`
+(8 KiB) added two heap allocations per task creation, changing kernel-heap
+layout and therefore page-allocator free-list state.  That is mechanically
+plausible.  It is also not what the data shows:
+
+- **The second step happened with an unchanged binary.**  Run 2 is the same
+  bytes as run 1 and still rose 27%.  Whatever caused that step is not code.
+- **A code change produces a step, not a ramp.**  3 680 -> 5 125 -> 6 652 is a
+  ramp across three runs, two of which share a binary.
+- **This benchmark is a known high-variance one.**  Run 1's dispersion report
+  lists it explicitly: `page_alloc_zeroed_free: mean is 26x its min`.  A
+  benchmark whose mean is 26x its minimum will be flagged often, by
+  construction.
+
+So the honest reading is: at least the second step is environmental, which
+removes the grounds for reading the first step as code.  What remains true and
+worth tracking is that the current value sits 41% above the top of its own
+eight-run range.
+
+### What would settle it
+
+Run the suite on the commit *before* the boxing changes (`61a4998c1`) and on
+`HEAD`, alternating, three runs each, and compare medians rather than single
+runs.  Alternating matters: consecutive runs share whatever the host was doing,
+which is exactly the confound above.  Until that is done this stays open and
+unattributed - and specifically must **not** be quoted as evidence that the
+boxing changes cost anything, because it is not.

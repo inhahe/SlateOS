@@ -5347,6 +5347,13 @@ extern "C" fn kernel_main() -> ! {
     // Realtek RTL8139 NIC self-test.
     rtl8139::self_test();
 
+    // Virtio-net self-test.  Sited with the other two NICs rather than among
+    // the virtio devices below, because all three now transmit a frame and
+    // their datapath results are worth reading as one block.
+    if let Err(e) = virtio::net::self_test() {
+        serial_println!("[virtio-net] Self-test failed: {e:?} (non-fatal)");
+    }
+
     // Intel HD Audio self-test.
     if let Err(e) = hda::self_test() {
         serial_println!("[hda] Self-test failed: {:?} (non-fatal)", e);
@@ -5793,6 +5800,21 @@ extern "C" fn kernel_main() -> ! {
     // `NS_FEATURES_ACTIVE` silently cost every VFS operation three spinlocks
     // for the whole run and went unnoticed until a benchmark contradicted it.
     scfilter::verify_index("boot");
+
+    // Kernel-stack depth census.  Sited here — after every self-test, but
+    // BEFORE the BOOT_OK marker — for two independent reasons:
+    //
+    //  * The scheduler's own self-test runs ~1100 log lines before the
+    //    process-spawn tests, which drive by far the deepest kernel stacks in
+    //    the system (spawn_process -> ELF parse -> page-table walk).  A census
+    //    there would systematically miss the tasks that matter.
+    //  * Anything printed after BOOT_OK is not printed at all as far as the
+    //    boot test is concerned: the harness stops at the marker and kills
+    //    QEMU, so output below it never reaches the log.
+    //
+    // It reports rather than gates: a deep stack is a condition the operator
+    // needs to see, not a reason to refuse to boot.
+    sched::report_stack_census();
 
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,

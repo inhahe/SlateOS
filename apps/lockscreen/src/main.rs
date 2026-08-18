@@ -18,7 +18,9 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
@@ -321,7 +323,11 @@ impl TimeOfDay {
         if hour >= 24 || minute >= 60 || second >= 60 {
             return None;
         }
-        Some(Self { hour, minute, second })
+        Some(Self {
+            hour,
+            minute,
+            second,
+        })
     }
 
     /// Format as "HH:MM".
@@ -351,7 +357,10 @@ pub struct DateInfo {
 impl DateInfo {
     /// Format as "Wednesday, January 15, 2026".
     pub fn format_long(&self) -> String {
-        format!("{}, {} {}, {}", self.weekday, self.month, self.day, self.year)
+        format!(
+            "{}, {} {}, {}",
+            self.weekday, self.month, self.day, self.year
+        )
     }
 }
 
@@ -535,10 +544,7 @@ fn build_accessibility_text(lock_screen: &LockScreen) -> String {
         }
         LockScreenState::PasswordEntry => {
             let user = lock_screen.active_user();
-            parts.push(format!(
-                "Unlock screen for {}.",
-                user.display_name
-            ));
+            parts.push(format!("Unlock screen for {}.", user.display_name));
             if lock_screen.lockout.is_active() {
                 parts.push(format!(
                     "Account locked. Try again in {}.",
@@ -628,7 +634,11 @@ impl LockScreen {
             state: LockScreenState::Clock,
             screen_width: SCREEN_WIDTH,
             screen_height: SCREEN_HEIGHT,
-            time: TimeOfDay { hour: 12, minute: 0, second: 0 },
+            time: TimeOfDay {
+                hour: 12,
+                minute: 0,
+                second: 0,
+            },
             date: None,
             config,
             users,
@@ -654,13 +664,11 @@ impl LockScreen {
 
     /// Get the currently active/selected user.
     pub fn active_user(&self) -> &UserInfo {
-        self.users
-            .get(self.selected_user_index)
-            .unwrap_or_else(|| {
-                // This should never happen if the constructor ensures non-empty,
-                // but we handle it defensively.
-                &self.users[0]
-            })
+        self.users.get(self.selected_user_index).unwrap_or_else(|| {
+            // This should never happen if the constructor ensures non-empty,
+            // but we handle it defensively.
+            &self.users[0]
+        })
     }
 
     /// Whether there are multiple users to choose from.
@@ -753,7 +761,8 @@ impl LockScreen {
             return false;
         }
 
-        let is_valid = self.validator
+        let is_valid = self
+            .validator
             .as_ref()
             .is_some_and(|v| v.validate(&self.password_buffer));
 
@@ -817,11 +826,16 @@ impl LockScreen {
                 // Any key press transitions to password entry.
                 match key.key {
                     // Don't transition on bare modifier keys.
-                    Key::LeftShift | Key::RightShift
-                    | Key::LeftCtrl | Key::RightCtrl
-                    | Key::LeftAlt | Key::RightAlt
-                    | Key::LeftSuper | Key::RightSuper
-                    | Key::CapsLock | Key::NumLock
+                    Key::LeftShift
+                    | Key::RightShift
+                    | Key::LeftCtrl
+                    | Key::RightCtrl
+                    | Key::LeftAlt
+                    | Key::RightAlt
+                    | Key::LeftSuper
+                    | Key::RightSuper
+                    | Key::CapsLock
+                    | Key::NumLock
                     | Key::ScrollLock => EventResult::Ignored,
                     _ => {
                         self.enter_password_mode();
@@ -835,34 +849,32 @@ impl LockScreen {
                     }
                 }
             }
-            LockScreenState::PasswordEntry => {
-                match key.key {
-                    Key::Escape => {
-                        self.return_to_clock();
-                        EventResult::Consumed
-                    }
-                    Key::Enter => {
-                        let _ = self.submit_password();
-                        EventResult::Consumed
-                    }
-                    Key::Backspace => {
-                        self.backspace();
-                        EventResult::Consumed
-                    }
-                    Key::Delete => {
-                        self.clear_password();
-                        EventResult::Consumed
-                    }
-                    _ => {
-                        if let Some(ch) = key.text
-                            && !ch.is_control()
-                        {
-                            self.type_char(ch);
-                        }
-                        EventResult::Consumed
-                    }
+            LockScreenState::PasswordEntry => match key.key {
+                Key::Escape => {
+                    self.return_to_clock();
+                    EventResult::Consumed
                 }
-            }
+                Key::Enter => {
+                    let _ = self.submit_password();
+                    EventResult::Consumed
+                }
+                Key::Backspace => {
+                    self.backspace();
+                    EventResult::Consumed
+                }
+                Key::Delete => {
+                    self.clear_password();
+                    EventResult::Consumed
+                }
+                _ => {
+                    if let Some(ch) = key.text
+                        && !ch.is_control()
+                    {
+                        self.type_char(ch);
+                    }
+                    EventResult::Consumed
+                }
+            },
         }
     }
 
@@ -1000,7 +1012,13 @@ impl LockScreen {
     /// Render the darkened wallpaper overlay.
     fn render_wallpaper_overlay(&self, tree: &mut RenderTree) {
         let overlay_color = Color::rgba(0, 0, 0, self.config.wallpaper_tint_alpha);
-        tree.fill_rect(0.0, 0.0, self.screen_width, self.screen_height, overlay_color);
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.screen_width,
+            self.screen_height,
+            overlay_color,
+        );
     }
 
     /// Render the clock view (large time + date).
@@ -1141,7 +1159,8 @@ impl LockScreen {
         }
 
         // Password hint (shown after HINT_THRESHOLD failed attempts).
-        if self.failed_attempts >= HINT_THRESHOLD && !self.lockout.is_active()
+        if self.failed_attempts >= HINT_THRESHOLD
+            && !self.lockout.is_active()
             && let Some(ref hint) = self.active_user().password_hint
         {
             let hint_str = format!("Hint: {hint}");
@@ -1272,8 +1291,9 @@ impl LockScreen {
             };
 
             for i in 0..dot_count {
-                let dot_x = dots_start_x + (i as f32 * PASSWORD_DOT_SPACING)
-                    - scroll_offset + PASSWORD_DOT_SPACING / 2.0 - dot_radius;
+                let dot_x = dots_start_x + (i as f32 * PASSWORD_DOT_SPACING) - scroll_offset
+                    + PASSWORD_DOT_SPACING / 2.0
+                    - dot_radius;
                 let dot_y = dot_cy - dot_radius;
 
                 tree.fill_rounded_rect(
@@ -1393,8 +1413,7 @@ impl LockScreen {
                 SMALL_AVATAR_FONT_SIZE,
                 FontWeightHint::Bold,
             );
-            let initials_y = avatar_y
-                + (SMALL_AVATAR_DIAMETER - SMALL_AVATAR_FONT_SIZE) / 2.0;
+            let initials_y = avatar_y + (SMALL_AVATAR_DIAMETER - SMALL_AVATAR_FONT_SIZE) / 2.0;
 
             tree.push(RenderCommand::Text {
                 x: initials_x,
@@ -1444,10 +1463,7 @@ struct Rect {
 
 /// Test whether a point (px, py) is inside a rectangle.
 fn hit_test(px: f32, py: f32, rect: &Rect) -> bool {
-    px >= rect.x
-        && px <= rect.x + rect.width
-        && py >= rect.y
-        && py <= rect.y + rect.height
+    px >= rect.x && px <= rect.x + rect.width && py >= rect.y && py <= rect.y + rect.height
 }
 
 // ============================================================================
@@ -1468,8 +1484,7 @@ mod tests {
     // -- Helper factories --
 
     fn single_user_lockscreen() -> LockScreen {
-        let user = UserInfo::new("alice", "Alice Johnson", true)
-            .with_hint("Name of your cat");
+        let user = UserInfo::new("alice", "Alice Johnson", true).with_hint("Name of your cat");
         let validator = PasswordValidator::from_password("correcthorse");
         LockScreen::new(vec![user], LockScreenConfig::default(), Some(validator))
     }
@@ -1851,7 +1866,10 @@ mod tests {
     #[test]
     fn test_sin_approx_pi_half() {
         let val = sin_approx(core::f32::consts::FRAC_PI_2);
-        assert!((val - 1.0).abs() < 0.01, "sin(pi/2) should be ~1, got {val}");
+        assert!(
+            (val - 1.0).abs() < 0.01,
+            "sin(pi/2) should be ~1, got {val}"
+        );
     }
 
     #[test]
@@ -1998,7 +2016,10 @@ mod tests {
     #[test]
     fn test_resize_event() {
         let mut ls = single_user_lockscreen();
-        let event = Event::Resize { width: 2560, height: 1440 };
+        let event = Event::Resize {
+            width: 2560,
+            height: 1440,
+        };
         let result = ls.handle_event(&event);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(ls.screen_width, 2560.0);
@@ -2018,7 +2039,11 @@ mod tests {
         });
         let tree = ls.render();
         // Should have at least: overlay + clock text + date text + hint text.
-        assert!(tree.len() >= 4, "Clock view should produce at least 4 commands, got {}", tree.len());
+        assert!(
+            tree.len() >= 4,
+            "Clock view should produce at least 4 commands, got {}",
+            tree.len()
+        );
     }
 
     #[test]
@@ -2029,7 +2054,11 @@ mod tests {
         let tree = ls.render();
         // Should have: overlay + avatar bg + initials + name + field bg + field border
         //  + dots (clipped) + submit button + arrow
-        assert!(tree.len() >= 8, "Password view should produce at least 8 commands, got {}", tree.len());
+        assert!(
+            tree.len() >= 8,
+            "Password view should produce at least 8 commands, got {}",
+            tree.len()
+        );
     }
 
     #[test]
@@ -2044,7 +2073,10 @@ mod tests {
             matches!(cmd, RenderCommand::Text { text, color, .. }
                 if text == "Incorrect password" && *color == theme::RED)
         });
-        assert!(has_error_text, "Render output should include the error message");
+        assert!(
+            has_error_text,
+            "Render output should include the error message"
+        );
     }
 
     #[test]
@@ -2053,10 +2085,14 @@ mod tests {
         ls.enter_password_mode();
         let tree = ls.render();
         // Should include "Switch user" label and user entries.
-        let has_switch_label = tree.commands.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "Switch user")
-        });
-        assert!(has_switch_label, "Multi-user render should include 'Switch user' label");
+        let has_switch_label = tree
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Switch user"));
+        assert!(
+            has_switch_label,
+            "Multi-user render should include 'Switch user' label"
+        );
     }
 
     // -- Accessibility --
@@ -2096,20 +2132,35 @@ mod tests {
 
     #[test]
     fn test_hit_test_inside() {
-        let rect = Rect { x: 10.0, y: 10.0, width: 100.0, height: 50.0 };
+        let rect = Rect {
+            x: 10.0,
+            y: 10.0,
+            width: 100.0,
+            height: 50.0,
+        };
         assert!(hit_test(50.0, 30.0, &rect));
     }
 
     #[test]
     fn test_hit_test_outside() {
-        let rect = Rect { x: 10.0, y: 10.0, width: 100.0, height: 50.0 };
+        let rect = Rect {
+            x: 10.0,
+            y: 10.0,
+            width: 100.0,
+            height: 50.0,
+        };
         assert!(!hit_test(5.0, 30.0, &rect));
         assert!(!hit_test(50.0, 70.0, &rect));
     }
 
     #[test]
     fn test_hit_test_edge() {
-        let rect = Rect { x: 10.0, y: 10.0, width: 100.0, height: 50.0 };
+        let rect = Rect {
+            x: 10.0,
+            y: 10.0,
+            width: 100.0,
+            height: 50.0,
+        };
         // Edges are inclusive.
         assert!(hit_test(10.0, 10.0, &rect));
         assert!(hit_test(110.0, 60.0, &rect));

@@ -2173,6 +2173,216 @@ def test_replication_declines_the_measured_false_positives(bh):
               f"-> {name}: another run of this same binary" in out, True)
 
 
+# --- hot-symbol addresses -----------------------------------------------------
+#
+# `elf_symbol_addresses` exists because a 4x swing in the SHA-256 benchmarks was
+# caused by `crypto::compress` changing address with its machine code
+# byte-identical (known-issues.md, A-A-4x-CRYPTO-"REGRESSION").  Recording the
+# address next to the timing is what makes a repeat recognisable without a
+# bisect, so the parser has to work on a *real* kernel ELF -- which is built by
+# either of Rust's two mangling schemes depending on the toolchain channel.  The
+# investigation itself accidentally produced one build of each, and the parser
+# initially appeared to fail on one of them (it was a path problem, not a
+# parsing one), which is precisely why both schemes are pinned here.
+#
+# The ELFs are synthesised rather than taken from `target/`, so the tests run in
+# a bare checkout where nothing has been built.
+
+def _synth_elf(path, symbols, *, ident_class=2, ident_data=1, magic=b"\x7fELF"):
+    """Write a minimal ELF64 with a .symtab/.strtab holding `symbols`.
+
+    `symbols` is a list of `(name, value)`.  Only the fields
+    `elf_symbol_addresses` actually reads are populated; everything else is
+    zero, which is the point -- the parser must not depend on more than it
+    needs.
+    """
+    import struct
+
+    strtab = bytearray(b"\x00")
+    offsets = []
+    for name, _ in symbols:
+        offsets.append(len(strtab))
+        strtab += name.encode() + b"\x00"
+
+    symtab = bytearray()
+    for (_, value), noff in zip(symbols, offsets):
+        ent = bytearray(24)
+        struct.pack_into("<I", ent, 0, noff)
+        struct.pack_into("<Q", ent, 8, value)
+        symtab += ent
+
+    ehdr_len = 64
+    sym_off = ehdr_len
+    str_off = sym_off + len(symtab)
+    sh_off = str_off + len(strtab)
+
+    ehdr = bytearray(ehdr_len)
+    ehdr[0:4] = magic
+    ehdr[4] = ident_class
+    ehdr[5] = ident_data
+    struct.pack_into("<Q", ehdr, 0x28, sh_off)
+    struct.pack_into("<H", ehdr, 0x3A, 64)
+    struct.pack_into("<H", ehdr, 0x3C, 3)
+
+    def shdr(sh_type, off, size, link=0, entsize=0):
+        s = bytearray(64)
+        struct.pack_into("<I", s, 0x04, sh_type)
+        struct.pack_into("<Q", s, 0x18, off)
+        struct.pack_into("<Q", s, 0x20, size)
+        struct.pack_into("<I", s, 0x28, link)
+        struct.pack_into("<Q", s, 0x38, entsize)
+        return s
+
+    blob = bytes(ehdr) + bytes(symtab) + bytes(strtab)
+    blob += bytes(shdr(0, 0, 0))
+    blob += bytes(shdr(2, sym_off, len(symtab), link=2, entsize=24))
+    blob += bytes(shdr(3, str_off, len(strtab)))
+    with open(path, "wb") as fh:
+        fh.write(blob)
+    return path
+
+
+def test_hot_symbols_read_legacy_mangling(bh, tmpdir):
+    elf = _synth_elf(os.path.join(tmpdir, "legacy.elf"), [
+        ("_ZN6kernel6crypto8compress17h8234a763022d2833E", 0xffffffff80afce00),
+        ("_ZN6kernel6crypto15sha512_compress17hff0d9f03de4c6bb2E",
+         0xffffffff80af5580),
+    ])
+    got = bh.elf_symbol_addresses(elf)
+    check("legacy mangling: compress address is read",
+          got.get("crypto::compress"), "0xffffffff80afce00")
+    check("legacy mangling: sha512_compress is read",
+          got.get("crypto::sha512_compress"), "0xffffffff80af5580")
+
+
+def test_hot_symbols_read_v0_mangling(bh, tmpdir):
+    elf = _synth_elf(os.path.join(tmpdir, "v0.elf"), [
+        ("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress", 0xffffffff80364980),
+    ])
+    got = bh.elf_symbol_addresses(elf)
+    check("v0 mangling: the same pattern still matches",
+          got.get("crypto::compress"), "0xffffffff80364980")
+
+
+def test_hot_symbols_ignore_unrelated_compress_functions(bh, tmpdir):
+    """`fs::compress` and `mm::compress` must not be mistaken for the crypto one.
+
+    The kernel has more than fifty symbols containing the word "compress"
+    (deflate, lz4, zstd, bzip2, the swap compressor).  The `6crypto` length
+    prefix is the whole of what keeps them out, so it is asserted rather than
+    assumed.
+    """
+    elf = _synth_elf(os.path.join(tmpdir, "noise.elf"), [
+        ("_RNvNtNtCsjQArNW8oxTF_6kernel2fs8compress7deflate", 0x1111),
+        ("_RNvNtNtCsjQArNW8oxTF_6kernel2mm8compress8compress", 0x2222),
+        ("_ZN6kernel2fs9fcompress13compress_data17habcdE", 0x3333),
+    ])
+    got = bh.elf_symbol_addresses(elf)
+    check("unrelated compress symbols are not reported", got, {})
+
+
+def test_hot_symbols_prefer_the_function_over_a_wrapper(bh, tmpdir):
+    """A monomorphised wrapper mentions the function and is not the function.
+
+    Real output contains entries like
+    `drop_in_place<Vec<kernel::fs::fcompress::CompressionRule>>` that embed
+    another symbol's name.  Shortest-match is how the function itself is
+    picked; if that rule broke, the recorded address would silently become some
+    unrelated thunk's, which is worse than recording nothing.
+    """
+    elf = _synth_elf(os.path.join(tmpdir, "wrap.elf"), [
+        ("_RINvNtCsg3_4core3ptr13drop_in_placeNtNtCsjQ_6kernel6crypto8compressEB1j_",
+         0xdead0000),
+        ("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress", 0xffffffff80364980),
+    ])
+    got = bh.elf_symbol_addresses(elf)
+    check("the shorter (real) symbol wins over the wrapper",
+          got.get("crypto::compress"), "0xffffffff80364980")
+
+
+def test_hot_symbols_skip_undefined_symbols(bh, tmpdir):
+    """A st_value of 0 is an undefined symbol, not an address of zero."""
+    elf = _synth_elf(os.path.join(tmpdir, "undef.elf"), [
+        ("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress", 0),
+    ])
+    got = bh.elf_symbol_addresses(elf)
+    check("an undefined symbol contributes no address", got, {})
+
+
+def test_hot_symbols_degrade_quietly_on_bad_input(bh, tmpdir):
+    """Never raise: this is bookkeeping bolted to a 9-minute measurement.
+
+    A completed benchmark run must be written even if the ELF is absent,
+    truncated, 32-bit, big-endian or not an ELF at all.  Losing the record to
+    an exception in the diagnostic would cost far more than the diagnostic is
+    worth.
+    """
+    missing = os.path.join(tmpdir, "nope.elf")
+    check("absent file yields {}", bh.elf_symbol_addresses(missing), {})
+
+    notelf = os.path.join(tmpdir, "plain.txt")
+    with open(notelf, "w", encoding="utf-8") as fh:
+        fh.write("this is not an ELF file, it is a note about one\n")
+    check("non-ELF yields {}", bh.elf_symbol_addresses(notelf), {})
+
+    trunc = os.path.join(tmpdir, "trunc.elf")
+    with open(trunc, "wb") as fh:
+        fh.write(b"\x7fELF\x02\x01" + b"\x00" * 20)
+    check("truncated ELF yields {}", bh.elf_symbol_addresses(trunc), {})
+
+    elf32 = _synth_elf(os.path.join(tmpdir, "elf32.elf"),
+                       [("_ZN6kernel6crypto8compress17hE", 0x1000)],
+                       ident_class=1)
+    check("32-bit ELF yields {}", bh.elf_symbol_addresses(elf32), {})
+
+
+def test_hot_symbols_absent_and_empty_mean_different_things(bh, tmpdir):
+    """`hot_symbols` absent = nobody looked; `{}` = looked, found nothing.
+
+    Collapsing the two would let a reader who finds no addresses next to a 4x
+    swing conclude the addresses did not move, when in fact no ELF was passed.
+    That is the same mistake this field exists to prevent, one level up, so the
+    distinction is asserted rather than left to the comment that states it.
+    """
+    import io
+    import json
+    import contextlib
+
+    serial = "\n".join([
+        "[bench] SCORE crypto_sha256_64B 1935 - TRACK 2000 1000",
+        "[bench] CANARY 8 8 100 8 9 12 11 0 800 900",
+    ]) + "\n"
+
+    def run(extra, history_name):
+        log = write(tmpdir, "serial-" + history_name, serial)
+        history = os.path.join(tmpdir, history_name)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bh.main(["--serial", log, "--history", history,
+                     "--profile", "release"] + extra)
+        line = [l for l in open(history, encoding="utf-8").read().splitlines()
+                if l.strip()][-1]
+        return json.loads(line)
+
+    no_elf = run([], "none.jsonl")
+    check("no --kernel-elf leaves the field out entirely",
+          "hot_symbols" in no_elf, False)
+
+    blank = _synth_elf(os.path.join(tmpdir, "blank.elf"),
+                       [("_ZN6kernel2mm5alloc17habcE", 0x2000)])
+    looked = run(["--kernel-elf", blank], "blank.jsonl")
+    check("an ELF with none of the hot functions records an empty map",
+          looked.get("hot_symbols"), {})
+
+    real = _synth_elf(os.path.join(tmpdir, "real.elf"),
+                      [("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress",
+                        0xffffffff80afce00)])
+    found = run(["--kernel-elf", real], "real.jsonl")
+    check("the address reaches the history record",
+          found.get("hot_symbols"),
+          {"crypto::compress": "0xffffffff80afce00"})
+
+
 def main():
     """Run every `test_*` in this file, in definition order.
 

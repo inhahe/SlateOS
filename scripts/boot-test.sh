@@ -1198,6 +1198,11 @@ print_bench_results() {
     # why re-deriving it at exit is wrong, and wrong in the hiding direction.
     local bench_args=(--serial "$file" --profile "$BENCH_PROFILE"
                       --host-load "$HOST_LOAD" --commit "${BT_HEAD:-unknown}")
+    # The ELF that was actually measured, so the record carries the addresses of
+    # the placement-sensitive functions alongside their timings.
+    if [ -f "${KERNEL_BIN:-}" ]; then
+        bench_args+=(--kernel-elf "$KERNEL_BIN")
+    fi
     if [ "${BT_DIRTY:-0}" = 1 ]; then
         bench_args+=(--dirty)
     fi

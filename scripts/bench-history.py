@@ -66,6 +66,7 @@ import os
 import platform
 import re
 import statistics
+import struct
 import subprocess
 import sys
 
@@ -189,6 +190,100 @@ CANARY_MIN_RESOLVABLE = math.ceil(100 / CANARY_TOLERANCE_PCT)
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
 DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "history.jsonl")
+
+#: Functions whose *address* has been shown to change their measured cost by
+#: several-fold under QEMU's TCG, with their machine code byte-identical.
+#:
+#: On 2026-08-18 `crypto_sha256_64B` went 7426 -> 30048 cycles across a commit
+#: that edits only `audio_mixer.rs`.  The SHA-256 code did not change (same
+#: symbol size, same mangled hash); `crypto::compress` merely moved to
+#: `…80afce00`, and moving it anywhere else -- two unrelated addresses were
+#: tried -- restored the original number exactly.  `crypto_sha512_64B`, a
+#: near-identical routine at a different address, was unaffected.  See
+#: A-A-4x-CRYPTO-"REGRESSION" in known-issues.md.
+#:
+#: Recording the addresses turns a repeat of that into a one-line observation
+#: rather than the multi-hour bisect it cost the first time: if a crypto
+#: benchmark jumps and `compress` moved in the same run, that is the answer.
+#:
+#: Matched as substrings so that one pattern covers both of Rust's mangling
+#: schemes -- legacy `_ZN6kernel6crypto8compress17h…E` and v0
+#: `_RNvNtCs…_6kernel6crypto8compress` share the length-prefixed `6crypto8compress`.
+#: The `6crypto` prefix is what keeps `fs::compress` and `mm::compress` out.
+HOT_SYMBOLS = {
+    "crypto::compress": "6crypto8compress",
+    "crypto::sha512_compress": "6crypto15sha512_compress",
+    "net::tcp::tcp_checksum_ip": "3tcp15tcp_checksum_ip",
+}
+
+
+def elf_symbol_addresses(path, wanted=HOT_SYMBOLS):
+    """Map friendly name -> load address for `wanted`, read from an ELF64 file.
+
+    Parsed by hand rather than shelled out to `nm`/`objdump` on purpose: neither
+    is on PATH in this environment by default (llvm-tools had to be installed
+    mid-investigation to get one), and a diagnostic that silently records
+    nothing on a machine missing an optional tool is worse than no diagnostic,
+    because its absence looks like "the addresses did not move".
+
+    Returns `{}` -- never raises -- if the file is missing, is not ELF64, or has
+    been stripped.  This is bookkeeping attached to a benchmark record; it must
+    never be the reason a completed measurement fails to be written.
+    """
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return {}
+    # 0x7f E L F, class 2 (64-bit), little-endian.
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        return {}
+
+    def u(fmt, off):
+        return struct.unpack_from(fmt, data, off)[0]
+
+    try:
+        e_shoff = u("<Q", 0x28)
+        e_shentsize = u("<H", 0x3A)
+        e_shnum = u("<H", 0x3C)
+        if not e_shoff or not e_shnum:
+            return {}
+        # Find .symtab (sh_type 2); its sh_link names the matching string table,
+        # which is why the string table is not searched for by name.
+        symtab = None
+        for i in range(e_shnum):
+            sh = e_shoff + i * e_shentsize
+            if u("<I", sh + 4) == 2:  # SHT_SYMTAB
+                symtab = sh
+                break
+        if symtab is None:
+            return {}
+        sym_off, sym_size = u("<Q", symtab + 0x18), u("<Q", symtab + 0x20)
+        sym_entsize = u("<Q", symtab + 0x38) or 24
+        strtab_idx = u("<I", symtab + 0x28)
+        st = e_shoff + strtab_idx * e_shentsize
+        str_off, str_size = u("<Q", st + 0x18), u("<Q", st + 0x20)
+        strs = data[str_off:str_off + str_size]
+
+        # Keep the shortest match per pattern: a monomorphised wrapper that
+        # merely mentions the function has a longer name than the function.
+        best = {}
+        for off in range(sym_off, sym_off + sym_size, sym_entsize):
+            name_off = u("<I", off)
+            value = u("<Q", off + 8)
+            if not value or name_off >= len(strs):
+                continue
+            end = strs.find(b"\0", name_off)
+            name = strs[name_off:end if end >= 0 else None].decode(
+                "utf-8", "replace")
+            for friendly, pattern in wanted.items():
+                if pattern in name:
+                    prev = best.get(friendly)
+                    if prev is None or len(name) < prev[0]:
+                        best[friendly] = (len(name), value)
+        return {k: f"{v[1]:#018x}" for k, v in sorted(best.items())}
+    except (struct.error, IndexError, ValueError):
+        return {}
 
 
 def split_is_unstable(token):
@@ -2535,6 +2630,10 @@ def main(argv=None):
                         help="serial log to parse (default: build/serial-test.txt)")
     parser.add_argument("--history", default=DEFAULT_HISTORY,
                         help="JSON-lines history file (default: bench/history.jsonl)")
+    parser.add_argument("--kernel-elf", default=None,
+                        help="kernel ELF to read hot-function addresses from, "
+                             "recorded as `hot_symbols` so a placement-caused "
+                             "swing can be recognised without a bisect")
     parser.add_argument("--threshold", type=float, default=25.0,
                         help="percent change worth reporting (default: 25)")
     parser.add_argument("--no-record", action="store_true",
@@ -2679,6 +2778,17 @@ def main(argv=None):
             "host_load": args.host_load,
             "dispersion": here_dispersion,
         }
+        # Addresses of the functions known to change cost by several-fold when
+        # only their placement changes.
+        #
+        # Absent means "no ELF was offered"; `{}` means "an ELF was offered and
+        # yielded nothing" (stripped, or the functions were inlined away). The
+        # two are kept distinct on purpose: collapsing them would let a reader
+        # who finds no addresses beside a 4x swing conclude the addresses did
+        # not move, when in fact nobody looked -- which is the same mistake,
+        # one level up, that this field exists to prevent.
+        if args.kernel_elf:
+            record["hot_symbols"] = elf_symbol_addresses(args.kernel_elf)
         # Absent rather than null when the caller did not measure it: an
         # explicit `wall_seconds: null` invites a reader to treat it as zero,
         # and `dispersion_count`-style "absent means unknown" handling is

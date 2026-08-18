@@ -126,19 +126,32 @@ def worktrees(repo):
     return result
 
 
-def is_ignored(tree, relpath):
-    """True if the worktree at `tree` considers `relpath` ignored.
+def is_ignored_dir(tree, relpath):
+    """True if the worktree at `tree` considers the *directory* `relpath` ignored.
 
     A safety interlock, not an optimisation: everything this script deletes is
     build output, and build output is ignored.  If git disagrees, the path is
     not what we think it is and we must not touch it.
 
+    Two details, both learned the hard way:
+
     Ask the worktree that *owns* the path.  `git check-ignore` answers only for
     the repository rooted at its cwd and fails outright ("is outside repository
     at ...") on a sibling worktree's path, which would otherwise read as "not
     ignored" and refuse every candidate but our own.
+
+    Pass the trailing slash.  `check-ignore` matches a *string*, not a path on
+    disk -- it never stats anything -- so it cannot tell that `target` names a
+    directory, and a directory-only pattern (`**/target/`, which is what this
+    repo's .gitignore carries) therefore does not match it.  Asking for `target`
+    returns rc=1, "not ignored", on a tree whose .gitignore plainly ignores it.
+    That is not a near miss: it made the interlock refuse *every* candidate
+    including our own, so step 2 of this script could never delete anything and
+    the whole thing was a no-op the first time the free-space floor was hit for
+    real.  A guard that always says no is indistinguishable from a broken guard,
+    which is why this is asserted below by asking about the real path.
     """
-    rc, _ = run(["git", "check-ignore", "-q", "--", relpath], cwd=tree)
+    rc, _ = run(["git", "check-ignore", "-q", "--", relpath + "/"], cwd=tree)
     return rc == 0
 
 
@@ -312,16 +325,34 @@ def main(argv=None):
             unique.append(tree)
 
     log("Step 2: target/ directories, integration checkout first")
+    considered = refused = 0
     for tree in unique:
         target = os.path.normpath(os.path.join(tree, "target"))
         if not os.path.isdir(target):
             continue
-        if not is_ignored(tree, "target"):
+        considered += 1
+        if not is_ignored_dir(tree, "target"):
+            refused += 1
             log("  REFUSING %s: git does not consider it ignored" % target)
             continue
         reclaim_dir(target, dry, args.sizes, log)
         if not dry and free_gib(root) >= args.need:
             break
+
+    if considered and refused == considered:
+        # Every candidate refused is not a plausible state of the world: these
+        # are cargo's own output directories in checkouts of one repository, and
+        # that repository ignores them.  It is what a *broken interlock* looks
+        # like, and it is indistinguishable from a correct one by its output
+        # alone -- which is exactly how a trailing-slash bug in `is_ignored_dir`
+        # went unnoticed until the free-space floor was hit for real and the
+        # script freed nothing.  Say so, rather than reporting a tidy failure.
+        log("  NOTE: all %d candidate(s) were refused. That is far more likely"
+            % considered)
+        log("        to be a bug in this script's ignore probe than %d trees"
+            % considered)
+        log("        genuinely un-ignoring their build output. Check it with:")
+        log("          git -C <tree> check-ignore -v -- target/")
 
     end = free_gib(root)
     log("Free now: %.1f GiB (was %.1f)" % (end, start))

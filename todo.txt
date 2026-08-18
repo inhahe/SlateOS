@@ -54368,16 +54368,38 @@ per-benchmark factor.
   - design-decisions.md §229 records why the factor is *printed* and not
     *applied*.
 
+DONE 2026-08-18 (same day, the item listed below as missing): the stimulus and
+the grader for the prediction now exist.
+  - scripts/canary-load-test.sh --load-at=NAME [--load-until=NAME] places the
+    load over an interior window, triggered on the live result line the kernel
+    prints when a named benchmark finishes. Follows the serial log on one
+    held-open fd in pure bash rather than a grep-per-second, because RESULT P19
+    says host activity during the QEMU window moves the reference cost by tens
+    of percent — and here that cost *is* the measurement.
+  - scripts/grade-positional.py scores the model against the loaded window:
+    sensitivity, localisation over the window widened by the sampling interval,
+    and the false-positive rate over the provably-unreachable remainder, which
+    is the only one of the three that can tell a working model from one that
+    flags everything.
+  - scripts/test-grade-positional.py, 15 groups. All five verdicts have a test
+    that produces them, each confirmed reachable by mutating the grader.
+  - The first real record carrying `positions` + labelled trace edges landed at
+    0ece277de (86 positions 0..85; start:5.16 end:5.78).
+
 NOT DONE, and deliberately — do not treat as an oversight:
-  - No correction is applied to any recorded value. Blocked on PREDICTION P21
+  - No correction is applied to any recorded value. Blocked on PREDICTION P22
     (known-issues.md), which is the experiment that would establish the factor
-    predicts a benchmark's inflation. Correcting before P21 grades would be
-    asserting its result.
+    predicts a benchmark's inflation. Correcting before P22 grades would be
+    asserting its result. (Registered as P21 on 2026-08-18 and renumbered to P22
+    the next day: P21 was already taken by the graded no-op-path-translation
+    prediction. An ambiguous identifier defeats the point of registering a
+    prediction in advance — a later reader cannot check what was claimed if the
+    name resolves to two different claims.)
+  - P22 itself is NOT graded. The stimulus and grader exist and are tested; no
+    loaded boot has been run through them yet. test-grade-positional.py passing
+    is not evidence — its end-to-end case is a synthetic log whose trace was
+    written by hand to be the right answer.
   - No positional analysis is possible on any *historical* record. All 71 carry
     neither a trace nor a position map, and the position map cannot be
     reconstructed: records are written with `sort_keys=True`, so `entries` was
-    alphabetised on the way to disk and the suite order is gone. The first
-    record with both is whichever `--bench` boot runs after this commit.
-  - scripts/canary-load-test.sh cannot yet start its spinners partway through
-    the suite; it starts them at `Booting QEMU`. P21(a) needs the delayed form.
-    This is the single missing piece for grading P21.
+    alphabetised on the way to disk and the suite order is gone.

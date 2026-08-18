@@ -12,6 +12,8 @@
 //! - Reduced motion (disable animations system-wide)
 //! - Focus indicator enhancement (extra-visible keyboard focus ring)
 
+use core::num::NonZeroU32;
+
 use guitk::color::Color;
 use guitk::render::RenderCommand;
 use guitk::style::CornerRadii;
@@ -99,6 +101,122 @@ impl HighContrastTheme {
 // Color filter (colorblind simulation/correction)
 // ============================================================================
 
+/// The complement of an 8-bit channel — `255 - value`.
+///
+/// Written as a bitwise complement because for a `u8` the two are the same
+/// value, and unlike the subtraction it cannot underflow for any input.
+const fn invert_channel(value: u8) -> u8 {
+    !value
+}
+
+/// A 3x3 integer matrix that mixes a color's channels: output channel `i` is
+/// `(rows[i] . [r, g, b]) / denominator`.
+///
+/// This type exists so that "recombine the channels with these weights" is
+/// written once instead of once per filter. Integer weights over a shared
+/// denominator rather than floats because a filter runs once per pixel.
+///
+/// # Invariant
+///
+/// **Every row sums to exactly `denominator`.** That single property is what
+/// makes a mix well-behaved: it is then a weighted *average* of the inputs, so
+/// it maps black to black and white to white, and — since no input channel
+/// exceeds 255 — no output channel can either. [`ChannelMix::new`] is the only
+/// constructor and it rejects anything else, and because it is a `const fn`
+/// every mix in this module is checked when the crate is compiled rather than
+/// when a pixel is drawn. That is why [`ChannelMix::apply`] needs no clamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChannelMix {
+    /// One row of weights per output channel, in red-green-blue order.
+    rows: [[u32; 3]; 3],
+    /// The shared divisor every row sums to.
+    denominator: NonZeroU32,
+}
+
+/// Whether `row`'s three weights add up to exactly `denominator`.
+const fn row_sums_to(row: [u32; 3], denominator: u32) -> bool {
+    let [a, b, c] = row;
+    match a.checked_add(b) {
+        Some(ab) => match ab.checked_add(c) {
+            Some(sum) => sum == denominator,
+            None => false,
+        },
+        None => false,
+    }
+}
+
+/// Unwraps a [`ChannelMix`] that is built in a `const` initializer.
+///
+/// A `None` here means the weights written a few lines above do not sum to
+/// their denominator, which is a typo, not a runtime condition. Panicking in a
+/// const context is a *compile* error at the point of use, so this turns the
+/// row-sum invariant into something the build enforces at zero runtime cost.
+#[allow(
+    clippy::panic,
+    reason = "evaluated only in a const initializer, where a panic is a build failure"
+)]
+const fn checked_at_compile_time(mix: Option<ChannelMix>) -> ChannelMix {
+    match mix {
+        Some(mix) => mix,
+        None => panic!("channel mix rows must each sum to the denominator"),
+    }
+}
+
+impl ChannelMix {
+    /// Perceptual luminance weighting: every output channel is the same
+    /// weighted average of the input, which is exactly what makes it gray.
+    ///
+    /// The denominator is 256 rather than 100 so the division is a shift.
+    const GRAYSCALE: Self = checked_at_compile_time(Self::new([[77, 150, 29]; 3], 256));
+    /// Simplified simulation of red-weak vision.
+    const PROTANOPIA: Self =
+        checked_at_compile_time(Self::new([[56, 43, 1], [55, 44, 1], [0, 24, 76]], 100));
+    /// Simplified simulation of green-weak vision.
+    const DEUTERANOPIA: Self =
+        checked_at_compile_time(Self::new([[63, 37, 0], [70, 30, 0], [0, 30, 70]], 100));
+    /// Simplified simulation of blue-weak vision.
+    const TRITANOPIA: Self =
+        checked_at_compile_time(Self::new([[95, 5, 0], [0, 43, 57], [0, 47, 53]], 100));
+
+    /// Builds a mix, returning `None` unless the denominator is non-zero and
+    /// every row sums to exactly it — see the type's invariant.
+    const fn new(rows: [[u32; 3]; 3], denominator: u32) -> Option<Self> {
+        let Some(nonzero) = NonZeroU32::new(denominator) else {
+            return None;
+        };
+        let [first, second, third] = rows;
+        if row_sums_to(first, denominator)
+            && row_sums_to(second, denominator)
+            && row_sums_to(third, denominator)
+        {
+            Some(Self {
+                rows,
+                denominator: nonzero,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Recombines `color`'s channels through this matrix, leaving alpha alone.
+    fn apply(self, color: Color) -> Color {
+        let input = [u32::from(color.r), u32::from(color.g), u32::from(color.b)];
+        let mut out = [0u8; 3];
+        for (slot, row) in out.iter_mut().zip(&self.rows) {
+            let mut sum = 0u32;
+            for (weight, channel) in row.iter().zip(&input) {
+                sum = sum.saturating_add(weight.saturating_mul(*channel));
+            }
+            // The row invariant bounds `sum` by `255 * denominator`, so the
+            // quotient always fits in a `u8`. The fallback clamps to white
+            // instead of wrapping to black should that ever stop being true.
+            *slot = u8::try_from(sum / self.denominator).unwrap_or(u8::MAX);
+        }
+        let [r, g, b] = out;
+        Color::rgba(r, g, b, color.a)
+    }
+}
+
 /// Color vision deficiency filter mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorFilter {
@@ -117,54 +235,49 @@ pub enum ColorFilter {
 }
 
 impl ColorFilter {
-    /// Apply this filter to a color.
+    /// Every filter, in the order the settings pane offers them.
+    ///
+    /// Anything that iterates the filters must go through this rather than
+    /// write its own list, so that adding a variant cannot leave a stale copy
+    /// behind.
+    pub const ALL: [Self; 6] = [
+        Self::None,
+        Self::Protanopia,
+        Self::Deuteranopia,
+        Self::Tritanopia,
+        Self::Grayscale,
+        Self::Inverted,
+    ];
+
+    /// The channel-mixing matrix this filter applies, or `None` for the two
+    /// filters that are not a linear mix of the input channels: [`Self::None`]
+    /// changes nothing, and [`Self::Inverted`] is affine (`255 - c`), not
+    /// linear.
+    const fn channel_mix(&self) -> Option<ChannelMix> {
+        match self {
+            Self::None | Self::Inverted => None,
+            Self::Grayscale => Some(ChannelMix::GRAYSCALE),
+            Self::Protanopia => Some(ChannelMix::PROTANOPIA),
+            Self::Deuteranopia => Some(ChannelMix::DEUTERANOPIA),
+            Self::Tritanopia => Some(ChannelMix::TRITANOPIA),
+        }
+    }
+
+    /// Apply this filter to a color. Alpha is never touched.
     pub fn apply(&self, color: Color) -> Color {
         match self {
+            // Deliberately not routed through the identity matrix, which would
+            // give the same answer: this is the overwhelmingly common case and
+            // it runs per pixel, so it has to stay a no-op rather than nine
+            // multiplies.
             Self::None => color,
-            Self::Grayscale => {
-                // Perceptual luminance weighting.
-                let lum =
-                    ((color.r as u32 * 77) + (color.g as u32 * 150) + (color.b as u32 * 29)) / 256;
-                let l = lum.min(255) as u8;
-                Color::rgba(l, l, l, color.a)
-            }
-            Self::Inverted => Color::rgba(255 - color.r, 255 - color.g, 255 - color.b, color.a),
-            Self::Protanopia => {
-                // Simplified simulation: reduce red sensitivity.
-                let r = ((color.r as u32 * 56) + (color.g as u32 * 43) + color.b as u32) / 100;
-                let g = ((color.r as u32 * 55) + (color.g as u32 * 44) + color.b as u32) / 100;
-                let b = ((color.g as u32 * 24) + (color.b as u32 * 76)) / 100;
-                Color::rgba(
-                    r.min(255) as u8,
-                    g.min(255) as u8,
-                    b.min(255) as u8,
-                    color.a,
-                )
-            }
-            Self::Deuteranopia => {
-                // Simplified simulation: reduce green sensitivity.
-                let r = ((color.r as u32 * 63) + (color.g as u32 * 37)) / 100;
-                let g = ((color.r as u32 * 70) + (color.g as u32 * 30)) / 100;
-                let b = ((color.g as u32 * 30) + (color.b as u32 * 70)) / 100;
-                Color::rgba(
-                    r.min(255) as u8,
-                    g.min(255) as u8,
-                    b.min(255) as u8,
-                    color.a,
-                )
-            }
-            Self::Tritanopia => {
-                // Simplified simulation: reduce blue sensitivity.
-                let r = ((color.r as u32 * 95) + (color.g as u32 * 5)) / 100;
-                let g = ((color.g as u32 * 43) + (color.b as u32 * 57)) / 100;
-                let b = ((color.g as u32 * 47) + (color.b as u32 * 53)) / 100;
-                Color::rgba(
-                    r.min(255) as u8,
-                    g.min(255) as u8,
-                    b.min(255) as u8,
-                    color.a,
-                )
-            }
+            Self::Inverted => Color::rgba(
+                invert_channel(color.r),
+                invert_channel(color.g),
+                invert_channel(color.b),
+                color.a,
+            ),
+            _ => self.channel_mix().map_or(color, |mix| mix.apply(color)),
         }
     }
 
@@ -1075,16 +1188,148 @@ mod tests {
 
     #[test]
     fn test_color_filter_labels() {
-        for filter in &[
-            ColorFilter::None,
-            ColorFilter::Protanopia,
-            ColorFilter::Deuteranopia,
-            ColorFilter::Tritanopia,
-            ColorFilter::Grayscale,
-            ColorFilter::Inverted,
-        ] {
+        for filter in &ColorFilter::ALL {
             assert!(!filter.label().is_empty());
         }
+    }
+
+    #[test]
+    fn every_filter_appears_in_all_exactly_once() {
+        // An exhaustive match, so a new variant fails to compile here rather
+        // than silently going missing from every loop that uses `ALL`.
+        let position = |filter: ColorFilter| match filter {
+            ColorFilter::None => 0,
+            ColorFilter::Protanopia => 1,
+            ColorFilter::Deuteranopia => 2,
+            ColorFilter::Tritanopia => 3,
+            ColorFilter::Grayscale => 4,
+            ColorFilter::Inverted => 5,
+        };
+        for (index, filter) in ColorFilter::ALL.into_iter().enumerate() {
+            assert_eq!(position(filter), index, "{filter:?} is out of place");
+        }
+    }
+
+    #[test]
+    fn no_two_filters_share_a_label() {
+        for (i, a) in ColorFilter::ALL.into_iter().enumerate() {
+            for b in ColorFilter::ALL.into_iter().skip(i + 1) {
+                assert_ne!(a.label(), b.label(), "{a:?} and {b:?} both say this");
+            }
+        }
+    }
+
+    #[test]
+    fn every_channel_mixing_filter_has_well_formed_weights() {
+        // `ChannelMix::new` is the thing that enforces "every row sums to the
+        // denominator", and it runs at compile time, so what is left to check
+        // here is that the filters that ought to mix actually do.
+        for filter in ColorFilter::ALL {
+            let mixes = filter.channel_mix().is_some();
+            let should_mix = match filter {
+                ColorFilter::None | ColorFilter::Inverted => false,
+                ColorFilter::Protanopia
+                | ColorFilter::Deuteranopia
+                | ColorFilter::Tritanopia
+                | ColorFilter::Grayscale => true,
+            };
+            assert_eq!(mixes, should_mix, "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn rows_that_do_not_sum_to_the_denominator_are_rejected() {
+        // Too dark, too bright, and a zero denominator.
+        assert!(ChannelMix::new([[50, 40, 9]; 3], 100).is_none());
+        assert!(ChannelMix::new([[50, 40, 11]; 3], 100).is_none());
+        assert!(ChannelMix::new([[1, 0, 0]; 3], 0).is_none());
+        // One bad row among three good ones is still rejected.
+        assert!(ChannelMix::new([[100, 0, 0], [0, 100, 0], [0, 0, 99]], 100).is_none());
+        assert!(ChannelMix::new([[100, 0, 0], [0, 100, 0], [0, 0, 100]], 100).is_some());
+    }
+
+    #[test]
+    fn black_and_white_survive_every_filter() {
+        // The point of the row-sum invariant: a weighted average of equal
+        // inputs is that input, so the extremes are fixed points of every mix.
+        // Only inversion moves them, and it swaps them.
+        let black = Color::rgba(0, 0, 0, 255);
+        let white = Color::rgba(255, 255, 255, 255);
+        for filter in ColorFilter::ALL {
+            let (want_black, want_white) = match filter {
+                ColorFilter::Inverted => (white, black),
+                ColorFilter::None
+                | ColorFilter::Protanopia
+                | ColorFilter::Deuteranopia
+                | ColorFilter::Tritanopia
+                | ColorFilter::Grayscale => (black, white),
+            };
+            assert_eq!(filter.apply(black), want_black, "{filter:?} on black");
+            assert_eq!(filter.apply(white), want_white, "{filter:?} on white");
+        }
+    }
+
+    #[test]
+    fn no_filter_touches_alpha() {
+        for filter in ColorFilter::ALL {
+            for alpha in [0u8, 1, 128, 254, 255] {
+                let out = filter.apply(Color::rgba(203, 17, 96, alpha));
+                assert_eq!(out.a, alpha, "{filter:?} at alpha {alpha}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_filter_accepts_every_channel_value() {
+        // Sweeps each channel across its whole range with the other two pinned
+        // at both extremes; the old hand-written sums were the kind of code
+        // where an out-of-range intermediate would only show up at one end.
+        for filter in ColorFilter::ALL {
+            for other in [0u8, 255] {
+                for value in 0..=255u8 {
+                    let _ = filter.apply(Color::rgba(value, other, other, 255));
+                    let _ = filter.apply(Color::rgba(other, value, other, 255));
+                    let _ = filter.apply(Color::rgba(other, other, value, 255));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inverting_twice_returns_the_original_color() {
+        for value in 0..=255u8 {
+            let c = Color::rgba(value, 255 - value, value / 2, 77);
+            assert_eq!(
+                ColorFilter::Inverted.apply(ColorFilter::Inverted.apply(c)),
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn the_filters_still_produce_the_weights_they_were_written_with() {
+        // Pins the numbers the matrices replaced, so the rewrite is provably
+        // the same filter and not merely a plausible one.
+        assert_eq!(
+            ColorFilter::Grayscale.apply(Color::rgba(255, 0, 0, 255)),
+            Color::rgba(76, 76, 76, 255)
+        );
+        assert_eq!(
+            ColorFilter::Protanopia.apply(Color::rgba(200, 100, 50, 255)),
+            Color::rgba(155, 154, 62, 255)
+        );
+        assert_eq!(
+            ColorFilter::Deuteranopia.apply(Color::rgba(100, 200, 50, 255)),
+            Color::rgba(137, 130, 95, 255)
+        );
+        assert_eq!(
+            ColorFilter::Tritanopia.apply(Color::rgba(50, 100, 200, 255)),
+            Color::rgba(52, 157, 153, 255)
+        );
+        assert_eq!(
+            ColorFilter::Inverted.apply(Color::rgba(100, 150, 200, 128)),
+            Color::rgba(155, 105, 55, 128)
+        );
     }
 
     // -- Magnifier --

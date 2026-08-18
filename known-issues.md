@@ -35989,3 +35989,59 @@ suite is likely one of: pin the hot benchmarks' buffers to a fixed alignment,
 report crypto throughput relative to an in-run reference loop rather than in
 absolute cycles, or mark these benchmarks as placement-sensitive and compare
 them only against same-build baselines.
+
+### RESOLVED as to cause (2026-08-18): placement, proven by a control that killed the first answer
+
+Three builds of the **same source**, differing only in how symbols are named
+and therefore in what order the linker gathers `.text`:
+
+| build | `crypto::compress` at | `crypto_sha256_64B` |
+|---|---|---|
+| HEAD, ordinary (legacy mangling) | `…80afce00` | **30048 cy** |
+| HEAD + `#[rustc_align(4096)]` on `compress` | `…80365000` | 7196 cy |
+| **HEAD, pristine, `RUSTC_BOOTSTRAP=1` only** | `…80364980` | **7188 cy** |
+
+The third row is the control, and it is the important one. The alignment
+attribute **did nothing**: pristine source built the same way is just as fast.
+What actually moved `compress` was `RUSTC_BOOTSTRAP=1` switching Rust's symbol
+mangling from legacy to v0 — mangled names become section names
+(`.text._RNv…`), section names drive link order, and `compress` landed
+somewhere else.
+
+**The near-miss is worth recording.** The aligned run restored all three
+benchmarks to baseline (7196/55676/19962 against 7426/55274/20058) and looked
+like a clean, causal fix. Reporting it would have shipped "align `compress` to
+4 KiB" as a remedy for something alignment has no part in. The only reason it
+was caught is that the mangling change was visible in `llvm-nm` output and was
+treated as a confound rather than a curiosity.
+
+### What is established
+
+- **No kernel code is at fault.** SHA-256's machine code is byte-identical
+  across every one of these builds; only `compress`'s address changes.
+- **The effect is one function's address.** `crypto_sha256_64B`, `_1KiB` and
+  `hmac_sha256` all route through `compress` and all three move together.
+  `crypto_sha512_64B` — near-identical code, same file, *different function* —
+  went 0.59x (faster) across the same boundary, and `poly1305`, `chacha20`,
+  `crc32`, `crc32c`, `ed25519` and `x25519` are all ~1.0x or faster.
+- **Any move is enough.** `…80365000` and `…80364980` are both fine; they are
+  not related by alignment, only by not being `…80afce00`.
+- **It is emulator-side.** `-accel tcg,tb-size=512` with a bit-identical binary
+  changed nothing (8053 ns vs 8087/8083), which rules out translation-buffer
+  flush thrash — the one hypothesis in this family a larger buffer would fix.
+  The remaining candidates are QEMU's address-indexed structures (the
+  direct-mapped TB jump cache, the softmmu TLB). Which one it is has **not**
+  been pinned down, and pinning it down needs QEMU source we do not have
+  checked out. It does not change what we should do.
+
+### What NOT to do
+
+- **Do not revert `665fbb27b`.** It is a good commit and is not the cause; it
+  merely shifted `.text` by 0x6BF0.
+- **Do not align, pad or reorder kernel code to chase this.** Any such fix is
+  luck, holds only until the next commit shifts `.text` again, and is
+  meaningless on real hardware where the effect almost certainly does not
+  exist.
+- **Do not switch the kernel to v0 mangling to "fix" it.** That is the same
+  luck wearing a respectable hat: it reshuffles every symbol and will land some
+  other hot function on the bad address eventually.

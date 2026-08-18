@@ -866,227 +866,241 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // with_stdio — fds 0/1/2 are Console.
-    let mut t = KernelFdTable::with_stdio();
-    for &fd in &[STDIN_FD, STDOUT_FD, STDERR_FD] {
-        let entry = t.lookup(fd).ok_or_else(|| {
-            serial_println!("[linux_fd] FAIL: stdio fd {} should be installed", fd);
-            KernelError::InternalError
-        })?;
-        if entry.kind != HandleKind::Console {
-            serial_println!("[linux_fd] FAIL: stdio fd {} kind = {:?}", fd, entry.kind);
-            return Err(KernelError::InternalError);
-        }
-    }
-
-    // install_lowest after stdio should give 3, 4, 5.
-    let f3 = t.install_lowest(FdEntry::file(0x1111, O_RDONLY))?;
-    let f4 = t.install_lowest(FdEntry::file(0x2222, O_RDWR))?;
-    let f5 = t.install_lowest(FdEntry::file(0x3333, O_WRONLY))?;
-    if (f3, f4, f5) != (3, 4, 5) {
-        serial_println!(
-            "[linux_fd] FAIL: install_lowest gave {}/{}/{}, want 3/4/5",
-            f3,
-            f4,
-            f5,
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // install_lowest_from(10, ...) skips to 10.
-    let f10 = t.install_lowest_from(10, FdEntry::file(0xAAAA, O_RDONLY))?;
-    if f10 != 10 {
-        serial_println!("[linux_fd] FAIL: install_lowest_from(10) = {}", f10);
-        return Err(KernelError::InternalError);
-    }
-
-    // lookup at fd 5 reads back what we wrote.
-    let e5 = t.lookup(5).ok_or(KernelError::InternalError)?;
-    if e5.raw_handle != 0x3333 || e5.status_flags != O_WRONLY {
-        serial_println!("[linux_fd] FAIL: lookup(5) returned wrong entry: {:?}", e5);
-        return Err(KernelError::InternalError);
-    }
-
-    // Out-of-range and negative lookups return None.
-    if t.lookup(-1).is_some() || t.lookup(MAX_FDS as i32).is_some() {
-        serial_println!("[linux_fd] FAIL: out-of-range lookup should be None");
-        return Err(KernelError::InternalError);
-    }
-
-    // is_handle_referenced for fd 4's handle: just the one ref.
-    if t.is_handle_referenced(HandleKind::File, 0x2222, -1)
-        && !t.is_handle_referenced(HandleKind::File, 0x2222, 4)
     {
-        // Excluding fd 4 should drop the count to zero (only one ref).
-    } else {
-        serial_println!(
-            "[linux_fd] FAIL: is_handle_referenced should drop to 0 when excluding the sole reference"
-        );
-        return Err(KernelError::InternalError);
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // with_stdio — fds 0/1/2 are Console.
+            let mut t = KernelFdTable::with_stdio();
+            for &fd in &[STDIN_FD, STDOUT_FD, STDERR_FD] {
+                let entry = t.lookup(fd).ok_or_else(|| {
+                    serial_println!("[linux_fd] FAIL: stdio fd {} should be installed", fd);
+                    KernelError::InternalError
+                })?;
+                if entry.kind != HandleKind::Console {
+                    serial_println!("[linux_fd] FAIL: stdio fd {} kind = {:?}", fd, entry.kind);
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // install_lowest after stdio should give 3, 4, 5.
+            let f3 = t.install_lowest(FdEntry::file(0x1111, O_RDONLY))?;
+            let f4 = t.install_lowest(FdEntry::file(0x2222, O_RDWR))?;
+            let f5 = t.install_lowest(FdEntry::file(0x3333, O_WRONLY))?;
+            if (f3, f4, f5) != (3, 4, 5) {
+                serial_println!(
+                    "[linux_fd] FAIL: install_lowest gave {}/{}/{}, want 3/4/5",
+                    f3,
+                    f4,
+                    f5,
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // install_lowest_from(10, ...) skips to 10.
+            let f10 = t.install_lowest_from(10, FdEntry::file(0xAAAA, O_RDONLY))?;
+            if f10 != 10 {
+                serial_println!("[linux_fd] FAIL: install_lowest_from(10) = {}", f10);
+                return Err(KernelError::InternalError);
+            }
+
+            // lookup at fd 5 reads back what we wrote.
+            let e5 = t.lookup(5).ok_or(KernelError::InternalError)?;
+            if e5.raw_handle != 0x3333 || e5.status_flags != O_WRONLY {
+                serial_println!("[linux_fd] FAIL: lookup(5) returned wrong entry: {:?}", e5);
+                return Err(KernelError::InternalError);
+            }
+
+            // Out-of-range and negative lookups return None.
+            if t.lookup(-1).is_some() || t.lookup(MAX_FDS as i32).is_some() {
+                serial_println!("[linux_fd] FAIL: out-of-range lookup should be None");
+                return Err(KernelError::InternalError);
+            }
+
+            // is_handle_referenced for fd 4's handle: just the one ref.
+            if t.is_handle_referenced(HandleKind::File, 0x2222, -1)
+                && !t.is_handle_referenced(HandleKind::File, 0x2222, 4)
+            {
+                // Excluding fd 4 should drop the count to zero (only one ref).
+            } else {
+                serial_println!(
+                    "[linux_fd] FAIL: is_handle_referenced should drop to 0 when excluding the sole reference"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // dup_lowest(4, 0) clones fd 4's File entry onto the next free slot.
+            let dup_fd = t.dup_lowest(4, 0)?;
+            if dup_fd != 6 {
+                serial_println!("[linux_fd] FAIL: dup_lowest(4, 0) = {}, want 6", dup_fd);
+                return Err(KernelError::InternalError);
+            }
+            let dup_entry = t.lookup(dup_fd).ok_or(KernelError::InternalError)?;
+            if dup_entry.raw_handle != 0x2222 || dup_entry.fd_flags != 0 {
+                serial_println!("[linux_fd] FAIL: dup entry mismatch: {:?}", dup_entry,);
+                return Err(KernelError::InternalError);
+            }
+            // Now there are two refs to handle 0x2222.
+            if !t.is_handle_referenced(HandleKind::File, 0x2222, 4) {
+                serial_println!(
+                    "[linux_fd] FAIL: after dup, handle should still be referenced if we exclude fd 4"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // dup2(3, 5) — overwrites fd 5 (handle 0x3333) with fd 3 (handle 0x1111).
+            let (new_fd, prev) = t.dup2(3, 5)?;
+            if new_fd != 5 {
+                serial_println!("[linux_fd] FAIL: dup2(3, 5) returned newfd {}", new_fd);
+                return Err(KernelError::InternalError);
+            }
+            let prev_entry = prev.ok_or(KernelError::InternalError)?;
+            if prev_entry.raw_handle != 0x3333 {
+                serial_println!(
+                    "[linux_fd] FAIL: dup2 should return prior fd 5 entry (handle 0x3333), got {:?}",
+                    prev_entry,
+                );
+                return Err(KernelError::InternalError);
+            }
+            let new_entry = t.lookup(5).ok_or(KernelError::InternalError)?;
+            if new_entry.raw_handle != 0x1111 {
+                serial_println!(
+                    "[linux_fd] FAIL: dup2 destination should have source handle 0x1111, got {:?}",
+                    new_entry,
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // dup2(3, 3) — same fd, must not close anything and must succeed.
+            let (same_fd, prev_same) = t.dup2(3, 3)?;
+            if same_fd != 3 || prev_same.is_some() {
+                serial_println!("[linux_fd] FAIL: dup2(3, 3) should be a no-op");
+                return Err(KernelError::InternalError);
+            }
+
+            // take(3) removes the entry; subsequent lookup is None.
+            if t.take(3).is_none() {
+                serial_println!("[linux_fd] FAIL: take(3) returned None");
+                return Err(KernelError::InternalError);
+            }
+            if t.lookup(3).is_some() {
+                serial_println!("[linux_fd] FAIL: lookup(3) after take should be None");
+                return Err(KernelError::InternalError);
+            }
+
+            // set_fd_flags + set_status_flags.
+            t.set_fd_flags(4, FD_CLOEXEC)?;
+            let e4 = t.lookup(4).ok_or(KernelError::InternalError)?;
+            if e4.fd_flags != FD_CLOEXEC {
+                serial_println!("[linux_fd] FAIL: set_fd_flags did not stick");
+                return Err(KernelError::InternalError);
+            }
+            // set_status_flags preserves O_ACCMODE bits: fd 4 was opened O_RDWR.
+            t.set_status_flags(4, O_NONBLOCK | O_RDONLY)?;
+            let e4 = t.lookup(4).ok_or(KernelError::InternalError)?;
+            if e4.status_flags & O_ACCMODE != O_RDWR {
+                serial_println!(
+                    "[linux_fd] FAIL: set_status_flags clobbered O_ACCMODE: {:#o}",
+                    e4.status_flags,
+                );
+                return Err(KernelError::InternalError);
+            }
+            if e4.status_flags & O_NONBLOCK == 0 {
+                serial_println!("[linux_fd] FAIL: set_status_flags did not set O_NONBLOCK");
+                return Err(KernelError::InternalError);
+            }
+
+            // set_fd_flags / set_status_flags on a closed fd → EBADF.
+            if !matches!(t.set_fd_flags(99, 0), Err(KernelError::InvalidHandle)) {
+                serial_println!("[linux_fd] FAIL: set_fd_flags on closed fd should be EBADF");
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        }
+        case()?;
     }
 
-    // dup_lowest(4, 0) clones fd 4's File entry onto the next free slot.
-    let dup_fd = t.dup_lowest(4, 0)?;
-    if dup_fd != 6 {
-        serial_println!("[linux_fd] FAIL: dup_lowest(4, 0) = {}, want 6", dup_fd);
-        return Err(KernelError::InternalError);
-    }
-    let dup_entry = t.lookup(dup_fd).ok_or(KernelError::InternalError)?;
-    if dup_entry.raw_handle != 0x2222 || dup_entry.fd_flags != 0 {
-        serial_println!("[linux_fd] FAIL: dup entry mismatch: {:?}", dup_entry,);
-        return Err(KernelError::InternalError);
-    }
-    // Now there are two refs to handle 0x2222.
-    if !t.is_handle_referenced(HandleKind::File, 0x2222, 4) {
-        serial_println!(
-            "[linux_fd] FAIL: after dup, handle should still be referenced if we exclude fd 4"
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // dup2(3, 5) — overwrites fd 5 (handle 0x3333) with fd 3 (handle 0x1111).
-    let (new_fd, prev) = t.dup2(3, 5)?;
-    if new_fd != 5 {
-        serial_println!("[linux_fd] FAIL: dup2(3, 5) returned newfd {}", new_fd);
-        return Err(KernelError::InternalError);
-    }
-    let prev_entry = prev.ok_or(KernelError::InternalError)?;
-    if prev_entry.raw_handle != 0x3333 {
-        serial_println!(
-            "[linux_fd] FAIL: dup2 should return prior fd 5 entry (handle 0x3333), got {:?}",
-            prev_entry,
-        );
-        return Err(KernelError::InternalError);
-    }
-    let new_entry = t.lookup(5).ok_or(KernelError::InternalError)?;
-    if new_entry.raw_handle != 0x1111 {
-        serial_println!(
-            "[linux_fd] FAIL: dup2 destination should have source handle 0x1111, got {:?}",
-            new_entry,
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // dup2(3, 3) — same fd, must not close anything and must succeed.
-    let (same_fd, prev_same) = t.dup2(3, 3)?;
-    if same_fd != 3 || prev_same.is_some() {
-        serial_println!("[linux_fd] FAIL: dup2(3, 3) should be a no-op");
-        return Err(KernelError::InternalError);
-    }
-
-    // take(3) removes the entry; subsequent lookup is None.
-    if t.take(3).is_none() {
-        serial_println!("[linux_fd] FAIL: take(3) returned None");
-        return Err(KernelError::InternalError);
-    }
-    if t.lookup(3).is_some() {
-        serial_println!("[linux_fd] FAIL: lookup(3) after take should be None");
-        return Err(KernelError::InternalError);
-    }
-
-    // set_fd_flags + set_status_flags.
-    t.set_fd_flags(4, FD_CLOEXEC)?;
-    let e4 = t.lookup(4).ok_or(KernelError::InternalError)?;
-    if e4.fd_flags != FD_CLOEXEC {
-        serial_println!("[linux_fd] FAIL: set_fd_flags did not stick");
-        return Err(KernelError::InternalError);
-    }
-    // set_status_flags preserves O_ACCMODE bits: fd 4 was opened O_RDWR.
-    t.set_status_flags(4, O_NONBLOCK | O_RDONLY)?;
-    let e4 = t.lookup(4).ok_or(KernelError::InternalError)?;
-    if e4.status_flags & O_ACCMODE != O_RDWR {
-        serial_println!(
-            "[linux_fd] FAIL: set_status_flags clobbered O_ACCMODE: {:#o}",
-            e4.status_flags,
-        );
-        return Err(KernelError::InternalError);
-    }
-    if e4.status_flags & O_NONBLOCK == 0 {
-        serial_println!("[linux_fd] FAIL: set_status_flags did not set O_NONBLOCK");
-        return Err(KernelError::InternalError);
-    }
-
-    // set_fd_flags / set_status_flags on a closed fd → EBADF.
-    if !matches!(t.set_fd_flags(99, 0), Err(KernelError::InvalidHandle)) {
-        serial_println!("[linux_fd] FAIL: set_fd_flags on closed fd should be EBADF");
-        return Err(KernelError::InternalError);
-    }
-
-    // ------------------------------------------------------------------
-    // take_cloexec_entries / ensure_stdio — exec close-on-exec semantics.
-    // ------------------------------------------------------------------
     {
-        let mut e = KernelFdTable::with_stdio();
-        // Install three File handles; mark fds 3 and 5 cloexec, fd 4 not.
-        let f3 = e.install_lowest(FdEntry::file(0xC0DE, O_RDONLY))?;
-        let f4 = e.install_lowest(FdEntry::file(0xBEEF, O_RDWR))?;
-        let f5 = e.install_lowest(FdEntry::file(0xFACE, O_WRONLY))?;
-        if (f3, f4, f5) != (3, 4, 5) {
-            serial_println!(
-                "[linux_fd] FAIL: cloexec setup install_lowest gave {}/{}/{}",
-                f3,
-                f4,
-                f5,
-            );
-            return Err(KernelError::InternalError);
-        }
-        e.set_fd_flags(3, FD_CLOEXEC)?;
-        e.set_fd_flags(5, FD_CLOEXEC)?;
-        // Also mark stderr (fd 2) cloexec — to verify ensure_stdio refills.
-        e.set_fd_flags(STDERR_FD, FD_CLOEXEC)?;
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // ------------------------------------------------------------------
+            // take_cloexec_entries / ensure_stdio — exec close-on-exec semantics.
+            // ------------------------------------------------------------------
+            {
+                let mut e = KernelFdTable::with_stdio();
+                // Install three File handles; mark fds 3 and 5 cloexec, fd 4 not.
+                let f3 = e.install_lowest(FdEntry::file(0xC0DE, O_RDONLY))?;
+                let f4 = e.install_lowest(FdEntry::file(0xBEEF, O_RDWR))?;
+                let f5 = e.install_lowest(FdEntry::file(0xFACE, O_WRONLY))?;
+                if (f3, f4, f5) != (3, 4, 5) {
+                    serial_println!(
+                        "[linux_fd] FAIL: cloexec setup install_lowest gave {}/{}/{}",
+                        f3,
+                        f4,
+                        f5,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                e.set_fd_flags(3, FD_CLOEXEC)?;
+                e.set_fd_flags(5, FD_CLOEXEC)?;
+                // Also mark stderr (fd 2) cloexec — to verify ensure_stdio refills.
+                e.set_fd_flags(STDERR_FD, FD_CLOEXEC)?;
 
-        let taken = e.take_cloexec_entries();
-        // Should have taken stderr + fd3 + fd5 = 3 entries.
-        if taken.len() != 3 {
-            serial_println!(
-                "[linux_fd] FAIL: take_cloexec_entries took {} entries, want 3",
-                taken.len(),
-            );
-            return Err(KernelError::InternalError);
-        }
-        // stderr slot is empty before ensure_stdio.
-        if e.lookup(STDERR_FD).is_some() {
-            serial_println!(
-                "[linux_fd] FAIL: cloexec stderr should be cleared before ensure_stdio"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // fd 4 (non-cloexec) survives.
-        let surv = e.lookup(4).ok_or_else(|| {
-            serial_println!("[linux_fd] FAIL: fd 4 (non-cloexec) should have survived");
-            KernelError::InternalError
-        })?;
-        if surv.raw_handle != 0xBEEF {
-            serial_println!("[linux_fd] FAIL: surviving fd 4 wrong handle: {:?}", surv);
-            return Err(KernelError::InternalError);
-        }
+                let taken = e.take_cloexec_entries();
+                // Should have taken stderr + fd3 + fd5 = 3 entries.
+                if taken.len() != 3 {
+                    serial_println!(
+                        "[linux_fd] FAIL: take_cloexec_entries took {} entries, want 3",
+                        taken.len(),
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                // stderr slot is empty before ensure_stdio.
+                if e.lookup(STDERR_FD).is_some() {
+                    serial_println!(
+                        "[linux_fd] FAIL: cloexec stderr should be cleared before ensure_stdio"
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                // fd 4 (non-cloexec) survives.
+                let surv = e.lookup(4).ok_or_else(|| {
+                    serial_println!("[linux_fd] FAIL: fd 4 (non-cloexec) should have survived");
+                    KernelError::InternalError
+                })?;
+                if surv.raw_handle != 0xBEEF {
+                    serial_println!("[linux_fd] FAIL: surviving fd 4 wrong handle: {:?}", surv);
+                    return Err(KernelError::InternalError);
+                }
 
-        e.ensure_stdio();
-        // stdin (0) was already populated and not cloexec — must not be
-        // overwritten.  stdout (1) ditto.  stderr (2) was cloexec'd —
-        // must be refilled with a Console entry.
-        let se = e.lookup(STDERR_FD).ok_or_else(|| {
-            serial_println!("[linux_fd] FAIL: stderr should be refilled by ensure_stdio");
-            KernelError::InternalError
-        })?;
-        if se.kind != HandleKind::Console {
-            serial_println!("[linux_fd] FAIL: refilled stderr kind = {:?}", se.kind);
-            return Err(KernelError::InternalError);
-        }
+                e.ensure_stdio();
+                // stdin (0) was already populated and not cloexec — must not be
+                // overwritten.  stdout (1) ditto.  stderr (2) was cloexec'd —
+                // must be refilled with a Console entry.
+                let se = e.lookup(STDERR_FD).ok_or_else(|| {
+                    serial_println!("[linux_fd] FAIL: stderr should be refilled by ensure_stdio");
+                    KernelError::InternalError
+                })?;
+                if se.kind != HandleKind::Console {
+                    serial_println!("[linux_fd] FAIL: refilled stderr kind = {:?}", se.kind);
+                    return Err(KernelError::InternalError);
+                }
 
-        // ensure_stdio MUST NOT overwrite an existing non-Console fd
-        // sitting at 0/1/2.  Plant a File at stdin and rerun.
-        e.take(STDIN_FD);
-        e.install_at(STDIN_FD, FdEntry::file(0xDEAD, O_RDWR))?;
-        e.ensure_stdio();
-        let s0 = e.lookup(STDIN_FD).ok_or(KernelError::InternalError)?;
-        if s0.kind != HandleKind::File || s0.raw_handle != 0xDEAD {
-            serial_println!(
-                "[linux_fd] FAIL: ensure_stdio clobbered non-Console stdin: {:?}",
-                s0,
-            );
-            return Err(KernelError::InternalError);
+                // ensure_stdio MUST NOT overwrite an existing non-Console fd
+                // sitting at 0/1/2.  Plant a File at stdin and rerun.
+                e.take(STDIN_FD);
+                e.install_at(STDIN_FD, FdEntry::file(0xDEAD, O_RDWR))?;
+                e.ensure_stdio();
+                let s0 = e.lookup(STDIN_FD).ok_or(KernelError::InternalError)?;
+                if s0.kind != HandleKind::File || s0.raw_handle != 0xDEAD {
+                    serial_println!(
+                        "[linux_fd] FAIL: ensure_stdio clobbered non-Console stdin: {:?}",
+                        s0,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            Ok(())
         }
+        case()?;
     }
 
     serial_println!("[linux_fd] Self-test PASSED");

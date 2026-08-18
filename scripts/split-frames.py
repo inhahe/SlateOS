@@ -710,24 +710,64 @@ def _binds(masked: str) -> set[str]:
     return out
 
 
-def _reads(masked: str) -> set[str]:
-    """Names a statement *mentions*, excluding the ones its own `let`s declare.
+def _binding_takes_effect(masked: str, hi: int) -> int:
+    """Offset at which the binding of a `let` pattern ending at `hi` is in scope.
 
-    The distinction is the whole ballgame for `--flat`.  `let a = SyscallArgs
-    { .. };` mentions `a`, but as a declaration, not as a use -- and counting
-    it as a use makes every paragraph after the first look like it reads the
-    previous paragraph's `a`.  That is not a hypothetical: it rejected 8 of the
-    9 paragraphs of `self_test_sysv_ipc_mqueue`, whose every case opens with
-    exactly that line.
-
-    Eliding only the pattern (rather than the whole statement) keeps the
-    initialiser honest, so `let a = a + 1;` still reads the outer `a` and the
-    paragraph holding it is still refused.
+    Which is the end of its initialiser, not the end of its pattern -- the
+    distinction Rust makes to give `let a = a + 1;` the *outer* `a` on the
+    right.  So: the statement's `;`, or the `{` of an `if let`/`while let`
+    body, whichever comes first at depth zero.
     """
-    out = masked
-    for lo, hi in _let_patterns(masked):
-        out = out[:lo] + " " * (hi - lo) + out[hi:]
-    return set(IDENT.findall(out))
+    d = 0
+    for i in range(hi, len(masked)):
+        ch = masked[i]
+        if ch in "([":
+            d += 1
+        elif ch in ")]":
+            d -= 1
+        elif d <= 0 and ch in ";{":
+            return i
+    return len(masked)
+
+
+def _reads(masked: str) -> set[str]:
+    """Names a statement mentions that must already be in scope around it.
+
+    The distinction is the whole ballgame for `--flat`, and it is a question
+    about *position*, not just about names:
+
+    * `let a = SyscallArgs { .. };` mentions `a`, but declares it.  Counting
+      that as a use makes every paragraph after the first look like it reads
+      the previous paragraph's `a`, which rejected 8 of the 9 paragraphs of
+      `self_test_sysv_ipc_mqueue` -- every one of its cases opens with exactly
+      that line.
+    * `if let Some(ev) = result.events.first() { ev.namespace_str() }` mentions
+      `ev` twice, and the second is the binding the first made.  Judging by
+      name alone made `eventlog::self_test` look as though Test 8 read Test 2's
+      `ev`, which welded nine paragraphs into two clusters.
+    * `let a = a + 1;` mentions `a` twice as well -- and there the second *is*
+      an outer read, because a binding is not in scope until its initialiser
+      has been evaluated.
+
+    All three fall out of one rule: a mention is an outer read when it stands
+    before the point where a `let` in this statement brings that name into
+    scope.  The pattern text itself is blanked, so a name appearing only there
+    is not a read at all.
+    """
+    spans = _let_patterns(masked)
+    in_scope: dict[str, int] = {}
+    blanked = masked
+    for lo, hi in spans:
+        at = _binding_takes_effect(masked, hi)
+        for name in IDENT.findall(masked[lo:hi]):
+            if name not in NOT_A_BINDING and not name[:1].isupper():
+                in_scope[name] = min(in_scope.get(name, at), at)
+        blanked = blanked[:lo] + " " * (hi - lo) + blanked[hi:]
+    return {
+        m.group(0)
+        for m in IDENT.finditer(blanked)
+        if m.start() < in_scope.get(m.group(0), len(masked) + 1)
+    }
 
 
 def _first_code_line(lines: list[str], span: tuple[int, int]) -> int:

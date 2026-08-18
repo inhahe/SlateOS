@@ -1072,68 +1072,95 @@ pub fn self_test() -> KernelResult<()> {
     // Save state and clear for testing.
     let _saved_total = total_events();
 
-    // Test 1: Basic event emission.
-    clear();
-    EventBuilder::new("system.boot", Severity::Info)
-        .message("Test boot event")
-        .pid(0)
-        .emit();
-    let t = total_events();
-    if t != 1 {
-        crate::serial_println!("[eventlog]   FAIL: expected 1 event, got {}", t);
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   1. Basic emission: OK");
-
-    // Test 2: Query with no filter.
-    let result = query(&EventFilter::all(), 100);
-    if result.matched != 1 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: expected 1 match, got {}",
-            result.matched
-        );
-        return Err(KernelError::InternalError);
-    }
-    if let Some(ev) = result.events.first() {
-        if ev.namespace_str() != "system.boot" {
-            crate::serial_println!("[eventlog]   FAIL: wrong namespace: {}", ev.namespace_str());
-            return Err(KernelError::InternalError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 1: Basic event emission.
+            clear();
+            EventBuilder::new("system.boot", Severity::Info)
+                .message("Test boot event")
+                .pid(0)
+                .emit();
+            let t = total_events();
+            if t != 1 {
+                crate::serial_println!("[eventlog]   FAIL: expected 1 event, got {}", t);
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   1. Basic emission: OK");
+            Ok(())
         }
-        if ev.message_str() != "Test boot event" {
-            crate::serial_println!("[eventlog]   FAIL: wrong message: {}", ev.message_str());
-            return Err(KernelError::InternalError);
+        case()?;
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 2: Query with no filter.
+            let result = query(&EventFilter::all(), 100);
+            if result.matched != 1 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: expected 1 match, got {}",
+                    result.matched
+                );
+                return Err(KernelError::InternalError);
+            }
+            if let Some(ev) = result.events.first() {
+                if ev.namespace_str() != "system.boot" {
+                    crate::serial_println!("[eventlog]   FAIL: wrong namespace: {}", ev.namespace_str());
+                    return Err(KernelError::InternalError);
+                }
+                if ev.message_str() != "Test boot event" {
+                    crate::serial_println!("[eventlog]   FAIL: wrong message: {}", ev.message_str());
+                    return Err(KernelError::InternalError);
+                }
+            } else {
+                crate::serial_println!("[eventlog]   FAIL: no events returned");
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   2. Query all: OK");
+            Ok(())
         }
-    } else {
-        crate::serial_println!("[eventlog]   FAIL: no events returned");
-        return Err(KernelError::InternalError);
+        case()?;
     }
-    crate::serial_println!("[eventlog]   2. Query all: OK");
 
-    // Test 3: Namespace prefix filtering.
-    EventBuilder::new("security.login", Severity::Info)
-        .message("User logged in")
-        .pid(100)
-        .service("auth")
-        .emit();
-    EventBuilder::new("security.logout", Severity::Info)
-        .message("User logged out")
-        .pid(100)
-        .emit();
-    EventBuilder::new("network.dhcp", Severity::Notice)
-        .message("DHCP lease acquired")
-        .kv("ip", "10.0.2.15")
-        .kv("lease_time", "3600")
-        .emit();
-
-    let sec_result = query(&EventFilter::all().namespace("security"), 100);
-    if sec_result.matched != 2 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: expected 2 security events, got {}",
-            sec_result.matched
-        );
-        return Err(KernelError::InternalError);
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 3: Namespace prefix filtering.
+            EventBuilder::new("security.login", Severity::Info)
+                .message("User logged in")
+                .pid(100)
+                .service("auth")
+                .emit();
+            EventBuilder::new("security.logout", Severity::Info)
+                .message("User logged out")
+                .pid(100)
+                .emit();
+            EventBuilder::new("network.dhcp", Severity::Notice)
+                .message("DHCP lease acquired")
+                .kv("ip", "10.0.2.15")
+                .kv("lease_time", "3600")
+                .emit();
+        }
+        case();
     }
-    crate::serial_println!("[eventlog]   3. Namespace filtering: OK");
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            let sec_result = query(&EventFilter::all().namespace("security"), 100);
+            if sec_result.matched != 2 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: expected 2 security events, got {}",
+                    sec_result.matched
+                );
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   3. Namespace filtering: OK");
+            Ok(())
+        }
+        case()?;
+    }
 
     // Test 4: Severity filtering.
     EventBuilder::new("system.error", Severity::Error)
@@ -1143,119 +1170,168 @@ pub fn self_test() -> KernelResult<()> {
         .message("Out of memory")
         .emit();
 
-    let warn_plus = query(&EventFilter::all().min_severity(Severity::Warning), 100);
-    // Should get: 1 Notice (network.dhcp) + 1 Error + 1 Critical = 3
-    // Wait — Notice is below Warning in our enum.  Let me check:
-    // Debug=0, Info=1, Notice=2, Warning=3, Error=4, Critical=5
-    // min_severity(Warning) → severity >= 3 → Error + Critical = 2
-    if warn_plus.matched != 2 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: expected 2 warning+ events, got {}",
-            warn_plus.matched,
-        );
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   4. Severity filtering: OK");
-
-    // Test 5: PID filtering.
-    let pid_result = query(&EventFilter::all().pid(100), 100);
-    if pid_result.matched != 2 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: expected 2 pid=100 events, got {}",
-            pid_result.matched
-        );
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   5. PID filtering: OK");
-
-    // Test 6: Text search.
-    let text_result = query(&EventFilter::all().search("logged"), 100);
-    if text_result.matched != 2 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: expected 2 'logged' matches, got {}",
-            text_result.matched
-        );
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   6. Text search: OK");
-
-    // Test 7: Sequence-based streaming (after_seq).
-    let seq_before = current_seq();
-    EventBuilder::new("application.test", Severity::Debug)
-        .message("Streaming test event")
-        .emit();
-    let stream_result = query(&EventFilter::all().after(seq_before.saturating_sub(1)), 100);
-    // Should get at least the new event.
-    let found_streaming = stream_result
-        .events
-        .iter()
-        .any(|e| e.message_str() == "Streaming test event");
-    if !found_streaming {
-        crate::serial_println!("[eventlog]   FAIL: streaming event not found");
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   7. Sequence-based streaming: OK");
-
-    // Test 8: Payload key-value pairs.
-    let dhcp_events = query(&EventFilter::all().namespace("network.dhcp"), 100);
-    if let Some(ev) = dhcp_events.events.first() {
-        let pairs: Vec<_> = ev.payload_iter().collect();
-        if pairs.len() != 2 {
-            crate::serial_println!(
-                "[eventlog]   FAIL: expected 2 payload pairs, got {}",
-                pairs.len()
-            );
-            return Err(KernelError::InternalError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            let warn_plus = query(&EventFilter::all().min_severity(Severity::Warning), 100);
+            // Should get: 1 Notice (network.dhcp) + 1 Error + 1 Critical = 3
+            // Wait — Notice is below Warning in our enum.  Let me check:
+            // Debug=0, Info=1, Notice=2, Warning=3, Error=4, Critical=5
+            // min_severity(Warning) → severity >= 3 → Error + Critical = 2
+            if warn_plus.matched != 2 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: expected 2 warning+ events, got {}",
+                    warn_plus.matched,
+                );
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   4. Severity filtering: OK");
+            Ok(())
         }
-        if pairs[0] != ("ip", "10.0.2.15") {
-            crate::serial_println!("[eventlog]   FAIL: wrong payload[0]: {:?}", pairs[0]);
-            return Err(KernelError::InternalError);
+        case()?;
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 5: PID filtering.
+            let pid_result = query(&EventFilter::all().pid(100), 100);
+            if pid_result.matched != 2 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: expected 2 pid=100 events, got {}",
+                    pid_result.matched
+                );
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   5. PID filtering: OK");
+            Ok(())
         }
-    } else {
-        crate::serial_println!("[eventlog]   FAIL: DHCP event not found");
-        return Err(KernelError::InternalError);
+        case()?;
     }
-    crate::serial_println!("[eventlog]   8. Payload key-value pairs: OK");
 
-    // Test 9: Statistics.
-    let st = stats();
-    if st.total_written < 7 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: stats total_written < 7: {}",
-            st.total_written
-        );
-        return Err(KernelError::InternalError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 6: Text search.
+            let text_result = query(&EventFilter::all().search("logged"), 100);
+            if text_result.matched != 2 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: expected 2 'logged' matches, got {}",
+                    text_result.matched
+                );
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   6. Text search: OK");
+            Ok(())
+        }
+        case()?;
     }
-    // Check that severity counts make sense.
-    let total_by_sev: u64 = st.by_severity.iter().map(|(_, c)| c).sum();
-    if total_by_sev != st.total_written {
-        crate::serial_println!(
-            "[eventlog]   FAIL: severity sum {} != total_written {}",
-            total_by_sev,
-            st.total_written,
-        );
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   9. Statistics consistency: OK");
 
-    // Test 10: Namespace validation.
-    if !is_valid_namespace("system") {
-        crate::serial_println!("[eventlog]   FAIL: 'system' should be valid");
-        return Err(KernelError::InternalError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 7: Sequence-based streaming (after_seq).
+            let seq_before = current_seq();
+            EventBuilder::new("application.test", Severity::Debug)
+                .message("Streaming test event")
+                .emit();
+            let stream_result = query(&EventFilter::all().after(seq_before.saturating_sub(1)), 100);
+            // Should get at least the new event.
+            let found_streaming = stream_result
+                .events
+                .iter()
+                .any(|e| e.message_str() == "Streaming test event");
+            if !found_streaming {
+                crate::serial_println!("[eventlog]   FAIL: streaming event not found");
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   7. Sequence-based streaming: OK");
+            Ok(())
+        }
+        case()?;
     }
-    if !is_valid_namespace("security.login") {
-        crate::serial_println!("[eventlog]   FAIL: 'security.login' should be valid");
-        return Err(KernelError::InternalError);
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 8: Payload key-value pairs.
+            let dhcp_events = query(&EventFilter::all().namespace("network.dhcp"), 100);
+            if let Some(ev) = dhcp_events.events.first() {
+                let pairs: Vec<_> = ev.payload_iter().collect();
+                if pairs.len() != 2 {
+                    crate::serial_println!(
+                        "[eventlog]   FAIL: expected 2 payload pairs, got {}",
+                        pairs.len()
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                if pairs[0] != ("ip", "10.0.2.15") {
+                    crate::serial_println!("[eventlog]   FAIL: wrong payload[0]: {:?}", pairs[0]);
+                    return Err(KernelError::InternalError);
+                }
+            } else {
+                crate::serial_println!("[eventlog]   FAIL: DHCP event not found");
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   8. Payload key-value pairs: OK");
+            Ok(())
+        }
+        case()?;
     }
-    if is_valid_namespace("foobar") {
-        crate::serial_println!("[eventlog]   FAIL: 'foobar' should be invalid");
-        return Err(KernelError::InternalError);
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 9: Statistics.
+            let st = stats();
+            if st.total_written < 7 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: stats total_written < 7: {}",
+                    st.total_written
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Check that severity counts make sense.
+            let total_by_sev: u64 = st.by_severity.iter().map(|(_, c)| c).sum();
+            if total_by_sev != st.total_written {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: severity sum {} != total_written {}",
+                    total_by_sev,
+                    st.total_written,
+                );
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   9. Statistics consistency: OK");
+            Ok(())
+        }
+        case()?;
     }
-    if is_valid_namespace("systemfoo") {
-        crate::serial_println!("[eventlog]   FAIL: 'systemfoo' should be invalid");
-        return Err(KernelError::InternalError);
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 10: Namespace validation.
+            if !is_valid_namespace("system") {
+                crate::serial_println!("[eventlog]   FAIL: 'system' should be valid");
+                return Err(KernelError::InternalError);
+            }
+            if !is_valid_namespace("security.login") {
+                crate::serial_println!("[eventlog]   FAIL: 'security.login' should be valid");
+                return Err(KernelError::InternalError);
+            }
+            if is_valid_namespace("foobar") {
+                crate::serial_println!("[eventlog]   FAIL: 'foobar' should be invalid");
+                return Err(KernelError::InternalError);
+            }
+            if is_valid_namespace("systemfoo") {
+                crate::serial_println!("[eventlog]   FAIL: 'systemfoo' should be invalid");
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]  10. Namespace validation: OK");
+            Ok(())
+        }
+        case()?;
     }
-    crate::serial_println!("[eventlog]  10. Namespace validation: OK");
 
     // Clean up.
     clear();

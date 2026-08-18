@@ -28539,7 +28539,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 16 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 17 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -29392,6 +29392,68 @@ target, where argv is bytes; such a case would measure the Windows command
 line rather than `printf`. Non-UTF-8 bytes are still tested where they can be:
 in the *format*, where they arrive as escapes the program decodes itself, and
 in `cfmt`'s unit tests, which take a byte slice directly.
+
+### Progress (appended 2026-08-18, `tr`)
+
+`tr` is the seventeenth (`scripts/tr-diff.sh`: 289 passed, 0 differed, 2 differ
+on purpose — the `--help` referral tail and the `--version` banner, both of
+which name an upstream project this is not; 70 differ when pointed at MSYS2's
+`tr` with `OURS=/usr/bin/tr`, which is the harness proving it still
+discriminates rather than passing everything put in front of it).
+
+The shipped version was a 265-line skeleton with `-d` and ranges and nothing
+else: no `-s`, no `-c`, no `-t`, no character classes, no equivalence classes,
+no `[c*n]` repeat, escape decoding that handled a handful of letters, and a
+`--help` of one line where GNU's is 54. Six things worth carrying forward,
+five of which the harness found and the sixth of which it structurally cannot:
+
+- **`tr` does not quote with `quote()`. It has two private renderers, and
+  which one runs depends on the message.** `make_printable_char` — printable
+  byte as itself, anything else as `\NNN` octal, *never* a named escape —
+  renders the reverse-range message. `make_printable_str` — named escapes for
+  `\a\b\t\n\v\f\r`, printable-or-octal otherwise — renders the `[=c=]` operand.
+  And `invalid character class` and `invalid repeat count` run
+  `make_printable_str` *then* `quote()`, so a backslash the first one produced
+  comes back out doubled: `tr -d '[:no\377such:]'` says
+  `invalid character class 'no\\377such'`, with two backslashes. Neither
+  renderer escapes `'` or `\`. **None of this is visible on printable input**,
+  which is why the first 250-case harness passed these cases while the code was
+  wrong — every diagnostic case in it had been written with printable text. The
+  general lesson for the next utility: a case that echoes caller bytes back
+  must use *unprintable* bytes, or it is not testing the renderer at all.
+- **I suspected the shared module before the caller, and was wrong.** Range
+  endpoints were printing as raw high bytes, and `coreutils::quote` was the
+  obvious suspect. It was read in full and is correct — measured against an
+  8333-row GNU fixture. The bug was `byte as char` in `tr`'s own `parse_set`.
+  A module with a fixture behind it is evidence; reach for the caller first.
+- **The repeat count is `strtoumax`'s grammar, not a string of digits.**
+  Leading whitespace is skipped and a leading `+` accepted (`[x* +1]` is one),
+  but `-` is not and `+` before whitespace is not. The trap is that the base is
+  chosen from the field's **raw first byte** — `*digit_str == '0' ? 8 : 10` —
+  *before* the whitespace is skipped, so `[x*010]` is eight and `[x* 010]` is
+  ten. Discriminating those two needs a SET1 of at least 11 bytes; with a short
+  SET1 the padding hides the difference, and the harness's original repeat
+  cases all used `a-f`.
+- **`find_bracketed_repeat` aborts at the first escaped byte of any kind**,
+  rather than scanning past it for the `]`. So `[x*\]]` is six literal bytes,
+  and so is `[x*\062]` — even though its `]` is unescaped and would otherwise
+  close the construct. `find_closing_delim`, which serves `[:…:]` and `[=…=]`,
+  has no such rule and reads straight through. Two scanners, two behaviours,
+  in one file.
+- **The mode decides which operand is "extra".** `tr -d a b c` names `'b'`;
+  `tr -s a b c` names `'c'`. Deleting *without* squeezing is the one mode that
+  takes a single set, so it is the one mode whose first-too-many operand is the
+  second. Ours had one rule for all modes and named the third every time. The
+  explanatory second line appears only at *exactly* one excess operand.
+- **One defect a byte-for-byte harness cannot see, so it is a unit test.**
+  Upstream reaches SET2 through a lazy generator that stops once SET1 is
+  exhausted; ours expanded it eagerly, so `tr a '[x*4294967296]'` was a 4 GiB
+  allocation and a 50-second wait against GNU's 0.29s. The *output* was
+  correct, so every comparison the harness makes passed. It is pinned by
+  `set2_is_not_materialised_past_set1` instead. SET1 is deliberately left
+  uncapped, because GNU grinds on a huge SET1 too and parity is the goal.
+
+35 unit tests, clippy clean.
 
 ## TD-PRINTF-BUILDS-THE-WHOLE-FIELD-IN-MEMORY (lane B, 2026-08-17) — **open, low priority**
 

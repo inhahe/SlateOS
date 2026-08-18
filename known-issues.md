@@ -32958,6 +32958,42 @@ Either way **one run decides nothing**, which is the whole point of
 `A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT`. Recorded in
 advance so the result cannot be read backwards into whichever story fits.
 
+### Outcome of that prediction - run 86, `e80fe679f`, 2026-08-17 22:39 EDT
+
+`page_alloc_zeroed_free` = **3853 ns**: the low cluster, as the
+spinner-mattered branch predicted.
+
+**This is very nearly zero evidence, and saying so is the point of having
+written the prediction down first.** The prediction was a bad one - not wrong,
+*uninformative* - because both branches predicted the same outcome with almost
+the same probability:
+
+| Hypothesis | P(low cluster) | Observed |
+|---|---|---|
+| the spinner was the cause | ~1.0 | low |
+| the value is drawn from the historical distribution | 24/29 = 0.83 | low |
+
+The likelihood ratio is about 1.2:1. A prediction whose two branches differ by
+20% cannot separate them in one trial; only the >= 5000 outcome would have said
+anything, and that outcome was unlikely under *either* hypothesis. Recording it
+in advance stopped it being read backwards, which is worth something, but the
+experiment as designed could not have paid out.
+
+Two further reasons not to lean on this reading at all:
+
+* 3853 is the **highest low-cluster value on record** (the previous low-cluster
+    maximum was 3734 at `e3ae7bae1`). If anything it drifts toward the gap, not
+    away from it.
+* Run 86 is itself flagged `RUN CONTAMINATED` - the reference-access canary
+    spread 28% over 13 samples against a 25% tolerance, 16 benchmarks stalled,
+    and `page_alloc_zeroed_free`'s own mean was **29x its min**. A contaminated
+    run is not the instrument you settle a bimodality question with.
+
+The entry's conclusion is unchanged: this benchmark is an unstable ruler, it is
+tracked-not-scored for that reason, and the only experiment that would settle
+it is the alternating-runs design at the end of this entry - not another single
+observation.
+
 ### What to do
 
 * **Do not cite this benchmark as evidence for or against any commit**,

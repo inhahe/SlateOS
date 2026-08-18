@@ -84755,791 +84755,819 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // NUMA + sched_setattr/getattr + landlock + kcmp + restart_syscall
         // -----------------------------------------------------------------
         {
-            // mbind invalid mode -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1000,
-                arg2: 99,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MBIND, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: mbind bad mode not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // mbind(addr=0, len=0x1000, MPOL_DEFAULT, NULL, 0, 0) -> 0
-            // (batch 103 upgrade: was ENOSYS; now accepted UMA-style on
-            // a 4 KiB-aligned addr with empty mask).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MBIND, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: mbind valid DEFAULT not 0");
-                return Err(KernelError::InternalError);
-            }
-            // set_mempolicy bad mode -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 99,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SET_MEMPOLICY, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: set_mempolicy bad mode not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // set_mempolicy(MPOL_DEFAULT, NULL, 0) -> 0 (batch 102 upgrade: was
-            // ENOSYS, now accepted UMA-style; policy is silently dropped — see
-            // todo.txt entry 131).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SET_MEMPOLICY, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: set_mempolicy MPOL_DEFAULT/NULL/0 not 0");
-                return Err(KernelError::InternalError);
-            }
-            // get_mempolicy bad flags -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0xff,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::GET_MEMPOLICY, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: get_mempolicy bad flags not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // get_mempolicy valid (all-NULL probe) -> 0 (UMA answer; see
-            // batch 101).  Pre-batch this expected ENOSYS; updated when
-            // sys_get_mempolicy was upgraded to a real single-node answer.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::GET_MEMPOLICY, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: get_mempolicy valid not 0");
-                return Err(KernelError::InternalError);
-            }
-            // migrate_pages(maxnode=0, NON-NULL old) -> EINVAL via the
-            // `--maxnode` underflow in get_nodes: `--maxnode` makes maxnode
-            // ULONG_MAX, which (with a non-NULL mask) exceeds the
-            // PAGE_SIZE*BITS_PER_BYTE cap -> -EINVAL.  This `get_nodes(old)`
-            // failure fires BEFORE the pid lookup, so the negative pid here
-            // does not drive the result (Linux: mask read beats ESRCH).
-            // Batch 547: a NON-NULL mask is required to reach the underflow
-            // path — with NULL masks, get_nodes short-circuits to empty
-            // success and the pid lookup would return -ESRCH instead.
-            let mn: u64 = 0x1;
-            let a = SyscallArgs {
-                arg0: u64::MAX,
-                arg1: 0,
-                arg2: (&raw const mn).addr() as u64,
-                arg3: (&raw const mn).addr() as u64,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MIGRATE_PAGES, &a).value
-                != i64::from(errno::EINVAL).wrapping_neg()
             {
-                serial_println!(
-                    "[syscall/linux]   FAIL: migrate_pages maxnode=0 (non-NULL old) not EINVAL"
-                );
-                return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn numa_mempolicy() -> crate::error::KernelResult<()> {
+                    // mbind invalid mode -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x1000,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MBIND, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: mbind bad mode not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // mbind(addr=0, len=0x1000, MPOL_DEFAULT, NULL, 0, 0) -> 0
+                    // (batch 103 upgrade: was ENOSYS; now accepted UMA-style on
+                    // a 4 KiB-aligned addr with empty mask).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x1000,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MBIND, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: mbind valid DEFAULT not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // set_mempolicy bad mode -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 99,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SET_MEMPOLICY, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: set_mempolicy bad mode not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // set_mempolicy(MPOL_DEFAULT, NULL, 0) -> 0 (batch 102 upgrade: was
+                    // ENOSYS, now accepted UMA-style; policy is silently dropped — see
+                    // todo.txt entry 131).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SET_MEMPOLICY, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: set_mempolicy MPOL_DEFAULT/NULL/0 not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // get_mempolicy bad flags -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0xff,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GET_MEMPOLICY, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: get_mempolicy bad flags not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // get_mempolicy valid (all-NULL probe) -> 0 (UMA answer; see
+                    // batch 101).  Pre-batch this expected ENOSYS; updated when
+                    // sys_get_mempolicy was upgraded to a real single-node answer.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GET_MEMPOLICY, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: get_mempolicy valid not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // migrate_pages(maxnode=0, NON-NULL old) -> EINVAL via the
+                    // `--maxnode` underflow in get_nodes: `--maxnode` makes maxnode
+                    // ULONG_MAX, which (with a non-NULL mask) exceeds the
+                    // PAGE_SIZE*BITS_PER_BYTE cap -> -EINVAL.  This `get_nodes(old)`
+                    // failure fires BEFORE the pid lookup, so the negative pid here
+                    // does not drive the result (Linux: mask read beats ESRCH).
+                    // Batch 547: a NON-NULL mask is required to reach the underflow
+                    // path — with NULL masks, get_nodes short-circuits to empty
+                    // success and the pid lookup would return -ESRCH instead.
+                    let mn: u64 = 0x1;
+                    let a = SyscallArgs {
+                        arg0: u64::MAX,
+                        arg1: 0,
+                        arg2: (&raw const mn).addr() as u64,
+                        arg3: (&raw const mn).addr() as u64,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MIGRATE_PAGES, &a).value
+                        != i64::from(errno::EINVAL).wrapping_neg()
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: migrate_pages maxnode=0 (non-NULL old) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Same underflow path with a positive pid: get_nodes(old) EINVAL
+                    // still fires before the pid lookup.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 0,
+                        arg2: (&raw const mn).addr() as u64,
+                        arg3: (&raw const mn).addr() as u64,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MIGRATE_PAGES, &a).value
+                        != i64::from(errno::EINVAL).wrapping_neg()
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: migrate_pages maxnode=0 (pid=1) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // move_pages bad flags -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0xff,
+                    };
+                    if dispatch_linux(nr::MOVE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: move_pages bad flags not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // move_pages(foreign pid, large count) -> ESRCH.  Batch 548
+                    // removed the invented E2BIG cap; the pid lookup (find_mm_struct
+                    // -> find_task_by_vpid -> NULL) now drives the result for a
+                    // non-self pid, ahead of any count/pages handling.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: (1 << 21),
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOVE_PAGES, &a).value != i64::from(errno::ESRCH).wrapping_neg() {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: move_pages foreign-pid huge count not ESRCH"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // move_pages(self, count=0) -> 0 (no-op success; pid==0 is self,
+                    // so the ESRCH lookup is skipped and the count==0 shortcut hits).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MOVE_PAGES, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: move_pages self count=0 not 0");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // sched_setattr non-zero flags -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: sched_setattr bad flags not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
+                }
+                numa_mempolicy()?;
             }
-            // Same underflow path with a positive pid: get_nodes(old) EINVAL
-            // still fires before the pid lookup.
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: 0,
-                arg2: (&raw const mn).addr() as u64,
-                arg3: (&raw const mn).addr() as u64,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MIGRATE_PAGES, &a).value
-                != i64::from(errno::EINVAL).wrapping_neg()
             {
-                serial_println!(
-                    "[syscall/linux]   FAIL: migrate_pages maxnode=0 (pid=1) not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // move_pages bad flags -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0xff,
-            };
-            if dispatch_linux(nr::MOVE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: move_pages bad flags not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // move_pages(foreign pid, large count) -> ESRCH.  Batch 548
-            // removed the invented E2BIG cap; the pid lookup (find_mm_struct
-            // -> find_task_by_vpid -> NULL) now drives the result for a
-            // non-self pid, ahead of any count/pages handling.
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: (1 << 21),
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOVE_PAGES, &a).value != i64::from(errno::ESRCH).wrapping_neg() {
-                serial_println!(
-                    "[syscall/linux]   FAIL: move_pages foreign-pid huge count not ESRCH"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // move_pages(self, count=0) -> 0 (no-op success; pid==0 is self,
-            // so the ESRCH lookup is skipped and the count==0 shortcut hits).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOVE_PAGES, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: move_pages self count=0 not 0");
-                return Err(KernelError::InternalError);
-            }
+                #[inline(never)]
+                fn sched_setattr_gates() -> crate::error::KernelResult<()> {
+                    // sched_setattr NULL attr -> EINVAL.  Linux folds (!uattr ||
+                    // pid<0 || flags) into one combined EINVAL gate at the top of
+                    // SYSCALL_DEFINE3(sched_setattr); NULL uattr does NOT yield
+                    // EFAULT here (despite the user-pointer parameter).  Batch
+                    // 217 reorders to match.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: sched_setattr NULL not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // sched_setattr negative pid -> EINVAL (same combined gate).
+                    // Pre-batch we accepted neg pid silently because pid<0 was
+                    // never validated; only ESRCH from the later pcb::state lookup
+                    // could fire, and that requires reaching the dispatch tail.
+                    // Use a valid attr buffer so we can prove the pid<0 gate
+                    // fires BEFORE the size/policy read.
+                    let mut good_pid_attr = [0u8; 48];
+                    good_pid_attr[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    let gpap = good_pid_attr.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: u64::MAX,
+                        arg1: gpap,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: sched_setattr neg pid not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   sched_setattr combined !uattr|pid<0|flags EINVAL: OK"
+                    );
+                    // sched_setattr(size = 0) -> EINVAL (batch 107 upgrade: was
+                    // EPERM after a no-op return; now sub-48 size is rejected
+                    // before we even look at the policy).
+                    let zero48 = [0u8; 48];
+                    let mut bad_size = zero48;
+                    bad_size[0..4].copy_from_slice(&0u32.to_le_bytes()); // explicit
+                    let bad_ptr = bad_size.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: bad_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: sched_setattr size<48 not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
 
-            // sched_setattr non-zero flags -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 1,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: sched_setattr bad flags not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // sched_setattr NULL attr -> EINVAL.  Linux folds (!uattr ||
-            // pid<0 || flags) into one combined EINVAL gate at the top of
-            // SYSCALL_DEFINE3(sched_setattr); NULL uattr does NOT yield
-            // EFAULT here (despite the user-pointer parameter).  Batch
-            // 217 reorders to match.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: sched_setattr NULL not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // sched_setattr negative pid -> EINVAL (same combined gate).
-            // Pre-batch we accepted neg pid silently because pid<0 was
-            // never validated; only ESRCH from the later pcb::state lookup
-            // could fire, and that requires reaching the dispatch tail.
-            // Use a valid attr buffer so we can prove the pid<0 gate
-            // fires BEFORE the size/policy read.
-            let mut good_pid_attr = [0u8; 48];
-            good_pid_attr[0..4].copy_from_slice(&48u32.to_le_bytes());
-            let gpap = good_pid_attr.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: u64::MAX,
-                arg1: gpap,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: sched_setattr neg pid not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   sched_setattr combined !uattr|pid<0|flags EINVAL: OK"
-            );
-            // sched_setattr(size = 0) -> EINVAL (batch 107 upgrade: was
-            // EPERM after a no-op return; now sub-48 size is rejected
-            // before we even look at the policy).
-            let zero48 = [0u8; 48];
-            let mut bad_size = zero48;
-            bad_size[0..4].copy_from_slice(&0u32.to_le_bytes()); // explicit
-            let bad_ptr = bad_size.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: bad_ptr,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: sched_setattr size<48 not EINVAL");
-                return Err(KernelError::InternalError);
-            }
+                    // sched_setattr v0 SCHED_OTHER, priority=0 -> 0.
+                    let mut good = [0u8; 48];
+                    good[0..4].copy_from_slice(&48u32.to_le_bytes()); // size = 48
+                    // sched_policy @ 4..8 = 0 (SCHED_OTHER), priority @ 20..24 = 0.
+                    let good_ptr = good.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: good_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: sched_setattr OTHER/0 not 0");
+                        return Err(KernelError::InternalError);
+                    }
 
-            // sched_setattr v0 SCHED_OTHER, priority=0 -> 0.
-            let mut good = [0u8; 48];
-            good[0..4].copy_from_slice(&48u32.to_le_bytes()); // size = 48
-            // sched_policy @ 4..8 = 0 (SCHED_OTHER), priority @ 20..24 = 0.
-            let good_ptr = good.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: good_ptr,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: sched_setattr OTHER/0 not 0");
-                return Err(KernelError::InternalError);
-            }
+                    // sched_setattr SCHED_DEADLINE -> -EOPNOTSUPP (a v6.6-defined
+                    // class our kernel doesn't back; translator concession, not a
+                    // v6.6 fidelity claim — proper fix would wire up dl_attr
+                    // validation).
+                    let mut dl = [0u8; 48];
+                    dl[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    dl[4..8].copy_from_slice(&6u32.to_le_bytes()); // SCHED_DEADLINE
+                    let dl_ptr = dl.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: dl_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!("[syscall/linux]   FAIL: sched_setattr DEADLINE not EOPNOTSUPP");
+                        return Err(KernelError::InternalError);
+                    }
+                    // Batch 506: sched_setattr SCHED_EXT(=7) -> -EINVAL.  v6.6 has
+                    // no SCHED_EXT (added in Linux 6.12), so its valid_policy()
+                    // returns false and __sched_setscheduler returns -EINVAL.
+                    // Pre-batch we returned -EOPNOTSUPP, treating SCHED_EXT as a
+                    // known-but-unimplemented class on equal footing with DEADLINE.
+                    // Post-batch policy=7 falls through to the shared priority
+                    // check's default arm (batch 505 removed the `7` arm).
+                    let mut ext = [0u8; 48];
+                    ext[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    ext[4..8].copy_from_slice(&7u32.to_le_bytes()); // SCHED_EXT
+                    let ext_ptr = ext.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: ext_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_setattr SCHED_EXT(=7) not EINVAL (batch 506; was EOPNOTSUPP)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   sched_setattr SCHED_EXT (v6.6 absent) -> EINVAL (batch 506): OK"
+                    );
+                    // Batch 507: sched_setattr sched_flags mask validation.  v6.6's
+                    // __sched_setscheduler enforces
+                    //   if (attr->sched_flags & ~(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV))
+                    //       return -EINVAL;
+                    // where SCHED_FLAG_ALL = 0x7F (RESET_ON_FORK | RECLAIM |
+                    // DL_OVERRUN | KEEP_ALL | UTIL_CLAMP) and SCHED_FLAG_SUGOV =
+                    // 0x1000_0000 (internal-only).  Pre-batch we read sched_flags
+                    // but never validated it.
+                    //
+                    // Case A: sched_flags = 0x80 (first unknown bit above
+                    // SCHED_FLAG_ALL) -> EINVAL.
+                    let mut flags_bad = [0u8; 48];
+                    flags_bad[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    // policy = SCHED_OTHER (0); priority = 0.
+                    flags_bad[8..16].copy_from_slice(&0x80u64.to_le_bytes());
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: flags_bad.as_ptr() as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_setattr sched_flags=0x80 not EINVAL (batch 507; was 0)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Case B: sched_flags = 0xFFFF_FFFF_FFFF_FFFF (every bit set,
+                    // including all unknown bits) -> EINVAL.  Strongest form of
+                    // the same check.
+                    let mut flags_max = [0u8; 48];
+                    flags_max[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    flags_max[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: flags_max.as_ptr() as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_setattr sched_flags=u64::MAX not EINVAL (batch 507)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Case C: sched_flags = SCHED_FLAG_ALL = 0x7F (every legal
+                    // userspace bit set) -> 0.  Regression guard that the mask
+                    // check doesn't over-reject the known bits.
+                    let mut flags_all = [0u8; 48];
+                    flags_all[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    flags_all[8..16].copy_from_slice(&0x7Fu64.to_le_bytes());
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: flags_all.as_ptr() as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_setattr sched_flags=SCHED_FLAG_ALL expected 0, got {}",
+                            dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Case D: sched_flags = SCHED_FLAG_SUGOV (0x1000_0000) -> 0.
+                    // v6.6's check defensively tolerates the internal-only bit
+                    // even though userspace shouldn't set it.
+                    let mut flags_sugov = [0u8; 48];
+                    flags_sugov[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    flags_sugov[8..16].copy_from_slice(&0x1000_0000u64.to_le_bytes());
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: flags_sugov.as_ptr() as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_setattr sched_flags=SCHED_FLAG_SUGOV expected 0, got {}",
+                            dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   sched_setattr sched_flags mask ~(ALL|SUGOV) -> EINVAL (batch 507): OK"
+                    );
 
-            // sched_setattr SCHED_DEADLINE -> -EOPNOTSUPP (a v6.6-defined
-            // class our kernel doesn't back; translator concession, not a
-            // v6.6 fidelity claim — proper fix would wire up dl_attr
-            // validation).
-            let mut dl = [0u8; 48];
-            dl[0..4].copy_from_slice(&48u32.to_le_bytes());
-            dl[4..8].copy_from_slice(&6u32.to_le_bytes()); // SCHED_DEADLINE
-            let dl_ptr = dl.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: dl_ptr,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                serial_println!("[syscall/linux]   FAIL: sched_setattr DEADLINE not EOPNOTSUPP");
-                return Err(KernelError::InternalError);
+                    // sched_setattr SCHED_OTHER with non-zero priority -> -EINVAL
+                    // (the policy/priority compatibility check rejects this).
+                    let mut bad_prio = [0u8; 48];
+                    bad_prio[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    bad_prio[4..8].copy_from_slice(&0u32.to_le_bytes()); // SCHED_OTHER
+                    bad_prio[20..24].copy_from_slice(&5u32.to_le_bytes()); // priority 5
+                    let bp_ptr = bad_prio.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: bp_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: sched_setattr OTHER/5 not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
+                }
+                sched_setattr_gates()?;
             }
-            // Batch 506: sched_setattr SCHED_EXT(=7) -> -EINVAL.  v6.6 has
-            // no SCHED_EXT (added in Linux 6.12), so its valid_policy()
-            // returns false and __sched_setscheduler returns -EINVAL.
-            // Pre-batch we returned -EOPNOTSUPP, treating SCHED_EXT as a
-            // known-but-unimplemented class on equal footing with DEADLINE.
-            // Post-batch policy=7 falls through to the shared priority
-            // check's default arm (batch 505 removed the `7` arm).
-            let mut ext = [0u8; 48];
-            ext[0..4].copy_from_slice(&48u32.to_le_bytes());
-            ext[4..8].copy_from_slice(&7u32.to_le_bytes()); // SCHED_EXT
-            let ext_ptr = ext.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: ext_ptr,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_setattr SCHED_EXT(=7) not EINVAL (batch 506; was EOPNOTSUPP)"
-                );
-                return Err(KernelError::InternalError);
+            {
+                #[inline(never)]
+                fn sched_setattr_trailing_zero() -> crate::error::KernelResult<()> {
+                    // Batch 231 forward-compat trailing-zero E2BIG check.  Linux's
+                    // sched_copy_attr (kernel/sched/syscalls.c) walks bytes
+                    // [sizeof(*attr), size) and returns -E2BIG on the first non-
+                    // zero byte so probes can detect what the kernel knows.  Our
+                    // kernel-known size = 48 (the v0 fields we parse).
+                    //
+                    // Case A: size=64 with zero tail -> 0 (passes zero-check,
+                    // SCHED_OTHER policy + zero priority accepted).
+                    let mut sched_pad_zero = [0u8; 64];
+                    sched_pad_zero[0..4].copy_from_slice(&64u32.to_le_bytes()); // size = 64
+                    // sched_policy @ 4..8 = 0 (SCHED_OTHER), priority @ 20..24 = 0.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: sched_pad_zero.as_ptr() as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: sched_setattr (size=64, zero-pad) not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // Case B: size=64 with non-zero byte at offset 48 -> E2BIG.
+                    let mut sched_pad_nonzero = [0u8; 64];
+                    sched_pad_nonzero[0..4].copy_from_slice(&64u32.to_le_bytes());
+                    sched_pad_nonzero[48] = 1;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: sched_pad_nonzero.as_ptr() as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::E2BIG) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_setattr (size=64, nonzero-pad) not E2BIG"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   sched_setattr forward-compat trailing-zero E2BIG: OK"
+                    );
+                    // sched_getattr size < 48 -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 32,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: sched_getattr small size not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // sched_getattr huge size -> EINVAL (was E2BIG).  Linux
+                    // combines `usize > PAGE_SIZE` into the top-of-function EINVAL
+                    // gate; the standalone E2BIG path doesn't exist.  PAGE_SIZE
+                    // is Linux x86_64 4096, not our internal 16 KiB frame.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: (1 << 21),
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: sched_getattr huge size not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // sched_getattr NULL attr -> EINVAL (was EFAULT).  Linux folds
+                    // !uattr into the same combined EINVAL gate.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 48,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: sched_getattr NULL not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // sched_getattr neg pid + valid attr -> EINVAL.  Linux's
+                    // combined gate rejects pid<0 ahead of any task lookup, so a
+                    // probe walking the ladder sees EINVAL where pre-batch we
+                    // proceeded into the find-task path and returned ESRCH (or 0
+                    // on an accidental match).
+                    Ok(())
+                }
+                sched_setattr_trailing_zero()?;
             }
-            serial_println!(
-                "[syscall/linux]   sched_setattr SCHED_EXT (v6.6 absent) -> EINVAL (batch 506): OK"
-            );
-            // Batch 507: sched_setattr sched_flags mask validation.  v6.6's
-            // __sched_setscheduler enforces
-            //   if (attr->sched_flags & ~(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV))
-            //       return -EINVAL;
-            // where SCHED_FLAG_ALL = 0x7F (RESET_ON_FORK | RECLAIM |
-            // DL_OVERRUN | KEEP_ALL | UTIL_CLAMP) and SCHED_FLAG_SUGOV =
-            // 0x1000_0000 (internal-only).  Pre-batch we read sched_flags
-            // but never validated it.
-            //
-            // Case A: sched_flags = 0x80 (first unknown bit above
-            // SCHED_FLAG_ALL) -> EINVAL.
-            let mut flags_bad = [0u8; 48];
-            flags_bad[0..4].copy_from_slice(&48u32.to_le_bytes());
-            // policy = SCHED_OTHER (0); priority = 0.
-            flags_bad[8..16].copy_from_slice(&0x80u64.to_le_bytes());
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: flags_bad.as_ptr() as u64,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_setattr sched_flags=0x80 not EINVAL (batch 507; was 0)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // Case B: sched_flags = 0xFFFF_FFFF_FFFF_FFFF (every bit set,
-            // including all unknown bits) -> EINVAL.  Strongest form of
-            // the same check.
-            let mut flags_max = [0u8; 48];
-            flags_max[0..4].copy_from_slice(&48u32.to_le_bytes());
-            flags_max[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: flags_max.as_ptr() as u64,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_setattr sched_flags=u64::MAX not EINVAL (batch 507)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // Case C: sched_flags = SCHED_FLAG_ALL = 0x7F (every legal
-            // userspace bit set) -> 0.  Regression guard that the mask
-            // check doesn't over-reject the known bits.
-            let mut flags_all = [0u8; 48];
-            flags_all[0..4].copy_from_slice(&48u32.to_le_bytes());
-            flags_all[8..16].copy_from_slice(&0x7Fu64.to_le_bytes());
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: flags_all.as_ptr() as u64,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_setattr sched_flags=SCHED_FLAG_ALL expected 0, got {}",
-                    dispatch_linux(nr::SCHED_SETATTR, &a).value,
-                );
-                return Err(KernelError::InternalError);
-            }
-            // Case D: sched_flags = SCHED_FLAG_SUGOV (0x1000_0000) -> 0.
-            // v6.6's check defensively tolerates the internal-only bit
-            // even though userspace shouldn't set it.
-            let mut flags_sugov = [0u8; 48];
-            flags_sugov[0..4].copy_from_slice(&48u32.to_le_bytes());
-            flags_sugov[8..16].copy_from_slice(&0x1000_0000u64.to_le_bytes());
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: flags_sugov.as_ptr() as u64,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_setattr sched_flags=SCHED_FLAG_SUGOV expected 0, got {}",
-                    dispatch_linux(nr::SCHED_SETATTR, &a).value,
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   sched_setattr sched_flags mask ~(ALL|SUGOV) -> EINVAL (batch 507): OK"
-            );
+            {
+                #[inline(never)]
+                fn sched_getattr() -> crate::error::KernelResult<()> {
+                    let mut sga_attr = [0u8; 64];
+                    let sga_ptr = sga_attr.as_mut_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: u64::MAX,
+                        arg1: sga_ptr,
+                        arg2: 48,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: sched_getattr neg pid not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   sched_getattr combined !uattr|pid<0|size|flags EINVAL: OK"
+                    );
+                    // sched_getattr(pid=0, attr, size=48) -> 0 (batch 106 upgrade:
+                    // was ENOSYS, now writes a v0-shaped sched_attr from PCB).
+                    let mut big_buf = [0xCCu8; 64];
+                    let big_ptr = big_buf.as_mut_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: big_ptr,
+                        arg2: 48,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: sched_getattr v0 not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // Verify attr.size field reflects the user-requested size.
+                    let written_size = u32::from_le_bytes([big_buf[0], big_buf[1], big_buf[2], big_buf[3]]);
+                    if written_size != 48 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr attr.size {} (expected 48)",
+                            written_size,
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // sched_policy should be in 0..=7 (we accept any of the
+                    // valid Linux policies — the boot-context default is
+                    // SCHED_OTHER (0)).
+                    let policy_byte = u32::from_le_bytes([big_buf[4], big_buf[5], big_buf[6], big_buf[7]]);
+                    if policy_byte > 7 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr policy {} > 7",
+                            policy_byte,
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Bytes 48..64 of big_buf were not requested (size=48), so
+                    // they should still hold the 0xCC sentinel — proves we
+                    // didn't over-write.
+                    if big_buf[48..].iter().any(|&b| b != 0xCC) {
+                        serial_println!("[syscall/linux]   FAIL: sched_getattr wrote past requested size",);
+                        return Err(KernelError::InternalError);
+                    }
 
-            // sched_setattr SCHED_OTHER with non-zero priority -> -EINVAL
-            // (the policy/priority compatibility check rejects this).
-            let mut bad_prio = [0u8; 48];
-            bad_prio[0..4].copy_from_slice(&48u32.to_le_bytes());
-            bad_prio[4..8].copy_from_slice(&0u32.to_le_bytes()); // SCHED_OTHER
-            bad_prio[20..24].copy_from_slice(&5u32.to_le_bytes()); // priority 5
-            let bp_ptr = bad_prio.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: bp_ptr,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: sched_setattr OTHER/5 not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // Batch 231 forward-compat trailing-zero E2BIG check.  Linux's
-            // sched_copy_attr (kernel/sched/syscalls.c) walks bytes
-            // [sizeof(*attr), size) and returns -E2BIG on the first non-
-            // zero byte so probes can detect what the kernel knows.  Our
-            // kernel-known size = 48 (the v0 fields we parse).
-            //
-            // Case A: size=64 with zero tail -> 0 (passes zero-check,
-            // SCHED_OTHER policy + zero priority accepted).
-            let mut sched_pad_zero = [0u8; 64];
-            sched_pad_zero[0..4].copy_from_slice(&64u32.to_le_bytes()); // size = 64
-            // sched_policy @ 4..8 = 0 (SCHED_OTHER), priority @ 20..24 = 0.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: sched_pad_zero.as_ptr() as u64,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: sched_setattr (size=64, zero-pad) not 0");
-                return Err(KernelError::InternalError);
-            }
-            // Case B: size=64 with non-zero byte at offset 48 -> E2BIG.
-            let mut sched_pad_nonzero = [0u8; 64];
-            sched_pad_nonzero[0..4].copy_from_slice(&64u32.to_le_bytes());
-            sched_pad_nonzero[48] = 1;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: sched_pad_nonzero.as_ptr() as u64,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::E2BIG) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_setattr (size=64, nonzero-pad) not E2BIG"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   sched_setattr forward-compat trailing-zero E2BIG: OK"
-            );
-            // sched_getattr size < 48 -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 32,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: sched_getattr small size not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // sched_getattr huge size -> EINVAL (was E2BIG).  Linux
-            // combines `usize > PAGE_SIZE` into the top-of-function EINVAL
-            // gate; the standalone E2BIG path doesn't exist.  PAGE_SIZE
-            // is Linux x86_64 4096, not our internal 16 KiB frame.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: (1 << 21),
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: sched_getattr huge size not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // sched_getattr NULL attr -> EINVAL (was EFAULT).  Linux folds
-            // !uattr into the same combined EINVAL gate.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 48,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: sched_getattr NULL not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // sched_getattr neg pid + valid attr -> EINVAL.  Linux's
-            // combined gate rejects pid<0 ahead of any task lookup, so a
-            // probe walking the ladder sees EINVAL where pre-batch we
-            // proceeded into the find-task path and returned ESRCH (or 0
-            // on an accidental match).
-            let mut sga_attr = [0u8; 64];
-            let sga_ptr = sga_attr.as_mut_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: u64::MAX,
-                arg1: sga_ptr,
-                arg2: 48,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: sched_getattr neg pid not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   sched_getattr combined !uattr|pid<0|size|flags EINVAL: OK"
-            );
-            // sched_getattr(pid=0, attr, size=48) -> 0 (batch 106 upgrade:
-            // was ENOSYS, now writes a v0-shaped sched_attr from PCB).
-            let mut big_buf = [0xCCu8; 64];
-            let big_ptr = big_buf.as_mut_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: big_ptr,
-                arg2: 48,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: sched_getattr v0 not 0");
-                return Err(KernelError::InternalError);
-            }
-            // Verify attr.size field reflects the user-requested size.
-            let written_size = u32::from_le_bytes([big_buf[0], big_buf[1], big_buf[2], big_buf[3]]);
-            if written_size != 48 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_getattr attr.size {} (expected 48)",
-                    written_size,
-                );
-                return Err(KernelError::InternalError);
-            }
-            // sched_policy should be in 0..=7 (we accept any of the
-            // valid Linux policies — the boot-context default is
-            // SCHED_OTHER (0)).
-            let policy_byte = u32::from_le_bytes([big_buf[4], big_buf[5], big_buf[6], big_buf[7]]);
-            if policy_byte > 7 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_getattr policy {} > 7",
-                    policy_byte,
-                );
-                return Err(KernelError::InternalError);
-            }
-            // Bytes 48..64 of big_buf were not requested (size=48), so
-            // they should still hold the 0xCC sentinel — proves we
-            // didn't over-write.
-            if big_buf[48..].iter().any(|&b| b != 0xCC) {
-                serial_println!("[syscall/linux]   FAIL: sched_getattr wrote past requested size",);
-                return Err(KernelError::InternalError);
-            }
+                    // Batch 292 int-truncation probes.  Linux declares
+                    //   long sys_sched_setattr(pid_t pid,
+                    //                          struct sched_attr __user *attr,
+                    //                          unsigned int flags);
+                    //   long sys_sched_getattr(pid_t pid,
+                    //                          struct sched_attr __user *attr,
+                    //                          unsigned int size,
+                    //                          unsigned int flags);
+                    // The x86_64 ABI truncates each arg to its declared type
+                    // before the body runs.  Pre-batch we held args as raw u64;
+                    // these probes prove the cast-at-entry takes effect.
 
-            // Batch 292 int-truncation probes.  Linux declares
-            //   long sys_sched_setattr(pid_t pid,
-            //                          struct sched_attr __user *attr,
-            //                          unsigned int flags);
-            //   long sys_sched_getattr(pid_t pid,
-            //                          struct sched_attr __user *attr,
-            //                          unsigned int size,
-            //                          unsigned int flags);
-            // The x86_64 ABI truncates each arg to its declared type
-            // before the body runs.  Pre-batch we held args as raw u64;
-            // these probes prove the cast-at-entry takes effect.
+                    // Probe A — sched_setattr flags truncates to 0.  Pre-batch
+                    // raw u64 != 0 → EINVAL.  Linux: post-truncation flags == 0,
+                    // passes to the body; v0 SCHED_OTHER buffer succeeds (== 0).
+                    let mut sa_flags_attr = [0u8; 48];
+                    sa_flags_attr[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    let sa_flags_ptr = sa_flags_attr.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: sa_flags_ptr,
+                        arg2: 0x1_0000_0000,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_setattr flags truncates to 0 not ok(0)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-            // Probe A — sched_setattr flags truncates to 0.  Pre-batch
-            // raw u64 != 0 → EINVAL.  Linux: post-truncation flags == 0,
-            // passes to the body; v0 SCHED_OTHER buffer succeeds (== 0).
-            let mut sa_flags_attr = [0u8; 48];
-            sa_flags_attr[0..4].copy_from_slice(&48u32.to_le_bytes());
-            let sa_flags_ptr = sa_flags_attr.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: sa_flags_ptr,
-                arg2: 0x1_0000_0000,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_setattr flags truncates to 0 not ok(0)"
-                );
-                return Err(KernelError::InternalError);
-            }
+                    // Probe B — sched_setattr pid truncates to 0.  Pre-batch the
+                    // <0 gate accepted pid_i32=0, but the resolution branch used
+                    // raw args.arg0 (0x1_0000_0000) and ESRCH'd on the lookup.
+                    // Linux: pid_i32=0 → caller path → succeeds.
+                    let a = SyscallArgs {
+                        arg0: 0x1_0000_0000,
+                        arg1: sa_flags_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_setattr pid truncates to 0 not ok(0)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-            // Probe B — sched_setattr pid truncates to 0.  Pre-batch the
-            // <0 gate accepted pid_i32=0, but the resolution branch used
-            // raw args.arg0 (0x1_0000_0000) and ESRCH'd on the lookup.
-            // Linux: pid_i32=0 → caller path → succeeds.
-            let a = SyscallArgs {
-                arg0: 0x1_0000_0000,
-                arg1: sa_flags_ptr,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_setattr pid truncates to 0 not ok(0)"
-                );
-                return Err(KernelError::InternalError);
-            }
+                    // Probe C — sched_getattr flags truncates to 0.  Pre-batch
+                    // raw u64 != 0 → EINVAL.  Linux: 0 after truncation, passes.
+                    let mut sga_trunc_buf = [0u8; 48];
+                    let sga_trunc_ptr = sga_trunc_buf.as_mut_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: sga_trunc_ptr,
+                        arg2: 48,
+                        arg3: 0x1_0000_0000,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr flags truncates to 0 not ok(0)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-            // Probe C — sched_getattr flags truncates to 0.  Pre-batch
-            // raw u64 != 0 → EINVAL.  Linux: 0 after truncation, passes.
-            let mut sga_trunc_buf = [0u8; 48];
-            let sga_trunc_ptr = sga_trunc_buf.as_mut_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: sga_trunc_ptr,
-                arg2: 48,
-                arg3: 0x1_0000_0000,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_getattr flags truncates to 0 not ok(0)"
-                );
-                return Err(KernelError::InternalError);
-            }
+                    // Probe D — sched_getattr size truncates to 48.  Pre-batch
+                    // raw 0x1_0000_0030 > PAGE_SIZE → EINVAL.  Linux's truncated
+                    // size = 0x30 = 48 passes both gates and writes a v0 attr.
+                    let mut sga_size_buf = [0u8; 48];
+                    let sga_size_ptr = sga_size_buf.as_mut_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: sga_size_ptr,
+                        arg2: 0x1_0000_0030,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr size truncates to 48 not ok(0)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // attr.size field should reflect min(truncated u32 size,
+                    // sizeof(kattr)) — for usize=0x30 (=48) and our v0 KSIZE=48,
+                    // min(48, 48) = 48 = 0x30, so this guard is unchanged by batch
+                    // 508.  (See batch 508 for the v6.6 `kattr.size = min(usize,
+                    // sizeof(kattr))` rule; the new probes below exercise it for
+                    // usize > KSIZE.)
+                    let trunc_size = u32::from_le_bytes([
+                        sga_size_buf[0],
+                        sga_size_buf[1],
+                        sga_size_buf[2],
+                        sga_size_buf[3],
+                    ]);
+                    if trunc_size != 0x30 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr size truncates attr.size {} (expected 0x30)",
+                            trunc_size,
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Batch 508: sched_getattr writes attr.size = min(usize,
+                    // sizeof(kattr)).  Pre-batch we echoed the raw user-requested
+                    // size, so usize=4096 produced attr.size=4096 (claiming the
+                    // kernel filled in 4 KiB of meaningful data when only 48 bytes
+                    // are populated).  v6.6: attr.size = min(usize, sizeof(kattr))
+                    // — an honest reply about what the kernel knows.  Our SCHED_
+                    // ATTR_KSIZE for sched_getattr's reply is 48 (v0 layout).
+                    //
+                    // Case A: usize=4096 (maximum Linux PAGE_SIZE) → attr.size=48.
+                    let mut sga_max_buf = [0u8; 4096];
+                    let sga_max_ptr = sga_max_buf.as_mut_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: sga_max_ptr,
+                        arg2: 4096,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr(usize=4096) not ok(0) (batch 508)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    let sz_4096 = u32::from_le_bytes([
+                        sga_max_buf[0],
+                        sga_max_buf[1],
+                        sga_max_buf[2],
+                        sga_max_buf[3],
+                    ]);
+                    if sz_4096 != 48 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr(usize=4096) attr.size {} (expected 48; batch 508, was 4096)",
+                            sz_4096,
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Case B: usize=100 (between KSIZE and PAGE_SIZE) → attr.size=48.
+                    let mut sga_100_buf = [0u8; 100];
+                    let sga_100_ptr = sga_100_buf.as_mut_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: sga_100_ptr,
+                        arg2: 100,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr(usize=100) not ok(0) (batch 508)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    let sz_100 = u32::from_le_bytes([
+                        sga_100_buf[0],
+                        sga_100_buf[1],
+                        sga_100_buf[2],
+                        sga_100_buf[3],
+                    ]);
+                    if sz_100 != 48 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr(usize=100) attr.size {} (expected 48; batch 508, was 100)",
+                            sz_100,
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Case C regression guard: usize=48 → attr.size=48 (no change).
+                    // Already verified by the v0 probe above (line ~57832); not
+                    // duplicated here.
+                    serial_println!(
+                        "[syscall/linux]   sched_getattr attr.size = min(usize, KSIZE) (batch 508): OK"
+                    );
 
-            // Probe D — sched_getattr size truncates to 48.  Pre-batch
-            // raw 0x1_0000_0030 > PAGE_SIZE → EINVAL.  Linux's truncated
-            // size = 0x30 = 48 passes both gates and writes a v0 attr.
-            let mut sga_size_buf = [0u8; 48];
-            let sga_size_ptr = sga_size_buf.as_mut_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: sga_size_ptr,
-                arg2: 0x1_0000_0030,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_getattr size truncates to 48 not ok(0)"
-                );
-                return Err(KernelError::InternalError);
+                    // Probe E — sched_getattr pid truncates to 0.  Pre-batch the
+                    // <0 gate passed (pid_i32=0), then args.arg0 raw != 0 →
+                    // pcb::state(0x1_0000_0000)=None → ESRCH.  Linux: caller path.
+                    let mut sga_pid_buf = [0u8; 48];
+                    let sga_pid_ptr = sga_pid_buf.as_mut_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0x1_0000_0000,
+                        arg1: sga_pid_ptr,
+                        arg2: 48,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr pid truncates to 0 not ok(0)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!("[syscall/linux]   sched_{{set,get}}attr pid_t/uint truncation: OK");
+                    Ok(())
+                }
+                sched_getattr()?;
             }
-            // attr.size field should reflect min(truncated u32 size,
-            // sizeof(kattr)) — for usize=0x30 (=48) and our v0 KSIZE=48,
-            // min(48, 48) = 48 = 0x30, so this guard is unchanged by batch
-            // 508.  (See batch 508 for the v6.6 `kattr.size = min(usize,
-            // sizeof(kattr))` rule; the new probes below exercise it for
-            // usize > KSIZE.)
-            let trunc_size = u32::from_le_bytes([
-                sga_size_buf[0],
-                sga_size_buf[1],
-                sga_size_buf[2],
-                sga_size_buf[3],
-            ]);
-            if trunc_size != 0x30 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_getattr size truncates attr.size {} (expected 0x30)",
-                    trunc_size,
-                );
-                return Err(KernelError::InternalError);
-            }
-            // Batch 508: sched_getattr writes attr.size = min(usize,
-            // sizeof(kattr)).  Pre-batch we echoed the raw user-requested
-            // size, so usize=4096 produced attr.size=4096 (claiming the
-            // kernel filled in 4 KiB of meaningful data when only 48 bytes
-            // are populated).  v6.6: attr.size = min(usize, sizeof(kattr))
-            // — an honest reply about what the kernel knows.  Our SCHED_
-            // ATTR_KSIZE for sched_getattr's reply is 48 (v0 layout).
-            //
-            // Case A: usize=4096 (maximum Linux PAGE_SIZE) → attr.size=48.
-            let mut sga_max_buf = [0u8; 4096];
-            let sga_max_ptr = sga_max_buf.as_mut_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: sga_max_ptr,
-                arg2: 4096,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_getattr(usize=4096) not ok(0) (batch 508)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            let sz_4096 = u32::from_le_bytes([
-                sga_max_buf[0],
-                sga_max_buf[1],
-                sga_max_buf[2],
-                sga_max_buf[3],
-            ]);
-            if sz_4096 != 48 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_getattr(usize=4096) attr.size {} (expected 48; batch 508, was 4096)",
-                    sz_4096,
-                );
-                return Err(KernelError::InternalError);
-            }
-            // Case B: usize=100 (between KSIZE and PAGE_SIZE) → attr.size=48.
-            let mut sga_100_buf = [0u8; 100];
-            let sga_100_ptr = sga_100_buf.as_mut_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: sga_100_ptr,
-                arg2: 100,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_getattr(usize=100) not ok(0) (batch 508)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            let sz_100 = u32::from_le_bytes([
-                sga_100_buf[0],
-                sga_100_buf[1],
-                sga_100_buf[2],
-                sga_100_buf[3],
-            ]);
-            if sz_100 != 48 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_getattr(usize=100) attr.size {} (expected 48; batch 508, was 100)",
-                    sz_100,
-                );
-                return Err(KernelError::InternalError);
-            }
-            // Case C regression guard: usize=48 → attr.size=48 (no change).
-            // Already verified by the v0 probe above (line ~57832); not
-            // duplicated here.
-            serial_println!(
-                "[syscall/linux]   sched_getattr attr.size = min(usize, KSIZE) (batch 508): OK"
-            );
-
-            // Probe E — sched_getattr pid truncates to 0.  Pre-batch the
-            // <0 gate passed (pid_i32=0), then args.arg0 raw != 0 →
-            // pcb::state(0x1_0000_0000)=None → ESRCH.  Linux: caller path.
-            let mut sga_pid_buf = [0u8; 48];
-            let sga_pid_ptr = sga_pid_buf.as_mut_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0x1_0000_0000,
-                arg1: sga_pid_ptr,
-                arg2: 48,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: sched_getattr pid truncates to 0 not ok(0)"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!("[syscall/linux]   sched_{{set,get}}attr pid_t/uint truncation: OK");
 
             // Batch 527: sched_setattr persists SCHED_FLAG_RESET_ON_FORK
             // (0x01) from sched_flags, and sched_getattr reports it back in
@@ -86076,1018 +86104,1053 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 }
                 case()?;
             }
-            serial_println!(
-                "[syscall/linux]   sched_setattr/getattr nice round-trip (batch 529): OK"
-            );
-
-            // Batch 384: landlock_create_ruleset VERSION-query.  Pre-batch
-            // we returned `0`, claiming a fictional "ABI version 0" that
-            // Linux never produces.  Linux's `!landlock_initialized` arm
-            // returns -EOPNOTSUPP for every code path in this syscall;
-            // mirror that so probes detect "no Landlock" via the same errno
-            // sandbox libraries (Chromium, BubbleWrap, systemd, libcap-ng)
-            // see on a Linux kernel built without the Landlock LSM
-            // initialized.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 1,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                != -i64::from(errno::EOPNOTSUPP)
             {
-                serial_println!("[syscall/linux]   FAIL: landlock version-query not EOPNOTSUPP");
-                return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn landlock_create_ruleset() -> crate::error::KernelResult<()> {
+                    serial_println!(
+                        "[syscall/linux]   sched_setattr/getattr nice round-trip (batch 529): OK"
+                    );
+
+                    // Batch 384: landlock_create_ruleset VERSION-query.  Pre-batch
+                    // we returned `0`, claiming a fictional "ABI version 0" that
+                    // Linux never produces.  Linux's `!landlock_initialized` arm
+                    // returns -EOPNOTSUPP for every code path in this syscall;
+                    // mirror that so probes detect "no Landlock" via the same errno
+                    // sandbox libraries (Chromium, BubbleWrap, systemd, libcap-ng)
+                    // see on a Linux kernel built without the Landlock LSM
+                    // initialized.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::EOPNOTSUPP)
+                    {
+                        serial_println!("[syscall/linux]   FAIL: landlock version-query not EOPNOTSUPP");
+                        return Err(KernelError::InternalError);
+                    }
+                    // Batch 523: landlock_create_ruleset flags=0x2 — formerly a
+                    // dedicated ERRATA-query path returning EOPNOTSUPP.  ERRATA is
+                    // a Linux 6.10 addition and does NOT exist in v6.6, so 0x2 is
+                    // an unknown flag and must hit the generic EINVAL arm (v6.6:
+                    // `if (flags) { if (VERSION ...) return ABI; return -EINVAL; }`).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 2,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock flags=0x2 (6.10 ERRATA) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   landlock_create_ruleset VERSION query -> EOPNOTSUPP, ERRATA(0x2, 6.10) -> EINVAL: OK"
+                    );
+                    // landlock_create_ruleset flags=0x3 -> EINVAL.  v6.6 accepts
+                    // ONLY flags == VERSION (0x1) exactly; any other value
+                    // (including 0x1 OR'd with the 6.10 ERRATA bit) is unknown and
+                    // returns EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 3,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: landlock flags=0x3 not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // landlock_create_ruleset VERSION with non-NULL attr -> EINVAL
+                    // (Linux requires attr=NULL,size=0 for query paths).
+                    let a = SyscallArgs {
+                        arg0: 8,
+                        arg1: 0,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: landlock VERSION+attr not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // landlock_create_ruleset flags=0x2 with non-zero size -> EINVAL
+                    // (unknown flag; the size is irrelevant once the flag fails the
+                    // VERSION match).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 8,
+                        arg2: 2,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: landlock flags=0x2+size not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // landlock_create_ruleset bad flags -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0xff,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: landlock bad flags not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!("[syscall/linux]   landlock_create_ruleset flag dispatch: OK");
+                    // landlock_create_ruleset real path with NULL attr -> EFAULT.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 8,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!("[syscall/linux]   FAIL: landlock NULL attr not EFAULT");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
+                }
+                landlock_create_ruleset()?;
             }
-            // Batch 523: landlock_create_ruleset flags=0x2 — formerly a
-            // dedicated ERRATA-query path returning EOPNOTSUPP.  ERRATA is
-            // a Linux 6.10 addition and does NOT exist in v6.6, so 0x2 is
-            // an unknown flag and must hit the generic EINVAL arm (v6.6:
-            // `if (flags) { if (VERSION ...) return ABI; return -EINVAL; }`).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 2,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock flags=0x2 (6.10 ERRATA) not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   landlock_create_ruleset VERSION query -> EOPNOTSUPP, ERRATA(0x2, 6.10) -> EINVAL: OK"
-            );
-            // landlock_create_ruleset flags=0x3 -> EINVAL.  v6.6 accepts
-            // ONLY flags == VERSION (0x1) exactly; any other value
-            // (including 0x1 OR'd with the 6.10 ERRATA bit) is unknown and
-            // returns EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 3,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: landlock flags=0x3 not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // landlock_create_ruleset VERSION with non-NULL attr -> EINVAL
-            // (Linux requires attr=NULL,size=0 for query paths).
-            let a = SyscallArgs {
-                arg0: 8,
-                arg1: 0,
-                arg2: 1,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: landlock VERSION+attr not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // landlock_create_ruleset flags=0x2 with non-zero size -> EINVAL
-            // (unknown flag; the size is irrelevant once the flag fails the
-            // VERSION match).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 8,
-                arg2: 2,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: landlock flags=0x2+size not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // landlock_create_ruleset bad flags -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0xff,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: landlock bad flags not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            serial_println!("[syscall/linux]   landlock_create_ruleset flag dispatch: OK");
-            // landlock_create_ruleset real path with NULL attr -> EFAULT.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 8,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EFAULT) {
-                serial_println!("[syscall/linux]   FAIL: landlock NULL attr not EFAULT");
-                return Err(KernelError::InternalError);
-            }
-            // Batch 384: landlock_create_ruleset real-ruleset path also
-            // moves to EOPNOTSUPP (was ENOSYS).  Linux's
-            // `!landlock_initialized` arm terminates here as well; ENOSYS
-            // would falsely signal "syscall-table miss" where the syscall
-            // is in fact registered.  Keep the readable 8-byte attr buffer
-            // so the pre-EOPNOTSUPP attr/size/forward-compat gates still
-            // get exercised by the discriminators below.
-            let landlock_attr = [0u8; 8];
-            let size_ptr = landlock_attr.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: size_ptr,
-                arg1: 8,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                != -i64::from(errno::EOPNOTSUPP)
             {
-                serial_println!("[syscall/linux]   FAIL: landlock valid not EOPNOTSUPP");
-                return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn landlock_size_bounds() -> crate::error::KernelResult<()> {
+                    // Batch 384: landlock_create_ruleset real-ruleset path also
+                    // moves to EOPNOTSUPP (was ENOSYS).  Linux's
+                    // `!landlock_initialized` arm terminates here as well; ENOSYS
+                    // would falsely signal "syscall-table miss" where the syscall
+                    // is in fact registered.  Keep the readable 8-byte attr buffer
+                    // so the pre-EOPNOTSUPP attr/size/forward-compat gates still
+                    // get exercised by the discriminators below.
+                    let landlock_attr = [0u8; 8];
+                    let size_ptr = landlock_attr.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: size_ptr,
+                        arg1: 8,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::EOPNOTSUPP)
+                    {
+                        serial_println!("[syscall/linux]   FAIL: landlock valid not EOPNOTSUPP");
+                        return Err(KernelError::InternalError);
+                    }
+                    // Batch 224 discriminator: (attr=valid, size=4) — usize <
+                    // ksize_min (8) so copy_min_struct_from_user returns -EINVAL.
+                    // Confirms the lower-bound EINVAL still fires when the size
+                    // is in the rejected range.
+                    let a = SyscallArgs {
+                        arg0: size_ptr,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: landlock (attr, size=4) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // Batch 224 discriminator: (attr=valid, size=4097) — usize >
+                    // PAGE_SIZE so copy_min_struct_from_user returns -E2BIG.
+                    // Pre-batch the upper bound was 1 MiB (with the same EINVAL
+                    // errno collapsed in), so 4097 fell through to ENOSYS.
+                    let a = SyscallArgs {
+                        arg0: size_ptr,
+                        arg1: 4097,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
+                        serial_println!("[syscall/linux]   FAIL: landlock (attr, size=4097) not E2BIG");
+                        return Err(KernelError::InternalError);
+                    }
+                    // Batch 224 discriminator: (attr=valid, size=2 MiB) — also
+                    // > PAGE_SIZE, must surface as E2BIG.  Pre-batch this hit our
+                    // 1 MiB upper bound which returned EINVAL with the wrong
+                    // errno.
+                    let a = SyscallArgs {
+                        arg0: size_ptr,
+                        arg1: 1 << 21,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
+                        serial_println!("[syscall/linux]   FAIL: landlock (attr, size=2MiB) not E2BIG");
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   landlock_create_ruleset NULL-EFAULT > size-EINVAL > size-E2BIG gate order: OK"
+                    );
+                    Ok(())
+                }
+                landlock_size_bounds()?;
             }
-            // Batch 224 discriminator: (attr=valid, size=4) — usize <
-            // ksize_min (8) so copy_min_struct_from_user returns -EINVAL.
-            // Confirms the lower-bound EINVAL still fires when the size
-            // is in the rejected range.
-            let a = SyscallArgs {
-                arg0: size_ptr,
-                arg1: 4,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: landlock (attr, size=4) not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // Batch 224 discriminator: (attr=valid, size=4097) — usize >
-            // PAGE_SIZE so copy_min_struct_from_user returns -E2BIG.
-            // Pre-batch the upper bound was 1 MiB (with the same EINVAL
-            // errno collapsed in), so 4097 fell through to ENOSYS.
-            let a = SyscallArgs {
-                arg0: size_ptr,
-                arg1: 4097,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
-                serial_println!("[syscall/linux]   FAIL: landlock (attr, size=4097) not E2BIG");
-                return Err(KernelError::InternalError);
-            }
-            // Batch 224 discriminator: (attr=valid, size=2 MiB) — also
-            // > PAGE_SIZE, must surface as E2BIG.  Pre-batch this hit our
-            // 1 MiB upper bound which returned EINVAL with the wrong
-            // errno.
-            let a = SyscallArgs {
-                arg0: size_ptr,
-                arg1: 1 << 21,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
-                serial_println!("[syscall/linux]   FAIL: landlock (attr, size=2MiB) not E2BIG");
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   landlock_create_ruleset NULL-EFAULT > size-EINVAL > size-E2BIG gate order: OK"
-            );
-            // Batch 230 forward-compat trailing-zero E2BIG check.  Linux's
-            // copy_struct_from_user (lib/usercopy.c) requires that any
-            // bytes past the kernel-known size (ksize=8) are zero; the
-            // first non-zero byte returns -E2BIG so probes can detect
-            // what the kernel knows.
-            //
-            // Case A: size=16 with zero tail -> EOPNOTSUPP (passes
-            // zero-check; landlock not initialized so terminal answer is
-            // EOPNOTSUPP after batch 384, not ENOSYS).
-            let landlock_pad_zero = [0u8; 16];
-            let a = SyscallArgs {
-                arg0: landlock_pad_zero.as_ptr() as u64,
-                arg1: 16,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                != -i64::from(errno::EOPNOTSUPP)
             {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock (attr, size=16, zero-pad) not EOPNOTSUPP"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // Case B: size=16 with non-zero byte at offset 8 -> E2BIG.
-            let mut landlock_pad_nonzero = [0u8; 16];
-            landlock_pad_nonzero[8] = 1;
-            let a = SyscallArgs {
-                arg0: landlock_pad_nonzero.as_ptr() as u64,
-                arg1: 16,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock (attr, size=16, nonzero-pad) not E2BIG"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   landlock_create_ruleset forward-compat trailing-zero E2BIG: OK"
-            );
-            // landlock_add_rule bad rule_type -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 99,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: landlock_add_rule bad type not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // landlock_add_rule NULL attr -> EFAULT.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT) {
-                serial_println!("[syscall/linux]   FAIL: landlock_add_rule NULL not EFAULT");
-                return Err(KernelError::InternalError);
-            }
-            // landlock_add_rule valid PATH_BENEATH (allowed_access=EXECUTE=0x1,
-            // parent_fd=0) -> EOPNOTSUPP (batch 396: terminal switched from
-            // EBADF to EOPNOTSUPP to match Linux gate 1
-            // !landlock_initialized).
-            let lpb_attr: [u8; 16] = {
-                let mut b = [0u8; 16];
-                b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
-                b
-            };
-            let lpb_attr_ptr = lpb_attr.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: lpb_attr_ptr,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule valid PATH_BENEATH not EOPNOTSUPP"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // landlock_add_rule PATH_BENEATH with allowed_access=0 -> ENOMSG
-            // (Linux's "empty rule body" path).
-            let lpb_empty: [u8; 16] = [0u8; 16];
-            let lpb_empty_ptr = lpb_empty.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: lpb_empty_ptr,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::ENOMSG) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule empty PATH_BENEATH not ENOMSG"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // landlock_add_rule PATH_BENEATH with allowed_access bit
-            // outside LANDLOCK_ACCESS_FS_MASK -> EINVAL.  Bit 0x8000 is
-            // IOCTL_DEV, a Linux 6.10 addition that is NOT in v6.6's mask
-            // (0x7fff = EXECUTE..TRUNCATE), so it must be rejected.  This
-            // pins the v6.6 mask boundary (batch 522).
-            let lpb_bad_access: [u8; 16] = {
-                let mut b = [0u8; 16];
-                b[0..8].copy_from_slice(&0x8000u64.to_ne_bytes());
-                b
-            };
-            let lpb_bad_access_ptr = lpb_bad_access.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: lpb_bad_access_ptr,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule PATH_BENEATH IOCTL_DEV(6.10) bit not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // landlock_add_rule rule_type=2 (LANDLOCK_RULE_NET_PORT) -> EINVAL.
-            // NET_PORT is a Linux 6.7 rule type; v6.6's switch has no case for
-            // it and returns -EINVAL via `default`.  The rule_type gate fires
-            // before the attr pointer/access/port checks, so a fully valid-
-            // looking NET_PORT attr still gets EINVAL (batch 522 — was
-            // EOPNOTSUPP when NET_PORT was wrongly accepted).
-            let lnp_attr: [u8; 16] = {
-                let mut b = [0u8; 16];
-                b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
-                b[8..16].copy_from_slice(&8080u64.to_ne_bytes());
-                b
-            };
-            let lnp_attr_ptr = lnp_attr.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 2,
-                arg2: lnp_attr_ptr,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule NET_PORT(6.7) rule_type not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!("[syscall/linux]   landlock_add_rule attr validation: OK");
+                #[inline(never)]
+                fn landlock_add_rule() -> crate::error::KernelResult<()> {
+                    // Batch 230 forward-compat trailing-zero E2BIG check.  Linux's
+                    // copy_struct_from_user (lib/usercopy.c) requires that any
+                    // bytes past the kernel-known size (ksize=8) are zero; the
+                    // first non-zero byte returns -E2BIG so probes can detect
+                    // what the kernel knows.
+                    //
+                    // Case A: size=16 with zero tail -> EOPNOTSUPP (passes
+                    // zero-check; landlock not initialized so terminal answer is
+                    // EOPNOTSUPP after batch 384, not ENOSYS).
+                    let landlock_pad_zero = [0u8; 16];
+                    let a = SyscallArgs {
+                        arg0: landlock_pad_zero.as_ptr() as u64,
+                        arg1: 16,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::EOPNOTSUPP)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock (attr, size=16, zero-pad) not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Case B: size=16 with non-zero byte at offset 8 -> E2BIG.
+                    let mut landlock_pad_nonzero = [0u8; 16];
+                    landlock_pad_nonzero[8] = 1;
+                    let a = SyscallArgs {
+                        arg0: landlock_pad_nonzero.as_ptr() as u64,
+                        arg1: 16,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock (attr, size=16, nonzero-pad) not E2BIG"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   landlock_create_ruleset forward-compat trailing-zero E2BIG: OK"
+                    );
+                    // landlock_add_rule bad rule_type -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 99,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: landlock_add_rule bad type not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // landlock_add_rule NULL attr -> EFAULT.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!("[syscall/linux]   FAIL: landlock_add_rule NULL not EFAULT");
+                        return Err(KernelError::InternalError);
+                    }
+                    // landlock_add_rule valid PATH_BENEATH (allowed_access=EXECUTE=0x1,
+                    // parent_fd=0) -> EOPNOTSUPP (batch 396: terminal switched from
+                    // EBADF to EOPNOTSUPP to match Linux gate 1
+                    // !landlock_initialized).
+                    let lpb_attr: [u8; 16] = {
+                        let mut b = [0u8; 16];
+                        b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
+                        b
+                    };
+                    let lpb_attr_ptr = lpb_attr.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: lpb_attr_ptr,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule valid PATH_BENEATH not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // landlock_add_rule PATH_BENEATH with allowed_access=0 -> ENOMSG
+                    // (Linux's "empty rule body" path).
+                    let lpb_empty: [u8; 16] = [0u8; 16];
+                    let lpb_empty_ptr = lpb_empty.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: lpb_empty_ptr,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::ENOMSG) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule empty PATH_BENEATH not ENOMSG"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // landlock_add_rule PATH_BENEATH with allowed_access bit
+                    // outside LANDLOCK_ACCESS_FS_MASK -> EINVAL.  Bit 0x8000 is
+                    // IOCTL_DEV, a Linux 6.10 addition that is NOT in v6.6's mask
+                    // (0x7fff = EXECUTE..TRUNCATE), so it must be rejected.  This
+                    // pins the v6.6 mask boundary (batch 522).
+                    let lpb_bad_access: [u8; 16] = {
+                        let mut b = [0u8; 16];
+                        b[0..8].copy_from_slice(&0x8000u64.to_ne_bytes());
+                        b
+                    };
+                    let lpb_bad_access_ptr = lpb_bad_access.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: lpb_bad_access_ptr,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule PATH_BENEATH IOCTL_DEV(6.10) bit not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // landlock_add_rule rule_type=2 (LANDLOCK_RULE_NET_PORT) -> EINVAL.
+                    // NET_PORT is a Linux 6.7 rule type; v6.6's switch has no case for
+                    // it and returns -EINVAL via `default`.  The rule_type gate fires
+                    // before the attr pointer/access/port checks, so a fully valid-
+                    // looking NET_PORT attr still gets EINVAL (batch 522 — was
+                    // EOPNOTSUPP when NET_PORT was wrongly accepted).
+                    let lnp_attr: [u8; 16] = {
+                        let mut b = [0u8; 16];
+                        b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
+                        b[8..16].copy_from_slice(&8080u64.to_ne_bytes());
+                        b
+                    };
+                    let lnp_attr_ptr = lnp_attr.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 2,
+                        arg2: lnp_attr_ptr,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule NET_PORT(6.7) rule_type not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!("[syscall/linux]   landlock_add_rule attr validation: OK");
 
-            // landlock_add_rule flags is C `__u32`; the high 32 bits of
-            // arg3 must be masked before the `flags != 0` rejection gate.
-            // Pre-batch the gate compared at u64 width, so any high-half
-            // garbage returned EINVAL where Linux's truncated flags=0 falls
-            // through to the rule_type / attr gates.
-            //
-            // (a) flags=0x1_0000_0000 (high-only), rule_type=1 (PATH_BENEATH),
-            //     attr=NULL: truncates to 0, flag gate passes, downstream
-            //     attr=NULL gate returns EFAULT.  Pre-fix returned EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: 0,
-                arg3: 0x1_0000_0000,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule(high-only,NULL) not EFAULT"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (b) flags=0x1_0000_0001 (high|bad-low 1): truncates to 1, gate
-            //     still rejects.  Verifies the mask continues to reject any
-            //     nonzero low half after the high-bit strip.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: 0,
-                arg3: 0x1_0000_0001,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule(high|bad-low) not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (c) flags=0x1_0000_0000 with bad rule_type=99: truncates to 0,
-            //     flag gate passes, downstream rule_type gate fires EINVAL.
-            //     Verifies subsequent gates still work after flag truncation.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 99,
-                arg2: 0,
-                arg3: 0x1_0000_0000,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule(high-only,type=99) not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (d) flags=0x1_0000_0000 with valid PATH_BENEATH attr
-            //     (allowed_access=EXECUTE=0x1): truncates to 0, flag gate
-            //     passes, full pre-validate flow runs to the terminal
-            //     EOPNOTSUPP (batch 396).  Pre-fix returned EINVAL on the
-            //     flag gate.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: lpb_attr_ptr,
-                arg3: 0x1_0000_0000,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule(high-only,valid) not EOPNOTSUPP"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   landlock_add_rule unsigned-int truncation (high-half ignored): OK"
-            );
+                    // landlock_add_rule flags is C `__u32`; the high 32 bits of
+                    // arg3 must be masked before the `flags != 0` rejection gate.
+                    // Pre-batch the gate compared at u64 width, so any high-half
+                    // garbage returned EINVAL where Linux's truncated flags=0 falls
+                    // through to the rule_type / attr gates.
+                    //
+                    // (a) flags=0x1_0000_0000 (high-only), rule_type=1 (PATH_BENEATH),
+                    //     attr=NULL: truncates to 0, flag gate passes, downstream
+                    //     attr=NULL gate returns EFAULT.  Pre-fix returned EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0x1_0000_0000,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule(high-only,NULL) not EFAULT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (b) flags=0x1_0000_0001 (high|bad-low 1): truncates to 1, gate
+                    //     still rejects.  Verifies the mask continues to reject any
+                    //     nonzero low half after the high-bit strip.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0x1_0000_0001,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule(high|bad-low) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (c) flags=0x1_0000_0000 with bad rule_type=99: truncates to 0,
+                    //     flag gate passes, downstream rule_type gate fires EINVAL.
+                    //     Verifies subsequent gates still work after flag truncation.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 99,
+                        arg2: 0,
+                        arg3: 0x1_0000_0000,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule(high-only,type=99) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (d) flags=0x1_0000_0000 with valid PATH_BENEATH attr
+                    //     (allowed_access=EXECUTE=0x1): truncates to 0, flag gate
+                    //     passes, full pre-validate flow runs to the terminal
+                    //     EOPNOTSUPP (batch 396).  Pre-fix returned EINVAL on the
+                    //     flag gate.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: lpb_attr_ptr,
+                        arg3: 0x1_0000_0000,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule(high-only,valid) not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   landlock_add_rule unsigned-int truncation (high-half ignored): OK"
+                    );
 
-            // landlock_add_rule rule_type is C enum (int-sized); the high 32
-            // bits of arg1 must be masked before the matches!(1 | 2) gate.
-            // Pre-batch the gate compared at u64 width, so any high-half
-            // garbage (even with low half = 1 or 2) failed the match and
-            // returned EINVAL where Linux's truncated rule_type matches and
-            // advances to the attr gate.
-            //
-            // (a) rule_type=0x1_0000_0001 (high|PATH_BENEATH), attr=NULL:
-            //     truncates to 1, matches PATH_BENEATH, downstream attr=NULL
-            //     gate returns EFAULT.  Pre-fix returned EINVAL because the
-            //     u64 match failed.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1_0000_0001,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|1) not EFAULT"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (b) rule_type=0x1_0000_0002 (high|NET_PORT), attr=NULL:
-            //     truncates to 2.  NET_PORT (2) is a Linux 6.7 rule type
-            //     absent from v6.6, so the rule_type gate returns EINVAL
-            //     (before the attr=NULL gate could return EFAULT).  This
-            //     still exercises the high-half truncation: the EINVAL comes
-            //     from the truncated low value 2, not from the raw u64.
-            //     (Batch 522 — was EFAULT when NET_PORT was wrongly accepted.)
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1_0000_0002,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|2) not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (c) rule_type=0x1_0000_0000 (high|0=invalid), attr=NULL:
-            //     truncates to 0, NOT in {1,2}, rule_type gate fires EINVAL.
-            //     Verifies the mask continues to reject unknown rule_type
-            //     after the high-bit strip.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1_0000_0000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|0) not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (d) rule_type=0x1_0000_0001 with valid PATH_BENEATH attr
-            //     (allowed_access=EXECUTE=0x1): truncates to 1, full pre-
-            //     validate flow runs to the terminal EOPNOTSUPP (batch
-            //     396).  Pre-fix returned EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1_0000_0001,
-                arg2: lpb_attr_ptr,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|1,valid) not EOPNOTSUPP"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   landlock_add_rule rule_type int truncation (high-half ignored): OK"
-            );
+                    // landlock_add_rule rule_type is C enum (int-sized); the high 32
+                    // bits of arg1 must be masked before the matches!(1 | 2) gate.
+                    // Pre-batch the gate compared at u64 width, so any high-half
+                    // garbage (even with low half = 1 or 2) failed the match and
+                    // returned EINVAL where Linux's truncated rule_type matches and
+                    // advances to the attr gate.
+                    //
+                    // (a) rule_type=0x1_0000_0001 (high|PATH_BENEATH), attr=NULL:
+                    //     truncates to 1, matches PATH_BENEATH, downstream attr=NULL
+                    //     gate returns EFAULT.  Pre-fix returned EINVAL because the
+                    //     u64 match failed.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x1_0000_0001,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|1) not EFAULT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (b) rule_type=0x1_0000_0002 (high|NET_PORT), attr=NULL:
+                    //     truncates to 2.  NET_PORT (2) is a Linux 6.7 rule type
+                    //     absent from v6.6, so the rule_type gate returns EINVAL
+                    //     (before the attr=NULL gate could return EFAULT).  This
+                    //     still exercises the high-half truncation: the EINVAL comes
+                    //     from the truncated low value 2, not from the raw u64.
+                    //     (Batch 522 — was EFAULT when NET_PORT was wrongly accepted.)
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x1_0000_0002,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|2) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (c) rule_type=0x1_0000_0000 (high|0=invalid), attr=NULL:
+                    //     truncates to 0, NOT in {1,2}, rule_type gate fires EINVAL.
+                    //     Verifies the mask continues to reject unknown rule_type
+                    //     after the high-bit strip.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x1_0000_0000,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|0) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (d) rule_type=0x1_0000_0001 with valid PATH_BENEATH attr
+                    //     (allowed_access=EXECUTE=0x1): truncates to 1, full pre-
+                    //     validate flow runs to the terminal EOPNOTSUPP (batch
+                    //     396).  Pre-fix returned EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x1_0000_0001,
+                        arg2: lpb_attr_ptr,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|1,valid) not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   landlock_add_rule rule_type int truncation (high-half ignored): OK"
+                    );
 
-            // landlock_restrict_self undefined flag bit (0x8) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 8,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_restrict_self undef flag not EINVAL"
-                );
-                return Err(KernelError::InternalError);
+                    // landlock_restrict_self undefined flag bit (0x8) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 8,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_restrict_self undef flag not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
+                }
+                landlock_add_rule()?;
             }
-            // Batch 396: terminals switched from EBADF to EOPNOTSUPP.
-            // Linux gate 1 in restrict_self is !landlock_initialized →
-            // EOPNOTSUPP before any flag/fd touch; we model
-            // landlock_initialized=false so every valid call shape
-            // terminates EOPNOTSUPP.
-            // landlock_restrict_self valid (flags=0) -> EOPNOTSUPP.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP)
             {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_restrict_self valid not EOPNOTSUPP"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // Batch 524: the LANDLOCK_RESTRICT_SELF_LOG_* bits do NOT exist
-            // in v6.6 (LOG_SAME_EXEC_OFF/LOG_NEW_EXEC_ON = 6.10,
-            // LOG_SUBDOMAINS_OFF = 6.12).  v6.6 gates `if (flags) return
-            // -EINVAL;`, so each of these must now return EINVAL.
-            // flags=0x1 (6.10 LOG_SAME_EXEC_OFF) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 1,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_restrict_self flags=0x1 (6.10) not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // flags=0x2 (6.10 LOG_NEW_EXEC_ON) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 2,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_restrict_self flags=0x2 (6.10) not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // flags=0x4 (6.12 LOG_SUBDOMAINS_OFF) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 4,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_restrict_self flags=0x4 (6.12) not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // flags=0x7 (all three post-6.6 log bits) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 7,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_restrict_self flags=0x7 not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            // flags=0x101 (undefined high bit) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x101,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_restrict_self high bit not EINVAL"
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   landlock_restrict_self flags!=0 -> EINVAL (v6.6: no flags): OK"
-            );
+                #[inline(never)]
+                fn landlock_restrict_self() -> crate::error::KernelResult<()> {
+                    // Batch 396: terminals switched from EBADF to EOPNOTSUPP.
+                    // Linux gate 1 in restrict_self is !landlock_initialized →
+                    // EOPNOTSUPP before any flag/fd touch; we model
+                    // landlock_initialized=false so every valid call shape
+                    // terminates EOPNOTSUPP.
+                    // landlock_restrict_self valid (flags=0) -> EOPNOTSUPP.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_restrict_self valid not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Batch 524: the LANDLOCK_RESTRICT_SELF_LOG_* bits do NOT exist
+                    // in v6.6 (LOG_SAME_EXEC_OFF/LOG_NEW_EXEC_ON = 6.10,
+                    // LOG_SUBDOMAINS_OFF = 6.12).  v6.6 gates `if (flags) return
+                    // -EINVAL;`, so each of these must now return EINVAL.
+                    // flags=0x1 (6.10 LOG_SAME_EXEC_OFF) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_restrict_self flags=0x1 (6.10) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // flags=0x2 (6.10 LOG_NEW_EXEC_ON) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 2,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_restrict_self flags=0x2 (6.10) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // flags=0x4 (6.12 LOG_SUBDOMAINS_OFF) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_restrict_self flags=0x4 (6.12) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // flags=0x7 (all three post-6.6 log bits) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 7,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_restrict_self flags=0x7 not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // flags=0x101 (undefined high bit) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x101,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_restrict_self high bit not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!(
+                        "[syscall/linux]   landlock_restrict_self flags!=0 -> EINVAL (v6.6: no flags): OK"
+                    );
 
-            // Batch 320: landlock_restrict_self unsigned-int truncation —
-            // high-half register garbage must be stripped before the
-            // LANDLOCK_RESTRICT_SELF_FLAGS mask check.
-            //
-            // Linux signature: `int landlock_restrict_self(int ruleset_fd,
-            // __u32 flags)`.  flags is C __u32 → low 32 bits only.  The
-            // AMD64 syscall ABI does not zero-extend int args, so high-half
-            // garbage must be stripped before the `flags != 0` test.  The
-            // key truncation probe is (c): a value whose LOW half is zero
-            // must reach the EOPNOTSUPP terminal — proving the high half is
-            // ignored.  (a)/(b)/(d) carry non-zero low halves and therefore
-            // hit the v6.6 `if (flags) return -EINVAL;` gate (batch 524).
-            //
-            // (a) landlock_restrict_self(0, 0x1_0000_0001) → EINVAL
-            //     (truncates to 1; non-zero -> EINVAL).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1_0000_0001,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-            if v != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_restrict_self(high|0x1) -> {} (expected -EINVAL)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
+                    // Batch 320: landlock_restrict_self unsigned-int truncation —
+                    // high-half register garbage must be stripped before the
+                    // LANDLOCK_RESTRICT_SELF_FLAGS mask check.
+                    //
+                    // Linux signature: `int landlock_restrict_self(int ruleset_fd,
+                    // __u32 flags)`.  flags is C __u32 → low 32 bits only.  The
+                    // AMD64 syscall ABI does not zero-extend int args, so high-half
+                    // garbage must be stripped before the `flags != 0` test.  The
+                    // key truncation probe is (c): a value whose LOW half is zero
+                    // must reach the EOPNOTSUPP terminal — proving the high half is
+                    // ignored.  (a)/(b)/(d) carry non-zero low halves and therefore
+                    // hit the v6.6 `if (flags) return -EINVAL;` gate (batch 524).
+                    //
+                    // (a) landlock_restrict_self(0, 0x1_0000_0001) → EINVAL
+                    //     (truncates to 1; non-zero -> EINVAL).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x1_0000_0001,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
+                    if v != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_restrict_self(high|0x1) -> {} (expected -EINVAL)",
+                            v
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-            // (b) landlock_restrict_self(0, 0x1_0000_0007) → EINVAL
-            //     (truncates to 7; non-zero -> EINVAL).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1_0000_0007,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-            if v != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_restrict_self(high|0x7) -> {} (expected -EINVAL)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
+                    // (b) landlock_restrict_self(0, 0x1_0000_0007) → EINVAL
+                    //     (truncates to 7; non-zero -> EINVAL).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x1_0000_0007,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
+                    if v != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_restrict_self(high|0x7) -> {} (expected -EINVAL)",
+                            v
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-            // (c) landlock_restrict_self(0, 0x1_0000_0000) → EOPNOTSUPP
-            //     (high-half only, low half zero; truncates to 0, flag gate
-            //     passes, modelled terminal EOPNOTSUPP).  This is the probe
-            //     that proves the high half is stripped — if it weren't,
-            //     0x1_0000_0000 != 0 would yield EINVAL.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1_0000_0000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-            if v != -i64::from(errno::EOPNOTSUPP) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_restrict_self(high-half-zero) -> {} (expected -EOPNOTSUPP)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
+                    // (c) landlock_restrict_self(0, 0x1_0000_0000) → EOPNOTSUPP
+                    //     (high-half only, low half zero; truncates to 0, flag gate
+                    //     passes, modelled terminal EOPNOTSUPP).  This is the probe
+                    //     that proves the high half is stripped — if it weren't,
+                    //     0x1_0000_0000 != 0 would yield EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x1_0000_0000,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
+                    if v != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_restrict_self(high-half-zero) -> {} (expected -EOPNOTSUPP)",
+                            v
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-            // (d) landlock_restrict_self(0, 0x1_0000_0008) → EINVAL
-            //     (truncates to 0x8; non-zero -> EINVAL).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1_0000_0008,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-            if v != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: landlock_restrict_self(high|bad-low) -> {} (expected -EINVAL)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
+                    // (d) landlock_restrict_self(0, 0x1_0000_0008) → EINVAL
+                    //     (truncates to 0x8; non-zero -> EINVAL).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x1_0000_0008,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
+                    if v != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_restrict_self(high|bad-low) -> {} (expected -EINVAL)",
+                            v
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-            serial_println!(
-                "[syscall/linux]   landlock_restrict_self unsigned-int truncation (high-half ignored): OK"
-            );
-            serial_println!(
-                "[syscall/linux]   landlock_add_rule + landlock_restrict_self terminal EOPNOTSUPP (Linux gate 1 !landlock_initialized): OK"
-            );
+                    serial_println!(
+                        "[syscall/linux]   landlock_restrict_self unsigned-int truncation (high-half ignored): OK"
+                    );
+                    serial_println!(
+                        "[syscall/linux]   landlock_add_rule + landlock_restrict_self terminal EOPNOTSUPP (Linux gate 1 !landlock_initialized): OK"
+                    );
 
-            // kcmp bad type, valid pids -> EINVAL.  Type validation lives
-            // in Linux's switch-default arm, so it fires only after the
-            // pid lookup succeeds.  In kernel context our liveness check
-            // is bypassed so the type gate is reached for any non-negative
-            // pid pair.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 99,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: kcmp bad type not EINVAL");
-                return Err(KernelError::InternalError);
+                    // kcmp bad type, valid pids -> EINVAL.  Type validation lives
+                    // in Linux's switch-default arm, so it fires only after the
+                    // pid lookup succeeds.  In kernel context our liveness check
+                    // is bypassed so the type gate is reached for any non-negative
+                    // pid pair.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: kcmp bad type not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // kcmp negative pid, valid type -> ESRCH.
+                    let a = SyscallArgs {
+                        arg0: u64::MAX,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::ESRCH) {
+                        serial_println!("[syscall/linux]   FAIL: kcmp neg pid not ESRCH");
+                        return Err(KernelError::InternalError);
+                    }
+                    // kcmp negative pid AND bad type -> ESRCH (pid lookup fires
+                    // ahead of the switch-default's EINVAL).  Pre-batch this
+                    // returned EINVAL because the type gate fired first.
+                    let a = SyscallArgs {
+                        arg0: u64::MAX,
+                        arg1: 0,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::ESRCH) {
+                        serial_println!("[syscall/linux]   FAIL: kcmp neg pid + bad type not ESRCH");
+                        return Err(KernelError::InternalError);
+                    }
+                    // kcmp valid pid1, negative pid2, bad type -> ESRCH (either
+                    // negative pid is enough to discriminate ahead of EINVAL).
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: u64::MAX,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::ESRCH) {
+                        serial_println!("[syscall/linux]   FAIL: kcmp pid2-neg + bad type not ESRCH");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
+                }
+                landlock_restrict_self()?;
             }
-            // kcmp negative pid, valid type -> ESRCH.
-            let a = SyscallArgs {
-                arg0: u64::MAX,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::ESRCH) {
-                serial_println!("[syscall/linux]   FAIL: kcmp neg pid not ESRCH");
-                return Err(KernelError::InternalError);
-            }
-            // kcmp negative pid AND bad type -> ESRCH (pid lookup fires
-            // ahead of the switch-default's EINVAL).  Pre-batch this
-            // returned EINVAL because the type gate fired first.
-            let a = SyscallArgs {
-                arg0: u64::MAX,
-                arg1: 0,
-                arg2: 99,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::ESRCH) {
-                serial_println!("[syscall/linux]   FAIL: kcmp neg pid + bad type not ESRCH");
-                return Err(KernelError::InternalError);
-            }
-            // kcmp valid pid1, negative pid2, bad type -> ESRCH (either
-            // negative pid is enough to discriminate ahead of EINVAL).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: u64::MAX,
-                arg2: 99,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::ESRCH) {
-                serial_println!("[syscall/linux]   FAIL: kcmp pid2-neg + bad type not ESRCH");
-                return Err(KernelError::InternalError);
-            }
-            // Batch 111: kcmp upgraded from -ENOSYS to a real comparator.
-            // Same TID + KCMP_VM -> equal (0).  Kernel-context fallback uses
-            // raw tid compare since no thread/process tables exist here.
-            let a = SyscallArgs {
-                arg0: 7,
-                arg1: 7,
-                arg2: 1,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: kcmp same tid VM not 0");
-                return Err(KernelError::InternalError);
-            }
-            // Different TIDs + KCMP_VM -> ordered (1 if tid1 < tid2).
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: 2,
-                arg2: 1,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != 1 {
-                serial_println!("[syscall/linux]   FAIL: kcmp 1<2 VM not 1");
-                return Err(KernelError::InternalError);
-            }
-            // Different TIDs reverse order + KCMP_FILES -> 2.
-            let a = SyscallArgs {
-                arg0: 9,
-                arg1: 3,
-                arg2: 2,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != 2 {
-                serial_println!("[syscall/linux]   FAIL: kcmp 9>3 FILES not 2");
-                return Err(KernelError::InternalError);
-            }
-            // KCMP_FILE same tid, same idx -> 0 (kernel-context fallback).
-            let a = SyscallArgs {
-                arg0: 5,
-                arg1: 5,
-                arg2: 0,
-                arg3: 4,
-                arg4: 4,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: kcmp FILE same idx not 0");
-                return Err(KernelError::InternalError);
-            }
-            // KCMP_FILE same tid, idx1 < idx2 -> 1.
-            let a = SyscallArgs {
-                arg0: 5,
-                arg1: 5,
-                arg2: 0,
-                arg3: 3,
-                arg4: 8,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != 1 {
-                serial_println!("[syscall/linux]   FAIL: kcmp FILE idx 3<8 not 1");
-                return Err(KernelError::InternalError);
-            }
-            // KCMP_FILE different tids -> deterministic order by (tid1, tid2).
-            let a = SyscallArgs {
-                arg0: 2,
-                arg1: 6,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != 1 {
-                serial_println!("[syscall/linux]   FAIL: kcmp FILE diff proc not 1");
-                return Err(KernelError::InternalError);
-            }
-            // KCMP_EPOLL_TFD with NULL idx2 -> EFAULT.
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: 1,
-                arg2: 7,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::EFAULT) {
-                serial_println!("[syscall/linux]   FAIL: kcmp EPOLL_TFD null not EFAULT");
-                return Err(KernelError::InternalError);
-            }
-            // KCMP_EPOLL_TFD with valid idx2 -> 3 (not comparable, no epoll).
-            let slot_buf = [0u8; 16];
-            let slot_ptr = slot_buf.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: 1,
-                arg2: 7,
-                arg3: 0,
-                arg4: slot_ptr,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != 3 {
-                serial_println!("[syscall/linux]   FAIL: kcmp EPOLL_TFD valid not 3");
-                return Err(KernelError::InternalError);
-            }
-            serial_println!("[syscall/linux]   kcmp pid-ESRCH-ahead-of-type-EINVAL gate order: OK");
+            {
+                #[inline(never)]
+                fn kcmp_restart_syscall() -> crate::error::KernelResult<()> {
+                    // Batch 111: kcmp upgraded from -ENOSYS to a real comparator.
+                    // Same TID + KCMP_VM -> equal (0).  Kernel-context fallback uses
+                    // raw tid compare since no thread/process tables exist here.
+                    let a = SyscallArgs {
+                        arg0: 7,
+                        arg1: 7,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: kcmp same tid VM not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // Different TIDs + KCMP_VM -> ordered (1 if tid1 < tid2).
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 2,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != 1 {
+                        serial_println!("[syscall/linux]   FAIL: kcmp 1<2 VM not 1");
+                        return Err(KernelError::InternalError);
+                    }
+                    // Different TIDs reverse order + KCMP_FILES -> 2.
+                    let a = SyscallArgs {
+                        arg0: 9,
+                        arg1: 3,
+                        arg2: 2,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != 2 {
+                        serial_println!("[syscall/linux]   FAIL: kcmp 9>3 FILES not 2");
+                        return Err(KernelError::InternalError);
+                    }
+                    // KCMP_FILE same tid, same idx -> 0 (kernel-context fallback).
+                    let a = SyscallArgs {
+                        arg0: 5,
+                        arg1: 5,
+                        arg2: 0,
+                        arg3: 4,
+                        arg4: 4,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: kcmp FILE same idx not 0");
+                        return Err(KernelError::InternalError);
+                    }
+                    // KCMP_FILE same tid, idx1 < idx2 -> 1.
+                    let a = SyscallArgs {
+                        arg0: 5,
+                        arg1: 5,
+                        arg2: 0,
+                        arg3: 3,
+                        arg4: 8,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != 1 {
+                        serial_println!("[syscall/linux]   FAIL: kcmp FILE idx 3<8 not 1");
+                        return Err(KernelError::InternalError);
+                    }
+                    // KCMP_FILE different tids -> deterministic order by (tid1, tid2).
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 6,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != 1 {
+                        serial_println!("[syscall/linux]   FAIL: kcmp FILE diff proc not 1");
+                        return Err(KernelError::InternalError);
+                    }
+                    // KCMP_EPOLL_TFD with NULL idx2 -> EFAULT.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 7,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!("[syscall/linux]   FAIL: kcmp EPOLL_TFD null not EFAULT");
+                        return Err(KernelError::InternalError);
+                    }
+                    // KCMP_EPOLL_TFD with valid idx2 -> 3 (not comparable, no epoll).
+                    let slot_buf = [0u8; 16];
+                    let slot_ptr = slot_buf.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 7,
+                        arg3: 0,
+                        arg4: slot_ptr,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != 3 {
+                        serial_println!("[syscall/linux]   FAIL: kcmp EPOLL_TFD valid not 3");
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!("[syscall/linux]   kcmp pid-ESRCH-ahead-of-type-EINVAL gate order: OK");
 
-            // Batch 295: x86_64 syscall ABI register truncation for kcmp's
-            // declared C types — `pid_t pid1`, `pid_t pid2`, `int type`.
-            // Pre-batch the dispatcher read `arg2` raw (u64) and used the
-            // raw 64-bit `args.arg0`/`args.arg1` as the thread-table key and
-            // ordering operand, so probes with sentinel high bits saw
-            // results Linux cannot produce.
+                    // Batch 295: x86_64 syscall ABI register truncation for kcmp's
+                    // declared C types — `pid_t pid1`, `pid_t pid2`, `int type`.
+                    // Pre-batch the dispatcher read `arg2` raw (u64) and used the
+                    // raw 64-bit `args.arg0`/`args.arg1` as the thread-table key and
+                    // ordering operand, so probes with sentinel high bits saw
+                    // results Linux cannot produce.
 
-            // (a) type = 0x1_0000_0007 + valid kcmp_epoll_slot ptr.
-            // Linux truncates to int -> 7 (KCMP_EPOLL_TFD), returns 3.
-            // Pre-batch: raw 0x1_0000_0007 > 7 -> EINVAL (wrong).
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: 1,
-                arg2: 0x1_0000_0007,
-                arg3: 0,
-                arg4: slot_ptr,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != 3 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: kcmp type high-half not truncated to EPOLL_TFD"
-                );
-                return Err(KernelError::InternalError);
-            }
+                    // (a) type = 0x1_0000_0007 + valid kcmp_epoll_slot ptr.
+                    // Linux truncates to int -> 7 (KCMP_EPOLL_TFD), returns 3.
+                    // Pre-batch: raw 0x1_0000_0007 > 7 -> EINVAL (wrong).
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 0x1_0000_0007,
+                        arg3: 0,
+                        arg4: slot_ptr,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != 3 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: kcmp type high-half not truncated to EPOLL_TFD"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-            // (b) type = 0xFFFF_FFFF.  As i32 this is -1, which has no
-            // matching switch arm -> EINVAL (default).  Pre-batch we already
-            // returned EINVAL via the unsigned > 7 path, but for the wrong
-            // reason; the truncation-aware sign-check is the Linux gate.
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: 1,
-                arg2: 0xFFFF_FFFF,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: kcmp type i32(-1) not EINVAL");
-                return Err(KernelError::InternalError);
-            }
+                    // (b) type = 0xFFFF_FFFF.  As i32 this is -1, which has no
+                    // matching switch arm -> EINVAL (default).  Pre-batch we already
+                    // returned EINVAL via the unsigned > 7 path, but for the wrong
+                    // reason; the truncation-aware sign-check is the Linux gate.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 0xFFFF_FFFF,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: kcmp type i32(-1) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
 
-            // (c) (pid1 = 0x1_0000_0001, pid2 = 0x2, type = KCMP_VM).
-            // Linux truncates both pids to i32 -> (1, 2).  In kernel-ctx the
-            // owner table is empty, so the fallback compares the *truncated*
-            // tids: 1 < 2 -> result 1.  Pre-batch the raw-u64 tids gave
-            // 0x1_0000_0001 > 2 -> result 2.
-            let a = SyscallArgs {
-                arg0: 0x1_0000_0001,
-                arg1: 0x2,
-                arg2: 1,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != 1 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: kcmp pid high-half not truncated for VM order"
-                );
-                return Err(KernelError::InternalError);
-            }
+                    // (c) (pid1 = 0x1_0000_0001, pid2 = 0x2, type = KCMP_VM).
+                    // Linux truncates both pids to i32 -> (1, 2).  In kernel-ctx the
+                    // owner table is empty, so the fallback compares the *truncated*
+                    // tids: 1 < 2 -> result 1.  Pre-batch the raw-u64 tids gave
+                    // 0x1_0000_0001 > 2 -> result 2.
+                    let a = SyscallArgs {
+                        arg0: 0x1_0000_0001,
+                        arg1: 0x2,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != 1 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: kcmp pid high-half not truncated for VM order"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-            // (d) (pid1 = 0x1_0000_0005, pid2 = 0x5, type = KCMP_FILE,
-            //      idx1 = 4, idx2 = 4).  Linux truncates both pids -> (5, 5),
-            // the kernel-context fallback sees same_proc via tid1 == tid2,
-            // and idx1 == idx2 -> 0.  Pre-batch the raw tids differed, so
-            // we took the "different owners" arm and returned 2 because
-            // 0x1_0000_0005 > 5.
-            let a = SyscallArgs {
-                arg0: 0x1_0000_0005,
-                arg1: 0x5,
-                arg2: 0,
-                arg3: 4,
-                arg4: 4,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::KCMP, &a).value != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: kcmp pid high-half not truncated for FILE same_proc"
-                );
-                return Err(KernelError::InternalError);
-            }
+                    // (d) (pid1 = 0x1_0000_0005, pid2 = 0x5, type = KCMP_FILE,
+                    //      idx1 = 4, idx2 = 4).  Linux truncates both pids -> (5, 5),
+                    // the kernel-context fallback sees same_proc via tid1 == tid2,
+                    // and idx1 == idx2 -> 0.  Pre-batch the raw tids differed, so
+                    // we took the "different owners" arm and returned 2 because
+                    // 0x1_0000_0005 > 5.
+                    let a = SyscallArgs {
+                        arg0: 0x1_0000_0005,
+                        arg1: 0x5,
+                        arg2: 0,
+                        arg3: 4,
+                        arg4: 4,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::KCMP, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: kcmp pid high-half not truncated for FILE same_proc"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-            serial_println!("[syscall/linux]   kcmp pid_t/int truncation: OK");
+                    serial_println!("[syscall/linux]   kcmp pid_t/int truncation: OK");
 
-            // restart_syscall -> EINTR.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::RESTART_SYSCALL, &a).value != -i64::from(errno::EINTR) {
-                serial_println!("[syscall/linux]   FAIL: restart_syscall not EINTR");
-                return Err(KernelError::InternalError);
+                    // restart_syscall -> EINTR.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::RESTART_SYSCALL, &a).value != -i64::from(errno::EINTR) {
+                        serial_println!("[syscall/linux]   FAIL: restart_syscall not EINTR");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
+                }
+                kcmp_restart_syscall()?;
             }
         }
         Ok(())

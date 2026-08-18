@@ -196,6 +196,21 @@ impl PayloadPair {
         }
     }
 
+    /// Copy `src` over `self` in place.  See [`EventEntry::copy_from`] for why
+    /// this exists rather than a `clone_from`.
+    fn copy_from(&mut self, src: &Self) {
+        let Self {
+            key,
+            key_len,
+            value,
+            value_len,
+        } = src;
+        self.key = *key;
+        self.key_len = *key_len;
+        self.value = *value;
+        self.value_len = *value_len;
+    }
+
     fn set(&mut self, key: &str, value: &str) {
         let kb = key.as_bytes();
         let kl = kb.len().min(MAX_PAYLOAD_KEY_LEN);
@@ -272,6 +287,59 @@ impl EventEntry {
             payload: [const { PayloadPair::zeroed() }; MAX_PAYLOAD_PAIRS],
             payload_count: 0,
         }
+    }
+
+    /// Copy `src` over `self` in place, field by field.
+    ///
+    /// Not `*self = src.clone()`, and not `Clone::clone_from`: a derived `Clone`
+    /// supplies only `clone`, and the default `clone_from` *is* `*self =
+    /// source.clone()`, so both spellings build a whole ~1.2 KiB `EventEntry` in
+    /// the caller's frame and then memcpy it into place.  At `opt-level = 0`
+    /// that temporary is real stack, on the one path every logged event takes.
+    /// Assigning field by field lowers to a memcpy from `src` straight into
+    /// `self` with nothing in between.
+    ///
+    /// Deriving `Copy` would also avoid the temporary, but it would make every
+    /// *accidental* copy of a 1.2 KiB struct silent and free to write — which is
+    /// the class of bug this is fixing, so the type deliberately stays non-`Copy`
+    /// and the one place that genuinely must copy says so explicitly.
+    ///
+    /// The source is destructured rather than read through `src.field` so that
+    /// adding a field to `EventEntry` is a compile error here, instead of a
+    /// field that silently stops being copied into the ring.
+    fn copy_from(&mut self, src: &Self) {
+        let Self {
+            seq,
+            timestamp_ns,
+            severity,
+            namespace,
+            namespace_len,
+            source_pid,
+            source_service,
+            source_service_len,
+            message,
+            message_len,
+            payload,
+            payload_count,
+        } = src;
+        self.seq = *seq;
+        self.timestamp_ns = *timestamp_ns;
+        self.severity = *severity;
+        self.namespace = *namespace;
+        self.namespace_len = *namespace_len;
+        self.source_pid = *source_pid;
+        self.source_service = *source_service;
+        self.source_service_len = *source_service_len;
+        self.message = *message;
+        self.message_len = *message_len;
+        // All `MAX_PAYLOAD_PAIRS` pairs are copied, not just the
+        // `payload_count` live ones: leaving the tail holding a previous
+        // event's key/value bytes would put one subsystem's data in another's
+        // ring slot, reachable by anything that reads past `payload_count`.
+        for (dst, pair) in self.payload.iter_mut().zip(payload.iter()) {
+            dst.copy_from(pair);
+        }
+        self.payload_count = *payload_count;
     }
 
     /// Get the namespace as a string slice.
@@ -403,6 +471,22 @@ impl EventEntry {
 ///     .kv("restart_count", "3")
 ///     .emit();
 /// ```
+///
+/// # Why the chain takes `&mut self`
+///
+/// The obvious builder spelling -- `fn pid(mut self, ..) -> Self` -- moves the
+/// whole builder once per link, and this builder *is* an [`EventEntry`]: about
+/// 1.2 KiB of fixed-size byte arrays.  At `opt-level = 0` there is no move
+/// elision, so a four-link chain materialises four separate ~1.2 KiB
+/// temporaries in the **caller's** frame and memcpies between them, and every
+/// site that logs an event pays it.  That was ~5 KiB per chain, and it is what
+/// made `eventlog::self_test`'s largest case claim 13 024 bytes of stack for
+/// twenty lines of test.
+///
+/// Taking `&mut self` and returning `&mut Self` leaves the call sites in the
+/// doc example above untouched -- a method taking `&mut self` may be called on
+/// the temporary that `new` returns, which lives to the end of the statement --
+/// while the builder is constructed once and mutated in place.
 pub struct EventBuilder {
     entry: EventEntry,
 }
@@ -422,13 +506,13 @@ impl EventBuilder {
     }
 
     /// Set the source process ID.
-    pub fn pid(mut self, pid: u32) -> Self {
+    pub fn pid(&mut self, pid: u32) -> &mut Self {
         self.entry.source_pid = pid;
         self
     }
 
     /// Set the source service name.
-    pub fn service(mut self, name: &str) -> Self {
+    pub fn service(&mut self, name: &str) -> &mut Self {
         let bytes = name.as_bytes();
         let len = bytes.len().min(MAX_SERVICE_LEN);
         self.entry.source_service[..len].copy_from_slice(bytes.get(..len).unwrap_or(&[]));
@@ -437,7 +521,7 @@ impl EventBuilder {
     }
 
     /// Set the human-readable message.
-    pub fn message(mut self, msg: &str) -> Self {
+    pub fn message(&mut self, msg: &str) -> &mut Self {
         let bytes = msg.as_bytes();
         let len = bytes.len().min(MAX_MESSAGE_LEN);
         self.entry.message[..len].copy_from_slice(bytes.get(..len).unwrap_or(&[]));
@@ -446,7 +530,7 @@ impl EventBuilder {
     }
 
     /// Set the message from format arguments (avoids heap allocation).
-    pub fn message_fmt(mut self, args: core::fmt::Arguments<'_>) -> Self {
+    pub fn message_fmt(&mut self, args: core::fmt::Arguments<'_>) -> &mut Self {
         let mut writer = MsgWriter {
             buf: &mut self.entry.message,
             pos: 0,
@@ -457,7 +541,7 @@ impl EventBuilder {
     }
 
     /// Add a key-value pair to the structured payload.
-    pub fn kv(mut self, key: &str, value: &str) -> Self {
+    pub fn kv(&mut self, key: &str, value: &str) -> &mut Self {
         let idx = self.entry.payload_count as usize;
         if idx < MAX_PAYLOAD_PAIRS {
             self.entry.payload[idx].set(key, value);
@@ -467,8 +551,8 @@ impl EventBuilder {
     }
 
     /// Submit the event to the global event log.
-    pub fn emit(self) {
-        emit_event(self.entry);
+    pub fn emit(&self) {
+        emit_event(&self.entry);
     }
 }
 
@@ -552,12 +636,16 @@ impl EventRing {
     }
 
     /// Write an event entry.  Returns the assigned sequence number.
-    fn write(&mut self, mut entry: EventEntry) -> u64 {
+    ///
+    /// Takes the entry by reference because an `EventEntry` is ~1.2 KiB and at
+    /// `opt-level = 0` every by-value hop along the emit path costs a full copy
+    /// of it in the caller's frame.  The one copy that genuinely has to happen —
+    /// into the ring slot — is [`EventEntry::copy_from`], below.
+    fn write(&mut self, entry: &EventEntry) -> u64 {
         self.ensure_init();
 
         let seq = self.total_written;
-        entry.seq = seq;
-        entry.timestamp_ns = current_timestamp_ns();
+        let timestamp_ns = current_timestamp_ns();
 
         // Update severity counter.
         let sev_idx = entry.severity.numeric() as usize;
@@ -586,12 +674,15 @@ impl EventRing {
 
         // Echo to serial if severity is high enough.
         if entry.severity >= self.serial_echo_level {
-            echo_serial(&entry);
+            echo_serial(entry);
         }
 
-        // Store in ring buffer.
+        // Store in ring buffer.  `seq` and `timestamp_ns` are stamped into the
+        // slot rather than onto the caller's entry, which is now shared.
         if let Some(slot) = self.entries.get_mut(self.write_idx) {
-            *slot = entry;
+            slot.copy_from(entry);
+            slot.seq = seq;
+            slot.timestamp_ns = timestamp_ns;
         }
 
         #[allow(clippy::arithmetic_side_effects)]
@@ -651,7 +742,7 @@ static GLOBAL_SEQ: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 
 /// Submit a pre-built event entry to the global event log.
-pub fn emit_event(entry: EventEntry) {
+pub fn emit_event(entry: &EventEntry) {
     let mut ring = EVENT_RING.lock();
     let seq = ring.write(entry);
     drop(ring);

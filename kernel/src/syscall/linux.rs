@@ -76360,7 +76360,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::ENOSYS) {
-                        serial_println!("[syscall/linux]   FAIL: perf_event_open(size=0) not ENOSYS");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: perf_event_open(size=0) not ENOSYS"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // perf_event_open(size=8, nonzero sub-VER0) -> E2BIG.  Linux
@@ -76378,7 +76380,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::E2BIG) {
-                        serial_println!("[syscall/linux]   FAIL: perf_event_open(size=8) not E2BIG");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: perf_event_open(size=8) not E2BIG"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // perf_event_open(size=8192) -> E2BIG (huge end of the bound).
@@ -76393,7 +76397,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::E2BIG) {
-                        serial_println!("[syscall/linux]   FAIL: perf_event_open(size=8192) not E2BIG");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: perf_event_open(size=8192) not E2BIG"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // perf_event_open(size=8192, flags=bad) -> EINVAL (flag mask
@@ -76422,7 +76428,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: perf_event_open(bad flag) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: perf_event_open(bad flag) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // perf_event_open(pid=-1, cpu=-1) -> EINVAL.
@@ -76435,7 +76443,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: perf_event_open(-1,-1) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: perf_event_open(-1,-1) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // perf_event_open(valid attr, pid=0, cpu=0) -> ENOSYS.
@@ -76614,7 +76624,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         serial_println!("[syscall/linux]   FAIL: keyctl(high|33) not EOPNOTSUPP");
                         return Err(KernelError::InternalError);
                     }
-                    serial_println!("[syscall/linux]   keyctl switch-default EOPNOTSUPP at cmd>=33: OK");
+                    serial_println!(
+                        "[syscall/linux]   keyctl switch-default EOPNOTSUPP at cmd>=33: OK"
+                    );
                     // === Batch 459: add_key / request_key Linux gate ladder ===
                     //
                     // Pre-batch behaviour:
@@ -76694,7 +76706,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::ADD_KEY, &a).value != -i64::from(errno::EPERM) {
-                        serial_println!("[syscall/linux]   FAIL: add_key(.internal type) not EPERM");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: add_key(.internal type) not EPERM"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // add_key(33-byte no-NUL type, ...) -> EINVAL (gate-2 ret>=len).
@@ -76751,7 +76765,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::ADD_KEY, &a).value != -i64::from(errno::EFAULT) {
-                        serial_println!("[syscall/linux]   FAIL: add_key(plen>0,NULL payload) not EFAULT");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: add_key(plen>0,NULL payload) not EFAULT"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // add_key("user", "k", payload, 1<<21, 0) -> EINVAL (gate-1).
@@ -76764,7 +76780,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::ADD_KEY, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: add_key(plen=2MiB,valid) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: add_key(plen=2MiB,valid) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     serial_println!(
@@ -76785,7 +76803,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::REQUEST_KEY, &a).value != -i64::from(errno::EFAULT) {
-                        serial_println!("[syscall/linux]   FAIL: request_key(NULL type) not EFAULT");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: request_key(NULL type) not EFAULT"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // request_key("", ...) -> EINVAL.
@@ -76798,7 +76818,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::REQUEST_KEY, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: request_key(empty type) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: request_key(empty type) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // request_key(".internal", ...) -> EPERM.
@@ -76811,7 +76833,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::REQUEST_KEY, &a).value != -i64::from(errno::EPERM) {
-                        serial_println!("[syscall/linux]   FAIL: request_key(.internal type) not EPERM");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: request_key(.internal type) not EPERM"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // request_key(33-byte no-NUL type, ...) -> EINVAL.
@@ -76824,7 +76848,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::REQUEST_KEY, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: request_key(33-byte type) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: request_key(33-byte type) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // request_key("user", NULL desc, _, _) -> EFAULT (NULL desc is
@@ -76838,7 +76864,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::REQUEST_KEY, &a).value != -i64::from(errno::EFAULT) {
-                        serial_println!("[syscall/linux]   FAIL: request_key(NULL desc) not EFAULT");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: request_key(NULL desc) not EFAULT"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // request_key("user", "k", NULL callout, _) -> ENOSYS (callout
@@ -76953,7 +76981,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::USERFAULTFD, &a).value != -i64::from(errno::ENOSYS) {
-                        serial_println!("[syscall/linux]   FAIL: userfaultfd(USER_MODE_ONLY) not ENOSYS");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: userfaultfd(USER_MODE_ONLY) not ENOSYS"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // userfaultfd(USER_MODE_ONLY | O_CLOEXEC) -> ENOSYS (valid
@@ -76972,7 +77002,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         );
                         return Err(KernelError::InternalError);
                     }
-                    serial_println!("[syscall/linux]   userfaultfd EPERM-before-EINVAL gate order: OK");
+                    serial_println!(
+                        "[syscall/linux]   userfaultfd EPERM-before-EINVAL gate order: OK"
+                    );
                     Ok(())
                 }
                 case()?;
@@ -77026,7 +77058,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MEMFD_CREATE, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: memfd_create(bad flag) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: memfd_create(bad flag) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // memfd_create(_, MFD_EXEC | MFD_NOEXEC_SEAL) -> EINVAL: the
@@ -77100,7 +77134,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MEMFD_CREATE, &a).value != -i64::from(errno::EBADF) {
-                        serial_println!("[syscall/linux]   FAIL: memfd_create kernel-ctx not EBADF");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: memfd_create kernel-ctx not EBADF"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // memfd_create(name, MFD_CLOEXEC | MFD_ALLOW_SEALING) -> EBADF
@@ -77115,7 +77151,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MEMFD_CREATE, &a).value != -i64::from(errno::EBADF) {
-                        serial_println!("[syscall/linux]   FAIL: memfd_create cloexec+seal not EBADF");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: memfd_create cloexec+seal not EBADF"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     serial_println!(
@@ -77154,7 +77192,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SIGNALFD4, &a).value != -i64::from(errno::EBADF) {
-                        serial_println!("[syscall/linux]   FAIL: signalfd4 flags high-half not truncated");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: signalfd4 flags high-half not truncated"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     Ok(())
@@ -77586,7 +77626,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PIDFD_OPEN, &a).value != -i64::from(errno::ESRCH) {
-                        serial_println!("[syscall/linux]   FAIL: pidfd_open(missing pid) not ESRCH");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: pidfd_open(missing pid) not ESRCH"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // pidfd_send_signal bogus sig -> EBADF: Linux validates the fd
@@ -77620,7 +77662,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: pidfd_send_signal(unknown flag) not EINVAL"
                         );
@@ -77636,7 +77679,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: pidfd_send_signal(multi-bit flags) not EINVAL"
                         );
@@ -77655,7 +77699,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: pidfd_send_signal(flags=1) -> {} (want EINVAL, v6.6)",
                             dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value,
@@ -77671,7 +77716,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: pidfd_send_signal(flags=2) -> {} (want EINVAL, v6.6)",
                             dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value,
@@ -77687,7 +77733,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: pidfd_send_signal(flags=4) -> {} (want EINVAL, v6.6)",
                             dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value,
@@ -77733,7 +77780,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         );
                         return Err(KernelError::InternalError);
                     }
-                    serial_println!("[syscall/linux]   pidfd_send_signal flags/fd/sig gate order: OK");
+                    serial_println!(
+                        "[syscall/linux]   pidfd_send_signal flags/fd/sig gate order: OK"
+                    );
                     // pidfd_getfd nonzero flag -> EINVAL.
                     let a = SyscallArgs {
                         arg0: 0,
@@ -77918,7 +77967,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     // path is actually reached.
                     let pvr_pid0_local_buf = [0u8; 4];
                     let mut pvr_pid0_iov = [0u8; 16];
-                    pvr_pid0_iov[0..8].copy_from_slice(&(pvr_pid0_local_buf.as_ptr() as u64).to_le_bytes());
+                    pvr_pid0_iov[0..8]
+                        .copy_from_slice(&(pvr_pid0_local_buf.as_ptr() as u64).to_le_bytes());
                     pvr_pid0_iov[8..16].copy_from_slice(&4u64.to_le_bytes());
                     let a = SyscallArgs {
                         arg0: 0,
@@ -77929,7 +77979,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PROCESS_VM_READV, &a).value != -i64::from(errno::ESRCH) {
-                        serial_println!("[syscall/linux]   FAIL: process_vm_readv(0, valid iov) not ESRCH");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: process_vm_readv(0, valid iov) not ESRCH"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // process_vm_readv with nonzero flags -> EINVAL.
@@ -77942,7 +77994,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 1,
                     };
                     if dispatch_linux(nr::PROCESS_VM_READV, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: process_vm_readv(flag) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: process_vm_readv(flag) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // Batch 233 gate-order discriminators: Linux's process_vm_rw
@@ -78117,7 +78171,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PROCESS_VM_READV, &a).value != 8 {
-                        serial_println!("[syscall/linux]   FAIL: process_vm_readv 8-byte copy bad len");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: process_vm_readv 8-byte copy bad len"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     if dst_bytes != *b"HelloPVR" {
@@ -78142,7 +78198,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PROCESS_VM_WRITEV, &a).value != 5 {
-                        serial_println!("[syscall/linux]   FAIL: process_vm_writev 5-byte copy bad len");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: process_vm_writev 5-byte copy bad len"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     if remote_dst != *b"WrXYZ" {
@@ -78175,7 +78233,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PROCESS_VM_READV, &a).value != 600 {
-                        serial_println!("[syscall/linux]   FAIL: process_vm_readv 600-byte copy bad len");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: process_vm_readv 600-byte copy bad len"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     let mut i = 0;
@@ -78188,7 +78248,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         i += 1;
                     }
                     if !ok {
-                        serial_println!("[syscall/linux]   FAIL: process_vm_readv 600 byte mismatch");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: process_vm_readv 600 byte mismatch"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // Multi-iovec split: read 10 bytes from src into two 5-byte
@@ -78230,7 +78292,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PROCESS_MRELEASE, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: process_mrelease(flag) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: process_mrelease(flag) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // process_mrelease(0,0) -> EBADF.
@@ -78360,7 +78424,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     // structural change here by reading back the comment-doc
                     // contract from the function header — see the doc comment
                     // above sys_process_mrelease for the Linux source citation.
-                    serial_println!("[syscall/linux]   process_mrelease terminal EINVAL (batch 496): OK");
+                    serial_println!(
+                        "[syscall/linux]   process_mrelease terminal EINVAL (batch 496): OK"
+                    );
                 }
                 case();
             }
@@ -80339,7 +80405,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SHMGET, &a_enoent_zero).value != -i64::from(errno::ENOENT) {
+                    if dispatch_linux(nr::SHMGET, &a_enoent_zero).value != -i64::from(errno::ENOENT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: shmget(key=5,size=0,0) not ENOENT ({})",
                             dispatch_linux(nr::SHMGET, &a_enoent_zero).value
@@ -80358,7 +80425,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SHMGET, &a_einval_create).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::SHMGET, &a_einval_create).value
+                        != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: shmget(key=5,size=0,IPC_CREAT) not EINVAL ({})",
                             dispatch_linux(nr::SHMGET, &a_einval_create).value
@@ -80425,7 +80494,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SHMCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: shmctl(shmid=5,cmd=2,bad buf) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: shmctl(shmid=5,cmd=2,bad buf) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // shmctl(shmid=-1, cmd=2, buf=NULL) -> EINVAL (shmid<0 gate).
@@ -80488,7 +80559,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SHMCTL, &a).value != -i64::from(errno::EFAULT) {
-                        serial_println!("[syscall/linux]   FAIL: shmctl(0,SHM_INFO,NULL) not EFAULT");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: shmctl(0,SHM_INFO,NULL) not EFAULT"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // shmctl(0, IPC_INFO=3, buf=&stack_buf) -> ENOSYS.
@@ -80522,7 +80595,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SHMCTL, &a).value != -i64::from(errno::ENOSYS) {
-                        serial_println!("[syscall/linux]   FAIL: shmctl(0,SHM_INFO,valid) not ENOSYS");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: shmctl(0,SHM_INFO,valid) not ENOSYS"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // shmctl(0, IPC_STAT=2, buf=&stack_buf) -> EINVAL.
@@ -80537,7 +80612,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SHMCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: shmctl(0,IPC_STAT,valid) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: shmctl(0,IPC_STAT,valid) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // shmctl(0, SHM_STAT_ANY=15, NULL) -> EINVAL (per-segment).
@@ -80550,7 +80627,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SHMCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: shmctl(0,SHM_STAT_ANY,NULL) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: shmctl(0,SHM_STAT_ANY,NULL) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     serial_println!(
@@ -80674,7 +80753,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SEMCTL, &a).value != -i64::from(errno::EFAULT) {
-                        serial_println!("[syscall/linux]   FAIL: semctl(0,0,SEM_INFO,NULL) not EFAULT");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: semctl(0,0,SEM_INFO,NULL) not EFAULT"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // semctl(0, 0, IPC_INFO=3, &stack_buf) -> ENOSYS.
@@ -80709,7 +80790,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SEMCTL, &a).value != -i64::from(errno::ENOSYS) {
-                        serial_println!("[syscall/linux]   FAIL: semctl(0,0,SEM_INFO,valid) not ENOSYS");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: semctl(0,0,SEM_INFO,valid) not ENOSYS"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // semctl(0, 0, IPC_STAT=2, &stack_buf) -> EINVAL.
@@ -80724,7 +80807,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SEMCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: semctl(0,0,IPC_STAT,valid) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: semctl(0,0,IPC_STAT,valid) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // semctl(0, 0, GETVAL=12, _) -> EINVAL (per-semset).
@@ -80818,7 +80903,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SEMGET, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: semget(IPC_PRIVATE,0,0) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: semget(IPC_PRIVATE,0,0) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // semget(key=5, nsems=0, semflg=IPC_CREAT) -> EINVAL.
@@ -80973,7 +81060,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SEMOP, &a).value != -i64::from(errno::E2BIG) {
-                        serial_println!("[syscall/linux]   FAIL: semop(sops=NULL,nsops=501) not E2BIG");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: semop(sops=NULL,nsops=501) not E2BIG"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     //   * nsops truncation: nsops is C `unsigned int`.  With low 32
@@ -80989,7 +81078,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SEMOP, &a).value != i64::from(errno::EINVAL).wrapping_neg() {
+                    if dispatch_linux(nr::SEMOP, &a).value
+                        != i64::from(errno::EINVAL).wrapping_neg()
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: semop(nsops=0x1_0000_0000) not EINVAL (trunc)"
                         );
@@ -81003,7 +81094,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SEMTIMEDOP, &a).value != i64::from(errno::EINVAL).wrapping_neg() {
+                    if dispatch_linux(nr::SEMTIMEDOP, &a).value
+                        != i64::from(errno::EINVAL).wrapping_neg()
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: semtimedop(nsops=0x1_0000_0000) not EINVAL (trunc)"
                         );
@@ -81019,7 +81112,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SEMTIMEDOP, &a).value != i64::from(errno::E2BIG).wrapping_neg() {
+                    if dispatch_linux(nr::SEMTIMEDOP, &a).value
+                        != i64::from(errno::E2BIG).wrapping_neg()
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: semtimedop(sops=NULL,nsops=600) not E2BIG"
                         );
@@ -81059,7 +81154,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SEMTIMEDOP, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: semtimedop(ts_ok) not terminal EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: semtimedop(ts_ok) not terminal EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     //   * tv_nsec = 2e9 (>= NSEC_PER_SEC) -> EINVAL via content gate.
@@ -81076,7 +81173,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SEMTIMEDOP, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: semtimedop(tv_nsec=2e9) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: semtimedop(tv_nsec=2e9) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     //   * tv_sec = -1 -> EINVAL.
@@ -81096,7 +81195,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         serial_println!("[syscall/linux]   FAIL: semtimedop(tv_sec=-1) not EINVAL");
                         return Err(KernelError::InternalError);
                     }
-                    serial_println!("[syscall/linux]   sem(timed)op gate-order / timespec64_valid: OK");
+                    serial_println!(
+                        "[syscall/linux]   sem(timed)op gate-order / timespec64_valid: OK"
+                    );
                     Ok(())
                 }
                 case()?;
@@ -81379,7 +81480,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MSGCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: msgctl(msqid=5,cmd=2,bad buf) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: msgctl(msqid=5,cmd=2,bad buf) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // msgctl(msqid=-1, cmd=2, buf=NULL) -> EINVAL.
@@ -81438,7 +81541,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MSGCTL, &a).value != -i64::from(errno::EFAULT) {
-                        serial_println!("[syscall/linux]   FAIL: msgctl(0,MSG_INFO,NULL) not EFAULT");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: msgctl(0,MSG_INFO,NULL) not EFAULT"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // msgctl(0, IPC_INFO=3, &stack_buf) -> ENOSYS.
@@ -81473,7 +81578,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MSGCTL, &a).value != -i64::from(errno::ENOSYS) {
-                        serial_println!("[syscall/linux]   FAIL: msgctl(0,MSG_INFO,valid) not ENOSYS");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: msgctl(0,MSG_INFO,valid) not ENOSYS"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // msgctl(0, IPC_STAT=2, &stack_buf) -> EINVAL.
@@ -81489,7 +81596,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MSGCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: msgctl(0,IPC_STAT,valid) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: msgctl(0,IPC_STAT,valid) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // msgctl(0, MSG_STAT_ANY=13, NULL) -> EINVAL (per-queue).
@@ -81502,7 +81611,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MSGCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: msgctl(0,MSG_STAT_ANY,NULL) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: msgctl(0,MSG_STAT_ANY,NULL) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     serial_println!(
@@ -81641,7 +81752,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MQ_TIMEDSEND, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: mq_timedsend(prio=MAX) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_timedsend(prio=MAX) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // mq_timedsend(_, _, _, prio=70000, _) -> EINVAL (well above
@@ -81655,7 +81768,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MQ_TIMEDSEND, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: mq_timedsend(prio=70000) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_timedsend(prio=70000) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // mq_timedsend(_, _, _, prio=32767, _) with NULL msg -> EBADF
@@ -81671,7 +81786,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MQ_TIMEDSEND, &a).value != -i64::from(errno::EBADF) {
-                        serial_println!("[syscall/linux]   FAIL: mq_timedsend(prio=32767, NULL) not EBADF");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_timedsend(prio=32767, NULL) not EBADF"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     serial_println!("[syscall/linux]   mq_timedsend prio validation: OK");
@@ -81805,7 +81922,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MQ_TIMEDSEND, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: mq_timedsend(bad tv_nsec) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_timedsend(bad tv_nsec) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // mq_timedsend with negative tv_sec -> EINVAL.
@@ -81818,7 +81937,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MQ_TIMEDSEND, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: mq_timedsend(neg tv_sec) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_timedsend(neg tv_sec) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // mq_timedsend with bad prio AND good timespec -> EINVAL
@@ -81849,10 +81970,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MQ_TIMEDRECEIVE, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: mq_timedreceive(bad tv_nsec) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_timedreceive(bad tv_nsec) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
-                    serial_println!("[syscall/linux]   mq_timed{{send,receive}} timespec64_valid: OK");
+                    serial_println!(
+                        "[syscall/linux]   mq_timed{{send,receive}} timespec64_valid: OK"
+                    );
 
                     // Batch 543: mq_timedreceive(NULL msg) -> EBADF, NOT EFAULT.
                     // store_msg touches the buffer only after fdget + f_op /
@@ -81884,9 +82009,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: good_ts_ptr,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::MQ_TIMEDSEND, &a).value != i64::from(errno::EBADF).wrapping_neg()
+                    if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
                     {
-                        serial_println!("[syscall/linux]   FAIL: mq_timedsend(NULL, good ts) not EBADF");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_timedsend(NULL, good ts) not EBADF"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // receive: NULL msg + NULL prio_ptr, good timespec -> EBADF.
@@ -81901,7 +82029,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     if dispatch_linux(nr::MQ_TIMEDRECEIVE, &a).value
                         != i64::from(errno::EBADF).wrapping_neg()
                     {
-                        serial_println!("[syscall/linux]   FAIL: mq_timedreceive(NULL, good ts) not EBADF");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_timedreceive(NULL, good ts) not EBADF"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     serial_println!(
@@ -81971,7 +82101,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MQ_NOTIFY, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: mq_notify SIGEV_THREAD_ID not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_notify SIGEV_THREAD_ID not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // (c) SIGEV_SIGNAL (=0) with sigev_signo = 99 (>NSIG) -> EINVAL.
@@ -82116,7 +82248,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MQ_GETSETATTR, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: mq_getsetattr junk mq_flags not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_getsetattr junk mq_flags not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // (c) mq_flags = O_NONBLOCK | 1 (extra bit set) -> EINVAL.
@@ -82137,7 +82271,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MQ_GETSETATTR, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: mq_getsetattr O_NONBLOCK|1 not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_getsetattr O_NONBLOCK|1 not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // (d) mq_flags negative (sign bit set) -> EINVAL.  Catches
@@ -82159,7 +82295,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MQ_GETSETATTR, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: mq_getsetattr mq_flags=-1 not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_getsetattr mq_flags=-1 not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // (e) NULL newattr, NULL oldattr, junk fd -> EBADF.  Proves
@@ -82173,7 +82311,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MQ_GETSETATTR, &a).value != -i64::from(errno::EBADF) {
-                        serial_println!("[syscall/linux]   FAIL: mq_getsetattr NULL newattr not EBADF");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mq_getsetattr NULL newattr not EBADF"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     serial_println!("[syscall/linux]   mq_getsetattr mq_flags & ~O_NONBLOCK: OK");
@@ -84796,7 +84936,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SET_MEMPOLICY, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: set_mempolicy bad mode not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: set_mempolicy bad mode not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // set_mempolicy(MPOL_DEFAULT, NULL, 0) -> 0 (batch 102 upgrade: was
@@ -84811,7 +84953,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SET_MEMPOLICY, &a).value != 0 {
-                        serial_println!("[syscall/linux]   FAIL: set_mempolicy MPOL_DEFAULT/NULL/0 not 0");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: set_mempolicy MPOL_DEFAULT/NULL/0 not 0"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // get_mempolicy bad flags -> EINVAL.
@@ -84824,7 +84968,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::GET_MEMPOLICY, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: get_mempolicy bad flags not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: get_mempolicy bad flags not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // get_mempolicy valid (all-NULL probe) -> 0 (UMA answer; see
@@ -84911,7 +85057,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::MOVE_PAGES, &a).value != i64::from(errno::ESRCH).wrapping_neg() {
+                    if dispatch_linux(nr::MOVE_PAGES, &a).value
+                        != i64::from(errno::ESRCH).wrapping_neg()
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: move_pages foreign-pid huge count not ESRCH"
                         );
@@ -84942,7 +85090,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: sched_setattr bad flags not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_setattr bad flags not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     Ok(())
@@ -85047,8 +85197,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                        serial_println!("[syscall/linux]   FAIL: sched_setattr DEADLINE not EOPNOTSUPP");
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EOPNOTSUPP)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_setattr DEADLINE not EOPNOTSUPP"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // Batch 506: sched_setattr SCHED_EXT(=7) -> -EINVAL.  v6.6 has
@@ -85220,7 +85373,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                        serial_println!("[syscall/linux]   FAIL: sched_setattr (size=64, zero-pad) not 0");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_setattr (size=64, zero-pad) not 0"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // Case B: size=64 with non-zero byte at offset 48 -> E2BIG.
@@ -85254,7 +85409,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: sched_getattr small size not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr small size not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // sched_getattr huge size -> EINVAL (was E2BIG).  Linux
@@ -85270,7 +85427,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: sched_getattr huge size not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr huge size not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // sched_getattr NULL attr -> EINVAL (was EFAULT).  Linux folds
@@ -85333,7 +85492,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         return Err(KernelError::InternalError);
                     }
                     // Verify attr.size field reflects the user-requested size.
-                    let written_size = u32::from_le_bytes([big_buf[0], big_buf[1], big_buf[2], big_buf[3]]);
+                    let written_size =
+                        u32::from_le_bytes([big_buf[0], big_buf[1], big_buf[2], big_buf[3]]);
                     if written_size != 48 {
                         serial_println!(
                             "[syscall/linux]   FAIL: sched_getattr attr.size {} (expected 48)",
@@ -85344,7 +85504,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     // sched_policy should be in 0..=7 (we accept any of the
                     // valid Linux policies — the boot-context default is
                     // SCHED_OTHER (0)).
-                    let policy_byte = u32::from_le_bytes([big_buf[4], big_buf[5], big_buf[6], big_buf[7]]);
+                    let policy_byte =
+                        u32::from_le_bytes([big_buf[4], big_buf[5], big_buf[6], big_buf[7]]);
                     if policy_byte > 7 {
                         serial_println!(
                             "[syscall/linux]   FAIL: sched_getattr policy {} > 7",
@@ -85356,7 +85517,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     // they should still hold the 0xCC sentinel — proves we
                     // didn't over-write.
                     if big_buf[48..].iter().any(|&b| b != 0xCC) {
-                        serial_println!("[syscall/linux]   FAIL: sched_getattr wrote past requested size",);
+                        serial_println!(
+                            "[syscall/linux]   FAIL: sched_getattr wrote past requested size",
+                        );
                         return Err(KernelError::InternalError);
                     }
 
@@ -85563,7 +85726,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         );
                         return Err(KernelError::InternalError);
                     }
-                    serial_println!("[syscall/linux]   sched_{{set,get}}attr pid_t/uint truncation: OK");
+                    serial_println!(
+                        "[syscall/linux]   sched_{{set,get}}attr pid_t/uint truncation: OK"
+                    );
                     Ok(())
                 }
                 sched_getattr()?;
@@ -85759,7 +85924,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         pcb::destroy(kp);
                         return Err(KernelError::InternalError);
                     }
-                    if pcb::get_sched_priority(kp) != Some(10) || pcb::get_sched_policy(kp) != Some(1) {
+                    if pcb::get_sched_priority(kp) != Some(10)
+                        || pcb::get_sched_policy(kp) != Some(1)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: KEEP_PARAMS must preserve FIFO/prio=10; got {:?}/{:?}",
                             pcb::get_sched_policy(kp),
@@ -85870,7 +86037,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         pcb::destroy(kp);
                         return Err(KernelError::InternalError);
                     }
-                    if pcb::get_sched_policy(kp) != Some(2) || pcb::get_sched_priority(kp) != Some(7) {
+                    if pcb::get_sched_policy(kp) != Some(2)
+                        || pcb::get_sched_priority(kp) != Some(7)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: plain setattr must store RR/7; got {:?}/{:?}",
                             pcb::get_sched_policy(kp),
@@ -86130,7 +86299,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
                         != -i64::from(errno::EOPNOTSUPP)
                     {
-                        serial_println!("[syscall/linux]   FAIL: landlock version-query not EOPNOTSUPP");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock version-query not EOPNOTSUPP"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // Batch 523: landlock_create_ruleset flags=0x2 — formerly a
@@ -86146,7 +86317,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock flags=0x2 (6.10 ERRATA) not EINVAL"
                         );
@@ -86167,7 +86340,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
                         serial_println!("[syscall/linux]   FAIL: landlock flags=0x3 not EINVAL");
                         return Err(KernelError::InternalError);
                     }
@@ -86181,7 +86356,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
                         serial_println!("[syscall/linux]   FAIL: landlock VERSION+attr not EINVAL");
                         return Err(KernelError::InternalError);
                     }
@@ -86196,8 +86373,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: landlock flags=0x2+size not EINVAL");
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock flags=0x2+size not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // landlock_create_ruleset bad flags -> EINVAL.
@@ -86209,7 +86390,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
                         serial_println!("[syscall/linux]   FAIL: landlock bad flags not EINVAL");
                         return Err(KernelError::InternalError);
                     }
@@ -86223,7 +86406,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EFAULT) {
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::EFAULT)
+                    {
                         serial_println!("[syscall/linux]   FAIL: landlock NULL attr not EFAULT");
                         return Err(KernelError::InternalError);
                     }
@@ -86269,8 +86454,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: landlock (attr, size=4) not EINVAL");
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock (attr, size=4) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // Batch 224 discriminator: (attr=valid, size=4097) — usize >
@@ -86285,8 +86474,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
-                        serial_println!("[syscall/linux]   FAIL: landlock (attr, size=4097) not E2BIG");
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::E2BIG)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock (attr, size=4097) not E2BIG"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // Batch 224 discriminator: (attr=valid, size=2 MiB) — also
@@ -86301,8 +86494,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
-                        serial_println!("[syscall/linux]   FAIL: landlock (attr, size=2MiB) not E2BIG");
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::E2BIG)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock (attr, size=2MiB) not E2BIG"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     serial_println!(
@@ -86352,7 +86549,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
+                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+                        != -i64::from(errno::E2BIG)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock (attr, size=16, nonzero-pad) not E2BIG"
                         );
@@ -86370,8 +86569,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: landlock_add_rule bad type not EINVAL");
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule bad type not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // landlock_add_rule NULL attr -> EFAULT.
@@ -86383,8 +86585,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT) {
-                        serial_println!("[syscall/linux]   FAIL: landlock_add_rule NULL not EFAULT");
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: landlock_add_rule NULL not EFAULT"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // landlock_add_rule valid PATH_BENEATH (allowed_access=EXECUTE=0x1,
@@ -86405,7 +86610,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value
+                        != -i64::from(errno::EOPNOTSUPP)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule valid PATH_BENEATH not EOPNOTSUPP"
                         );
@@ -86423,7 +86630,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::ENOMSG) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::ENOMSG)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule empty PATH_BENEATH not ENOMSG"
                         );
@@ -86448,7 +86656,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule PATH_BENEATH IOCTL_DEV(6.10) bit not EINVAL"
                         );
@@ -86475,7 +86684,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule NET_PORT(6.7) rule_type not EINVAL"
                         );
@@ -86500,7 +86710,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule(high-only,NULL) not EFAULT"
                         );
@@ -86517,7 +86728,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule(high|bad-low) not EINVAL"
                         );
@@ -86534,7 +86746,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule(high-only,type=99) not EINVAL"
                         );
@@ -86553,7 +86766,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value
+                        != -i64::from(errno::EOPNOTSUPP)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule(high-only,valid) not EOPNOTSUPP"
                         );
@@ -86582,7 +86797,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|1) not EFAULT"
                         );
@@ -86603,7 +86819,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|2) not EINVAL"
                         );
@@ -86621,7 +86838,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|0) not EINVAL"
                         );
@@ -86639,7 +86857,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value
+                        != -i64::from(errno::EOPNOTSUPP)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|1,valid) not EOPNOTSUPP"
                         );
@@ -86658,7 +86878,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_restrict_self undef flag not EINVAL"
                         );
@@ -86685,7 +86907,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP)
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
+                        != -i64::from(errno::EOPNOTSUPP)
                     {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_restrict_self valid not EOPNOTSUPP"
@@ -86705,7 +86928,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_restrict_self flags=0x1 (6.10) not EINVAL"
                         );
@@ -86720,7 +86945,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_restrict_self flags=0x2 (6.10) not EINVAL"
                         );
@@ -86735,7 +86962,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_restrict_self flags=0x4 (6.12) not EINVAL"
                         );
@@ -86750,7 +86979,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_restrict_self flags=0x7 not EINVAL"
                         );
@@ -86765,7 +86996,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: landlock_restrict_self high bit not EINVAL"
                         );
@@ -86916,7 +87149,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::ESRCH) {
-                        serial_println!("[syscall/linux]   FAIL: kcmp neg pid + bad type not ESRCH");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: kcmp neg pid + bad type not ESRCH"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // kcmp valid pid1, negative pid2, bad type -> ESRCH (either
@@ -86930,7 +87165,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::ESRCH) {
-                        serial_println!("[syscall/linux]   FAIL: kcmp pid2-neg + bad type not ESRCH");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: kcmp pid2-neg + bad type not ESRCH"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     Ok(())
@@ -87048,7 +87285,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         serial_println!("[syscall/linux]   FAIL: kcmp EPOLL_TFD valid not 3");
                         return Err(KernelError::InternalError);
                     }
-                    serial_println!("[syscall/linux]   kcmp pid-ESRCH-ahead-of-type-EINVAL gate order: OK");
+                    serial_println!(
+                        "[syscall/linux]   kcmp pid-ESRCH-ahead-of-type-EINVAL gate order: OK"
+                    );
 
                     // Batch 295: x86_64 syscall ABI register truncation for kcmp's
                     // declared C types — `pid_t pid1`, `pid_t pid2`, `int type`.
@@ -99596,7 +99835,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: preadv iov_len=u64::MAX not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: preadv iov_len=u64::MAX not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // Discriminator B: iov_len = i64::MAX as u64 + 1 -> EINVAL
@@ -99646,7 +99887,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         );
                         return Err(KernelError::InternalError);
                     }
-                    serial_println!("[syscall/linux]   preadv/pwritev iov_len SSIZE_MAX gating: OK");
+                    serial_println!(
+                        "[syscall/linux]   preadv/pwritev iov_len SSIZE_MAX gating: OK"
+                    );
                     Ok(())
                 }
                 case()?;
@@ -99801,7 +100044,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
-                        serial_println!("[syscall/linux]   FAIL: prctl(PR_SET_NAME, NULL) not EFAULT");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_NAME, NULL) not EFAULT"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
@@ -99832,7 +100077,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                        serial_println!("[syscall/linux]   FAIL: prctl(PR_SET_NAME, valid name) not 0");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_NAME, valid name) not 0"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
@@ -99867,7 +100114,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                        serial_println!("[syscall/linux]   FAIL: prctl(high|PDEATHSIG, sig=0) not 0");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(high|PDEATHSIG, sig=0) not 0"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
@@ -100054,7 +100303,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EFAULT) {
-                        serial_println!("[syscall/linux]   FAIL: capset(V3, pid=0, NULL) not EFAULT");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: capset(V3, pid=0, NULL) not EFAULT"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
@@ -100167,7 +100418,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::CAPGET, &a).value != 0 {
-                        serial_println!("[syscall/linux]   FAIL: capget(V3, pid=0, valid datap) not 0");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: capget(V3, pid=0, valid datap) not 0"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
@@ -100189,11 +100442,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::CAPGET, &a).value != 0 {
-                        serial_println!("[syscall/linux]   FAIL: capget(V3, pid=-1, NULL datap) not 0");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: capget(V3, pid=-1, NULL datap) not 0"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
-                    serial_println!("[syscall/linux]   capget pid validation (Linux gate order): OK");
+                    serial_println!(
+                        "[syscall/linux]   capget pid validation (Linux gate order): OK"
+                    );
                     Ok(())
                 }
                 case()?;
@@ -100325,7 +100582,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: mremap(new_len=u64::MAX) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mremap(new_len=u64::MAX) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
@@ -100343,11 +100602,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::ENOMEM) {
-                        serial_println!("[syscall/linux]   FAIL: mremap(new_len=0x4000) not ENOMEM");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mremap(new_len=0x4000) not ENOMEM"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
-                    serial_println!("[syscall/linux]   mremap new_size PAGE_ALIGN overflow gating: OK");
+                    serial_println!(
+                        "[syscall/linux]   mremap new_size PAGE_ALIGN overflow gating: OK"
+                    );
                     Ok(())
                 }
                 case()?;
@@ -100443,7 +100706,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::GETSOCKOPT, &a).value != -i64::from(errno::EFAULT) {
-                        serial_println!("[syscall/linux]   FAIL: getsockopt(optlen=NULL) not EFAULT");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: getsockopt(optlen=NULL) not EFAULT"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
@@ -100562,7 +100827,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EAFNOSUPPORT) {
-                        serial_println!("[syscall/linux]   FAIL: socket(domain=99) not EAFNOSUPPORT");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(domain=99) not EAFNOSUPPORT"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
@@ -100603,7 +100870,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                        serial_println!("[syscall/linux]   FAIL: socketpair(AF_INET) not EOPNOTSUPP");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET) not EOPNOTSUPP"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
@@ -100748,7 +101017,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::ENOSYS) {
-                        serial_println!("[syscall/linux]   FAIL: perf_event_open(size=64) not ENOSYS");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: perf_event_open(size=64) not ENOSYS"
+                        );
                         return Err(KernelError::InternalError);
                     }
 
@@ -100825,7 +101096,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::ENOMEM) {
-                        serial_println!("[syscall/linux]   FAIL: mremap(FIXED, new_addr=0) not ENOMEM");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mremap(FIXED, new_addr=0) not ENOMEM"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     serial_println!("[syscall/linux]   mremap MREMAP_FIXED new_addr bounds: OK");
@@ -100970,7 +101243,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                        serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RAW,99) not ENOSYS");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,RAW,99) not ENOSYS"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     serial_println!("[syscall/linux]   socket EPROTONOSUPPORT gating: OK");
@@ -101348,7 +101623,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: socket(AF_INET,STREAM,-1) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,STREAM,-1) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // B: AF_INET / STREAM / 256
@@ -101391,7 +101668,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RAW,256) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,RAW,256) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // E: AF_INET / SOCK_RAW / -1
@@ -101404,7 +101683,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RAW,-1) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,RAW,-1) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // F: AF_INET / SOCK_RDM / 256 — IPPROTO_MAX
@@ -101418,7 +101699,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RDM,256) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,RDM,256) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // G: regression — AF_INET / STREAM / TCP=6
@@ -102251,7 +102534,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_INET,RDM) not ESOCKTNOSUPPORT"
                         );
@@ -102266,7 +102551,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,99) not EPROTONOSUPPORT"
                         );
@@ -102281,7 +102568,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,99) not EPROTONOSUPPORT"
                         );
@@ -102312,7 +102601,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM) not ESOCKTNOSUPPORT"
                         );
@@ -102378,7 +102669,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_INET,DCCP) not ESOCKTNOSUPPORT"
                         );
@@ -102393,7 +102686,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_INET,SOCK_PACKET) not ESOCKTNOSUPPORT"
                         );
@@ -102408,7 +102703,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_INET,7) not ESOCKTNOSUPPORT"
                         );
@@ -102423,7 +102720,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,0) not ESOCKTNOSUPPORT"
                         );
@@ -102438,7 +102737,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DCCP) not ESOCKTNOSUPPORT"
                         );
@@ -102453,7 +102754,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_PACKET,DCCP) not ESOCKTNOSUPPORT"
                         );
@@ -102486,7 +102789,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: socketpair(AF_INET,11) not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,11) not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     serial_println!(
@@ -102664,7 +102969,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,-1) not EPROTONOSUPPORT"
                         );
@@ -102720,7 +103027,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,-1) not EPROTONOSUPPORT"
                         );
@@ -102735,7 +103044,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_NETLINK,RAW,-1) not EPROTONOSUPPORT"
                         );
@@ -102750,7 +103061,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,32) not EPROTONOSUPPORT"
                         );
@@ -102765,7 +103078,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_NETLINK,RAW,99) not EPROTONOSUPPORT"
                         );
@@ -102814,7 +103129,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM,-1) gate-order not ESOCKTNOSUPPORT"
                         );
@@ -102829,7 +103146,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM,99) gate-order not ESOCKTNOSUPPORT"
                         );
@@ -102935,7 +103254,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,2) regression not EPROTONOSUPPORT"
                         );
@@ -102950,7 +103271,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,-1) regression not EPROTONOSUPPORT"
                         );
@@ -103057,7 +103380,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,ICMPV6) not EPROTONOSUPPORT"
                         );
@@ -103072,7 +103397,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,ICMP) not EPROTONOSUPPORT"
                         );
@@ -103087,7 +103414,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,99) regression not EPROTONOSUPPORT"
                         );
@@ -103146,7 +103475,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,99,sv) not EPROTONOSUPPORT"
                         );
@@ -103161,7 +103492,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,DCCP,99,sv) not EPROTONOSUPPORT"
                         );
@@ -103176,7 +103509,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,PACKET,-1,sv) not EPROTONOSUPPORT"
                         );
@@ -103192,7 +103527,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,0,sv) not ESOCKTNOSUPPORT"
                         );
@@ -103208,7 +103545,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,PF_UNIX,sv) not ESOCKTNOSUPPORT"
                         );
@@ -103224,7 +103563,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,DCCP,PF_UNIX,sv) not ESOCKTNOSUPPORT"
                         );
@@ -103241,7 +103582,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_INET,RDM,99,sv) cross-family regression not ESOCKTNOSUPPORT"
                         );
@@ -103257,7 +103600,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,99,sv) regression not EPROTONOSUPPORT"
                         );
@@ -103317,7 +103662,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,0,sv) not EPROTONOSUPPORT"
                         );
@@ -103332,7 +103679,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::EPROTONOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_INET6,RAW,0,sv) not EPROTONOSUPPORT"
                         );
@@ -103516,7 +103865,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                        serial_println!("[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM) not ENOSYS");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM) not ENOSYS"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     // F: AF_PACKET / SOCK_RAW (acceptance — RAW in allowlist)
@@ -103547,7 +103898,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM) not ESOCKTNOSUPPORT"
                         );
@@ -103562,7 +103915,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != -i64::from(errno::ESOCKTNOSUPPORT)
+                    {
                         serial_println!(
                             "[syscall/linux]   FAIL: socketpair(AF_PACKET,RDM) not ESOCKTNOSUPPORT"
                         );
@@ -103650,7 +104005,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     };
                     core::hint::black_box(&bad_times);
                     if dispatch_linux(nr::FUTIMESAT, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: futimesat bad tv_usec[0] not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futimesat bad tv_usec[0] not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     Ok(())
@@ -103674,7 +104031,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     };
                     core::hint::black_box(&bad_times);
                     if dispatch_linux(nr::FUTIMESAT, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!("[syscall/linux]   FAIL: futimesat bad tv_usec[1] not EINVAL");
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futimesat bad tv_usec[1] not EINVAL"
+                        );
                         return Err(KernelError::InternalError);
                     }
                     Ok(())

@@ -14,6 +14,8 @@
 //!
 //! All rendering produces `Vec<RenderCommand>` that any backend can consume.
 
+use core::num::NonZeroUsize;
+
 use crate::color::Color;
 use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -213,13 +215,32 @@ pub fn parse_hex_color(input: &str) -> Option<Color> {
 }
 
 /// Convert a single hex character to its 4-bit value.
+///
+/// This was three hand-written subtractions from `b'0'`, `b'a'` and `b'A'`,
+/// each safe only because the `match` arm above it had already narrowed the
+/// character to that range. `char::to_digit` is the same function with the
+/// range check and the subtraction in one place, and it is the one the rest of
+/// the standard library agrees with.
 fn hex_char_to_u8(c: char) -> Option<u8> {
-    match c {
-        '0'..='9' => Some(c as u8 - b'0'),
-        'a'..='f' => Some(c as u8 - b'a' + 10),
-        'A'..='F' => Some(c as u8 - b'A' + 10),
-        _ => None,
-    }
+    // `to_digit(16)` yields 0..=15, so the conversion cannot fail; `ok()` is
+    // discarding an error that no input can produce.
+    u8::try_from(c.to_digit(16)?).ok()
+}
+
+/// The top-left corner of preset swatch `i` in a grid `cols` wide whose own
+/// corner is at (`x`, `y`).
+///
+/// The palette is drawn by one loop and hit-tested by another, and each used
+/// to divide the index by the column count and scale the result itself. Two
+/// copies of the same four lines put the clickable square where the drawn one
+/// is only for as long as they stay in step; written once, they cannot drift.
+fn preset_swatch_origin(i: usize, cols: NonZeroUsize, x: f32, y: f32) -> (f32, f32) {
+    let col = i % cols;
+    let row = i / cols;
+    (
+        x + col as f32 * (SWATCH_SIZE + SWATCH_GAP),
+        y + row as f32 * (SWATCH_SIZE + SWATCH_GAP),
+    )
 }
 
 // ============================================================================
@@ -1645,10 +1666,7 @@ impl ColorPickerDialog {
         let cols = self.preset_columns(available_width);
 
         for (i, color) in PRESET_COLORS.iter().enumerate() {
-            let col = i % cols;
-            let row = i / cols;
-            let sx = x + col as f32 * (SWATCH_SIZE + SWATCH_GAP);
-            let sy = swatch_y + row as f32 * (SWATCH_SIZE + SWATCH_GAP);
+            let (sx, sy) = preset_swatch_origin(i, cols, x, swatch_y);
 
             cmds.push(RenderCommand::FillRect {
                 x: sx,
@@ -1769,10 +1787,7 @@ impl ColorPickerDialog {
         let cols = self.preset_columns(sv_size + HUE_BAR_WIDTH + PADDING * 4.0 + PREVIEW_SIZE);
 
         for (i, color) in PRESET_COLORS.iter().enumerate() {
-            let col = i % cols;
-            let row = i / cols;
-            let sx = PADDING + col as f32 * (SWATCH_SIZE + SWATCH_GAP);
-            let sy = preset_y + row as f32 * (SWATCH_SIZE + SWATCH_GAP);
+            let (sx, sy) = preset_swatch_origin(i, cols, PADDING, preset_y);
 
             if x >= sx && x <= sx + SWATCH_SIZE && y >= sy && y <= sy + SWATCH_SIZE {
                 return Some(*color);
@@ -1888,15 +1903,22 @@ impl ColorPickerDialog {
         content_y + PADDING + self.picker.sv_size + PADDING
     }
 
-    fn preset_columns(&self, available_width: f32) -> usize {
-        let cols = ((available_width + SWATCH_GAP) / (SWATCH_SIZE + SWATCH_GAP)) as usize;
-        cols.max(1)
+    /// How many swatches fit across `available_width` — at least one, however
+    /// narrow the panel gets.
+    ///
+    /// The count is a `NonZeroUsize` rather than a `usize` that happens to be
+    /// positive, because two render loops divide the swatch index by it to get
+    /// a row and a column. As a plain `usize` the `.max(1)` that made those
+    /// divisions safe sat here, some forty lines from either of them.
+    fn preset_columns(&self, available_width: f32) -> NonZeroUsize {
+        let fitting = ((available_width + SWATCH_GAP) / (SWATCH_SIZE + SWATCH_GAP)) as usize;
+        NonZeroUsize::new(fitting).unwrap_or(NonZeroUsize::MIN)
     }
 
     fn preset_palette_height(&self) -> f32 {
         let cols =
             self.preset_columns(self.picker.sv_size + HUE_BAR_WIDTH + PADDING * 4.0 + PREVIEW_SIZE);
-        let rows = PRESET_COLORS.len().div_ceil(cols);
+        let rows = PRESET_COLORS.len().div_ceil(cols.get());
         14.0 + rows as f32 * (SWATCH_SIZE + SWATCH_GAP)
     }
 }
@@ -1918,11 +1940,16 @@ fn render_checkerboard(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32
         corner_radii: CornerRadii::ZERO,
     });
     // Dark cells
-    let cols = (width / cell) as u32 + 1;
-    let rows = (height / cell) as u32 + 1;
+    // One extra of each so the partial cell at the right and bottom edges is
+    // still drawn; the per-cell clamp below trims it to the panel.
+    let cols = ((width / cell) as u32).saturating_add(1);
+    let rows = ((height / cell) as u32).saturating_add(1);
     for row in 0..rows {
         for col in 0..cols {
-            if (row + col) % 2 == 1 {
+            // The parity of `row + col`, without the sum: a checkerboard cell
+            // is dark exactly when its two coordinates disagree in the last
+            // bit, which xor answers directly and cannot overflow.
+            if (row ^ col) % 2 == 1 {
                 let cx = x + col as f32 * cell;
                 let cy = y + row as f32 * cell;
                 let cw = cell.min(x + width - cx);
@@ -1961,6 +1988,63 @@ mod tests {
     )]
 
     use super::*;
+
+    /// Every hex digit, in both cases, must still come out as the value the
+    /// three hand-written subtractions produced — and every non-digit must
+    /// still be refused, including the ones adjacent to each old range.
+    #[test]
+    fn every_hex_digit_keeps_the_value_the_old_table_gave_it() {
+        for (i, c) in "0123456789".chars().enumerate() {
+            assert_eq!(hex_char_to_u8(c), Some(i as u8), "{c}");
+        }
+        for (i, c) in "abcdef".chars().enumerate() {
+            assert_eq!(hex_char_to_u8(c), Some(i as u8 + 10), "{c}");
+            let upper = c.to_ascii_uppercase();
+            assert_eq!(hex_char_to_u8(upper), Some(i as u8 + 10), "{upper}");
+        }
+        // '/' and ':' bracket the digits; '`'/'g' and '@'/'G' the letters.
+        for c in ['/', ':', '`', 'g', '@', 'G', ' ', '\u{e9}', '\u{ff10}'] {
+            assert_eq!(hex_char_to_u8(c), None, "{c:?}");
+        }
+    }
+
+    /// A grid one column wide is what a panel too narrow for two swatches
+    /// gets; without it the row and column would be a division by zero.
+    #[test]
+    fn a_palette_too_narrow_for_a_swatch_still_has_one_column() {
+        let dialog = ColorPickerDialog::new(Color::rgb(0, 0, 0));
+        for width in [-100.0, 0.0, 1.0, f32::NAN] {
+            assert_eq!(dialog.preset_columns(width), NonZeroUsize::MIN, "{width}");
+        }
+    }
+
+    /// Swatches run left to right and wrap to the next row, and no two share a
+    /// position — the property the drawing loop and the hit-test both rely on.
+    #[test]
+    fn preset_swatches_fill_rows_left_to_right_without_overlapping() {
+        let cols = NonZeroUsize::new(4).unwrap();
+        let pitch = SWATCH_SIZE + SWATCH_GAP;
+        assert_eq!(preset_swatch_origin(0, cols, 10.0, 20.0), (10.0, 20.0));
+        assert_eq!(
+            preset_swatch_origin(3, cols, 10.0, 20.0),
+            (10.0 + 3.0 * pitch, 20.0)
+        );
+        assert_eq!(
+            preset_swatch_origin(4, cols, 10.0, 20.0),
+            (10.0, 20.0 + pitch),
+            "the fifth swatch begins the second row"
+        );
+
+        let mut seen = Vec::new();
+        for i in 0..PRESET_COLORS.len() {
+            let (x, y) = preset_swatch_origin(i, cols, 0.0, 0.0);
+            assert!(
+                !seen.contains(&(x.to_bits(), y.to_bits())),
+                "swatch {i} repeats a position"
+            );
+            seen.push((x.to_bits(), y.to_bits()));
+        }
+    }
 
     // --- HSV ↔ RGB conversion tests ---
 

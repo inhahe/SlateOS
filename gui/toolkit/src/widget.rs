@@ -489,31 +489,29 @@ impl Widget {
 
             let layouts = flex_layout(container_size, flex, &child_info, &self.style.padding);
 
-            // Apply layout results to children
-            let mut visible_idx = 0;
-            for child in &mut self.children {
-                if !child.visible {
-                    continue;
-                }
-                if visible_idx < layouts.len() {
-                    let lb = &layouts[visible_idx];
-                    child.layout.x = lb.x;
-                    child.layout.y = lb.y;
-
-                    // Recursively layout children with their computed size
-                    let child_constraint = SizeConstraint {
-                        min_width: 0.0,
-                        max_width: lb.width,
-                        min_height: 0.0,
-                        max_height: lb.height,
-                    };
-                    child.do_layout(child_constraint);
-                    child.layout.x = lb.x;
-                    child.layout.y = lb.y;
-                    child.layout.width = lb.width;
-                    child.layout.height = lb.height;
-                }
-                visible_idx += 1;
+            // Apply layout results to children. `child_info` above was built
+            // from this same filter, and `flex_layout` returns one box per
+            // input, so the visible children and the boxes correspond one to
+            // one -- which is what `zip` says. The hand-rolled counter this
+            // replaces had to be bounds-checked against `layouts.len()` in a
+            // statement above the indexing it licensed, and was incremented
+            // outside the `if` that used it, so the two could only be seen to
+            // agree by reading the whole loop.
+            for (child, lb) in self.children.iter_mut().filter(|c| c.visible).zip(&layouts) {
+                // Recursively layout children with their computed size. The
+                // box is applied afterwards: `do_layout` sets the child's own
+                // width and height from the constraint, and would otherwise
+                // overwrite what flex decided.
+                child.do_layout(SizeConstraint {
+                    min_width: 0.0,
+                    max_width: lb.width,
+                    min_height: 0.0,
+                    max_height: lb.height,
+                });
+                child.layout.x = lb.x;
+                child.layout.y = lb.y;
+                child.layout.width = lb.width;
+                child.layout.height = lb.height;
             }
 
             // Update own size to fit content if unconstrained

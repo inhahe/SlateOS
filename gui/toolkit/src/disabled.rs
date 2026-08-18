@@ -1648,7 +1648,7 @@ mod tests {
         let state = validator.validate_field(field, "abc");
         assert!(!state.valid);
         assert!(
-            state.message.as_deref().unwrap().contains("5"),
+            state.message.as_deref().unwrap().contains('5'),
             "expected the MinLength complaint, got {:?}",
             state.message
         );

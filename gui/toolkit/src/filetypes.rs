@@ -1606,20 +1606,21 @@ pub fn detect_from_extension(ext: &str) -> &'static FileTypeInfo {
 pub fn detect_from_magic(header: &[u8]) -> Option<&'static FileTypeInfo> {
     for sig in MAGIC_TABLE {
         let end = sig.offset.saturating_add(sig.bytes.len());
-        if header.len() >= end {
-            let window = &header[sig.offset..end];
-            if window == sig.bytes {
-                // Translate the extension enum to the table entry.
-                let ext_str = extension_enum_to_str(sig.extension);
-                if ext_str.is_empty() {
-                    // Unknown / foreign binary — return None rather than the
-                    // generic unknown entry so callers can distinguish "no
-                    // match" from "matched but unrecognised format".
-                    return None;
-                }
-                return Some(detect_from_extension(ext_str));
-            }
+        // `get` returns `None` for a window that runs off the end, so "the
+        // header is long enough" and "the bytes match" are one question here
+        // rather than a length test standing above the slice it licenses.
+        if header.get(sig.offset..end) != Some(sig.bytes) {
+            continue;
         }
+        // Translate the extension enum to the table entry.
+        let ext_str = extension_enum_to_str(sig.extension);
+        if ext_str.is_empty() {
+            // Unknown / foreign binary — return None rather than the generic
+            // unknown entry so callers can distinguish "no match" from
+            // "matched but unrecognised format".
+            return None;
+        }
+        return Some(detect_from_extension(ext_str));
     }
     None
 }

@@ -4107,6 +4107,7 @@ dependencies = [
  "osfont",
  "textfind",
  "textfmt",
+ "tzrules",
 ]
 
 [[package]]

@@ -22,6 +22,7 @@
 //! ```
 
 use super::fpu::FpuState;
+use alloc::boxed::Box;
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table;
@@ -612,15 +613,33 @@ pub struct Task {
     /// allocation (idle tasks, AP idle tasks) or is externally provided.
     pub kstack_slot: Option<usize>,
 
-    /// Saved FPU/SSE state (x87 + XMM0-XMM15).
+    /// Saved FPU/SSE/AVX state (x87 + XMM/YMM/ZMM).
     ///
-    /// Saved by `fxsave64` on switch-out, restored by `fxrstor64` on
-    /// switch-in.  Initialized to a clean default state (all registers
-    /// zeroed, FCW=0x037F, MXCSR=0x1F80) for new tasks.
+    /// Saved by `xsave64`/`fxsave64` on switch-out, restored by
+    /// `xrstor64`/`fxrstor64` on switch-in.  Initialized to a clean default
+    /// state (all registers zeroed, FCW=0x037F, MXCSR=0x1F80) for new tasks.
     ///
-    /// 512 bytes, 16-byte aligned.  Placed last in the struct to avoid
-    /// padding between smaller fields.
-    pub fpu_state: FpuState,
+    /// **Boxed deliberately.**  The save area is 4096 bytes; embedding it by
+    /// value made `Task` a ~4.4 KiB type, and *every by-value move of a `Task`
+    /// then cost a 4 KiB memcpy through a stack temporary*.  In an unoptimised
+    /// build none of those moves are elided, and the spawn path performs
+    /// several of them in a row (`FpuState::new_default` ->
+    /// `Ok(Self { .. })` -> `Result<Task, _>` -> `Box::new(new_task)`).
+    /// Measured with `build/stackframes.py` on the debug kernel, that chain
+    /// claimed 40640 bytes of a 64 KiB task stack across three frames, which
+    /// is what caused the intermittent stack-canary halts recorded in
+    /// `known-issues.md` as
+    /// `A-INTERMITTENT-STACK-CANARY-HALT-AT-REAP-TIME`.
+    ///
+    /// Behind a `Box`, `Task` is a few hundred bytes and its moves are free.
+    /// The cost is one extra pointer indirection when the context switch takes
+    /// `&raw mut *t.fpu_state` — negligible next to the XSAVE it is about to
+    /// perform — and one small allocation per task, next to the 64 KiB stack
+    /// each task already allocates.
+    ///
+    /// Boxing also stops `FpuState`'s `align(64)` propagating to `Task`, which
+    /// was forcing every stack frame holding one to be 64-byte aligned.
+    pub fpu_state: Box<FpuState>,
 }
 
 impl Task {
@@ -783,6 +802,45 @@ impl Task {
         Some(total_scannable.saturating_sub(unused_bytes))
     }
 
+    /// Cheap test for "could this task's stack usage exceed `bytes`?".
+    ///
+    /// One volatile read, versus the O(stack-size) scan
+    /// [`stack_usage_bytes`](Self::stack_usage_bytes) performs.  Intended for
+    /// callers maintaining a running maximum, where the answer is almost
+    /// always "no" and paying for a full scan to learn that is wasteful.
+    ///
+    /// Exact in the direction that matters: a `false` means the task provably
+    /// used at most `bytes`, so skipping the full measurement cannot lose a
+    /// record.  A `true` only means "worth measuring".
+    ///
+    /// The stack grows **down** from `stack_top`, so a usage of `bytes`
+    /// occupies the top `bytes` of the stack and its deepest word sits at
+    /// offset `TASK_STACK_SIZE - bytes`.  To beat that, a task must have
+    /// disturbed the word immediately below — which is the only word this
+    /// reads.
+    #[must_use]
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn could_exceed_stack_usage(&self, bytes: usize) -> bool {
+        if self.stack_bottom == 0 {
+            return false; // Idle task — no allocated stack.
+        }
+        // Word just below the current record's boundary.  Clamped to offset 8
+        // so the canary itself is never mistaken for stack payload.
+        let Some(offset) = TASK_STACK_SIZE.checked_sub(bytes).and_then(|o| o.checked_sub(8)) else {
+            // `bytes` already covers the whole stack; nothing can beat it.
+            return false;
+        };
+        if offset < 8 {
+            return false;
+        }
+        // SAFETY: `offset` is in [8, TASK_STACK_SIZE - 8] by the checks above,
+        // so the address lies inside this task's mapped stack, and is 8-byte
+        // aligned because TASK_STACK_SIZE and the subtrahends are.
+        let word =
+            unsafe { ptr::read_volatile((self.stack_bottom + offset as u64) as *const u64) };
+        word != STACK_SENTINEL
+    }
+
     /// Stack usage as a percentage (0-100).
     ///
     /// Returns `None` for tasks without allocated stacks.
@@ -852,7 +910,7 @@ impl Task {
             cgroup_id: crate::cgroup::ROOT_CGROUP,
             net_ns: crate::netns::ROOT_NS,
             kstack_slot: None,
-            fpu_state: FpuState::new_default(),
+            fpu_state: FpuState::new_default_boxed(),
         }
     }
 
@@ -934,7 +992,7 @@ impl Task {
             cgroup_id: crate::cgroup::ROOT_CGROUP,
             net_ns: crate::netns::ROOT_NS,
             kstack_slot: None,
-            fpu_state: FpuState::new_default(),
+            fpu_state: FpuState::new_default_boxed(),
         }
     }
 
@@ -1084,7 +1142,7 @@ impl Task {
             cgroup_id: crate::cgroup::ROOT_CGROUP,
             net_ns: crate::netns::ROOT_NS,
             kstack_slot,
-            fpu_state: FpuState::new_default(),
+            fpu_state: FpuState::new_default_boxed(),
         })
     }
 
@@ -1201,48 +1259,151 @@ impl Task {
         core::str::from_utf8(bytes).unwrap_or("<invalid>")
     }
 
-    /// Verify the stack canary is intact.
+    /// Verify the stack canary is intact, **halting the CPU if it is not**.
     ///
-    /// Called on every context switch (for the task that just ran).
-    /// If the canary is corrupted, the task has overflowed its kernel
-    /// stack.  We panic immediately because the alternative — silent
-    /// memory corruption — is far worse.
+    /// Called from the context-switch paths, for a task that is live and
+    /// about to run again.  Halting is the correct response there: the
+    /// alternative is to resume a task on a stack we know is corrupt, and
+    /// silent memory corruption is far worse than a stopped machine.
+    ///
+    /// For a task that is already **dead and removed** from the table —
+    /// the reaper's case — use [`report_stack_canary`](Self::report_stack_canary)
+    /// instead.  Nothing is going to run on that stack again, so a halt buys
+    /// no safety and destroys the rest of the boot's diagnostics.
     ///
     /// The idle task (stack_bottom == 0) uses the bootloader stack
     /// and has no canary — skip the check.
     #[inline]
     pub fn check_stack_canary(&self) {
-        if self.stack_bottom == 0 {
-            return; // Idle task, no canary.
+        if !self.report_stack_canary() {
+            serial_println!("FATAL: Kernel stack overflow is unrecoverable. Halting.");
+            crate::cpu::halt_loop();
         }
-        // SAFETY: stack_bottom is a valid HHDM address for this task's
+    }
+
+    /// Verify the stack canary and, if it is corrupt, print a full
+    /// post-mortem.  Returns `true` if intact.
+    ///
+    /// This does **not** halt.  It is the check to use once the task is
+    /// dead: the damage is already done and already bounded (the task will
+    /// never run again), so the useful thing is to say as much as possible
+    /// about *how* the canary died rather than to stop the machine.
+    ///
+    /// The post-mortem exists because the bare "expected X, found Y" message
+    /// this replaced could not distinguish the two things that produce a
+    /// corrupt canary, which want opposite fixes:
+    ///
+    /// * a **real overflow** — the task's own frames reached the bottom of
+    ///   its 64 KiB stack.  Note the guard page does *not* catch this: the
+    ///   guard sits *below* `stack_bottom`, so a write that lands exactly on
+    ///   the canary corrupts it without ever leaving the mapped stack.  That
+    ///   is precisely the case the canary is for.
+    /// * a **stale reference** — the stack was freed and its kstack slot
+    ///   handed to another task, whose allocation memset it to zero, while
+    ///   this `Task` kept a non-NULL `stack_bottom`.  Then nothing is wrong
+    ///   with anyone's stack and the bug is in the free path.
+    ///
+    /// The composition of the bottom and top of the stack separates them.
+    /// A real overflow leaves the *top* full of ordinary frame data (return
+    /// addresses, saved registers); a recycled stack has been zeroed or
+    /// repainted with [`STACK_SENTINEL`] end to end.
+    #[must_use]
+    pub fn report_stack_canary(&self) -> bool {
+        if self.stack_bottom == 0 {
+            return true; // Idle task, no canary.
+        }
+        // SAFETY: stack_bottom is a valid kernel address for this task's
         // allocated stack.  The canary was written during new_kernel().
         let canary = unsafe { ptr::read_volatile(self.stack_bottom as *const u64) };
         // Compare against the value planted into THIS stack at creation,
         // not the global canary (which may have been randomized after this
         // task was created — see `planted_canary` docs).
-        if canary != self.planted_canary {
-            // Stack overflow detected.  Print as much info as possible
-            // before halting — the stack is corrupted so we might crash
-            // trying to print, but it's better than silent corruption.
-            serial_println!(
-                "FATAL: Stack canary corrupted for task {} ({})!",
-                self.id,
-                self.name_str()
-            );
-            serial_println!(
-                "  Expected: {:#018x}, Found: {:#018x}",
-                self.planted_canary,
-                canary
-            );
-            serial_println!(
-                "  stack_bottom={:#x}, stack_top={:#x}",
-                self.stack_bottom,
-                self.stack_bottom.wrapping_add(TASK_STACK_SIZE as u64)
-            );
-            serial_println!("FATAL: Kernel stack overflow is unrecoverable. Halting.");
-            crate::cpu::halt_loop();
+        if canary == self.planted_canary {
+            return true;
         }
+
+        serial_println!(
+            "FATAL: Stack canary corrupted for task {} ({})!",
+            self.id,
+            self.name_str()
+        );
+        serial_println!(
+            "  Expected: {:#018x}, Found: {:#018x}",
+            self.planted_canary,
+            canary
+        );
+        serial_println!(
+            "  stack_bottom={:#x}, stack_top={:#x}, slot={:?}, phys={:#x}",
+            self.stack_bottom,
+            self.stack_bottom.wrapping_add(TASK_STACK_SIZE as u64),
+            self.kstack_slot,
+            self.stack_phys
+        );
+
+        // Watermark: how deep did this task's stack actually get?
+        if let (Some(used), Some(pct)) = (self.stack_usage_bytes(), self.stack_usage_pct()) {
+            serial_println!("  watermark: {} bytes used of {} ({}%)", used, TASK_STACK_SIZE, pct);
+        }
+
+        // Composition of the two ends of the stack.  See the doc comment:
+        // this is what tells a genuine overflow from a recycled slot.
+        let (bz, bs, bo) = self.scan_region(8, 512);
+        let (tz, ts, to) = self.scan_region(
+            (TASK_STACK_SIZE as u64).saturating_sub(512),
+            512,
+        );
+        serial_println!(
+            "  bottom 512B: {} zero, {} sentinel, {} other",
+            bz,
+            bs,
+            bo
+        );
+        serial_println!("  top    512B: {} zero, {} sentinel, {} other", tz, ts, to);
+        if to == 0 && bo == 0 {
+            serial_println!(
+                "  VERDICT: no frame data anywhere — stack was recycled/zeroed under a \
+                 stale stack_bottom; the bug is in the stack free path, NOT an overflow."
+            );
+        } else {
+            serial_println!(
+                "  VERDICT: live frame data present — this is a real stack overflow; \
+                 the deep path needs trimming or TASK_STACK_SIZE needs raising."
+            );
+        }
+
+        false
+    }
+
+    /// Classify `len` bytes of this task's stack starting at `offset` from
+    /// `stack_bottom`, returning `(zero_words, sentinel_words, other_words)`.
+    ///
+    /// Used only by the canary post-mortem.  Reads are volatile and
+    /// bounds-clamped to the stack; `offset`/`len` beyond the stack yield
+    /// all-zero counts rather than reading out of bounds.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn scan_region(&self, offset: u64, len: u64) -> (usize, usize, usize) {
+        let size = TASK_STACK_SIZE as u64;
+        if self.stack_bottom == 0 || offset >= size {
+            return (0, 0, 0);
+        }
+        let end = offset.saturating_add(len).min(size);
+        let (mut zero, mut sentinel, mut other) = (0usize, 0usize, 0usize);
+        let mut at = offset;
+        while at.saturating_add(8) <= end {
+            // SAFETY: `at` is within [0, TASK_STACK_SIZE) by the loop bound
+            // and the clamp above, so the address lies inside this task's
+            // mapped stack.  8-byte aligned because offset and len are.
+            let w = unsafe { ptr::read_volatile((self.stack_bottom + at) as *const u64) };
+            if w == 0 {
+                zero += 1;
+            } else if w == STACK_SENTINEL {
+                sentinel += 1;
+            } else {
+                other += 1;
+            }
+            at += 8;
+        }
+        (zero, sentinel, other)
     }
 }
 

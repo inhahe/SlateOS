@@ -1412,6 +1412,18 @@ if [ ! -f "$SWAP_IMG" ]; then
     dd if=/dev/zero of="$SWAP_IMG" bs=1M count=16 status=none 2>/dev/null
 fi
 
+# Step 3a: Backing store for the NVMe controller (see the device notes above
+# the QEMU invocation).  `-device nvme` requires a drive — a controller with no
+# namespace enumerates zero namespaces, and the driver's identify/namespace path
+# (the part most likely to be wrong) would go untested, which is precisely the
+# "present but inert" trap that `intel-hda` without `hda-duplex` sets.
+NVME_IMG="$PROJECT_ROOT/build/nvme.img"
+NVME_IMG_WIN="$(to_win_path "$NVME_IMG")"
+if [ ! -f "$NVME_IMG" ]; then
+    echo "=== Creating 32 MiB NVMe disk image ==="
+    dd if=/dev/zero of="$NVME_IMG" bs=1M count=32 status=none 2>/dev/null
+fi
+
 # Step 3b: Attach the Path-Z glibc rootfs (rootfs.ext4) as a second virtio-blk
 # disk when present.  It is enumerated AFTER swap-disk, so it becomes vdb: the
 # kernel's swap loop skips it (ext4 superblock detected) and the /mnt ext4 probe
@@ -1877,7 +1889,74 @@ QEMU_START_EPOCH=$(date +%s)
 #
 # Unlike ati-vga these are multimedia-class, not VGA-class, so they suppress
 # nothing and need no counterpart to `-vga std`.
+#
+# `nvme` and `qemu-xhci` close the same gap for the last two whole subsystems
+# that had no hardware here.  Before they were added, every boot printed
+#
+#     [nvme] No NVMe controller found
+#     [xhci] No xHCI controller found (USB not available)
+#
+# so nvme.rs (~950 lines) and xhci.rs (~2400 lines) had never executed past
+# their PCI scan.  Both are found by CLASS, not by vendor/device id, so the
+# choice of model matters less than it does above -- any controller QEMU offers
+# in the right class will bind:
+#
+#   nvme       class 01h/08h (NVM)        -> nvme.rs   find_devices_by_class
+#   qemu-xhci  class 0Ch/03h (USB)        -> xhci.rs   find_devices_by_class
+#
+# `usb-kbd` is to qemu-xhci what `hda-duplex` is to intel-hda: without a device
+# on the bus, the driver enumerates an empty root hub and everything that makes
+# xHCI hard -- slot enable, address-device, the control-transfer TRB rings,
+# descriptor parsing, the HID boot-protocol path -- stays untested.  A keyboard
+# is the right choice because xhci.rs already has a HID boot-protocol driver
+# looking for exactly this (USB_CLASS_HID / USB_HID_SUBCLASS_BOOT).
+#
+# The NVMe drive is `if=none` and named explicitly so it attaches ONLY to the
+# nvme controller.  A bare `-drive` would be auto-assigned to the q35 AHCI bus
+# and change which disk is which, which is the sort of thing that turns a
+# coverage improvement into a mysterious rootfs failure.
+#
+# --- The three NICs ---------------------------------------------------------
+#
+# Until now the boot test attached no NIC at all, and got one anyway: with no
+# -netdev/-nic/-net on the command line QEMU silently creates a default NIC,
+# which on q35 is an e1000e (8086:10d3).  So e1000.rs was tested by accident,
+# and rtl8139.rs and virtio/net.rs printed "no device" on every boot and had
+# never executed a single line past their PCI scan.
+#
+# All three are now named explicitly, each on its own user-mode netdev.  Being
+# explicit is the point: the implicit default is a QEMU policy that changes by
+# machine type and by version, so a test that depends on it is a test that
+# reports on QEMU as much as on us.  `e1000e` is named rather than `e1000`
+# because 8086:10d3 is what the default produced, so this keeps the device the
+# e1000 driver has actually been running against rather than quietly swapping
+# it for an 82540EM (8086:100e).
+#
+# Distinct MACs are required, not cosmetic: `net::interface::init` takes the
+# MAC of whichever NIC it selects, and two NICs answering to the same address
+# on one user-net segment would make ARP results depend on arrival order.
+#
+# What this actually tests is the transmit datapath.  Each of the three
+# drivers now sends one inert frame in its self-test (addressed to itself,
+# with the IEEE 802 local-experimental EtherType 0x88B5) and waits for the
+# hardware to hand the descriptor back -- e1000's DD bit, the RTL8139's OWN
+# bit, virtio's used ring.  That needs no peer on the wire and proves what no
+# register read-back can: that the ring lives where the device was told, that
+# the addresses programmed into it are physical, and that the doorbell write
+# reached the right register.
+#
+# Note that adding virtio-net changes which NIC the *stack* uses:
+# `net::send_frame` and `net::interface::init` both prefer virtio-net, then
+# e1000, then rtl8139.  That is a deliberate consequence -- it puts the virtio
+# path under the existing DHCP/ARP/ICMP tests, while e1000 and rtl8139 keep
+# their own direct datapath coverage regardless of which one is primary.
 "$QEMU" \
+    -netdev user,id=net0 \
+    -device e1000e,netdev=net0,mac=52:54:00:12:34:56 \
+    -netdev user,id=net1 \
+    -device rtl8139,netdev=net1,mac=52:54:00:12:34:57 \
+    -netdev user,id=net2 \
+    -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58 \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
     -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \
     -device virtio-blk-pci,drive=swap-disk \
@@ -1893,6 +1972,10 @@ QEMU_START_EPOCH=$(date +%s)
     -device intel-hda \
     -device hda-duplex,audiodev=snd0 \
     -device virtio-sound-pci,audiodev=snd0,streams=2 \
+    -drive "id=nvme-disk,if=none,format=raw,file=$NVME_IMG_WIN" \
+    -device nvme,drive=nvme-disk,serial=SLATE-NVME-1 \
+    -device qemu-xhci,id=xhci0 \
+    -device usb-kbd,bus=xhci0.0 \
     -serial "file:$SERIAL_FILE_WIN" \
     -pidfile "$PIDFILE_WIN" \
     -display none \

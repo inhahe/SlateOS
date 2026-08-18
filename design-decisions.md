@@ -11546,6 +11546,307 @@ way:
 
 ---
 
+## §224 — A canary check halts where a task is about to keep running, and only reports where it is already dead
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** Each kernel task's stack has a known value — a "canary" — written
+at the very bottom, so that a task which uses more stack than it has overwrites
+that value and is caught. When the check finds the value wrong it stops the
+whole machine. That is right in the middle of a context switch, where the task
+is about to resume on a stack we now know is bad. It is wrong when the task is
+already dead and gone, which is where the check *also* ran — there it threw away
+the rest of the boot's output to prevent nothing. The decision is that halting
+is a property of the **call site**, not of the condition, and the check is now
+two functions rather than one.
+
+### What was actually there
+
+The reaper's own comment read:
+
+> Final canary check — if the task overflowed before dying, log a warning
+> (the task is already dead so we can't halt, but the corruption may have
+> affected other memory).
+
+— immediately above a call to a function whose last line is
+`crate::cpu::halt_loop()`. The intent was recorded correctly and the behaviour
+had been the opposite of it for as long as the call existed. Nobody noticed
+because the check almost never fires; when it finally did, it took down a
+boot test at the ~85% mark and destroyed the output that would have said
+whether anything *else* was wrong.
+
+### The alternatives
+
+| | **Halt only where the stack will be reused** (chosen) | **Halt on every detection** |
+|---|---|---|
+| *What changes:* | a dead task's bad canary prints a post-mortem and the boot continues | any bad canary anywhere stops the machine |
+| Argument for | the rest of the run's diagnostics survive, and the post-mortem is what identifies the cause | corruption is corruption; continuing runs on a machine whose memory state is unknown |
+
+The second position is not weak and deserves stating properly: a corrupt
+canary is evidence that *something* wrote where it should not have, and the
+blast radius of a stack overflow is not confined to the stack — the frames
+below it belong to somebody. Continuing is, strictly, continuing on a machine
+whose memory you can no longer vouch for.
+
+What settles it is that halting **does not undo any of that**. By the time the
+reaper looks, the write happened tens of thousands of log lines ago; the task
+is dead, removed from the table, and its stack is about to be freed. There is
+no future write to prevent. The halt is a response to damage that is already
+complete and already bounded — it buys no safety, and it costs the one thing
+that could still identify the cause.
+
+Whereas at the context-switch sites the calculus is exactly inverted: the task
+is live, its `rsp` points into that stack, and letting it resume means the
+*next* push writes past the canary into whatever lies below. There the halt
+prevents a specific, imminent, unbounded write. Same condition, opposite
+correct answer, because the question is not "how bad is this?" but "is
+anything going to run on this stack again?"
+
+So `check_stack_canary()` keeps the halt and keeps the context-switch callers;
+`report_stack_canary()` returns a `bool` and takes the reaper.
+
+### The corollary that generalises
+
+**A check that halts inherits its severity from where it is called, not from
+what it detects.** Copying an assertion to a second call site silently
+re-decides a policy question that was answered for the first one. When the
+new site's answer differs, the result is what happened here — a comment
+describing the behaviour the author wanted, sitting on top of the behaviour
+they got, agreeing with each other nowhere but in the reader's assumption.
+
+### The measurement that was missing, which is the more important half
+
+Fixing the halt makes the failure survivable; it does not make it
+understandable. Two unrelated faults produce a corrupt canary — a genuine
+overflow, or a stale pointer to a stack that was freed and re-issued to
+someone else — and they want opposite fixes. The message that existed
+(`Expected: X, Found: Y`) distinguishes them not at all.
+
+Both are now distinguished automatically, from data the kernel was already
+generating and discarding: every stack is painted with a sentinel pattern at
+creation for watermark tracking. The post-mortem reports the composition of
+the bottom *and* the top of the stack, and a real overflow leaves the top full
+of ordinary frame data where a recycled slot has been zeroed end to end.
+
+And a **system-wide stack census** now runs on every boot, reporting the five
+deepest kernel stacks and warning above 75% of capacity. The tree already had
+a `test_stack_watermark` self-test, which proved the watermark API worked by
+measuring a purpose-built task that touches 256 bytes — so the question "is any
+*real* kernel stack close to overflowing?" had no answer anywhere, despite the
+data to answer it being painted into every stack in the system. That is the
+same shape as §222: an instrument that exists, is exercised, and is never
+pointed at the thing it was built for.
+
+The 75% line is not arbitrary. It leaves 16 KiB of the 64 KiB stack free,
+which is roughly the worst case for an interrupt arriving at a task's deepest
+point — the IRET frame, the register save and the handler's own frames all land
+on the *same* kernel stack. A task sitting quietly above that line is one
+badly-timed interrupt away from writing through its own canary, which is a
+plausible reading of the failure that prompted all of this.
+
+---
+
+## §225 — A driver self-test that only reads back registers the driver itself wrote is a test of the driver's memory, not of the hardware
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** Each network card driver had a "self-test" that checked things
+like "is the MAC address sensible" and "is the transmit-enable bit set". Every
+one of those values is something the driver had put there itself a moment
+earlier, so the test passes even if the card is not actually able to send
+anything. The decision is that each network driver's self-test now **actually
+transmits a frame** and waits for the card to report it finished — which needs
+no other machine on the network, because the card reports completion by writing
+back into our own memory. Doing this immediately found two real bugs in the
+RTL8139 driver that had been there since it was written.
+
+### What the tests were checking
+
+The e1000's self-test is representative. Five checks, all green, all vacuous:
+
+| Check | What it proves |
+|---|---|
+| MAC is not all-zeros/all-ones | the driver read *something* out of the EEPROM |
+| link status readable | the MMIO window is mapped |
+| STATUS register != `0xFFFF_FFFF` | the MMIO window is mapped |
+| `RCTL.EN` set | the driver's own init wrote `RCTL` |
+| `TCTL.EN` set | the driver's own init wrote `TCTL` |
+
+A driver whose transmit-ring base address is a *virtual* address instead of a
+physical one passes all five. So does one whose descriptor struct has a field
+in the wrong place, and one whose doorbell write lands on the wrong register
+offset. Those are the three most likely ways a DMA-ring driver is wrong, and
+none of them is observable from anything on that list.
+
+### The alternatives
+
+| | **Transmit a real frame** (chosen) | **Read-back checks only** |
+|---|---|---|
+| *What changes:* | each NIC sends one 60-byte frame during boot and the log reports the descriptor coming back | boot emits no packets |
+| Argument for | the failure modes that actually happen are the ones only a transmission can detect | a self-test with no side effects can run anywhere, including on a machine attached to a network someone cares about |
+
+The objection to transmitting is real and worth stating: a self-test that emits
+packets is a self-test that can be *noticed* by other machines, and "the kernel
+self-test spammed the LAN" is a legitimate thing to not want.
+
+What defuses it is that the frame can be made inert by construction rather than
+by policy. It is addressed **to our own MAC, from our own MAC**, with EtherType
+`0x88B5` — which IEEE Std 802 reserves for local experimental use, so no
+protocol anywhere claims it. No other station treats it as addressed to itself;
+nothing parses it. It is one 60-byte frame per NIC per boot, and it is the
+minimum that can prove anything at all.
+
+The other half of what defuses it: **no peer is required.** Every one of these
+cards reports completion itself, by DMA-writing into memory we own — the e1000
+sets the Descriptor Done bit in our descriptor, the RTL8139 sets OWN in its
+status register, virtio publishes the chain head in the used ring. So the test
+works on a machine with no network at all, which is what makes it usable in an
+automated boot test rather than a thing someone runs by hand occasionally.
+
+### What it found immediately
+
+Writing the RTL8139 half required reading the OWN bit's semantics properly, and
+the driver had them **backwards**. The header comment read "set by software to
+start TX, cleared by hardware on completion". The RTL8139 inverts the usual
+convention: `OWN == 1` means the *host* owns the descriptor (Linux names the
+same bit `TxHostOwns` in `8139too.c`), and writing the byte count is what clears
+it. Two consequences, both live since the driver was written:
+
+- The pre-send wait tested `status & OWN == 0` and broke out of the loop on it
+  — that is, it treated "the NIC is **currently DMA-ing this buffer**" as "the
+  buffer is free", then `memcpy`'d the next frame over it. Corruption on the
+  wire, invisible from this end.
+- When the descriptor genuinely *was* free (`OWN == 1`) the loop instead spun
+  its full 100 000 iterations and then proceeded anyway, because the timeout
+  had no failure path. So the check cost real time and bought nothing.
+
+Separately, the driver never padded short frames. Ethernet requires 60 bytes
+before the FCS; the transmit buffers are recycled, so a 40-byte frame would have
+had 20 bytes of *the previous frame* appended to it and DMA-ed onto the wire.
+That is kernel memory disclosed to the network, and silent from this end.
+
+Both are fixed, along with the timeout now returning `TimedOut` instead of
+falling through, and a per-descriptor in-flight flag — needed because
+`OWN == 0` cannot distinguish "the NIC is still working on this" from "this
+descriptor has never been used", and without the distinction the first four
+sends of every boot would each burn the full timeout.
+
+### The corollary that generalises
+
+**A test whose assertions read back values the code under test wrote is a test
+of nothing but the code's memory.** The check has to close a loop through
+something the code does not control — here, the hardware's own DMA write-back.
+This is the same shape as §222 ("a driver whose hardware is absent is not
+lightly tested, it is untested") one level in: §222 got the hardware attached,
+and this one is about what you then *ask* it.
+
+The tell is worth naming, because it is easy to spot in review once you look
+for it: if every assertion in a test would still hold after commenting out the
+hardware, the test does not test hardware.
+
+---
+
+## §226 — A large struct destined for the heap is allocated first and initialised in place, never built by value and then boxed
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** When kernel code needs a big chunk of memory on the heap — say a
+4 KiB block for saving a CPU's floating-point registers — the obvious-looking
+Rust for it, `Box::new(Thing::new())`, does not actually put it on the heap
+straight away. It builds the whole thing on the *stack* first, then copies it
+to the heap. Kernel stacks are small and fixed (64 KiB here), so a few of those
+copies in a row can eat most of one. That is exactly what crashed this kernel:
+one 4 KiB field, copied through three function frames, claimed 40 640 bytes of
+a 64 KiB stack and intermittently ran a task off the bottom of its own stack.
+The decision is a rule: anything big that is going to live on the heap must be
+allocated on the heap *first* and filled in there, never assembled on the stack
+and moved.
+
+**The threshold:** ~1 KiB. Below that the copy is noise; above it, on a 64 KiB
+stack traversed by paths that are already several frames deep, it is not.
+
+### The pattern
+
+Wrong — and it does not look wrong:
+
+```rust
+let state = FpuState::new_default();   // 4 KiB built in this frame
+let boxed = Box::new(state);           // ...then memcpy'd to the heap
+```
+
+Also wrong, and looks even more innocent, because the temporary is unnamed:
+
+```rust
+let boxed = Box::new(FpuState::new_default());
+```
+
+Right — the value never exists on the stack at all:
+
+```rust
+pub fn new_default_boxed() -> Box<Self> {
+    let layout = Layout::new::<Self>();
+    // SAFETY: non-zero size; an all-zero FpuState is a valid FpuState.
+    let ptr = unsafe { alloc_zeroed(layout) }.cast::<Self>();
+    if ptr.is_null() {
+        handle_alloc_error(layout);
+    }
+    // SAFETY: freshly allocated, correctly aligned, exclusively ours.
+    unsafe { &mut *ptr }.write_defaults();   // patch in place
+    // SAFETY: `ptr` came from the global allocator with `Self`'s layout.
+    unsafe { Box::from_raw(ptr) }
+}
+```
+
+`alloc_zeroed` is only correct when **all-zero is a valid value of the type**.
+`FpuState` is a plain `[u8; 4096]`, so it is. `KernelFdTable` is
+`[Option<FdEntry>; 256]`, and it is *not*: Rust does not promise that `None` is
+all-zero bytes for an arbitrary `Option<T>`. There the pattern is
+`Box::<Self>::new_uninit()` followed by an explicit `write(None)` per element,
+then `assume_init()` — same shape, no illegal assumption.
+
+### Why the alternatives lose
+
+| Option | Why not |
+|---|---|
+| **Trust the optimiser to elide the copy** | It does, at `opt-level ≥ 1` — and the boot test builds *debug*. The same source measured 40 640 bytes of stack in debug and 8 960 in release. A rule that only holds in release is not a rule; it is a build configuration that happens to hide a bug. |
+| **Grow the kernel stacks** | Treats the symptom, costs memory on every task forever, and leaves the copies in place to be re-discovered by the next struct that grows. |
+| **Case-by-case, only where a stack overflow is observed** | This bug was intermittent, took ~1 boot in 10, was attributed to the wrong cause for two sessions, and needed a purpose-written disassembly tool to localise. Discovering these one crash at a time is not a strategy. |
+| **A lint / `#[deny]`** | There is no such lint. Clippy's `large_stack_frames` is close but fires on the frame, not on the by-value move, and does not run against our target reliably. Would be strictly better if it existed — see *Revisit if*. |
+
+### The cost, stated honestly
+
+The correct form is more code and it contains `unsafe`. Three or four lines of
+`SAFETY`-commented allocator work replace one line of `Box::new`. That is a real
+loss in readability, and it is why the ~1 KiB threshold exists rather than
+applying the rule to everything. The judgement is that for a handful of large,
+long-lived structs the trade is clearly worth it, and for small ones it clearly
+is not.
+
+### How to check
+
+`python scripts/stack-frames.py --profile debug --top 40` lists every function
+by the stack its prologue claims; `--diff BEFORE_ELF AFTER_ELF` shows what a
+change moved. Run it after touching a spawn, fork, or context-switch path.
+
+Note the tool had to sum **stack-probe chains** to be useful: a function needing
+more than a page emits `sub $0x1000, %rsp; movq $0, (%rsp)` repeatedly rather
+than one big `sub`, so reading only the first `sub` reports exactly 4096 for
+every large function — hiding precisely the ones worth finding. The first
+version of the tool did that and produced a clean bill of health for a kernel
+that was overflowing.
+
+**Revisit if** a lint appears that can flag a by-value move above N bytes
+(rustc's `-Zprint-type-sizes` plus a build-time check is the plausible
+home-grown version), at which point the rule can be enforced mechanically
+instead of by convention; or if we ever move to building the boot test at
+`opt-level = 1`, which would hide the problem again rather than fix it, and so
+should not be done for this reason.
+
+---
+
 ## §300 — A NULL pointer is `EFAULT` only where the kernel would see it; glibc's own pre-checks keep their `EINVAL`
 
 **Date:** 2026-08-13

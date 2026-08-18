@@ -32908,6 +32908,1288 @@ shape. It is worth running over any transcribed algorithm in this tree,
 because it costs nothing and, unlike a test that checks the digest's shape, it
 cannot be satisfied by a plausible-looking function.
 
+## A-INTERMITTENT-STACK-CANARY-HALT-AT-REAP-TIME (lane A, 2026-08-17) - **ROOT CAUSE FOUND AND FIXED 2026-08-17**
+
+**In short:** roughly one boot in ten dies with `FATAL: Stack canary
+corrupted`, naming a task that exited tens of thousands of log lines
+earlier, and halts the machine - throwing away the rest of the boot's
+self-tests. Two very different faults produce that message and they want
+opposite fixes, and the message as written could not tell them apart. The
+halt itself was also wrong at that call site, and is fixed; the underlying
+corruption is now instrumented to identify itself on the next occurrence.
+
+**Symptom** (observed once in 74 boots' history; ~9.5% of boots fail for
+some reason, this fingerprint is new):
+
+```
+[sched]   sleep_ns: PASSED (slept 21.563ms for 20ms request)
+FATAL: Stack canary corrupted for task 100 (spawn-test-linux-sysv)!
+  Expected: 0xdeadbeefcafebabe, Found: 0x0000000000000000
+  stack_bottom=0xffffc10000004000, stack_top=0xffffc10000014000
+FATAL: Kernel stack overflow is unrecoverable. Halting.
+```
+
+### What the evidence establishes
+
+- The check fired from the **reaper** (`reap_dead_tasks`), not from a
+  context switch: task 100 is not `current`, and the message lands
+  immediately after another task exited and triggered a reap.
+- Task 100 was created at serial line 1474 and **exited at line 1482**; the
+  canary was not read until line **25349**. It stayed in the task table that
+  whole time because the reaper skips any task still recorded as `current`
+  on some CPU. So the corruption happened ~24000 lines before it was noticed.
+- `stack_bottom = 0xffffc10000004000` decodes to **slot 0** of the kstack
+  allocator (`KSTACK_REGION_BASE = 0xFFFF_C100_0000_0000`, `GUARD_SIZE =
+  0x4000`) - the first slot the bitmap allocator hands out and the first it
+  re-issues after a free.
+- Task 100 predates the per-boot canary randomisation (line 1597), so
+  `0xdeadbeefcafebabe` is genuinely the value that was planted.
+- `stack_bottom` was non-zero, so `free_stack()` - which zeroes it - had not
+  run on that `Task`.
+
+### The two candidate causes
+
+| | **Real marginal overflow** | **Stale reference to a recycled slot** |
+|---|---|---|
+| What happened | the task's own frames reached the bottom of its 64 KiB stack and overwrote the canary | the slot was freed and re-issued; `kstack::alloc` memsets the whole stack, and this `Task` still pointed at it |
+| Where the bug is | the deep path, or `TASK_STACK_SIZE` | the stack free path |
+
+**The guard page does not rule out the first.** The guard sits *below*
+`stack_bottom`, so a write landing exactly on the canary corrupts it without
+ever leaving the mapped stack - which is precisely the case the canary
+exists to catch. Reading exactly zero is consistent with a zero-initialised
+local buffer or a `write_bytes` reaching the bottom eight bytes.
+
+The second is much weaker than it first looks: `kstack::alloc` zeroes the
+stack, but `Task::new_kernel` then plants a fresh (randomised, non-zero)
+canary a few instructions later. A stale read would therefore have to land
+inside that window to see zero rather than the *new* task's canary. Possible,
+but it requires a coincidence that a 24000-line-later reap does not offer.
+
+Intermittency fits the first cause well: the code path is deterministic, but
+an interrupt taken near the deepest point pushes an IRET frame, a register
+save and the handler's own frames onto the *same* kernel stack. `spawn_process`
+-> ELF parse -> page-table work is among the deepest paths in the kernel.
+
+### What was fixed now
+
+1. **The reaper no longer halts.** Its comment already said *"the task is
+   already dead so we can't halt"* while calling `check_stack_canary()`,
+   which halts unconditionally - intent and behaviour had silently disagreed.
+   Split into two:
+   - `check_stack_canary()` - still halts. Correct for the context-switch
+     callers, where a live task is about to resume on a stack known to be bad.
+   - `report_stack_canary() -> bool` - diagnoses and returns. Correct for the
+     reaper, where the task is dead and already removed from the table, so a
+     halt buys no safety and costs the rest of the boot's diagnostics.
+
+2. **The failure now identifies its own cause.** The post-mortem prints the
+   stack watermark, the kstack slot, and the composition (zero / sentinel /
+   other words) of the bottom 512 bytes *and* the top 512 bytes. That last
+   pair is the discriminator: a real overflow leaves the top of the stack
+   full of ordinary frame data, whereas a recycled slot has been zeroed or
+   repainted end to end. It prints an explicit `VERDICT:` line either way.
+
+3. **A system-wide stack census now runs every boot** (`report_stack_census`,
+   last in the scheduler self-test). It reports the five deepest kernel
+   stacks and warns above 75%. This is the measurement whose absence made the
+   bug undiagnosable: `test_stack_watermark` proved the watermark *API*
+   worked, but only ever measured a purpose-built task that touches 256
+   bytes, so "is any real kernel stack close to overflowing?" was a question
+   nothing in the tree could answer - despite every stack already being
+   painted with a sentinel that answers it for free.
+
+### First census results (2026-08-17) - the headroom is smaller than assumed
+
+The census ran on the next green boot and answered the question directly:
+
+```
+[sched]   Stack peak this boot: 43896 bytes (66% of 65536) by task 283 (spawn-test-glibc-forkexec)
+[sched]   Stack census: 5 live task(s) with allocated stacks, deepest first
+[sched]     task 397  kworker                   42424 bytes ( 64% of 65536)
+[sched]     task 396  kswapd                     5048 bytes (  7% of 65536)
+[sched]     task 406  efd-to-test                4904 bytes (  7% of 65536)
+[sched]     task 407  svc-accept                 4552 bytes (  6% of 65536)
+[sched]     task 408  cgroup-e2e                 4200 bytes (  6% of 65536)
+```
+
+Three things in that are worth reading carefully.
+
+**The deepest stack of the boot belonged to a task that was already dead** -
+task 283 was reaped long before the census ran, and is visible only because
+the reaper folds each dying task's watermark into the peak before freeing its
+stack. A census of live tasks alone would have reported 64% and missed the
+real maximum. This is the half that makes the instrument honest, and it is
+also the half that was easiest to leave out.
+
+**`kworker` sits at 64% at steady state, and it is long-lived.** The peak is
+not a one-off spike in a short-lived spawn task; a permanent kernel worker is
+routinely two-thirds of the way down its stack. The distance from there to the
+canary is about 23 KiB.
+
+**The deep tasks are the spawn family** - `spawn-test-glibc-forkexec` at the
+peak, and `spawn-test-linux-sysv` is the task whose canary failed. Same family
+of paths (`spawn_process` -> ELF parse -> page-table work), which is what
+hypothesis (a) predicted.
+
+What this does *not* yet do is prove (a). 23 KiB is a large amount for one
+interrupt to consume, so a single badly-timed IRQ at `kworker`'s depth does not
+obviously reach the canary; nested interrupts, or a spawn path deeper than any
+seen in these boots, would be needed. The census will show that as a rising
+number, which is the point of printing it every boot: the next occurrence now
+arrives with both a `VERDICT:` line and a depth history to compare against.
+
+No task crossed the 75% warning line on this boot, so the threshold has not yet
+been exercised in anger.
+
+### Generalisation
+
+Two rules fell out of this one.
+
+**An assertion that halts must be sited where halting helps.** The same
+canary check was correct at the context-switch callers and wrong at the
+reaper, for the same reason in both cases: whether anything is going to
+*run* on that stack again. A check copied to a second call site inherits its
+severity, and severity is a property of the site, not of the condition.
+
+**When a diagnostic fires intermittently, the first fix is to make the
+diagnostic conclusive, not to guess at the cause.** Both hypotheses here are
+plausible, they want opposite fixes, and picking one on a hunch had an even
+chance of hardening the wrong path while leaving the real one live. The
+evidence needed to choose was cheap - it was sitting unread in a sentinel
+pattern the kernel already paints on every stack.
+
+---
+
+### RESOLVED 2026-08-17 - hypothesis (a) was right, and the cause was one field
+
+Everything above stands as written except its conclusion.  Hypothesis (a)
+(a real marginal overflow on the spawn path) is now **proven**, and the
+reason 23 KiB of headroom was not in fact enough is a single struct field.
+
+**In short:** `Task` embedded its 4096-byte FPU save area *by value*.  That
+made `Task` a ~4.4 KiB type, and in Rust a by-value move of a large type is
+a `memcpy` through a stack temporary.  The spawn path performs several such
+moves back to back, and at `opt-level = 0` - which is what
+`scripts/boot-test.sh` builds by default, and the profile every observed
+halt came from - the compiler elides none of them.  Three frames on one
+call chain therefore claimed **40 640 bytes of a 64 KiB stack** for nothing
+but copies of a zeroed 4 KiB array.
+
+#### How it was found
+
+A watermark says *which task* came closest to its canary.  It structurally
+cannot say *which function* put it there.  That gap is what kept the bug
+alive for as long as it did, and it is now closed by a new tool,
+**`scripts/stack-frames.py`**, which disassembles the built kernel and
+reports, per function, the stack its prologue claims.
+
+Two traps in writing that tool are worth recording, because either one
+alone would have produced a confident wrong answer:
+
+1. **Stack-probe chains.**  A function needing more than a page does not
+   emit one `sub $N, %rsp`.  It emits `sub $0x1000, %rsp; movq $0, (%rsp)`
+   repeated a page at a time, so a guard page can never be jumped over
+   untouched.  A naive "first `sub` in the prologue" reading therefore
+   reports **exactly 4096 for every large function** - hiding precisely the
+   ones worth finding.  The first version of the tool did exactly this, and
+   the uniform 4096s looked like a clean bill of health.  The chain must be
+   summed.
+2. **Profile matters enormously.**  Measuring the release build and
+   concluding the kernel is fine is a real way to be wrong here: the same
+   spawn path measured **40 640 bytes in debug and 8 960 in release**.
+
+#### The measurement
+
+Static, debug profile, before and after boxing `FpuState`:
+
+| Frame | before | after |
+|---|---:|---:|
+| `FpuState::new_default` | 8 320 | off path |
+| `Task::new_kernel` | 9 600 | 1 256 |
+| `sched::spawn_inner::{{closure}}` | 22 720 | 2 000 |
+| **total on one call chain** | **40 640** | **3 256** |
+
+40 640 bytes is **93% of the 43 896-byte peak the census measured**, in
+three frames.  There was never 23 KiB of headroom to spend on an unlucky
+interrupt; the frames themselves had already spent it.
+
+Two independent confirmations, taken before any fix:
+
+- **Static:** the identical source measured 40 640 in debug and 8 960 in
+  release - a 4.5x profile gap that only a by-value-copy explanation
+  accounts for.
+- **Runtime:** booting release instead of debug moved the census peak from
+  43 896 (66%) to 13 560 (20%), and `kworker` from 42 424 (64%) to
+  10 200 (15%).
+
+#### The fix
+
+`Task::fpu_state` is now `Box<FpuState>`, built by a new
+`FpuState::new_default_boxed()` that allocates zeroed memory and patches
+the 14 non-zero bytes **in place**.  This detail is the whole point:
+`Box::new(FpuState::new_default())` would have fixed *nothing*, because it
+builds the value in the caller's frame and only then copies it to the heap.
+Only allocate-then-initialise-in-place keeps it off the stack.
+
+A second instance of the same defect was found by the same tool and fixed
+in the same way: `KernelFdTable` is `[Option<FdEntry>; 256]` = 8192 bytes,
+and was likewise built by value and then `Box::new`'d, at two sites.  It
+now has `new_boxed()` / `with_stdio_boxed()`.  (`alloc_zeroed` is
+deliberately *not* used there - `Option<FdEntry>`'s `None` is not
+guaranteed to be all-zero bytes, a layout detail Rust does not promise.
+`Box::new_uninit()` plus an explicit per-element `write(None)` is.)
+
+Together the two fixes removed roughly **85 KiB of stack claims across nine
+functions**:
+
+| Function | before | after |
+|---|---:|---:|
+| `sched::spawn_inner::{{closure}}` | 22 720 | 2 000 |
+| `proc::pcb::fork_create::{{closure}}` | 16 624 | 0 |
+| `Task::new_kernel` | 9 600 | 1 256 |
+| `sched::init` | 9 344 | 0 |
+| `sched::register_ap_idle` | 9 216 | 0 |
+| `proc::pcb::linux_fd_install_stdio` | 8 336 | 0 |
+| `Result::<Task, _>::branch` | 4 608 | 0 |
+| `Task::new_ap_idle` | 4 352 | 0 |
+| `Task::new_idle` | 4 352 | 0 |
+
+`linux_fd_install_stdio` also stopped allocating while holding
+`PROCESS_TABLE`'s spinlock, which is a separate latent bug (see the Q24
+allocation-under-spinlock sweep) fixed incidentally by the same change.
+
+#### Runtime confirmation
+
+Debug boot, after both fixes (boot 81, PASS, streak 8):
+
+```
+[sched]   Stack peak this boot: 38280 bytes (58% of 65536) by task 283 (spawn-test-glibc-forkexec)
+[sched]   Stack census: 5 live task(s) with allocated stacks, deepest first
+[sched]     task 397  kworker                    7664 bytes ( 11% of 65536)
+[sched]     task 396  kswapd                     5048 bytes (  7% of 65536)
+[sched]     task 406  efd-to-test                4904 bytes (  7% of 65536)
+[sched]     task 407  svc-accept                 4552 bytes (  6% of 65536)
+[sched]     task 408  cgroup-e2e                 4200 bytes (  6% of 65536)
+```
+
+`kworker` - the long-lived task that sat at **64%** for the whole boot, and
+the one whose 23 KiB of remaining headroom the entry above worried about -
+is now at **11%**.  That is 34.8 KiB freed on a permanent kernel thread, a
+5.5x drop, and headroom from 23 KiB to 57 KiB.  This is the number that
+closes the bug: `spawn_inner` runs on the *caller's* stack, and the caller
+is `kworker`.
+
+The **peak** moved less - 43 896 to 38 280 - and this is expected rather
+than disappointing.  The peak belongs to task 283's own stack, so it
+measures code running *inside* the spawned task, not the spawn machinery.
+See the follow-on entry below for what is still down there.
+
+#### Generalisation (added to the two rules above)
+
+**A large struct destined for the heap must never be built by value.**
+This is recorded as `design-decisions.md` §226 with the pattern to use.
+The rule has teeth because the failure is invisible in release builds and
+invisible in code review: `Box::new(Big::new())` reads exactly like
+heap allocation, and is not.
+
+**A watermark localises a symptom to a task; only static frame analysis
+localises it to a function.** The census was a real improvement and still
+could not have found this. `scripts/stack-frames.py` is now part of the
+tree; run it after any change to a spawn, fork, or context-switch path.
+
+---
+
+## A-LARGE-KERNEL-STACK-FRAMES-REMAIN-IN-SELF-TESTS-AND-KSHELL (lane A, 2026-08-17) - **open, low severity**
+
+**In short:** after the two fixes above, the biggest remaining stack frames
+in the kernel are no longer on core paths - they are in boot self-tests and
+in `kshell` command handlers.  None is currently close to overflowing, but
+several are large enough that adding a few locals to one could push it
+over, and they are the reason the boot's peak is still 38 280 bytes rather
+than something in the low thousands.
+
+Measured with `python scripts/stack-frames.py --profile debug` on the debug
+kernel after both fixes landed (top offenders, bytes claimed by the
+prologue):
+
+| Function | bytes |
+|---|---:|
+| `self_test_prctl_dispatch` | 32 160 |
+| `kshell::cmd_oci` | 31 760 |
+| `linux_fd::self_test` | 28 224 |
+| `kshell::cmd_container` | 27 432 |
+| `eventlog::self_test` | 26 720 |
+| `scfilter::init` | 21 872 |
+| `kernel_main` | 19 776 |
+| `self_test_numa_sched_landlock` | 19 664 |
+| `test_per_cpu_work_stealing` | 19 504 |
+| `self_test_legacy_deprecated_syscalls` | 18 832 |
+| `PerCpuScheduler::new_const` | 18 752 |
+| `net::httpd::self_test` | 17 152 |
+| `xhci::init` | 15 504 |
+| `oci::build_one_stage_inner` | 15 000 |
+
+Plus some large stack *locals* found by inspection rather than by the tool:
+
+- `kernel/src/audio_notify.rs:133` - `[0u8; 8192]`
+- `kernel/src/audio_mixer.rs:420,425` - ~12 KiB combined
+- `kernel/src/syscall/linux.rs:80592` - `[0u8; 4096]`
+- `kernel/src/kshell.rs:106303-4`
+
+And one core-path remnant: `proc::pcb::fork_create` itself is still 6 328
+bytes, because it builds a ~35-field tuple by value.
+
+**Why this is low severity, not zero severity.** These frames are real but
+they do not nest: a self-test is called from `kernel_main`'s test runner at
+shallow depth, and a `kshell` handler from the shell loop.  The census
+after both fixes shows the deepest live stack at 11% and the boot peak at
+58%, so nothing is near the canary today.  The risk is that 32 KiB is half
+a stack, and the next person to add a buffer to `self_test_prctl_dispatch`
+has no warning that they are spending the second half.
+
+**Proper fix.** Not "make the tests smaller" one at a time - the pattern is
+the bug.  These functions accumulate dozens of independent test fixtures as
+distinct locals in one frame, and at `opt-level = 0` every one of them is
+live for the whole function.  Either split each self-test into
+`#[inline(never)]` per-case functions so the fixtures' frames are disjoint,
+or move the fixtures behind boxed allocation as `FpuState` now is.  The
+first is preferable: it costs nothing at runtime and the frames genuinely
+do not overlap in time.
+
+**How to reproduce / verify.** `python scripts/stack-frames.py --profile
+debug --top 40`, and `--diff BEFORE_ELF AFTER_ELF` to check a change.
+Note the profile: these numbers are debug, which is what `boot-test.sh`
+builds and therefore what any canary halt will come from.
+
+---
+
+## A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT (lane A, 2026-08-18) - **not a bug; methodology, recorded so it stops being rediscovered**
+
+**In short:** the benchmark suite flags "regressions" that are not real, on
+roughly half of all runs.  This is not a fault in the suite or in the
+contamination canary - both are working.  It is that the machine running the
+benchmarks is somebody's desktop, with Unreal Editor, Chrome, Creative Cloud,
+the Epic Games launcher and assorted node processes resident, and it is never
+going to be quiet.  The only thing that separates a code regression from
+ambient noise on this host is **replication**, and this entry records the
+measurement that proves it, so the next session does not spend an hour
+re-deriving it.
+
+### The measurement
+
+Two `--bench` runs of the **byte-identical kernel binary**, back to back, with
+nothing started by the agent during either QEMU window:
+
+| | run 1 (2026-08-18T00:49) | run 2 (replication) |
+|---|---|---|
+| benchmarks flagged `REGRESSED, UNREPLICATED` | 9 | 12 |
+| whole-suite vs 8-run median | x1.216 | x1.291 |
+| canary verdict | contaminated (spread 76%) | contaminated (spread 164%) |
+
+**Overlap between the two sets: 1 benchmark out of 20. Jaccard 0.05.**
+
+Run 1 flagged `net_arp_lookup`, `vfs_stat_deep`, `crypto_ed25519_sign`,
+`crypto_x25519`, `service_connect`, `page_alloc_zeroed_free`,
+`cp_try_wait_empty`, `crypto_sha256_64B`, `ipc_channel_sync`.
+Run 2 flagged `http_gzip_1KiB`, `http_build_response_1KiB`,
+`vfs_stat_breakdown_prologue`, `vfs_write_256`, `dashboard_api_status`,
+`ipc_channel_roundtrip_64k`, `vfs_stat_3comp`, `crypto_sha256_1KiB`,
+`page_alloc_zeroed_free`, `ipc_channel`, `vfs_stat_breakdown_ns`, `ipc_pipe`.
+
+Same code.  Nineteen of the twenty are noise.
+
+### Three wrong hypotheses, recorded because each was plausible
+
+Getting to that answer took three attempts, and the two failures are worth
+keeping because both are the sort of thing that sounds right:
+
+1. **"A single unlucky sample condemns the run."**  Wrong.  `ab_interleaved`
+   already takes the **minimum over 500 interleaved rounds** per arm, which is
+   a sound estimator against an interrupt landing in one measurement.  The
+   sampling was never the weak part.
+2. **"The canary is reading the suite's own TLB residue, not the host."**
+   This one had real evidence behind it - run 1's `CANARY-TRACE` showed the
+   elevation confined to two *adjacent* positions (48:10.6, 56:9.4) with
+   everything else flat at 6.0-6.6, which is not what ambient load looks like,
+   and the two endpoints agreed to 2% (`start=6, end=6, pct=102`), ruling out
+   drift.  It predicted the bump would recur at the same positions on an
+   identical binary.  It did not: run 2's bump was at 40 (11.6) and 64 (16.5).
+   Refuted by its own prediction, which is the good outcome.
+3. **"The host is busy."**  Correct.  Cumulative CPU on the box is dominated by
+   `UnrealEditor`, `explorer`, `Creative Cloud`, `EpicGamesLauncher`, `chrome`
+   and `node`.  Every instrument was reporting this accurately the whole time.
+
+The general lesson is the one this project keeps relearning from the other end:
+*before concluding an instrument is lying, check whether the thing it is
+measuring is actually true.*  Two sessions have now gone looking for a defect
+in this canary that was not there.
+
+### What to actually do
+
+- **Never accept or reject a benchmark movement from one run.**  The harness
+  already says this (`REGRESSED, UNREPLICATED` -> "re-run WITHOUT rebuilding to
+  confirm").  Follow it literally: `git stash` any uncommitted source changes
+  first, so `cargo` has nothing to rebuild and the second run is provably the
+  same binary.
+- **A `RUN CONTAMINATED` verdict does not invalidate the boot test.**  Both runs
+  above passed every correctness gate.  Contamination taints the *numbers*, not
+  the *pass*.
+- **Do not chase a whole-suite outlier.**  `!! OUTLIER RUN: everything measured
+  slower than usual by N%` means the comparison denominator is bad; drift
+  correction removes the uniform part but cannot remove a non-uniform one.
+- The one thing that *would* be worth building: a mode that runs the suite
+  **twice in one boot** and reports only benchmarks that moved in both halves.
+  That gets replication without paying a second 17-minute release build, and it
+  is the only change here that would improve the signal rather than just
+  documenting the noise.  Not built yet.
+
+---
+
+## A-BENCH-PAGE-ALLOC-ZEROED-FREE-IS-AN-UNSTABLE-MEASUREMENT, NOT A REGRESSION (lane A, 2026-08-18) - **open; my own earlier headline here was wrong, see the correction at the end**
+
+**In short:** one benchmark, `page_alloc_zeroed_free`, sometimes reports a
+number about 40-80% higher than usual.  It looked like a slowdown that had
+"left its historical range", and this entry originally said so.  **That was
+wrong** - reading all 29 runs instead of the last few shows the same unchanged
+binary producing both the normal and the elevated number, so the benchmark is
+an unreliable ruler rather than a record of code getting slower.  Nothing needs
+to be fixed in the allocator; the *measurement* needs fixing.  **Read the
+CORRECTION section at the end of this entry before using anything above it** -
+the original numbers below are left in place because the correction only makes
+sense next to the claim it corrects.
+
+### The numbers (as originally recorded - see the CORRECTION below)
+
+| run | value | own recent range | median over 8 runs |
+|---|---:|---|---:|
+| baseline (commit `61a4998c1`) | 3 680 ns | 2 909-4 717 ns | 3 645 ns |
+| run 1 (`e2f2a2726`) | 5 125 ns | " | " |
+| run 2 (**identical binary** to run 1) | 6 652 ns | " | " |
+
+Flagged `+35%` then `+27%` against the suite, i.e. after drift correction, and
+run-over-run drift itself was small both times (+2.8%, +2.1%).
+
+### Why it is *not* being attributed to the FpuState / KernelFdTable boxing
+
+The tempting story is that boxing `FpuState` (4 KiB) and `KernelFdTable`
+(8 KiB) added two heap allocations per task creation, changing kernel-heap
+layout and therefore page-allocator free-list state.  That is mechanically
+plausible.  It is also not what the data shows:
+
+- **The second step happened with an unchanged binary.**  Run 2 is the same
+  bytes as run 1 and still rose 27%.  Whatever caused that step is not code.
+- **A code change produces a step, not a ramp.**  3 680 -> 5 125 -> 6 652 is a
+  ramp across three runs, two of which share a binary.
+- **This benchmark is a known high-variance one.**  Run 1's dispersion report
+  lists it explicitly: `page_alloc_zeroed_free: mean is 26x its min`.  A
+  benchmark whose mean is 26x its minimum will be flagged often, by
+  construction.
+
+So the honest reading is: at least the second step is environmental, which
+removes the grounds for reading the first step as code.  What remains true and
+worth tracking is that the current value sits 41% above the top of its own
+eight-run range.
+
+### What would settle it
+
+Run the suite on the commit *before* the boxing changes (`61a4998c1`) and on
+`HEAD`, alternating, three runs each, and compare medians rather than single
+runs.  Alternating matters: consecutive runs share whatever the host was doing,
+which is exactly the confound above.  Until that is done this stays open and
+unattributed - and specifically must **not** be quoted as evidence that the
+boxing changes cost anything, because it is not.
+
+
+### CORRECTION 2026-08-17 - the headline above was overstated
+
+I wrote the heading "has left its historical range" from three consecutive
+runs. Reading the *entire* release-profile series (n = 29) instead of the tail
+does not support it. The number the scorecard reports and that drives verdicts
+is the `entries` field; `mean_ns` is a separate, far noisier statistic.
+
+**`entries`, every release run, oldest to newest:**
+
+```
+3631 3626 3502 3473 3687 3585 3647 5114 3558 3609 3659 3595 3734 3636 3643
+3645 3642 3533 3557 5230 3570 5117 3553 3593 3632 3658 3680 5125 6652
+```
+
+n=29, min 3473, median 3636, max 6652.
+
+**The three claims in the original entry, checked:**
+
+| Claim | Verdict |
+|---|---|
+| 5125 is outside the historical range | **False.** 5114 (`d542299e2`) and 5230 / 5117 (`f61bc4e71`) all predate the boxing commits. |
+| The series ramps 3680 -> 5125 -> 6652 | **True but meaningless** - see the same-binary spreads below. |
+| 6652 is a new maximum | **True.** It is the only genuinely new value, and it is one sample. |
+
+**The finding that actually matters - identical binaries land in both modes:**
+
+| Commit | `entries` across repeat runs | spread |
+|---|---|---|
+| `f61bc4e71` | 5230, 5117, 3593, 3658 | **1.5x** |
+| `d542299e2` | 5114, 3558 | **1.4x** |
+| `53cb74578` | 3557, 3570, 3553, 3632 | 1.0x |
+| `602fc62e0` | 3502, 3473 | 1.0x |
+
+`f61bc4e71` produced both 5230 and 3593 from **the same binary**. A benchmark
+that swings 1.5x with the code held constant cannot support a 1.4x per-commit
+attribution, which is precisely what the original heading was doing. The right
+description is an unstable measurement with an occasional elevated mode, not a
+regression that needs a culprit.
+
+**`mean_ns` has two distinct high populations**, which is worth recording
+because it shows the elevated `entries` and the huge means are not one
+phenomenon:
+
+| Population | `mean_ns` | `entries` | Runs |
+|---|---|---|---|
+| A | ~65k-68k | **normal** (3502-3734) | `602fc62e0`, `9ecef3188`, `e3ae7bae1` |
+| B | ~131k-135k | **elevated** (5114-6652) | `d542299e2`, `37d1a4bb1`, `e5a6b2183` |
+
+So a run can have a 17x mean with a perfectly ordinary reported figure, and
+`mean_ns` should be treated as diagnostic only.
+
+### The reported number is ALREADY a minimum - which makes this worse, not better
+
+I first wrote here that the fix was "report a minimum or median rather than a
+mean". **That was wrong, and checking `bench.rs` rather than assuming is what
+caught it.** `record()` publishes
+
+```rust
+measured_ns: result.min_ns,
+```
+
+so the `entries` figure this whole entry is about is the **minimum over 500
+iterations** already. There is no mean-to-min fix available; it has been the
+min all along.
+
+That inverts the conclusion. A *mean* swinging 1.5x is unremarkable - a handful
+of multi-millisecond stalls will do it. A **minimum over 500 iterations**
+swinging 1.5x on an unchanged binary is a much stronger claim: for the floor to
+rise 50%, essentially *every one* of the 500 iterations had to get slower. That
+is not occasional interference, it is a sustained condition lasting the entire
+measurement window.
+
+And `bench.rs` says exactly what that condition is, in the comment right above
+the benchmark:
+
+> Tracked, not scored: this is the cold path, whose cost is dominated by a
+> 16 KiB memset and therefore by host memory bandwidth, so a published
+> per-allocation figure is not the right yardstick.
+
+So `page_alloc_zeroed_free` is, by its own author's description, largely a
+**host memory-bandwidth gauge**. When something else on this desktop is moving
+memory for a sustained period, the floor for a memset-bound loop genuinely
+rises, for every iteration, and the min moves with it. The benchmark is
+behaving correctly; it is measuring the host, and the host is a workstation.
+
+### Does the existing SplitCheck already catch it? Weakly - below its threshold
+
+`bench.rs` already has machinery for precisely "the achievable floor moved
+during the window": `SplitCheck` compares the min over the first half of the
+iterations against the second half, and `min_cycles` is not a stable property
+of the code when they diverge. Checking it against the five elevated runs:
+
+| `entries` | split | |
+|---:|---:|---|
+| 5114 | 3 | elevated |
+| 5230 | 2 | elevated |
+| 5117 | 9 | elevated |
+| 5125 | 6 | elevated |
+| 6652 | 0 | elevated |
+
+Non-zero split on **4 of 5** elevated runs, against **4 of 24** normal runs -
+an association, but at magnitudes (2-9%) far below the level that prints a `!`.
+Meanwhile the two runs that *were* loudly flagged (`44!` and `57!`) had entirely
+ordinary values of 3473 and 3680.
+
+So the split check carries some signal here and is not firing on it, while
+firing on runs that were fine. With n=5 that is a lead, not a conclusion, and
+it should not be "fixed" by lowering a threshold until there is more data -
+the flagged-but-fine cases say a lower threshold would mostly add false alarms.
+
+### The orphaned QEMU spinner - a real factor, but NOT the explanation
+
+`A-ADHOC-QEMU-PROBES-LEAK-THE-EMULATOR-ABOUT-TWO-THIRDS-OF-THE-TIME` records a
+leaked QEMU that burned 729 s of CPU on this host. Checking the clock rather
+than assuming (history timestamps are **UTC**; the host runs EDT = UTC-4):
+
+* Spinner alive: 2026-08-17 01:04 EDT until killed ~22:02 EDT (~21 h).
+* `37d1a4bb1` ran 2026-08-18T00:49Z = 08-17 **20:49 EDT** - spinner alive.
+* `e5a6b2183` ran 2026-08-18T01:13Z = 08-17 **21:13 EDT** - spinner alive.
+
+Tempting, and wrong to stop there. Two facts kill it as *the* cause:
+
+* `d542299e2` (entries 5114) ran 08-16 22:49 EDT, **before the spinner existed**.
+* `f61bc4e71` produced its two *low* readings (3593, 3658) at 15:43 / 15:50 EDT,
+    with the spinner alive the whole time.
+
+So the spinner was present for both elevated and normal readings, and one
+elevated reading predates it entirely. It is a genuine contaminant that should
+never have been running, but it does not explain this benchmark's bimodality.
+
+### Falsifiable prediction, recorded before the run that tests it
+
+The `--bench` run started 2026-08-17 22:10 EDT for the SCHED lock-order hoists
+is the first benchmark run on this host since the spinner was killed.
+
+* **If the spinner mattered**, `page_alloc_zeroed_free` returns to the ~3600
+    cluster.
+* **If it does not**, the value is a coin-flip over the historical
+    distribution - roughly a 5/29 chance of landing >= 5000 regardless.
+
+Either way **one run decides nothing**, which is the whole point of
+`A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT`. Recorded in
+advance so the result cannot be read backwards into whichever story fits.
+
+### Outcome of that prediction - run 86, `e80fe679f`, 2026-08-17 22:39 EDT
+
+`page_alloc_zeroed_free` = **3853 ns**: the low cluster, as the
+spinner-mattered branch predicted.
+
+**This is very nearly zero evidence, and saying so is the point of having
+written the prediction down first.** The prediction was a bad one - not wrong,
+*uninformative* - because both branches predicted the same outcome with almost
+the same probability:
+
+| Hypothesis | P(low cluster) | Observed |
+|---|---|---|
+| the spinner was the cause | ~1.0 | low |
+| the value is drawn from the historical distribution | 24/29 = 0.83 | low |
+
+The likelihood ratio is about 1.2:1. A prediction whose two branches differ by
+20% cannot separate them in one trial; only the >= 5000 outcome would have said
+anything, and that outcome was unlikely under *either* hypothesis. Recording it
+in advance stopped it being read backwards, which is worth something, but the
+experiment as designed could not have paid out.
+
+Two further reasons not to lean on this reading at all:
+
+* 3853 is the **highest low-cluster value on record** (the previous low-cluster
+    maximum was 3734 at `e3ae7bae1`). If anything it drifts toward the gap, not
+    away from it.
+* Run 86 is itself flagged `RUN CONTAMINATED` - the reference-access canary
+    spread 28% over 13 samples against a 25% tolerance, 16 benchmarks stalled,
+    and `page_alloc_zeroed_free`'s own mean was **29x its min**. A contaminated
+    run is not the instrument you settle a bimodality question with.
+
+The entry's conclusion is unchanged: this benchmark is an unstable ruler, it is
+tracked-not-scored for that reason, and the only experiment that would settle
+it is the alternating-runs design at the end of this entry - not another single
+observation.
+
+### Run 87 settles it: the same binary, twice, 3853 -> 5659
+
+Run 86 flagged `sched_pick_next_d8` as `REGRESSED, UNREPLICATED` and the report
+prescribed its own remedy - re-run `--bench` *without rebuilding*.  That was
+done immediately (run 87, 2026-08-17 23:0x EDT).  `cargo` reported
+`Finished release profile in 6.00s` with no compilation and the ELF's mtime
+stayed at 22:36:38, so runs 86 and 87 measured a **byte-identical kernel**.
+
+| benchmark | run 86 | run 87 | verdict |
+|---|---:|---:|---|
+| `sched_pick_next_d8` | 45 ns | **38 ns** | contradicted; inside its 34-44 range |
+| `page_alloc_zeroed_free` | 3853 ns | **5659 ns** | +47% on an unchanged binary |
+
+Two conclusions, one for each row.
+
+**The SCHED lock-order hoists did not regress `sched_pick_next_d8`.** The 45 ns
+reading was environmental: the whole `sched_pick_next_*` family sat at 44-45 ns
+in run 86 (d1, d8, d64, d256, d1024 all within 1 ns of each other, against
+per-benchmark medians of 38-42 ns), which is the signature of a suite-wide floor
+shift, not of a change that would have to be depth-dependent to be real.  Run 86
+was flagged `RUN CONTAMINATED` and run 87 put the family back at 38 ns.
+
+**The `page_alloc_zeroed_free` bimodality is environmental, and is now proven so
+without needing any of the earlier reasoning.** This is the alternating-runs
+experiment's first pair, and it came back as clean a result as that design could
+produce:
+
+* Same binary. No rebuild, no code change, no commit between the two readings.
+* Back to back, ~20 minutes apart.
+* **The orphaned QEMU spinner was dead for both.** So the elevated mode occurs
+    with the spinner gone - which retires the spinner hypothesis outright,
+    rather than merely failing to support it as the run-86 reading did.
+* The elevated reading is the *second* of the pair, so it cannot be dismissed as
+    a warm-up artefact of a cold host.
+
+That is a 1.47x swing in a **minimum over 500 iterations** with the code held
+fixed.  Nothing about a commit can be read off this benchmark, and the
+`In short:` headline of this entry - an unstable measurement, not a regression -
+is now supported by direct replication rather than by inference from the series.
+
+**The prediction two sections up is therefore moot** and should not be cited:
+its low-cluster outcome was uninformative at 1.2:1, and this pair supersedes it
+with a controlled comparison.
+
+### What to do
+
+* **Do not cite this benchmark as evidence for or against any commit**,
+    including the `FpuState` / `KernelFdTable` boxing. It cannot carry that
+    weight.
+* **Do not "fix" it by changing the estimator** - it is already a minimum over
+    500 iterations. The earlier version of this entry recommended exactly that,
+    from an assumption about the code rather than a reading of it.
+* The honest options are (a) leave it tracked-but-unscored, which is what it
+    already is and what its own comment argues for, or (b) normalise it against
+    a deliberate host-memory-bandwidth reference measured in the same boot, so
+    the number reports the allocator rather than whatever else the desktop was
+    doing. (b) is the only one that would make it diffable boot-over-boot.
+* If someone does want to settle whether the elevated mode is real, the
+    experiment is alternating runs of two commits, three each, comparing
+    medians - not consecutive runs of successive commits.
+
+## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17)
+
+**In short:** the 1-pixel line the compositor draws around a window is drawn
+one pixel higher than the space the layout reserved for it. Nobody sees a
+problem, because the row it lands on is part of the window's drop shadow and
+is repainted anyway. But it means the code that *draws* the frame and the code
+that *measures* the frame disagree by one pixel, and the next person to trust
+the measurement will be wrong by one pixel too.
+
+`Window::frame_insets` returns `(top, side, bottom) = (TITLE_BAR_HEIGHT,
+BORDER_WIDTH, BORDER_WIDTH)`: a border down each side and along the bottom,
+and **no border above the title bar**. Every measurement derives from that —
+`frame_rect`, `outer_rect`, `title_bar_rect`, hit testing, damage tracking.
+
+`Compositor::render_border` (gui/compositor/src/lib.rs) does not. It strokes a
+box whose top edge is `BORDER_WIDTH` above `frame_rect`, so the frame is drawn
+one row taller than it is measured. That row falls inside `outer_rect` (which
+adds `SHADOW_SIZE` = 8 px of shadow beyond the frame) and inside
+`window_drawn_extent`, so it is repainted correctly and is inside the resize
+grab band — hence no visible symptom today.
+
+**Where:** `render_border` carries the discrepancy explicitly now, as a
+`Rect::new` that adds the row to `frame_rect` with a comment, rather than as
+open-coded constants that merely happened not to match. `frame_insets` is at
+`gui/compositor/src/lib.rs`; `nothing_a_window_draws_falls_outside_its_damage_extent`
+pins the containment that keeps it harmless.
+
+**Proper fix:** decide which is right and make both agree.
+- If the border above the title bar is wanted (it is what a real window frame
+  looks like), `frame_insets` should return `top = TITLE_BAR_HEIGHT +
+  BORDER_WIDTH` and `title_bar_rect` should start `BORDER_WIDTH` below the top
+  of the frame box. This shifts every framed window's title bar and the resize
+  grab bands by one pixel, and moves the boundary between "title bar" (drag to
+  move) and "top border" (drag to resize) — so it wants a look at the drag
+  tests, whose grab points are chosen relative to `TITLE_BAR_HEIGHT`.
+- If it is not wanted, `render_border` should stroke `frame_rect` unmodified
+  and the extra row disappears.
+
+Not urgent: nothing is visibly wrong and nothing is unsafe. Logged because a
+one-pixel disagreement between drawing and measurement is exactly the kind of
+thing that becomes a real bug the moment either side is touched.
+
+## C-THE-CREDENTIAL-STORE-ENCRYPTS-EVERY-SECRET-WITH-THE-SAME-KEYSTREAM (lane C, 2026-08-17)
+
+**In short:** the credential manager — the thing that holds the user's saved
+passwords — scrambles every secret in the vault with the *same* repeating
+pattern. Anyone who can read the vault file can recover its contents without
+ever learning the master password, by lining two entries up against each
+other and cancelling the pattern out. This is the single worst defect
+currently known in lane C's tree.
+
+**Where:** `gui/credentials/src/main.rs`, `encrypt` / `decrypt` /
+`generate_keystream`.
+
+`generate_keystream(key, len)` produces `SHA-256(key ‖ 0) ‖ SHA-256(key ‖ 1) ‖
+…`. It takes no nonce (a number used once, mixed in so that encrypting the
+same thing twice gives different output). So it is a pure function of the
+session key, and every credential in a vault is XORed with the identical
+keystream. XOR two ciphertexts together and the keystream cancels, leaving the
+two plaintexts XORed with each other — the classic "two-time pad", which is
+routinely solved by hand for text. No key recovery is needed and no master
+password is needed; read access to the stored ciphertexts is enough.
+
+The doc comment says "this is a demonstration cipher; production use would
+employ AES-256-GCM", which covers *weak* but not *broken*: a demonstration
+cipher is still expected to keep two records from decrypting each other.
+
+**Proper fix (does not need any new primitive):** give every encryption its own
+nonce and mix it into the keystream — `SHA-256(key ‖ nonce ‖ counter)` — then
+store the nonce beside the ciphertext. A per-record sequence number that is
+persisted and never reused under a given key is a sufficient nonce and needs
+no randomness, so this is fixable today with the SHA-256 already in the file.
+That turns the construction into SHA-256 used as a counter-mode PRF, which is
+a defensible stream cipher rather than a broken one.
+
+Still missing after that fix, and requiring things the tree does not yet have:
+authentication (the ciphertext can be flipped bit-for-bit undetected — wants an
+HMAC or a real AEAD) and a vetted AES-256-GCM. See
+`open-questions.md` → "Do we write our own cryptographic primitives?".
+
+**Resolved 2026-08-17, as described.** `encrypt` now takes a nonce and returns
+`nonce ‖ ciphertext`; `decrypt` reads the nonce back off the front and returns
+`Result`, because a blob shorter than the 8-byte nonce never came from
+`encrypt`. `generate_keystream(key, nonce, len)` is
+`SHA-256(key ‖ nonce ‖ counter)`. `CredentialStore` supplies nonces from
+`next_nonce`, a counter that only ever increases; `take_nonces(n)` hands out a
+contiguous base so a caller already holding `&mut credentials` (the re-encrypt
+loop in `set_master_password`) can still get fresh ones. Gaps are harmless —
+nonces must be unique, not contiguous.
+
+Regression test:
+`the_same_plaintext_twice_does_not_produce_the_same_ciphertext` asserts the
+*bodies* differ and not merely the nonce prefixes, plus
+`a_blob_too_short_to_hold_a_nonce_is_rejected_not_misread`.
+
+**One thing a persistence layer must not get wrong**, and there is no
+persistence layer yet: `next_nonce` has to round-trip to disk. A vault
+reloaded with the counter reset to zero re-issues nonces it has already used
+and reintroduces exactly this bug. The field carries a comment saying so.
+
+The authentication half is *not* fixed and remains open under C-Q5.
+
+## C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES (lane C, 2026-08-17)
+
+**In short:** the credential manager turns the user's master password into a
+key with a single pass of SHA-256, mixed with a fixed word that is compiled
+into the program and is therefore identical on every SlateOS machine. Both
+halves of that are wrong in the same direction: a single pass means an
+attacker can try billions of candidate passwords per second on a GPU, and a
+shared fixed word means one precomputed table cracks every user in the world
+rather than having to be rebuilt per user.
+
+**Where:** `gui/credentials/src/main.rs`, `derive_session_key` and the
+`KEY_DERIVATION_SALT` constant.
+
+```rust
+const KEY_DERIVATION_SALT: &str = "slateos_credential_salt";
+
+fn derive_session_key(master_password: &str) -> [u8; 32] {
+    let mut input = master_password.as_bytes().to_vec();
+    input.extend_from_slice(KEY_DERIVATION_SALT.as_bytes());
+    sha256(&input)
+}
+```
+
+A password-to-key function is supposed to be *deliberately slow* (key
+stretching) and *per-user distinct* (a random salt stored with the vault).
+This is neither. `apps/lockscreen` derives its stored hash the same way and
+has the same problem.
+
+**Proper fix:** iterate. Even a plain `for _ in 0..N { h = sha256(h ‖ pw) }`
+with N in the hundreds of thousands is an enormous improvement and needs
+nothing new — that is essentially PBKDF2's structure. The per-vault random
+salt needs a randomness source the crate does not have (see below), but a
+salt that merely varies per *installation* already defeats a shared table, so
+it should not wait for one. The end state wants a memory-hard KDF (scrypt or
+Argon2id), which is gated on the same open question as the cipher.
+
+**Half resolved 2026-08-17 — the stretching. The salt is still shared.**
+
+`derive_session_key(password, rounds)` now runs `rounds` iterations of
+`SHA-256(acc ‖ password ‖ salt)`. The password and salt are folded back in on
+*every* round rather than the accumulator merely being rehashed: a chain of
+the form `h = SHA-256(h)` is the same chain for every password, so an attacker
+could walk it once and test candidates against any point on it. Mixing the
+password in each round is what forces the full cost per guess.
+
+The count was picked by measurement, not by taste: one SHA-256 of a ~70-byte
+input on this machine is **1.278 µs release** (8.564 µs debug), so
+`DEFAULT_KDF_ROUNDS = 100_000` is ~130 ms per unlock.
+
+**A second defect had to be fixed for the first fix to be worth anything.**
+The store kept `master_password_hash = SHA-256(password)` to check unlock
+attempts against. An attacker holding the vault would have tested guesses
+against *that* — one SHA-256 each — and never called `derive_session_key` at
+all, so the stretching would have been decorative. The field is now
+`master_password_verifier`, `SHA-256(stretched key ‖ label)`, so a guess costs
+the full derivation. `IdentityVerifier::verify` had the identical bug on the
+re-verification path and is routed through the same value.
+Both comparisons use `constant_time_eq` rather than `==`, which returns early
+on the first differing byte and so leaks how many leading bytes matched.
+
+**Why the round count is stored rather than compiled in.** `kdf_rounds` is a
+field of `CredentialStore` (`with_kdf_rounds`, default `DEFAULT_KDF_ROUNDS`).
+The right number rises with hardware, and a vault written under the old number
+must keep opening after the default moves — it can only do that if it
+remembers what the old number was. Every real password-hashing format records
+its cost parameters beside the hash for this reason. **This too must
+round-trip through any persistence layer.** It also lets the test module run
+at 4 rounds instead of putting the suite in the minutes;
+`default_kdf_rounds_are_usable` exercises the shipped number once.
+
+**Still open:** the salt. `KEY_DERIVATION_SALT` is still a compile-time
+constant shared by every install, because a per-vault salt needs entropy that
+userspace cannot obtain — see the next entry and
+`requests/c-a-userspace-entropy-syscall.md`. `apps/lockscreen` still derives
+its stored hash with a single SHA-256 pass and has not been touched.
+
+## C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE (lane C, 2026-08-17)
+
+**In short:** nothing in lane C can obtain an unpredictable number. The
+credential manager's password *generator* — the feature whose entire job is
+producing something an attacker cannot guess — runs a 3-line xorshift
+generator seeded by a number its caller passes in, in practice a timestamp.
+An attacker who knows roughly when a password was generated can enumerate the
+possibilities.
+
+**Where:** `gui/credentials/src/main.rs`, `Xorshift64` and
+`generate_password(.., seed: u64)`.
+
+`Xorshift64` is a perfectly good *statistical* generator and a useless
+*cryptographic* one: its entire future output is determined by 64 bits of
+state, and recovering that state from output is trivial. Seeded from a
+second-resolution timestamp, the real entropy is closer to 20 bits.
+
+**Where the fix has to come from:** the kernel. A userspace CSPRNG needs a
+seed from an entropy pool the kernel maintains (RDRAND/RDSEED, interrupt
+timing, etc.), surfaced through a syscall. `kernel/src/crypto.rs` exists
+(lane A) but lane C has no interface to it. Filed as
+`requests/c-a-userspace-entropy-syscall.md`.
+
+Until then the honest thing is for `generate_password` to *say* it is not
+cryptographically strong rather than to look like it is, and for anything that
+needs a real nonce to use a persisted counter instead (see the keystream
+entry above).
+
+## C-SHA-256-IS-IMPLEMENTED-ELEVEN-TIMES-IN-THIS-TREE (lane C, 2026-08-17)
+
+**In short:** eleven separate copies of the same cryptographic hash function
+have been written by hand in this repository. Each one can be independently
+wrong, and each one has to be independently reviewed, tested and fixed. Some
+of them guard logging in and unlocking the screen.
+
+**Where** (found by `grep -rn "fn sha256" --include=*.rs`):
+
+| Copy | Lane | Shape |
+|---|---|---|
+| `kernel/src/crypto.rs` | A | one-shot |
+| `posix/src/sha2.rs` | B | one-shot, has the FIPS million-`a` vector |
+| `posix/src/crypt.rs` | B | via `sha2` |
+| `init/login/src/main.rs` | B | block compression + one-shot |
+| `userspace/coreutils/src/bin/sha256sum.rs` | B | one-shot |
+| `userspace/backup/src/main.rs` | B | streaming |
+| `kernel/src/oci.rs` | A | digest string |
+| `kernel/build.rs` | A | build-time |
+| `gui/credentials/src/main.rs` | **C** | one-shot |
+| `apps/lockscreen/src/main.rs` | **C** | one-shot |
+| `apps/backup/src/main.rs` | **C** | streaming `Sha256` struct |
+
+All three lane-C copies do carry the standard known-answer vectors (empty,
+`"abc"`, the 448-bit message), so none of them is presently *wrong*. That is
+luck holding, not a design.
+
+**Proper fix:** one implementation, one set of test vectors, shared. Lane C
+can extract its three into a small top-level crate alongside the existing
+`byteread` / `textfind` / `textfmt` utility crates and adopt it; lanes A and B
+have to opt in themselves, so the cross-lane half is a request rather than an
+edit. Note `kernel/` is `no_std`, so the shared crate must be `no_std` with an
+`alloc`-free one-shot API to be adoptable by all three lanes.
+
+### Correction and progress, 2026-08-17
+
+**It is twenty-six, not eleven.** The original count came from
+`grep "fn sha256"`, which misses every copy that names its entry point
+something else or exposes only a `Sha256` struct. Two greps are needed to see
+them all, and neither alone is sufficient:
+
+```
+grep -rln "0x6a09e667" --include=*.rs .   # the eight IV words
+grep -rln "fn sha256\|struct Sha256" --include=*.rs .
+```
+
+The union is 26 files. The original entry also missed one of lane C's own:
+**`apps/diskimager`** has a streaming copy, so lane C had four, not three.
+
+**Done.** `sha2/` now exists at the workspace root — `no_std`, no `alloc`, the
+four FIPS 180-4 vectors, a streaming form cross-checked against the one-shot
+one at every length up to three blocks and every split within each length, and
+a `benches/rate.rs` (commit `d8ad84f54`). `gui/credentials` is migrated
+(`eb6e77799`), which is also the first evidence for the claim that the copies
+cost something: it was **22% faster** afterwards (1.20 vs 1.54 µs/iter on a
+70-byte input, both measured in one process), because that copy allocated a
+`Vec` per call for the padded message. That matters concretely — the
+credential KDF runs 100 000 hashes per unlock.
+
+**Remaining, 25 copies.** Lane C's three: `apps/backup` (streaming +
+`sha256_bytes`/`sha256_hex`/`sha256_file`), `apps/diskimager` (streaming),
+`apps/lockscreen` (one-shot). Lanes A and B own the other 22 and must opt in
+themselves; requests are filed rather than edits made.
+
+**What consolidating does and does not buy.** It does not make the primitive
+vetted — a single unvetted SHA-256 is still unvetted, and whether this tree
+should be writing its own crypto at all is `open-questions.md` C-Q5. What it
+buys is that the answer has one place to land, that a mistake is caught once
+rather than needing to be caught 26 times, and — per the measurement above —
+that the duplication was costing performance as well as review budget.
+
+### Lane C is done, 2026-08-17
+
+All four of lane C's copies are gone. `gui/credentials` (`eb6e77799`),
+`apps/diskimager` (`65883cf92` — which was not a migration but a bug fix; see
+`C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256` below), and now
+`apps/backup` and `apps/lockscreen`. **22 copies remain, all in lanes A and B**
+— 20 in B, 3 in A, minus `posix/src/crypt.rs` which correctly delegates to
+`posix/src/sha2.rs` rather than carrying its own.
+
+The migrations were not neutral. Deleting the copies removed clippy warnings
+in bulk, because a hand-transcribed FIPS table is one long run of exactly the
+constructs the workspace lints forbid — `w[i - 15]`, `h[i] = h[i] + a`,
+`block_start + 64`:
+
+| Crate | warnings before | after |
+|---|---|---|
+| `apps/backup` | 368 | 266 |
+| `apps/lockscreen` | 85 | **11** |
+
+That is 176 warnings that were never going to be fixed in place, because
+fixing them means bounds-checking a loop whose bounds are the specification.
+It is worth stating as a general result: **an inlined copy of a published
+algorithm is a large, permanent lint-debt liability, and moving it into a
+crate that is written once against the vectors is the only way to discharge
+it.** The remaining `apps/**` lint debt is now dominated by ordinary
+application code, which is fixable.
+
+Two further findings from the audit, both recorded separately:
+
+- The mechanical check that found the disk-imager stub — extract every
+  8-hex-digit literal from a file and look for a contiguous run equal to the
+  64-word K table and the 8-word IV — also found the **same stub hashing
+  system passwords** in `userspace/login` and `userspace/chpasswd`. See
+  `C-THE-SAME-STUB-IS-THE-SYSTEM-PASSWORD-HASH` at the end of this file.
+- Five further lane-B copies have no known-answer vector at all
+  (`userspace/backup`, `pkg`, `rsync`, `ssh`, `useradm`), though all five do
+  carry the full constant tables. Listed in
+  `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
+
+
+## C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256 (lane C, 2026-08-17)
+
+**In short.** `apps/diskimager` offers to checksum an image with MD5, SHA-1 or
+SHA-256 and shows you a digest of exactly the right length. None of the three
+is the algorithm it claims. All three are the same made-up mixing function, so
+the "SHA-256" it prints for a downloaded `.iso` will never match the SHA-256
+the publisher printed — and its "verify after write" tick box is checking the
+disk against a number that means nothing outside this program.
+
+**Where.** `apps/diskimager/src/main.rs`, `HashState` (~lines 205-290).
+
+**What it actually computes.** `new()` seeds `state` with the genuine
+published initial values for whichever algorithm you picked — the real
+SHA-256 IV (`0x6a09e667, 0xbb67ae85, …`), the real MD5 and SHA-1 ones. That
+is the entire resemblance. `update()` then ignores all of it:
+
+```rust
+for (idx, &byte) in data.iter().enumerate() {
+    let slot = idx % 8;
+    if let Some(s) = self.state.get_mut(slot) {
+        *s = s.wrapping_mul(31).wrapping_add(byte as u64);
+    }
+}
+```
+
+That is eight interleaved `u64` polynomial accumulators — a Rabin-style
+rolling fingerprint with base 31 — and it is identical for all three
+algorithms. `finalize()` then stirs the eight words together and truncates the
+hex to 32, 40 or 64 characters depending on which name you asked for. The
+choice of algorithm affects **only the length of the output string** and the
+eight seed constants.
+
+**How it survived.** Two ways, both worth noting because they generalise.
+
+1. *The tests check shape, not value.* There are eight tests over `HashState`.
+   They assert the digest is 64 characters, that it is all hex digits, that
+   the same input twice gives the same output, and that two different inputs
+   give different outputs. Every one of those passes for `*s = s*31 + byte`.
+   Not one test compares against a known answer — and a known-answer vector is
+   the *only* test that can distinguish a hash from a plausible-looking
+   function, which is precisely why FIPS publishes them.
+
+2. *It has already been "fixed" once, at the wrong level.* There is a
+   nine-line comment in `finalize()` explaining that the previous version
+   emitted the raw state words and truncated, so that bytes landing in
+   discarded words produced identical digests — "a real collision" — and that
+   folding all eight words in fixes it. That diagnosis is correct and the fix
+   works. But it treats the stub as the thing to repair rather than the thing
+   to replace, which is the band-aid accumulation `CLAUDE.md` warns about: the
+   collision was a symptom, and the disease is that this is not a hash.
+
+**Impact.** Two distinct failures, one much worse than the other.
+
+- **Comparing against a published checksum is broken outright, and silently.**
+  This is the headline use of a disk imager: download an install image, paste
+  in the checksum from the download page, confirm it matches. It never will.
+  The user sees `Mismatch`, concludes their download is corrupt, and
+  re-downloads forever. Worse in the other direction: the Verify tab will
+  happily *display* a 64-character "SHA-256" that a user may copy and publish
+  as if it were one.
+- **Verify-after-write is weaker than it looks but not worthless.** It
+  compares the source against the written-back data using the same function on
+  both sides, so it is a self-consistency check, and a base-31 polynomial over
+  `u64` does catch random corruption with high probability. It will not catch
+  deliberate tampering, and it is not what the UI implies.
+
+**Severity.** High. It is a correctness bug in the feature the application
+exists for, it is invisible to the user (the output is well-formed and
+stable), and the tests are green.
+
+**Proper fix.** Not "write the missing rounds into `update()`" — delegate.
+`sha2/` already exists at the workspace root (`d8ad84f54`): `no_std`, no
+`alloc`, checked against all four FIPS 180-4 vectors. SHA-1 and MD5 need the
+same treatment — they are obsolete *for security* but a disk imager needs them
+precisely because publishers still post them, so they should be shared crates
+in the same shape, each with the known-answer vectors from FIPS 180-4 and RFC
+1321 respectively. Then `HashState` becomes a thin enum over three real
+implementations.
+
+**And add value-checking tests**, in `diskimager` as well as in the crates, so
+the next stub cannot pass. The minimum bar for any hash in this tree: the
+digest of the empty input, and the digest of `"abc"`. Both are published for
+all three algorithms.
+
+### FIXED, 2026-08-17 (`cf5ebb13f`, and the commit that follows it)
+
+Done as written above — delegated, not patched.
+
+`blockbuf`, `sha1` and `md5` now sit at the workspace root beside `sha2`.
+Three crates rather than two because SHA-1 and MD5 written standalone would
+have meant a third and fourth copy of Merkle–Damgård partial-block and padding
+logic, which is the half that actually hides bugs: a wrong compression
+function fails the first known-answer vector, whereas a wrong buffer only
+misbehaves in the seam between two `update` calls — so it passes every
+published vector, all of which arrive in a single call. `blockbuf` is that
+logic once, tested over every length up to three blocks at every possible
+split point. MD5's `T` table is generated from its definition
+`floor(2^32 · |sin(i+1)|)` rather than transcribed, which removes that error
+class rather than testing for it.
+
+`HashState` is now a three-variant enum over `md5::Md5` / `sha1::Sha1` /
+`sha2::Sha256`, and `diskimager` carries four new tests:
+
+| Test | What the stub would have failed |
+|---|---|
+| `hashes_match_their_published_vectors` | everything — six vectors, empty and `"abc"`, all three algorithms |
+| `each_algorithm_produces_its_own_length_and_value` | nothing; it guards the picker wiring, not the maths |
+| `splitting_the_input_does_not_change_the_digest` | nothing; it guards the *new* risk, that a file read in chunks hashes differently from a file read whole |
+| `finalize_is_repeatable` | nothing; the real hashers consume themselves on finalize, so `HashState` finalizes a clone |
+
+117 tests pass in `diskimager`; 26 tests and 5 doctests in the three crates.
+The crate's 29 remaining clippy warnings are pre-existing and unchanged —
+measured before and after, identical counts by lint — and are tracked
+separately under the `apps/**` half of the lint debt.
+
+**The generalisable lesson, restated because it is the only one that
+matters:** none of the eight original tests was wrong. They were all true of
+`state[i % 8] = state[i % 8] * 31 + byte`. Shape tests cannot fail on a stub,
+so a subsystem with only shape tests is untested no matter how many it has.
+
+## C-THE-SAME-STUB-IS-THE-SYSTEM-PASSWORD-HASH (found by lane C, owned by lane B, 2026-08-17)
+
+**In short.** The made-up mixing function that `apps/diskimager` was passing
+off as three checksums is also, byte for byte, the function `userspace/login`
+and `userspace/chpasswd` use to hash passwords into `/etc/shadow`. Two
+consequences, both reproduced: a password set with `passwd` cannot be used to
+log in at all, and the entries `chpasswd` writes are labelled `$5$` — the
+standard crypt(3) identifier for SHA-crypt — while containing something that
+is not SHA-crypt, not SHA-256, and not stretched by any number of rounds.
+
+**Not mine to fix.** `userspace/**` is lane B's. Filed in full, with the
+reproduction and the mechanical check that found it, as
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`. Logged here so
+it is not lost if that request is actioned and removed.
+
+**The short form of the fix**, which is lane B's call: `posix/src/crypt.rs` is
+already a correct and complete SHA-crypt — `$5$`/`$6$`/`$1$`, the `rounds=`
+field, the crypt base-64 alphabet, Drepper's published vectors, 29 tests —
+delegating its core to `posix/src/sha2.rs`. Three tools that read and write
+one file should be calling it instead of each hashing differently. The part
+with a genuine tradeoff is what to do with the entries already written in two
+wrong formats.
+
+**Why this is in lane C's tracker at all.** Because the two bugs are the same
+bug, and finding the second one cost nothing once the first was understood.
+The check is mechanical: extract every 8-hex-digit literal from a file that
+claims to implement a published algorithm, and look for a contiguous run
+matching the algorithm's published constant table. `chpasswd` and `login`
+carry the genuine SHA-256 IV and no K table at all — exactly the disk imager's
+shape. It is worth running over any transcribed algorithm in this tree,
+because it costs nothing and, unlike a test that checks the digest's shape, it
+cannot be satisfied by a plausible-looking function.
+## A-ADHOC-QEMU-PROBES-LEAK-THE-EMULATOR-ABOUT-TWO-THIRDS-OF-THE-TIME (lane A, 2026-08-18) - **fixed by `scripts/qemu-probe.py`; read this before hand-rolling a probe**
+
+**In short:** the one-line trick everyone uses to ask QEMU "do you support this
+device?" leaves the emulator running forever about two thirds of the time. Four
+such leftovers were found on this machine still alive 16-21 hours later, and one
+of them had been spinning the whole time, stealing CPU from the benchmark suite
+that runs on the same machine. It is now fixed: use `scripts/qemu-probe.py`
+instead of writing the one-liner by hand.
+
+### The idiom that leaks
+
+```
+printf 'info pci\nquit\n' | qemu-system-x86_64 -monitor stdio -device ...
+```
+
+### Why it leaks - it is a race, not a forgotten `quit`
+
+This is the part that makes it worth writing down, because the idiom *looks*
+correct and spot-checks fine. The pipeline hands QEMU the bytes and then
+immediately closes the write end of the pipe. QEMU's stdio monitor sees the
+commands and the EOF at essentially the same instant. If the EOF wins, the
+character device is torn down with the queued `quit` **still unexecuted** - the
+monitor is gone, nothing else will ever ask the VM to stop, and QEMU runs until
+the machine reboots.
+
+Measured on QEMU 11.0.93, same command each time:
+
+| stdin handling | outcome |
+|---|---|
+| closed immediately (the naive idiom) | **4 of 6 runs wedged** |
+| held open, `quit` sent after a 0.4 s settle | **0 of 4 runs wedged** |
+
+Two corollaries that cost real time when they are guessed at instead:
+
+- **The leak was not caused by the bad `-device` spelling being probed.**
+  QEMU only *warns* on an unknown `ati-vga` model (`warning: Unknown ATI VGA
+  model name, using default rage128p`) and carries on, so those runs would have
+  exited cleanly. The device argument is a red herring.
+- **`Popen.communicate()` inherits the bug**, because closing stdin is exactly
+  what `communicate` does. Calling `proctree.run_captured` - the repo's own
+  "the timeout is real" helper - therefore does **not** save you here. It
+  contains the damage (the Job Object still kills the tree on the deadline) but
+  every probe then costs the full timeout and reports a spurious "did not exit".
+
+### Why they were still alive 16-21 hours later
+
+Under MSYS, `kill "$!"` uses the Cygwin PID and does **not** reliably
+`TerminateProcess` a native Windows `qemu-system-x86_64.exe`. This is already
+documented at `scripts/boot-test.sh:565`, where the boot path solves it properly:
+QEMU writes a `-pidfile` and `kill_qemu()` `taskkill`s the real Windows PID.
+Ad-hoc probes had no such protection.
+
+### Why it matters beyond tidiness
+
+One orphan (`-device ati-vga,model=xyzzy -display none`) had accumulated **729
+seconds of CPU**. A permanently-spinning process on the host is precisely the
+background contamination that
+`A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT` describes and
+that `bench-history.py` spends its effort trying to detect. It is not a plausible
+explanation for the large movements documented there - the desktop applications
+dwarf it - but it is real, it is ours, and unlike Chrome it is avoidable.
+
+### The fix
+
+`scripts/qemu-probe.py`. It never closes stdin before the guest has exited, and
+wraps the run in `proctree.Tree`, so a Job Object with `KILL_ON_JOB_CLOSE` tears
+down QEMU and any descendants on the deadline, on Ctrl-C, or if the script itself
+dies. The settle makes the common case exit in ~0.5 s; the job is what makes it a
+*guarantee*. It also replays the monitor's per-character terminal echo back into
+plain text, so the output can actually be grepped for a BAR address.
+
+```
+python scripts/qemu-probe.py --device ati-vga,model=rv100 -- "info pci"
+```
+
+**If you are about to hand-roll a QEMU invocation that is not the boot test, use
+this instead.** If it genuinely cannot be used, at minimum run through
+`scripts/run-timeout.py` so the Job Object still bounds the damage.
+
 ---
 
 ## [B] FIXED — `passwd`, `login` and `chpasswd` now share one `crypt(3)`; entries written before this need a root reset

@@ -46,6 +46,7 @@
 
 #![allow(dead_code)] // Many entry points will be wired up incrementally.
 
+use alloc::boxed::Box;
 use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
@@ -488,6 +489,44 @@ impl KernelFdTable {
         }
     }
 
+    /// Build an empty table **directly on the heap**, without ever
+    /// materialising one on the stack.
+    ///
+    /// `KernelFdTable` is `[Option<FdEntry>; 256]` — 8192 bytes.  Returning it
+    /// by value and then boxing it (`Box::new(KernelFdTable::new())`) costs a
+    /// full 8 KiB stack temporary in the caller's frame, because at
+    /// `opt-level = 0` — the profile `scripts/boot-test.sh` builds by default
+    /// — the move into the box is not elided.  Measured with
+    /// `scripts/stack-frames.py` on the debug kernel, `KernelFdTable::new`
+    /// alone claimed 8272 bytes, and `proc::pcb::fork_create`'s closure, which
+    /// holds one of these, claimed 16624.
+    ///
+    /// This is the same defect that made `Task` expensive to move (see
+    /// `sched::fpu::FpuState::new_default_boxed`), and it has the same fix:
+    /// allocate first, initialise in place, never let the value exist in a
+    /// stack frame.
+    ///
+    /// `alloc_zeroed` is deliberately **not** used here.  `Option<FdEntry>`'s
+    /// `None` is not guaranteed to be all-zero bytes — that is a layout detail
+    /// Rust does not promise — so the entries are written explicitly.
+    #[must_use]
+    pub fn new_boxed() -> Box<Self> {
+        let mut b = Box::<Self>::new_uninit();
+        // SAFETY: `b` is a freshly-allocated, correctly-sized and -aligned
+        // allocation for `Self`.  Every one of the `MAX_FDS` entries is
+        // written exactly once before `assume_init`, so the whole `entries`
+        // array — which is the only field — is initialised.  The pointer stays
+        // in bounds because `i < MAX_FDS` and `entries` has `MAX_FDS`
+        // elements.
+        unsafe {
+            let entries = (&raw mut (*b.as_mut_ptr()).entries).cast::<Option<FdEntry>>();
+            for i in 0..MAX_FDS {
+                entries.add(i).write(None);
+            }
+            b.assume_init()
+        }
+    }
+
     /// Build a table with stdin/stdout/stderr pre-installed as
     /// console handles.
     ///
@@ -499,6 +538,19 @@ impl KernelFdTable {
     pub fn with_stdio() -> Self {
         let mut t = Self::new();
         // SAFETY-equivalent invariant: `entries` has length `MAX_FDS` >= 3.
+        t.entries[STDIN_FD as usize] = Some(FdEntry::console(O_RDONLY));
+        t.entries[STDOUT_FD as usize] = Some(FdEntry::console(O_WRONLY));
+        t.entries[STDERR_FD as usize] = Some(FdEntry::console(O_WRONLY));
+        t
+    }
+
+    /// [`with_stdio`](Self::with_stdio), built directly on the heap.
+    ///
+    /// See [`new_boxed`](Self::new_boxed) for why the by-value form is
+    /// expensive enough to be worth a second constructor.
+    #[must_use]
+    pub fn with_stdio_boxed() -> Box<Self> {
+        let mut t = Self::new_boxed();
         t.entries[STDIN_FD as usize] = Some(FdEntry::console(O_RDONLY));
         t.entries[STDOUT_FD as usize] = Some(FdEntry::console(O_WRONLY));
         t.entries[STDERR_FD as usize] = Some(FdEntry::console(O_WRONLY));

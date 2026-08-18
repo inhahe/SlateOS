@@ -126,6 +126,39 @@ fn now_ms() -> u64 {
     crate::hpet::elapsed_ns() / 1_000_000
 }
 
+/// Truncate a caller-supplied reason to [`MAX_REASON_LEN`] bytes, cutting only
+/// on a character boundary.
+///
+/// The obvious `&reason[..MAX_REASON_LEN]` **panics** when byte 256 falls in
+/// the middle of a multi-byte UTF-8 sequence, and `reason` comes from
+/// userspace — so a process could halt the kernel by asking for a capability
+/// with a well-chosen accented character straddling the limit.  There is no
+/// bound on how far back the boundary is, so this walks rather than assuming.
+///
+/// Cutting short is the right failure: the reason is a human-readable
+/// annotation shown in a permission prompt, so losing up to three trailing
+/// bytes of it is not a loss worth a second failure mode.
+fn truncate_reason(reason: &str) -> String {
+    if reason.len() <= MAX_REASON_LEN {
+        return String::from(reason);
+    }
+    // `floor_char_boundary` is still unstable, so find the cut by walking back
+    // from the limit past any UTF-8 continuation bytes (0b10xx_xxxx).
+    let mut end = MAX_REASON_LEN;
+    while end > 0 && !reason.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    reason.get(..end).map_or_else(
+        || {
+            // Unreachable: `end` is a char boundary in `0..=reason.len()`.
+            // Returning empty rather than panicking keeps the "userspace
+            // cannot halt the kernel" property total rather than argued.
+            String::new()
+        },
+        String::from,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -145,6 +178,17 @@ pub fn request_capability(
     rights: Rights,
     reason: &str,
 ) -> KernelResult<RequestId> {
+    // Do everything that allocates BEFORE taking the lock.
+    //
+    // `REQUESTS` is a spinlock, and a spinlock held across an allocation is
+    // held across an unbounded amount of other people's locking: the kernel
+    // heap takes its own lock, and on growth it reaches the frame allocator
+    // and the page tables.  Building the strings first costs, at worst, two
+    // `String`s on a request that then fails a limit check — the cheap side of
+    // this trade by a wide margin.
+    let process_name_owned = String::from(process_name);
+    let reason_str = truncate_reason(reason);
+
     let mut requests = REQUESTS.lock();
 
     // Check system-wide limit.
@@ -171,20 +215,13 @@ pub fn request_capability(
         return Err(KernelError::ResourceExhausted);
     }
 
-    // Truncate reason to max length.
-    let reason_str = if reason.len() > MAX_REASON_LEN {
-        String::from(&reason[..MAX_REASON_LEN])
-    } else {
-        String::from(reason)
-    };
-
     let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let now = now_ms();
 
     let req = CapRequest {
         id,
         pid,
-        process_name: String::from(process_name),
+        process_name: process_name_owned,
         resource_type,
         rights,
         reason: reason_str,
@@ -508,6 +545,48 @@ pub fn self_test() -> KernelResult<()> {
         pending_before,
         pending_after
     );
+
+    // Test: an over-long reason whose byte-256 cut lands mid-character.
+    //
+    // The old code sliced `&reason[..MAX_REASON_LEN]` directly, which panics
+    // when byte 256 is inside a multi-byte UTF-8 sequence -- and `reason` is
+    // supplied by userspace, so that was a kernel halt any process could
+    // trigger by choosing its wording.  Build exactly that string: 255 ASCII
+    // bytes followed by a 2-byte character, so the limit falls between the
+    // character's two bytes.
+    {
+        let mut evil = String::new();
+        for _ in 0..255 {
+            evil.push('a');
+        }
+        // U+00E9 (e-acute) encodes as 0xC3 0xA9; byte 256 is the 0xA9.
+        evil.push('\u{00E9}');
+        evil.push_str("trailing text that must not appear");
+        assert!(!evil.is_char_boundary(MAX_REASON_LEN), "test premise");
+
+        let cut = truncate_reason(&evil);
+        assert_eq!(
+            cut.len(),
+            255,
+            "should back up to the character boundary before the limit"
+        );
+        assert!(cut.chars().all(|c| c == 'a'), "should keep only whole chars");
+
+        // And it survives the full path, not just the helper.
+        let id_evil = request_capability(
+            99,
+            "utf8-boundary-test",
+            ResourceType::File,
+            Rights::READ,
+            &evil,
+        )?;
+        assert!(id_evil > 0);
+        serial_println!(
+            "[cap-request]   Over-long reason cut on a char boundary: OK ({} -> {} bytes)",
+            evil.len(),
+            cut.len()
+        );
+    }
 
     // Cleanup: GC all entries.
     gc(0);

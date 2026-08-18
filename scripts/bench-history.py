@@ -949,10 +949,38 @@ def record_host_load(record):
     return load if load in HOST_LOAD_CHOICES else HOST_LOAD_UNKNOWN
 
 
+def record_experiment(record):
+    """Why this run was a deliberate probe, or `""` for an ordinary run.
+
+    A run whose *binary* was built to answer a question -- a QEMU flag under
+    test, a compiler feature toggled by hand, a bisect step -- is a real
+    measurement of a kernel that no checkout reproduces. It belongs in the
+    history (throwing away measurements is how findings get re-discovered the
+    expensive way) but it must never become the yardstick a later honest run is
+    judged against.
+
+    This is a different assertion from the two labels that already exist, which
+    is why it is a third field rather than a reuse of either. `dirty` says the
+    source moved a little from `commit`, and is true of most runs during
+    development, so excluding on it would empty the history. `host_load:
+    loaded` says the *host* was poisoned while the guest was fine. Neither
+    covers "the guest itself was not the guest we ship".
+
+    The cost of not having had this: five probe runs of the placement
+    investigation (three at ~8085 ns for `crypto_sha256_64B`, two at ~1936 for
+    the identical source built with a different symbol-mangling scheme) would
+    have entered one 8-run window, widening that benchmark's outlier fence past
+    4x and silently blinding the detector for it for the next eight runs.
+    """
+    why = record.get("experiment", "")
+    return why if isinstance(why, str) else ""
+
+
 def comparable_records(records, host, profile=LEGACY_PROFILE):
     """Records that may legitimately serve as history for a run here.
 
-    Same host, same build profile, and **not** a deliberately-loaded control.
+    Same host, same build profile, **not** a deliberately-loaded control, and
+    **not** a deliberate experiment (`record_experiment`).
 
     Extracted because `previous_for_host` and `report_run_position` had each
     open-coded the host/profile filter, so a third rule (excluding controls)
@@ -964,6 +992,7 @@ def comparable_records(records, host, profile=LEGACY_PROFILE):
         if record.get("host") == host
         and record_profile(record) == profile
         and record_host_load(record) != HOST_LOAD_LOADED
+        and not record_experiment(record)
     ]
 
 
@@ -2666,6 +2695,12 @@ def main(argv=None):
     parser.add_argument("--dirty", action="store_true",
                         help="the tree had uncommitted changes at build time, "
                              "so --commit names an ancestor of what ran.")
+    parser.add_argument("--experiment", default="",
+                        help="why this run was a deliberate probe (a QEMU flag "
+                             "under test, a hand-toggled compiler feature, a "
+                             "bisect step). Recorded in full, but never used "
+                             "as a baseline for a later run: the binary is one "
+                             "no checkout reproduces.")
     args = parser.parse_args(argv)
 
     if args.list:
@@ -2740,6 +2775,13 @@ def main(argv=None):
         extra.append(f"host load: recorded as '{args.host_load}' by the "
                      f"caller -- an assertion, not a measurement, so it does "
                      f"not move the verdict either way")
+    if args.experiment:
+        # Said out loud because the exclusion is otherwise invisible: the run
+        # prints a full comparison and is then never referred to again, and a
+        # caller who passed the flag by habit would have no way to notice.
+        extra.append(f"experiment: {args.experiment} -- recorded, but excluded "
+                     f"from every future baseline, because the binary is one "
+                     f"no checkout reproduces")
     report_run_verdict(run_v, run_notes, extra)
 
     if not args.no_record:
@@ -2789,6 +2831,12 @@ def main(argv=None):
         # one level up, that this field exists to prevent.
         if args.kernel_elf:
             record["hot_symbols"] = elf_symbol_addresses(args.kernel_elf)
+        # Only present on probe runs, so that the overwhelming majority of
+        # records -- ordinary ones -- carry no field asserting they are
+        # ordinary. An empty string here would be a claim; absence is the
+        # default.
+        if args.experiment:
+            record["experiment"] = args.experiment
         # Absent rather than null when the caller did not measure it: an
         # explicit `wall_seconds: null` invites a reader to treat it as zero,
         # and `dispersion_count`-style "absent means unknown" handling is

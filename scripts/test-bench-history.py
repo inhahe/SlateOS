@@ -2336,6 +2336,84 @@ def test_hot_symbols_degrade_quietly_on_bad_input(bh, tmpdir):
     check("32-bit ELF yields {}", bh.elf_symbol_addresses(elf32), {})
 
 
+def test_experiment_runs_are_recorded_but_never_a_baseline(bh, tmpdir):
+    """A probe run must be kept and must never become the yardstick.
+
+    The five runs of the placement investigation are the motivating case: three
+    read ~8085 ns for `crypto_sha256_64B` and two read ~1936 for *the same
+    source*, built with a different symbol-mangling scheme. Landing all five in
+    one 8-run window would push that benchmark's outlier fence past 4x and
+    silently blind the detector for it. Deleting them was the wrong answer --
+    they are the evidence for the finding -- so they are labelled instead.
+    """
+    import io
+    import json
+    import contextlib
+
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "[bench] SCORE crypto_sha256_64B 8085 - TRACK 2000 1000",
+        "[bench] CANARY 8 8 100 8 9 12 11 0 800 900",
+    ]) + "\n")
+    history = os.path.join(tmpdir, "history.jsonl")
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        bh.main(["--serial", log, "--history", history, "--profile", "release",
+                 "--experiment", "QEMU tb-size probe, test arm"])
+    record = json.loads(open(history, encoding="utf-8").read().strip())
+    check("the reason is stored verbatim",
+          record["experiment"], "QEMU tb-size probe, test arm")
+    check("...and the run says so, since the exclusion is otherwise invisible",
+          "excluded from every future baseline" in buf.getvalue(), True)
+
+    check("an experiment record is not comparable history",
+          bh.comparable_records([record], record["host"], "release"), [])
+    check("...and so cannot be the previous run",
+          bh.previous_for_host([record], record["host"], "release"), None)
+
+    # An ordinary run alongside it is still found, so the filter excludes the
+    # probe rather than merely emptying the window.
+    ordinary = dict(record)
+    ordinary.pop("experiment")
+    ordinary["timestamp"] = "2026-08-18T16:00:00+00:00"
+    window = bh.comparable_records([record, ordinary], record["host"], "release")
+    check("the ordinary run beside it is still eligible", len(window), 1)
+    check("...and it is the one without the label",
+          window[0]["timestamp"], "2026-08-18T16:00:00+00:00")
+
+    check("an ordinary run carries no experiment key at all",
+          "experiment" in ordinary, False)
+    check("...which reads as the empty reason", bh.record_experiment(ordinary), "")
+    check("a non-string label is not trusted to exclude",
+          bh.record_experiment({"experiment": 1}), "")
+
+
+def test_committed_history_keeps_the_probe_runs_labelled(bh):
+    """The real history must carry the labels, not just the code that reads them.
+
+    A guard, not a unit test: the five probe records were labelled by hand
+    after the fact, and nothing else would notice if a future merge or rewrite
+    dropped the field and quietly re-admitted them to the baseline.
+    """
+    import json
+
+    path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "bench", "history.jsonl")
+    if not os.path.exists(path):
+        check("history file exists to be checked", True, True)
+        return
+    records = [json.loads(l) for l in
+               open(path, encoding="utf-8").read().splitlines() if l.strip()]
+    labelled = {r["timestamp"] for r in records if bh.record_experiment(r)}
+    expected = {
+        "2026-08-18T12:58:40+00:00",
+        "2026-08-18T13:02:07+00:00",
+        "2026-08-18T15:06:22+00:00",
+        "2026-08-18T15:33:15+00:00",
+        "2026-08-18T15:46:49+00:00",
+    }
+    check("every placement-probe run is still labelled an experiment",
+          expected - labelled, set())
+
+
 def test_hot_symbols_absent_and_empty_mean_different_things(bh, tmpdir):
     """`hot_symbols` absent = nobody looked; `{}` = looked, found nothing.
 

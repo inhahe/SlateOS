@@ -1206,6 +1206,17 @@ print_bench_results() {
     if [ "${BT_DIRTY:-0}" = 1 ]; then
         bench_args+=(--dirty)
     fi
+    # A probe run is recorded but never becomes a baseline. BENCH_EXPERIMENT
+    # states the reason; QEMU_EXTRA implies one even when the caller forgot,
+    # because a run under non-default emulator flags is no more reproducible
+    # from a checkout than one under a hand-patched kernel -- and it was exactly
+    # such a run (a tb-size probe) that landed unlabelled in the history and
+    # motivated all of this.
+    if [ -n "${BENCH_EXPERIMENT:-}" ]; then
+        bench_args+=(--experiment "$BENCH_EXPERIMENT")
+    elif [ -n "${QEMU_EXTRA:-}" ]; then
+        bench_args+=(--experiment "QEMU_EXTRA=$QEMU_EXTRA (non-default emulator flags)")
+    fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
         # Spelt as a full `if` rather than `[ ... ] && ...`: under `set -e` a
@@ -1584,7 +1595,26 @@ QEMU_CPU="${QEMU_CPU:-qemu64,+smep,+smap,+umip}"
 # changed).  Separating "our code got slower" from "TCG got slower at running
 # the same code" needs the binary held fixed and the emulator varied, which is
 # exactly what this knob is for.  Default empty: no effect on ordinary runs.
+#
+# Setting it also marks the benchmark record an experiment (see BENCH_EXPERIMENT
+# below), so a probe run cannot become the baseline a later honest run is judged
+# against.
 read -r -a QEMU_EXTRA_ARGS <<< "${QEMU_EXTRA:-}"
+
+# Why this run is a deliberate probe rather than a tracking run, e.g.
+#
+#     BENCH_EXPERIMENT="alignment probe on crypto::compress" ./scripts/boot-test.sh --bench
+#
+# Such a run measures a kernel (or an emulator) that no checkout reproduces, so
+# it is recorded in full but excluded from every future baseline.  Set it for
+# any hand-modified build: a bisect step, a toggled compiler feature, a source
+# patch applied only to answer a question.  QEMU_EXTRA implies it; a modified
+# *guest* cannot be detected from here, so it must be declared.
+#
+# The cost of not having had it: five probe runs of the placement investigation
+# went in unlabelled, three reading ~8085 ns for `crypto_sha256_64B` and two
+# ~1936 for identical source, which between them would have stretched that
+# benchmark's outlier fence past 4x and blinded the detector for it.
 
 # --- Cross-worktree boot lock -------------------------------------------------
 #

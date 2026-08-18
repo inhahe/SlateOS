@@ -33849,6 +33849,60 @@ bare `return` that `case()?` would silently change the meaning of - and need
 hand splitting.  `net::ssh::init` (12 448) and `fs::procfs::generate` (11 072)
 have no case structure at all.
 
+### Progress - 2026-08-18: the kernel is now entirely below the stdlib floor
+
+`cmd_oci`'s `run`/`create` arm - the "restructuring job, not a splitting one"
+the paragraph above left as the last item above the floor - is done, by hand
+rather than by `split-frames.py`.  **With it, the largest prologue in the kernel
+is `alloc`'s own `Handle::insert_recursing` at 13 088 bytes.  Every remaining
+kernel function is below it.**  That is the terminal state for this line of
+work as originally framed: there is no longer any kernel frame whose shrinking
+would lower the kernel's peak.
+
+| | before | after |
+|---|---:|---:|
+| largest single frame on the `oci run` path | 13 344 | **4 048** |
+| peak over that path (`cmd_oci` -> `oci_run` -> `OciRunFlags::parse`) | 19 640 | **10 344** |
+| `cmd_oci` as `--peak` reports it | 13 344 | **2 432** |
+| prologues claiming >= 4 KiB | 459 | **458** |
+
+Nine siblings along the container lifecycle: `prepare_rootfs`, `build_config`,
+`report_created`, `bind_network`, `mount_jail`, `apply_created_state`,
+`merge_env`, `effective_workdir` / `effective_uid_gid`, `launch_init`.  Largest
+of them is `launch_init` at 2 160.
+
+**Two things worth keeping from how it was done.**
+
+- **The transformer was the wrong tool and that was clear in advance.**
+  `--arms` splits *at a `match`*; this arm's cost was not in a match, it was in
+  700 lines of straight-line configuration where every local really is live at
+  the end.  The split had to follow the container's lifecycle, which no
+  structural rule can infer.  Attempting it with `--arms` anyway would have
+  produced one arm containing everything.
+- **It was moved by script, not retyped.**  `build/split-oci-run.py` (untracked;
+  `build/` is git-ignored) extracts each paragraph by line range, re-indents it,
+  and applies a list of asserted renames.  The reason is not tedium: the arm is
+  ~700 lines of console output whose exact wording is the shell's user
+  interface, and retyping it is precisely how wording drifts without anyone
+  noticing.  Every rename is asserted to have matched at least once, so a range
+  that moved fails in the script rather than 700 lines away in rustc.
+
+**Two structural changes fell out and were kept**, both because they are
+clearer than what they replace, not merely smaller: the 23-binding
+`let OciRunFlags { .. } = ` destructure goes back to a single `f` threaded as
+`&OciRunFlags`, and `match container::create` becomes a `let ... else` early
+return, which de-nests 440 lines by a level.
+
+**What is left after this** is all below 13 088 and therefore does not move the
+kernel's peak - it buys headroom on its own call path only, which is still worth
+having (see the wrong prediction recorded above) but is no longer urgent:
+`net::ssh::init` (12 448), `fs::vfs::self_test` (12 432), `fs::xz::lzma2_decode`
+(12 416), `fs::handle::self_test` (12 288), `fs::procfs::generate` (11 072),
+`fs::ext4::fsck::fsck_ext4` (10 656), and the ~9.6-10.2 KiB kshell dispatchers
+`cmd_sysinfo`, `cmd_focusassist`, `cmd_autostart`, `cmd_wallpaper`, `cmd_nc`,
+`cmd_appnotify`, `cmd_parental`.  On the `oci run` path specifically the
+dominant term is now `OciRunFlags::parse` at 6 088.
+
 ---
 
 ## A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT (lane A, 2026-08-18) - **not a bug; methodology, recorded so it stops being rediscovered**
